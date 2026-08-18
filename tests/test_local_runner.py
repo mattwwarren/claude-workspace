@@ -19,13 +19,17 @@ from cw.executor_diagnostics import (
 )
 from cw.local_runner import (
     _FIXED_HEALTH,
+    _PATH_FREE_TASK_INSTRUCTION,
+    AIDER_FILE_REQUEST_UNANSWERED,
     AIDER_NO_OUTPUT,
     AIDER_NOT_FOUND,
     PLAN_MISSING,
+    TASK_CONTEXT_RELATIVE_PATH,
     FakeAiderRunner,
     FakePlanFetcher,
     RealAiderRunner,
     _blocked_scope,
+    _detect_unanswered_file_request,
     aider_available,
     build_argv,
     build_env,
@@ -135,9 +139,12 @@ def test_read_start_time_ns_dead_pid_returns_none() -> None:
 # ---------------------------------------------------------------------------
 
 
+_READ_ONLY_PATH = Path(".cw/task_context.md")
+
+
 def test_build_argv_prepends_openai_prefix() -> None:
     """build_argv prepends 'openai/' to a model without it."""
-    argv = build_argv("qwen2.5-coder-32b-instruct", "task")
+    argv = build_argv("qwen2.5-coder-32b-instruct", "task", [], _READ_ONLY_PATH)
     assert "--model" in argv
     model = argv[argv.index("--model") + 1]
     assert model == "openai/qwen2.5-coder-32b-instruct"
@@ -145,7 +152,7 @@ def test_build_argv_prepends_openai_prefix() -> None:
 
 def test_build_argv_no_double_prefix() -> None:
     """build_argv does not double-prepend 'openai/'."""
-    argv = build_argv("openai/qwen2.5-coder-32b-instruct", "task")
+    argv = build_argv("openai/qwen2.5-coder-32b-instruct", "task", [], _READ_ONLY_PATH)
     model = argv[argv.index("--model") + 1]
     assert model == "openai/qwen2.5-coder-32b-instruct"
     assert model.count("openai/") == 1
@@ -153,7 +160,7 @@ def test_build_argv_no_double_prefix() -> None:
 
 def test_build_argv_includes_required_flags() -> None:
     """build_argv includes all required aider flags."""
-    argv = build_argv("model", "my task")
+    argv = build_argv("model", "my task", [], _READ_ONLY_PATH)
     assert "--yes" in argv
     assert "--auto-commits" in argv
     assert "--no-pretty" in argv
@@ -167,10 +174,71 @@ def test_build_argv_includes_required_flags() -> None:
 def test_build_argv_message_value_is_redactable_shape() -> None:
     """The --message flag is immediately followed by its value, so redact_argv
     can replace that value wholesale by index (#1239)."""
-    argv = build_argv("model", "ticket + plan body")
+    argv = build_argv("model", "ticket + plan body", [], _READ_ONLY_PATH)
     assert "--message" in argv
     idx = argv.index("--message")
     assert argv[idx + 1] == "ticket + plan body"
+
+
+def test_build_argv_emits_file_flags_for_each_planned_file() -> None:
+    """Each plan-enumerated file becomes a ``--file <path>`` pair, in order,
+    positioned before --message (#1905)."""
+    argv = build_argv("model", "instr", ["a.py", "b/c.py"], _READ_ONLY_PATH)
+    assert argv.count("--file") == 2
+    first = argv.index("--file")
+    assert argv[first : first + 4] == ["--file", "a.py", "--file", "b/c.py"]
+    assert first < argv.index("--message")
+
+
+def test_build_argv_no_file_flags_when_files_empty() -> None:
+    """files=[] emits no --file flag at all (backward-compat fallback pin)."""
+    argv = build_argv("model", "instr", [], _READ_ONLY_PATH)
+    assert "--file" not in argv
+
+
+def test_build_argv_file_flags_do_not_disturb_message_redactable_shape() -> None:
+    """--message is still immediately followed by its value with --file present."""
+    argv = build_argv("model", "instr", ["a.py", "b/c.py"], _READ_ONLY_PATH)
+    assert argv[argv.index("--message") + 1] == "instr"
+
+
+def test_build_argv_emits_read_flag_for_task_context_path() -> None:
+    """The task-context file is registered read-only via --read, positioned
+    after the --file pairs and immediately before --message (#1905)."""
+    argv = build_argv("m", "instr", ["a.py"], _READ_ONLY_PATH)
+    assert argv == [
+        "aider",
+        "--model",
+        "openai/m",
+        "--file",
+        "a.py",
+        "--read",
+        ".cw/task_context.md",
+        "--message",
+        "instr",
+        "--yes",
+        "--auto-commits",
+        "--no-pretty",
+        "--no-browser",
+        "--no-auto-lint",
+        "--no-auto-test",
+        "--map-tokens",
+        "0",
+        "--no-stream",
+    ]
+
+
+def test_build_argv_read_flag_present_even_when_files_empty() -> None:
+    """--read is unconditional (unlike --file): build_task_message always
+    materialises the read-only file when it returns non-None."""
+    argv = build_argv("m", "instr", [], _READ_ONLY_PATH)
+    assert argv[argv.index("--read") + 1] == ".cw/task_context.md"
+
+
+def test_build_argv_read_flag_does_not_disturb_message_redactable_shape() -> None:
+    """--message keeps its index-adjacent value with both --file and --read."""
+    argv = build_argv("m", "instr", ["a.py"], _READ_ONLY_PATH)
+    assert argv[argv.index("--message") + 1] == "instr"
 
 
 # ---------------------------------------------------------------------------
@@ -297,20 +365,49 @@ def test_build_task_message_missing_plan_returns_none(tmp_path: Path) -> None:
     assert result is None
 
 
+def _task_context(worktree: Path) -> str:
+    """Read the materialised read-only task-context file (#1905)."""
+    return (worktree / TASK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
+
+
+# The ticket's own reproduction shape: a plan whose prose names paths the
+# implementation must NOT edit. Hand-authored (this is *our* plan format, not
+# an external system's payload), matching the conftest _plan_text convention.
+_EXCLUSION_PLAN = """## Summary
+
+Rework the staleness monitor.
+
+**EXPLICITLY OUT OF SCOPE — do not edit even if it is present in your \
+context:** `core/database.py`, `etl_mcp/api/document_extract.py`, \
+`tests/pipelines_v2/test_community_home_medical_ingest_integration.py`
+
+## Touch-point Contract
+- `core/database.py:1380-1381` for a column type
+- `core/models/auth.py:5-13` for a TypedDict shape
+
+## Files Modified
+- src/real_target.py
+"""
+
+
 def test_build_task_message_reads_plan(tmp_path: Path) -> None:
-    """build_task_message reads .cw/plan.md when present."""
+    """The plan reaches the model via the read-only file, not the message.
+
+    Post-#1905 the returned task_message is the fixed path-free instruction;
+    the plan body itself is materialised to TASK_CONTEXT_RELATIVE_PATH.
+    """
     cw_dir = tmp_path / ".cw"
     cw_dir.mkdir()
     (cw_dir / "plan.md").write_text("Do the thing.\n", encoding="utf-8")
 
     result = build_task_message(tmp_path)
 
-    assert result is not None
-    assert "Do the thing." in result
+    assert result == _PATH_FREE_TASK_INSTRUCTION
+    assert "Do the thing." in _task_context(tmp_path)
 
 
 def test_build_task_message_supplements_context(tmp_path: Path) -> None:
-    """build_task_message adds ticket title/body from .cw/context.json when present."""
+    """Ticket title/body from .cw/context.json land in the read-only file."""
     cw_dir = tmp_path / ".cw"
     cw_dir.mkdir()
     (cw_dir / "plan.md").write_text("plan content", encoding="utf-8")
@@ -321,14 +418,15 @@ def test_build_task_message_supplements_context(tmp_path: Path) -> None:
 
     result = build_task_message(tmp_path)
 
-    assert result is not None
-    assert "My Ticket" in result
-    assert "Ticket body" in result
-    assert "plan content" in result
+    assert result == _PATH_FREE_TASK_INSTRUCTION
+    context = _task_context(tmp_path)
+    assert "My Ticket" in context
+    assert "Ticket body" in context
+    assert "plan content" in context
 
 
 def test_build_task_message_malformed_context_json(tmp_path: Path) -> None:
-    """build_task_message returns plan-only message when context.json is malformed."""
+    """A malformed context.json still yields a plan-only read-only file."""
     cw_dir = tmp_path / ".cw"
     cw_dir.mkdir()
     (cw_dir / "plan.md").write_text("plan text", encoding="utf-8")
@@ -336,8 +434,84 @@ def test_build_task_message_malformed_context_json(tmp_path: Path) -> None:
 
     result = build_task_message(tmp_path)
 
+    assert result == _PATH_FREE_TASK_INSTRUCTION
+    assert "plan text" in _task_context(tmp_path)
+
+
+def test_build_task_message_is_path_free_even_with_exclusion_list_and_touch_points(
+    tmp_path: Path,
+) -> None:
+    """The regression test for #1905's over-inclusion half.
+
+    aider scans the --message string for path-like tokens and (under
+    --yes-always) auto-adds every one it finds to the chat — so an exclusion
+    list or a touch-point citation in the plan prose used to force exactly the
+    files it named *not* to touch into the edit set. The returned message must
+    therefore carry no repo path at all.
+    """
+    cw_dir = tmp_path / ".cw"
+    cw_dir.mkdir()
+    (cw_dir / "plan.md").write_text(_EXCLUSION_PLAN, encoding="utf-8")
+
+    result = build_task_message(tmp_path)
+
     assert result is not None
-    assert "plan text" in result
+    for path in (
+        "core/database.py",
+        "etl_mcp",
+        "auth.py",
+        "community_home_medical",
+        "src/real_target.py",
+    ):
+        assert path not in result
+    assert "/" not in result
+
+
+def test_build_task_message_materializes_task_context_file_with_full_plan_and_header(
+    tmp_path: Path,
+) -> None:
+    """Nothing is lost: the full plan text still reaches the model, relocated
+    into the read-only reference file."""
+    cw_dir = tmp_path / ".cw"
+    cw_dir.mkdir()
+    (cw_dir / "plan.md").write_text(_EXCLUSION_PLAN, encoding="utf-8")
+    (cw_dir / "context.json").write_text(
+        json.dumps({"title": "Ticket title", "body": "Ticket body"}),
+        encoding="utf-8",
+    )
+
+    build_task_message(tmp_path)
+
+    context = _task_context(tmp_path)
+    assert "core/database.py" in context
+    assert "src/real_target.py" in context
+    assert "Ticket title" in context
+    assert "Ticket body" in context
+
+
+def test_build_task_message_task_context_file_overwritten_on_each_call(
+    tmp_path: Path,
+) -> None:
+    """A retry into the same worktree must not read a prior attempt's plan."""
+    cw_dir = tmp_path / ".cw"
+    cw_dir.mkdir()
+    (cw_dir / "plan.md").write_text("first plan", encoding="utf-8")
+    build_task_message(tmp_path)
+
+    (cw_dir / "plan.md").write_text("second plan", encoding="utf-8")
+    build_task_message(tmp_path)
+
+    context = _task_context(tmp_path)
+    assert "second plan" in context
+    assert "first plan" not in context
+
+
+def test_build_task_message_returns_none_still_skips_task_context_write(
+    tmp_path: Path,
+) -> None:
+    """The plan-missing blocked path leaves no orphaned read-only file."""
+    assert build_task_message(tmp_path) is None
+    assert not (tmp_path / TASK_CONTEXT_RELATIVE_PATH).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -586,6 +760,219 @@ def test_synthesize_git_result_no_output_malformed_utf8_replaced(
 
     assert result.blocker is not None
     assert "partial output before crash:" in result.blocker.details
+
+
+# ---------------------------------------------------------------------------
+# _detect_unanswered_file_request — free-text "add this file" ask (#1905)
+# ---------------------------------------------------------------------------
+
+# Verbatim model output captured on the two real stalled runs the ticket cites.
+_GEN5307_LOG = (
+    "To implement this plan, I need to propose edits to one existing file "
+    "that hasn't been\nadded to the chat yet:\n\n"
+    "* tests/pipelines_v2/functions/test_pipeline_staleness_monitor_dedupe.py\n\n"
+    "Please add this file to the chat so I can proceed with the full "
+    "implementation.\n\nTokens: 116k sent, 2.0k received.\n"
+)
+_GEN5457_LOG = (
+    "For files not in the chat, I need to tell the user their full path names "
+    "and ask them to add the files to the chat.\n...\n"
+    "I can only create SEARCH/REPLACE blocks for files that have been added "
+    "to the chat.\n"
+)
+# aider's own post-add confirmation (aider/prompts.py:31-33) — must NOT match.
+_ADDED_FILES_LOG = (
+    "I added these files to the chat: core/database.py\n"
+    "Let me know if there are others we should add."
+)
+_SEARCH_BLOCK = (
+    "core/database.py\n"
+    "<<<<<<< SEARCH\n"
+    "old = 1\n"
+    "=======\n"
+    "new = 2\n"
+    ">>>>>>> REPLACE\n"
+)
+
+
+def test_detect_unanswered_file_request_true_for_ticket_body_quote() -> None:
+    """The GEN-5307 stall's verbatim model output is classified as a file ask."""
+    assert _detect_unanswered_file_request(_GEN5307_LOG) is True
+
+
+def test_detect_unanswered_file_request_true_for_gen5457_quotes() -> None:
+    """The GEN-5457 stall's verbatim model output is classified likewise."""
+    assert _detect_unanswered_file_request(_GEN5457_LOG) is True
+
+
+def test_detect_unanswered_file_request_false_when_search_block_present() -> None:
+    """Edit blocks were emitted → a different failure; must not misclassify."""
+    assert _detect_unanswered_file_request(_GEN5457_LOG + _SEARCH_BLOCK) is False
+
+
+def test_detect_unanswered_file_request_false_for_successful_add_confirmation() -> None:
+    """aider's own "I added these files to the chat" confirmation is not an ask."""
+    assert _detect_unanswered_file_request(_ADDED_FILES_LOG) is False
+
+
+def test_detect_unanswered_file_request_false_for_generic_empty_log() -> None:
+    """Unrelated diagnostic output is not a file ask."""
+    assert _detect_unanswered_file_request("aider: some diagnostic output\n") is False
+
+
+def test_detect_unanswered_file_request_false_for_empty_string() -> None:
+    """An empty log is not a file ask."""
+    assert _detect_unanswered_file_request("") is False
+
+
+def test_synthesize_git_result_no_output_file_request_disposition(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """No commits + an unanswered file ask → the distinct parked disposition."""
+    worktree = _make_no_output_worktree(make_git_repo, "wt-file-request")
+    _write_aider_log(worktree, _GEN5307_LOG)
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+    )
+
+    assert result.blocker is not None
+    assert result.blocker.reason == AIDER_FILE_REQUEST_UNANSWERED
+    assert result.blocker.retry_eligible is False
+    assert result.blocker.retry_delay_seconds is None
+    assert "Please add this file to the chat" in result.blocker.details
+    AutoDevResult.model_validate(result.model_dump(mode="json"))
+
+
+def test_synthesize_git_result_no_output_file_request_still_persists_diagnostics(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The file-request branch still writes a missing_output bundle (#1239)."""
+    worktree = _make_no_output_worktree(make_git_repo, "wt-file-request-diag")
+    _write_aider_log(worktree, _GEN5307_LOG)
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+        session_id="s-filereq",
+    )
+
+    assert result.blocker is not None
+    assert result.blocker.reason == AIDER_FILE_REQUEST_UNANSWERED
+    assert render_bundle_path("s-filereq") in result.blocker.details
+    [path] = list(
+        diagnostics_bundle_dir("s-filereq").glob("aider-missing_output-*.json")
+    )
+    failure = ExecutorFailure.model_validate_json(path.read_text())
+    assert failure.category == "missing_output"
+
+
+def test_synthesize_git_result_no_output_generic_reason_when_no_phrase_match(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Unrelated log content still yields the generic AIDER_NO_OUTPUT reason."""
+    worktree = _make_no_output_worktree(make_git_repo, "wt-file-request-generic")
+    _write_aider_log(worktree, "aider: some diagnostic output\n")
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+    )
+
+    assert result.blocker is not None
+    assert result.blocker.reason == AIDER_NO_OUTPUT
+    assert result.blocker.retry_eligible is True
+
+
+def test_synthesize_git_result_detects_file_request_beyond_tail_window(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The edit-block veto scans the FULL log, not the 4000-char details tail.
+
+    A SEARCH marker that scrolled out of the tail window still means aider
+    produced edits, so the run must not be classified as an unanswered ask.
+    """
+    worktree = _make_no_output_worktree(make_git_repo, "wt-file-request-beyond-tail")
+    _write_aider_log(worktree, _SEARCH_BLOCK + "x" * 5000 + _GEN5307_LOG)
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+    )
+
+    assert result.blocker is not None
+    assert result.blocker.reason == AIDER_NO_OUTPUT
+
+
+def test_detect_reflection_echo_committed_file_outside_manifest_not_flagged(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """KNOWN-OPEN residual vector, tracked for closure in #1915.
+
+    aider's reflection loop re-scans the model's *own reply* every turn
+    (``check_for_file_mentions(content)`` where ``content =
+    self.partial_response_content``, base_coder.py:1561), independently of the
+    --message/--read split #1905 closes. So a model echo of an excluded path
+    ("I will not touch core/database.py per the exclusion list") can still
+    re-trigger confirm_ask → auto-accept under --yes-always, and the excluded
+    file gets committed anyway.
+
+    cw cannot observe aider's reflection loop — it sees only the worktree's
+    post-exit git state. This test pins that today's synthesize_git_result
+    reports ordinary success on exactly that outcome: scope carries a plain
+    file *count* (schema.py:292), _git_facts → _parse_numstat_totals reduce the
+    diff to counts, and synthesize_git_result takes no manifest parameter at
+    all — committed file names are retained nowhere in AutoDevResult, so a
+    post-hoc cross-check against the plan manifest is not structurally
+    possible with today's data shape.
+
+    #1915 closes when this test flips to asserting the manifest violation is
+    detected and surfaced (e.g. a new blocker.reason).
+    """
+    worktree = _make_no_output_worktree(make_git_repo, "wt-reflection-echo")
+    _write_plan(worktree)
+    (worktree / ".cw" / "plan.md").write_text(
+        "## Files Modified\n- src/in_scope.py\n", encoding="utf-8"
+    )
+    # The reflection-echo outcome: a file the manifest never named, committed.
+    excluded = worktree / "core"
+    excluded.mkdir(parents=True, exist_ok=True)
+    (excluded / "database.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(worktree), "add", "core/database.py"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "commit", "-m", "echoed edit"],
+        check=True,
+        capture_output=True,
+    )
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+    )
+
+    assert result.status == "stage_complete"
+    assert result.blocker is None
+    assert result.scope.files == 1
 
 
 def test_real_runner_launch_truncates_log_on_retry(tmp_path: Path) -> None:

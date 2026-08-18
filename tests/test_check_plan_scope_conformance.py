@@ -14,6 +14,8 @@ import sys
 import types
 from pathlib import Path
 
+from tests.conftest import _plan_text
+
 # ---------------------------------------------------------------------------
 # Script loader
 # ---------------------------------------------------------------------------
@@ -40,21 +42,6 @@ _mod = _load_module()
 # ---------------------------------------------------------------------------
 # Fixture builders
 # ---------------------------------------------------------------------------
-
-
-def _plan_text(paths: list[str]) -> str:
-    """Build a realistic plan document with a ``## Files Modified`` section."""
-    bullets = "\n".join(f"- {p} (~40 lines)" for p in paths)
-    return (
-        "# Implementation Plan: Something (#9999)\n\n"
-        "## Patterns Found\n\n"
-        "- Proposed: a thing.\n\n"
-        "## Files Modified\n\n"
-        f"{bullets}\n\n"
-        "**Scope tier:** small\n\n"
-        "## Ambiguities\n\n"
-        "NO_AMBIGUITIES\n"
-    )
 
 
 def _paths(prefix: str, count: int) -> list[str]:
