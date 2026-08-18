@@ -607,11 +607,15 @@ class TestCompleteTimedOutMergedTasks:
         """A task that genuinely spawned, ran and shipped inside its FIRST
         pipeline stage, then timed out before the row advanced.
 
-        stage_high_water is None and spawn_error_count is 0, so on the task
-        record this is byte-identical to _usage_limit_only_task above apart
-        from ever_spawned=True. This is the shape #1623's reverted
-        stage_high_water disjunct wrongly refused; the test using it exists
-        to prove #1631's new predicate does NOT reintroduce that regression.
+        stage_high_water is None and spawn_error_count is 0, matching
+        _usage_limit_only_task above -- and both tasks' `attempts` values
+        (1 here vs. 3 there) equally fail the first disjunct's
+        `attempts == spawn_error_count` check against spawn_error_count=0, so
+        neither `attempts` nor `stage` (which the guard does not read at all)
+        affects _is_never_claimed's verdict here; only `ever_spawned` does.
+        This is the shape #1623's reverted stage_high_water disjunct wrongly
+        refused; the test using it exists to prove #1631's new predicate does
+        NOT reintroduce that regression.
         """
         return _make_ticket_task(
             ticket_id=ticket_id,

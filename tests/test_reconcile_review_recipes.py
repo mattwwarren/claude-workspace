@@ -1128,6 +1128,12 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
     assert added[0].ticket_id == task.ticket_id
     assert added[0].client == task.client
     assert added[0].lane == task.lane
+    # #1631: this is a brand-new row for a ticket with no session spawned
+    # under it yet -- the model default (True, fail-open) is for rows of
+    # unknown history, not this one, whose history is positively known.
+    # Dropping this kwarg would silently reopen #1631's false-completion gap
+    # for every ticket redispatched through auto-fix-CI.
+    assert added[0].ever_spawned is False
     assert dispatched == [{"once": True, "client": task.client, "emit": None}]
     taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
     # auto_fix_ci's evidence is the failing checks, not the (meaningless-here)

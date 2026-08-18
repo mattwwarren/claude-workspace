@@ -211,7 +211,18 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
 
     try:
         add_ticket(
-            TicketTask(ticket_id=job.ticket_id, client=job.client, lane=job.lane)
+            TicketTask(
+                ticket_id=job.ticket_id,
+                client=job.client,
+                lane=job.lane,
+                # #1631: this constructs a brand-new row for a ticket that has
+                # not yet spawned a session under it -- the same positive-proof
+                # shape dev_queue_add's construction site has. The model
+                # default (True, fail-open) is for rows whose history is
+                # unknown; this row's history IS known, so it must not inherit
+                # the default.
+                ever_spawned=False,
+            )
         )
         run_dispatch_loop(once=True, client=job.client, emit=None)
     except CwError as exc:
