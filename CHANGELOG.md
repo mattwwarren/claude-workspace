@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.36.0] - 2026-08-18
+
 ### Added
 
 - **Per-lane attempt ceiling for dispatch and concierge (#1751):** dispatch's
