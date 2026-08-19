@@ -270,13 +270,15 @@ worker may recover and continue. Visible in `cw event tail` and
   "pending": 2,
   "running": 1,
   "cap": 3,
-  "skip_reason": "freshness_gate | usage_limited | cap_full | lane_cap_blocked | attempt_cap_blocked | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
+  "skip_reason": "disk_pressure_gate | freshness_gate | usage_limited | cap_full | lane_cap_blocked | attempt_cap_blocked | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
 }
 ```
 **Semantics:** Emitted once per client per tick. `claimed` is the number of
 tasks newly spawned this tick. `pending` is the pre-claim count (read before
 the claim loop). `running` is the count of RUNNING tasks at tick start.
-`skip_reason` follows first-match precedence: `freshness_gate` (local branch
+`skip_reason` follows first-match precedence: `disk_pressure_gate` (client's
+worktree-base mount below `disk_pressure_min_free_gb` free, checked before
+the freshness gate's `git pull`) → `freshness_gate` (local branch
 behind origin, checked before anything else) → `usage_limited` (API rate
 limit; backoff armed) → `cap_full` (running ≥ cap) → `lane_cap_blocked`
 (pending tasks exist but all lane slots occupied) → `spawn_error` (exception
@@ -295,6 +297,30 @@ breakdown), and on freshness-gate ticks `freshness_detail`
 main_diverged_from_origin | main_detached_head`) plus `blocked_branch`.
 `correlation_id` is `None` (per-client aggregate, not per-ticket). Consumers
 MUST tolerate unknown `skip_reason` values.
+
+### `gate.disk_pressure_bypassed`
+
+**Emitter:** `_emit_disk_pressure_bypass` (`cw.dispatch.gating`, called from `_apply_disk_pressure_gate`)
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "disk_free_gb": 1.2,
+  "disk_min_free_gb": 5.0
+}
+```
+**Semantics:** GitHub #1887 (split from #1858). Emitted when
+`disk_pressure_gate_enabled` is `false` and the claim-time disk-pressure
+probe (`cw.disk.check_disk_usage` on
+`cw.worktree.resolve_worktree_base(client)`) reports free space below
+`disk_pressure_min_free_gb` — the operator has explicitly disabled the
+gate, so the client proceeds to claim this tick instead of being held
+PENDING, and this event records that the skip was suppressed. Mirrors
+`gate.ssh_key_bypassed` (#1437)'s bypass shape; forwarded to the
+operator-attention channel by default (same as `gate.auto_approved`),
+since a disk-pressure bypass is attention-worthy.
+
+`correlation_id` is `None` (per-client, not per-ticket).
 
 ### `dispatch.loop_exited`
 

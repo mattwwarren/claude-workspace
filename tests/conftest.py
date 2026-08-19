@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 from cw.config import save_state
+from cw.disk import DiskUsage
 from cw.models import (
     ClientConfig,
     CwState,
@@ -615,6 +616,28 @@ def _mock_ssh_key_available(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _mock_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the claim-time disk-pressure probe to 'abundant space' (#1887).
+
+    Sibling of ``_mock_gh_availability`` / ``_mock_ssh_key_available``:
+    ``dispatch_tick``'s disk-pressure gate calls ``check_disk_usage``, which
+    reads the *host machine's* real free space via ``shutil.disk_usage``.
+    Without a default, every existing dispatch test would pass or fail
+    depending on how full the CI runner's disk happens to be. Patching the
+    ``cw.dispatch.gating`` binding autouse guarantees no dispatch test probes
+    the real filesystem; the mount reads as roomy unless a test overrides this
+    seam. ``TestDiskPressurePreflightGate`` re-patches the same name via
+    ``_force_disk_pressure_gated`` and pytest's patch stacking lets the
+    test-level patch win. ``test_disk.py`` exercises the real helper via
+    ``cw.disk`` directly and is unaffected.
+    """
+    monkeypatch.setattr(
+        "cw.dispatch.gating.check_disk_usage",
+        lambda _path: DiskUsage(total_gb=500.0, free_gb=250.0),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default the codex filesystem-capability fingerprint probe (#1709).
 
@@ -946,3 +969,31 @@ def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
         return repo
 
     return _make
+
+
+def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") -> None:
+    """Write *relpath* under *worktree* and commit it as a real tracked file.
+
+    Shared by tests that need a ``make_git_repo`` worktree to carry tracked
+    files beyond its base empty commit — cw #1915's ``build_aiderignore``
+    exercises ``git ls-files`` against a real tracked-file set, and its tests
+    (plus the corresponding executor spawn test) all need this same
+    mkdir/write/add/commit sequence. Reuses ``_clean_git_env()`` so the nested
+    git invocation doesn't inherit a wrapping git call's env.
+    """
+    path = worktree / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    clean_env = _clean_git_env()
+    subprocess.run(
+        ["git", "-C", str(worktree), "add", relpath],
+        capture_output=True,
+        check=True,
+        env=clean_env,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "commit", "-m", f"add {relpath}"],
+        capture_output=True,
+        check=True,
+        env=clean_env,
+    )

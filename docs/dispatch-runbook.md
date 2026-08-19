@@ -216,6 +216,13 @@ BLOCKED_ON_USER / AWAITING_OPERATOR_SIGNOFF by reconcile does not count
 against the budget, so an unresolved "ghost" session cannot permanently
 strand a slot.
 
+`OrchestratorConfig.disk_pressure_gate_enabled` (#1887, default: `true`)
+adds a claim-time preflight probe of each client's worktree-base mount:
+when free space drops below `disk_pressure_min_free_gb` (default `5.0`
+GB), that client is held PENDING for the tick with
+`skip_reason=disk_pressure_gate` instead of risking a session spawning
+onto an already-filling disk.
+
 To dispatch in a planned order rather than raw priority, produce a
 DispatchPlan first: `cw dev-queue plan -c <client>` spawns a one-shot
 planner session and persists the plan; `run --use-plan` (also on `serve`)

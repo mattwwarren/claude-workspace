@@ -1279,6 +1279,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.PR_ACTION_TAKEN,
                 OrchestratorEventType.PR_ACTION_FAILED,
                 OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
+                OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED,
                 OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
             }
         )
@@ -1727,6 +1728,7 @@ class TestPackageExportCompleteness:
             "ConcurrencyOverrides",
             "CwState",
             "DEFAULT_AUTO_PURPOSES",
+            "DEFAULT_DISK_PRESSURE_MIN_FREE_GB",
             "DEFAULT_GLOBAL_ATTEMPT_CEILING",
             "DEFAULT_LANE",
             "DEFAULT_STAGE",

@@ -79,6 +79,14 @@ class ConcurrencyOverrides(BaseModel):
 DEFAULT_GLOBAL_ATTEMPT_CEILING = 10
 
 
+# Judgment default for the claim-time disk-pressure gate (#1887, split from
+# #1858) -- conservative and open to tuning per host/mount, not derived from a
+# measured incident threshold. Named (not an inline literal at the field
+# default) so an operator or reviewer can find it by name, same convention as
+# DEFAULT_GLOBAL_ATTEMPT_CEILING above.
+DEFAULT_DISK_PRESSURE_MIN_FREE_GB = 5.0
+
+
 CLAUDE_NATIVE_BACKEND: str = "claude-native"
 LOCAL_BACKEND: str = "local"
 CODEX_BACKEND: str = "codex"
@@ -351,6 +359,10 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # already-live safety probe is attention-worthy, same rationale as
         # GATE_AUTO_APPROVED above.
         OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
+        # GitHub #1887: the disk_pressure_gate operator escape hatch
+        # suppressing an already-live safety probe is attention-worthy, same
+        # rationale as SSH_KEY_GATE_BYPASSED directly above.
+        OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED,
         # GitHub #1730: a review-stage requeue proceeding with no operator-visible
         # confirmation that the send-back comment actually reached the reviewer is
         # a no-human-in-the-loop decision -- operator-attention-worthy, forwarded
@@ -623,6 +635,22 @@ class OrchestratorConfig(BaseModel):
     # each bypass emits SSH_KEY_GATE_BYPASSED (forwarded to the operator
     # channel by default -- see _DEFAULT_OPERATOR_EVENT_TYPES above).
     ssh_key_gate_enabled: bool = True
+    # GitHub #1887 (split from #1858) — operator escape hatch for the
+    # claim-time disk-pressure preflight gate. Default True (gate stays
+    # enforced), same already-live-safety-probe posture as
+    # ssh_key_gate_enabled above: it gates a `shutil.disk_usage` probe of the
+    # client's worktree-base mount that holds that client PENDING rather than
+    # risk a session filling an already-tight disk, not new automation.
+    # Setting this False bypasses that skip whenever the probe reports
+    # pressure; each bypass emits DISK_PRESSURE_GATE_BYPASSED (forwarded to
+    # the operator channel by default -- see _DEFAULT_OPERATOR_EVENT_TYPES
+    # above).
+    disk_pressure_gate_enabled: bool = True
+    # Minimum free space (GB) on a client's worktree-base mount before the
+    # gate above holds that client PENDING (#1887). See
+    # DEFAULT_DISK_PRESSURE_MIN_FREE_GB for why the default is a judgment
+    # call rather than a measured threshold.
+    disk_pressure_min_free_gb: float = DEFAULT_DISK_PRESSURE_MIN_FREE_GB
     # GitHub #1862 — operator escape hatch for the pre-dispatch open-PR gate
     # (cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids). Default True (gate
     # stays enforced), mirroring ssh_key_gate_enabled's fail-safe default: it
