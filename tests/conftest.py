@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 from cw.config import save_state
+from cw.disk import DiskUsage
 from cw.models import (
     ClientConfig,
     CwState,
@@ -611,6 +612,28 @@ def _mock_ssh_key_available(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(
         "cw.dispatch.gating.check_ssh_key_available", lambda **_kw: True
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the claim-time disk-pressure probe to 'abundant space' (#1887).
+
+    Sibling of ``_mock_gh_availability`` / ``_mock_ssh_key_available``:
+    ``dispatch_tick``'s disk-pressure gate calls ``check_disk_usage``, which
+    reads the *host machine's* real free space via ``shutil.disk_usage``.
+    Without a default, every existing dispatch test would pass or fail
+    depending on how full the CI runner's disk happens to be. Patching the
+    ``cw.dispatch.gating`` binding autouse guarantees no dispatch test probes
+    the real filesystem; the mount reads as roomy unless a test overrides this
+    seam. ``TestDiskPressurePreflightGate`` re-patches the same name via
+    ``_force_disk_pressure_gated`` and pytest's patch stacking lets the
+    test-level patch win. ``test_disk.py`` exercises the real helper via
+    ``cw.disk`` directly and is unaffected.
+    """
+    monkeypatch.setattr(
+        "cw.dispatch.gating.check_disk_usage",
+        lambda _path: DiskUsage(total_gb=500.0, free_gb=250.0),
     )
 
 
