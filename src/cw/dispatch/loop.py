@@ -534,6 +534,10 @@ def _run_dispatch_loop_body(
     # Track the SSH-key-gate operator error line dedup (#927); fleet-wide
     # sentinel, not per-client (see _SSH_KEY_WARN_SENTINEL).
     warned_ssh_key: set[str] = set()
+    # Track the disk-pressure-gate operator WARN line dedup (#1887); keyed
+    # per-client, not fleet-wide, since each client's worktree_base may sit
+    # on its own mount.
+    warned_disk_pressure: set[str] = set()
     # Back-off window: loaded from the persisted sidecar so a loop restart after
     # a code merge honours an active backoff rather than re-opening the spawn gate
     # immediately (#804).
@@ -582,6 +586,7 @@ def _run_dispatch_loop_body(
                 warned_fetch_fail=warned_fetch_fail,
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
+                warned_disk_pressure=warned_disk_pressure,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client,

@@ -31,6 +31,7 @@ from cw.dev_queue import (
     save_dev_queue,
     save_plan,
 )
+from cw.disk import DiskUsage
 from cw.dispatch import (
     _AVAILABILITY_OUTAGE_REASON,
     _AVAILABILITY_PROBE_TTL_SECONDS,
@@ -51,7 +52,6 @@ from cw.dispatch import (
     dispatch_tick,
     run_dispatch_loop,
 )
-from cw.disk import DiskUsage
 from cw.dispatch_state import (
     AvailabilityProbeCache,
     load_availability_probe_cache,
@@ -4089,6 +4089,7 @@ class TestRunDispatchLoopVerbose:
             warned_fetch_fail: set[str] | None = None,
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
+            warned_disk_pressure: set[str] | None = None,
             usage_limited_until: datetime | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -4105,6 +4106,7 @@ class TestRunDispatchLoopVerbose:
                 warned_fetch_fail=warned_fetch_fail,
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
+                warned_disk_pressure=warned_disk_pressure,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -12723,6 +12725,7 @@ class TestWaveCollisionDetection:
             warned_fetch_fail: set[str] | None = None,
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
+            warned_disk_pressure: set[str] | None = None,
             usage_limited_until: datetime | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -12738,6 +12741,7 @@ class TestWaveCollisionDetection:
                 warned_fetch_fail=warned_fetch_fail,
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
+                warned_disk_pressure=warned_disk_pressure,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -15191,9 +15195,7 @@ class TestDiskPressurePreflightGate:
             event_types=[OrchestratorEventType.DISPATCH_TICK],
         )
         assert len(events) == 1
-        assert (
-            events[0].payload["skip_reason"] == DispatchSkipReason.DISK_PRESSURE_GATE
-        )
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.DISK_PRESSURE_GATE
 
     def test_gate_disabled_bypasses_skip_and_emits_bypass_event(
         self,

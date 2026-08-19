@@ -19,9 +19,7 @@ class TestCheckDiskUsage:
     against ``OrchestratorConfig.disk_pressure_min_free_gb`` directly.
     """
 
-    def test_returns_free_and_total_gb_for_existing_path(
-        self, tmp_path: Path
-    ) -> None:
+    def test_returns_free_and_total_gb_for_existing_path(self, tmp_path: Path) -> None:
         """A real, existing directory yields positive, self-consistent numbers."""
         usage = check_disk_usage(tmp_path)
 

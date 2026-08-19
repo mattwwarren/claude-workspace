@@ -13,6 +13,7 @@ from cw.dev_queue import (
     dev_queue_lock,
     load_dev_queue,
 )
+from cw.disk import check_disk_usage
 from cw.dispatch_state import (
     AvailabilityProbeCache,
     load_availability_probe_cache,
@@ -45,6 +46,7 @@ from cw.worktree import (
     get_head_branch,
     is_main_behind_origin,
     is_main_checkout_dirty,
+    resolve_worktree_base,
 )
 
 if TYPE_CHECKING:
@@ -296,6 +298,152 @@ def _emit_ssh_key_bypass(
             "gate_enabled": gate_enabled,
         },
     )
+
+
+def _resolve_disk_pressure(
+    client: ClientConfig, *, min_free_gb: float
+) -> tuple[bool, float]:
+    """Probe *client*'s worktree-base mount, returning ``(gated, free_gb)``.
+
+    Probes :func:`~cw.worktree.resolve_worktree_base` -- the filesystem that
+    will actually receive new worktree data -- NOT ``client.workspace_path``:
+    an operator can point ``worktree_base`` at a different, more
+    space-constrained mount, and that is precisely the disk a claimed task's
+    checkout fills.
+
+    Fails OPEN on ``OSError`` (returns ``(False, 0.0)``), mirroring
+    :func:`_resolve_freshness`'s posture rather than the SSH-key gate's
+    fail-closed one: a probe error is not evidence of disk pressure, and
+    holding the whole fleet PENDING on an unreadable mount would be a
+    self-inflicted outage.
+    """
+    try:
+        usage = check_disk_usage(resolve_worktree_base(client))
+    except OSError:
+        _log.warning(
+            "dispatch_tick: disk-pressure probe failed for %s; proceeding",
+            client.name,
+        )
+        return (False, 0.0)
+    return (usage.free_gb < min_free_gb, usage.free_gb)
+
+
+def _emit_disk_pressure_skip(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    pending_count: int,
+    running_count: int,
+    cap: int,
+    emit: Callable[[str], None] | None,
+    warned_disk_pressure: set[str] | None,
+    free_gb: float,
+    min_free_gb: float,
+) -> None:
+    """Emit the operator WARN line (once per client) + dispatch.tick skip event.
+
+    Mirrors :func:`_emit_ssh_key_skip`'s shape (``skip_reason=
+    DISK_PRESSURE_GATE``, plus ``disk_free_gb``/``disk_min_free_gb``), but
+    ``warned_disk_pressure`` is keyed on ``client.name`` rather than a shared
+    fleet sentinel: unlike a single local ssh-agent, disk pressure genuinely
+    varies per client, since each client's ``worktree_base`` may sit on its
+    own mount.
+    """
+    if emit is not None and (
+        warned_disk_pressure is None or client.name not in warned_disk_pressure
+    ):
+        emit(
+            f"WARN {client.name}: worktree disk low —"
+            f" {free_gb:.1f} GB free, need {min_free_gb:.1f} GB;"
+            " client held PENDING until space frees up"
+        )
+        if warned_disk_pressure is not None:
+            warned_disk_pressure.add(client.name)
+    lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
+    record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {
+            "client": client.name,
+            "claimed": 0,
+            "pending": pending_count,
+            "running": running_count,
+            "cap": cap,
+            "skip_reason": DispatchSkipReason.DISK_PRESSURE_GATE,
+            "disk_free_gb": free_gb,
+            "disk_min_free_gb": min_free_gb,
+            "lanes": _lane_stats_for_client(
+                client, queue_snapshot, occupants=lane_occupants
+            ),
+            "lane_occupants": lane_occupants,
+            "occupied": sum(len(v) for v in lane_occupants.values()),
+        },
+    )
+
+
+def _emit_disk_pressure_bypass(
+    client: ClientConfig,
+    *,
+    free_gb: float,
+    min_free_gb: float,
+) -> None:
+    """Record the operator-forwarded bypass event (GitHub #1887).
+
+    Sibling of :func:`_emit_disk_pressure_skip`, NOT a reuse of it: called
+    instead of that helper when the probe reports pressure but
+    ``OrchestratorConfig.disk_pressure_gate_enabled`` is False, so the
+    would-be skip is suppressed and the client dispatches anyway. Same
+    no-stdout-line rationale as :func:`_emit_ssh_key_bypass`:
+    DISK_PRESSURE_GATE_BYPASSED is in the default operator-channel
+    forward-set, so a duplicate emit would be noise.
+    """
+    record_event(
+        OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED,
+        {
+            "client": client.name,
+            "disk_free_gb": free_gb,
+            "disk_min_free_gb": min_free_gb,
+        },
+    )
+
+
+def _apply_disk_pressure_gate(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    pending_count: int,
+    running_count: int,
+    cap: int,
+    emit: Callable[[str], None] | None,
+    warned_disk_pressure: set[str] | None,
+    min_free_gb: float,
+    gate_enabled: bool,
+) -> bool:
+    """Run the claim-time disk-pressure gate; True means hold *client* PENDING.
+
+    Extracted as its own helper (rather than inlined into
+    ``cw.dispatch.tick._run_preflight_gates`` the way the ssh-key block is)
+    specifically to keep that caller under the PLR0911 six-return ceiling: it
+    has 4 returns today, and folding this gate's two branches in would put it
+    exactly at 6 with no headroom left for the next gate.
+    """
+    gated, free_gb = _resolve_disk_pressure(client, min_free_gb=min_free_gb)
+    if not gated:
+        return False
+    if not gate_enabled:
+        _emit_disk_pressure_bypass(client, free_gb=free_gb, min_free_gb=min_free_gb)
+        return False
+    _emit_disk_pressure_skip(
+        client,
+        queue_snapshot,
+        pending_count=pending_count,
+        running_count=running_count,
+        cap=cap,
+        emit=emit,
+        warned_disk_pressure=warned_disk_pressure,
+        free_gb=free_gb,
+        min_free_gb=min_free_gb,
+    )
+    return True
 
 
 def _record_availability_block(*, now: datetime, was_latched: bool) -> None:
