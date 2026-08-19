@@ -9,7 +9,7 @@ import subprocess
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -30,10 +30,12 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.review_findings import (
     CapturedDiff,
+    Confidence,
     DebtRecord,
     EscalationMetadata,
     Finding,
     ReviewerFindingsDocument,
+    Severity,
 )
 
 if TYPE_CHECKING:
@@ -353,7 +355,56 @@ def _make_escalation(**overrides: object) -> EscalationMetadata:
     return EscalationMetadata.model_validate(kwargs)
 
 
-def _finding_kwargs(**overrides: object) -> dict[str, object]:
+class _FindingKwargs(TypedDict):
+    """Precisely-typed kwargs for a genuinely-valid Finding literal.
+
+    Mirrors Finding's 10 non-defaulted-in-practice fields exactly (#1922) --
+    the shape a real captured fixture needs to splat directly into
+    Finding(**kwargs) and type-check under --strict. NOT for
+    intentionally-invalid payloads; see _RawFindingKwargs for that.
+    """
+
+    severity: Severity
+    file: str
+    line_start: int | None
+    line_end: int | None
+    summary: str
+    consequence: str
+    suggested_fix: str
+    evidence: str
+    confidence: Confidence
+    escalation: EscalationMetadata | None
+
+
+class _RawFindingKwargs(TypedDict, total=False):
+    """Loosely-typed kwargs bag for a possibly-invalid Finding payload (#1922).
+
+    Every value is `object`, not the real field type: this shape exists
+    solely to give Finding.model_construct(**...) splats a closed key set
+    (excluding BaseModel.model_construct's `_fields_set` parameter) so mypy
+    stops conservatively checking the splat against every keyword-reachable
+    parameter. It intentionally does NOT constrain values -- callers
+    deliberately construct invalid Findings here (bad severities, blank
+    evidence) to bypass Pydantic validation and exercise defensive checks
+    downstream.
+    """
+
+    severity: object
+    file: object
+    line_start: object
+    line_end: object
+    summary: object
+    consequence: object
+    suggested_fix: object
+    evidence: object
+    confidence: object
+    escalation: object
+    no_diff_anchor: object
+    transitive_impact_evidence: object
+    release_critical_exception: object
+
+
+def _finding_kwargs(**overrides: object) -> _RawFindingKwargs:
     """Full kwargs for a valid Finding (#1237).
 
     Shared by :func:`_make_finding` and by tests that need the raw dict
@@ -375,7 +426,7 @@ def _finding_kwargs(**overrides: object) -> dict[str, object]:
         "escalation": None,
     }
     kwargs.update(overrides)
-    return kwargs
+    return cast("_RawFindingKwargs", kwargs)
 
 
 def _make_finding(**overrides: object) -> Finding:
