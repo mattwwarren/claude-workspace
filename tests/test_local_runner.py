@@ -31,12 +31,14 @@ from cw.local_runner import (
     _blocked_scope,
     _detect_unanswered_file_request,
     aider_available,
+    build_aiderignore,
     build_argv,
     build_env,
     build_task_message,
     read_process_start_time_ns,
     synthesize_git_result,
 )
+from tests.conftest import commit_tracked_file
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -239,6 +241,139 @@ def test_build_argv_read_flag_does_not_disturb_message_redactable_shape() -> Non
     """--message keeps its index-adjacent value with both --file and --read."""
     argv = build_argv("m", "instr", ["a.py"], _READ_ONLY_PATH)
     assert argv[argv.index("--message") + 1] == "instr"
+
+
+def test_build_argv_emits_aiderignore_flag_when_path_given() -> None:
+    """A non-None aiderignore_path becomes a --aiderignore flag, grouped with
+    the --file flags, before --read/--message (#1915)."""
+    aiderignore_path = Path(".cw/aiderignore")
+    argv = build_argv("m", "instr", ["a.py"], _READ_ONLY_PATH, aiderignore_path)
+    assert "--aiderignore" in argv
+    idx = argv.index("--aiderignore")
+    assert argv[idx + 1] == str(aiderignore_path)
+    assert idx < argv.index("--read")
+    assert argv[argv.index("--message") + 1] == "instr"
+
+
+def test_build_argv_omits_aiderignore_flag_when_none() -> None:
+    """aiderignore_path=None (the default) emits no --aiderignore flag at all,
+    preserving every pre-#1915 positional call site's argv unchanged (#1915)."""
+    argv = build_argv("m", "instr", ["a.py"], _READ_ONLY_PATH)
+    assert "--aiderignore" not in argv
+
+
+# ---------------------------------------------------------------------------
+# build_aiderignore (#1915) — closes the reflection-loop echo residual vector:
+# blocks every git-tracked file outside the plan's manifest from aider's
+# addable-file universe, so no model-reply echo of an excluded path can
+# trigger check_for_file_mentions' auto-add under --yes-always.
+# ---------------------------------------------------------------------------
+
+
+def test_build_aiderignore_blocks_tracked_files_outside_manifest(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Tracked files outside the manifest are blocked; manifest files are not."""
+    worktree = make_git_repo("wt-aiderignore-block")
+    commit_tracked_file(worktree, "core/database.py")
+    commit_tracked_file(worktree, "src/in_scope.py")
+
+    result = build_aiderignore(worktree, ["src/in_scope.py"])
+
+    assert result is not None
+    content = result.read_text(encoding="utf-8")
+    assert "/core/database.py" in content
+    assert "/src/in_scope.py" not in content
+
+
+def test_build_aiderignore_returns_none_for_empty_manifest(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """An empty manifest degrades to no --aiderignore at all (#1905's fallback
+    contract: absent manifest → unconstrained behaviour, never a hard block)."""
+    worktree = make_git_repo("wt-aiderignore-empty-manifest")
+
+    assert build_aiderignore(worktree, []) is None
+
+
+def test_build_aiderignore_root_anchors_every_blocked_line(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Every blocked line is written with a leading '/' so a bare same-basename
+    match in another directory doesn't spuriously match anywhere in the tree
+    (gitignore's no-internal-slash-matches-anywhere gotcha)."""
+    worktree = make_git_repo("wt-aiderignore-anchor")
+    commit_tracked_file(worktree, "a/util.py")
+    commit_tracked_file(worktree, "b/util.py")
+
+    result = build_aiderignore(worktree, ["a/util.py"])
+
+    assert result is not None
+    lines = [
+        line
+        for line in result.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert lines
+    for line in lines:
+        assert line.startswith("/")
+
+
+def test_build_aiderignore_merges_existing_repo_aiderignore(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A pre-existing client-repo .aiderignore is folded in, not replaced —
+    --aiderignore is a single-value override, so silently dropping it would
+    regress any client repo relying on it (#1915)."""
+    worktree = make_git_repo("wt-aiderignore-merge")
+    (worktree / ".aiderignore").write_text("*.log\n", encoding="utf-8")
+    commit_tracked_file(worktree, "core/database.py")
+    commit_tracked_file(worktree, "src/in_scope.py")
+
+    result = build_aiderignore(worktree, ["src/in_scope.py"])
+
+    assert result is not None
+    content = result.read_text(encoding="utf-8")
+    assert "*.log" in content
+    assert "/core/database.py" in content
+
+
+def test_build_aiderignore_never_blocks_a_manifest_path_even_if_repo_aiderignore_would(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The single most safety-critical assertion: even when the client repo's
+    own .aiderignore would already match a manifest path, the generated block
+    set never includes it — aider's --file intake loop silently *skips* (only a
+    tool_warning, no error) any explicit --file entry that matches the
+    aiderignore spec (coders/base_coder.py:449-457), so a manifest path landing
+    in the block set would silently defeat #1905's --file manifest feature."""
+    worktree = make_git_repo("wt-aiderignore-never-blocks-manifest")
+    (worktree / ".aiderignore").write_text("src/*.py\n", encoding="utf-8")
+    commit_tracked_file(worktree, "src/real_target.py")
+    commit_tracked_file(worktree, "core/database.py")
+
+    result = build_aiderignore(worktree, ["src/real_target.py"])
+
+    assert result is not None
+    content = result.read_text(encoding="utf-8")
+    assert "/src/real_target.py" not in content
+
+
+def test_build_aiderignore_fails_open_when_git_ls_files_errors(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A failing 'git ls-files' degrades to None (no --aiderignore emitted),
+    never a raised exception — _local_preflight runs outside spawn()'s
+    try/except, so any exception here would propagate uncaught (#1915)."""
+    worktree = make_git_repo("wt-aiderignore-git-fails")
+
+    with patch(
+        "cw.local_runner.subprocess.run",
+        side_effect=subprocess.CalledProcessError(1, ["git", "ls-files"]),
+    ):
+        result = build_aiderignore(worktree, ["src/in_scope.py"])
+
+    assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -912,31 +1047,35 @@ def test_synthesize_git_result_detects_file_request_beyond_tail_window(
     assert result.blocker.reason == AIDER_NO_OUTPUT
 
 
-def test_detect_reflection_echo_committed_file_outside_manifest_not_flagged(
+def test_synthesize_git_result_has_no_manifest_cross_check_by_design(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """KNOWN-OPEN residual vector, tracked for closure in #1915.
+    """Intentional design boundary, not an open gap: synthesize_git_result does
+    not cross-check committed files against the plan manifest, by design.
 
-    aider's reflection loop re-scans the model's *own reply* every turn
-    (``check_for_file_mentions(content)`` where ``content =
-    self.partial_response_content``, base_coder.py:1561), independently of the
-    --message/--read split #1905 closes. So a model echo of an excluded path
-    ("I will not touch core/database.py per the exclusion list") can still
-    re-trigger confirm_ask → auto-accept under --yes-always, and the excluded
-    file gets committed anyway.
+    #1915 closed the reflection-loop echo vector — a model reply that echoes
+    an excluded path re-triggering ``check_for_file_mentions`` →
+    ``confirm_ask`` auto-accept under --yes-always on every reflection round
+    (base_coder.py:1561, independent of the --message/--read split #1905
+    closed) — via a *prevention* fix upstream of this function:
+    ``local_runner.build_aiderignore``/``build_argv`` narrow aider's own
+    addable-file universe at argv-construction time (pre-flight), before aider
+    ever starts, so an excluded file can never enter the chat in the first
+    place. See test_build_aiderignore_* and
+    test_local_executor_spawn_passes_aiderignore_flag_to_argv for the actual
+    closure assertions.
 
-    cw cannot observe aider's reflection loop — it sees only the worktree's
-    post-exit git state. This test pins that today's synthesize_git_result
-    reports ordinary success on exactly that outcome: scope carries a plain
-    file *count* (schema.py:292), _git_facts → _parse_numstat_totals reduce the
-    diff to counts, and synthesize_git_result takes no manifest parameter at
-    all — committed file names are retained nowhere in AutoDevResult, so a
-    post-hoc cross-check against the plan manifest is not structurally
-    possible with today's data shape.
-
-    #1915 closes when this test flips to asserting the manifest violation is
-    detected and surfaced (e.g. a new blocker.reason).
+    synthesize_git_result itself is a post-hoc, git-facts-only function this
+    fix does not touch: scope carries a plain file *count*
+    (schema.py:292), _git_facts → _parse_numstat_totals reduce the diff to
+    counts, and synthesize_git_result takes no manifest parameter at all —
+    committed file names are retained nowhere in AutoDevResult, so a post-hoc
+    cross-check against the plan manifest remains not structurally possible
+    with today's data shape. That is now an accepted design boundary, not a
+    residual gap: prevention makes detection here unnecessary. This test pins
+    that boundary so a future change to this function's contract is a
+    deliberate decision, not an accidental regression.
     """
     worktree = _make_no_output_worktree(make_git_repo, "wt-reflection-echo")
     _write_plan(worktree)
