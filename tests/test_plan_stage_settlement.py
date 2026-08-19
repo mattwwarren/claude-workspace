@@ -792,7 +792,7 @@ def test_stage_1_completion_sentinel_template_includes_resolution_fields() -> No
     assert '"resolution_evidence"' in json_block
 
     section = _stage1_completion_section()
-    window = _nearby(section, "<<<AUTO_DEV_RESULT", span=3000)
+    window = _after(section, "<<<AUTO_DEV_RESULT", span=3000)
     assert "must include both keys only if this round settled" in window
     assert "Step 1c.0 step 5" in window
     assert "must not include them otherwise" in window
@@ -854,7 +854,7 @@ def test_settled_item_cannot_yield_second_resolution_evidence_candidate() -> Non
     #     step 4/5 transcription pass, never a prior-round marker found present.
     window = _after(block, "**Resolution-evidence candidate (#1896).**", span=900)
     assert "settles ≥1 item in this round's own transcription pass" in window
-    assert "scoped strictly to items settled by step 4's transcription in " in window
+    assert "Scoped strictly to items settled by step 4's transcription in " in window
     assert "this round's own pass" in window
     assert (
         "a `plan-stage-settled` marker merely found already present from a "
