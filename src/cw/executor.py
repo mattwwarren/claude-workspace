@@ -40,6 +40,7 @@ from cw.local_runner import (
     PlanFetcher,
     RealAiderRunner,
     aider_available,
+    build_aiderignore,
     build_argv,
     build_env,
     build_task_message,
@@ -318,6 +319,9 @@ class _PreflightOK(NamedTuple):
     files: list[str]
     # The materialised read-only task-context file passed to aider as --read.
     read_only_path: Path
+    # The materialised --aiderignore file blocking every tracked file outside
+    # the manifest (#1915); None when the manifest is empty (no restriction).
+    aiderignore_path: Path | None
 
 
 def _local_preflight(
@@ -371,12 +375,14 @@ def _local_preflight(
     plan_text = ""
     with contextlib.suppress(OSError):
         plan_text = (worktree / ".cw" / "plan.md").read_text(encoding="utf-8")
+    files = parse_plan_files_modified(plan_text)
     return _PreflightOK(
         endpoint=config.endpoint,  # narrowed: is-None check above
         model=config.model or "",
         task_message=task_message,
-        files=parse_plan_files_modified(plan_text),
+        files=files,
         read_only_path=worktree / TASK_CONTEXT_RELATIVE_PATH,
+        aiderignore_path=build_aiderignore(worktree, files),
     )
 
 
@@ -463,6 +469,7 @@ class LocalExecutor:
                     preflight.task_message,
                     preflight.files,
                     preflight.read_only_path,
+                    preflight.aiderignore_path,
                 )
                 env = build_env(preflight.endpoint)
                 proc = self._runner.launch(worktree, argv, env)
