@@ -1864,6 +1864,177 @@ def test_release_stale_gated_tasks_auto_policy_requeues_variant_b(
     assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_b"
 
 
+def test_release_stale_gated_tasks_auto_policy_requeues_stale_dispatch_variant_b(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reap_policy=auto: a stale_dispatch/pr_already_open park (the agent-
+    reported GitHub #1862 sentinel, extended here per #1902) requeues to
+    PENDING once its blocked_on_pr is observed MERGED -- same release
+    mechanism as test_release_stale_gated_tasks_auto_policy_requeues_variant_b,
+    exercised through the second Variant B producer/reason pair.
+
+    Caveat (#1902 R3, binding): the ``blocking`` fixture below is
+    hand-constructed exactly like the sibling Variant A/B fixtures
+    (COMPLETED status, pr_url + pr_state=MERGED pre-set) -- it does not
+    come from any real production code path. Per the plan's R3 reachability
+    trace, no store row today is ever populated with a stale_dispatch
+    park's own self-PR pr_url: the self-check that produces this park
+    discovers the PR via a live ``gh pr list --head <branch>`` query, which
+    never writes to any TicketTask.pr_url. This test proves the release
+    *mechanism* is wired correctly for the extended predicate -- it does
+    NOT prove this release is reachable in production for the
+    stale_dispatch disposition today. See #1927, the tracking issue for the
+    independent PR-state source that would make it reachable.
+    """
+    blocking = _make_ticket_task(
+        ticket_id="SG-SD-BLOCKER",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="https://github.com/foo/bar/pull/70",
+        pr_state=PrState(state="MERGED"),
+    )
+    blocked = _make_ticket_task(
+        ticket_id="SG-SD1",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="stale_dispatch",
+        blocked_reason="pr_already_open",
+        blocked_on_pr=70,
+        session_id="sess-sd1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
+    save_state(CwState(sessions=[]))
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-SD1"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD1")
+    assert reloaded.status == QueueItemStatus.PENDING
+    assert reloaded.session_id is None
+    assert reloaded.blocked_on_pr is None  # unconditional-clear on transition
+
+    events = read_events()
+    reap_events = [
+        e
+        for e in events
+        if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        and e.payload.get("ticket_id") == "SG-SD1"
+    ]
+    assert len(reap_events) == 1
+    assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_b"
+
+
+def test_release_stale_gated_tasks_stale_dispatch_still_open_pr_is_noop(
+    tmp_config_dir: Path,
+) -> None:
+    """A stale_dispatch park whose blocking PR is still OPEN (not yet
+    merged) must not be released -- the ticket's explicit no-false-release
+    case (#1902). The ``blocking`` fixture below is hand-constructed like
+    its sibling Variant A/B fixtures; no production code path populates a
+    row's pr_url for a stale_dispatch self-PR today (#1902 R3, #1927)."""
+    blocking = _make_ticket_task(
+        ticket_id="SG-SD-BLOCKER2",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        pr_url="https://github.com/foo/bar/pull/71",
+        pr_state=PrState(state="OPEN"),
+    )
+    blocked = _make_ticket_task(
+        ticket_id="SG-SD2",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="stale_dispatch",
+        blocked_reason="pr_already_open",
+        blocked_on_pr=71,
+    )
+    save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
+    save_state(CwState(sessions=[]))
+
+    released = release_stale_gated_tasks()
+
+    assert released == []
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD2")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.blocked_on_pr == 71
+
+
+def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps(
+    tmp_config_dir: Path,
+) -> None:
+    """Default signal_only: a stale_dispatch Variant B park stamps
+    stale_gate_detected_at without mutating status, symmetric with
+    test_release_stale_gated_tasks_variant_b_signal_only_stamps. The
+    ``blocking`` fixture below is hand-constructed like its sibling
+    Variant A/B fixtures; no production code path populates a row's
+    pr_url for a stale_dispatch self-PR today (#1902 R3, #1927)."""
+    blocking = _make_ticket_task(
+        ticket_id="SG-SD-BLOCKER3",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="https://github.com/foo/bar/pull/72",
+        pr_state=PrState(state="MERGED"),
+    )
+    blocked = _make_ticket_task(
+        ticket_id="SG-SD3",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="stale_dispatch",
+        blocked_reason="pr_already_open",
+        blocked_on_pr=72,
+    )
+    save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
+    save_state(CwState(sessions=[]))
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-SD3"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD3")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.stale_gate_detected_at is not None
+    assert reloaded.blocked_on_pr == 72
+
+
+def test_is_variant_b_gate_task_stale_dispatch_requires_matching_blocked_reason(
+    tmp_config_dir: Path,
+) -> None:
+    """Guards the predicate's second `and`: a stale_dispatch-disposition row
+    with a mismatched blocked_reason must not be released, even with a
+    non-null blocked_on_pr and a merged blocking PR available in the
+    cross-reference index. The ``blocking`` fixture below is
+    hand-constructed like its sibling Variant A/B fixtures; no production
+    code path populates a row's pr_url for a stale_dispatch self-PR today
+    (#1902 R3, #1927)."""
+    blocking = _make_ticket_task(
+        ticket_id="SG-SD-BLOCKER4",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="https://github.com/foo/bar/pull/73",
+        pr_state=PrState(state="MERGED"),
+    )
+    blocked = _make_ticket_task(
+        ticket_id="SG-SD4",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="stale_dispatch",
+        blocked_reason="some_other_reason",
+        blocked_on_pr=73,
+    )
+    save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
+    save_state(CwState(sessions=[]))
+
+    released = release_stale_gated_tasks()
+
+    assert released == []
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD4")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.blocked_on_pr == 73
+
+
 def test_release_stale_gated_tasks_variant_b_signal_only_stamps(
     tmp_config_dir: Path,
 ) -> None:
