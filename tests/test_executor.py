@@ -60,7 +60,7 @@ from cw.opencode_runner import (
     OpencodeRunner,
 )
 from cw.result import EmitOutcome
-from tests.conftest import find_completed_session
+from tests.conftest import commit_tracked_file, find_completed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1266,6 +1266,58 @@ def test_local_preflight_files_empty_without_files_modified_heading(
     assert result.files == []
 
 
+def test_local_preflight_threads_aiderignore_path_into_preflight_ok(
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A non-empty manifest threads a materialised aiderignore path onto
+    _PreflightOK (#1915)."""
+    worktree = make_git_repo("wt-preflight-aiderignore")
+    commit_tracked_file(worktree, "core/database.py")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text(
+        "## Files Modified\n- src/real_target.py\n", encoding="utf-8"
+    )
+
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    task = TicketTask(ticket_id="T-aiderignore", client="test", stage=Stage.IMPL)
+    client = ClientConfig(name="test", workspace_path=worktree)
+
+    with patch("cw.executor.aider_available", return_value=True):
+        result = _local_preflight(config, task, worktree, client)
+
+    assert isinstance(result, _PreflightOK)
+    assert isinstance(result.aiderignore_path, Path)
+    assert "/core/database.py" in result.aiderignore_path.read_text(encoding="utf-8")
+
+
+def test_local_preflight_aiderignore_path_none_without_manifest(
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """No manifest section → no aiderignore emitted (mirrors the empty-files
+    fallback contract, #1915)."""
+    worktree = make_git_repo("wt-preflight-aiderignore-none")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
+
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    task = TicketTask(ticket_id="T-aiderignore-none", client="test", stage=Stage.IMPL)
+    client = ClientConfig(name="test", workspace_path=worktree)
+
+    with patch("cw.executor.aider_available", return_value=True):
+        result = _local_preflight(config, task, worktree, client)
+
+    assert isinstance(result, _PreflightOK)
+    assert result.aiderignore_path is None
+
+
 def test_local_preflight_threads_read_only_path_into_preflight_ok(
     tmp_path: Path,
     make_git_repo: Callable[[str], Path],
@@ -1332,6 +1384,29 @@ def test_local_executor_spawn_passes_read_flag_to_argv(
     message = argv[argv.index("--message") + 1]
     for path in ("core/database.py", "etl_mcp", "auth.py"):
         assert path not in message
+
+
+def test_local_executor_spawn_passes_aiderignore_flag_to_argv(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """End-to-end: the argv aider actually receives blocks every tracked file
+    outside the manifest via --aiderignore. This is the test that most
+    directly encodes #1915's acceptance criterion — a model reply echoing a
+    non-manifest path cannot cause a chat-file addition, because the excluded
+    files never enter aider's addable-file universe in the first place."""
+    worktree = make_git_repo("wt-spawn-aiderignore")
+    commit_tracked_file(worktree, "core/database.py")
+    commit_tracked_file(worktree, "etl_mcp/api/x.py")
+    argv = _local_spawn_argv(worktree, _EXCLUSION_PLAN)
+
+    assert "--aiderignore" in argv
+    idx = argv.index("--aiderignore")
+    aiderignore_path = Path(argv[idx + 1])
+    lines = aiderignore_path.read_text(encoding="utf-8").splitlines()
+    assert "/core/database.py" in lines
+    assert "/etl_mcp/api/x.py" in lines
+    assert "/src/real_target.py" not in lines
 
 
 def test_local_preflight_ok_model_none_defaults_to_empty_string(

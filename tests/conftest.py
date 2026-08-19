@@ -946,3 +946,31 @@ def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
         return repo
 
     return _make
+
+
+def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") -> None:
+    """Write *relpath* under *worktree* and commit it as a real tracked file.
+
+    Shared by tests that need a ``make_git_repo`` worktree to carry tracked
+    files beyond its base empty commit — cw #1915's ``build_aiderignore``
+    exercises ``git ls-files`` against a real tracked-file set, and its tests
+    (plus the corresponding executor spawn test) all need this same
+    mkdir/write/add/commit sequence. Reuses ``_clean_git_env()`` so the nested
+    git invocation doesn't inherit a wrapping git call's env.
+    """
+    path = worktree / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    clean_env = _clean_git_env()
+    subprocess.run(
+        ["git", "-C", str(worktree), "add", relpath],
+        capture_output=True,
+        check=True,
+        env=clean_env,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "commit", "-m", f"add {relpath}"],
+        capture_output=True,
+        check=True,
+        env=clean_env,
+    )

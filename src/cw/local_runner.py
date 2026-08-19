@@ -65,6 +65,19 @@ LIVENESS_UNAVAILABLE = "liveness_unavailable"
 # _PreflightOK and into build_argv's --read flag.
 TASK_CONTEXT_RELATIVE_PATH: Path = Path(".cw", "task_context.md")
 
+# The generated --aiderignore file (#1915). Blocks every git-tracked file
+# outside the plan's manifest from aider's *addable-file universe*
+# (Coder.get_addable_relative_files → GitRepo.get_tracked_files → ignored_file),
+# the same universe check_for_file_mentions offers to confirm_ask on BOTH the
+# initial --message scan and the model's own reply on every reflection round
+# (base_coder.py:1561) — so an excluded file can never be re-added no matter
+# how a reply echoes its path. A manifest path must NEVER appear in this
+# file's block set: aider's --file intake loop silently *skips* (only a
+# tool_warning, no error) any explicit --file entry that matches the
+# aiderignore spec (coders/base_coder.py:449-457), which would silently
+# defeat #1905's --file manifest feature.
+AIDERIGNORE_RELATIVE_PATH: Path = Path(".cw", "aiderignore")
+
 # Why path-free: aider scans the --message string for path-like tokens
 # (Coder.check_for_file_mentions ← preproc_user_input) and, under --yes, adds
 # every file it finds to the chat. Embedding the plan text there meant the
@@ -323,6 +336,7 @@ def build_argv(
     task_message: str,
     files: list[str],
     read_only_path: Path | str,
+    aiderignore_path: Path | None = None,
 ) -> list[str]:
     """Return the aider argv for the given model, message, files and reference.
 
@@ -341,19 +355,28 @@ def build_argv(
     (``TASK_CONTEXT_RELATIVE_PATH``), passed as ``--read`` so the plan prose
     reaches the model without being scanned for path mentions.
 
-    Flag order (files, then read, then message) keeps ``--message``'s value
-    immediately after the flag, which ``executor_diagnostics.redact_argv``
-    relies on for index-based redaction (#1239).
+    *aiderignore_path*, when not None, is emitted as ``--aiderignore <path>``,
+    grouped with the ``--file`` flags before ``--read`` (#1915). Defaults to
+    None so every pre-#1915 positional call site keeps compiling unchanged.
+
+    Flag order (files, aiderignore, then read, then message) keeps
+    ``--message``'s value immediately after the flag, which
+    ``executor_diagnostics.redact_argv`` relies on for index-based redaction
+    (#1239).
     """
     qualified_model = model if model.startswith("openai/") else f"openai/{model}"
     file_flags: list[str] = []
     for path in files:
         file_flags.extend(["--file", path])
+    aiderignore_flags: list[str] = []
+    if aiderignore_path is not None:
+        aiderignore_flags = ["--aiderignore", str(aiderignore_path)]
     return [
         "aider",
         "--model",
         qualified_model,
         *file_flags,
+        *aiderignore_flags,
         "--read",
         str(read_only_path),
         "--message",
@@ -368,6 +391,84 @@ def build_argv(
         "0",
         "--no-stream",
     ]
+
+
+def _tracked_files(worktree: Path) -> list[str] | None:
+    """Return ``git ls-files`` output for *worktree*, or None on failure.
+
+    Failure (not a git repo, git absent, etc.) degrades to None so callers can
+    fail open (no --aiderignore emitted) rather than raise — mirrors
+    ``_local_preflight``'s existing plan-read suppression (executor.py).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(worktree), "ls-files"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    return [line for line in result.stdout.splitlines() if line]
+
+
+_AIDERIGNORE_SEPARATOR = "# --- cw #1915: plan-manifest enforcement ---"
+
+
+def build_aiderignore(worktree: Path, manifest_files: list[str]) -> Path | None:
+    """Materialise a ``--aiderignore`` file blocking every tracked file the
+    plan's ``## Files Modified`` manifest doesn't name, and return its path.
+
+    Returns None (no ``--aiderignore`` flag emitted at all) when *manifest_files*
+    is empty, mirroring #1905's "no manifest → no restriction" fallback
+    contract, or when the tracked-file listing itself cannot be determined
+    (fail-open, never a crash — this runs in ``_local_preflight``, outside
+    ``spawn()``'s try/except).
+
+    A pre-existing ``worktree/.aiderignore`` (aider's own default location) is
+    read and folded in verbatim ahead of cw's own block lines: ``--aiderignore``
+    is a single-value override, not additive, so passing cw's generated file
+    without merging would silently replace — not extend — a client repo's own
+    exclusions. Because that pre-existing content is merged in unfiltered, one
+    of its patterns could coincidentally match a manifest path (e.g. a client
+    ``.aiderignore`` line ``src/*.py`` matching manifest file
+    ``src/real_target.py``) — so every manifest path also gets an explicit
+    ``!/``-prefixed negation line, appended last. Gitignore's later-pattern-wins
+    semantics then force those paths to stay addable regardless of what any
+    earlier line (merged-in or cw's own) says. This is on top of, not instead
+    of, computing the block set as ``tracked - manifest`` by construction — see
+    AIDERIGNORE_RELATIVE_PATH's docstring comment for why a manifest path must
+    never end up excluded. (Caveat: gitignore negation cannot re-include a path
+    inside an excluded *directory* — not a concern here since patterns are
+    per-file, not directory-level.)
+
+    Every blocked line is written ``/``-prefixed (root-anchored gitignore
+    syntax) to avoid the "no internal slash matches the basename anywhere in
+    the tree" gotcha for single-segment filenames.
+    """
+    if not manifest_files:
+        return None
+    tracked = _tracked_files(worktree)
+    if tracked is None:
+        return None
+    manifest_set = set(manifest_files)
+    blocked = sorted(f for f in tracked if f not in manifest_set)
+
+    existing = ""
+    existing_aiderignore_path = worktree / ".aiderignore"
+    with contextlib.suppress(OSError):
+        existing = existing_aiderignore_path.read_text(encoding="utf-8")
+
+    lines = [existing.rstrip("\n")] if existing else []
+    lines.append(_AIDERIGNORE_SEPARATOR)
+    lines.extend(f"/{path}" for path in blocked)
+    lines.extend(f"!/{path}" for path in sorted(manifest_set))
+    content = "\n".join(lines) + "\n"
+
+    out_path = worktree / AIDERIGNORE_RELATIVE_PATH
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(content, encoding="utf-8")
+    return out_path
 
 
 # Git identity and core vars aider needs for commits. The subprocess receives
