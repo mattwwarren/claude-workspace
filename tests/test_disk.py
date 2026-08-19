@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
-from cw.disk import DiskUsage, check_disk_usage
+import pytest
 
-if TYPE_CHECKING:
-    from pathlib import Path
+from cw.disk import DiskUsage, _nearest_existing_ancestor, check_disk_usage
 
 
 class TestCheckDiskUsage:
@@ -42,3 +41,11 @@ class TestCheckDiskUsage:
 
         assert isinstance(usage, DiskUsage)
         assert usage._fields == ("total_gb", "free_gb")
+
+    def test_ancestor_walk_terminates_at_filesystem_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With nothing on disk existing, the walk stops at root, not forever."""
+        monkeypatch.setattr(Path, "exists", lambda _self: False)
+
+        assert _nearest_existing_ancestor(tmp_path) == Path(tmp_path.anchor)

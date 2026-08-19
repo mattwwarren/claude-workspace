@@ -15242,6 +15242,39 @@ class TestDiskPressurePreflightGate:
         ]
         assert skip_ticks == []
 
+    def test_probe_oserror_fails_open_and_dispatches(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unprobeable mount is not evidence of pressure: the gate fails open."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1H", client="test-client"))
+
+        probe_error = "mount went away"
+
+        def _raise(_path: Path) -> DiskUsage:
+            raise OSError(probe_error)
+
+        monkeypatch.setattr("cw.dispatch.gating.check_disk_usage", _raise)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+        tick_events = read_events(
+            consumer="test-d1-probe-error",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        skip_ticks = [
+            e
+            for e in tick_events
+            if e.payload.get("skip_reason") == DispatchSkipReason.DISK_PRESSURE_GATE
+        ]
+        assert skip_ticks == []
+
 
 # ---------------------------------------------------------------------------
 # TestSpawnInvalidatesStaleContextJson (#1046)
