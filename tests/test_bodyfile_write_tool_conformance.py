@@ -18,6 +18,8 @@ convention of ``test_harden_ticket_positioning.py`` and
 import re
 from pathlib import Path
 
+from tests.conftest import _cmd
+
 ROOT = Path(__file__).parent.parent
 CLAUDE_MD = ROOT / "CLAUDE.md"
 SKILLS = ROOT / ".claude" / "skills"
@@ -50,10 +52,6 @@ def _claude_md() -> str:
 
 def _skill(name: str) -> str:
     return (SKILLS / name).read_text()
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def test_claude_md_agent_file_operations_gains_body_rule() -> None:
