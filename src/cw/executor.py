@@ -72,6 +72,7 @@ from cw.opencode_runner import (
     RealOpencodeRunner,
     build_stage_prompt,
     opencode_available,
+    stage_entry_marker,
 )
 from cw.opencode_runner import (
     build_argv as build_opencode_argv,
@@ -606,10 +607,11 @@ def _opencode_preflight(
     Returns a blocked ``AutoDevResult`` on binary-missing or unsupported
     stage; returns ``_OpencodePreflightOK`` with the resolved argv + env
     (stage prompt) when the binary is available and the stage is supported.
-    The stage prompt instructs opencode to read and follow the existing
-    ``auto-dev-{stage}.md`` command file (R6) — no plan fetch is needed
-    for FINALIZE, and other stages handle their own context materialization
-    per their command files.
+    FINALIZE's prompt points at the ``auto-dev-finalize.md`` command file
+    (worktree copy first, home fallback — #1670 R6); PLAN/IMPL/REVIEW get
+    self-contained prompts (see ``build_stage_prompt``). Every blocked result
+    carries the dispatched stage's own entry marker so dispatch never walks
+    ``task.stage`` forward on a failure sentinel.
     """
     del client  # unused: opencode builds its prompt from ticket_id + stage
     if stage.value not in SUPPORTED_STAGES:
@@ -626,8 +628,9 @@ def _opencode_preflight(
             reason=OPENCODE_NOT_FOUND,
             retry_eligible=True,
             retry_delay_seconds=0,
+            stage_reached=stage_entry_marker(stage.value),
         )
-    prompt = build_stage_prompt(stage.value, task.ticket_id)
+    prompt = build_stage_prompt(stage.value, task.ticket_id, worktree)
     return _OpencodePreflightOK(
         argv=build_opencode_argv(config.model, worktree, prompt),
         env=build_opencode_env(),
@@ -639,10 +642,12 @@ class OpencodeExecutor:
 
     Supports PLAN, IMPL, REVIEW, and FINALIZE stages. Unsupported stages
     (e.g. HARDEN) are blocked in pre-flight with
-    ``reason=opencode_<stage>_not_implemented``. Each stage's prompt
-    materializes an instruction to read and follow the existing
-    ``auto-dev-{stage}.md`` command file (R6) and emit the sentinel with
-    the correct ``stage_reached`` marker (R1).
+    ``reason=opencode_<stage>_not_implemented``. FINALIZE's prompt points at
+    the ``auto-dev-finalize.md`` command file (R6, worktree copy first);
+    PLAN/IMPL/REVIEW carry self-contained stage contracts because their
+    command files require Claude Code-only machinery (see
+    ``opencode_runner.build_stage_prompt``). Every prompt instructs opencode
+    to emit the sentinel with the correct ``stage_reached`` marker (R1).
 
     spawn() is non-blocking on the launch path: after synchronous pre-flight
     checks, it launches opencode via ``OpencodeRunner.launch`` (Popen, no wait),
@@ -731,6 +736,7 @@ class OpencodeExecutor:
                     worktree=worktree,
                     reason=LIVENESS_UNAVAILABLE,
                     details=append_diagnostics_pointer(liveness_detail, session_id=sid),
+                    stage_reached=stage_entry_marker(stage.value),
                 )
             else:
                 completion_result = preflight
@@ -764,6 +770,7 @@ class OpencodeExecutor:
                         details=append_diagnostics_pointer(
                             unexpected_error_detail, session_id=sid
                         ),
+                        stage_reached=stage_entry_marker(stage.value),
                     ).model_dump(mode="json"),
                     guard_already_completed=True,
                 )
