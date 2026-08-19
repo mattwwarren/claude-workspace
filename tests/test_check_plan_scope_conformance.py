@@ -384,6 +384,118 @@ def test_mixed_bullets_and_table_rows_both_parsed() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fence-awareness (#1917)
+# ---------------------------------------------------------------------------
+
+
+def test_files_modified_heading_inside_fenced_example_is_ignored() -> None:
+    """A fenced illustration ahead of the real section is not the manifest.
+
+    Mirrors tests/test_plan_files.py's
+    ``test_ignores_files_modified_section_illustrated_inside_a_code_fence`` —
+    the same false positive that blocked #1905's first impl pass. Prior to
+    #1917 this script's ``_parse_files_modified`` had no fence tracking at
+    all, unlike ``src/cw/plan_files.py``'s copy.
+    """
+    text = (
+        "# Plan\n\n"
+        "## Patterns Found\n\n"
+        "```\n"
+        "## Files Modified\n"
+        "- src/fake_illustration.py\n"
+        "```\n\n"
+        "## Files Modified\n"
+        "- src/real_target.py\n"
+    )
+    assert _mod._parse_files_modified(text) == ["src/real_target.py"]
+
+
+def test_skips_fenced_bullets_inside_the_files_modified_body() -> None:
+    """A fence opened and closed mid-section hides only its own bullets.
+
+    Mirrors tests/test_plan_files.py's sibling body-fence test.
+    """
+    text = (
+        "## Files Modified\n"
+        "- a/before.py\n"
+        "```python\n"
+        "- a/fenced.py\n"
+        "```\n"
+        "- a/after.py\n"
+    )
+    assert _mod._parse_files_modified(text) == ["a/before.py", "a/after.py"]
+
+
+def test_tilde_fence_is_also_skipped() -> None:
+    """A ``~~~``-fenced example is ignored, same as a backtick fence."""
+    text = (
+        "# Plan\n\n"
+        "~~~\n"
+        "## Files Modified\n"
+        "- src/fake_illustration.py\n"
+        "~~~\n\n"
+        "## Files Modified\n"
+        "- src/real_target.py\n"
+    )
+    assert _mod._parse_files_modified(text) == ["src/real_target.py"]
+
+
+def test_indented_fence_marker_still_toggles() -> None:
+    """A fence marker indented under a list item still opens/closes the fence."""
+    text = (
+        "## Files Modified\n"
+        "- a/before.py\n"
+        "- example:\n"
+        "  ```\n"
+        "  ## Files Modified\n"
+        "  - a/fake.py\n"
+        "  ```\n"
+        "- a/after.py\n"
+    )
+    assert _mod._parse_files_modified(text) == ["a/before.py", "a/after.py"]
+
+
+def test_1905_incident_regression_full_pipeline(tmp_path: Path) -> None:
+    """The acceptance-criteria-mandated #1905 regression, end to end.
+
+    Reproduces the incident shape: an early fenced illustration block
+    containing a literal ``## Files Modified`` heading with one fake path,
+    followed further down by the real heading enumerating 9 real paths.
+    Asserts both the parser and the CLI pipeline land on the real 9 files,
+    not the fake one, and that the delivered set does NOT trigger drift.
+    """
+    real_files = _paths("real", 9)
+    fake_illustration = (
+        "```\n"
+        "## Files Modified\n"
+        "- src/cw/fake_illustration.py\n"
+        "```\n\n"
+    )
+    text = (
+        "# Implementation Plan: Something (#1905)\n\n"
+        "## Patterns Found\n\n"
+        "Illustrated example of a files-modified section, for reference:\n\n"
+        f"{fake_illustration}"
+        "## Files Modified\n\n"
+        + "\n".join(f"- {p} (~10 lines)" for p in real_files)
+        + "\n"
+    )
+
+    assert _mod._parse_files_modified(text) == real_files
+
+    plan = tmp_path / "plan.md"
+    plan.write_text(text, encoding="utf-8")
+    touched = tmp_path / "touched.txt"
+    touched.write_text("\n".join(real_files) + "\n", encoding="utf-8")
+
+    result = _run_cli(plan, touched)
+    assert result.returncode == 0, result.stderr
+    verdict = json.loads(result.stdout)
+    assert verdict["triggered"] is False
+    assert verdict["extra_files"] == []
+
+
+# ---------------------------------------------------------------------------
 # pyproject.toml per-repo override (R2)
 # ---------------------------------------------------------------------------
 
