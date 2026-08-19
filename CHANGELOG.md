@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`resolution_consumed`/`resolution_evidence` wired into `AutoDevResult` (#1896):** the plan-stage settlement mechanism (`auto-dev-plan.md` Step 1c.0) now emits both fields on a plan-stage pause when the round settled at least one ambiguity/premise item, and `AutoDevResult` (`cw.auto_dev_result.schema`) validates them — `resolution_consumed` is a `StrictBool` rejecting coercible non-bool values, and `resolution_evidence` requires a non-empty `comment_id` and non-empty `items` list when present. `cw.dispatch.productivity`'s existing STRICT consumer, previously structurally correct but dormant per the #1750 plan's first Adopted Assumption, is now live against a real producer.
+
 ## [1.37.0] - 2026-08-19
 
 ### Added
