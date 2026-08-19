@@ -605,10 +605,14 @@ class TicketTask(BaseModel):
     # GitHub #1713 — Variant B's blocking PR number: bare int, no owner/repo
     # qualifier (a dev-queue client is bound to exactly one repo; see the
     # ticket's Self-Verified Premises). Stamped by dispatch/routing.py's Rule
-    # 5 when a `merge_gate_blocked`/`prior_pipeline_pr_open` park's
-    # blocker.details names the blocking PR. Cross-referenced by
-    # release_stale_gated_tasks against another task's hydrated pr_state
-    # within the same client to detect when that blocking PR has merged.
+    # 5 when a `merge_gate_blocked`/`prior_pipeline_pr_open` park or a
+    # `stale_dispatch`/`pr_already_open` park (GitHub #1902 fast-follow to
+    # #1862) has a blocker.details naming the blocking PR. Cross-referenced
+    # by release_stale_gated_tasks against another task's hydrated pr_state
+    # within the same client to detect when that blocking PR has merged --
+    # currently production-unreachable for the stale_dispatch case (#1902
+    # R3): no store row is known to carry that self-PR's pr_url until #1927
+    # (an independent PR-state source) lands.
     blocked_on_pr: int | None = None
 
     @field_validator("gate_recipes")

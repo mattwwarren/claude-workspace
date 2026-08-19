@@ -10,8 +10,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result import STALE_DISPATCH_BLOCKER_REASON
 from cw.config import load_clients, load_orchestrator_config, load_state, save_state
 from cw.dev_queue import (
+    STALE_DISPATCH_DISPOSITION,
     _stamp_salvage_stage,
     dev_queue_lock,
     load_dev_queue,
@@ -748,7 +750,11 @@ _VARIANT_A_BLOCKED_DISPOSITION = "blocked"
 
 # Variant B gate-class markers: a BLOCKED_ON_USER row with no PR of its own,
 # parked behind a DIFFERENT ticket's open PR (dispatch/routing.py Rule 5,
-# merge_gate_blocked/prior_pipeline_pr_open).
+# merge_gate_blocked/prior_pipeline_pr_open). GitHub #1902 (fast-follow to
+# #1862) widens this to a second disposition/reason pair,
+# STALE_DISPATCH_DISPOSITION/STALE_DISPATCH_BLOCKER_REASON -- see
+# _is_variant_b_gate_task's docstring for the full two-producer contract and
+# the #1927 caveat.
 _VARIANT_B_DISPOSITION = "merge_gate_blocked"
 
 _PROPOSED_ACTION_VARIANT_A = "release_stale_gate_variant_a"
@@ -773,17 +779,33 @@ def _is_variant_a_gate_task(task: TicketTask) -> bool:
 
 
 def _is_variant_b_gate_task(task: TicketTask) -> bool:
-    """True iff *task* is a BLOCKED_ON_USER row parked behind ANOTHER ticket's PR."""
+    """True iff *task* is a BLOCKED_ON_USER row parked behind ANOTHER
+    ticket's PR -- either dispatch's own Rule 5 merge gate
+    (disposition="merge_gate_blocked", GitHub #1713) or an agent-reported
+    stale_dispatch sentinel (disposition=STALE_DISPATCH_DISPOSITION,
+    GitHub #1862/#1902 fast-follow). Both stamp task.blocked_on_pr via the
+    identical _extract_blocked_on_pr regex over blocker.details.
+
+    NOTE (#1902 R3): for stale_dispatch specifically, no production code
+    path is currently known to populate a store row whose pr_url matches
+    this PR -- release_stale_gated_tasks's Variant B loop is therefore
+    unit-test-reachable but production-unreachable for this disposition
+    until #1927 closes that gap.
+    """
+    if task.status != QueueItemStatus.BLOCKED_ON_USER:
+        return False
+    if task.blocked_on_pr is None:
+        return False
     # Function-level import breaks the cw.dispatch<->cw.reconcile package
     # import cycle -- see the comment above _VARIANT_A_MERGE_PENDING_
     # DISPOSITION.
     from cw.dispatch.routing import _PRIOR_PIPELINE_PR_OPEN_REASON
 
+    if task.disposition == _VARIANT_B_DISPOSITION:
+        return task.blocked_reason == _PRIOR_PIPELINE_PR_OPEN_REASON
     return (
-        task.status == QueueItemStatus.BLOCKED_ON_USER
-        and task.disposition == _VARIANT_B_DISPOSITION
-        and task.blocked_reason == _PRIOR_PIPELINE_PR_OPEN_REASON
-        and task.blocked_on_pr is not None
+        task.disposition == STALE_DISPATCH_DISPOSITION
+        and task.blocked_reason == STALE_DISPATCH_BLOCKER_REASON
     )
 
 
@@ -859,9 +881,13 @@ def release_stale_gated_tasks() -> list[str]:
     * Variant B -- the row is blocked behind a DIFFERENT ticket's PR
       (disposition "merge_gate_blocked"/blocked_reason=
       "prior_pipeline_pr_open", ``blocked_on_pr`` carrying the blocking PR's
-      bare number). No event stream names this row directly, so it is found
-      by a dev-queue-wide cross-reference scan against every OTHER task's
-      hydrated ``pr_state`` within the same client.
+      bare number) *or* behind its own earlier, un-harvested-sentinel PR
+      (disposition ``STALE_DISPATCH_DISPOSITION``/blocked_reason=
+      "pr_already_open", GitHub #1902 fast-follow to #1862 -- currently
+      production-unreachable for the latter, see #1902 R3/#1927). No event
+      stream names this row directly, so it is found by a dev-queue-wide
+      cross-reference scan against every OTHER task's hydrated ``pr_state``
+      within the same client.
 
     Per ``park_terminal_sibling_tasks``'s exact precedent (ADR-0006):
     ``SESSION_REAP_PROPOSED`` fires on EVERY detection regardless of
