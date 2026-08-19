@@ -1934,7 +1934,9 @@ def test_release_stale_gated_tasks_stale_dispatch_still_open_pr_is_noop(
 ) -> None:
     """A stale_dispatch park whose blocking PR is still OPEN (not yet
     merged) must not be released -- the ticket's explicit no-false-release
-    case (#1902)."""
+    case (#1902). The ``blocking`` fixture below is hand-constructed like
+    its sibling Variant A/B fixtures; no production code path populates a
+    row's pr_url for a stale_dispatch self-PR today (#1902 R3, #1927)."""
     blocking = _make_ticket_task(
         ticket_id="SG-SD-BLOCKER2",
         client="client-a",
@@ -1966,7 +1968,10 @@ def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps(
 ) -> None:
     """Default signal_only: a stale_dispatch Variant B park stamps
     stale_gate_detected_at without mutating status, symmetric with
-    test_release_stale_gated_tasks_variant_b_signal_only_stamps."""
+    test_release_stale_gated_tasks_variant_b_signal_only_stamps. The
+    ``blocking`` fixture below is hand-constructed like its sibling
+    Variant A/B fixtures; no production code path populates a row's
+    pr_url for a stale_dispatch self-PR today (#1902 R3, #1927)."""
     blocking = _make_ticket_task(
         ticket_id="SG-SD-BLOCKER3",
         client="client-a",
@@ -2000,7 +2005,10 @@ def test_is_variant_b_gate_task_stale_dispatch_requires_matching_blocked_reason(
     """Guards the predicate's second `and`: a stale_dispatch-disposition row
     with a mismatched blocked_reason must not be released, even with a
     non-null blocked_on_pr and a merged blocking PR available in the
-    cross-reference index."""
+    cross-reference index. The ``blocking`` fixture below is
+    hand-constructed like its sibling Variant A/B fixtures; no production
+    code path populates a row's pr_url for a stale_dispatch self-PR today
+    (#1902 R3, #1927)."""
     blocking = _make_ticket_task(
         ticket_id="SG-SD-BLOCKER4",
         client="client-a",
