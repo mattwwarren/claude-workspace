@@ -355,7 +355,7 @@ def _make_escalation(**overrides: object) -> EscalationMetadata:
     return EscalationMetadata.model_validate(kwargs)
 
 
-class _FindingKwargs(TypedDict):
+class FindingKwargs(TypedDict):
     """Precisely-typed kwargs for a genuinely-valid Finding literal.
 
     Mirrors Finding's 10 non-defaulted-in-practice fields exactly (#1922) --
