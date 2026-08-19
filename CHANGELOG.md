@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **auto-dev dispatch rules no longer assume a synchronous Agent tool (#1944):**
+  the headless spawn rules in `auto-dev-{plan,impl,review,finalize}.md` were
+  written against a subagent tool that ran synchronously unless given
+  `run_in_background: true`. That parameter no longer exists — Agent spawns are
+  asynchronous unconditionally — which left "block on each before dispatching the
+  next, and do NOT end the parent turn between them" with no blocking primitive
+  to use, and drove sessions to hold the turn open with no-op `Bash` calls
+  instead. One observed headless review pass spent 173 of its 234 `Bash` calls on
+  `true`. The rules now say to end the parent turn and resume on the spawn's
+  completion notification, which is safe: in-flight subagents appear in the Stop
+  hook payload's `background_tasks` as `{"type": "subagent", "status": "running",
+  ...}` (verified empirically), so `cw signal-stop`'s existing deferral guard
+  prevents the #175/#176 orphan. Adds an explicit never-busy-wait rule — an
+  artificially open turn also suppresses the #176 headless-timeout backstop,
+  which can only evaluate at a turn boundary — and documents the parent/subagent
+  asymmetry: a parent's turn-end is a pause, a subagent's is a return, so a
+  subagent must not background work and then return.
+
 ## [1.38.0] - 2026-08-19
 
 ### Added

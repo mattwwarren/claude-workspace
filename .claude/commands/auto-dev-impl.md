@@ -71,16 +71,26 @@ unresolvable case defaults to `small`/Sonnet, and the operator can re-dispatch w
 **Spawn shape depends on mode AND dispatch context** (all variants pass `model: $IMPL_MODEL`
 resolved above — Sonnet for Small scope, Opus for Large):
 
-- **Interactive mode AND not in a dispatch worktree:** `isolation: "worktree"`, `model: $IMPL_MODEL`,
-  `run_in_background: true` (the parent waits for the next user gate anyway — no orphan hazard).
-- **`--headless` mode AND not in a dispatch worktree:** `isolation: "worktree"`, `model: $IMPL_MODEL`,
-  **synchronous** (omit `run_in_background`) — same orphan-hazard rationale as the Step
-  1b Plan agent fix (`750ea77`).
+- **Not in a dispatch worktree (either mode):** `isolation: "worktree"`, `model: $IMPL_MODEL`.
 - **In a dispatch worktree (either mode):** **omit `isolation: "worktree"` entirely** — the
-  dispatch worktree IS the sandbox. Spawn synchronously with no `isolation` key and
-  with `model: $IMPL_MODEL` — the agent works directly in the current cwd, and
+  dispatch worktree IS the sandbox. Spawn with no `isolation` key and with
+  `model: $IMPL_MODEL` — the agent works directly in the current cwd, and
   `worktree_path` in `.claude/cw-context.json` is the authoritative anchor for all git
   operations.
+
+**Async dispatch note (verified 2026-08-19).** The Agent tool is asynchronous unconditionally —
+`run_in_background` is no longer one of its parameters and there is no way to block on a spawn.
+Waiting for the impl agent means **ending the parent turn** and resuming on its completion
+notification. That is safe in headless: the Stop hook payload lists the in-flight subagent in
+`background_tasks` (`{"type": "subagent", "status": "running", ...}`) and `cw signal-stop` defers
+session completion while that list is non-empty (`src/cw/cli/stop_hook.py:364`), so the run is not
+orphaned. **Never** hold the turn open with no-op `Bash` calls (`true`, `sleep`, repeated polls) —
+each is a wasted model round-trip, and an artificially open turn suppresses the #176
+headless-timeout backstop, which can only evaluate at a turn boundary. The asymmetry matters when
+writing the impl agent's own prompt: a parent's turn-end is a pause, but a **subagent's** turn-end
+is a *return* — work it leaves running in the background does not survive, so the impl agent must
+finish its build/test commands inside its own turn rather than backgrounding them and returning.
+(`run_in_background` is still a valid `Bash` parameter; only the Agent spawn lost it.)
 
 ### Worktree Isolation Guard (headless) — #402
 

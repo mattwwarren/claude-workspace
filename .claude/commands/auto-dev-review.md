@@ -54,8 +54,14 @@ cw event record stage.entered \
 
 Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for the orphan hazard this avoids):
 
-- **Interactive mode:** all reviewers run with `run_in_background: true` (parallel — a human is watching and USER-origin Stop hooks do not auto-transition session state).
-- **`--headless` mode:** reviewers run **serially** (no `run_in_background: true`). Block on each before dispatching the next, and do NOT end the parent turn between them — background dispatch here trips the cw-side Stop-hook session-completion the way Step 1b's Plan-agent dispatch did before `750ea77`, orphaning the run with no sentinel. The reviewer set typically completes in under 4 minutes serially for a Small-scope diff.
+- **Interactive mode:** spawn all reviewers in parallel, in a single message (a human is watching and USER-origin Stop hooks do not auto-transition session state).
+- **`--headless` mode:** reviewers run **serially** — spawn one, **end the parent turn**, and let that reviewer's completion notification resume you before dispatching the next. Serial ordering is retained so each reviewer's findings are in hand before the next is framed; it is no longer required for orphan-safety (see the async dispatch note below). The reviewer set typically completes in under 4 minutes serially for a Small-scope diff.
+
+**Async dispatch note (verified 2026-08-19).** The Agent tool is asynchronous unconditionally — `run_in_background` is no longer one of its parameters and there is no way to block on a spawn. **Ending the parent turn is the supported wait**, and it is safe in headless: the Stop hook payload lists every in-flight subagent in `background_tasks` (`{"type": "subagent", "status": "running", ...}`), and `cw signal-stop` defers session completion for as long as that list is non-empty (`src/cw/cli/stop_hook.py:364`). The parent is not marked COMPLETED and the run is not orphaned — the hazard behind issues #175 / #176 is covered by that guard plus the #176 Layer-1 sentinel backstop.
+
+**Never busy-wait.** Do not hold the turn open with no-op `Bash` calls (`true`, `sleep`, repeated status polls) to avoid ending it. Each poll costs a full model round-trip and buys nothing — one observed review pass spent 173 of its 234 Bash calls on `true` — and an artificially open turn suppresses the #176 headless-timeout backstop, which can only evaluate at a turn boundary.
+
+**Parent turns and subagent turns are not symmetric.** A parent's turn-end is a *pause* — the completion notification resumes it. A **subagent's** turn-end is a *return*: its final text becomes the result, and any work it left running in the background does not survive to a later turn. So a subagent must finish what it started inside its own turn — a subagent that backgrounds a long command and then ends its turn reports "done" while the command is still running. `run_in_background` remains a real and valid `Bash` parameter; it is only the Agent-tool spawn that no longer has it.
 
 **Sandbox warning**: reviewer subagents spawned without `isolation: "worktree"` have inconsistent file access depending on sandbox state. **Inline the full diff directly in each reviewer's prompt** (captured from the main session) so reviewers evaluate purely from prompt content. Do not assume read access "just works."
 
@@ -290,7 +296,7 @@ Prerequisite: the implementation branch must already be on origin (Step 2's agen
    git branch -D <branch-name>  # local only; origin still has it
    ```
 
-2. Spawn the fix agent with `isolation: "worktree"`, `model: "sonnet"`, and `run_in_background: true`. The agent's **first actions** must be:
+2. Spawn the fix agent with `isolation: "worktree"` and `model: "sonnet"` (the spawn is async either way — end the turn and resume on its completion notification; see the async dispatch note above). The agent's **first actions** must be:
    ```bash
    git fetch origin
    git checkout -B <branch-name> origin/<branch-name>   # -B: idempotent (cw may pre-provision this branch, #712)
