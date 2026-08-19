@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.37.0] - 2026-08-19
+
 ### Added
 
 - **Claim-time disk-pressure preflight gate for dispatch (#1887):** dispatch
