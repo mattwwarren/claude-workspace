@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Claim-time disk-pressure preflight gate for dispatch (#1887):** dispatch
+  now checks free space on a client's worktree-base mount (via
+  `cw.disk.check_disk_usage`, a `shutil.disk_usage` probe that walks up to
+  the nearest existing ancestor) as a third preflight gate, between the
+  SSH-agent-key gate and the freshness gate. When free space drops below
+  `OrchestratorConfig.disk_pressure_min_free_gb` (default 5.0 GB), the
+  client is held `PENDING` for the tick with `skip_reason=disk_pressure_gate`
+  instead of spawning a session onto a filling disk. The probe fails open on
+  `OSError`, mirroring the freshness gate, and
+  `disk_pressure_gate_enabled=False` is the operator escape hatch; each
+  bypass records `gate.disk_pressure_bypassed`, forwarded to the operator
+  channel by default.
+
 ### Fixed
 
 - **`--aiderignore` blocks non-manifest files from aider's reflection-loop
