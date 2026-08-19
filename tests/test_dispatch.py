@@ -15865,3 +15865,47 @@ class TestStaleDispatchSentinelRouting:
         # STAGE_FAILURE_STATUSES membership makes this breadcrumb-eligible:
         # the blocker reason travels verbatim for the attention monitor.
         assert matching[0].payload["breadcrumbs"] == "pr_already_open"
+
+    def test_park_stamps_blocked_on_pr(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """GitHub #1902 fast-follow: stale_dispatch shares the identical
+        blocker.details PR-number extraction Variant B's
+        prior_pipeline_pr_open already uses (routing/pr_refs.py's
+        _extract_blocked_on_pr) -- same regex, second producer. Mirrors
+        test_prior_pipeline_pr_open_park_stamps_blocked_on_pr field-for-
+        field."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._running_task("GEN-1902-stamp")
+        apply_staged_decision(
+            task, "stale_dispatch", self._last_result(), self._clients(tmp_path)
+        )
+
+        assert task.disposition == "stale_dispatch"
+        assert task.blocked_reason == "pr_already_open"
+        assert task.blocked_on_pr == 1899
+
+    def test_malformed_details_leaves_blocked_on_pr_none(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Fail-closed: mirrors
+        test_prior_pipeline_pr_open_malformed_details_leaves_blocked_on_pr_none
+        for the stale_dispatch producer -- a details string with no
+        'PR #<N>' match must leave blocked_on_pr None rather than a wrong
+        guess."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._running_task("GEN-1902-malformed")
+        last_result = self._last_result()
+        last_result["blocker"] = {
+            "stage": "stage1_pre_flight",
+            "reason": "pr_already_open",
+            "details": "no PR reference here",
+        }
+        apply_staged_decision(
+            task, "stale_dispatch", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.blocked_on_pr is None
