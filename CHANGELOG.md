@@ -10,6 +10,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`resolution_consumed`/`resolution_evidence` wired into `AutoDevResult` (#1896):** the plan-stage settlement mechanism (`auto-dev-plan.md` Step 1c.0) now emits both fields on a plan-stage pause when the round settled at least one ambiguity/premise item, and `AutoDevResult` (`cw.auto_dev_result.schema`) validates them — `resolution_consumed` is a `StrictBool` rejecting coercible non-bool values, and `resolution_evidence` requires a non-empty `comment_id` and non-empty `items` list when present. `cw.dispatch.productivity`'s existing STRICT consumer, previously structurally correct but dormant per the #1750 plan's first Adopted Assumption, is now live against a real producer.
 
+- **OpencodeExecutor extended to all auto-dev stages (#1669):** the
+  opencode backend previously supported FINALIZE only; it now handles PLAN,
+  IMPL, REVIEW, and FINALIZE. FINALIZE keeps its `auto-dev-finalize.md`
+  command-file prompt (the one stage validated backend-neutral, #1670 R6),
+  now resolved worktree-first (the git-tracked authoritative copy) with a
+  `~/.claude/commands/` fallback for client worktrees. PLAN/IMPL/REVIEW get
+  self-contained prompts carrying each stage's essential headless contract —
+  their command files require Claude Code-only machinery (Agent/Skill tools,
+  `$CW_SESSION`, hook-written `.claude/cw-context.json`) an opencode
+  subprocess cannot execute. Every opencode failure sentinel now carries the
+  dispatched stage's own `stage_reached` entry marker
+  (`stage_entry_marker`), so a PLAN-stage failure no longer reads as a
+  later-stage self-escalation that walks the task pointer past planning.
+  Three headless-wiring fixes make opencode functional in fire-and-forget
+  dispatch: `TMPDIR` added to `_ENV_ALLOWLIST` (tempfile calls in
+  gh/git/python were failing silently), `--auto` flag added to `build_argv`
+  (permission prompts were hanging with no TTY), and command-file resolution
+  to absolute paths. `SLACK_MCP_CLIENT_ID` and `SLACK_MCP_CLIENT_SECRET`
+  added to `_ENV_ALLOWLIST` so Slack MCP OAuth succeeds in the subprocess
+  env.
+
 ## [1.37.0] - 2026-08-19
 
 ### Added

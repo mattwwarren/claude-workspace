@@ -1451,19 +1451,19 @@ def test_resolve_executor_opencode(tmp_config_dir: Path) -> None:
     assert isinstance(executor, OpencodeExecutor)
 
 
-def test_opencode_executor_wrong_stage_blocked(
+def test_opencode_executor_unsupported_stage_blocked(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """spawn() on a non-FINALIZE stage → blocked/opencode_<stage>_not_implemented."""
+    """HARDEN stage → blocked/opencode_harden_not_implemented."""
     worktree = make_git_repo("wt-opencode-wrong-stage")
     fake_runner = FakeOpencodeRunner()
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.HARDEN)
 
-    executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+    executor.spawn(stage=Stage.HARDEN, task=task, worktree=worktree, client=client)
 
     assert len(fake_runner.calls) == 0
     state = load_state()
@@ -1473,7 +1473,7 @@ def test_opencode_executor_wrong_stage_blocked(
     assert result.status == "blocked"
     assert result.stage_reached == STAGE4A_MERGE_GATE
     assert result.blocker is not None
-    assert result.blocker.reason == "opencode_impl_not_implemented"
+    assert result.blocker.reason == "opencode_harden_not_implemented"
 
 
 def test_opencode_executor_blocked_binary_missing(
@@ -1502,6 +1502,38 @@ def test_opencode_executor_blocked_binary_missing(
     assert result.blocker is not None
     assert result.blocker.reason == OPENCODE_NOT_FOUND
     assert result.blocker.retry_eligible is True
+    assert result.stage_reached == STAGE4A_MERGE_GATE
+
+
+def test_opencode_executor_blocked_binary_missing_plan_stage_marker(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """PLAN-stage binary-missing failure carries stage1_plan, never stage2_impl.
+
+    A stage2_impl marker on a PLAN-stage blocked sentinel classifies as a
+    later-stage self-escalation and dispatch walks task.stage forward
+    PLAN→IMPL (_resolve_stage_walk), silently skipping planning.
+    """
+    worktree = make_git_repo("wt-opencode-binary-missing-plan")
+    fake_runner = FakeOpencodeRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.PLAN)
+
+    with patch("cw.executor.opencode_available", return_value=False):
+        executor.spawn(stage=Stage.PLAN, task=task, worktree=worktree, client=client)
+
+    assert len(fake_runner.calls) == 0
+    state = load_state()
+    session = find_completed_session(state)
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == OPENCODE_NOT_FOUND
+    assert result.stage_reached == "stage1_plan"
+    assert result.blocker.stage == "stage1_plan"
 
 
 def test_opencode_executor_spawn_runner_path(
@@ -1532,6 +1564,7 @@ def test_opencode_executor_spawn_runner_path(
         assert call["argv"][0] == "opencode"
         assert "--format" in call["argv"]
         assert "--pure" in call["argv"]
+        assert "--auto" in call["argv"]
         assert "--model" in call["argv"]
         prompt = call["argv"][-1]
         assert "auto-dev-finalize.md" in prompt
@@ -1542,6 +1575,52 @@ def test_opencode_executor_spawn_runner_path(
         assert session.status == SessionStatus.ACTIVE
         assert session.local_liveness is not None
         assert session.local_liveness.pid > 0
+        assert session.last_result is None
+    finally:
+        for proc in fake_runner.procs:
+            proc.kill()
+            proc.wait()
+
+
+def test_opencode_executor_spawn_impl_stage(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """IMPL stage spawn → launch() called with impl prompt, session left ACTIVE.
+
+    Verifies that opencode is no longer FINALIZE-only: the IMPL stage
+    pre-flight builds a self-contained impl prompt (the auto-dev-impl.md
+    command file requires Claude Code-only machinery, so the prompt must
+    not point at it).
+    """
+    worktree = make_git_repo("wt-opencode-impl-stage")
+
+    fake_runner = FakeOpencodeRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="genhealth/glm-5.2")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    try:
+        with patch("cw.executor.opencode_available", return_value=True):
+            sid = executor.spawn(
+                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+            )
+
+        assert len(fake_runner.calls) == 1
+        call = fake_runner.calls[0]
+        assert call["argv"][0] == "opencode"
+        assert "--auto" in call["argv"]
+        prompt = call["argv"][-1]
+        assert "auto-dev-impl.md" not in prompt
+        assert "T-1" in prompt
+        assert "stage2_impl" in prompt
+        assert "Auto-Dev-Stage: impl-complete" in prompt
+
+        state = load_state()
+        session = next(s for s in state.sessions if s.id == sid)
+        assert session.status == SessionStatus.ACTIVE
+        assert session.local_liveness is not None
         assert session.last_result is None
     finally:
         for proc in fake_runner.procs:
