@@ -216,6 +216,13 @@ BLOCKED_ON_USER / AWAITING_OPERATOR_SIGNOFF by reconcile does not count
 against the budget, so an unresolved "ghost" session cannot permanently
 strand a slot.
 
+`OrchestratorConfig.disk_pressure_gate_enabled` (#1887, default: `true`)
+adds a claim-time preflight probe of each client's worktree-base mount:
+when free space drops below `disk_pressure_min_free_gb` (default `5.0`
+GB), that client is held PENDING for the tick with
+`skip_reason=disk_pressure_gate` instead of risking a session spawning
+onto an already-filling disk.
+
 To dispatch in a planned order rather than raw priority, produce a
 DispatchPlan first: `cw dev-queue plan -c <client>` spawns a one-shot
 planner session and persists the plan; `run --use-plan` (also on `serve`)
@@ -397,8 +404,19 @@ directly (see §6 in [`session-disposition.md`](session-disposition.md)).
 | `forbidden_area` | Forbidden-area rejection; update constraints or reroute. |
 | `blocked` | Triage `blocker.reason`. Check `blocker.retry_eligible` and `blocker.recovery_hint`. `blocker.reason: "plan_unreviewable"` / `"plan_unsound"` mean plan review needs human judgment — if the pipeline bounces repeatedly on an intricate ticket, use the **spec-driven subagent escape hatch** (§7) rather than retrying. A `blocked` at FINALIZE with `blocker.reason: "agent_block"` self-heals: dispatch auto-regresses the ticket to IMPL (up to 2 regressions, #770) — no operator action. |
 | `merge_gate_blocked` | A prior pipeline PR is still open. Merge or close it, then re-dispatch. |
+| `stale_dispatch` | **This** ticket already has an open, unmerged PR from an earlier dispatch (#1862) — distinct from `merge_gate_blocked`, which is about a *different* ticket's PR. The session found it and refused rather than re-implementing work already in review; `blocker.details` names the PR. Land or close that PR, then `cw dev-queue requeue <T> -c <client>`. Re-dispatching first just reproduces the refusal. |
 
 Not a sentinel status but seen in the same `disposition` field:
+`stale_dispatch_gate` — the same condition caught *before* any session was
+spawned, by the pre-dispatch open-PR gate. Recognizable by
+`blocked_reason: "pr_already_open_pre_dispatch"`, an empty `session_id`, and
+a `dispatch.tick` event carrying `skip_reason=stale_pr_blocked`. Same
+operator action as `stale_dispatch` above. The gate covers PLAN/IMPL-stage
+`PENDING` rows only (a REVIEW/FINALIZE ticket legitimately has an open PR)
+and fails open on any `gh` error, so it can hold a healthy ticket only if the
+PR is genuinely open.
+
+Also not a sentinel status:
 `validation_failed` — the sentinel was emitted but malformed. The queue
 auto-requeues the ticket to PENDING (clearing `session_id`) until the
 attempt cap, then fails it. If it recurs, inspect the raw JSON with
@@ -574,8 +592,18 @@ row to `CANCELLED` — not `BLOCKED_ON_USER`. `cw dev-queue requeue` normally
 rejects anything but `BLOCKED_ON_USER`/`AWAITING_OPERATOR_SIGNOFF`, so a
 CANCELLED row is otherwise a requeue dead-end (#1018).
 
-Fix: requeue it explicitly with the escape hatch, which moves it back to
-PENDING at its current stage and clears `session_id`/`stage_base_ref`:
+**One-command path (#1889):** `cw spawn close --confirmed-dead --requeue
+<sid>` folds the close and the requeue into a single invocation — it closes
+the session, then (if a `ticket_id` resolves from the session name) requeues
+the ticket to PENDING at its current stage, same as the two-step recipe
+below. This is the recommended path for the common case: a stranded RUNNING
+session whose session name still encodes a resolvable ticket. Prefer the
+manual two-step recipe only when you need to close without immediately
+requeuing (e.g. inspecting the row first).
+
+Manual two-step recipe: requeue it explicitly with the escape hatch, which
+moves it back to PENDING at its current stage and clears
+`session_id`/`stage_base_ref`:
 
 ```bash
 cw dev-queue requeue <T> -c <CLIENT> --from-cancelled
@@ -583,17 +611,22 @@ cw dev-queue requeue <T> -c <CLIENT> --from-cancelled
 
 §11.1's `cancelled_row_restore` concierge recipe already auto-handles this
 when the worktree has committed work ahead of base and `concierge_enabled:
-true`. This manual CLI flag covers the remaining cases: zero commits ahead
-of base, a missing/pruned worktree, or concierge disabled. See also:
-Attempt-cap reset (below) — a different terminal condition
-(`attempt_cap_blocked` on a parked row), not a CANCELLED row.
+true`. Both the manual `--from-cancelled` flag and `--requeue` above cover
+the remaining cases: zero commits ahead of base, a missing/pruned worktree,
+or concierge disabled. `--requeue` is safe to pass even when concierge is
+enabled and could win the race — its underlying `requeue_ticket()` call
+raising `RequeueStateError` is followed by one fresh read; if that read
+shows the row already landed on PENDING/RUNNING (the concierge recipe having
+resolved it first), `--requeue` treats that as success and no-ops rather
+than erroring. See also: Attempt-cap reset (below) — a different terminal
+condition (`attempt_cap_blocked` on a parked row), not a CANCELLED row.
 
-**Caveat:** `--from-cancelled` accepts *any* CANCELLED row, regardless of why
-it was cancelled — the row carries no record of provenance by the time it
-reaches this flag. If the ticket may have been deliberately cancelled (e.g.
-via `cw dev-queue cancel` as a duplicate or superseded ticket) rather than
-stranded by `spawn close`, check `cw dev-queue tasks -t <T> -c <CLIENT>` /
-the event history before requeuing it.
+**Caveat:** both `--from-cancelled` and `--requeue` accept *any* CANCELLED
+row, regardless of why it was cancelled — the row carries no record of
+provenance by the time it reaches either flag. If the ticket may have been
+deliberately cancelled (e.g. via `cw dev-queue cancel` as a duplicate or
+superseded ticket) rather than stranded by `spawn close`, check `cw
+dev-queue tasks -t <T> -c <CLIENT>` / the event history before requeuing it.
 
 ### FAILED row recovery (`--from-failed`)
 
@@ -702,6 +735,17 @@ concierge is off, or when the row is refused at the attempt ceiling.
 
 A quota window or hang loop (#979) grinds a ticket to
 `attempt_cap_blocked` (`attempts` bumps on every claim AND stage transition).
+
+The number the park fired against is the *resolved* attempt ceiling — the
+row's lane `attempt_ceiling`, or `global_attempt_ceiling` when the lane sets
+none (#1751). Do not read `global_attempt_ceiling` and assume it is what
+parked the row: both park events (`dispatch.tick` with
+`skip_reason=attempt_cap_blocked`, and the matching
+`session.needs_attention`) carry the resolved number on an `attempt_ceiling`
+payload field. A lane whose operator answers every park can set
+`attempt_ceiling: false` to opt out of the cap entirely — see
+`config/CONFIG_REFERENCE.md`.
+
 Reset recipe — the file-edit steps are only safe with ZERO loops alive:
 
 ```bash
@@ -1197,8 +1241,11 @@ Three recipes, each individually toggleable via `concierge_recoveries`:
    committed work ahead of its base branch is restored to PENDING, so work
    is never silently lost to a stray cancel.
 
-Both recipe 1 and recipe 2 gate on `attempts < global_attempt_ceiling`; at
-the ceiling, the row is refused and left parked rather than requeued — that
+Both recipe 1 and recipe 2 gate on `unproductive_attempts` being below the
+resolved attempt ceiling (the row's lane `attempt_ceiling`, or
+`global_attempt_ceiling` when the lane sets none — #1751; a lane with
+`attempt_ceiling: false` has no ceiling and is never refused here). At the
+ceiling, the row is refused and left parked rather than requeued — that
 refusal is itself an escalation-eligible state (see 11.2) for
 `stalled_retry_cap_parked` rows, so an operator still gets paged rather than
 the ticket silently spinning forever. Every recovery emits a

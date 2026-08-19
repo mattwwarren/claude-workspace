@@ -63,6 +63,7 @@ from cw.models import (
 from tests.conftest import (
     _make_daemon_session,
     _make_ticket_task,
+    _write_project_config_yaml,
     plan_body,
     stub_fetch_plan,
 )
@@ -6711,6 +6712,97 @@ class TestRequeueTicket:
         with pytest.raises(RequeueStageError):
             requeue_ticket("GEN-500", "genhealth", stage_override="impl")
 
+    # -- #1906: honest tracker gate for the impl-bypass plan-availability
+    # guard -- fetch_approved_plan_comment is GitHub-only; skip the call
+    # (and the misleading "was found on the tracker" claim) when the
+    # resolved tracker is positively known to be non-GitHub. -------------
+
+    def _assert_fetch_approved_plan_comment_not_called(
+        self, _ticket_id: str, **_kwargs: object
+    ) -> str | None:
+        msg = (
+            "fetch_approved_plan_comment must not be called for a"
+            " known non-GitHub tracker"
+        )
+        raise AssertionError(msg)
+
+    def test_requeue_stage_impl_bypass_honest_for_non_github_tracker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A Linear-tracked client's impl-bypass guard never calls the
+        GitHub-only fetch_approved_plan_comment -- it isn't the right
+        tracker to ask -- and the resulting refusal message must not claim
+        the tracker was checked for a reviewed plan comment, since it
+        wasn't."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        _write_project_config_yaml(
+            tmp_path / "ws", "tracking:\n  primary:\n    system: linear\n"
+        )
+        missing_wt = tmp_path / "no-such-worktree"
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: missing_wt,
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.fetch_approved_plan_comment",
+            self._assert_fetch_approved_plan_comment_not_called,
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-7a")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError) as exc_info:
+            requeue_ticket("GEN-500", "genhealth", stage_override="impl")
+
+        msg = str(exc_info.value)
+        assert "was found on the tracker" not in msg
+        assert "linear" in msg
+        assert "GEN-500" in msg
+
+    def test_requeue_stage_impl_bypass_github_tracker_message_unchanged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: a github-issues (or unconfigured) tracker's refusal
+        message is byte-identical to the pre-#1906 text -- the GitHub/
+        default path is untouched."""
+        from cw.dev_queue import requeue_ticket
+        from cw.dev_queue.lifecycle import _PLAN_SOUNDNESS_MARKER, _PLAN_SPEC_MARKER
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        missing_wt = tmp_path / "no-such-worktree"
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: missing_wt,
+        )
+        stub_fetch_plan(
+            monkeypatch, None, target="cw.dev_queue.requeue.fetch_approved_plan_comment"
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-7c")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError) as exc_info:
+            requeue_ticket("GEN-500", "genhealth", stage_override="impl")
+
+        wt_path = missing_wt
+        expected = (
+            f"Cannot requeue ticket 'GEN-500' to stage 'impl':"
+            f" no approved plan is available. '{wt_path / '.cw' / 'plan.md'}'"
+            " is missing or stale, and no reviewed plan comment"
+            f" ('{_PLAN_SPEC_MARKER}' + '{_PLAN_SOUNDNESS_MARKER}')"
+            " was found on the tracker. Let Stage 1 (plan) run and post its"
+            " approved plan first, or requeue at --stage plan instead."
+        )
+        assert str(exc_info.value) == expected
+
     def test_requeue_same_stage_at_impl_unaffected(
         self,
         tmp_config_dir: Path,
@@ -8829,6 +8921,94 @@ class TestDeriveDisposition:
 
     def test_unknown_returns_abandoned(self) -> None:
         assert self._derive("some_unknown_status") == "abandoned"
+
+    def test_stale_dispatch_derives_verbatim(self) -> None:
+        """#1862: STAGE_FAILURE_STATUSES membership composes in by reference."""
+        assert self._derive("stale_dispatch") == "stale_dispatch"
+
+
+# ---------------------------------------------------------------------------
+# TestStaleDispatchDispositions (#1862)
+# ---------------------------------------------------------------------------
+
+
+class TestStaleDispatchDispositions:
+    """The two #1862 disposition literals and their lockstep guards.
+
+    The agent-emitted sentinel path and the code-side pre-dispatch gate park
+    use DISTINCT literals (plan adopted assumption 7, #1729 precedent). One
+    literal for both would put a gate-class park -- which hardcodes
+    ``breadcrumbs=""`` and structurally cannot carry one -- into
+    ``BREADCRUMB_ELIGIBLE_PAUSED_STATUSES``.
+    """
+
+    def test_status_derived_disposition_value(self) -> None:
+        from cw.dev_queue import STALE_DISPATCH_DISPOSITION
+
+        assert STALE_DISPATCH_DISPOSITION == "stale_dispatch"
+
+    def test_status_derived_disposition_is_a_status_member(self) -> None:
+        from typing import get_args
+
+        from cw.auto_dev_result import Status
+        from cw.dev_queue import STALE_DISPATCH_DISPOSITION
+
+        assert STALE_DISPATCH_DISPOSITION in get_args(Status)
+
+    def test_gate_disposition_value(self) -> None:
+        from cw.dev_queue import STALE_DISPATCH_GATE_DISPOSITION
+
+        assert STALE_DISPATCH_GATE_DISPOSITION == "stale_dispatch_gate"
+
+    def test_gate_disposition_is_never_a_status_member(self) -> None:
+        """Inverse lockstep guard: the gate literal must not collapse into
+        the Status-derived set (adopted assumption 7)."""
+        from typing import get_args
+
+        from cw.auto_dev_result import Status
+        from cw.dev_queue import STALE_DISPATCH_GATE_DISPOSITION
+
+        assert STALE_DISPATCH_GATE_DISPOSITION not in get_args(Status)
+
+    def test_gate_disposition_is_not_breadcrumb_eligible(self) -> None:
+        from cw.dev_queue import STALE_DISPATCH_GATE_DISPOSITION
+        from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+        assert (
+            STALE_DISPATCH_GATE_DISPOSITION not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        )
+
+    def test_pre_dispatch_stale_pr_reason_value(self) -> None:
+        from cw.dev_queue.lifecycle import _PRE_DISPATCH_STALE_PR_REASON
+
+        assert _PRE_DISPATCH_STALE_PR_REASON == "pr_already_open_pre_dispatch"
+
+    def test_gate_park_stamps_disposition_without_charging_attempt(self) -> None:
+        """The code-side park: BLOCKED_ON_USER, no unproductive charge, no pr_url."""
+        from cw.dev_queue import (
+            STALE_DISPATCH_GATE_DISPOSITION,
+            transition_task_status,
+        )
+        from cw.dev_queue.lifecycle import _PRE_DISPATCH_STALE_PR_REASON
+
+        task = TicketTask(
+            ticket_id="GEN-1862-park",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+        )
+        transition_task_status(
+            task,
+            QueueItemStatus.BLOCKED_ON_USER,
+            disposition=STALE_DISPATCH_GATE_DISPOSITION,
+            blocked_reason=_PRE_DISPATCH_STALE_PR_REASON,
+            unproductive=False,
+        )
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "stale_dispatch_gate"
+        assert task.blocked_reason == _PRE_DISPATCH_STALE_PR_REASON
+        assert task.completed_at is not None
+        assert task.pr_url is None
+        assert task.unproductive_attempts == 0
 
 
 # ---------------------------------------------------------------------------

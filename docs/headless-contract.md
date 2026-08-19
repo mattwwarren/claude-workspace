@@ -212,6 +212,7 @@ The `status` field is a closed set. Consumers MUST treat unknown statuses as a p
 | `no_op` | Pre-flight detected the ticket already satisfied (or otherwise not work-bearing); no plan, no branch, no PR. Introduced at `schema_version=2`. Rationale: terse, neutral wording — does not presume the cause (already-merged dupe, invalid ticket, code already covers it). The actor (skill / cw) decides what to do via `next_actions` (typically `close_issue_as_completed`). Emitted at `schema_version=3` with `stage_reached='stage1_pre_flight'` and `plan_source='none'`. (During the rollout window, parsers also accept this shape under `schema_version=2`.) |
 | `ambiguities_pending_resolution` | Planning halted because the ambiguity scan surfaced clarifying questions that exceed the auto-resolve threshold; no branch created. The `ambiguities` array is non-empty. Introduced at `schema_version=4`. |
 | `empty_diff_blocked` | The branch exists but measures **zero commits ahead of `origin/<default_branch>`** — there is no diff to review and nothing for a PR to carry, so the run parks for human triage instead of presenting an empty diff at the Stage 4 approval prompt as if it were an ordinary scope-tier decision (#1870). Post-branch, unlike `scope_exceeded`/`forbidden_area`: `branch` is non-null and a `blocker` MAY be present (typically `empty_diff_no_commits`, naming the branch and base measured). `next_actions` is empty (terminal-reject). Legal at both `stage2_impl` and `stage3_review` — whichever stage detected it. Dispatch independently re-verifies this condition with its own git measurement at the REVIEW→FINALIZE checkpoint, so a producer that never emits this status is still caught. Accepted under all supported schema versions (rollout exception) until the producer skills bump their emitted `schema_version` to 6. |
+| `stale_dispatch` | This ticket **already has an open, unmerged PR** from an earlier dispatch, so the run refuses rather than re-implementing on top of work already in review (#1862). Distinct from `no_op` (nothing is complete — the PR is unmerged and unreviewed) and from `blocked` (nothing is broken — the PR is healthy, just not this session's to duplicate). The discovered PR's identity travels in `blocker.details` (number/URL/review state), NOT in `pr`, which stays null: this run did not create it. `next_actions` is empty (terminal-reject). Legal at `stage1_pre_flight` (the Stage 0 intake self-check, the common case) and at any later stage a resume path discovers it — pre-branch or post-branch, so `branch` is unconstrained. Dispatch runs an independent pre-dispatch gate for the same condition (see §"The `stale_dispatch_gate` Disposition" below), so a producer that never emits this status is still caught. Accepted under all supported schema versions (rollout exception) until the producer skills bump their emitted `schema_version` to 7. |
 | `premises_pending_verification` | Planning halted because the Plan Soundness Reviewer flagged unverified premises; no branch created. The `premises` array is non-empty. Promoted from §4.4 interim state at `schema_version=4`. (A sentinel whose every premise is fully resolved — `verified: true` + a non-empty `resolution` string — is rewritten to `stage_complete` at the parse boundary before this status is ever observed by a consumer; see the "resolved premise items downgrade" row in §6's coercion table, #1325.) |
 
 ### 4.2 `blocker.reason` (when `status = "blocked"`)
@@ -249,6 +250,7 @@ Full v3 shape with Phase B and Phase E fields (issue #174):
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. |
 | `automerge_not_armed` | `gh pr merge --auto` reported success but the read-back (`autoMergeRequest`) came back null — auto-merge was never actually armed. Fires from `auto-dev-finalize.md` Step 4c's re-verification or Step 4d's reuse-path arm+verify (#1140). |
 | `empty_diff_no_commits` | The branch measures zero commits ahead of `origin/<default_branch>` — nothing to review or ship (#1870). Usable with the `empty_diff_blocked` status (its canonical pairing) and with plain `blocked`, for a producer that detects the condition but has not adopted the new status. `details` names the branch and the base it was measured against; `blocker.stage` is whichever of `stage2_impl`/`stage3_review` detected it. |
+| `pr_already_open` | An open, unmerged PR already exists for this ticket's own feature branch (#1862). Canonical pairing for the `stale_dispatch` status; also usable with plain `blocked` for a producer that detects the condition but has not adopted the new status. `details` MUST name the discovered PR (number, URL, and review state if known) — that identity is the whole triage signal, since `pr` stays null for this status. `blocker.stage` is whichever stage detected it (`stage1_pre_flight` for the Stage 0 intake self-check). Deliberately distinct from cw's own `pr_already_open_pre_dispatch`, the `blocked_reason` its *code-side* pre-dispatch gate stamps when no agent ever ran. |
 | `operator_unavailable` | Operator/dependency currently unreachable (e.g. locked push key, network/GitHub outage) — not a broken implementation leg. cw classifies this via `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` and tags the park distinctly (RFC 0011 A1). |
 
 `blocker.reason` is an **open enum** — the producer may add new reasons without a `schema_version` bump. Consumers MUST treat unknown reasons as opaque strings and surface verbatim. (Unlike `status`, which is closed: see §4 and §8.)
@@ -475,6 +477,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 | 5 | Added the optional `review.agents_run` int (§3.3) — count of reviewer agents that ran, reconciled against the executor-neutral review-verdict contract's `agents_run` list (#1237). Defaults to `0`; v1-v4 payloads that omit it parse unchanged — no schema_version bump was required to introduce it (purely advisory at the time). The review-verdict model group itself (`Finding`, `EscalationMetadata`, `ReviewVerdict`, ...) lives in `cw.review_findings` / the `.claude/review-verdict.json` artifact (#1108), not the sentinel block. (#1194 later graduated `agents_run` to a required-non-zero signal for one opt-in downstream consumer — see Note A9 below; that graduation itself required no further bump.) |
 
 | 6 | Added the `empty_diff_blocked` status (§4.1) — a branch measured with zero commits ahead of `origin/<default_branch>` — and its canonical `empty_diff_no_commits` `blocker.reason` (§4.2, open enum, no bump of its own). Required by the "new value added to a closed enum" rule below. Accepted under **all** supported schema versions (v2-v6) as a rollout exception, same precedent as v4's `ambiguities_pending_resolution`/`premises_pending_verification`: the codex-review executor and the producer skills still stamp their pre-existing `schema_version` today, and bumping every emitter in lockstep is a larger blast radius than the status itself. Tracked in #1870. |
+| 7 | Added the `stale_dispatch` status (§4.1) — this ticket already has an open, unmerged PR from an earlier dispatch — and its canonical `pr_already_open` `blocker.reason` (§4.2, open enum, no bump of its own). Also widened `stage_reached='stage1_pre_flight'`'s allowed-status set (previously `no_op`/`blocked`) to admit it: the Stage 0 intake self-check that detects the condition runs before any planning, so it has no other legal stage to report. Required by the "new value added to a closed enum" rule below. Accepted under **all** supported schema versions (v2-v7) as a rollout exception, same precedent as v6's `empty_diff_blocked`. Tracked in #1862. |
 
 **Note (A6, #953):** Rejecting empty-question ambiguity items and coercing an empty/missing ambiguities array to a labeled placeholder is a parser-side strictness tightening of an existing v4 invariant — **no version bump** (consistent with the #430 `_coerce_empty_pending_array` precedent).
 
@@ -501,7 +504,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 - A new `next_actions` entry is added (parsers already treat unknown actions as advisory).
 - A new `blocker.reason` value is added (open enum — see §4.2).
 
-**Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`). **Exception (one-time):** `stage_reached='stage1_pre_flight'`, `plan_source='none'`, and `plan_source='github_issue_existing'` are accepted under both v2 and v3. This is documented under v3 in the table above; the v2 acceptance covers in-flight skill emissions that predate the parser's v3 awareness. Similarly, the `ambiguities_pending_resolution` / `premises_pending_verification` statuses (officially v4), the `stage_complete` (#699) / `merge_pending` (#899) statuses, and `empty_diff_blocked` (officially v6, #1870) are accepted under **all** supported schema versions as a rollout exception until the producer skill bumps its emitted version.
+**Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`). **Exception (one-time):** `stage_reached='stage1_pre_flight'`, `plan_source='none'`, and `plan_source='github_issue_existing'` are accepted under both v2 and v3. This is documented under v3 in the table above; the v2 acceptance covers in-flight skill emissions that predate the parser's v3 awareness. Similarly, the `ambiguities_pending_resolution` / `premises_pending_verification` statuses (officially v4), the `stage_complete` (#699) / `merge_pending` (#899) statuses, `empty_diff_blocked` (officially v6, #1870), and `stale_dispatch` (officially v7, #1862) are accepted under **all** supported schema versions as a rollout exception until the producer skill bumps its emitted version.
 
 When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lockstep. **Order matters:** the parser must accept the new version BEFORE the skill emits it, otherwise in-flight emissions land in deployed parsers that don't recognize them. Parsers MUST defensively reject unknown `schema_version` values per §6 (4).
 
@@ -669,6 +672,62 @@ timeouts, ADR-0014 — but still present in old event logs and persisted rows):
 | `finalize_blocked` | Stalled FINALIZE-stage session with commits but no PR; parked for rescue. |
 | `salvage_completed` | Git-state HIGH path: draft PR auto-created, task COMPLETED. |
 | `salvage_parked` | Git-state LOW path: task set BLOCKED_ON_USER for human salvage. |
+
+---
+
+## The `stale_dispatch_gate` Disposition (GitHub #1862)
+
+The **pre-dispatch open-PR gate** stops `cw dev-queue` from re-claiming a
+PLAN/IMPL-stage `PENDING` ticket whose own feature branch already carries an
+open, unmerged PR. The incident it closes: a dispatch pushed a branch and
+opened a PR, but the queue row was never advanced past PLAN/IMPL (the session
+died before its sentinel landed, or the sentinel was never harvested), so the
+next tick re-claimed it and a second worker re-implemented work already in
+review.
+
+Like `finalize_gate_held` above, this is a **`disposition`** stamped by `cw`
+itself onto a `BLOCKED_ON_USER` row — no producer ever emits it, and it will
+never appear in an `AutoDevResult`.
+
+**Two distinct literals, deliberately not one** (the #1729 convention):
+
+| Literal | Where it comes from | What it means |
+|---|---|---|
+| `stale_dispatch` | `Status` (§4.1), stamped verbatim as the disposition by `_derive_disposition` | A session **ran**, discovered the open PR itself, and refused. `blocked_reason` is the sentinel's `blocker.reason` (canonically `pr_already_open`), and it is breadcrumb-eligible — the reason travels verbatim to the attention monitor. |
+| `stale_dispatch_gate` | `cw.dev_queue.STALE_DISPATCH_GATE_DISPOSITION` — **never** a `Status` member | The dispatch loop refused to spawn at all. **No session ever ran**, so `breadcrumbs` is hardcoded empty and the literal stays out of `BREADCRUMB_ELIGIBLE_PAUSED_STATUSES`. `blocked_reason` is `pr_already_open_pre_dispatch`. |
+
+**Where the gate fires:** `cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids`,
+called once per client per tick from `_dispatch_client_lanes` — outside every
+lock, before the per-lane claim loop — and folded into `_claim_next_pending` as
+a precomputed set. Per-ticket probe results are TTL-cached (300s) in
+`dispatch_state.json` under `open_pr_probe`.
+
+**Scope:** `Stage.PLAN` and `Stage.IMPL` only. A `REVIEW`/`FINALIZE`-stage
+ticket legitimately has an open PR — that is the artifact under review — so
+gating there would park the entire healthy tail of the pipeline.
+
+**Fail open, always.** A transient `gh` failure or an absent `gh` binary is
+treated as "no open PR" and is never cached. A false positive parks a healthy
+ticket and costs an operator; a false negative costs at most one duplicate
+dispatch, which is the status quo this gate improves on.
+
+**Observability:** a `dispatch.tick` event with
+`skip_reason=stale_pr_blocked` (per-task, outside the per-client-tick
+precedence chain, like `attempt_cap_blocked`) and a `session.needs_attention`
+event with `paused_status=stale_dispatch_gate`.
+
+**Resolution:** land or close the PR, then `cw dev-queue requeue <ticket> -c
+<client>`. (Not `cw dev-queue unblock` — that command's `SALVAGE_PARKED`
+precondition is never satisfied by either `stale_dispatch` park, gate-side or
+agent-emitted; `requeue` is the general-purpose `BLOCKED_ON_USER` release
+path every sibling gate disposition already documents.) Deliberately NOT
+auto-released when the PR merges — that extension of the
+`#1713` Variant B machinery is tracked separately in #1902. `stale_dispatch`
+and `stale_dispatch_gate` are also deliberately not `HOLD_DISPOSITIONS`
+members: an open PR clears by landing or closing it, not by an operator saying
+"proceed anyway", and membership would make the row eligible for concierge's
+false-park auto-requeue recipe — re-dispatching the exact ticket the gate
+exists to hold back.
 
 ---
 

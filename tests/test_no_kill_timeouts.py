@@ -309,3 +309,78 @@ def test_liveness_renotify_survives_dedup_terminal(
     events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
     assert len(events) == 2
     assert len(_dedup_terminal(events)) == 2
+
+
+# ---------------------------------------------------------------------------
+# 5. Real-incident signature regression (#1889)
+# ---------------------------------------------------------------------------
+#
+# claude --bg async-completion wakeups (background Bash, Agent-tool subagent)
+# are not reliably delivered to the session -- an upstream claude-code
+# defect, not cw-fixable (see docs/spikes/claude-bg-wakeup-drop-findings.md).
+# Real captured transcripts for three incidents (#1801, #1838, #1751) all
+# show the identical shape: a *resolved* async-dispatch tool_result, followed
+# by ordinary end_turn text saying "waiting for X", then silence -- not a
+# dangling tool_use. That leaves the same flat-transcript signature the
+# liveness distress path already detects via an empty idle transcript; these
+# two tests pin that the composed real signature (resolved tool_result +
+# "waiting" text) is not accidentally treated as "session doing work" by any
+# future change to the distress heuristic.
+
+
+def _stale_transcript_with_text(
+    home: Path, worktree: Path, assistant_text: str, *, stale_minutes: float
+) -> None:
+    from tests._reconcile_helpers import _write_idle_transcript_with_text
+
+    transcript = _write_idle_transcript_with_text(home, worktree, assistant_text)
+    ts = (_NOW - timedelta(minutes=stale_minutes)).timestamp()
+    os.utime(str(transcript), (ts, ts))
+
+
+def test_distress_fires_on_resolved_bg_bash_wait_signature(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    """#1801 real transcript shape: a resolved bg-Bash tool_result, then plain
+    "waiting for it" end_turn text -- must still cross into the top-bucket
+    distress signal like an empty idle transcript does."""
+    sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
+    _stale_transcript_with_text(
+        home,
+        tmp_path / "wt",
+        "Waiting for that background command to finish (it should be "
+        "near-instant — likely just slow shell startup).",
+        stale_minutes=46,
+    )
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state)
+
+    assert sess.liveness_bucket is LivenessBucket.STALE_45M
+    events = _distress_events()
+    assert len(events) == 1
+    assert events[0]["session_id"] == sess.id
+
+
+def test_distress_fires_on_resolved_subagent_wait_signature(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    """#1838 real transcript shape: a resolved Agent-tool tool_result, then
+    plain "waiting for it to finish" end_turn text -- same distress
+    requirement as the bg-Bash channel above."""
+    sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
+    _stale_transcript_with_text(
+        home,
+        tmp_path / "wt",
+        "Fix-cycle 1 agent dispatched (`a30d3f56fd68cc778`) in an isolated "
+        "worktree to apply the 6-item action list. Waiting for it to finish.",
+        stale_minutes=46,
+    )
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state)
+
+    assert sess.liveness_bucket is LivenessBucket.STALE_45M
+    events = _distress_events()
+    assert len(events) == 1
+    assert events[0]["session_id"] == sess.id

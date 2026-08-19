@@ -6,7 +6,112 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.37.0] - 2026-08-19
+
+### Added
+
+- **Claim-time disk-pressure preflight gate for dispatch (#1887):** dispatch
+  now checks free space on a client's worktree-base mount (via
+  `cw.disk.check_disk_usage`, a `shutil.disk_usage` probe that walks up to
+  the nearest existing ancestor) as a third preflight gate, between the
+  SSH-agent-key gate and the freshness gate. When free space drops below
+  `OrchestratorConfig.disk_pressure_min_free_gb` (default 5.0 GB), the
+  client is held `PENDING` for the tick with `skip_reason=disk_pressure_gate`
+  instead of spawning a session onto a filling disk. The probe fails open on
+  `OSError`, mirroring the freshness gate, and
+  `disk_pressure_gate_enabled=False` is the operator escape hatch; each
+  bypass records `gate.disk_pressure_bypassed`, forwarded to the operator
+  channel by default.
+
+- **Variant B gate-release predicate extended to `stale_dispatch` parks
+  (#1902):** `release_stale_gated_tasks`'s cross-reference scan now also
+  recognizes a `stale_dispatch`/`pr_already_open` park (alongside the
+  existing `merge_gate_blocked`/`prior_pipeline_pr_open` case) as eligible
+  for auto-release once its blocking PR merges. This is groundwork only: no
+  production code path yet populates a store row's `pr_url` for the
+  `stale_dispatch` producer, so the new branch is unit-test-reachable but
+  production-unreachable until the independent PR-state source in #1927
+  lands — the ticket's literal "self-releases once merged" acceptance
+  criterion is not yet satisfied by this diff alone.
+
 ### Fixed
+
+- **`--aiderignore` blocks non-manifest files from aider's reflection-loop
+  echo re-adds (#1915):** aider's reflection loop rescans the model's own
+  reply text on every round, independently of the `--message`/`--read`
+  split #1905 closed, so an excluded path echoed in reasoning prose could
+  still get auto-confirmed back into the chat under `--yes-always`. `cw`
+  now materializes a `.cw/aiderignore` blocking every git-tracked file the
+  plan's `## Files Modified` manifest doesn't name (folding in and negating
+  against any pre-existing worktree `.aiderignore` so a client repo's own
+  patterns can't shadow a manifest path), threads it through
+  `_local_preflight`/`spawn` as `--aiderignore`, so an excluded file is
+  never addable in the first place.
+
+- **Fence-aware `## Files Modified` heading matcher in the scope-conformance
+  gate (#1917):** `check_plan_scope_conformance.py`'s `_parse_files_modified`
+  previously matched the first `## Files` heading line-by-line with no fence
+  tracking, so a plan illustrating a fixture `## Files Modified` heading
+  inside a fenced code block earlier in the document was parsed as the real
+  enumeration — see #1905's impl-gate false positive. Both this script and
+  its mirrored copy (`src/cw/plan_files.py::parse_plan_files_modified`) now
+  skip lines inside fenced code blocks (``` and `~~~`, including indented
+  fence markers) before searching for the heading.
+
+## [1.36.0] - 2026-08-18
+
+### Added
+
+- **Per-lane attempt ceiling for dispatch and concierge (#1751):** dispatch's
+  claim path and reconcile's concierge recovery recipes previously enforced
+  only the single global `dispatch.attempt_ceiling`. Adds
+  `LaneConfig.attempt_ceiling` and `resolve_attempt_ceiling`, which resolve a
+  per-lane override before falling back to the global default, so individual
+  lanes can carry their own attempt budget without disturbing the fleet-wide
+  ceiling.
+
+- **`cw spawn close --requeue` (#1889):** folds
+  `cw dev-queue requeue ... --from-cancelled` into `cw spawn close`, so
+  closing a confirmed-dead session whose `claude --bg` async-completion
+  wakeup never arrived and requeuing its ticket back to PENDING at its
+  current stage is one command instead of two separate ones run in sequence.
+
+### Fixed
+
+- **Headless aider no longer stalls silently on a missing-file free-text ask
+  (#1905):** three related defects in `LocalExecutor`. (1) `build_argv` passed
+  no `--file` flags at all, so which files entered aider's chat was decided
+  entirely by aider's own path-mention heuristic; the plan's `## Files
+  Modified` manifest is now parsed (`cw.plan_files.parse_plan_files_modified`,
+  mirroring `.claude/scripts/check_plan_scope_conformance.py`) and threaded
+  through pre-flight into one `--file` flag per planned path — a plan with no
+  manifest section still falls back to the previous behaviour. (2) The full
+  plan and ticket prose used to be embedded in `--message`, which is the exact
+  text aider scans for path mentions, so a plan's own "EXPLICITLY OUT OF SCOPE"
+  list and its touch-point citations force-added under `--yes` precisely the
+  files they named as untouchable; that content is now materialised to
+  `.cw/task_context.md` and handed to aider via `--read`, whose content bypasses
+  the mention scan, while `--message` carries only a fixed, path-free
+  instruction. (3) A run that ended with the model asking for a file to be
+  added to the chat, instead of emitting edits, was reported as the generic
+  retryable `aider_no_output`; it now gets the distinct, non-retryable
+  `blocker.reason` `aider_file_request_unanswered` so the disposition is
+  self-diagnosing and parks for a human instead of re-dispatching into the same
+  stall.
+
+- **A requeue-to-impl refusal message no longer claims a non-GitHub tracker
+  was checked when it wasn't (#1906):** `requeue.py`'s impl-bypass plan-
+  availability guard called `fetch_approved_plan_comment` (GitHub-only)
+  unconditionally as its tracker fallback, so a Linear-tracked (or other
+  non-GitHub) ticket's requeue-to-impl refusal wrongly told the operator "no
+  reviewed plan comment ... was found on the tracker" even though the
+  tracker was never actually queried, and directed them to re-run Stage 1
+  when an approved plan may already be posted there. The guard now resolves
+  the client's tracker first: it still fail-opens (attempts the GitHub fetch)
+  when the tracker is unresolvable, but skips the call and returns an honest,
+  tracker-aware refusal message when the tracker is positively known to be
+  non-GitHub — pointing the operator at tracker-side plan recovery instead of
+  a redundant Stage 1 rerun.
 
 - **A usage-limit-only attempt history no longer reads as a legitimate
   first-stage ship (#1631):** reconcile's timed-out-merged backstop refused to
@@ -64,6 +169,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is not yet general for that case.
 
 ### Added
+
+- **Dispatch now gates on an already-open PR for PLAN/IMPL-stage tickets, with
+  a new `stale_dispatch` terminal status (#1862):** a ticket could be
+  re-dispatched into PLAN or IMPL while a PR from a prior attempt was still
+  open, producing duplicate work and duplicate PRs. Adds a pre-dispatch
+  open-PR probe (`src/cw/dispatch/pr_gate.py`) backed by an
+  `OpenPrProbeCache` sidecar so repeated ticks don't re-query GitHub for the
+  same ticket, gated by the new `OrchestratorConfig.pr_gate_enabled` escape
+  hatch (default enabled, mirroring `ssh_key_gate_enabled`) and skipped
+  outright when a client has no free dispatch slots. The probe loop caps
+  itself at 20 open-PR checks per tick and batches its sidecar writes rather
+  than persisting one at a time. Detecting an open PR routes the ticket to
+  the new `stale_dispatch` terminal status instead of dispatching a
+  duplicate; recovery is via `cw dev-queue requeue <ticket> -c <client>`,
+  documented in `docs/dispatch-runbook.md` and `docs/session-disposition.md`.
 
 - **`SESSION_NEEDS_ATTENTION` now re-fires on a debounced cadence for
   sessions latched at the top staleness bucket (#1858):** a session

@@ -319,6 +319,16 @@ class OrchestratorEventType(StrEnum):
     # is operator-attention-worthy — forwarded by default. No paired failure
     # event: emitting this has no mutation of its own that can fail.
     SSH_KEY_GATE_BYPASSED = "gate.ssh_key_bypassed"
+    # GitHub #1887 (split from #1858) -- disk_pressure_gate operator escape
+    # hatch. Emitted by _emit_disk_pressure_bypass when the claim-time
+    # disk-pressure probe reports the client's worktree-base mount below
+    # OrchestratorConfig.disk_pressure_min_free_gb but the operator has set
+    # disk_pressure_gate_enabled=False, so the would-be skip is suppressed and
+    # the client dispatches anyway. Same rationale as SSH_KEY_GATE_BYPASSED
+    # above: an automated safety decision suppressing a gate with no human in
+    # the loop is operator-attention-worthy -- forwarded by default. No paired
+    # failure event: emitting this has no mutation of its own that can fail.
+    DISK_PRESSURE_GATE_BYPASSED = "gate.disk_pressure_bypassed"
     # GitHub #1617 -- scope_hint routing-decision audit trail. Emitted at every
     # scope-gate-relevant routing decision (Rule 1, Rule 3, the stage-walk's
     # REVIEW rung, and the _approve_ticket_locked gate-release site) recording
@@ -381,7 +391,8 @@ class DispatchSkipReason(StrEnum):
     """First-match skip_reason values emitted in dispatch.tick events.
 
     Precedence (highest first):
-    AVAILABILITY_GATE > SSH_KEY_GATE > FRESHNESS_GATE > USAGE_LIMITED
+    AVAILABILITY_GATE > SSH_KEY_GATE > DISK_PRESSURE_GATE > FRESHNESS_GATE
+    > USAGE_LIMITED
     > HOST_CAPACITY_GATED > CAP_FULL > LANE_CAP_BLOCKED > SPAWN_ERROR
     > LANE_CIRCUIT_PAUSED > SPAWN_ERROR_BACKOFF > NO_PENDING > NONE.
     AVAILABILITY_GATE ranks first: it is the fleet-wide gh-availability
@@ -392,8 +403,16 @@ class DispatchSkipReason(StrEnum):
     probe checked right after the gh-availability gate but before the
     freshness gate, since a session spawned without an unlocked SSH key
     cannot push and would burn a slot for a guaranteed-failing session.
+    DISK_PRESSURE_GATE ranks third (#1887, split from #1858): a per-client
+    ``shutil.disk_usage`` probe of the worktree-base mount, checked before the
+    freshness gate so a nearly-full disk holds the client PENDING rather than
+    letting that gate's ``git pull --ff-only`` -- and then a whole session --
+    write more data onto it.
     ATTEMPT_CAP_BLOCKED is emitted per-task when the global attempt ceiling
     parks a task; it is not part of the per-client-tick precedence chain.
+    STALE_PR_BLOCKED (#1862) is likewise per-task and outside the precedence
+    chain: it is emitted when the pre-dispatch open-PR gate parks a PLAN/IMPL-
+    stage task whose branch already carries an open, unmerged PR.
     HOST_CAPACITY_GATED ranks just above CAP_FULL (#1444): a fleet-wide
     ``OrchestratorConfig.host_session_budget`` ceiling on concurrently-running
     DAEMON sessions across the whole host, folded into the per-client
@@ -404,12 +423,14 @@ class DispatchSkipReason(StrEnum):
 
     AVAILABILITY_GATE = "availability_gate"
     SSH_KEY_GATE = "ssh_key_gate"
+    DISK_PRESSURE_GATE = "disk_pressure_gate"
     FRESHNESS_GATE = "freshness_gate"
     USAGE_LIMITED = "usage_limited"
     HOST_CAPACITY_GATED = "host_capacity_gated"
     CAP_FULL = "cap_full"
     LANE_CAP_BLOCKED = "lane_cap_blocked"
     ATTEMPT_CAP_BLOCKED = "attempt_cap_blocked"
+    STALE_PR_BLOCKED = "stale_pr_blocked"
     SPAWN_ERROR = "spawn_error"
     LANE_CIRCUIT_PAUSED = "lane_circuit_paused"
     SPAWN_ERROR_BACKOFF = "spawn_error_backoff"

@@ -61,6 +61,10 @@ import sys, json
 _BLOCKER_REASON_PAUSED_STATUSES = {
     "blocked", "awaiting_operator_availability", "merge_gate_blocked",
     "codex_must_fix_mechanically_rejected", "empty_diff_blocked",
+    # #1862: STAGE_FAILURE_STATUSES member, so breadcrumb-eligible by
+    # derivation. Its gate-side twin ("stale_dispatch_gate") is deliberately
+    # NOT here -- no session ran, so that park hardcodes breadcrumbs="".
+    "stale_dispatch",
 }
 
 # finalize_regress_repeat (GitHub #1717, src/cw/dispatch/regress_repeat.py) is

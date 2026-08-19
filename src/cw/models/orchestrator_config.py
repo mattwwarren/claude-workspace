@@ -79,6 +79,14 @@ class ConcurrencyOverrides(BaseModel):
 DEFAULT_GLOBAL_ATTEMPT_CEILING = 10
 
 
+# Judgment default for the claim-time disk-pressure gate (#1887, split from
+# #1858) -- conservative and open to tuning per host/mount, not derived from a
+# measured incident threshold. Named (not an inline literal at the field
+# default) so an operator or reviewer can find it by name, same convention as
+# DEFAULT_GLOBAL_ATTEMPT_CEILING above.
+DEFAULT_DISK_PRESSURE_MIN_FREE_GB = 5.0
+
+
 CLAUDE_NATIVE_BACKEND: str = "claude-native"
 LOCAL_BACKEND: str = "local"
 CODEX_BACKEND: str = "codex"
@@ -201,6 +209,31 @@ class LaneConfig(BaseModel):
     # global-True default back OUT -- the same asymmetry finalize_gate/signoff
     # already encode for their own gates.
     codex_fix_loop_enabled: Literal[True] | None = None
+    # Lane-level override for the global attempt ceiling (#1751, scoping the
+    # flat #786 bound that #1750 re-pointed at unproductive_attempts).
+    # Precedence: lane > OrchestratorConfig.global_attempt_ceiling. Resolved by
+    # cw.reconcile._shared.resolve_attempt_ceiling, which BOTH the dispatch
+    # claim path and the concierge recovery recipes call -- they must agree on
+    # the number or the concierge would refuse a requeue the claim path would
+    # have allowed (the drift #1750's own comments warn against).
+    #
+    # Tri-state, and NOT the Literal[True] | None shape its three sibling
+    # lane-override fields use: this one genuinely needs a "disable" state that
+    # none of them do. `None` = the lane sets no override (defer to global) --
+    # the meaning every sibling already assigns to None, which is exactly why
+    # `False`, not `None`, is the disable token here: a lane that wants to
+    # inherit whatever the global ceiling later becomes and a lane that wants
+    # no ceiling ever are different intents that must stay distinguishable, and
+    # Pydantic collapses "key absent" and "key present: null" to the same None.
+    # `False` = the lane explicitly disables the ceiling (a supervised lane
+    # whose operator answers every park IS the rate limiter, so an automated
+    # bound buys nothing). A positive int = the lane's own ceiling.
+    #
+    # `False` is free to reuse for this meaning precisely because
+    # codex_fix_loop_enabled above reserves it as "cannot be used" -- the
+    # opt-in-only asymmetry that makes Literal[True] valid there is what
+    # leaves False unclaimed here.
+    attempt_ceiling: Literal[False] | int | None = None
     # Lane-level gate-recipe enablement map (RFC 0009 P4, #1067). Middle tier in
     # resolve_gate_recipe_enabled's 3-tier precedence: consulted when the ticket
     # carries no override for the recipe, and itself overridden by
@@ -223,6 +256,38 @@ class LaneConfig(BaseModel):
             msg = "lane name must be non-empty"
             raise ValueError(msg)
         return v
+
+    @field_validator("attempt_ceiling", mode="before")
+    @classmethod
+    def _check_attempt_ceiling(cls, value: object) -> object:
+        """Reject the two raw values Pydantic's smart union silently reinterprets.
+
+        ``bool`` is an ``int`` subclass, so ``Literal[False] | int`` resolves
+        ``0`` to ``False`` (i.e. "disabled" -- the *opposite* of what an
+        operator writing "cap at 0" means) and ``True`` to ``1`` (a ceiling of
+        one unproductive attempt, not "enabled"). Both are plausible typos in
+        hand-edited YAML, so they fail loudly here rather than being quietly
+        reinterpreted. Runs ``mode="before"`` because by the time the union has
+        run, the evidence of which literal was written is already gone.
+        """
+        if isinstance(value, bool):
+            if value is True:
+                msg = (
+                    "lane attempt_ceiling does not accept true; use a positive"
+                    " integer to set a lane ceiling, false to disable the"
+                    " ceiling, or omit the key to defer to"
+                    " global_attempt_ceiling"
+                )
+                raise ValueError(msg)
+            return value
+        if isinstance(value, int) and value <= 0:
+            msg = (
+                f"lane attempt_ceiling must be a positive integer (got {value});"
+                " use false to disable the ceiling, or omit the key to defer to"
+                " global_attempt_ceiling"
+            )
+            raise ValueError(msg)
+        return value
 
     @field_validator("gate_recipes")
     @classmethod
@@ -294,6 +359,10 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # already-live safety probe is attention-worthy, same rationale as
         # GATE_AUTO_APPROVED above.
         OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
+        # GitHub #1887: the disk_pressure_gate operator escape hatch
+        # suppressing an already-live safety probe is attention-worthy, same
+        # rationale as SSH_KEY_GATE_BYPASSED directly above.
+        OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED,
         # GitHub #1730: a review-stage requeue proceeding with no operator-visible
         # confirmation that the send-back comment actually reached the reviewer is
         # a no-human-in-the-loop decision -- operator-attention-worthy, forwarded
@@ -566,6 +635,30 @@ class OrchestratorConfig(BaseModel):
     # each bypass emits SSH_KEY_GATE_BYPASSED (forwarded to the operator
     # channel by default -- see _DEFAULT_OPERATOR_EVENT_TYPES above).
     ssh_key_gate_enabled: bool = True
+    # GitHub #1887 (split from #1858) — operator escape hatch for the
+    # claim-time disk-pressure preflight gate. Default True (gate stays
+    # enforced), same already-live-safety-probe posture as
+    # ssh_key_gate_enabled above: it gates a `shutil.disk_usage` probe of the
+    # client's worktree-base mount that holds that client PENDING rather than
+    # risk a session filling an already-tight disk, not new automation.
+    # Setting this False bypasses that skip whenever the probe reports
+    # pressure; each bypass emits DISK_PRESSURE_GATE_BYPASSED (forwarded to
+    # the operator channel by default -- see _DEFAULT_OPERATOR_EVENT_TYPES
+    # above).
+    disk_pressure_gate_enabled: bool = True
+    # Minimum free space (GB) on a client's worktree-base mount before the
+    # gate above holds that client PENDING (#1887). See
+    # DEFAULT_DISK_PRESSURE_MIN_FREE_GB for why the default is a judgment
+    # call rather than a measured threshold.
+    disk_pressure_min_free_gb: float = DEFAULT_DISK_PRESSURE_MIN_FREE_GB
+    # GitHub #1862 — operator escape hatch for the pre-dispatch open-PR gate
+    # (cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids). Default True (gate
+    # stays enforced), mirroring ssh_key_gate_enabled's fail-safe default: it
+    # gates an already-live probe that can park PLAN/IMPL-stage PENDING tasks,
+    # not new automation. Setting this False skips the gate entirely for every
+    # client -- the operator's escape hatch if a `gh`-probe fan-out ever stalls
+    # a dispatch tick (e.g. a large cold-cache PLAN/IMPL backlog).
+    pr_gate_enabled: bool = True
     # Tool-name patterns forwarded to EVERY DAEMON worker spawn as a single
     # `--disallowed-tools=<comma-joined>` token (cw.spawn.build_disallowed_tools_arg).
     # Default empty: cw forces no tool restriction on workers. Replaces the

@@ -56,6 +56,7 @@ from cw.auto_dev_result import (
     SCOPE_TIER_SMALL,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
+    STALE_DISPATCH_BLOCKER_REASON,
 )
 from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
 from cw.dev_queue import (
@@ -934,13 +935,23 @@ def _route_staged_decision(
             if blocker_reason == _AUTOMERGE_NOT_ARMED_REASON
             else None
         )
+        # GitHub #1862: a stale_dispatch report legitimately carries zero
+        # commits and zero findings -- the session correctly refused to
+        # duplicate work already sitting in an open PR. Under the generic
+        # evidence-based computation that reads as unproductive, so repeated
+        # honest refusals would charge the ceiling and eventually re-park the
+        # row at attempt_cap_blocked, burying the specific signal this status
+        # exists to surface. Hardcoded False for the same reason Rule 4
+        # hardcodes it for no_op: a correct, evidence-producing terminal
+        # outcome, not a crashloop.
+        rule5_unproductive = False if status == "stale_dispatch" else claim_unproductive
         transition_task_status(
             task,
             QueueItemStatus.BLOCKED_ON_USER,
             disposition=disposition,
             pr_url=gate_pr_url,
             blocked_reason=blocker_reason,
-            unproductive=claim_unproductive,  # #1750 Rule 5
+            unproductive=rule5_unproductive,  # #1750 Rule 5
         )
         # GitHub #1713 Variant B: prior_pipeline_pr_open blocks this ticket
         # behind a DIFFERENT ticket's open PR -- this row has no PR of its
@@ -951,7 +962,26 @@ def _route_staged_decision(
         # returns: that call's unconditional latch-clear (mirrors
         # escalation_parked_at) zeroes blocked_on_pr as part of every
         # transition, so stamping before the call would be immediately wiped.
-        if blocker_reason == _PRIOR_PIPELINE_PR_OPEN_REASON:
+        #
+        # GitHub #1902 (fast-follow to #1862): a stale_dispatch sentinel's
+        # pr_already_open blocker.details names the blocking PR in the
+        # identical "PR #<N>" free-text shape, so the same
+        # _extract_blocked_on_pr regex applies unchanged -- second producer,
+        # not a new parser. NOTE: unlike prior_pipeline_pr_open (whose
+        # blocking PR belongs to a DIFFERENT ticket that already completed
+        # and so carries its pr_url on some other store row),
+        # stale_dispatch's blocking PR is this ticket's OWN earlier,
+        # un-harvested-sentinel dispatch, discovered via a live
+        # `gh pr list --head <branch>` query that never writes a pr_url onto
+        # any TicketTask row. Stamping blocked_on_pr here is therefore
+        # currently production-unreachable release groundwork for this
+        # disposition -- release_stale_gated_tasks's Variant B
+        # cross-reference scan (reconcile/tasks.py) has no row to match it
+        # against until #1927 (an independent PR-state source) lands.
+        if blocker_reason in (
+            _PRIOR_PIPELINE_PR_OPEN_REASON,
+            STALE_DISPATCH_BLOCKER_REASON,
+        ):
             details = blocker.get("details") if isinstance(blocker, dict) else None
             task.blocked_on_pr = _extract_blocked_on_pr(details)
     else:

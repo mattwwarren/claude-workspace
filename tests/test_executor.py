@@ -30,10 +30,12 @@ from cw.executor_diagnostics import (
     render_bundle_path,
 )
 from cw.local_runner import (
+    _PATH_FREE_TASK_INSTRUCTION,
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
     LIVENESS_UNAVAILABLE,
     PLAN_MISSING,
+    TASK_CONTEXT_RELATIVE_PATH,
     UNEXPECTED_ERROR,
     FakeAiderRunner,
 )
@@ -58,7 +60,7 @@ from cw.opencode_runner import (
     OpencodeRunner,
 )
 from cw.result import EmitOutcome
-from tests.conftest import find_completed_session
+from tests.conftest import commit_tracked_file, find_completed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1162,7 +1164,249 @@ def test_local_preflight_success_returns_preflight_ok(
     assert isinstance(result, _PreflightOK)
     assert result.endpoint == "http://localhost:1234/v1"
     assert result.model == "qwen"
-    assert "do the thing" in result.task_message
+    # Post-#1905: the plan body reaches the model through the read-only
+    # task-context file, never through the mention-scanned --message string.
+    assert result.task_message == _PATH_FREE_TASK_INSTRUCTION
+    assert "do the thing" not in result.task_message
+    assert "do the thing" in (worktree / TASK_CONTEXT_RELATIVE_PATH).read_text(
+        encoding="utf-8"
+    )
+
+
+# The ticket's own reproduction shape (#1905): plan prose that names paths the
+# implementation must NOT edit, which aider's mention scan used to force-add.
+_EXCLUSION_PLAN = """## Summary
+
+Rework the staleness monitor.
+
+**EXPLICITLY OUT OF SCOPE:** `core/database.py`, `etl_mcp/api/x.py`
+
+## Touch-point Contract
+- `core/models/auth.py:5-13` for a TypedDict shape
+
+## Files Modified
+- src/real_target.py
+"""
+
+
+def _local_spawn_argv(
+    worktree: Path,
+    plan_text: str,
+) -> list[str]:
+    """Run a full LocalExecutor.spawn through FakeAiderRunner; return the argv."""
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text(plan_text, encoding="utf-8")
+
+    fake_runner = FakeAiderRunner()
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-files", client="test", stage=Stage.IMPL)
+
+    try:
+        with patch("cw.executor.aider_available", return_value=True):
+            executor.spawn(
+                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+            )
+        return cast("list[str]", fake_runner.calls[0]["argv"])
+    finally:
+        for proc in fake_runner.procs:
+            proc.kill()
+            proc.wait()
+
+
+def test_local_preflight_threads_files_modified_into_preflight_ok(
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The plan's file manifest is parsed and threaded onto _PreflightOK (#1905)."""
+    worktree = make_git_repo("wt-preflight-files")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text(
+        "## Files Modified\n- src/cw/a.py\n- tests/test_a.py\n", encoding="utf-8"
+    )
+
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    task = TicketTask(ticket_id="T-files", client="test", stage=Stage.IMPL)
+    client = ClientConfig(name="test", workspace_path=worktree)
+
+    with patch("cw.executor.aider_available", return_value=True):
+        result = _local_preflight(config, task, worktree, client)
+
+    assert isinstance(result, _PreflightOK)
+    assert result.files == ["src/cw/a.py", "tests/test_a.py"]
+
+
+def test_local_preflight_files_empty_without_files_modified_heading(
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A plan with no manifest section falls back to zero --file flags (A1)."""
+    worktree = make_git_repo("wt-preflight-no-files")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
+
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    task = TicketTask(ticket_id="T-nofiles", client="test", stage=Stage.IMPL)
+    client = ClientConfig(name="test", workspace_path=worktree)
+
+    with patch("cw.executor.aider_available", return_value=True):
+        result = _local_preflight(config, task, worktree, client)
+
+    assert isinstance(result, _PreflightOK)
+    assert result.files == []
+
+
+def test_local_preflight_threads_aiderignore_path_into_preflight_ok(
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A non-empty manifest threads a materialised aiderignore path onto
+    _PreflightOK (#1915)."""
+    worktree = make_git_repo("wt-preflight-aiderignore")
+    commit_tracked_file(worktree, "core/database.py")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text(
+        "## Files Modified\n- src/real_target.py\n", encoding="utf-8"
+    )
+
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    task = TicketTask(ticket_id="T-aiderignore", client="test", stage=Stage.IMPL)
+    client = ClientConfig(name="test", workspace_path=worktree)
+
+    with patch("cw.executor.aider_available", return_value=True):
+        result = _local_preflight(config, task, worktree, client)
+
+    assert isinstance(result, _PreflightOK)
+    assert isinstance(result.aiderignore_path, Path)
+    assert "/core/database.py" in result.aiderignore_path.read_text(encoding="utf-8")
+
+
+def test_local_preflight_aiderignore_path_none_without_manifest(
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """No manifest section → no aiderignore emitted (mirrors the empty-files
+    fallback contract, #1915)."""
+    worktree = make_git_repo("wt-preflight-aiderignore-none")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
+
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    task = TicketTask(ticket_id="T-aiderignore-none", client="test", stage=Stage.IMPL)
+    client = ClientConfig(name="test", workspace_path=worktree)
+
+    with patch("cw.executor.aider_available", return_value=True):
+        result = _local_preflight(config, task, worktree, client)
+
+    assert isinstance(result, _PreflightOK)
+    assert result.aiderignore_path is None
+
+
+def test_local_preflight_threads_read_only_path_into_preflight_ok(
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """_PreflightOK carries the materialised read-only task-context path."""
+    worktree = make_git_repo("wt-preflight-readonly")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("plan body here", encoding="utf-8")
+    (cw_dir / "context.json").write_text(
+        '{"title": "T", "body": "B"}', encoding="utf-8"
+    )
+
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    task = TicketTask(ticket_id="T-ro", client="test", stage=Stage.IMPL)
+    client = ClientConfig(name="test", workspace_path=worktree)
+
+    with patch("cw.executor.aider_available", return_value=True):
+        result = _local_preflight(config, task, worktree, client)
+
+    assert isinstance(result, _PreflightOK)
+    assert result.read_only_path == worktree / TASK_CONTEXT_RELATIVE_PATH
+    context = result.read_only_path.read_text(encoding="utf-8")
+    assert "plan body here" in context
+    assert "T" in context
+
+
+def test_local_executor_spawn_passes_file_flags_to_argv(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """End-to-end: each manifest path reaches aider's argv as a --file pair."""
+    worktree = make_git_repo("wt-spawn-file-flags")
+    argv = _local_spawn_argv(
+        worktree, "## Files Modified\n- src/cw/a.py\n- tests/test_a.py\n"
+    )
+
+    first = argv.index("--file")
+    assert argv[first : first + 4] == [
+        "--file",
+        "src/cw/a.py",
+        "--file",
+        "tests/test_a.py",
+    ]
+
+
+def test_local_executor_spawn_passes_read_flag_to_argv(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """End-to-end: the argv aider actually receives carries no excluded path.
+
+    The spawn-level counterpart of test_build_task_message_is_path_free_*:
+    closes the loop from "the unit function is path-free" to "the subprocess
+    argv is path-free" (#1905).
+    """
+    worktree = make_git_repo("wt-spawn-read-flag")
+    argv = _local_spawn_argv(worktree, _EXCLUSION_PLAN)
+
+    read_idx = argv.index("--read")
+    assert argv[read_idx + 1] == str(worktree / TASK_CONTEXT_RELATIVE_PATH)
+    message = argv[argv.index("--message") + 1]
+    for path in ("core/database.py", "etl_mcp", "auth.py"):
+        assert path not in message
+
+
+def test_local_executor_spawn_passes_aiderignore_flag_to_argv(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """End-to-end: the argv aider actually receives blocks every tracked file
+    outside the manifest via --aiderignore. This is the test that most
+    directly encodes #1915's acceptance criterion — a model reply echoing a
+    non-manifest path cannot cause a chat-file addition, because the excluded
+    files never enter aider's addable-file universe in the first place."""
+    worktree = make_git_repo("wt-spawn-aiderignore")
+    commit_tracked_file(worktree, "core/database.py")
+    commit_tracked_file(worktree, "etl_mcp/api/x.py")
+    argv = _local_spawn_argv(worktree, _EXCLUSION_PLAN)
+
+    assert "--aiderignore" in argv
+    idx = argv.index("--aiderignore")
+    aiderignore_path = Path(argv[idx + 1])
+    lines = aiderignore_path.read_text(encoding="utf-8").splitlines()
+    assert "/core/database.py" in lines
+    assert "/etl_mcp/api/x.py" in lines
+    assert "/src/real_target.py" not in lines
 
 
 def test_local_preflight_ok_model_none_defaults_to_empty_string(

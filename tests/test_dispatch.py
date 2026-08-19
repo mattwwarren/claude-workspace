@@ -31,6 +31,7 @@ from cw.dev_queue import (
     save_dev_queue,
     save_plan,
 )
+from cw.disk import DiskUsage
 from cw.dispatch import (
     _AVAILABILITY_OUTAGE_REASON,
     _AVAILABILITY_PROBE_TTL_SECONDS,
@@ -69,6 +70,7 @@ from cw.exceptions import (
 from cw.local_runner import make_blocked
 from cw.models import (
     CODEX_BACKEND,
+    DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
     OPENCODE_BACKEND,
@@ -226,6 +228,14 @@ def _make_clients_yaml(
                 lines.append(f"        max_parallel: {lane.max_parallel}\n")
                 if lane.priority != 0:
                     lines.append(f"        priority: {lane.priority}\n")
+                # #1751: `false` (disable) and a positive int are distinct
+                # states, and both differ from `None` (defer to global) — so
+                # the emitted YAML must preserve the literal token, not
+                # coerce it. `str(False)` is "False", which PyYAML parses as
+                # a bool, so lowercasing is what keeps the round-trip honest.
+                if lane.attempt_ceiling is not None:
+                    token = str(lane.attempt_ceiling).lower()
+                    lines.append(f"        attempt_ceiling: {token}\n")
         if codex_review_client == client.name:
             lines.append("    pipeline:\n")
             lines.append("      executors:\n")
@@ -3310,6 +3320,246 @@ class TestGlobalAttemptCeiling:
 
 
 # ---------------------------------------------------------------------------
+# TestPerLaneAttemptCeiling
+# ---------------------------------------------------------------------------
+
+
+class TestPerLaneAttemptCeiling:
+    """LaneConfig.attempt_ceiling overrides global_attempt_ceiling (#1751).
+
+    Sibling of :class:`TestGlobalAttemptCeiling` above: same dispatch-tick
+    admission gate, exercised through a client whose lane declares its own
+    ceiling. A supervised lane has a human as its rate limiter, so the single
+    global bound #786 shipped is not the right bound for every lane.
+    """
+
+    def _ceiling_config(self, ceiling: int) -> OrchestratorConfig:
+        return OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1},
+            global_attempt_ceiling=ceiling,
+        )
+
+    def test_lane_ceiling_overrides_global_lower(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Lane ceiling 25 with global 10: a row at 15 still claims."""
+        from tests._reconcile_helpers import _client_with_lane
+
+        client = _client_with_lane(
+            sample_client_config.name,
+            DEFAULT_LANE,
+            base=sample_client_config,
+            max_parallel=1,
+            attempt_ceiling=25,
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1751-higher",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        attempts=15,
+                        unproductive_attempts=15,
+                    )
+                ]
+            )
+        )
+
+        dispatch_tick(
+            self._ceiling_config(ceiling=10), native_daemon=FakeNativeDaemonClient()
+        )
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-1751-higher")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.disposition != "attempt_cap_blocked"
+
+    def test_lane_ceiling_overrides_global_higher(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Lane ceiling 2 with global 10: a row at 2 parks below the global bound."""
+        from tests._reconcile_helpers import _client_with_lane
+
+        client = _client_with_lane(
+            sample_client_config.name,
+            DEFAULT_LANE,
+            base=sample_client_config,
+            max_parallel=1,
+            attempt_ceiling=2,
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1751-lower",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        attempts=2,
+                        unproductive_attempts=2,
+                    )
+                ]
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=10), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        parked = next(t for t in queue.tasks if t.ticket_id == "GEN-1751-lower")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        assert daemon.spawn_calls == []
+
+    def test_lane_ceiling_false_disables_park_entirely(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """``attempt_ceiling: false`` never parks, however high the counter."""
+        from tests._reconcile_helpers import _client_with_lane
+
+        client = _client_with_lane(
+            sample_client_config.name,
+            DEFAULT_LANE,
+            base=sample_client_config,
+            max_parallel=1,
+            attempt_ceiling=False,
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1751-disabled",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        attempts=50,
+                        unproductive_attempts=50,
+                    )
+                ]
+            )
+        )
+
+        dispatch_tick(
+            self._ceiling_config(ceiling=10), native_daemon=FakeNativeDaemonClient()
+        )
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-1751-disabled")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.disposition != "attempt_cap_blocked"
+
+    def test_unmatched_lane_falls_through_to_global(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """A task whose lane is not the overridden one keeps #786's behaviour."""
+        client = sample_client_config.model_copy(
+            update={
+                "lanes": [
+                    LaneConfig(name=DEFAULT_LANE, max_parallel=1),
+                    LaneConfig(
+                        name="supervised", max_parallel=1, attempt_ceiling=False
+                    ),
+                ]
+            }
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1751-fallthrough",
+                        client="test-client",
+                        lane=DEFAULT_LANE,
+                        status=QueueItemStatus.PENDING,
+                        attempts=3,
+                        unproductive_attempts=3,
+                    )
+                ]
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        parked = next(t for t in queue.tasks if t.ticket_id == "GEN-1751-fallthrough")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        assert daemon.spawn_calls == []
+
+    def test_park_events_carry_resolved_lane_ceiling(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Both park events report the RESOLVED ceiling, not the global one.
+
+        With a per-lane ceiling an operator can no longer infer "why did this
+        park" from ``global_attempt_ceiling`` alone, so the number that
+        actually fired must ride on the payload.
+        """
+        from tests._reconcile_helpers import _client_with_lane
+
+        client = _client_with_lane(
+            sample_client_config.name,
+            DEFAULT_LANE,
+            base=sample_client_config,
+            max_parallel=1,
+            attempt_ceiling=5,
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1751-events",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        attempts=5,
+                        unproductive_attempts=5,
+                    )
+                ]
+            )
+        )
+
+        dispatch_tick(
+            self._ceiling_config(ceiling=50), native_daemon=FakeNativeDaemonClient()
+        )
+
+        events = read_events(
+            consumer="test-1751-lane-ceiling-events",
+            event_types=[
+                OrchestratorEventType.DISPATCH_TICK,
+                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            ],
+        )
+        cap_events = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.ATTEMPT_CAP_BLOCKED
+        ]
+        assert len(cap_events) == 1
+        assert cap_events[0].payload["attempt_ceiling"] == 5
+
+        attention_events = [
+            e for e in events if e.payload.get("paused_status") == "attempt_cap_blocked"
+        ]
+        assert len(attention_events) == 1
+        assert attention_events[0].payload["attempt_ceiling"] == 5
+
+
+# ---------------------------------------------------------------------------
 # TestClaimNextPendingPriority
 # ---------------------------------------------------------------------------
 
@@ -3839,6 +4089,7 @@ class TestRunDispatchLoopVerbose:
             warned_fetch_fail: set[str] | None = None,
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
+            warned_disk_pressure: set[str] | None = None,
             usage_limited_until: datetime | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -3855,6 +4106,7 @@ class TestRunDispatchLoopVerbose:
                 warned_fetch_fail=warned_fetch_fail,
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
+                warned_disk_pressure=warned_disk_pressure,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -4901,6 +5153,7 @@ class TestClaimNextPendingUsageLimitedGate:
         result = _claim_next_pending(
             "test-client",
             lane=DEFAULT_LANE,
+            client=sample_client_config,
             config=simple_config,
             usage_limited_until=future,
         )
@@ -4925,6 +5178,7 @@ class TestClaimNextPendingUsageLimitedGate:
         claimed, backoff_skipped = _claim_next_pending(
             "test-client",
             lane=DEFAULT_LANE,
+            client=sample_client_config,
             config=simple_config,
             usage_limited_until=past,
         )
@@ -10707,6 +10961,7 @@ class TestApplyStagedDecision:
             OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
             STAGE_FAILURE_STATUSES,
         )
+        from cw.dev_queue import STALE_DISPATCH_GATE_DISPOSITION
         from cw.dispatch import (
             _APPROVAL_GATE_REASON,
             _AWAITING_OPERATOR_REASON,
@@ -10726,6 +10981,11 @@ class TestApplyStagedDecision:
             # mechanical gate's own paused_status ("empty_diff_gate"), which
             # stays excluded with every other gate-class park below.
             "empty_diff_blocked",
+            # #1862: same derivation, same distinction -- the agent-emitted
+            # "stale_dispatch" status carries a blocker.reason, while the
+            # pre-dispatch gate's own paused_status ("stale_dispatch_gate")
+            # stays excluded with every other gate-class park below.
+            "stale_dispatch",
             "awaiting_operator_availability",
             must_fix_mechanically_rejected,
         } == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
@@ -10754,6 +11014,10 @@ class TestApplyStagedDecision:
                 _FINALIZE_HOLD_REASON,
                 _SIGNOFF_GATE_REASON,
                 _APPROVAL_GATE_REASON,
+                # #1862: same rule, applied to the pre-dispatch open-PR gate.
+                # _park_stale_pr_task (claim.py) hardcodes breadcrumbs="" --
+                # no session ever ran -- so its paused_status must stay out.
+                STALE_DISPATCH_GATE_DISPOSITION,
             }
             & BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
         )
@@ -12461,6 +12725,7 @@ class TestWaveCollisionDetection:
             warned_fetch_fail: set[str] | None = None,
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
+            warned_disk_pressure: set[str] | None = None,
             usage_limited_until: datetime | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -12476,6 +12741,7 @@ class TestWaveCollisionDetection:
                 warned_fetch_fail=warned_fetch_fail,
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
+                warned_disk_pressure=warned_disk_pressure,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -14749,6 +15015,268 @@ class TestSshKeyPreflightGate:
 
 
 # ---------------------------------------------------------------------------
+# TestDiskPressurePreflightGate (#1887, split from #1858)
+# ---------------------------------------------------------------------------
+
+
+def _force_disk_pressure_gated(
+    monkeypatch: pytest.MonkeyPatch, *, free_gb: float = 0.5
+) -> None:
+    """Force the claim-time disk-pressure probe to report a nearly-full mount.
+
+    Overrides the autouse ``_mock_disk_usage`` default (which reports 250 GB
+    free) on the same ``cw.dispatch.gating.check_disk_usage`` seam.
+    """
+    monkeypatch.setattr(
+        "cw.dispatch.gating.check_disk_usage",
+        lambda _path: DiskUsage(total_gb=500.0, free_gb=free_gb),
+    )
+
+
+class TestDiskPressurePreflightGate:
+    """Claim-time disk-pressure preflight gate (#1887, split from #1858).
+
+    A ``shutil.disk_usage`` probe of the client's worktree-base mount runs as
+    the third per-client pre-claim gate in ``dispatch_tick``'s client loop,
+    after the fleet-wide gh-availability and SSH-agent-key gates and before
+    the per-client freshness gate (whose ``git pull --ff-only`` would
+    otherwise write more data onto an already-tight disk). On pressure the
+    client stays PENDING (no claim, no ``attempts`` consumed) and an operator
+    WARN line is emitted once per client per dispatch-loop run.
+    """
+
+    def test_available_spawns_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """With plenty of free space, dispatch proceeds as usual."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1A", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+
+    def test_low_disk_holds_task_pending_no_attempt_consumed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The core binding requirement: a gated PENDING task keeps attempts=0."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1B", client="test-client", attempts=0))
+        _force_disk_pressure_gated(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 0
+        assert daemon.spawn_calls == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == "GEN-D1B")
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 0
+
+    def test_low_disk_emits_dispatch_tick_disk_pressure_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A gated client emits dispatch.tick with skip_reason=disk_pressure_gate."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1C", client="test-client"))
+        _force_disk_pressure_gated(monkeypatch, free_gb=1.25)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-d1-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        ticks = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.DISK_PRESSURE_GATE
+        ]
+        assert len(ticks) == 1
+        payload = ticks[0].payload
+        assert payload["client"] == "test-client"
+        assert payload["claimed"] == 0
+        assert payload["pending"] == 1
+        assert payload["disk_free_gb"] == 1.25
+        assert payload["disk_min_free_gb"] == DEFAULT_DISK_PRESSURE_MIN_FREE_GB
+
+    def test_low_disk_emits_operator_warn_line_once_per_client(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The operator WARN line is deduplicated across ticks in one run."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1D", client="test-client"))
+        _force_disk_pressure_gated(monkeypatch)
+
+        lines: list[str] = []
+        warned_disk_pressure: set[str] = set()
+        daemon = FakeNativeDaemonClient()
+        for _ in range(2):
+            dispatch_tick(
+                simple_config,
+                native_daemon=daemon,
+                auto_ff=False,
+                emit=lines.append,
+                warned_disk_pressure=warned_disk_pressure,
+            )
+
+        matches = [
+            ln for ln in lines if ln.startswith("WARN test-client: worktree disk low")
+        ]
+        assert len(matches) == 1
+        assert warned_disk_pressure == {"test-client"}
+
+    def test_ssh_key_gate_takes_precedence_over_disk_pressure_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both probes forced bad: SSH_KEY_GATE wins, not DISK_PRESSURE_GATE."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1E", client="test-client"))
+        _force_ssh_key_unavailable(monkeypatch)
+        _force_disk_pressure_gated(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-d1-precedence-ssh",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.SSH_KEY_GATE
+
+    def test_disk_pressure_gate_takes_precedence_over_freshness_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Low disk + stale repo: DISK_PRESSURE_GATE wins over FRESHNESS_GATE."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1F", client="test-client"))
+        _force_disk_pressure_gated(monkeypatch)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 3),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.gating.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-d1-precedence-fresh",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.DISK_PRESSURE_GATE
+
+    def test_gate_disabled_bypasses_skip_and_emits_bypass_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """disk_pressure_gate_enabled=False bypasses the pressure skip — the
+        client dispatches normally, a DISK_PRESSURE_GATE_BYPASSED event is
+        recorded, and no dispatch.tick DISK_PRESSURE_GATE skip is recorded."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1G", client="test-client"))
+        _force_disk_pressure_gated(monkeypatch, free_gb=1.5)
+
+        bypass_config = simple_config.model_copy(
+            update={"disk_pressure_gate_enabled": False}
+        )
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(bypass_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+
+        bypass_events = read_events(
+            consumer="test-d1-bypass",
+            event_types=[OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED],
+        )
+        assert len(bypass_events) == 1
+        assert bypass_events[0].payload["client"] == "test-client"
+        assert bypass_events[0].payload["disk_free_gb"] == 1.5
+        assert (
+            bypass_events[0].payload["disk_min_free_gb"]
+            == DEFAULT_DISK_PRESSURE_MIN_FREE_GB
+        )
+
+        tick_events = read_events(
+            consumer="test-d1-bypass-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        skip_ticks = [
+            e
+            for e in tick_events
+            if e.payload.get("skip_reason") == DispatchSkipReason.DISK_PRESSURE_GATE
+        ]
+        assert skip_ticks == []
+
+    def test_probe_oserror_fails_open_and_dispatches(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unprobeable mount is not evidence of pressure: the gate fails open."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1H", client="test-client"))
+
+        probe_error = "mount went away"
+
+        def _raise(_path: Path) -> DiskUsage:
+            raise OSError(probe_error)
+
+        monkeypatch.setattr("cw.dispatch.gating.check_disk_usage", _raise)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+        tick_events = read_events(
+            consumer="test-d1-probe-error",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        skip_ticks = [
+            e
+            for e in tick_events
+            if e.payload.get("skip_reason") == DispatchSkipReason.DISK_PRESSURE_GATE
+        ]
+        assert skip_ticks == []
+
+
+# ---------------------------------------------------------------------------
 # TestSpawnInvalidatesStaleContextJson (#1046)
 # ---------------------------------------------------------------------------
 
@@ -15173,3 +15701,479 @@ class TestUnproductiveAttemptRouting:
             )
 
         assert task.unproductive_attempts == ceiling
+
+
+# ---------------------------------------------------------------------------
+# TestClaimNextPendingStalePr (#1862)
+# ---------------------------------------------------------------------------
+
+
+class TestClaimNextPendingStalePr:
+    """The pre-dispatch open-PR gate in ``_claim_next_pending``.
+
+    Mirrors ``TestGlobalAttemptCeiling``'s shape: drive a real ``dispatch_tick``
+    and assert the task is parked instead of claimed. The gate's *resolution*
+    (which ticket ids are stale) is stubbed here -- ``tests/test_dispatch_pr_gate.py``
+    covers that half; this class pins the claim-path wiring.
+    """
+
+    def _config(self) -> OrchestratorConfig:
+        return OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1},
+        )
+
+    def _stub_gate(
+        self, monkeypatch: pytest.MonkeyPatch, *ticket_ids: str
+    ) -> list[str]:
+        """Patch the lanes-level gate resolver; return the call log."""
+        calls: list[str] = []
+
+        def _fake(
+            client: ClientConfig, snapshot: DevQueueStore, **_: object
+        ) -> frozenset[str]:
+            calls.append(client.name)
+            return frozenset(ticket_ids)
+
+        monkeypatch.setattr("cw.dispatch.lanes.resolve_stale_pr_ticket_ids", _fake)
+        return calls
+
+    def test_plan_stage_task_with_open_pr_is_parked_not_claimed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        self._stub_gate(monkeypatch, "GEN-1862")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-1862",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        stage=Stage.PLAN,
+                    )
+                ]
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._config(), native_daemon=daemon)
+
+        parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-1862")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "stale_dispatch_gate"
+        assert parked.blocked_reason == "pr_already_open_pre_dispatch"
+        assert parked.attempts == 0
+        assert parked.unproductive_attempts == 0
+        assert daemon.spawn_calls == []
+
+    def test_impl_stage_task_with_open_pr_is_parked(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        self._stub_gate(monkeypatch, "GEN-impl")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-impl",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        stage=Stage.IMPL,
+                    )
+                ]
+            )
+        )
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-impl")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "stale_dispatch_gate"
+
+    def test_review_stage_task_claims_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stage-scoped: a REVIEW-stage ticket legitimately has an open PR."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        self._stub_gate(monkeypatch, "GEN-review")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-review",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        stage=Stage.REVIEW,
+                    )
+                ]
+            )
+        )
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        claimed = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-review")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.disposition is None
+
+    def test_ticket_absent_from_the_gate_set_claims_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No false positive: the existing claim path is unchanged."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        self._stub_gate(monkeypatch)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-clean",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        stage=Stage.PLAN,
+                    )
+                ]
+            )
+        )
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        claimed = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-clean")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.attempts == 1
+
+    def test_priority_path_also_parks(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The gate fires on the priority-ticket loop too."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        self._stub_gate(monkeypatch, "GEN-pri")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-pri",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        stage=Stage.PLAN,
+                    )
+                ]
+            )
+        )
+        save_plan(
+            DispatchPlan(tasks=[TicketTask(ticket_id="GEN-pri", client="test-client")])
+        )
+
+        dispatch_tick(
+            self._config(), native_daemon=FakeNativeDaemonClient(), use_plan=True
+        )
+
+        parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-pri")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "stale_dispatch_gate"
+
+    def test_park_emits_tick_and_attention_events(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        self._stub_gate(monkeypatch, "GEN-events")
+        task = _make_ticket_task(
+            ticket_id="GEN-events",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.PLAN,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        events = read_events(
+            consumer="test-1862-gate-events",
+            event_types=[
+                OrchestratorEventType.DISPATCH_TICK,
+                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            ],
+        )
+        tick_events = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.STALE_PR_BLOCKED
+        ]
+        assert len(tick_events) == 1
+        assert tick_events[0].payload["ticket_id"] == "GEN-events"
+        assert tick_events[0].payload["client"] == "test-client"
+
+        attention = [
+            e for e in events if e.payload.get("paused_status") == "stale_dispatch_gate"
+        ]
+        assert len(attention) == 1
+        assert attention[0].payload["ticket_id"] == "GEN-events"
+        assert attention[0].payload["lane"] == task.lane
+        # Gate-class park: hardcoded empty breadcrumbs (#1729 convention).
+        assert attention[0].payload["breadcrumbs"] == ""
+
+    def test_gate_resolver_is_called_once_per_client_per_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        calls = self._stub_gate(monkeypatch)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-once",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        stage=Stage.PLAN,
+                    )
+                ]
+            )
+        )
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        assert calls == ["test-client"]
+
+    def test_gate_skipped_when_client_has_no_capacity(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A client with zero available slots this tick never pays the gate's
+        cost (#1862 perf follow-up): the resolver must not even be called.
+
+        Mirrors ``test_skip_reason_cap_full_when_running_at_cap``'s shape --
+        an ACTIVE DAEMON session already occupies the sole cap=1 slot.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        calls = self._stub_gate(monkeypatch, "GEN-nocap")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-nocap",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        stage=Stage.PLAN,
+                    )
+                ]
+            )
+        )
+        sess = Session(
+            id="running-sess",
+            name="test-client/auto-dev/OTHER-1",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert calls == []
+        untouched = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "GEN-nocap"
+        )
+        assert untouched.status == QueueItemStatus.PENDING
+
+    def test_gate_disabled_by_config_toggle(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """OrchestratorConfig.pr_gate_enabled=False is the fleet-wide escape
+        hatch (#1862), mirroring ssh_key_gate_enabled: the resolver is never
+        called and a stale-PR task claims normally."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        calls = self._stub_gate(monkeypatch, "GEN-toggle-off")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-toggle-off",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        stage=Stage.PLAN,
+                    )
+                ]
+            )
+        )
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1},
+            pr_gate_enabled=False,
+        )
+
+        dispatch_tick(config, native_daemon=FakeNativeDaemonClient())
+
+        assert calls == []
+        claimed = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "GEN-toggle-off"
+        )
+        assert claimed.status == QueueItemStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# TestStaleDispatchSentinelRouting (#1862)
+# ---------------------------------------------------------------------------
+
+
+class TestStaleDispatchSentinelRouting:
+    """Rule 5 routing for the agent-emitted ``stale_dispatch`` sentinel.
+
+    Distinct from the code-side gate park above: here a session *did* run and
+    reported the conflict itself, so the disposition is the Status-derived
+    ``"stale_dispatch"``, not ``"stale_dispatch_gate"``.
+    """
+
+    def _clients(self, tmp_path: Path) -> dict[str, ClientConfig]:
+        return {
+            "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
+        }
+
+    def _running_task(self, ticket_id: str) -> TicketTask:
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _last_result(self) -> dict[str, object]:
+        return {
+            "status": "stale_dispatch",
+            "blocker": {
+                "stage": "stage1_pre_flight",
+                "reason": "pr_already_open",
+                "details": "PR #1899 (dev/1862) is open and awaiting review.",
+            },
+            "commits": [],
+            "review": {"must_fix_initial": 0, "should_fix": 0},
+        }
+
+    def test_routes_to_blocked_on_user_with_verbatim_disposition(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        from cw.dispatch import apply_staged_decision
+
+        task = self._running_task("GEN-1862-sentinel")
+        apply_staged_decision(
+            task, "stale_dispatch", self._last_result(), self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "stale_dispatch"
+        assert task.blocked_reason == "pr_already_open"
+        assert task.pr_url is None
+
+    def test_does_not_charge_an_unproductive_attempt(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """A stale-dispatch report legitimately carries zero commits (#1862).
+
+        Without the Rule 5 override it would be evidence-classified as
+        unproductive and eventually park at ``attempt_cap_blocked``, burying
+        the honest signal this ticket exists to surface.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._running_task("GEN-1862-noncharge")
+        apply_staged_decision(
+            task, "stale_dispatch", self._last_result(), self._clients(tmp_path)
+        )
+
+        assert task.unproductive_attempts == 0
+
+    def test_emits_needs_attention_with_status_paused_status(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        from cw.dispatch import apply_staged_decision
+
+        task = self._running_task("GEN-1862-attn")
+        apply_staged_decision(
+            task, "stale_dispatch", self._last_result(), self._clients(tmp_path)
+        )
+
+        events = read_events(
+            consumer="test-1862-sentinel-attn",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        matching = [
+            e for e in events if e.payload.get("paused_status") == "stale_dispatch"
+        ]
+        assert len(matching) == 1
+        assert matching[0].payload["ticket_id"] == "GEN-1862-attn"
+        # STAGE_FAILURE_STATUSES membership makes this breadcrumb-eligible:
+        # the blocker reason travels verbatim for the attention monitor.
+        assert matching[0].payload["breadcrumbs"] == "pr_already_open"
+
+    def test_park_stamps_blocked_on_pr(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """GitHub #1902 fast-follow: stale_dispatch shares the identical
+        blocker.details PR-number extraction Variant B's
+        prior_pipeline_pr_open already uses (routing/pr_refs.py's
+        _extract_blocked_on_pr) -- same regex, second producer. Mirrors
+        test_prior_pipeline_pr_open_park_stamps_blocked_on_pr field-for-
+        field."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._running_task("GEN-1902-stamp")
+        apply_staged_decision(
+            task, "stale_dispatch", self._last_result(), self._clients(tmp_path)
+        )
+
+        assert task.disposition == "stale_dispatch"
+        assert task.blocked_reason == "pr_already_open"
+        assert task.blocked_on_pr == 1899
+
+    def test_malformed_details_leaves_blocked_on_pr_none(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Fail-closed: mirrors
+        test_prior_pipeline_pr_open_malformed_details_leaves_blocked_on_pr_none
+        for the stale_dispatch producer -- a details string with no
+        'PR #<N>' match must leave blocked_on_pr None rather than a wrong
+        guess."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._running_task("GEN-1902-malformed")
+        last_result = self._last_result()
+        last_result["blocker"] = {
+            "stage": "stage1_pre_flight",
+            "reason": "pr_already_open",
+            "details": "no PR reference here",
+        }
+        apply_staged_decision(
+            task, "stale_dispatch", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.blocked_on_pr is None

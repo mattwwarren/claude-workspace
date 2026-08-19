@@ -37,6 +37,7 @@ from cw.events import record_event
 from cw.exceptions import RequeueStageError, RequeueStateError, UnblockStateError
 from cw.gh import fetch_approved_plan_comment
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _checked_out_branch, worktree_path_for
 
 if TYPE_CHECKING:
@@ -85,8 +86,29 @@ def _impl_bypass_worktree_path(task: TicketTask, client_cfg: ClientConfig) -> Pa
     return worktree_path_for(client_cfg, branch)
 
 
-def _impl_bypass_plan_available(task: TicketTask, client_cfg: ClientConfig) -> bool:
-    """True iff an approved plan is available for a forward bypass to IMPL.
+class _ImplBypassPlanCheck(NamedTuple):
+    """Verdict from :func:`_impl_bypass_plan_available` (GitHub #1906).
+
+    A named 3-tuple rather than a bare ``bool`` so the caller can build an
+    honest refusal message without re-deriving tracker state. ``tracker_checked``
+    is True only when :func:`fetch_approved_plan_comment` (GitHub-only) was
+    actually called -- i.e. the tracker was ``None`` (unresolvable, fail-open)
+    or positively ``github-issues``. It is False when a *known, non-GitHub*
+    tracker (e.g. ``linear``) caused the call to be skipped -- that case must
+    not be described as "no reviewed plan comment ... was found on the
+    tracker", since the tracker was never actually asked.
+    """
+
+    available: bool
+    tracker_checked: bool
+    tracker: str | None
+
+
+def _impl_bypass_plan_available(
+    task: TicketTask, client_cfg: ClientConfig
+) -> _ImplBypassPlanCheck:
+    """Verdict on whether an approved plan is available for a forward bypass
+    to IMPL.
 
     Local-first, tracker-fallback -- the inverse order of
     :func:`cw.dev_queue.lifecycle._plan_is_reviewed` (tracker-first,
@@ -103,6 +125,17 @@ def _impl_bypass_plan_available(task: TicketTask, client_cfg: ClientConfig) -> b
     :func:`fetch_approved_plan_comment` when the local read fails to prove
     the plan is there (worktree missing, foreign branch, or no/unmarked
     ``.cw/plan.md``). See GitHub #1681.
+
+    :func:`fetch_approved_plan_comment` is GitHub-only (``src/cw/gh.py``) --
+    calling it against a Linear-tracked (or other non-GitHub) client silently
+    returns ``None`` (a ``gh`` call against a non-GitHub-shaped ticket id
+    just fails), which previously masqueraded as "the tracker was checked and
+    had no reviewed comment" (#1906). The fallthrough is now gated on the
+    resolved tracker: fail-open (attempt the GitHub fetch, matching prior
+    behavior) when ``resolve_tracker`` returns ``None`` (unresolvable/absent
+    config -- verified backward-compatible against every existing test, all
+    of which resolve ``tracker=None``); skip the call entirely, honestly,
+    when the tracker is *positively* known to be non-GitHub.
     """
     branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
     wt_path = _impl_bypass_worktree_path(task, client_cfg)
@@ -113,10 +146,15 @@ def _impl_bypass_plan_available(task: TicketTask, client_cfg: ClientConfig) -> b
         except (OSError, UnicodeDecodeError):
             body = None
         if body is not None and _plan_body_signoff_ok(body):
-            return True
+            return _ImplBypassPlanCheck(True, tracker_checked=False, tracker=None)
+
+    tracker = resolve_tracker(client_cfg.workspace_path)
+    if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
+        return _ImplBypassPlanCheck(False, tracker_checked=False, tracker=tracker)
 
     tracker_body = fetch_approved_plan_comment(task.ticket_id)
-    return tracker_body is not None and _plan_body_signoff_ok(tracker_body)
+    available = tracker_body is not None and _plan_body_signoff_ok(tracker_body)
+    return _ImplBypassPlanCheck(available, tracker_checked=True, tracker=tracker)
 
 
 def _apply_requeue_stage(
@@ -181,21 +219,44 @@ def _apply_requeue_stage(
 
     # Guarded because impl hard-exits plan_missing; review and finalize
     # degrade and are deliberately not guarded (see #1681 Decisions).
-    if (
-        target_stage == Stage.IMPL
-        and target_idx > current_idx
-        and not _impl_bypass_plan_available(task, client_cfg)
-    ):
-        wt_path = _impl_bypass_worktree_path(task, client_cfg)
-        msg = (
-            f"Cannot requeue ticket '{task.ticket_id}' to stage 'impl':"
-            f" no approved plan is available. '{wt_path / '.cw' / 'plan.md'}'"
-            " is missing or stale, and no reviewed plan comment"
-            f" ('{_PLAN_SPEC_MARKER}' + '{_PLAN_SOUNDNESS_MARKER}')"
-            " was found on the tracker. Let Stage 1 (plan) run and post its"
-            " approved plan first, or requeue at --stage plan instead."
-        )
-        raise RequeueStageError(msg)
+    if target_stage == Stage.IMPL and target_idx > current_idx:
+        plan_check = _impl_bypass_plan_available(task, client_cfg)
+        if not plan_check.available:
+            wt_path = _impl_bypass_worktree_path(task, client_cfg)
+            if plan_check.tracker_checked:
+                availability_clause = (
+                    " is missing or stale, and no reviewed plan comment"
+                    f" ('{_PLAN_SPEC_MARKER}' + '{_PLAN_SOUNDNESS_MARKER}')"
+                    " was found on the tracker."
+                )
+                remediation_clause = (
+                    " Let Stage 1 (plan) run and post its approved plan"
+                    " first, or requeue at --stage plan instead."
+                )
+            else:
+                # #1906: fetch_approved_plan_comment is GitHub-only -- a
+                # known non-GitHub tracker (e.g. linear) was never actually
+                # queried, so the message must not claim it was checked, and
+                # must not tell the operator to regenerate a plan that may
+                # already be posted and approved on that tracker.
+                availability_clause = (
+                    " is missing or stale, and the configured tracker"
+                    f" ({plan_check.tracker!r}) was not checked for a"
+                    " reviewed plan comment -- tracker-side plan recovery"
+                    " for this tracker is not implemented by this guard."
+                )
+                remediation_clause = (
+                    " Verify whether an approved plan is already posted on"
+                    f" the {plan_check.tracker!r} tracker before requeuing;"
+                    " if so, Stage 2's tracker-aware plan recovery can pick"
+                    " it up directly instead of re-running Stage 1 (plan)."
+                )
+            msg = (
+                f"Cannot requeue ticket '{task.ticket_id}' to stage 'impl':"
+                f" no approved plan is available. '{wt_path / '.cw' / 'plan.md'}'"
+                f"{availability_clause}{remediation_clause}"
+            )
+            raise RequeueStageError(msg)
 
     # Forward or same-stage: caller enforces the BLOCKED_ON_USER precondition.
     old_stage = task.stage
