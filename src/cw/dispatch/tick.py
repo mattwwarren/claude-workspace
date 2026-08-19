@@ -23,6 +23,7 @@ from cw.dev_queue import (
 )
 from cw.executor_diagnostics import cleanup_expired_diagnostics
 from cw.models import (
+    DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
     OCCUPIED_LANE_STATUSES,
     ClientConfig,
     QueueItemStatus,
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     )
     from cw.native_daemon import NativeDaemonClient
 from cw.dispatch.gating import (
+    _apply_disk_pressure_gate,
     _emit_availability_skip,
     _emit_ssh_key_bypass,
     _emit_ssh_key_skip,
@@ -293,15 +295,19 @@ def _run_preflight_gates(
     cap: int,
     emit: Callable[[str], None] | None,
     warned_ssh_key: set[str] | None,
+    warned_disk_pressure: set[str] | None = None,
     ssh_key_gate_enabled: bool = True,
+    disk_pressure_gate_enabled: bool = True,
+    disk_pressure_min_free_gb: float = DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
 ) -> _PreflightGateResult:
-    """Resolve + apply the availability and SSH-key preflight gates, in order.
+    """Resolve + apply the three preflight gates, in precedence order.
 
-    Combines both independent per-client pre-claim gates (fleet-wide
-    gh-availability, then SSH-agent-key (#927)) behind a single caller-side
-    branch: :func:`dispatch_tick`'s client loop keeps one `if gated: continue`
-    for both instead of one per gate, keeping ``dispatch_tick`` under the
-    PLR0912/PLR0915 ceilings (CLAUDE.md) as this second gate is added.
+    Combines all three independent per-client pre-claim gates (fleet-wide
+    gh-availability, then SSH-agent-key (#927), then claim-time disk-pressure
+    (#1887)) behind a single caller-side branch: :func:`dispatch_tick`'s
+    client loop keeps one `if gated: continue` for all of them instead of one
+    per gate, keeping ``dispatch_tick`` under the PLR0912/PLR0915 ceilings
+    (CLAUDE.md) as each gate is added.
 
     Returns the resolved (memoized) verdicts to thread back into the caller's
     loop-scoped variables, and whether the client should be skipped this tick
@@ -318,6 +324,12 @@ def _run_preflight_gates(
     this is False, the would-be skip is suppressed -- a bypass event is
     recorded instead of the skip, and the client proceeds (``gated=False``).
     Default True reproduces pre-#1437 behavior exactly.
+
+    ``disk_pressure_gate_enabled`` / ``disk_pressure_min_free_gb`` (GitHub
+    #1887) drive the third gate, applied via
+    :func:`~cw.dispatch.gating._apply_disk_pressure_gate` (extracted rather
+    than inlined here to keep this function under the PLR0911 six-return
+    ceiling -- see that helper's docstring).
     """
     resolved_available = _resolve_availability_once(available)
     if not resolved_available:
@@ -354,6 +366,21 @@ def _run_preflight_gates(
             resolved_available, resolved_ssh_key_available, True
         )
 
+    if _apply_disk_pressure_gate(
+        client,
+        queue_snapshot,
+        pending_count=pending_count,
+        running_count=running_count,
+        cap=cap,
+        emit=emit,
+        warned_disk_pressure=warned_disk_pressure,
+        min_free_gb=disk_pressure_min_free_gb,
+        gate_enabled=disk_pressure_gate_enabled,
+    ):
+        return _PreflightGateResult(
+            resolved_available, resolved_ssh_key_available, True
+        )
+
     return _PreflightGateResult(resolved_available, resolved_ssh_key_available, False)
 
 
@@ -368,6 +395,7 @@ def dispatch_tick(
     warned_fetch_fail: set[str] | None = None,
     warned_collision: set[frozenset[str]] | None = None,
     warned_ssh_key: set[str] | None = None,
+    warned_disk_pressure: set[str] | None = None,
     usage_limited_until: datetime | None = None,
     auto_ff: bool = True,
     client_filter: str | None = None,
@@ -408,6 +436,11 @@ def dispatch_tick(
             (fleet-wide, keyed on a single sentinel -- see
             ``_SSH_KEY_WARN_SENTINEL``). Caller owns the set; mutated
             in-place.
+        warned_disk_pressure: Mutable set of client names that have already
+            received the disk-pressure-gate operator WARN line during this
+            dispatcher run (#1887). Keyed per-client, not fleet-wide like
+            ``warned_ssh_key``: each client's ``worktree_base`` may sit on
+            its own mount. Caller owns the set; mutated in-place.
         usage_limited_until: When set and in the future, all clients are
             skipped with ``skip_reason=USAGE_LIMITED`` and the function
             returns immediately. The back-off window is set by the
@@ -510,7 +543,11 @@ def dispatch_tick(
         # for the same answer. (2) SSH-agent-key (#927): a session spawned
         # without an unlocked SSH key cannot push, so this holds every
         # client PENDING rather than burn a slot on a guaranteed failure.
-        # Both are memoized (not hoisted above the loop) so they're only
+        # (3) claim-time disk-pressure (#1887): a `shutil.disk_usage` probe of
+        # the client's worktree-base mount, checked before the freshness
+        # gate's `git pull --ff-only` can write more data onto an already-tight
+        # disk.
+        # The first two are memoized (not hoisted above the loop) so they're only
         # resolved once the loop body actually runs for at least one client
         # — an empty ``clients`` dict or a fully-paused fleet
         # (``max_parallel_clients=0``, which breaks on the first iteration
@@ -531,7 +568,7 @@ def dispatch_tick(
         # this gated path NEITHER _record_client_freshness_block NOR
         # _reset_client_freshness_blocks runs — the freshness counter stays
         # frozen during an outage, it must not reset. Same posture applies
-        # to the SSH-key gate.
+        # to the SSH-key and disk-pressure gates.
         available, ssh_key_available, gated = _run_preflight_gates(
             client,
             queue_snapshot,
@@ -542,7 +579,10 @@ def dispatch_tick(
             cap=cap,
             emit=emit,
             warned_ssh_key=warned_ssh_key,
+            warned_disk_pressure=warned_disk_pressure,
             ssh_key_gate_enabled=config.ssh_key_gate_enabled,
+            disk_pressure_gate_enabled=config.disk_pressure_gate_enabled,
+            disk_pressure_min_free_gb=config.disk_pressure_min_free_gb,
         )
         if gated:
             continue

@@ -31,6 +31,7 @@ from cw.dev_queue import (
     save_dev_queue,
     save_plan,
 )
+from cw.disk import DiskUsage
 from cw.dispatch import (
     _AVAILABILITY_OUTAGE_REASON,
     _AVAILABILITY_PROBE_TTL_SECONDS,
@@ -69,6 +70,7 @@ from cw.exceptions import (
 from cw.local_runner import make_blocked
 from cw.models import (
     CODEX_BACKEND,
+    DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
     OPENCODE_BACKEND,
@@ -4087,6 +4089,7 @@ class TestRunDispatchLoopVerbose:
             warned_fetch_fail: set[str] | None = None,
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
+            warned_disk_pressure: set[str] | None = None,
             usage_limited_until: datetime | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -4103,6 +4106,7 @@ class TestRunDispatchLoopVerbose:
                 warned_fetch_fail=warned_fetch_fail,
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
+                warned_disk_pressure=warned_disk_pressure,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -12721,6 +12725,7 @@ class TestWaveCollisionDetection:
             warned_fetch_fail: set[str] | None = None,
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
+            warned_disk_pressure: set[str] | None = None,
             usage_limited_until: datetime | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -12736,6 +12741,7 @@ class TestWaveCollisionDetection:
                 warned_fetch_fail=warned_fetch_fail,
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
+                warned_disk_pressure=warned_disk_pressure,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -15006,6 +15012,268 @@ class TestSshKeyPreflightGate:
             event_types=[OrchestratorEventType.SSH_KEY_GATE_BYPASSED],
         )
         assert bypass_events == []
+
+
+# ---------------------------------------------------------------------------
+# TestDiskPressurePreflightGate (#1887, split from #1858)
+# ---------------------------------------------------------------------------
+
+
+def _force_disk_pressure_gated(
+    monkeypatch: pytest.MonkeyPatch, *, free_gb: float = 0.5
+) -> None:
+    """Force the claim-time disk-pressure probe to report a nearly-full mount.
+
+    Overrides the autouse ``_mock_disk_usage`` default (which reports 250 GB
+    free) on the same ``cw.dispatch.gating.check_disk_usage`` seam.
+    """
+    monkeypatch.setattr(
+        "cw.dispatch.gating.check_disk_usage",
+        lambda _path: DiskUsage(total_gb=500.0, free_gb=free_gb),
+    )
+
+
+class TestDiskPressurePreflightGate:
+    """Claim-time disk-pressure preflight gate (#1887, split from #1858).
+
+    A ``shutil.disk_usage`` probe of the client's worktree-base mount runs as
+    the third per-client pre-claim gate in ``dispatch_tick``'s client loop,
+    after the fleet-wide gh-availability and SSH-agent-key gates and before
+    the per-client freshness gate (whose ``git pull --ff-only`` would
+    otherwise write more data onto an already-tight disk). On pressure the
+    client stays PENDING (no claim, no ``attempts`` consumed) and an operator
+    WARN line is emitted once per client per dispatch-loop run.
+    """
+
+    def test_available_spawns_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """With plenty of free space, dispatch proceeds as usual."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1A", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+
+    def test_low_disk_holds_task_pending_no_attempt_consumed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The core binding requirement: a gated PENDING task keeps attempts=0."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1B", client="test-client", attempts=0))
+        _force_disk_pressure_gated(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 0
+        assert daemon.spawn_calls == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == "GEN-D1B")
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 0
+
+    def test_low_disk_emits_dispatch_tick_disk_pressure_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A gated client emits dispatch.tick with skip_reason=disk_pressure_gate."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1C", client="test-client"))
+        _force_disk_pressure_gated(monkeypatch, free_gb=1.25)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-d1-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        ticks = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.DISK_PRESSURE_GATE
+        ]
+        assert len(ticks) == 1
+        payload = ticks[0].payload
+        assert payload["client"] == "test-client"
+        assert payload["claimed"] == 0
+        assert payload["pending"] == 1
+        assert payload["disk_free_gb"] == 1.25
+        assert payload["disk_min_free_gb"] == DEFAULT_DISK_PRESSURE_MIN_FREE_GB
+
+    def test_low_disk_emits_operator_warn_line_once_per_client(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The operator WARN line is deduplicated across ticks in one run."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1D", client="test-client"))
+        _force_disk_pressure_gated(monkeypatch)
+
+        lines: list[str] = []
+        warned_disk_pressure: set[str] = set()
+        daemon = FakeNativeDaemonClient()
+        for _ in range(2):
+            dispatch_tick(
+                simple_config,
+                native_daemon=daemon,
+                auto_ff=False,
+                emit=lines.append,
+                warned_disk_pressure=warned_disk_pressure,
+            )
+
+        matches = [
+            ln for ln in lines if ln.startswith("WARN test-client: worktree disk low")
+        ]
+        assert len(matches) == 1
+        assert warned_disk_pressure == {"test-client"}
+
+    def test_ssh_key_gate_takes_precedence_over_disk_pressure_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both probes forced bad: SSH_KEY_GATE wins, not DISK_PRESSURE_GATE."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1E", client="test-client"))
+        _force_ssh_key_unavailable(monkeypatch)
+        _force_disk_pressure_gated(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-d1-precedence-ssh",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.SSH_KEY_GATE
+
+    def test_disk_pressure_gate_takes_precedence_over_freshness_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Low disk + stale repo: DISK_PRESSURE_GATE wins over FRESHNESS_GATE."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1F", client="test-client"))
+        _force_disk_pressure_gated(monkeypatch)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 3),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.gating.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-d1-precedence-fresh",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.DISK_PRESSURE_GATE
+
+    def test_gate_disabled_bypasses_skip_and_emits_bypass_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """disk_pressure_gate_enabled=False bypasses the pressure skip — the
+        client dispatches normally, a DISK_PRESSURE_GATE_BYPASSED event is
+        recorded, and no dispatch.tick DISK_PRESSURE_GATE skip is recorded."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1G", client="test-client"))
+        _force_disk_pressure_gated(monkeypatch, free_gb=1.5)
+
+        bypass_config = simple_config.model_copy(
+            update={"disk_pressure_gate_enabled": False}
+        )
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(bypass_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+
+        bypass_events = read_events(
+            consumer="test-d1-bypass",
+            event_types=[OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED],
+        )
+        assert len(bypass_events) == 1
+        assert bypass_events[0].payload["client"] == "test-client"
+        assert bypass_events[0].payload["disk_free_gb"] == 1.5
+        assert (
+            bypass_events[0].payload["disk_min_free_gb"]
+            == DEFAULT_DISK_PRESSURE_MIN_FREE_GB
+        )
+
+        tick_events = read_events(
+            consumer="test-d1-bypass-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        skip_ticks = [
+            e
+            for e in tick_events
+            if e.payload.get("skip_reason") == DispatchSkipReason.DISK_PRESSURE_GATE
+        ]
+        assert skip_ticks == []
+
+    def test_probe_oserror_fails_open_and_dispatches(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unprobeable mount is not evidence of pressure: the gate fails open."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-D1H", client="test-client"))
+
+        probe_error = "mount went away"
+
+        def _raise(_path: Path) -> DiskUsage:
+            raise OSError(probe_error)
+
+        monkeypatch.setattr("cw.dispatch.gating.check_disk_usage", _raise)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+        tick_events = read_events(
+            consumer="test-d1-probe-error",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        skip_ticks = [
+            e
+            for e in tick_events
+            if e.payload.get("skip_reason") == DispatchSkipReason.DISK_PRESSURE_GATE
+        ]
+        assert skip_ticks == []
 
 
 # ---------------------------------------------------------------------------

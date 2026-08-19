@@ -617,6 +617,26 @@ review_recipes_enabled: false
 # same as gate.auto_approved) so the operator sees every suppressed gate.
 ssh_key_gate_enabled: true
 
+# Claim-time disk-pressure preflight gate operator escape hatch (GitHub
+# #1887, split from #1858). Default true (gate stays enforced) -- same
+# already-live-safety-probe posture as ssh_key_gate_enabled above. This
+# field gates a `shutil.disk_usage` probe of the client's worktree-base
+# mount: when free space drops below disk_pressure_min_free_gb, that
+# client stays PENDING (no claim, no attempts consumed) rather than risk
+# a session filling an already-tight disk. Setting this false bypasses
+# that skip whenever the probe reports pressure -- each bypass records a
+# gate.disk_pressure_bypassed event (forwarded to the operator channel by
+# default, same as gate.auto_approved) so the operator sees every
+# suppressed gate.
+disk_pressure_gate_enabled: true
+
+# Minimum free space, in GB, required on a client's worktree-base mount
+# before the disk-pressure gate above holds that client PENDING (GitHub
+# #1887). Defined as DEFAULT_DISK_PRESSURE_MIN_FREE_GB in
+# src/cw/models/orchestrator_config.py -- a judgment default open to
+# tuning per host/mount, not derived from a measured incident threshold.
+disk_pressure_min_free_gb: 5.0
+
 # Minimum elapsed seconds between PR-state hydration passes in the serve tick
 # (GitHub #929). Gated off max(pr_state.hydrated_at) across dev-queue tasks —
 # no separate timer state. Each pass fetches `gh pr view` for every open PR
@@ -680,6 +700,7 @@ operator_channel_forward:
     - pr.action_taken           # RFC 0010 — a review recipe acted on a PR
     - pr.action_failed
     - gate.ssh_key_bypassed     # GitHub #1437 — operator bypassed the ssh-key gate probe
+    - gate.disk_pressure_bypassed  # GitHub #1887 — operator bypassed the disk-pressure gate probe
     - requeue.review_delivery_degraded  # GitHub #1730 — a review requeue ran without the operator's send-back
   task_transition_statuses:
     - blocked_on_user
