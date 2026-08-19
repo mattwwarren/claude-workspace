@@ -3,9 +3,10 @@
 Pure-markdown assertions over ``.claude/commands/auto-dev-finalize.md`` Step
 4c.5 and ``.claude/commands/prep-pr.md`` Step 1, plus one schema assertion.
 Follows this repo's established convention (see
-``tests/test_auto_dev_finalize_early_push.py`` and its four siblings) of a
-small **private per-file** ``_cmd()``-style helper that reads the prose and
-asserts substrings/regions, rather than a shared ``conftest.py`` fixture.
+``tests/test_auto_dev_finalize_early_push.py`` and its four siblings) of
+reading the prose and asserting substrings/regions. The reader itself is the
+shared ``_cmd()`` helper imported from ``tests.conftest`` (#1787) — it used to
+be a private per-file copy here.
 
 What is pinned here:
 
@@ -22,19 +23,11 @@ What is pinned here:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
-
-ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
+from tests.conftest import _cmd
 
 _SECTION_HEADING = "Semantic auto-resolve attempt (operator direction, #1850)"
 _TEMPLATE_HEADING = "**Sentinel template — `merge_conflict_post_push` blocker:**"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _finalize() -> str:

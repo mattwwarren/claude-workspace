@@ -2,16 +2,7 @@
 now {author, created_at, body}, not a bare body string.
 """
 
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-COMMANDS = ROOT / ".claude" / "commands"
-
-
-# NOTE: another local copy of the `_cmd(name)` helper carried by ~10 other test
-# files. Consolidation into conftest.py is deferred — tracked as #1787.
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text(encoding="utf-8")
+from tests.conftest import _cmd
 
 
 def test_comments_schema_carries_created_at() -> None:

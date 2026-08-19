@@ -1,14 +1,7 @@
 """Guard tests: every /auto-dev subagent spawn must carry an explicit model: pin."""
 
-from pathlib import Path
-
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
-
-COMMANDS = Path(__file__).parent.parent / ".claude" / "commands"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
+from tests.conftest import _cmd
 
 
 def test_plan_step1b_plan_agent_pins_sonnet() -> None:
