@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`--aiderignore` blocks non-manifest files from aider's reflection-loop
+  echo re-adds (#1915):** aider's reflection loop rescans the model's own
+  reply text on every round, independently of the `--message`/`--read`
+  split #1905 closed, so an excluded path echoed in reasoning prose could
+  still get auto-confirmed back into the chat under `--yes-always`. `cw`
+  now materializes a `.cw/aiderignore` blocking every git-tracked file the
+  plan's `## Files Modified` manifest doesn't name (folding in and negating
+  against any pre-existing worktree `.aiderignore` so a client repo's own
+  patterns can't shadow a manifest path), threads it through
+  `_local_preflight`/`spawn` as `--aiderignore`, so an excluded file is
+  never addable in the first place.
+
 - **Fence-aware `## Files Modified` heading matcher in the scope-conformance
   gate (#1917):** `check_plan_scope_conformance.py`'s `_parse_files_modified`
   previously matched the first `## Files` heading line-by-line with no fence
