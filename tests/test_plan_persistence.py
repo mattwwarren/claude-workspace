@@ -3,11 +3,9 @@
 Pure-markdown assertions over the auto-dev pipeline instruction files. Mirrors
 the ``read_text()`` + literal-substring/window convention of
 ``test_auto_dev_preflight_resolutions.py`` / ``test_plan_format_only_findings.py``.
-``_cmd`` is duplicated locally per the established convention (no shared
-module for it — confirmed in both ``test_auto_dev_preflight_resolutions.py``
-and ``test_plan_format_only_findings.py``); ``_after``/``_nearby`` are
-imported from ``test_auto_dev_preflight_resolutions`` rather than duplicated,
-since that file already defines and exports them.
+``_cmd`` is imported from ``tests.conftest`` (#1787); ``_after``/``_nearby``
+are imported from ``test_auto_dev_preflight_resolutions`` rather than
+duplicated, since that file already defines and exports them.
 
 Background: when the headless Stage-1 plan pipeline exits `blocked` with
 `plan_unreviewable` or `plan_unsound` after a Step 1f.3 MUST_FIX-persists-
@@ -27,12 +25,8 @@ draft-persistence rule in Step 1c's headless branch that each exit clause
 references.
 """
 
-from pathlib import Path
-
+from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
-
-ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
 
 DRAFT_FILE = ".cw/plan-draft.md"
 PLAN_FILE = ".cw/plan.md"
@@ -49,10 +43,6 @@ UNSOUND_PERSISTS_ANCHOR = (
     "**MUST_FIX persists after 1 revision cycle, headless** → EXIT "
     '`blocked` with `blocker.reason: "plan_unsound"`.'
 )
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _step1a_section() -> str:

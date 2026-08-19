@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.37.0] - 2026-08-19
+
 ### Added
 
 - **Claim-time disk-pressure preflight gate for dispatch (#1887):** dispatch
@@ -20,6 +22,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `disk_pressure_gate_enabled=False` is the operator escape hatch; each
   bypass records `gate.disk_pressure_bypassed`, forwarded to the operator
   channel by default.
+
+- **Variant B gate-release predicate extended to `stale_dispatch` parks
+  (#1902):** `release_stale_gated_tasks`'s cross-reference scan now also
+  recognizes a `stale_dispatch`/`pr_already_open` park (alongside the
+  existing `merge_gate_blocked`/`prior_pipeline_pr_open` case) as eligible
+  for auto-release once its blocking PR merges. This is groundwork only: no
+  production code path yet populates a store row's `pr_url` for the
+  `stale_dispatch` producer, so the new branch is unit-test-reachable but
+  production-unreachable until the independent PR-state source in #1927
+  lands — the ticket's literal "self-releases once merged" acceptance
+  criterion is not yet satisfied by this diff alone.
 
 ### Fixed
 

@@ -3,8 +3,8 @@
 Pure-markdown assertions over `.claude/commands/auto-dev-impl.md`'s Orientation
 paragraph. Mirrors the ``read_text()`` + literal-substring/window convention of
 ``test_auto_dev_preflight_resolutions.py`` / ``test_plan_persistence.py``.
-``_cmd`` is duplicated locally per the established convention (no shared module
-for it); ``_after``/``_nearby`` are imported from
+``_cmd`` is imported from ``tests.conftest`` (#1787); ``_after``/``_nearby``
+are imported from
 ``test_auto_dev_preflight_resolutions`` rather than duplicated, since that file
 already defines and exports them.
 
@@ -19,12 +19,8 @@ complete (GEN-5485). This adds a `linear` sub-branch to the Orientation
 paragraph, additive only -- the GitHub sub-branch is untouched.
 """
 
-from pathlib import Path
-
+from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
-
-ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
 
 ORIENTATION_START = "**Orientation:**"
 ORIENTATION_END = "**Comments are live, not cached"
@@ -44,10 +40,6 @@ GH_ME_EMPTY_SENTENCE = (
 PLAN_MISSING_EXIT = 'exit `blocked` with `blocker.reason: "plan_missing"`'
 WRITE_INSTRUCTION = "Write the comment verbatim to `.cw/plan.md`"
 MARKER = "<!-- plan-spec-reviewed"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _orientation_section() -> str:

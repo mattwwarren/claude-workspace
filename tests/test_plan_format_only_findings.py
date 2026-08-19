@@ -3,8 +3,8 @@
 Pure-markdown assertions over the auto-dev pipeline instruction files. Mirrors the
 ``read_text()`` + literal-substring/window convention of
 ``test_auto_dev_preflight_resolutions.py`` / ``test_auto_dev_model_pins.py``.
-``_cmd``/``_agent`` are duplicated locally per the established convention (no
-shared module for those); ``_after`` is imported from
+``_cmd`` is imported from ``tests.conftest`` (#1787); ``_agent`` remains a
+local duplicate (no shared module for it); ``_after`` is imported from
 ``test_auto_dev_preflight_resolutions`` rather than duplicated, since that file
 already defines it.
 
@@ -20,18 +20,14 @@ where every persisting MUST_FIX finding is category ``Format-Only``.
 
 from pathlib import Path
 
+from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
 AGENTS = ROOT / ".claude" / "agents"
 
 CARVEOUT_ANCHOR = "**Format-only carve-out (severity floor).**"
 FORMAT_ONLY_REVISION_ANCHOR = "**Format-only revision (defense-in-depth).**"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _agent(name: str) -> str:

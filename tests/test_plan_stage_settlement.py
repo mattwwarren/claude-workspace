@@ -3,8 +3,9 @@
 Pure-markdown assertions over the auto-dev pipeline instruction files,
 following the ``read_text()`` + literal-substring/window convention of
 ``test_auto_dev_preflight_resolutions.py`` / ``test_plan_persistence.py`` /
-``test_consolidated_park.py``. ``_cmd``/``_agent`` are duplicated locally per
-the established convention; ``_after``/``_nearby`` are imported from
+``test_consolidated_park.py``. ``_cmd`` is imported from ``tests.conftest``
+(#1787) and ``_agent`` remains a local duplicate per the established
+convention; ``_after``/``_nearby`` are imported from
 ``test_auto_dev_preflight_resolutions`` and
 ``_step1c_prompt_must_include_window`` from
 ``test_ambiguity_scan_adopted_assumptions`` rather than re-derived.
@@ -24,13 +25,13 @@ the reviewer always receives the complete live-fetched stream.
 import re
 from pathlib import Path
 
+from tests.conftest import _cmd
 from tests.test_ambiguity_scan_adopted_assumptions import (
     _step1c_prompt_must_include_window,
 )
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
 AGENTS = ROOT / ".claude" / "agents"
 
 DRAFT_FILE = ".cw/plan-draft.md"
@@ -61,10 +62,6 @@ DEFERRED_WIRING_ANCHOR = "**`DEFERRED` wiring (R7, active registration):**"
 
 PM_SETTLED_HEADING = "### Settled items are out of scope (do not re-raise)"
 PM_1593_HEADING = "### Before surfacing: check the plan's own resolution record"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _agent(name: str) -> str:

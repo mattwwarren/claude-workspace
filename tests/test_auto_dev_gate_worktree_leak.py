@@ -12,13 +12,7 @@ Covers the Step 2.5 / Mitigation 1 gate-worktree block in both
 - gate-failure prose covers a gate-setup failure, not just checks 1/3/4
 """
 
-from pathlib import Path
-
-COMMANDS = Path(__file__).parent.parent / ".claude" / "commands"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
+from tests.conftest import _cmd
 
 
 def test_impl_gate_worktree_path_keyed_on_session_not_pid() -> None:
