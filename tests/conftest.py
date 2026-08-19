@@ -52,6 +52,10 @@ CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC_ROOT = _REPO_ROOT / "src"
 
+# Root of the repo-tracked slash-command prose that the doc-guard test files
+# assert against, backing the shared ``_cmd`` reader below (#1787).
+_COMMANDS_ROOT = _REPO_ROOT / ".claude" / "commands"
+
 # Optional external CLIs whose presence a test must not silently assume
 # (#1753). git is intentionally excluded — universally present, and much
 # of the suite shells out to it directly.
@@ -87,6 +91,45 @@ def _on_block(workflow: dict[Any, Any]) -> dict[str, Any]:
     """
     on_block: dict[str, Any] = workflow[True]
     return on_block
+
+
+def _cmd(name: str) -> str:
+    """Return the text of ``.claude/commands/<name>`` (#1787).
+
+    Canonical reader for the doc-guard test files that assert against
+    slash-command prose. Consolidates 20 byte-identical (modulo an explicit
+    ``encoding="utf-8"``) private per-file copies, the same "hoist a duplicated
+    private test helper into conftest.py" pattern as ``_load_workflow`` above;
+    a new command-prose guard test should import this rather than adding a
+    twenty-first copy. Imported by::
+
+        test_ambiguity_scan_adopted_assumptions.py
+        test_auto_dev_finalize_automerge_verification.py
+        test_auto_dev_finalize_early_push.py
+        test_auto_dev_finalize_semantic_resolve.py
+        test_auto_dev_gate_worktree_leak.py
+        test_auto_dev_intake_context_schema.py
+        test_auto_dev_model_pins.py
+        test_auto_dev_preflight_resolutions.py
+        test_blocking_findings_comment.py
+        test_bodyfile_write_tool_conformance.py
+        test_completion_artifacts_per_gate.py
+        test_consolidated_park.py
+        test_impl_guard_staleness_docs.py
+        test_impl_plan_recovery_tracker_aware.py
+        test_operator_actionable_findings_comment.py
+        test_plan_format_only_findings.py
+        test_plan_persistence.py
+        test_plan_stage_settlement.py
+        test_scope_conformance_gate_docs.py
+        test_unavailability.py
+
+    ``test_auto_dev_intake_origin_sync_retry.py`` keeps its own copy: its
+    signature is genuinely divergent (zero-argument, hardcoded filename), so it
+    is not a duplicate of this helper. Each file's sibling ``_agent``/``_doc``/
+    ``_skill`` readers stay file-local — out of scope for #1787.
+    """
+    return (_COMMANDS_ROOT / name).read_text(encoding="utf-8")
 
 
 def _stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
