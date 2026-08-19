@@ -2,9 +2,9 @@
 
 Pure-markdown assertions over the auto-dev pipeline instruction files, mirroring
 ``test_blocking_findings_comment.py``'s ``read_text()`` + literal-substring/window
-convention. ``_cmd``/``_doc`` are duplicated locally per the established
-convention; ``_after`` is imported from ``test_auto_dev_preflight_resolutions``
-rather than duplicated.
+convention. ``_cmd`` is imported from ``tests.conftest`` (#1787) and ``_doc``
+stays a local reader; ``_after`` is imported from
+``test_auto_dev_preflight_resolutions`` rather than duplicated.
 
 Background: a reviewer finding whose remedy lies entirely outside the diff — an
 acceptance criterion demanding a follow-up ticket that was never filed (#1764) —
@@ -18,10 +18,10 @@ under the fixed header ``## Operator-Actionable Review Findings``.
 
 from pathlib import Path
 
+from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
 DOCS = ROOT / "docs"
 
 HEADER = "## Operator-Actionable Review Findings"
@@ -47,10 +47,6 @@ MEANING_ROW_OPERATOR_ACTIONABLE_ANCHOR = (
     "| `review_operator_actionable` | An accepted MUST_FIX finding carrying "
     "`no_diff_anchor: true`"
 )
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _doc(name: str) -> str:

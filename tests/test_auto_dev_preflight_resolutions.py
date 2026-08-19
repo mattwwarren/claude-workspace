@@ -6,8 +6,9 @@ Pure-markdown assertions over the auto-dev pipeline instruction files. Mirrors t
 
 from pathlib import Path
 
+from tests.conftest import _cmd
+
 ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
 AGENTS = ROOT / ".claude" / "agents"
 SKILLS = ROOT / ".claude" / "skills"
 
@@ -19,10 +20,6 @@ PREMISES_NONEMPTY_PARKED_EXIT = (
     "`unverified` non-empty AND `parked` non-empty → EXIT "
     "`premises_pending_verification`"
 )
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _agent(name: str) -> str:
