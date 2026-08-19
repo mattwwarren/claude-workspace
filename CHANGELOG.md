@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **OpencodeExecutor extended to all auto-dev stages (#1669):** the
+  opencode backend previously supported FINALIZE only; it now handles PLAN,
+  IMPL, REVIEW, and FINALIZE via stage-specific prompts that instruct
+  opencode to read and follow the corresponding `~/.claude/commands/auto-dev-{stage}.md`
+  command file and emit the `<<<AUTO_DEV_RESULT>>>` sentinel with the correct
+  `stage_reached` marker. Three headless-wiring fixes make opencode functional
+  in fire-and-forget dispatch: `TMPDIR` added to `_ENV_ALLOWLIST` (tempfile
+  calls in gh/git/python were failing silently), `--auto` flag added to
+  `build_argv` (permission prompts were hanging with no TTY), and command-file
+  paths changed from relative to absolute `~/.claude/commands/` (client
+  worktrees don't contain `.claude/commands/`). `SLACK_MCP_CLIENT_ID` and
+  `SLACK_MCP_CLIENT_SECRET` added to `_ENV_ALLOWLIST` so Slack MCP OAuth
+  succeeds in the subprocess env.
+
 ## [1.37.0] - 2026-08-19
 
 ### Added
