@@ -19,6 +19,7 @@ from typing import Any, Literal
 from pydantic import (
     BaseModel,
     Field,
+    StrictBool,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -602,12 +603,44 @@ class AutoDevResult(BaseModel):
     # track cost omit this field; consumers treat None as "cost unknown".
     # Must be non-negative when present. See GitHub issue #124.
     cost_usd: float | None = None
+    # True iff this claim consumed an operator resolution during a plan-stage
+    # `ambiguities_pending_resolution`/`premises_pending_verification` park,
+    # with provenance recorded in resolution_evidence below. Optional —
+    # producers that don't track this omit both fields; consumers
+    # (cw.dispatch.productivity) treat a bare True with no evidence as not
+    # credited. Typed `StrictBool` (not a `mode="before"` custom validator,
+    # unlike `stage_reached`'s coercion-guard pattern) so Pydantic itself
+    # rejects a coercible non-bool ("true"/1) rather than silently lax-mode
+    # coercing it to True and defeating the consumer's identity check in
+    # `productivity.py`. See GitHub issue #1896 R3.
+    resolution_consumed: StrictBool = False
+    # Provenance for resolution_consumed above: the settlement round's source
+    # comment id/URL and the settled item ids. None when resolution_consumed
+    # is False or absent. See GitHub issue #1896.
+    resolution_evidence: dict[str, Any] | None = None
 
     @field_validator("cost_usd")
     @classmethod
     def _validate_cost_usd(cls, v: float | None) -> float | None:
         if v is not None and v < 0:
             msg = "cost_usd must be non-negative"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("resolution_evidence")
+    @classmethod
+    def _validate_resolution_evidence(
+        cls, v: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if v is None:
+            return v
+        comment_id = v.get("comment_id")
+        items = v.get("items")
+        if not comment_id or not isinstance(items, list) or not items:
+            msg = (
+                "resolution_evidence must carry a non-empty 'comment_id' and a "
+                "non-empty 'items' list (see #1896 R4)"
+            )
             raise ValueError(msg)
         return v
 

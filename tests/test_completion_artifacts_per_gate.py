@@ -15,19 +15,7 @@ per-gate reporting contract across the three `.claude/commands/*.md` sites so
 the two-field collapse cannot silently creep back in.
 """
 
-from pathlib import Path
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-COMMANDS = _REPO_ROOT / ".claude" / "commands"
-
-
-# NOTE: this is another local copy of the `_cmd(name)` helper that
-# tests/test_scope_conformance_gate_docs.py, tests/test_auto_dev_model_pins.py,
-# and tests/test_consolidated_park.py each already carry. Consolidating the
-# duplicated helper into conftest.py is deliberately NOT attempted here — it
-# is tracked separately as #1787.
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text(encoding="utf-8")
+from tests.conftest import _cmd
 
 
 def test_impl_completion_artifacts_reports_one_row_per_gate() -> None:

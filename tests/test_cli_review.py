@@ -360,7 +360,7 @@ class TestReviewConsolidateCommand:
 
     def test_invalid_severity_prints_nested_field_path(self, runner: CliRunner) -> None:
         raw_finding = _finding_kwargs(severity="BOGUS")
-        payload = _consolidate_payload(documents=[_doc_payload(raw_finding)])
+        payload = _consolidate_payload(documents=[_doc_payload(dict(raw_finding))])
         result = runner.invoke(
             main, ["review", "consolidate", "-"], input=json.dumps(payload)
         )

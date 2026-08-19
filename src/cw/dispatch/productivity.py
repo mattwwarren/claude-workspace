@@ -60,9 +60,24 @@ class ClaimEvidence:
     STRICT per resolution R1: a bare ``resolution_consumed: true`` carries no
     trail a later reader can check, so it does not count. Only a boolean
     accompanied by a non-empty ``resolution_evidence`` object credits the
-    claim. See the #1750 plan's first Adopted Assumption: no producer emits
-    these keys yet, so this signal is structurally correct but dormant until a
-    fast-follow wires the sentinel schema.
+    claim. The #1750 plan's first Adopted Assumption noted no producer emitted
+    these keys yet, leaving this signal structurally correct but dormant;
+    #1896 wired the producer -- ``auto-dev-plan.md``'s Step 1c.0 settlement
+    mechanism now emits both keys on a plan-stage pause when the round settled
+    at least one item, and ``AutoDevResult`` (``cw.auto_dev_result.schema``)
+    rejects a coercible non-bool ``resolution_consumed`` at the schema layer
+    (a ``StrictBool`` field), not here -- this function's ``is not True``
+    identity check alone would not catch a producer bug emitting
+    ``"resolution_consumed": "true"`` as a string, since every sentinel
+    round-trips through schema validation before reaching this extractor.
+
+    Residual trust boundary: this function and the schema-layer strictness
+    verify shape/type only, never truth. A sentinel that emits
+    ``resolution_consumed: true`` with a well-formed but fabricated or stale
+    ``resolution_evidence`` will be credited -- nothing downstream can check
+    the claim against what actually happened. This is an accepted property of
+    a trusted-producer design (the producer is this repo's own
+    ``auto-dev-plan.md`` pipeline), not a defect to fix.
     """
 
 

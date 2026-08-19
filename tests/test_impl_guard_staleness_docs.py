@@ -3,20 +3,8 @@ override (#1794) — mirrors tests/test_scope_conformance_gate_docs.py's pairing
 of a script-behavior test file with a prose-wiring test file.
 """
 
-from pathlib import Path
-
+from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
-
-ROOT = Path(__file__).resolve().parents[1]
-COMMANDS = ROOT / ".claude" / "commands"
-
-
-# NOTE: another local copy of the `_cmd(name)` helper that
-# tests/test_scope_conformance_gate_docs.py and ~9 other test files already
-# carry. Consolidating it into conftest.py is deliberately NOT attempted here —
-# it is tracked separately as #1787.
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text(encoding="utf-8")
 
 
 def _guard_section() -> str:

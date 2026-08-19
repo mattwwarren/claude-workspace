@@ -3,10 +3,10 @@
 Pure-markdown assertions over the auto-dev finalize pipeline instruction file
 and the headless contract doc. This repo has an established convention (see
 ``tests/test_auto_dev_model_pins.py``, ``tests/test_auto_dev_preflight_resolutions.py``,
-and ``tests/test_unavailability.py``) of a small **private per-file**
-``_cmd()``-style helper that reads ``.claude/commands/*.md`` prose and asserts
-substrings/regions, rather than a shared ``conftest.py`` fixture. This file is
-the 4th consumer of that same pattern.
+and ``tests/test_unavailability.py``) of reading ``.claude/commands/*.md``
+prose and asserting substrings/regions. The reader itself is the shared
+``_cmd()`` helper in ``tests/conftest.py`` (#1787) — it used to be a private
+per-file copy here. ``_doc`` stays local.
 
 Root cause pinned here: ``gh pr merge --auto`` can report success while the
 read-back (``autoMergeRequest``) stays null — the prior prose either had no
@@ -22,13 +22,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.conftest import _cmd
+
 ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
 DOCS = ROOT / "docs"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _doc(name: str) -> str:

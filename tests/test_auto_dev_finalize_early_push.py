@@ -5,11 +5,10 @@ the prep-pr.md sync-with-base step, and the dispatch runbook doc. This repo
 has an established convention (see ``tests/test_auto_dev_model_pins.py``,
 ``tests/test_auto_dev_preflight_resolutions.py``,
 ``tests/test_unavailability.py``, and
-``tests/test_auto_dev_finalize_automerge_verification.py``) of a small
-**private per-file** ``_cmd()``-style helper that reads
-``.claude/commands/*.md`` prose and asserts substrings/regions, rather than a
-shared ``conftest.py`` fixture. This file is the 5th consumer of that same
-pattern.
+``tests/test_auto_dev_finalize_automerge_verification.py``) of reading
+``.claude/commands/*.md`` prose and asserting substrings/regions. The reader
+itself is the shared ``_cmd()`` helper in ``tests/conftest.py`` (#1787) — it
+used to be a private per-file copy here. ``_doc`` stays local.
 
 Root cause pinned here (GEN-5343): finalize's Step 4c.2 checks out the
 feature branch from origin, merges ``origin/main`` into it (a local merge
@@ -34,14 +33,10 @@ import typing
 from pathlib import Path
 
 from cw.auto_dev_result import _STAGE_REACHED_CANONICAL, StageReached
+from tests.conftest import _cmd
 
 ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
 DOCS = ROOT / "docs"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _doc(name: str) -> str:
