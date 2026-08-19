@@ -307,6 +307,26 @@ def plan_body(*, spec: bool = True, soundness: bool = True) -> str:
     return "\n".join(lines)
 
 
+def _plan_text(paths: list[str]) -> str:
+    """Build a realistic plan document with a ``## Files Modified`` section.
+
+    Shared by test_check_plan_scope_conformance.py and test_plan_files.py —
+    both exercise the same ``## Files Modified`` parsing contract, one via
+    the standalone .claude/scripts mirror, the other via src/cw.plan_files.
+    """
+    bullets = "\n".join(f"- {p} (~40 lines)" for p in paths)
+    return (
+        "# Implementation Plan: Something (#9999)\n\n"
+        "## Patterns Found\n\n"
+        "- Proposed: a thing.\n\n"
+        "## Files Modified\n\n"
+        f"{bullets}\n\n"
+        "**Scope tier:** small\n\n"
+        "## Ambiguities\n\n"
+        "NO_AMBIGUITIES\n"
+    )
+
+
 def stub_fetch_plan(
     monkeypatch: pytest.MonkeyPatch,
     body: str | None,

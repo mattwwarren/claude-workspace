@@ -24,6 +24,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Headless aider no longer stalls silently on a missing-file free-text ask
+  (#1905):** three related defects in `LocalExecutor`. (1) `build_argv` passed
+  no `--file` flags at all, so which files entered aider's chat was decided
+  entirely by aider's own path-mention heuristic; the plan's `## Files
+  Modified` manifest is now parsed (`cw.plan_files.parse_plan_files_modified`,
+  mirroring `.claude/scripts/check_plan_scope_conformance.py`) and threaded
+  through pre-flight into one `--file` flag per planned path — a plan with no
+  manifest section still falls back to the previous behaviour. (2) The full
+  plan and ticket prose used to be embedded in `--message`, which is the exact
+  text aider scans for path mentions, so a plan's own "EXPLICITLY OUT OF SCOPE"
+  list and its touch-point citations force-added under `--yes` precisely the
+  files they named as untouchable; that content is now materialised to
+  `.cw/task_context.md` and handed to aider via `--read`, whose content bypasses
+  the mention scan, while `--message` carries only a fixed, path-free
+  instruction. (3) A run that ended with the model asking for a file to be
+  added to the chat, instead of emitting edits, was reported as the generic
+  retryable `aider_no_output`; it now gets the distinct, non-retryable
+  `blocker.reason` `aider_file_request_unanswered` so the disposition is
+  self-diagnosing and parks for a human instead of re-dispatching into the same
+  stall.
+
 - **A requeue-to-impl refusal message no longer claims a non-GitHub tracker
   was checked when it wasn't (#1906):** `requeue.py`'s impl-bypass plan-
   availability guard called `fetch_approved_plan_comment` (GitHub-only)
