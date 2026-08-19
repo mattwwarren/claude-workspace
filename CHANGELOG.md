@@ -20,11 +20,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   completion notification, which is safe: in-flight subagents appear in the Stop
   hook payload's `background_tasks` as `{"type": "subagent", "status": "running",
   ...}` (verified empirically), so `cw signal-stop`'s existing deferral guard
-  prevents the #175/#176 orphan. Adds an explicit never-busy-wait rule — an
-  artificially open turn also suppresses the #176 headless-timeout backstop,
-  which can only evaluate at a turn boundary — and documents the parent/subagent
-  asymmetry: a parent's turn-end is a pause, a subagent's is a return, so a
-  subagent must not background work and then return.
+  prevents the #175/#176 orphan. Adds an explicit never-busy-wait rule — after
+  ADR-0014 removed every kill timer, the only automated stuck-worker signal is
+  the transcript-staleness liveness sweep, and no-op polls keep the transcript
+  fresh so a spinning worker classifies as LIVE and `SESSION_NEEDS_ATTENTION`
+  never fires — and documents the parent/subagent asymmetry: a parent's
+  turn-end is a pause, a subagent's is a return, so a subagent must not
+  background work and then return. Also sweeps the dead Agent-tool
+  `run_in_background: true` from `review.md`, `review-monitor.md`, and
+  `review-sweep.md` (issue #1944 remaining-work item 2; Bash usages keep the
+  parameter — it is only the Agent spawn that lost it), and marks the
+  `auto-dev-finalize.md` capture-gate spawn as claude-native-only: opencode's
+  FINALIZE stage consumes the same file (#1670) but has no Agent tool, Stop
+  hook, or completion notifications, so it must run the capture inline.
 
 ## [1.38.0] - 2026-08-19
 

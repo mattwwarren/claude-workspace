@@ -185,7 +185,7 @@ Only spawn reviewers relevant to what changed. Each reviewer is a Task agent.
 
 ## Step 4: Spawn Review Agents in Parallel
 
-Launch all selected reviewers simultaneously using the Task tool with `run_in_background: true`.
+Launch all selected reviewers simultaneously in a single message (Agent-tool spawns are async unconditionally — `run_in_background` is no longer one of their parameters; see #1944).
 
 **Every agent prompt MUST include:**
 
@@ -299,7 +299,7 @@ Collect every validated `ESCALATIONS:` entry from first-wave output. Then:
 
 1. **Filter to reviewers that did NOT run in the first wave.** If an escalation targets a reviewer already in wave one, drop it — that reviewer already had the diff and chose not to flag it. (Cross-checks like "Architecture should also see this" between two agents that both already ran add nothing.)
 2. **Deduplicate by target reviewer.** If three agents all escalate to Performance Reviewer, spawn it once with all three reasons concatenated.
-3. **Spawn the second wave in parallel**, same Task tool + `run_in_background: true` pattern as Step 4. Each second-wave prompt gets the standard agent prompt template PLUS an "Escalation context" section listing what triggered the escalation:
+3. **Spawn the second wave in parallel**, same single-message async spawn pattern as Step 4. Each second-wave prompt gets the standard agent prompt template PLUS an "Escalation context" section listing what triggered the escalation:
    ```
    ## Escalation Context
 

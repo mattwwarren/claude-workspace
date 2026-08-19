@@ -73,8 +73,8 @@ resolved above — Sonnet for Small scope, Opus for Large):
 
 - **Not in a dispatch worktree (either mode):** `isolation: "worktree"`, `model: $IMPL_MODEL`.
 - **In a dispatch worktree (either mode):** **omit `isolation: "worktree"` entirely** — the
-  dispatch worktree IS the sandbox. Spawn with no `isolation` key and with
-  `model: $IMPL_MODEL` — the agent works directly in the current cwd, and
+  dispatch worktree IS the sandbox. Spawn with no `isolation` key and
+  with `model: $IMPL_MODEL` — the agent works directly in the current cwd, and
   `worktree_path` in `.claude/cw-context.json` is the authoritative anchor for all git
   operations.
 
@@ -85,9 +85,11 @@ notification. That is safe in headless: the Stop hook payload lists the in-fligh
 `background_tasks` (`{"type": "subagent", "status": "running", ...}`) and `cw signal-stop` defers
 session completion while that list is non-empty (`src/cw/cli/stop_hook.py:364`), so the run is not
 orphaned. **Never** hold the turn open with no-op `Bash` calls (`true`, `sleep`, repeated polls) —
-each is a wasted model round-trip, and an artificially open turn suppresses the #176
-headless-timeout backstop, which can only evaluate at a turn boundary. The asymmetry matters when
-writing the impl agent's own prompt: a parent's turn-end is a pause, but a **subagent's** turn-end
+each is a wasted model round-trip, and busy-waiting camouflages a stuck worker: ADR-0014 removed
+every kill timer, so the only automated stuck-worker signal left is the liveness distress sweep
+(`src/cw/reconcile/liveness.py`), which keys on transcript staleness — no-op polls keep the
+transcript fresh, pin the session at LIVE, and `SESSION_NEEDS_ATTENTION` never fires. The
+asymmetry matters when writing the impl agent's own prompt: a parent's turn-end is a pause, but a **subagent's** turn-end
 is a *return* — work it leaves running in the background does not survive, so the impl agent must
 finish its build/test commands inside its own turn rather than backgrounding them and returning.
 (`run_in_background` is still a valid `Bash` parameter; only the Agent spawn lost it.)

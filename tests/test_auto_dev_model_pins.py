@@ -120,9 +120,13 @@ def test_review_large_scope_pins_sonnet() -> None:
 
 
 def test_review_fix_agent_pins_sonnet() -> None:
-    """Fix agent in review stage must pin model: "sonnet"."""
+    """Fix agent in review stage must pin model: "sonnet".
+
+    #1944 removed the dead Agent-tool `run_in_background: true` from the spawn
+    text (the tool is async unconditionally), so the pin no longer includes it.
+    """
     content = _cmd("auto-dev-review.md")
-    pin = '`isolation: "worktree"`, `model: "sonnet"`, and `run_in_background: true`'
+    pin = '`isolation: "worktree"` and `model: "sonnet"`'
     assert pin in content
 
 
@@ -139,9 +143,13 @@ def test_finalize_prep_pr_agent_pins_sonnet() -> None:
 
 
 def test_finalize_ui_capture_agent_pins_haiku() -> None:
-    """UI-evidence capture agent must pin model: "haiku" (cheap screenshot work)."""
+    """UI-evidence capture agent must pin model: "haiku" (cheap screenshot work).
+
+    #1944 removed the dead Agent-tool `run_in_background: true` from the spawn
+    text (the tool is async unconditionally), so the pin no longer includes it.
+    """
     content = _cmd("auto-dev-finalize.md")
-    pin = '`isolation: "worktree"`, `model: "haiku"`, `run_in_background: true`'
+    pin = '`isolation: "worktree"`, `model: "haiku"`'
     assert pin in content
 
 
