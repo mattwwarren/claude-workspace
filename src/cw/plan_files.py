@@ -18,9 +18,9 @@ its ``_load_scope_thresholds`` re-implements rather than imports
 **The two copies must be kept in lockstep by hand**; ``tests/test_plan_files.py``
 and ``tests/test_check_plan_scope_conformance.py`` assert against a shared
 fixture builder (``tests/conftest.py::_plan_text``) so drift shows up as a
-failing test in one suite but not the other. One divergence is known and
-deliberate: this copy is code-fence-aware (below) and the script is not yet —
-re-syncing the script is tracked in #1917.
+failing test in one suite but not the other. As of #1917, both copies are
+code-fence-aware (``` and ~~~, including indented fence markers) — keep them
+in lockstep by hand going forward.
 """
 
 from __future__ import annotations
@@ -45,8 +45,9 @@ _MIN_TABLE_PIPES = 2
 # Plans routinely *illustrate* a files-modified section inside a fenced block
 # (this ticket's own plan does), so fenced lines are dropped before parsing —
 # otherwise the illustration is mistaken for the real manifest. The mirrored
-# gate script is still fence-unaware; that half is tracked in #1917.
-_FENCE_MARKER = "```"
+# gate script (``.claude/scripts/check_plan_scope_conformance.py``) now has
+# its own ``_strip_fenced_lines``/``_FENCE_MARKERS`` mirroring this one (#1917).
+_FENCE_MARKERS = ("```", "~~~")
 
 
 def _looks_like_path(token: str) -> bool:
@@ -72,16 +73,21 @@ def _extract_path_token(text: str) -> str | None:
 
 
 def _strip_fenced_lines(lines: list[str]) -> list[str]:
-    """Drop fenced code-block lines, and the ``` fences delimiting them.
+    """Drop fenced code-block lines, and the fences delimiting them.
 
-    A language tag (``` ```python ```) still opens a fence. An unterminated
-    fence swallows the rest of the document, which is the safe direction: a
-    fenced illustration must never be read as plan structure.
+    Recognizes both ``` and ~~~ fence markers. A fence marker may be indented
+    under a list item and still toggles correctly (matched via
+    ``.strip().startswith(...)``). Either marker type toggles the same single
+    ``in_fence`` flag — a stray ``~~~`` line inside a ``` block also toggles
+    state; mismatched fence types are not tracked separately. A language tag
+    (e.g. ```` ```python ````) still opens a fence. An unterminated fence
+    swallows the rest of the document, which is the safe direction: a fenced
+    illustration must never be read as plan structure.
     """
     kept: list[str] = []
     in_fence = False
     for line in lines:
-        if line.strip().startswith(_FENCE_MARKER):
+        if line.strip().startswith(_FENCE_MARKERS):
             in_fence = not in_fence
         elif not in_fence:
             kept.append(line)
@@ -91,9 +97,10 @@ def _strip_fenced_lines(lines: list[str]) -> list[str]:
 def parse_plan_files_modified(plan_text: str) -> list[str]:
     """Extract the file paths listed under the plan's files-modified section.
 
-    Parsing is fence-aware: lines inside a ``` code fence are removed first, so
-    a plan that merely *illustrates* a ``## Files Modified`` section (heading or
-    bullets) inside a fenced example cannot be mistaken for the real manifest.
+    Parsing is fence-aware: lines inside a ``` or ~~~ code fence are removed
+    first, so a plan that merely *illustrates* a ``## Files Modified`` section
+    (heading or bullets) inside a fenced example cannot be mistaken for the
+    real manifest.
 
     The heading is matched by prefix (``_FILES_HEADING_PREFIX``). Within the
     section body, paths may be carried either as bullets (``- path`` /
