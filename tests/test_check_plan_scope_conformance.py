@@ -465,12 +465,7 @@ def test_1905_incident_regression_full_pipeline(tmp_path: Path) -> None:
     not the fake one, and that the delivered set does NOT trigger drift.
     """
     real_files = _paths("real", 9)
-    fake_illustration = (
-        "```\n"
-        "## Files Modified\n"
-        "- src/cw/fake_illustration.py\n"
-        "```\n\n"
-    )
+    fake_illustration = "```\n## Files Modified\n- src/cw/fake_illustration.py\n```\n\n"
     text = (
         "# Implementation Plan: Something (#1905)\n\n"
         "## Patterns Found\n\n"
