@@ -42,6 +42,7 @@ from cw.review_findings import (
     write_review_verdict,
 )
 from tests.conftest import (
+    _FindingKwargs,
     _finding_kwargs,
     _make_debt_record,
     _make_diff,
@@ -132,7 +133,7 @@ index 21cc6981..043f6a49 100644
 
 # The real Finding field values from the rejected #1729 SysAdmin Reviewer
 # finding, quoted verbatim from the diagnostics artifact above.
-_PR1729_REJECTED_FINDING_KWARGS: dict[str, object] = {
+_PR1729_REJECTED_FINDING_KWARGS: _FindingKwargs = {
     "severity": "SHOULD_FIX",
     "file": "tests/test_dispatch.py",
     "line_start": 9522,
@@ -196,7 +197,7 @@ _PR1729_REJECTED_FINDING_KWARGS: dict[str, object] = {
 # is empty), and the real post-change function this finding targets is named
 # ``test_breadcrumb_eligible_paused_statuses_composition`` (confirmed via
 # `git show 494414f8:tests/test_dispatch.py`).
-_PR1729_9491_MUST_FIX_FINDING_KWARGS: dict[str, object] = {
+_PR1729_9491_MUST_FIX_FINDING_KWARGS: _FindingKwargs = {
     "severity": "MUST_FIX",
     "file": "tests/test_dispatch.py",
     "line_start": 9491,
