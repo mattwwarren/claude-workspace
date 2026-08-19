@@ -15702,6 +15702,92 @@ class TestUnproductiveAttemptRouting:
 
         assert task.unproductive_attempts == ceiling
 
+    def test_1896_plan_stage_resolution_sequence_never_reaches_the_ceiling(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1896: wired ``resolution_consumed`` keeps a plan-stage clarification
+        loop off the ceiling, same shape as #1727's IMPL/REVIEW tail above.
+
+        Four sequential plan-stage `ambiguities_pending_resolution` parks, three
+        of which carry a genuine consumed-resolution claim and one of which
+        (the crashloop-shaped park) does not — only the fourth should charge.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        clients = self._clients(tmp_path)
+        task = self._make_running_task("UP-1896", stage=Stage.PLAN)
+
+        for round_n in range(1, 4):
+            task.status = QueueItemStatus.RUNNING
+            apply_staged_decision(
+                task,
+                "ambiguities_pending_resolution",
+                {
+                    "status": "ambiguities_pending_resolution",
+                    "ambiguities": [{"question": f"which cap round {round_n}?"}],
+                    "next_actions": ["user_resolve_cap"],
+                    "resolution_consumed": True,
+                    "resolution_evidence": {
+                        "comment_id": f"c{round_n}",
+                        "items": [f"R{round_n}"],
+                    },
+                },
+                clients,
+            )
+
+        # Fourth round: no resolution evidence at all -- the baseline-omission
+        # shape, chargeable.
+        task.status = QueueItemStatus.RUNNING
+        apply_staged_decision(
+            task,
+            "ambiguities_pending_resolution",
+            {
+                "status": "ambiguities_pending_resolution",
+                "ambiguities": [{"question": "which cap round 4?"}],
+                "next_actions": ["user_resolve_cap"],
+            },
+            clients,
+        )
+
+        assert task.unproductive_attempts == 1
+        assert task.unproductive_attempts < 10  # ceiling
+
+    def test_1896_plan_stage_pause_without_resolution_evidence_is_charged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Baseline-omission coverage only -- NOT a reclaim/staleness test.
+
+        Mirrors ``test_same_stage_block_with_no_evidence_is_charged`` (see
+        above), generalized to the plan stage: a plan-stage pause whose
+        payload omits ``resolution_consumed`` entirely is charged exactly
+        like any other evidence-free park. This test proves only that the
+        baseline (no keys present) is chargeable -- it says nothing about
+        resolution *reuse* or *staleness* across rounds, which is stateless
+        by design at this layer (the extractor reads a single payload in
+        isolation) and untestable here; see
+        ``tests/test_plan_stage_settlement.py``'s
+        ``test_settled_item_cannot_yield_second_resolution_evidence_candidate``
+        for the actual anti-gaming/reclaim-prevention proof, which lives at
+        the pipeline-instruction layer instead.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-1896-B", stage=Stage.PLAN)
+        last_result: dict[str, object] = {
+            "status": "ambiguities_pending_resolution",
+            "ambiguities": [{"question": "which cap?"}],
+            "next_actions": ["user_resolve_cap"],
+        }
+        apply_staged_decision(
+            task,
+            "ambiguities_pending_resolution",
+            last_result,
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 1
+
 
 # ---------------------------------------------------------------------------
 # TestClaimNextPendingStalePr (#1862)

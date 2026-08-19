@@ -2276,6 +2276,120 @@ class TestCostUsdField:
         assert restored.cost_usd == 2.5
 
 
+class TestResolutionConsumedField:
+    """``resolution_consumed``/``resolution_evidence`` — the #1896 producer wiring.
+
+    Duplicates a private ``_make_shipped_payload`` helper local to this class
+    per this file's established per-class-private-helper convention (zero
+    precedent for hoisting/sharing ``TestCostUsdField``'s copy).
+    """
+
+    def _make_shipped_payload(self, **extra: object) -> dict[str, object]:
+        """Minimal valid shipped payload for building test AutoDevResults."""
+        base: dict[str, object] = {
+            "schema_version": 2,
+            "ticket_id": "T-1",
+            "status": "shipped",
+            "stage_reached": "stage5_post_create",
+            "scope": {
+                "tier": "small",
+                "files": 1,
+                "lines_estimate": 5,
+                "lines_actual": 5,
+                "forbidden_touched": False,
+            },
+            "plan_source": "linear_existing",
+            "branch": "dev/t-1",
+            "worktree_path": "/tmp/wt",
+            "fork_point_sha": "abc",
+            "commits": ["c1"],
+            "pr": {
+                "number": 1,
+                "url": "https://example.com",
+                "auto_merge": True,
+                "base": "main",
+            },
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "HIGH",
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": None,
+            "next_actions": ["wait_for_ci"],
+        }
+        base.update(extra)
+        return base
+
+    def test_resolution_consumed_defaults_to_false_and_evidence_to_none(self) -> None:
+        payload = self._make_shipped_payload()
+        result = AutoDevResult.model_validate(payload)
+        assert result.resolution_consumed is False
+        assert result.resolution_evidence is None
+
+    def test_resolution_consumed_true_with_valid_evidence_round_trips(self) -> None:
+        payload = self._make_shipped_payload(
+            resolution_consumed=True,
+            resolution_evidence={"comment_id": "123", "items": ["R1"]},
+        )
+        result = AutoDevResult.model_validate(payload)
+        assert result.resolution_consumed is True
+        assert result.resolution_evidence == {"comment_id": "123", "items": ["R1"]}
+
+        dumped = result.model_dump(mode="json")
+        restored = AutoDevResult.model_validate(dumped)
+        assert restored.resolution_consumed is True
+        assert restored.resolution_evidence == {"comment_id": "123", "items": ["R1"]}
+
+    def test_resolution_consumed_rejects_string_true(self) -> None:
+        payload = self._make_shipped_payload(resolution_consumed="true")
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(payload)
+
+    def test_resolution_consumed_rejects_int_one(self) -> None:
+        payload = self._make_shipped_payload(resolution_consumed=1)
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(payload)
+
+    def test_resolution_evidence_missing_comment_id_is_rejected(self) -> None:
+        payload = self._make_shipped_payload(
+            resolution_consumed=True,
+            resolution_evidence={"items": ["R1"]},
+        )
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(payload)
+
+    def test_resolution_evidence_empty_items_is_rejected(self) -> None:
+        payload = self._make_shipped_payload(
+            resolution_consumed=True,
+            resolution_evidence={"comment_id": "123", "items": []},
+        )
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(payload)
+
+    def test_resolution_evidence_without_resolution_consumed_key_is_still_schema_valid(
+        self,
+    ) -> None:
+        payload = self._make_shipped_payload(
+            resolution_evidence={"comment_id": "123", "items": ["R1"]},
+        )
+        result = AutoDevResult.model_validate(payload)
+        assert result.resolution_consumed is False
+        assert result.resolution_evidence == {"comment_id": "123", "items": ["R1"]}
+
+    def test_omitting_both_keys_entirely_stays_schema_valid(self) -> None:
+        payload = self._make_shipped_payload()
+        assert "resolution_consumed" not in payload
+        assert "resolution_evidence" not in payload
+        result = AutoDevResult.model_validate(payload)
+        assert result.resolution_consumed is False
+        assert result.resolution_evidence is None
+
+
 # ---------------------------------------------------------------------------
 # Issue #430 — coerce legitimate-but-sparse sentinels
 #
