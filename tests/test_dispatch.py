@@ -15766,7 +15766,7 @@ class TestUnproductiveAttemptRouting:
         by design at this layer (the extractor reads a single payload in
         isolation) and untestable here; see
         ``tests/test_plan_stage_settlement.py``'s
-        ``test_settled_item_excluded_from_resettlement_cannot_yield_second_resolution_evidence_candidate``
+        ``test_settled_item_cannot_yield_second_resolution_evidence_candidate``
         for the actual anti-gaming/reclaim-prevention proof, which lives at
         the pipeline-instruction layer instead.
         """
