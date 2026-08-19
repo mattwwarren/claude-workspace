@@ -14,7 +14,7 @@ import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from pydantic import ValidationError
@@ -27,10 +27,13 @@ from cw.models import (
     SessionStatus,
 )
 from tests.conftest import (
+    _DEFAULT_PYTEST_BASETEMP,
     _OPTIONAL_BINARY_DENYLIST,
+    _REPO_ROOT,
     _make_daemon_session,
     _make_ticket_task,
     _seed_daemon_session,
+    pytest_configure,
 )
 
 if TYPE_CHECKING:
@@ -223,3 +226,62 @@ class TestOptionalBinaryAbsenceGuard:
 
         result = shutil.which("codex")
         assert result == str(bin_dir / "codex")
+
+
+class _FakeOption:
+    """Minimal stand-in for ``pytest.Config.option`` (#1888).
+
+    ``pytest_configure`` only ever reads ``.option.basetemp`` off the real
+    ``Config``, so this fake carries nothing else.
+    """
+
+    def __init__(self, basetemp: str | None = None) -> None:
+        self.basetemp = basetemp
+
+
+class _FakeConfig:
+    """Minimal stand-in for ``pytest.Config`` (#1888) -- just an ``.option``."""
+
+    def __init__(self, basetemp: str | None = None) -> None:
+        self.option = _FakeOption(basetemp)
+
+
+class TestPytestBasetempIsolation:
+    """The ``pytest_configure`` --basetemp default (#1888, split from #1858).
+
+    Each cw worker session runs full-suite pytest in its own git worktree
+    but shares the host's /tmp; without a worktree-local ``--basetemp``,
+    concurrent sessions' basetemp dirs can sum and exhaust a shared /tmp
+    tmpfs (the ENOSPC incident behind #1858). These tests cover the hook in
+    isolation via a minimal fake ``Config`` (so the unset/override branches
+    are cheap and don't depend on hook-registration ordering), plus one
+    end-to-end test that runs inside the actual configured session -- see
+    ``test_live_session_basetemp_is_under_repo_root``, which is the
+    load-bearing self-diagnosing check.
+    """
+
+    def test_default_basetemp_constant_is_under_repo_root(self) -> None:
+        assert _DEFAULT_PYTEST_BASETEMP == _REPO_ROOT / ".pytest_basetemp"
+
+    def test_pytest_configure_defaults_basetemp_when_unset(self) -> None:
+        config = _FakeConfig(basetemp=None)
+        pytest_configure(cast("pytest.Config", config))
+        assert config.option.basetemp == str(_DEFAULT_PYTEST_BASETEMP)
+
+    def test_pytest_configure_respects_explicit_override(self) -> None:
+        config = _FakeConfig(basetemp="/custom/path")
+        pytest_configure(cast("pytest.Config", config))
+        assert config.option.basetemp == "/custom/path"
+
+    def test_live_session_basetemp_is_under_repo_root(
+        self, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """End-to-end: the suite's own session basetemp is the worktree-local dir.
+
+        Runs inside the actual pytest session executing this suite, so if
+        the hook-ordering assumption (conftest.py's ``pytest_configure``
+        runs before ``_pytest.tmpdir``'s builtin one) is ever wrong, this
+        test fails immediately and self-diagnoses -- no reliance on
+        ``pytester`` subprocess machinery.
+        """
+        assert tmp_path_factory.getbasetemp() == _DEFAULT_PYTEST_BASETEMP.resolve()

@@ -1211,6 +1211,66 @@ class TestRemoveWorktree:
         with pytest.raises(WorktreeError):
             remove_worktree(client, "feat/dirty", force=False)
 
+    def test_gitignored_untracked_dir_does_not_block_removal(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """A gitignored untracked dir doesn't block worktree removal (#1888).
+
+        Real, non-mocked regression test settling the basetemp-isolation
+        plan's key risk: pytest's ``--basetemp`` dir is gitignored but left
+        on disk between runs (pytest does not delete a *given* basetemp at
+        session end -- see ``_pytest.tmpdir.TempPathFactory.getbasetemp``),
+        so it will exist, untracked, at ``cw session done --cleanup`` time.
+        ``.pytest_cache/`` already exercises this exact scenario
+        incident-free; this test settles it empirically against real git
+        rather than resting on that circumstantial evidence alone (Option A:
+        real bare-repo/real-git tests, per ``TestIsMainBehindOrigin`` below).
+        """
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        repo = make_git_repo("origin-repo")
+        (repo / ".gitignore").write_text(".pytest_basetemp/\n")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", ".gitignore"],
+            check=True,
+            env=clean_env,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", "add gitignore"],
+            check=True,
+            env=clean_env,
+        )
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=repo,
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = worktree_path_for(client, "feat/basetemp-test")
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "worktree",
+                "add",
+                str(wt_path),
+                "-b",
+                "feat/basetemp-test",
+            ],
+            check=True,
+            env=clean_env,
+        )
+
+        basetemp_dir = wt_path / ".pytest_basetemp"
+        basetemp_dir.mkdir()
+        (basetemp_dir / "scratch.txt").write_text("scratch\n")
+
+        remove_worktree(client, "feat/basetemp-test", force=False)
+
+        assert not wt_path.exists()
+
 
 class TestIsMainBehindOrigin:
     """Tests for is_main_behind_origin."""
