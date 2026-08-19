@@ -281,9 +281,9 @@ def test_build_aiderignore_blocks_tracked_files_outside_manifest(
     result = build_aiderignore(worktree, ["src/in_scope.py"])
 
     assert result is not None
-    content = result.read_text(encoding="utf-8")
-    assert "/core/database.py" in content
-    assert "/src/in_scope.py" not in content
+    lines = result.read_text(encoding="utf-8").splitlines()
+    assert "/core/database.py" in lines
+    assert "/src/in_scope.py" not in lines
 
 
 def test_build_aiderignore_returns_none_for_empty_manifest(
@@ -299,9 +299,10 @@ def test_build_aiderignore_returns_none_for_empty_manifest(
 def test_build_aiderignore_root_anchors_every_blocked_line(
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """Every blocked line is written with a leading '/' so a bare same-basename
-    match in another directory doesn't spuriously match anywhere in the tree
-    (gitignore's no-internal-slash-matches-anywhere gotcha)."""
+    """Every blocked and negated line is written with a leading '/' (or '!/'
+    for negations) so a bare same-basename match in another directory doesn't
+    spuriously match anywhere in the tree (gitignore's
+    no-internal-slash-matches-anywhere gotcha)."""
     worktree = make_git_repo("wt-aiderignore-anchor")
     commit_tracked_file(worktree, "a/util.py")
     commit_tracked_file(worktree, "b/util.py")
@@ -316,7 +317,7 @@ def test_build_aiderignore_root_anchors_every_blocked_line(
     ]
     assert lines
     for line in lines:
-        assert line.startswith("/")
+        assert line.startswith(("/", "!/"))
 
 
 def test_build_aiderignore_merges_existing_repo_aiderignore(
@@ -342,11 +343,19 @@ def test_build_aiderignore_never_blocks_a_manifest_path_even_if_repo_aiderignore
     make_git_repo: Callable[[str], Path],
 ) -> None:
     """The single most safety-critical assertion: even when the client repo's
-    own .aiderignore would already match a manifest path, the generated block
-    set never includes it — aider's --file intake loop silently *skips* (only a
-    tool_warning, no error) any explicit --file entry that matches the
-    aiderignore spec (coders/base_coder.py:449-457), so a manifest path landing
-    in the block set would silently defeat #1905's --file manifest feature."""
+    own .aiderignore would already match a manifest path, the generated file's
+    *effective* gitignore matching still leaves the manifest path un-ignored —
+    aider's --file intake loop silently *skips* (only a tool_warning, no
+    error) any explicit --file entry that matches the aiderignore spec
+    (coders/base_coder.py:449-457), so a manifest path matched by ANY pattern
+    in the merged file — cw's own or carried over from the pre-existing repo
+    .aiderignore — would silently defeat #1905's --file manifest feature.
+
+    Checks git's own gitignore matcher against the merged file (via
+    core.excludesFile), not just a literal-string search, so a pattern merged
+    in verbatim from the pre-existing repo .aiderignore (e.g. src/*.py) can't
+    silently re-exclude the manifest path while cw's own block-line format
+    happens to be absent."""
     worktree = make_git_repo("wt-aiderignore-never-blocks-manifest")
     (worktree / ".aiderignore").write_text("src/*.py\n", encoding="utf-8")
     commit_tracked_file(worktree, "src/real_target.py")
@@ -355,8 +364,26 @@ def test_build_aiderignore_never_blocks_a_manifest_path_even_if_repo_aiderignore
     result = build_aiderignore(worktree, ["src/real_target.py"])
 
     assert result is not None
-    content = result.read_text(encoding="utf-8")
-    assert "/src/real_target.py" not in content
+    lines = result.read_text(encoding="utf-8").splitlines()
+    assert "/src/real_target.py" not in lines
+    assert "!/src/real_target.py" in lines
+
+    check = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "-c",
+            f"core.excludesFile={result}",
+            "check-ignore",
+            "--no-index",
+            "-q",
+            "src/real_target.py",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert check.returncode == 1, "manifest path must NOT be effectively ignored"
 
 
 def test_build_aiderignore_fails_open_when_git_ls_files_errors(

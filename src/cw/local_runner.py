@@ -429,14 +429,22 @@ def build_aiderignore(worktree: Path, manifest_files: list[str]) -> Path | None:
     read and folded in verbatim ahead of cw's own block lines: ``--aiderignore``
     is a single-value override, not additive, so passing cw's generated file
     without merging would silently replace — not extend — a client repo's own
-    exclusions.
+    exclusions. Because that pre-existing content is merged in unfiltered, one
+    of its patterns could coincidentally match a manifest path (e.g. a client
+    ``.aiderignore`` line ``src/*.py`` matching manifest file
+    ``src/real_target.py``) — so every manifest path also gets an explicit
+    ``!/``-prefixed negation line, appended last. Gitignore's later-pattern-wins
+    semantics then force those paths to stay addable regardless of what any
+    earlier line (merged-in or cw's own) says. This is on top of, not instead
+    of, computing the block set as ``tracked - manifest`` by construction — see
+    AIDERIGNORE_RELATIVE_PATH's docstring comment for why a manifest path must
+    never end up excluded. (Caveat: gitignore negation cannot re-include a path
+    inside an excluded *directory* — not a concern here since patterns are
+    per-file, not directory-level.)
 
     Every blocked line is written ``/``-prefixed (root-anchored gitignore
     syntax) to avoid the "no internal slash matches the basename anywhere in
-    the tree" gotcha for single-segment filenames. The block set is computed
-    as ``tracked - manifest`` (set difference), so no manifest path can ever
-    appear in it by construction — see AIDERIGNORE_RELATIVE_PATH's docstring
-    comment for why that must hold.
+    the tree" gotcha for single-segment filenames.
     """
     if not manifest_files:
         return None
@@ -447,13 +455,14 @@ def build_aiderignore(worktree: Path, manifest_files: list[str]) -> Path | None:
     blocked = sorted(f for f in tracked if f not in manifest_set)
 
     existing = ""
-    aiderignore_file = worktree / ".aiderignore"
+    existing_aiderignore_path = worktree / ".aiderignore"
     with contextlib.suppress(OSError):
-        existing = aiderignore_file.read_text(encoding="utf-8")
+        existing = existing_aiderignore_path.read_text(encoding="utf-8")
 
     lines = [existing.rstrip("\n")] if existing else []
     lines.append(_AIDERIGNORE_SEPARATOR)
     lines.extend(f"/{path}" for path in blocked)
+    lines.extend(f"!/{path}" for path in sorted(manifest_set))
     content = "\n".join(lines) + "\n"
 
     out_path = worktree / AIDERIGNORE_RELATIVE_PATH

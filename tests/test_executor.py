@@ -1403,10 +1403,10 @@ def test_local_executor_spawn_passes_aiderignore_flag_to_argv(
     assert "--aiderignore" in argv
     idx = argv.index("--aiderignore")
     aiderignore_path = Path(argv[idx + 1])
-    content = aiderignore_path.read_text(encoding="utf-8")
-    assert "/core/database.py" in content
-    assert "/etl_mcp/api/x.py" in content
-    assert "/src/real_target.py" not in content
+    lines = aiderignore_path.read_text(encoding="utf-8").splitlines()
+    assert "/core/database.py" in lines
+    assert "/etl_mcp/api/x.py" in lines
+    assert "/src/real_target.py" not in lines
 
 
 def test_local_preflight_ok_model_none_defaults_to_empty_string(
