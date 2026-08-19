@@ -75,6 +75,14 @@ _FILES_HEADING_PREFIX = "## Files"
 _PATH_MARKERS = ("/", ".")
 _STRIP_CHARS = "`*_'\",;:()[]"
 
+# Plans routinely *illustrate* a files-modified section inside a fenced block,
+# so fenced lines are dropped before parsing — otherwise the illustration is
+# mistaken for the real manifest (#1905, #1917). Mirrors
+# ``src/cw/plan_files.py``'s ``_strip_fenced_lines``/``_FENCE_MARKERS``, the
+# origin of this copy — see that module's docstring for why the two copies
+# cannot be shared via import.
+_FENCE_MARKERS = ("```", "~~~")
+
 
 def _extract_path_token(text: str) -> str | None:
     """Return the first whitespace-delimited token in *text* if it looks
@@ -95,8 +103,36 @@ def _looks_like_path(token: str) -> bool:
     return any(marker in token for marker in _PATH_MARKERS)
 
 
+def _strip_fenced_lines(lines: list[str]) -> list[str]:
+    """Drop fenced code-block lines, and the fences delimiting them.
+
+    Recognizes both ``` and ~~~ fence markers, mirroring
+    ``src/cw/plan_files.py``'s ``_strip_fenced_lines``. A fence marker may be
+    indented under a list item and still toggles correctly (matched via
+    ``.strip().startswith(...)``). Either marker type toggles the same single
+    ``in_fence`` flag — a stray ``~~~`` line inside a ``` block also toggles
+    state; mismatched fence types are not tracked separately. A language tag
+    (e.g. ```` ```python ````) still opens a fence. An unterminated fence
+    swallows the rest of the document, which is the safe direction: a fenced
+    illustration must never be read as plan structure.
+    """
+    kept: list[str] = []
+    in_fence = False
+    for line in lines:
+        if line.strip().startswith(_FENCE_MARKERS):
+            in_fence = not in_fence
+        elif not in_fence:
+            kept.append(line)
+    return kept
+
+
 def _parse_files_modified(plan_text: str) -> list[str]:
     """Extract the file paths listed under the plan's files-modified section.
+
+    Parsing is fence-aware: lines inside a ``` or ~~~ code fence are removed
+    first, so a plan that merely *illustrates* a ``## Files Modified``
+    section (heading or bullets) inside a fenced example cannot be mistaken
+    for the real manifest (#1905, #1917).
 
     The section heading is matched by prefix (``_FILES_HEADING_PREFIX``, e.g.
     ``"## Files Modified"`` or the real-world variant ``"## Files touched,
@@ -111,7 +147,7 @@ def _parse_files_modified(plan_text: str) -> list[str]:
     files", because an empty baseline would make every delivered file look
     unplanned.
     """
-    lines = plan_text.splitlines()
+    lines = _strip_fenced_lines(plan_text.splitlines())
     try:
         start = next(
             i

@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Fence-aware `## Files Modified` heading matcher in the scope-conformance
+  gate (#1917):** `check_plan_scope_conformance.py`'s `_parse_files_modified`
+  previously matched the first `## Files` heading line-by-line with no fence
+  tracking, so a plan illustrating a fixture `## Files Modified` heading
+  inside a fenced code block earlier in the document was parsed as the real
+  enumeration — see #1905's impl-gate false positive. Both this script and
+  its mirrored copy (`src/cw/plan_files.py::parse_plan_files_modified`) now
+  skip lines inside fenced code blocks (``` and `~~~`, including indented
+  fence markers) before searching for the heading.
+
 ## [1.36.0] - 2026-08-18
 
 ### Added

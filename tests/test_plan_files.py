@@ -87,7 +87,9 @@ def test_ignores_files_modified_section_illustrated_inside_a_code_fence() -> Non
     This is the false positive that blocked #1905's first impl pass: the plan
     doc fenced an example ``## Files Modified`` block, and the fence-unaware
     matcher parsed the example's fake path as the whole manifest. The mirrored
-    gate script still has this weakness — tracked in #1917.
+    gate script now has this same fence-awareness — see
+    tests/test_check_plan_scope_conformance.py's
+    ``test_files_modified_heading_inside_fenced_example_is_ignored`` (#1917).
     """
     plan = (
         "# Plan\n\n"
@@ -110,6 +112,41 @@ def test_skips_fenced_bullets_inside_the_files_modified_body() -> None:
         "```python\n"
         "- a/fenced.py\n"
         "```\n"
+        "- a/after.py\n"
+    )
+    assert parse_plan_files_modified(plan) == ["a/before.py", "a/after.py"]
+
+
+def test_tilde_fence_is_also_skipped() -> None:
+    """A ``~~~``-fenced example is ignored, same as a backtick fence (#1917).
+
+    Mirrors test_check_plan_scope_conformance.py's sibling test.
+    """
+    plan = (
+        "# Plan\n\n"
+        "~~~\n"
+        "## Files Modified\n"
+        "- src/fake_illustration.py\n"
+        "~~~\n\n"
+        "## Files Modified\n"
+        "- src/real_target.py\n"
+    )
+    assert parse_plan_files_modified(plan) == ["src/real_target.py"]
+
+
+def test_indented_fence_marker_still_toggles() -> None:
+    """A fence marker indented under a list item still opens/closes the fence.
+
+    Mirrors test_check_plan_scope_conformance.py's sibling test.
+    """
+    plan = (
+        "## Files Modified\n"
+        "- a/before.py\n"
+        "- example:\n"
+        "  ```\n"
+        "  ## Files Modified\n"
+        "  - a/fake.py\n"
+        "  ```\n"
         "- a/after.py\n"
     )
     assert parse_plan_files_modified(plan) == ["a/before.py", "a/after.py"]
