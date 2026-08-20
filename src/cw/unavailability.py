@@ -22,6 +22,14 @@ signature list below with an explicit comment pointing back here (pattern:
 ``cw.dev_queue.lifecycle._PLAN_SPEC_MARKER`` mirroring ``gh._PLAN_MARKER``).
 Keep the three copies in sync — see
 ``test_unavailability_signatures_mirrored_in_prose`` for the drift guard.
+
+A separate, sibling ``PROVIDER_UNAVAILABILITY_SIGNATURES`` table (#1923)
+covers the Anthropic-API provider-overload (HTTP 529) family. It is
+deliberately NOT folded into ``UNAVAILABILITY_SIGNATURES`` above: that
+table's drift guard requires every signature appear verbatim in
+``auto-dev-finalize.md``/``auto-dev-intake.md``, two prose files scoped to
+git/gh subprocess failures that have no business carrying an API-error
+string. See ``classify_provider_unavailability`` below.
 """
 
 from __future__ import annotations
@@ -71,6 +79,35 @@ def classify_unavailability(text: str) -> str | None:
     cw.review_strategy/cw.collision's safe-default philosophy.
     """
     for signature, family in UNAVAILABILITY_SIGNATURES:
+        if signature in text:
+            return family
+    return None
+
+
+# Sibling family: Anthropic provider overload (HTTP 529). Deliberately a
+# separate table from UNAVAILABILITY_SIGNATURES -- see the module docstring.
+FAMILY_PROVIDER_OVERLOAD = "provider_overload"
+
+# (signature substring, family) pairs, checked in order, first match wins.
+# Signature lifted verbatim from a live capture: dev-1751 impl worker,
+# session 286032f7-47ee-4985-a45d-e7a946aa1d9d, 8 occurrences starting
+# 2026-08-18T17:27:09.071Z. A deliberate sibling table per the #1923 SPLIT
+# decision, not a member of UNAVAILABILITY_SIGNATURES.
+PROVIDER_UNAVAILABILITY_SIGNATURES: tuple[tuple[str, str], ...] = (
+    ("API Error: 529 Overloaded", FAMILY_PROVIDER_OVERLOAD),
+)
+
+
+def classify_provider_unavailability(text: str) -> str | None:
+    """Return the matched provider-overload family, or None if no signature matches.
+
+    Same substring-match/never-raises contract as classify_unavailability.
+    Kept as an independent small loop rather than factored through a shared
+    helper with classify_unavailability -- a 1-entry table doesn't justify
+    coupling two independently-evolving tables through shared infra; revisit
+    if a third table is ever added.
+    """
+    for signature, family in PROVIDER_UNAVAILABILITY_SIGNATURES:
         if signature in text:
             return family
     return None

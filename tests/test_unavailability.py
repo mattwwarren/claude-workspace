@@ -194,10 +194,15 @@ class TestClassifyProviderUnavailability:
     ) -> None:
         """Genuine disjointness, not accidental non-overlap (#1923)."""
         assert (
-            classify_provider_unavailability("...git@github.com: Permission denied (publickey).")
+            classify_provider_unavailability(
+                "...git@github.com: Permission denied (publickey)."
+            )
             is None
         )
-        assert classify_provider_unavailability("gh: Something Went Wrong (HTTP 500)") is None
+        assert (
+            classify_provider_unavailability("gh: Something Went Wrong (HTTP 500)")
+            is None
+        )
 
     def test_provider_unavailability_signatures_table_is_frozen(self) -> None:
         assert isinstance(PROVIDER_UNAVAILABILITY_SIGNATURES, tuple)
