@@ -56,6 +56,7 @@ from cw.reconcile import (
     revert_timed_out_tasks,
 )
 from tests._reconcile_helpers import (
+    PROVIDER_OVERLOAD_TEXT,
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
     _inflate_scope,
@@ -64,6 +65,7 @@ from tests._reconcile_helpers import (
     _mk_daemon_session_with_worktree,
     _mk_headless_daemon_session,
     _mk_session,
+    _notification_record,
     _shipped_salvage_payload,
     _stage_complete_payload,
     _ul_record,
@@ -723,6 +725,164 @@ def test_detect_usage_limit_tail_none_when_no_record_has_timestamp(
     assert detection.detected is True
     assert detection.matched_at is None
     assert detection.transcript_tail_at is None
+
+
+# ---------------------------------------------------------------------------
+# #1923: provider-overload (API 529) diagnostic scanner — _detect_provider_overload
+# ---------------------------------------------------------------------------
+
+
+def test_detect_provider_overload_returns_true_for_queue_operation_record(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queue-operation-typed record carrying the captured 529 text → True."""
+    from cw.reconcile import _detect_provider_overload
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-529-qo"
+    sess = _mk_headless_daemon_session("po-qo", worktree, started_at)
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [_notification_record(PROVIDER_OVERLOAD_TEXT, kind="queue-operation")],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_provider_overload(sess) is True
+
+
+def test_detect_provider_overload_returns_true_for_user_record(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user-typed record carrying the captured 529 text → True."""
+    from cw.reconcile import _detect_provider_overload
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-529-user"
+    sess = _mk_headless_daemon_session("po-user", worktree, started_at)
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [_notification_record(PROVIDER_OVERLOAD_TEXT, kind="user")],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_provider_overload(sess) is True
+
+
+def test_detect_provider_overload_returns_false_when_absent(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No matching text anywhere in the transcript → False."""
+    from cw.reconcile import _detect_provider_overload
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-529-absent"
+    sess = _mk_headless_daemon_session("po-absent", worktree, started_at)
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [_notification_record("routine progress update", kind="user")],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_provider_overload(sess) is False
+
+
+def test_detect_provider_overload_returns_false_when_no_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No locatable transcript → False (mirrors _detect_usage_limit's fail-open)."""
+    from cw.reconcile import _detect_provider_overload
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-529-notrans"
+    sess = _mk_headless_daemon_session("po-notrans", worktree, started_at)
+
+    assert _detect_provider_overload(sess) is False
+
+
+def test_detect_provider_overload_ignores_assistant_typed_record(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: an assistant-typed, list-content record carrying the same
+
+    text must NOT be picked up -- proves this scanner does not accidentally
+    piggyback on _iter_assistant_records (#1923).
+    """
+    from cw.reconcile import _detect_provider_overload
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-529-assistant"
+    sess = _mk_headless_daemon_session("po-assistant", worktree, started_at)
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [_ul_record(PROVIDER_OVERLOAD_TEXT)],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_provider_overload(sess) is False
+
+
+def test_detect_provider_overload_is_case_sensitive(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lowercased variant of the signature must NOT match."""
+    from cw.reconcile import _detect_provider_overload
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-529-case"
+    sess = _mk_headless_daemon_session("po-case", worktree, started_at)
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [_notification_record("api error: 529 overloaded", kind="user")],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_provider_overload(sess) is False
 
 
 # ---------------------------------------------------------------------------

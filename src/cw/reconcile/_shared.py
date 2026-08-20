@@ -76,6 +76,7 @@ from cw.result import (
     emit_result_on,
     has_terminal_result,
 )
+from cw.unavailability import FAMILY_PROVIDER_OVERLOAD, classify_provider_unavailability
 from cw.worktree import (
     reconcile_result_scope,
     resolve_scope_guard_default_branch,
@@ -432,6 +433,15 @@ class ReapCandidate:
     # disposition and to override a lane's reap_policy: auto. Fail-open: False
     # whenever the evidence is missing or unreadable.
     unresolved_subagent_spawn: bool = False
+    # True when the session's transcript carries the provider-overload
+    # (API 529) signature (#1923). Computed DAEMON-only in phantom detect,
+    # mirroring usage_limit_detected/unresolved_subagent_spawn above.
+    # PAYLOAD-ONLY per A1/R1: surfaced solely in the SESSION_PHANTOM_REVERTED
+    # payload for operator visibility -- never read by resolve_reap_policy,
+    # never aggregated into ReconcileReport.usage_limited or any other report
+    # field, and never overrides reap_policy: signal_only the way
+    # unresolved_subagent_spawn does. Stricter than both cited precedents.
+    provider_overload_detected: bool = False
 
 
 def _apply_correction_signal_fields(
@@ -793,6 +803,63 @@ def _detect_usage_limit(session: Session) -> UsageLimitDetection:
         matched_at=matched_at,
         transcript_tail_at=_last_content_entry_timestamp(transcript),
     )
+
+
+def _iter_notification_records(path: Path) -> Iterator[str]:
+    """Yield text from task-notification records in a jsonl transcript (#1923).
+
+    Unlike :func:`_iter_assistant_records`, which requires ``type ==
+    "assistant"`` and a list-shaped ``message.content``, this yields text
+    from two different record shapes -- both lifted verbatim from a live
+    capture (dev-1751 impl worker, session
+    286032f7-47ee-4985-a45d-e7a946aa1d9d): (a) ``type == "user"`` records
+    whose ``message.content`` is a bare string, and (b) ``type ==
+    "queue-operation"`` records whose top-level ``content`` is a bare
+    string. Swallows ``OSError`` like ``_iter_assistant_records``; yields
+    nothing on any read error.
+    """
+    try:
+        with path.open() as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                record_type = record.get("type")
+                if record_type == "user":
+                    message = record.get("message")
+                    if isinstance(message, dict):
+                        content = message.get("content")
+                        if isinstance(content, str):
+                            yield content
+                elif record_type == "queue-operation":
+                    content = record.get("content")
+                    if isinstance(content, str):
+                        yield content
+    except OSError:
+        return
+
+
+def _detect_provider_overload(session: Session) -> bool:
+    """Scan the session's transcript for the provider-overload (API 529)
+
+    signature (#1923). Uses :func:`_locate_session_transcript` for precise
+    per-session lookup. Returns True iff any yielded notification text
+    classifies as :data:`FAMILY_PROVIDER_OVERLOAD`; False when the
+    transcript is missing or no text matches. Never raises. Simplified to a
+    plain bool, unlike :class:`UsageLimitDetection` -- this field has no
+    recency-gate/backoff-window consumer (see A1/R1: payload-only, no
+    routing weight), so there is nothing downstream that needs a timestamp.
+    """
+    transcript = _locate_session_transcript(session)
+    if transcript is None:
+        return False
+    for text in _iter_notification_records(transcript):
+        if classify_provider_unavailability(text) == FAMILY_PROVIDER_OVERLOAD:
+            return True
+    return False
 
 
 def _usage_limit_is_recent(
@@ -1886,6 +1953,7 @@ def _emit_reap_proposed(
 # ``cw.reconcile._shared.NAME`` intercepts all callers. These helpers are not
 # called elsewhere inside this module, so there is no dual-name hazard.
 detect_usage_limit = _detect_usage_limit
+detect_provider_overload = _detect_provider_overload
 usage_limit_is_recent = _usage_limit_is_recent
 salvage_terminal_result = _salvage_terminal_result
 worktree_dirty_by_path = _worktree_dirty_by_path
