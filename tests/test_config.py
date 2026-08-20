@@ -2066,6 +2066,75 @@ class TestOrchestratorConfigOperatorGithubLoginByRepo:
             )
 
 
+class TestBusyWaitGuardConfigFields:
+    """The #1946 busy-wait guard's per-lane-with-global-default knobs."""
+
+    def test_global_defaults_are_on(self) -> None:
+        """Default-on: the guard fires unless an operator opts out."""
+        from cw.models import OrchestratorConfig
+
+        config = OrchestratorConfig()
+        assert config.busy_wait_guard_enabled is True
+        assert config.busy_wait_guard_repeat_threshold == 3
+        assert config.busy_wait_guard_window_seconds == 300
+
+    def test_lane_overrides_default_to_none(self) -> None:
+        """None on a lane means "inherit", mirroring LaneConfig.reap_policy."""
+        from cw.models import LaneConfig
+
+        lane = LaneConfig(name="fast")
+        assert lane.busy_wait_guard_enabled is None
+        assert lane.busy_wait_guard_repeat_threshold is None
+        assert lane.busy_wait_guard_window_seconds is None
+
+    def test_global_overrides_round_trip(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        config = OrchestratorConfig.model_validate(
+            {
+                "busy_wait_guard_enabled": False,
+                "busy_wait_guard_repeat_threshold": 7,
+                "busy_wait_guard_window_seconds": 60,
+            }
+        )
+        assert config.busy_wait_guard_enabled is False
+        assert config.busy_wait_guard_repeat_threshold == 7
+        assert config.busy_wait_guard_window_seconds == 60
+
+    def test_lane_overrides_round_trip_via_clients_yaml(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A lane block in clients.yaml loads the three overrides."""
+        ws_dir = tmp_config_dir / "ws"
+        ws_dir.mkdir()
+        clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_path.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    lanes:\n"
+            "      - name: fast\n"
+            "        busy_wait_guard_enabled: false\n"
+            "        busy_wait_guard_repeat_threshold: 2\n"
+            "        busy_wait_guard_window_seconds: 120\n"
+        )
+
+        lane = load_clients()["acme"].lanes[0]
+        assert lane.busy_wait_guard_enabled is False
+        assert lane.busy_wait_guard_repeat_threshold == 2
+        assert lane.busy_wait_guard_window_seconds == 120
+
+    def test_wrong_type_raises_validation_error(self) -> None:
+        from pydantic import ValidationError
+
+        from cw.models import OrchestratorConfig
+
+        with pytest.raises(ValidationError):
+            OrchestratorConfig.model_validate(
+                {"busy_wait_guard_repeat_threshold": "many"}
+            )
+
+
 # ---------------------------------------------------------------------------
 # TestDispatchStateLock
 # ---------------------------------------------------------------------------

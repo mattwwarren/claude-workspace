@@ -38,7 +38,11 @@ from cw.models import (
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
 )
-from tests.conftest import _invoke_hook_command, _write_hook_context_file
+from tests.conftest import (
+    _hold_context_lock,
+    _invoke_hook_command,
+    _write_hook_context_file,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -245,16 +249,12 @@ def test_pre_hook_fails_open_on_lock_exhaustion(
     reads the module-global where it is *defined*, so patching the
     re-exported copy would silently be a no-op.
     """
-    import fcntl
-
     monkeypatch.setattr(
         "cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
     )
     worktree = _stamped_worktree(tmp_path)
-    lock_path = worktree / ".claude" / "cw-context.json.lock"
 
-    with lock_path.open("w") as holder:
-        fcntl.flock(holder, fcntl.LOCK_EX)
+    with _hold_context_lock(worktree):
         result = _invoke_hook_command(
             "agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree)
         )
