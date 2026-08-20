@@ -7876,6 +7876,71 @@ class TestApplyStagedDecision:
         assert task.regress_attempts == 1
         assert task.session_id is None
 
+    # -- #1948: worker-declared provider_overload -- same-stage retry ------
+
+    def test_blocked_provider_overload_reverts_to_pending_same_stage(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked + reason=provider_overload -> PENDING, same stage (no
+        regress), charged against the global unproductive-attempts ceiling
+        (not regress_attempts -- this is not a _stage_regress)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PO-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage2_impl", "reason": "provider_overload"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
+        assert task.regress_attempts == 0
+        assert task.unproductive_attempts == 1
+        assert task.session_id is None
+
+    def test_blocked_provider_overload_at_finalize_does_not_stage_regress(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Same blocker reason at FINALIZE stays at FINALIZE -- provider
+        overload is a same-stage retry, never a Rule 5a stage regress to
+        IMPL."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PO-2", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "provider_overload"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.FINALIZE
+        assert task.regress_attempts == 0
+
+    def test_blocked_retry_eligible_true_without_provider_overload_reason_still_parks(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """retry_eligible=True alone does not trigger the same-stage retry --
+        only blocker.reason == 'provider_overload' does. Mandatory negative
+        test per the #1923-round-3 resolution: a generic retry_eligible read
+        would silently start auto-reverting other blocker families."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PO-3", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {
+                "stage": "stage2_impl",
+                "reason": "impl_failed",
+                "retry_eligible": True,
+            },
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "blocked"
+
     # -- #1717: FINALIZE self-heal regress round-trip repeat detection -----
 
     def test_finalize_regress_round_trip_no_commit_emits_repeat_not_silent_rearm(
