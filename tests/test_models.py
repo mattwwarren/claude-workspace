@@ -836,6 +836,41 @@ class TestLaneConfig:
             LaneConfig(name="x", review_recipies={"address_review": True})  # type: ignore[call-arg]
 
 
+class TestBusyWaitGuardConfigBounds:
+    """#1946 review gate: repeat_threshold <= 1 makes _repeat_threshold_tripped's
+    ``matching >= repeat_threshold - 1`` condition always true, blocking every
+    non-bare-noop Bash call on its first occurrence. Field(ge=...) must reject
+    that at both the global and lane-override level."""
+
+    def test_global_repeat_threshold_rejects_one(self) -> None:
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(busy_wait_guard_repeat_threshold=1)
+
+    def test_global_repeat_threshold_accepts_two(self) -> None:
+        config = OrchestratorConfig(busy_wait_guard_repeat_threshold=2)
+        assert config.busy_wait_guard_repeat_threshold == 2
+
+    def test_global_window_seconds_rejects_zero(self) -> None:
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(busy_wait_guard_window_seconds=0)
+
+    def test_global_window_seconds_accepts_one(self) -> None:
+        config = OrchestratorConfig(busy_wait_guard_window_seconds=1)
+        assert config.busy_wait_guard_window_seconds == 1
+
+    def test_lane_repeat_threshold_rejects_one(self) -> None:
+        with pytest.raises(ValidationError):
+            LaneConfig(name="x", busy_wait_guard_repeat_threshold=1)
+
+    def test_lane_repeat_threshold_accepts_none(self) -> None:
+        lane = LaneConfig(name="x")
+        assert lane.busy_wait_guard_repeat_threshold is None
+
+    def test_lane_window_seconds_rejects_zero(self) -> None:
+        with pytest.raises(ValidationError):
+            LaneConfig(name="x", busy_wait_guard_window_seconds=0)
+
+
 class TestStageExecutorConfigExtraForbid:
     """RFC 0005 A1 (dormant); extra='forbid' coverage added by #1200."""
 

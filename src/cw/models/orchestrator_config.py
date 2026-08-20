@@ -202,8 +202,8 @@ class LaneConfig(BaseModel):
     # it (that function's signature is reconcile-specific -- it takes a
     # ReapCandidate, which no hook subprocess ever has).
     busy_wait_guard_enabled: bool | None = None
-    busy_wait_guard_repeat_threshold: int | None = None
-    busy_wait_guard_window_seconds: int | None = None
+    busy_wait_guard_repeat_threshold: int | None = Field(default=None, ge=2)
+    busy_wait_guard_window_seconds: int | None = Field(default=None, ge=1)
     pipeline: StagePipelineConfig | None = None
     # Lane-level operator-signoff override (RFC 0007 Phase 3). None defers to
     # OrchestratorConfig.default_signoff. See GitHub #990.
@@ -534,8 +534,12 @@ class OrchestratorConfig(BaseModel):
     # manufacture -- with the loud ConfigValidationError still reaching every
     # other cw command that reads the same file.
     busy_wait_guard_enabled: bool = True
-    busy_wait_guard_repeat_threshold: int = 3
-    busy_wait_guard_window_seconds: int = 300
+    # ge=2: repeat_threshold - 1 is the guard's block threshold
+    # (_repeat_threshold_tripped); a value <= 1 collapses that to >= 0, which
+    # is always true and blocks every non-bare-noop Bash call on its first
+    # occurrence -- the opposite of the fail-open design goal.
+    busy_wait_guard_repeat_threshold: int = Field(default=3, ge=2)
+    busy_wait_guard_window_seconds: int = Field(default=300, ge=1)
     # Elapsed seconds before reconcile attempts to route an emitted-but-unrouted
     # sentinel (signal_stop never fired). A re-check delay, not a disposition
     # timer: an emitted sentinel is positive evidence the worker completed.

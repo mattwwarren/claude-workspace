@@ -149,7 +149,15 @@ def _extract_bash_command(payload: dict[str, object]) -> tuple[str | None, bool]
             f"tool_input is {type(tool_input).__name__}, expected dict"
         )
         return None, False
-    run_in_background = bool(tool_input.get("run_in_background", False))
+    run_in_background_raw = tool_input.get("run_in_background", False)
+    if isinstance(run_in_background_raw, bool):
+        run_in_background = run_in_background_raw
+    else:
+        _warn_unexpected_shape(
+            f"tool_input.run_in_background is "
+            f"{type(run_in_background_raw).__name__}, expected bool"
+        )
+        run_in_background = False
     command = tool_input.get("command")
     if not isinstance(command, str):
         _warn_unexpected_shape(

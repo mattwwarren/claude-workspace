@@ -76,7 +76,7 @@ _BASH_PRE_PAYLOAD: dict[str, object] = {
 
 
 def _payload(
-    cwd: Path, command: object = "true", *, run_in_background: bool = False
+    cwd: Path, command: object = "true", *, run_in_background: object = False
 ) -> dict[str, object]:
     """Return the Bash payload pointed at *cwd* carrying *command*."""
     return {
@@ -449,6 +449,24 @@ def test_warns_loudly_on_non_string_command(tmp_path: Path) -> None:
     assert "guard-busy-wait" in result.output
     assert "#1946" in result.output
     assert "int" in result.output
+
+
+def test_warns_loudly_on_non_bool_run_in_background_and_still_classifies(
+    tmp_path: Path,
+) -> None:
+    """A non-bool ``run_in_background`` warns, names the observed type, and the
+    conservative branch treats it as ``False`` -- the call is still classified
+    (and, for a bare no-op, still blocked) rather than silently skipped."""
+    worktree = _worktree(tmp_path)
+
+    result = _invoke(worktree, "true", run_in_background="false")
+
+    assert result.exit_code == _BLOCK_EXIT
+    assert "WARN" in result.output
+    assert "guard-busy-wait" in result.output
+    assert "#1946" in result.output
+    assert "run_in_background" in result.output
+    assert "str" in result.output
 
 
 def test_no_warning_on_empty_stdin() -> None:
