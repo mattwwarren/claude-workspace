@@ -934,6 +934,45 @@ not integer) used elsewhere in this file, derived from
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 
+### `guard.busy_wait_blocked`
+
+**Emitter:** the `cw guard-busy-wait` PreToolUse hook subprocess
+(`cw.cli.guard_busy_wait`), running inside the dispatched worker — the same
+emitter class as `cw signal-stop`, which already records `session.completed`
+from a hook subprocess.
+**Payload:**
+```json
+{
+  "client": "<str | null>",
+  "lane": "<str | null>",
+  "reason": "bare_noop | bare_sleep | repeat_threshold",
+  "command_hash": "<str>",
+  "repeat_threshold": "<int | null>",
+  "window_seconds": "<int | null>"
+}
+```
+**Semantics:** Emitted every time the guard blocks a Bash tool call (exit 2).
+`reason` names which rule tripped: `bare_noop` for a bare `true`/`:`,
+`bare_sleep` for a bare `sleep N` with no follow-on work, and
+`repeat_threshold` for the same command repeated past the configured count
+inside the rolling window. `repeat_threshold`/`window_seconds` carry the
+resolved values that tripped, and are `null` for the two stateless reasons.
+
+`command_hash` is a truncated SHA-256 of the whitespace-normalized command,
+**not** the command text — shell commands routinely embed secrets inline, and
+neither the guard nor this record needs anything but equality. Two events
+carrying the same hash blocked the same command.
+
+The block itself is the enforcement; this event is the observability half. A
+block that only reached the worker's own stderr would leave a false positive
+indistinguishable from a call the worker never made, so the record is emitted
+best-effort in its own isolated `try`/`except`: a failure to write it never
+suppresses the block. Nothing consumes this event — it exists for the operator
+and for `cw event tail`.
+
+`correlation_id` is the worker's cw `session_id` from its
+`.claude/cw-context.json`, or `null` when the context is unreadable.
+
 ### `concierge.recovered`
 
 **Emitter:** `run_concierge_recoveries` (`cw.reconcile.concierge`)
