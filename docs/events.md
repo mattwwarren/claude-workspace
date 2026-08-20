@@ -270,33 +270,85 @@ worker may recover and continue. Visible in `cw event tail` and
   "pending": 2,
   "running": 1,
   "cap": 3,
-  "skip_reason": "disk_pressure_gate | freshness_gate | usage_limited | cap_full | lane_cap_blocked | attempt_cap_blocked | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
+  "skip_reason": "availability_gate | ssh_key_gate | disk_pressure_gate | freshness_gate | usage_limited | host_capacity_gated | cap_full | lane_cap_blocked | attempt_cap_blocked | stale_pr_blocked | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
 }
 ```
 **Semantics:** Emitted once per client per tick. `claimed` is the number of
 tasks newly spawned this tick. `pending` is the pre-claim count (read before
 the claim loop). `running` is the count of RUNNING tasks at tick start.
-`skip_reason` follows first-match precedence: `disk_pressure_gate` (client's
-worktree-base mount below `disk_pressure_min_free_gb` free, checked before
-the freshness gate's `git pull`) → `freshness_gate` (local branch
-behind origin, checked before anything else) → `usage_limited` (API rate
-limit; backoff armed) → `cap_full` (running ≥ cap) → `lane_cap_blocked`
-(pending tasks exist but all lane slots occupied) → `spawn_error` (exception
-during spawn) → `lane_circuit_paused` (per-lane circuit breaker tripped after
-consecutive spawn errors, #875) → `spawn_error_backoff` (pending tasks exist
-but all in exponential backoff after spawn_error, next_eligible_at in the
-future) → `no_pending` (nothing to claim) → `none` (at least one session
-spawned). `attempt_cap_blocked` sits outside this per-client precedence
-chain: it is emitted **per task** (payload carries `ticket_id`) when the
-attempt ceiling parks a task, and additionally carries `attempt_ceiling`
-(int) — the *resolved* ceiling that actually fired (#1751). Read that field,
-not `global_attempt_ceiling`: the ceiling is lane-scoped, so the row's lane
-may have overridden the global value. Optional extra keys: `lanes` (per-lane
-breakdown), and on freshness-gate ticks `freshness_detail`
+`skip_reason` follows first-match precedence: `availability_gate` (fleet-wide
+gh-availability preflight probe, RFC 0011 A5, checked before any per-client
+gate so a real GitHub outage short-circuits every client before any pays the
+freshness git-fetch cost) → `ssh_key_gate` (#927; per-client `ssh-add -l`
+preflight — a session spawned without an unlocked SSH key cannot push and
+would burn a slot on a guaranteed-failing session) → `disk_pressure_gate`
+(client's worktree-base mount below `disk_pressure_min_free_gb` free,
+checked before the freshness gate's `git pull`) → `freshness_gate` (local
+branch behind origin) → `usage_limited` (API rate limit; backoff armed) →
+`host_capacity_gated` (#1444; fleet-wide `host_session_budget` ceiling on
+concurrently-running DAEMON sessions across the whole host, checked ahead of
+the per-client cap so an operator can distinguish "this client's own cap is
+full" from "the whole host is out of budget") → `cap_full` (running ≥ cap)
+→ `lane_cap_blocked` (pending tasks exist but all lane slots occupied) →
+`spawn_error` (exception during spawn) → `lane_circuit_paused` (per-lane
+circuit breaker tripped after consecutive spawn errors, #875) →
+`spawn_error_backoff` (pending tasks exist but all in exponential backoff
+after spawn_error, next_eligible_at in the future) → `no_pending` (nothing
+to claim) → `none` (at least one session spawned). Two values sit outside
+this per-client precedence chain, emitted **per task** instead:
+`attempt_cap_blocked` (payload carries `ticket_id`) when the attempt
+ceiling parks a task, additionally carrying `attempt_ceiling` (int) — the
+*resolved* ceiling that actually fired (#1751); read that field, not
+`global_attempt_ceiling`, since the ceiling is lane-scoped and the row's
+lane may have overridden the global value. `stale_pr_blocked` (#1862) when
+the pre-dispatch open-PR gate parks a PLAN/IMPL-stage task whose branch
+already carries an open, unmerged PR — payload carries `ticket_id`, no
+`attempt_ceiling`.
+
+Optional extra keys, grouped by which skip-reason path emits them: `lanes`
+(per-lane breakdown) is present on the main claim-loop tick and every
+per-client skip path (`availability_gate`, `ssh_key_gate`,
+`disk_pressure_gate`, `freshness_gate`, `usage_limited`), but absent on the
+two per-task ticks (`attempt_cap_blocked`, `stale_pr_blocked`).
+`lane_occupants` (`dict[str, list[{"ticket_id": str, "status": str}]]`, a
+top-level key — deliberately *not* nested inside `lanes`, since
+`orchestrate.py`'s `_extract_lanes` hard-filters `lanes` values to
+numerics and would silently strip a nested ticket-id string, #1243) and
+`occupied` (int, total occupant count across lanes) are present on that
+same set of ticks. `host_running` (int) and `host_budget` (int | null) are
+present only on the main claim-loop tick — the one tick that can carry
+`host_capacity_gated`. `disk_free_gb` / `disk_min_free_gb` (float) are
+present only on `disk_pressure_gate` ticks. `freshness_detail`
 (`non_main_head | main_behind_origin | main_dirty_checkout |
-main_diverged_from_origin | main_detached_head`) plus `blocked_branch`.
-`correlation_id` is `None` (per-client aggregate, not per-ticket). Consumers
-MUST tolerate unknown `skip_reason` values.
+main_diverged_from_origin | main_detached_head`) plus `blocked_branch` are
+present only on `freshness_gate` ticks.
+
+`correlation_id` is `None` (per-client aggregate, not per-ticket).
+Consumers MUST tolerate unknown `skip_reason` values.
+
+### `gate.ssh_key_bypassed`
+
+**Emitter:** `_emit_ssh_key_bypass` (`cw.dispatch.gating`, called from `cw.dispatch.tick`)
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "probe_result": false,
+  "gate_enabled": false
+}
+```
+**Semantics:** GitHub #1437. Emitted when `ssh_key_gate_enabled` is `false`
+and the per-client `ssh-add -l` preflight probe (#927) reports the SSH
+agent key unavailable — the operator has explicitly disabled the gate, so
+the client dispatches anyway instead of being held PENDING, and this event
+records that the skip was suppressed. `probe_result` is the raw probe
+outcome (`false` means unavailable) and `gate_enabled` echoes the config
+flag that suppressed the skip. Earlier sibling of
+`gate.disk_pressure_bypassed` (#1887), which mirrors this bypass shape;
+forwarded to the operator-attention channel by default (same as
+`gate.auto_approved`), since an SSH-key-gate bypass is attention-worthy.
+
+`correlation_id` is `None` (per-client, not per-ticket).
 
 ### `gate.disk_pressure_bypassed`
 
