@@ -10,6 +10,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **#1646 agent-spawn stamp reconfirmed hollow under the async `Agent` tool; `PostToolUse:Agent` wiring removed (#1947):** replaying a live async `Agent(isolation="worktree")` spawn (session `ea2f3d42`/ticket #1902) showed `PostToolUse:Agent` fires at launch-return (`13:12:09.513Z`, paired with the `Async agent launched successfully.` tool_result) — ~3.9s after `PreToolUse:Agent` and ~3.5s *before* the harness's own `turn_duration` record still reported `pendingBackgroundAgentCount: 1`. The `agent_spawn_stamp.unresolved_count` pair balanced back to 0 while the subagent was, per the harness's own accounting, still running, so the phantom sweep's `unresolved_subagent_spawn` signal never fired for this incident (no `session.reap_proposed` event exists for it). `PostToolUse:Agent`/`cw agent-spawn-post` are removed; `cw signal-stop` (`cli/stop_hook.py`) now snapshots/clears the counter off the Stop hook payload's own `background_tasks` list instead — a signal that tracks the harness's live turn-accounting rather than a tool-call return that races ahead of it. The shared lock-then-read-then-write plumbing (`cw.cli.agent_spawn_stamp._context_lock` and friends) moved to `cw.cli._hook_io._write_cw_context_locked` so both `cw agent-spawn-pre` and `cw signal-stop` share one discipline against the same file. `cw.reconcile._shared`'s read side (`extract_unresolved_spawn_count`) is unchanged. See #1886.
 
+- **auto-dev dispatch rules no longer assume a synchronous Agent tool (#1944):**
+  the headless spawn rules in `auto-dev-{plan,impl,review,finalize}.md` were
+  written against a subagent tool that ran synchronously unless given
+  `run_in_background: true`. That parameter no longer exists — Agent spawns are
+  asynchronous unconditionally — which left "block on each before dispatching the
+  next, and do NOT end the parent turn between them" with no blocking primitive
+  to use, and drove sessions to hold the turn open with no-op `Bash` calls
+  instead. One observed headless review pass spent 173 of its 234 `Bash` calls on
+  `true`. The rules now say to end the parent turn and resume on the spawn's
+  completion notification, which is safe: in-flight subagents appear in the Stop
+  hook payload's `background_tasks` as `{"type": "subagent", "status": "running",
+  ...}` (verified empirically), so `cw signal-stop`'s existing deferral guard
+  prevents the #175/#176 orphan. Adds an explicit never-busy-wait rule — after
+  ADR-0014 removed every kill timer, the only automated stuck-worker signal is
+  the transcript-staleness liveness sweep, and no-op polls keep the transcript
+  fresh so a spinning worker classifies as LIVE and `SESSION_NEEDS_ATTENTION`
+  never fires — and documents the parent/subagent asymmetry: a parent's
+  turn-end is a pause, a subagent's is a return, so a subagent must not
+  background work and then return. Also sweeps the dead Agent-tool
+  `run_in_background: true` from `review.md`, `review-monitor.md`, and
+  `review-sweep.md` (issue #1944 remaining-work item 2; Bash usages keep the
+  parameter — it is only the Agent spawn that lost it), and marks the
+  `auto-dev-finalize.md` capture-gate spawn as claude-native-only: opencode's
+  FINALIZE stage consumes the same file (#1670) but has no Agent tool, Stop
+  hook, or completion notifications, so it must run the capture inline.
+
 ### Added
 
 - **Provider-overload (API 529) classifier and reconcile diagnostics (#1923):** `src/cw/unavailability.py` gains a sibling `FAMILY_PROVIDER_OVERLOAD` / `PROVIDER_UNAVAILABILITY_SIGNATURES` table and `classify_provider_unavailability()`, covering the Anthropic API 529-overload signature captured live in dev-1751. Kept separate from the existing `UNAVAILABILITY_SIGNATURES` table since that table's prose drift-guard test requires every signature appear verbatim in files scoped to git/gh subprocess failures, not API errors. The reconcile phantom sweep now surfaces this as a diagnostics-only `provider_overload_detected` field on `ReapCandidate` (DAEMON-only), reported in the `SESSION_PHANTOM_REVERTED` event payload and documented in `docs/events.md`. It carries zero routing weight — `resolve_reap_policy`, `_route_phantom_by_policy`, and `reap_policy: signal_only` are all untouched. Layer 1/3 of the #1923 SPLIT plan; retry-routing (Layer 2) split out to #1948.

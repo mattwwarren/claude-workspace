@@ -573,7 +573,7 @@ gh api "repos/<repo>/pulls/<pr_number>/reviews" \
 
 A login is a bot if it ends with `[bot]`, `-ai`, or `-bot`, or matches a known list (`sourcery-ai`, `coderabbitai`, `dependabot`, `renovate`, `github-actions`, `codecov-commenter`). **Exception:** `sonarqubecloud` / `sonarcloud` / `sonarqube` (with or without `[bot]`) BLOCK merge and must be treated as human-equivalent — fix their findings, do not skip.
 
-Dispatch one background agent per PR (parallel-safe — each operates in its own worktree). Use `Task` tool with `subagent_type: "general-purpose"`, `model: "sonnet"`, `run_in_background: true`.
+Dispatch one agent per PR (parallel-safe — each operates in its own worktree). Use the Agent tool with `subagent_type: "general-purpose"`, `model: "sonnet"` (spawns are async unconditionally — `run_in_background` is no longer a parameter; see #1944).
 
 **Prompt template** (substitute placeholders per PR):
 
@@ -807,7 +807,7 @@ For each monitored PR where `role == "author"`:
    gh pr comment <pr_number> --body "Promoting from draft to ready for review."
    ```
 
-   **Then immediately dispatch a rebase agent for this PR** using the Step 4b auto-fix prompt template (Bash + `Task` tool, `subagent_type: "general-purpose"`, `model: "sonnet"`, `run_in_background: true`). Substitute the PR's branch and metadata. The agent's `git fetch && git rebase origin/main` is a no-op if the branch is already current, so this is safe even for never-stacked drafts. Increment the daily counter:
+   **Then immediately dispatch a rebase agent for this PR** using the Step 4b auto-fix prompt template (Bash + Agent tool, `subagent_type: "general-purpose"`, `model: "sonnet"`; the spawn is async unconditionally, see #1944). Substitute the PR's branch and metadata. The agent's `git fetch && git rebase origin/main` is a no-op if the branch is already current, so this is safe even for never-stacked drafts. Increment the daily counter:
    ```bash
    ~/.claude/scripts/review_monitor.py record-auto-fix <pr_number> --repo <repo>
    ```

@@ -116,7 +116,7 @@ Use the code-review plugin approach — 3 focused Sonnet agents running in paral
 | **CLAUDE.md Auditor** | Check changes against CLAUDE.md rules. Only flag violations explicitly called out. |
 | **Context Checker** | Read git blame/history of modified lines. Flag regressions or patterns that contradict prior fixes. |
 
-Spawn all 3 as parallel Task agents (sonnet model, `run_in_background: true`). Each gets: the diff, changed file list, CLAUDE.md content, and the output rules above.
+Spawn all 3 as parallel agents in a single message (sonnet model; Agent-tool spawns are async unconditionally — `run_in_background` is no longer a parameter, see #1944). Each gets: the diff, changed file list, CLAUDE.md content, and the output rules above.
 
 ### Deep Review
 
