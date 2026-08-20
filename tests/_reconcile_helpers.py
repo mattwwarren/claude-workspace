@@ -347,6 +347,24 @@ def _ul_record(text: str, timestamp: str | None = None) -> dict[str, object]:
     return record
 
 
+def _notification_record(text: str, kind: str = "user") -> dict[str, object]:
+    """One task-notification record for ``_write_transcript_records`` (#1923).
+
+    Both shapes are lifted verbatim from a live capture (dev-1751 impl
+    worker, session 286032f7-47ee-4985-a45d-e7a946aa1d9d) -- neither is
+    reachable through ``_iter_assistant_records``/``_ul_record``, which
+    require ``type == "assistant"`` and a list-shaped ``message.content``.
+
+    ``kind="user"`` builds a ``type: "user"`` record with a bare-string
+    ``message.content``. ``kind="queue-operation"`` builds a
+    ``type: "queue-operation"`` record with a bare-string top-level
+    ``content`` (no ``message`` key at all).
+    """
+    if kind == "queue-operation":
+        return {"type": "queue-operation", "operation": "enqueue", "content": text}
+    return {"type": "user", "message": {"role": "user", "content": text}}
+
+
 def _make_terminal_payload(status: str, ticket_id: str) -> dict[str, Any]:
     """Build a minimal valid AutoDevResult payload for the given terminal status."""
     # Base shape shared by most statuses.

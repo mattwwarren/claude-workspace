@@ -66,6 +66,7 @@ from tests._reconcile_helpers import (
     _mk_headless_daemon_session,
     _mk_phantom_daemon_session,
     _mk_session,
+    _notification_record,
     _shipped_salvage_payload,
     _stage_complete_payload,
     _state_queue_snapshot,
@@ -1313,6 +1314,105 @@ def test_detect_phantom_candidates_usage_limit_stale_false(
     assert c.usage_limit_detected is False
 
 
+_PROVIDER_OVERLOAD_TEXT = (
+    'Agent "Implement plan for ticket #1751" failed: Agent terminated early '
+    "due to an API error: API Error: 529 Overloaded. This is a server-side "
+    "issue, usually temporary — try again in a moment. If it persists, check "
+    "https://status.claude.com."
+)
+
+
+def test_detect_phantom_candidates_provider_overload_detected_true(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DAEMON phantom with a provider-overload transcript → True (#1923)."""
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-529-phantom"
+    sess = _mk_phantom_daemon_session(
+        "phantom-529-1",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+    )
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [_notification_record(_PROVIDER_OVERLOAD_TEXT, kind="queue-operation")],
+    )
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=started_at
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.CRASH_COMPLETE
+    assert c.provider_overload_detected is True
+
+
+def test_detect_phantom_candidates_provider_overload_false_when_no_transcript(
+    tmp_config_dir: Path,
+) -> None:
+    """DAEMON phantom with no transcript → provider_overload_detected=False (#1923)."""
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-529-notrans", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=started_at
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.CRASH_COMPLETE
+    assert c.provider_overload_detected is False
+
+
+def test_detect_phantom_candidates_provider_overload_false_for_user_origin(
+    tmp_config_dir: Path,
+) -> None:
+    """USER-origin sessions never compute provider_overload_detected (#1923).
+
+    Mirrors the DAEMON-only gate on usage_limit_detected/worktree_dirty --
+    USER sessions have no cw-managed worktree/transcript path to scan.
+    """
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_session("phantom-529-user", "gone-ref-user")
+    sess.origin = SessionOrigin.USER
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=started_at
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.CRASH_COMPLETE
+    assert c.provider_overload_detected is False
+
+
 def test_phantom_sentinel_mismatch_veto_when_transcript_live(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -1962,6 +2062,142 @@ def test_act_on_phantom_dirty_routes_blocked(
     )
     assert len(events) == 1
     assert events[0].payload["worktree_dirty"] is True
+
+
+def test_act_on_phantom_crash_payload_carries_provider_overload_detected_clean(
+    tmp_config_dir: Path,
+) -> None:
+    """A clean CRASH_COMPLETE candidate's payload carries provider_overload_detected
+
+    (#1923). Mirrors test_act_on_phantom_crash_routes_pending, plus the new field.
+    """
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-529-payload-clean", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="phantom-529-payload-clean",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-529-payload-clean",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="phantom-529-payload-clean",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="phantom-529-payload-clean",
+        worktree_dirty=False,
+        provider_overload_detected=True,
+        client="client-a",
+        worktree_path=None,
+    )
+
+    _act_on_phantom_candidates(state, [candidate], now=now, config=_auto_config())
+
+    events = read_events(
+        consumer="test-phantom-529-payload-clean",
+        event_types=[OrchestratorEventType.SESSION_PHANTOM_REVERTED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["provider_overload_detected"] is True
+
+
+def test_act_on_phantom_crash_payload_carries_provider_overload_detected_dirty(
+    tmp_config_dir: Path,
+) -> None:
+    """A dirty CRASH_COMPLETE candidate's payload also carries
+
+    provider_overload_detected (#1923) -- both branches of
+    _emit_phantom_terminal_events share one payload dict.
+    """
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-529-payload-dirty", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="phantom-529-payload-dirty",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-529-payload-dirty",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="phantom-529-payload-dirty",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="phantom-529-payload-dirty",
+        worktree_dirty=True,
+        provider_overload_detected=True,
+        client="client-a",
+        worktree_path=None,
+    )
+
+    _act_on_phantom_candidates(state, [candidate], now=now)
+
+    events = read_events(
+        consumer="test-phantom-529-payload-dirty",
+        event_types=[OrchestratorEventType.SESSION_PHANTOM_REVERTED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["provider_overload_detected"] is True
+
+
+def test_provider_overload_detected_does_not_bypass_signal_only_routing(
+    tmp_config_dir: Path,
+) -> None:
+    """A1/R1 regression (#1923): provider_overload_detected=True on a clean
+
+    CRASH_COMPLETE candidate under reap_policy: signal_only still routes
+    through the ordinary signal_mutations/BLOCKED_ON_USER path exactly like
+    any other signal_only candidate -- it does NOT get
+    unresolved_subagent_spawn's unconditional-override treatment, and
+    _route_phantom_by_policy's auto_candidates/signal_mutations split is
+    unaffected by the new field's value. Modeled on the sibling
+    signal-only routing test (usage_limit_detected) two definitions above.
+    """
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_session("po-so-phantom-1", "gone-ref")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/po-so-phantom-1"
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="po-so-phantom-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="po-so-phantom-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="po-so-phantom-1",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="po-so-phantom-1",
+        worktree_dirty=False,
+        provider_overload_detected=True,
+        client="client-a",
+    )
+
+    reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
+        state, [candidate], now=now, config=OrchestratorConfig()
+    )
+
+    # Not in the auto-reverted-to-PENDING return list; routed to BLOCKED_ON_USER
+    # under the ordinary signal_only disposition, same as any other candidate.
+    assert "po-so-phantom-1" not in reverted
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "po-so-phantom-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+    assert t.disposition == ReapReason.PHANTOM_SURFACE.value
 
 
 # ---------------------------------------------------------------------------
