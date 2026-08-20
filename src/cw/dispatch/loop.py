@@ -480,8 +480,8 @@ def _run_stale_dispatch_watch_registration_guarded() -> None:
         # 2. Logging: _log.exception captures the full traceback.
         # 3. Non-critical: registration is best-effort backfill; skipping a
         #    tick loses nothing, because the pass is a full retroactive
-        #    rescan — the next tick re-derives the identical candidate set
-        #    from unchanged on-disk state.
+        #    rescan — the next tick re-derives whatever candidates remain
+        #    unregistered from current on-disk state.
         # 4. Paired test: tests/test_dispatch.py
         #    TestRunDispatchLoopStaleDispatchWatchHook.
         _log.exception(

@@ -140,6 +140,78 @@ def register_watched_pr(watched: WatchedPr) -> bool:
     return True
 
 
+def register_or_adopt_watched_pr(
+    watched: WatchedPr,
+) -> Literal["inserted", "adopted", "already_active", "collision"]:
+    """Insert *watched*, adopting a pre-existing client-less watch in place.
+
+    GitHub #1927. For ``register_watched_pr``'s ``(repo, pr_number, active)``
+    dedup, a bare ``False`` return is indistinguishable from "already
+    handled" — but for a producer that needs the row itself to carry
+    ``watched.client`` (the ``stale_dispatch_park`` producer, whose park can
+    only self-release via a *client*-tagged watch — see
+    ``cw.reconcile.tasks._merged_pr_numbers_by_client``), an existing
+    client-less watch silently shadowing it is a correctness bug, not a
+    no-op: the park would hold its lane slot indefinitely with no signal.
+
+    Returns:
+
+    * ``"inserted"`` — no active watch for ``(repo, pr_number)`` existed;
+      *watched* was appended (same case ``register_watched_pr`` returns True
+      for).
+    * ``"adopted"`` — an active, client-less watch already existed (the
+      common case: a pre-existing webhook/cli watch, RFC 0011 S2). It is
+      tagged with ``watched.client`` in place rather than shadowed. Safe
+      because no consumer reads ``WatchedPr.client`` except the per-client
+      merge index this exists to feed — the entry's outbound-consent role
+      (RFC 0011 B2, ``resolve_outbound_consent_allowed``) reads only
+      ``pr_url``/``status``.
+    * ``"already_active"`` — an active watch already exists for this exact
+      client (idempotent no-op; unreachable through the current
+      ``stale_dispatch_watch`` caller, whose own pre-filter already excludes
+      this case, but a correct outcome for any other caller of this
+      general-purpose primitive).
+    * ``"collision"`` — an active watch exists for a DIFFERENT, non-``None``
+      client. Nothing is inserted or mutated; a ``watched_pr.collision``
+      event records the park's client, the PR, and the colliding watch's
+      client/source, so the outcome is observable rather than silent.
+    """
+    with _lock():
+        store = load_dev_queue()
+        for existing in store.watched_prs:
+            if not (
+                existing.repo == watched.repo
+                and existing.pr_number == watched.pr_number
+                and existing.status == "active"
+            ):
+                continue
+            if existing.client is None:
+                existing.client = watched.client
+                save_dev_queue(store)
+                return "adopted"
+            if existing.client == watched.client:
+                return "already_active"
+            # Why: emit inline under dev_queue_lock, mirroring
+            # _emit_task_deleted's identical precedent below — record_event
+            # nests _inbox_lock INSIDE dev_queue_lock, never the reverse, so
+            # this is deadlock-safe.
+            record_event(
+                OrchestratorEventType.WATCHED_PR_COLLISION,
+                {
+                    "client": watched.client,
+                    "repo": watched.repo,
+                    "pr_number": watched.pr_number,
+                    "colliding_client": existing.client,
+                    "colliding_source": existing.source,
+                },
+                correlation_id=watched.client,
+            )
+            return "collision"
+        store.watched_prs.append(watched)
+        save_dev_queue(store)
+    return "inserted"
+
+
 def _emit_task_deleted(
     removed: TicketTask, reason: Literal["operator_remove", "operator_clear"]
 ) -> None:

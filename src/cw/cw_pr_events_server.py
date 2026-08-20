@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from cw._util import MCP_EXTRA_MSG
 from cw.event_bus import EventBus
+from cw.gh import github_pr_url
 from cw.pr_events_auth import (
     CW_PR_EVENTS_HMAC_SECRET_ENV,
     SIGNATURE_HEADER,
@@ -149,7 +150,7 @@ def _handle_review_requested_sync(
     reviewer_nodes = [reviewer] if isinstance(reviewer, dict) else []
     requester = payload.get("requester_login")
     requester_login = requester if isinstance(requester, str) else None
-    pr_url = f"https://github.com/{repo}/pull/{pr_number}"
+    pr_url = github_pr_url(repo, pr_number)
     return resolve_and_register_review_request(
         repo=repo,
         pr_number=pr_number,

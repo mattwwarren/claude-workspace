@@ -16,6 +16,7 @@ from cw.gh import (
     current_gh_login,
     fetch_approved_plan_comment,
     fetch_pr_view,
+    github_pr_url,
     post_issue_comment,
     pr_exists_for_branch,
     pr_is_merged_for_ticket,
@@ -23,6 +24,22 @@ from cw.gh import (
 
 if TYPE_CHECKING:
     import pytest
+
+
+class TestGithubPrUrl:
+    """github_pr_url (GitHub #1927): the single shared PR-URL format, used by
+    every WatchedPr producer (webhook, cli, stale_dispatch_park)."""
+
+    def test_builds_expected_url(self) -> None:
+        assert github_pr_url("foo/bar", 70) == "https://github.com/foo/bar/pull/70"
+
+    def test_round_trips_through_pr_hydrate_parse_pr_url(self) -> None:
+        from cw.pr_hydrate import _parse_pr_url
+
+        assert _parse_pr_url(github_pr_url("acme/widgets", 1234)) == (
+            "acme/widgets",
+            1234,
+        )
 
 
 def _make_run_result(returncode: int = 0, stdout: str = "") -> Any:
