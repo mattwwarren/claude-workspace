@@ -786,6 +786,7 @@ def _route_stage_failure(
         # 4/5's no_op/stale_dispatch hardcodes -- a provider outage killing
         # the RUNNING exit is unproductive by definition regardless of
         # whatever partial evidence landed before the API died.
+        prior_session_id = task.session_id
         transition_task_status(task, QueueItemStatus.PENDING, unproductive=True)
         task.session_id = None
         task.stage_base_ref = None
@@ -798,6 +799,8 @@ def _route_stage_failure(
                 "to_stage": task.stage,
                 "reason": "provider_overload_retry",
                 "blocker_reason": blocker_reason,
+                "session_id": prior_session_id,
+                "unproductive_attempts": task.unproductive_attempts,
             },
         )
         return
