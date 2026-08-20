@@ -270,33 +270,41 @@ worker may recover and continue. Visible in `cw event tail` and
   "pending": 2,
   "running": 1,
   "cap": 3,
-  "skip_reason": "disk_pressure_gate | freshness_gate | usage_limited | cap_full | lane_cap_blocked | attempt_cap_blocked | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
+  "skip_reason": "availability_gate | ssh_key_gate | disk_pressure_gate | freshness_gate | usage_limited | host_capacity_gated | cap_full | lane_cap_blocked | attempt_cap_blocked | stale_pr_blocked | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
 }
 ```
 **Semantics:** Emitted once per client per tick. `claimed` is the number of
 tasks newly spawned this tick. `pending` is the pre-claim count (read before
 the claim loop). `running` is the count of RUNNING tasks at tick start.
-`skip_reason` follows first-match precedence: `disk_pressure_gate` (client's
-worktree-base mount below `disk_pressure_min_free_gb` free, checked before
-the freshness gate's `git pull`) → `freshness_gate` (local branch
-behind origin, checked before anything else) → `usage_limited` (API rate
-limit; backoff armed) → `cap_full` (running ≥ cap) → `lane_cap_blocked`
-(pending tasks exist but all lane slots occupied) → `spawn_error` (exception
-during spawn) → `lane_circuit_paused` (per-lane circuit breaker tripped after
-consecutive spawn errors, #875) → `spawn_error_backoff` (pending tasks exist
-but all in exponential backoff after spawn_error, next_eligible_at in the
-future) → `no_pending` (nothing to claim) → `none` (at least one session
-spawned). `attempt_cap_blocked` sits outside this per-client precedence
-chain: it is emitted **per task** (payload carries `ticket_id`) when the
-attempt ceiling parks a task, and additionally carries `attempt_ceiling`
-(int) — the *resolved* ceiling that actually fired (#1751). Read that field,
-not `global_attempt_ceiling`: the ceiling is lane-scoped, so the row's lane
-may have overridden the global value. Optional extra keys: `lanes` (per-lane
-breakdown), and on freshness-gate ticks `freshness_detail`
-(`non_main_head | main_behind_origin | main_dirty_checkout |
-main_diverged_from_origin | main_detached_head`) plus `blocked_branch`.
-`correlation_id` is `None` (per-client aggregate, not per-ticket). Consumers
-MUST tolerate unknown `skip_reason` values.
+`skip_reason` follows first-match precedence: `availability_gate` (fleet-wide
+gh-availability preflight probe, RFC 0011 A5, checked before any per-client
+gate so a real GitHub outage short-circuits every client before any pays the
+freshness git-fetch cost) → `ssh_key_gate` (#927; per-client `ssh-add -l`
+preflight — a session spawned without an unlocked SSH key cannot push and
+would burn a slot on a guaranteed-failing session) → `disk_pressure_gate`
+(client's worktree-base mount below `disk_pressure_min_free_gb` free,
+checked before the freshness gate's `git pull`) → `freshness_gate` (local
+branch behind origin) → `usage_limited` (API rate limit; backoff armed) →
+`host_capacity_gated` (#1444; fleet-wide `host_session_budget` ceiling on
+concurrently-running DAEMON sessions across the whole host, checked ahead of
+the per-client cap so an operator can distinguish "this client's own cap is
+full" from "the whole host is out of budget") → `cap_full` (running ≥ cap)
+→ `lane_cap_blocked` (pending tasks exist but all lane slots occupied) →
+`spawn_error` (exception during spawn) → `lane_circuit_paused` (per-lane
+circuit breaker tripped after consecutive spawn errors, #875) →
+`spawn_error_backoff` (pending tasks exist but all in exponential backoff
+after spawn_error, next_eligible_at in the future) → `no_pending` (nothing
+to claim) → `none` (at least one session spawned). Two values sit outside
+this per-client precedence chain, emitted **per task** instead:
+`attempt_cap_blocked` (payload carries `ticket_id`) when the attempt
+ceiling parks a task, additionally carrying `attempt_ceiling` (int) — the
+*resolved* ceiling that actually fired (#1751); read that field, not
+`global_attempt_ceiling`, since the ceiling is lane-scoped and the row's
+lane may have overridden the global value. `stale_pr_blocked` (#1862) when
+the pre-dispatch open-PR gate parks a PLAN/IMPL-stage task whose branch
+already carries an open, unmerged PR — payload carries `ticket_id`, no
+`attempt_ceiling`. `correlation_id` is `None` (per-client aggregate, not
+per-ticket). Consumers MUST tolerate unknown `skip_reason` values.
 
 ### `gate.disk_pressure_bypassed`
 
