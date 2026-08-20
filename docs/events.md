@@ -303,8 +303,28 @@ ceiling parks a task, additionally carrying `attempt_ceiling` (int) — the
 lane may have overridden the global value. `stale_pr_blocked` (#1862) when
 the pre-dispatch open-PR gate parks a PLAN/IMPL-stage task whose branch
 already carries an open, unmerged PR — payload carries `ticket_id`, no
-`attempt_ceiling`. `correlation_id` is `None` (per-client aggregate, not
-per-ticket). Consumers MUST tolerate unknown `skip_reason` values.
+`attempt_ceiling`.
+
+Optional extra keys, grouped by which skip-reason path emits them: `lanes`
+(per-lane breakdown) is present on the main claim-loop tick and every
+per-client skip path (`availability_gate`, `ssh_key_gate`,
+`disk_pressure_gate`, `freshness_gate`, `usage_limited`), but absent on the
+two per-task ticks (`attempt_cap_blocked`, `stale_pr_blocked`).
+`lane_occupants` (`dict[str, list[{"ticket_id": str, "status": str}]]`, a
+top-level key — deliberately *not* nested inside `lanes`, since
+`orchestrate.py`'s `_extract_lanes` hard-filters `lanes` values to
+numerics and would silently strip a nested ticket-id string, #1243) and
+`occupied` (int, total occupant count across lanes) are present on that
+same set of ticks. `host_running` (int) and `host_budget` (int | null) are
+present only on the main claim-loop tick — the one tick that can carry
+`host_capacity_gated`. `disk_free_gb` / `disk_min_free_gb` (float) are
+present only on `disk_pressure_gate` ticks. `freshness_detail`
+(`non_main_head | main_behind_origin | main_dirty_checkout |
+main_diverged_from_origin | main_detached_head`) plus `blocked_branch` are
+present only on `freshness_gate` ticks.
+
+`correlation_id` is `None` (per-client aggregate, not per-ticket).
+Consumers MUST tolerate unknown `skip_reason` values.
 
 ### `gate.ssh_key_bypassed`
 
