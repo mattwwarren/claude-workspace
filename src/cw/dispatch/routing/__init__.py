@@ -117,6 +117,7 @@ from cw.dispatch.routing.stage_walk import (
     _walk_stage_pointer_forward,
 )
 from cw.events import record_event
+from cw.unavailability import FAMILY_PROVIDER_OVERLOAD
 from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
@@ -899,6 +900,41 @@ def _route_staged_decision(
                     "reason": "finalize_regress",
                     "blocker_reason": blocker_reason,
                     "regress_attempt": task.regress_attempts,
+                },
+            )
+            return True
+        if status == "blocked" and blocker_reason == FAMILY_PROVIDER_OVERLOAD:
+            # #1948: worker-declared provider overload (API 529) is transient and
+            # provider-side; same-stage retry, NOT a _stage_regress -- task.stage
+            # is untouched (no pipeline boundary crossed), so none of
+            # _stage_regress's re-entry machinery (regress_attempts,
+            # regressed_into_stage, pending_operator_comment,
+            # finalize_regress_branch_head) applies. Narrow reason-keyed --
+            # blocker.retry_eligible is never read (operator's #1923-round-3
+            # resolution, carried forward: a generic read would silently start
+            # auto-reverting local_main_diverged_from_origin/operator_unavailable,
+            # which OPERATOR_UNAVAILABLE_BLOCKER_REASONS deliberately excludes).
+            # Bound: the global attempt ceiling (unproductive_attempts /
+            # claim.py's resolve_attempt_ceiling), deliberately NOT
+            # regress_attempts/FINALIZE_REGRESS_CAP -- that cap exists because
+            # _stage_regress already double-bounds against it (lifecycle.py:757);
+            # this branch performs no stage regress, so nothing else bounds it.
+            # unproductive=True hardcoded (not claim_unproductive): mirrors Rule
+            # 4/5's no_op/stale_dispatch hardcodes -- a provider outage killing
+            # the RUNNING exit is unproductive by definition regardless of
+            # whatever partial evidence landed before the API died.
+            transition_task_status(task, QueueItemStatus.PENDING, unproductive=True)
+            task.session_id = None
+            task.stage_base_ref = None
+            record_event(
+                OrchestratorEventType.TICKET_REQUEUED,
+                {
+                    "ticket_id": task.ticket_id,
+                    "client": task.client,
+                    "from_stage": task.stage,
+                    "to_stage": task.stage,
+                    "reason": "provider_overload_retry",
+                    "blocker_reason": blocker_reason,
                 },
             )
             return True
