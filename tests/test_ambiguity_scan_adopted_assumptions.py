@@ -10,15 +10,11 @@ the convention already followed by ``test_consolidated_park.py`` /
 
 from pathlib import Path
 
+from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
 AGENTS = ROOT / ".claude" / "agents"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _agent(name: str) -> str:

@@ -126,6 +126,56 @@ class TestExtractClaimEvidence:
             had_commits=True, had_findings=True, resolution_consumed=True
         )
 
+    def test_producer_shaped_autodevresult_dump_is_read_as_consumed(self) -> None:
+        """#1896: a real producer payload round-tripped through the schema.
+
+        Builds an actual ``AutoDevResult`` (mirroring how ``session.last_result``
+        is persisted — ``model_dump(mode="json")`` of a validated model, per
+        ``src/cw/result.py``), then feeds that dump straight to the extractor,
+        proving the producer-shaped payload — not a hand-built dict — is read
+        as consumed.
+        """
+        from cw.auto_dev_result import AutoDevResult
+
+        payload: dict[str, object] = {
+            "schema_version": 4,
+            "ticket_id": "UP-1896",
+            "status": "ambiguities_pending_resolution",
+            "stage_reached": "stage1_plan",
+            "scope": {
+                "tier": None,
+                "files": 0,
+                "lines_estimate": 0,
+                "lines_actual": None,
+                "forbidden_touched": False,
+            },
+            "plan_source": "generated",
+            "branch": None,
+            "worktree_path": "/tmp/wt",
+            "fork_point_sha": None,
+            "commits": [],
+            "pr": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": None,
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "ambiguities": [{"question": "which cap?"}],
+            "blocker": None,
+            "next_actions": ["user_resolve_cap"],
+            "resolution_consumed": True,
+            "resolution_evidence": {"comment_id": "123", "items": ["R1"]},
+        }
+        result = AutoDevResult.model_validate(payload)
+        dumped = result.model_dump(mode="json")
+
+        assert extract_claim_evidence(dumped).resolution_consumed is True
+
 
 class TestIsUnproductive:
     """OR-combination truth table across the three evidence fields."""

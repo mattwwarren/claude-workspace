@@ -8,25 +8,17 @@ require the ``## Files Modified`` heading the parser anchors on.
 
 from pathlib import Path
 
+from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-COMMANDS = _REPO_ROOT / ".claude" / "commands"
 AGENTS = _REPO_ROOT / ".claude" / "agents"
-
-
-# NOTE: this is another local copy of the `_cmd(name)` helper that
-# tests/test_auto_dev_model_pins.py and tests/test_consolidated_park.py each
-# already carry. Consolidating the duplicated helper into conftest.py is
-# deliberately NOT attempted here — it is tracked separately as #1787.
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text(encoding="utf-8")
 
 
 # NOTE: mirrors the `_agent(name)` / `AGENTS` pair already duplicated locally
 # in tests/test_plan_format_only_findings.py and
-# tests/test_auto_dev_preflight_resolutions.py — no shared module, per this
-# repo's established convention (see the note on `_cmd` above).
+# tests/test_auto_dev_preflight_resolutions.py — no shared module for `_agent`,
+# per this repo's established convention.
 def _agent(name: str) -> str:
     return (AGENTS / name).read_text(encoding="utf-8")
 

@@ -42,6 +42,7 @@ from cw.review_findings import (
     write_review_verdict,
 )
 from tests.conftest import (
+    FindingKwargs,
     _finding_kwargs,
     _make_debt_record,
     _make_diff,
@@ -132,7 +133,7 @@ index 21cc6981..043f6a49 100644
 
 # The real Finding field values from the rejected #1729 SysAdmin Reviewer
 # finding, quoted verbatim from the diagnostics artifact above.
-_PR1729_REJECTED_FINDING_KWARGS: dict[str, object] = {
+_PR1729_REJECTED_FINDING_KWARGS: FindingKwargs = {
     "severity": "SHOULD_FIX",
     "file": "tests/test_dispatch.py",
     "line_start": 9522,
@@ -196,7 +197,7 @@ _PR1729_REJECTED_FINDING_KWARGS: dict[str, object] = {
 # is empty), and the real post-change function this finding targets is named
 # ``test_breadcrumb_eligible_paused_statuses_composition`` (confirmed via
 # `git show 494414f8:tests/test_dispatch.py`).
-_PR1729_9491_MUST_FIX_FINDING_KWARGS: dict[str, object] = {
+_PR1729_9491_MUST_FIX_FINDING_KWARGS: FindingKwargs = {
     "severity": "MUST_FIX",
     "file": "tests/test_dispatch.py",
     "line_start": 9491,
@@ -755,8 +756,12 @@ class TestSeverityAndDispositionLiterals:
 
     def test_invalid_disposition_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            AcceptedFinding(
-                finding=_make_finding(), reviewers=["r"], disposition="wontfix"
+            AcceptedFinding.model_validate(
+                {
+                    "finding": _make_finding(),
+                    "reviewers": ["r"],
+                    "disposition": "wontfix",
+                }
             )
 
 
@@ -781,27 +786,32 @@ class TestRejectionReasonLiteral:
             _make_reviewer_doc(bad), diff
         )
         assert rejected
-        assert all(r.reason != "escalation_evidence_not_in_diff" for r in rejected)
+        escalation_only_reason: str = "escalation_evidence_not_in_diff"
+        assert all(r.reason != escalation_only_reason for r in rejected)
 
     def test_rejected_finding_reason_rejects_escalation_value(self) -> None:
         # R6 (#1236): RejectedFinding.reason uses the split RejectedFindingReason
         # Literal, which excludes the escalation-only value.
         with pytest.raises(ValidationError):
-            RejectedFinding(
-                raw={},
-                reviewer_role="R",
-                reason="escalation_evidence_not_in_diff",
+            RejectedFinding.model_validate(
+                {
+                    "raw": {},
+                    "reviewer_role": "R",
+                    "reason": "escalation_evidence_not_in_diff",
+                }
             )
 
     def test_stripped_escalation_reason_rejects_core_value(self) -> None:
         # R6 (#1236): StrippedEscalation.reason uses EscalationStripReason, which
         # excludes every core rejection reason.
         with pytest.raises(ValidationError):
-            StrippedEscalation(
-                reviewer_role="R",
-                finding_index=0,
-                target_reviewer="Perf Reviewer",
-                reason="evidence_not_in_diff",
+            StrippedEscalation.model_validate(
+                {
+                    "reviewer_role": "R",
+                    "finding_index": 0,
+                    "target_reviewer": "Perf Reviewer",
+                    "reason": "evidence_not_in_diff",
+                }
             )
 
     def test_unanchored_is_valid_rejection_reason_literal(self) -> None:

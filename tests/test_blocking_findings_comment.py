@@ -3,8 +3,9 @@
 Pure-markdown assertions over the auto-dev pipeline instruction files,
 following the ``read_text()`` + literal-substring/window convention of
 ``test_consolidated_park.py`` / ``test_plan_persistence.py``. ``_cmd`` is
-duplicated locally per the established convention; ``_after``/``_nearby`` are
-imported from ``test_auto_dev_preflight_resolutions`` rather than duplicated.
+imported from ``tests.conftest`` (#1787) and ``_doc`` stays a local reader;
+``_after``/``_nearby`` are imported from
+``test_auto_dev_preflight_resolutions`` rather than duplicated.
 
 Background: a `plan_unreviewable`, `plan_unsound`, or `review_blocked`
 headless exit carries the blocking MUST_FIX finding(s) only inside the
@@ -18,10 +19,10 @@ session transcript. This adds a single shared, greppable header,
 
 from pathlib import Path
 
+from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
 DOCS = ROOT / "docs"
 
 HEADER = "## Blocking Review Findings"
@@ -101,10 +102,6 @@ MEANING_ROW_PLAN_DEVIATION_ANCHOR = (
     "from an explicit plan requirement/prohibition) survived the fix loop or "
     "was judged beyond fix-loop scope."
 )
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _doc(name: str) -> str:

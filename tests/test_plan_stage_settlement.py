@@ -3,8 +3,9 @@
 Pure-markdown assertions over the auto-dev pipeline instruction files,
 following the ``read_text()`` + literal-substring/window convention of
 ``test_auto_dev_preflight_resolutions.py`` / ``test_plan_persistence.py`` /
-``test_consolidated_park.py``. ``_cmd``/``_agent`` are duplicated locally per
-the established convention; ``_after``/``_nearby`` are imported from
+``test_consolidated_park.py``. ``_cmd`` is imported from ``tests.conftest``
+(#1787) and ``_agent`` remains a local duplicate per the established
+convention; ``_after``/``_nearby`` are imported from
 ``test_auto_dev_preflight_resolutions`` and
 ``_step1c_prompt_must_include_window`` from
 ``test_ambiguity_scan_adopted_assumptions`` rather than re-derived.
@@ -24,13 +25,13 @@ the reviewer always receives the complete live-fetched stream.
 import re
 from pathlib import Path
 
+from tests.conftest import _cmd
 from tests.test_ambiguity_scan_adopted_assumptions import (
     _step1c_prompt_must_include_window,
 )
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
 AGENTS = ROOT / ".claude" / "agents"
 
 DRAFT_FILE = ".cw/plan-draft.md"
@@ -61,10 +62,6 @@ DEFERRED_WIRING_ANCHOR = "**`DEFERRED` wiring (R7, active registration):**"
 
 PM_SETTLED_HEADING = "### Settled items are out of scope (do not re-raise)"
 PM_1593_HEADING = "### Before surfacing: check the plan's own resolution record"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _agent(name: str) -> str:
@@ -765,3 +762,99 @@ def test_stub_check_silent_when_all_stubs_classified() -> None:
         "If none remain, the check passes silently and evaluation proceeds to "
         "the cap check below — a fully-resolved round never trips it." in stub
     )
+
+
+# ---------------------------------------------------------------------------
+# #1896 -- resolution_consumed producer wiring
+# ---------------------------------------------------------------------------
+
+
+def _stage1_completion_section() -> str:
+    content = _cmd("auto-dev-plan.md")
+    start = content.index("## Stage 1 Completion (headless only)")
+    return content[start:]
+
+
+def _stage1_completion_json_block() -> str:
+    section = _stage1_completion_section()
+    start = section.index("<<<AUTO_DEV_RESULT")
+    end = section.index("AUTO_DEV_RESULT>>>", start)
+    return section[start:end]
+
+
+def test_stage_1_completion_sentinel_template_includes_resolution_fields() -> None:
+    """The Stage 1 Completion sentinel template carries both new keys (#1896)."""
+    json_block = _stage1_completion_json_block()
+    assert '"resolution_consumed"' in json_block
+    assert '"resolution_evidence"' in json_block
+
+    section = _stage1_completion_section()
+    window = _after(section, "<<<AUTO_DEV_RESULT", span=3000)
+    assert "must include both keys only if this round settled" in window
+    assert "Step 1c.0 step 5" in window
+    assert "must not include them otherwise" in window
+
+
+def test_step_4c_exit_bullets_state_consumed_or_omit_rule() -> None:
+    """Each of the three Step 4c pause EXIT bullets states the consumed/omit rule."""
+    section = _step1c_headless_section()
+    clause = (
+        "If this round settled ≥1 item via Step 1c.0 step 5, include "
+        "`resolution_consumed: true` and `resolution_evidence`; otherwise omit "
+        "both keys."
+    )
+    for anchor in EXIT_BULLET_ANCHORS:
+        bullet = _exit_bullet(anchor)
+        assert clause in bullet, f"missing consumed/omit clause on bullet {anchor!r}"
+    assert section.count(clause) == 3
+
+
+def test_settled_item_cannot_yield_second_resolution_evidence_candidate() -> None:
+    """An already-settled item can never mint a second resolution_evidence candidate.
+
+    Three facts, read together, establish this in prose a reader can point to:
+
+    1. Step 1c.0's settlement machinery (step 4 transcription, step 5
+       recording) only ever processes "still-open items from step 2" — the
+       currently-open numbered items in the *newest* `## Pending Verification
+       Scan` comment. An already-settled item is never among those (it was
+       removed from the open set the round it settled).
+    2. The Product Manager Reviewer's `## Settled Plan Items` exclusion
+       (`PM_SETTLED_HEADING`) suppresses a settled item by content match and
+       confers no re-eligibility — a suppressed candidate is never surfaced,
+       so it is never posted into a future `## Pending Verification Scan`
+       comment for step 2 to find.
+    3. The new `resolution_evidence` candidate (#1896) attaches only to items
+       settled by step 4/5's *own current-round transcription pass* — never a
+       `plan-stage-settled` marker merely found already present from a prior
+       round.
+    """
+    block = _step1c0_block()
+
+    # (1) Settlement is scoped to still-open items from step 2's newest park.
+    assert "For each still-open item from step 2" in block
+    assert (
+        "Locate the newest `## Pending Verification Scan` comment in the "
+        "live-fetched comments. It defines the currently-open numbered items" in block
+    )
+
+    # (2) PM Reviewer's exclusion is content-match and confers no re-eligibility.
+    content = _agent("product-manager-reviewer.md")
+    pm_window = _after(content, PM_SETTLED_HEADING, span=1400)
+    assert "Exclusion is by content match, not by number" in pm_window
+    assert "suppress the candidate entirely" in pm_window
+    assert (
+        "`## Settled Plan Items` closes specific *questions* by identity" in pm_window
+    )
+
+    # (3) The resolution_evidence candidate is scoped to this round's own
+    #     step 4/5 transcription pass, never a prior-round marker found present.
+    window = _after(block, "**Resolution-evidence candidate (#1896).**", span=900)
+    assert "settles ≥1 item in this round's own transcription pass" in window
+    assert "Scoped strictly to items settled by step 4's transcription in " in window
+    assert "this round's own pass" in window
+    assert (
+        "a `plan-stage-settled` marker merely found already present from a "
+        "prior round is not among" in window
+    )
+    assert "can never mint a second `resolution_evidence` candidate" in window

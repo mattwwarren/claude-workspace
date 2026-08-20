@@ -3,8 +3,8 @@
 Pure-markdown assertions over the auto-dev pipeline instruction files,
 following the ``read_text()`` + literal-substring/window convention of
 ``test_auto_dev_preflight_resolutions.py`` / ``test_plan_persistence.py``.
-``_cmd`` is duplicated locally per the established convention; ``_after`` is
-imported from ``test_auto_dev_preflight_resolutions``.
+``_cmd`` is imported from ``tests.conftest`` (#1787); ``_after`` is imported
+from ``test_auto_dev_preflight_resolutions``.
 
 Background: Stage 1's human-gated exits fired serially — the Step 1c parks
 happened before the Step 1f plan-quality stations ever ran, and the
@@ -15,18 +15,10 @@ before any human-gated exit and posts ONE ``## Pending Verification Scan``
 comment, so tickets converge in two rounds instead of 3-6.
 """
 
-from pathlib import Path
-
+from tests.conftest import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
-ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
-
 PARK_ANCHOR = "**Consolidated park (single-exit rule, #1650).**"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
 
 
 def _step1c_headless_section() -> str:

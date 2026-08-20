@@ -6,16 +6,13 @@ member, plus structural tests pinning down matching semantics and guarding
 against a ``tool_denied`` (#636) regression per RFC 0011 A2 R4.
 
 The drift-guard test (``test_unavailability_signatures_mirrored_in_prose``)
-reuses the ``COMMANDS``/``_cmd()`` helper convention already used by
+reads the command prose through the shared ``_cmd()`` helper in
+``tests/conftest.py`` (#1787), the same reader used by
 ``tests/test_auto_dev_model_pins.py`` and
-``tests/test_auto_dev_preflight_resolutions.py`` — a small private per-file
-copy, not a shared ``conftest.py`` fixture, following the repo's established
-convention for a third consumer of this pattern.
+``tests/test_auto_dev_preflight_resolutions.py``.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import pytest
 
@@ -26,13 +23,7 @@ from cw.unavailability import (
     UNAVAILABILITY_SIGNATURES,
     classify_unavailability,
 )
-
-ROOT = Path(__file__).parent.parent
-COMMANDS = ROOT / ".claude" / "commands"
-
-
-def _cmd(name: str) -> str:
-    return (COMMANDS / name).read_text()
+from tests.conftest import _cmd
 
 
 class TestClassifyUnavailabilityFixtures:
