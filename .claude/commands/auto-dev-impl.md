@@ -353,6 +353,10 @@ After all Stage 2 steps complete in headless mode (branch pushed, gates passed, 
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-impl <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
 
+**Validating is not emitting (#1890).** `cw result validate -` confirms the JSON is well-formed — it does not emit the sentinel. Never narrate emission as a separate act from performing it: the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the validated JSON, MUST be the final characters of this same message.
+
+**No interactive escalation, ever (#1890).** In headless mode there is no listener. Never escalate an implementation blocker (BLOCK, `impl_not_pushed`, `impl_failed`, `plan_scope_drift`, `agent_block`) by asking a question and ending your turn. Escalate exclusively via this sentinel's `blocker` field with `status: "blocked"`.
+
 ```bash
 printf '%s' "$SENTINEL_JSON" | cw result validate -
 ```
