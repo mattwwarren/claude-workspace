@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.40.0] - 2026-08-20
+
 ### Added
 
 - **`cw guard-busy-wait` PreToolUse guard — the mechanical layer for #1944's never-busy-wait rule (#1946):** #1945 shipped the prose half (an explicit "never busy-wait" rule in `auto-dev-{plan,impl,review}.md`) after finding a headless review pass that spent 173 of its 234 `Bash` calls on `true` — a worker holding its turn open waiting on an async Agent spawn it had no blocking primitive to wait on. That pattern is worse than wasteful: ADR-0014 removed every kill timer, so the only automated stuck-worker signal left is the transcript-staleness liveness sweep, and a no-op poll loop keeps the transcript fresh enough that the spinning worker classifies as LIVE and `session.needs_attention` never fires. A new `cw guard-busy-wait` command rides the existing `"Bash"` `PreToolUse` matcher in `cw.spawn._HOOK_SETTINGS_TEMPLATE` alongside `cw guard-cwd` and blocks (exit 2, reason fed back on stderr) three shapes: a bare `true`/`:` no-op, a bare `sleep N` with no follow-on work (`sleep 5 && ./run_tests.sh` passes), and an identical command repeated past a configured threshold inside a rolling window. Fail-open throughout, mirroring `cw guard-cwd`: unreadable stdin, a missing/malformed context, a contended lock, or any unexpected error all yield a silent exit 0.
