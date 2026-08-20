@@ -835,16 +835,20 @@ class TestHookSettingsTemplate:
         # Must not regress the pre-existing Bash guard entry.
         assert any(entry.get("matcher") == "Bash" for entry in entries)
 
-    def test_hook_settings_template_includes_agent_spawn_posttooluse(self) -> None:
-        """#1646: a PostToolUse key now exists, matched to the same tool."""
-        from cw.spawn import _AGENT_TOOL_MATCHER, _HOOK_SETTINGS_TEMPLATE
+    def test_hook_settings_template_has_no_posttooluse_agent_spawn_entry(self) -> None:
+        """#1947: the PostToolUse:Agent decrement wiring is removed.
 
-        entries = _HOOK_SETTINGS_TEMPLATE["hooks"]["PostToolUse"]
-        assert any(
-            entry.get("matcher") == _AGENT_TOOL_MATCHER
-            and entry["hooks"][0]["command"] == "cw agent-spawn-post"
-            for entry in entries
-        )
+        Replaying a live async ``Agent(isolation="worktree")`` spawn
+        (session ea2f3d42/#1902) confirmed it fired at launch-return, not
+        subagent completion -- the counter balanced to 0 while the harness's
+        own turn accounting (``pendingBackgroundAgentCount``) still showed
+        the subagent pending. ``cw signal-stop`` now owns the write instead
+        (``tests/test_cli_stop_hook.py``). No ``PostToolUse`` key should
+        exist in the template at all -- it was the only entry in it.
+        """
+        from cw.spawn import _HOOK_SETTINGS_TEMPLATE
+
+        assert "PostToolUse" not in _HOOK_SETTINGS_TEMPLATE["hooks"]
 
     def test_agent_tool_matcher_is_anchored_and_matches_captured_tool_name(
         self,
