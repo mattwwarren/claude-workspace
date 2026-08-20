@@ -17,7 +17,11 @@ from pydantic import ValidationError
 
 from cw.auto_dev_result import AutoDevResult
 from cw.cli._base import handle_errors, main
-from cw.cli._hook_io import _read_cw_context, _read_hook_stdin_json
+from cw.cli._hook_io import (
+    _read_cw_context,
+    _read_hook_stdin_json,
+    _write_cw_context_locked,
+)
 from cw.cli._sentinels import _parse_sentinel_from_transcript
 from cw.config import (
     load_state,
@@ -27,6 +31,9 @@ from cw.config import (
 from cw.events import record_event
 from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
 from cw.models import (
+    AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+    AGENT_SPAWN_STAMP_KEY,
+    AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     CompletionReason,
     LastResultSource,
     OrchestratorEventType,
@@ -329,6 +336,38 @@ def _handle_user_origin_stop(
     return True
 
 
+def _snapshot_agent_spawn_stamp(
+    context: dict[str, object], count: int
+) -> dict[str, object]:
+    """Overwrite ``agent_spawn_stamp`` with a live snapshot of *count*.
+
+    #1947: replaces the removed ``PostToolUse:Agent`` decrement. Unlike
+    ``agent_spawn_stamp._adjust_unresolved_count`` this is a *set*, not a
+    delta -- the Stop hook payload's own ``background_tasks`` list is already
+    the harness's authoritative live count for this turn, so there is nothing
+    to accumulate against. ``last_stamped_at`` refreshes on every write
+    (snapshot or clear alike) per this ticket's Adopted Assumption: it is an
+    operator-facing nicety only, not load-bearing for any comparison.
+    """
+    context[AGENT_SPAWN_STAMP_KEY] = {
+        AGENT_SPAWN_UNRESOLVED_COUNT_KEY: count,
+        AGENT_SPAWN_LAST_STAMPED_AT_KEY: datetime.now(UTC).isoformat(),
+    }
+    return context
+
+
+def _clear_agent_spawn_stamp(context: dict[str, object]) -> dict[str, object]:
+    """Zero ``agent_spawn_stamp`` -- the counterpart of
+    :func:`_snapshot_agent_spawn_stamp`.
+
+    Runs on every Stop whose ``background_tasks`` is empty/absent, i.e. every
+    turn that is NOT deferring for pending background work. This is what
+    retires a snapshot written by a prior deferred turn once the harness's
+    own accounting shows nothing outstanding -- see :func:`signal_stop`.
+    """
+    return _snapshot_agent_spawn_stamp(context, 0)
+
+
 @main.command(name="signal-stop")
 @handle_errors
 def signal_stop() -> None:
@@ -373,9 +412,21 @@ def signal_stop() -> None:
         # DAEMON-origin sessions, killed via `claude stop`, orphaning the
         # in-flight subagent. See issue #151.
         #
-        # Fast path: no state I/O. The idempotency guard below is
-        # unreachable on this path by design — deferral leaves state
-        # untouched regardless of current session status.
+        # Fast path: no session/dev_queue state I/O. The idempotency guard
+        # below is unreachable on this path by design — deferral leaves
+        # session state untouched regardless of current session status.
+        #
+        # #1947: snapshot the live background_tasks count into cw-context.json
+        # -- this is the replacement for the removed PostToolUse:Agent
+        # decrement, which replaying a real async spawn showed balances at
+        # launch-return rather than subagent completion. This field, unlike
+        # that hook, tracks the harness's own turn-accounting. Fails open
+        # silently (missing file, lock contention, malformed context) via
+        # _write_cw_context_locked's own contract -- never raises, never
+        # blocks the Stop hook's remaining duties.
+        _write_cw_context_locked(
+            cwd_value, lambda ctx: _snapshot_agent_spawn_stamp(ctx, len(bg_tasks))
+        )
         #
         # Backstop: if the second Stop hook ever fails to fire (daemon
         # bug, subagent hard crash with no clean Stop), reconcile.py
@@ -383,6 +434,14 @@ def signal_stop() -> None:
         # reverting any matching dev_queue task to PENDING for retry.
         # Recovery, not silent wedge.
         return
+
+    # #1947: every Stop that reaches this point has background_tasks
+    # empty/absent -- clear any stale agent_spawn_stamp snapshot a prior
+    # deferred turn left behind. Runs unconditionally here (before the
+    # session lookup below) so it fires even when no session in
+    # state.sessions matches this hook's session_id; fails open silently,
+    # same contract as the snapshot write above.
+    _write_cw_context_locked(cwd_value, _clear_agent_spawn_stamp)
 
     # Why not mutate_state: dual-lock (dev_queue_lock nested at the TIMED_OUT path)
     # and daemon.stop() network call inside the lock window (criteria 1 and 2).
