@@ -290,6 +290,16 @@ def _detect_phantom_candidates(
             if session.origin is SessionOrigin.DAEMON
             else False
         )
+        # #1923: scan for the provider-overload (API 529) signature so the
+        # operator can see the phantom was likely caused by an upstream
+        # outage rather than a code bug. DAEMON-only for the same reason as
+        # worktree_dirty/usage_limit_detected above. Diagnostics-only per
+        # A1/R1 -- see ReapCandidate.provider_overload_detected's doc comment.
+        provider_overload_detected = (
+            _shared.detect_provider_overload(session)
+            if session.origin is SessionOrigin.DAEMON
+            else False
+        )
         candidates.append(
             ReapCandidate(
                 session_id=session.id,
@@ -298,6 +308,7 @@ def _detect_phantom_candidates(
                 worktree_dirty=worktree_dirty,
                 unresolved_subagent_spawn=unresolved_subagent_spawn,
                 usage_limit_detected=usage_limit_detected,
+                provider_overload_detected=provider_overload_detected,
                 lane=lane,
                 client=session.client,
                 worktree_path=session.worktree_path,

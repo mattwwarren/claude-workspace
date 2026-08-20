@@ -513,7 +513,8 @@ carries `correlation_id=None` — read `payload["ticket_id"]` to correlate.
   "client": "<str>",
   "worktree_dirty": false,
   "worktree_path": "<str | null>",
-  "queue_status": "pending"
+  "queue_status": "pending",
+  "provider_overload_detected": false
 }
 ```
 **Semantics:** Emitted for each DAEMON-origin session that is reaped as a
@@ -526,7 +527,10 @@ worktree set on the session at time of reap (populated from `session.worktree_pa
 which is always set for DAEMON sessions; `session.branch` is always `null` for
 DAEMON sessions and is NOT used for path resolution). `queue_status` is
 `"pending"` when the ticket was re-queued for retry or `"blocked_on_user"` when
-it was parked for operator inspection due to a dirty worktree. `correlation_id`
+it was parked for operator inspection due to a dirty worktree. `provider_overload_detected`
+is `true` when the session's transcript carries the provider-overload (API 529)
+signature (#1923) — diagnostics-only, it carries no routing weight and never
+overrides `reap_policy` or the ticket's `queue_status`. `correlation_id`
 is the `ticket_id`. NOT emitted for USER-origin sessions (those are reaped
 without task revert).
 
