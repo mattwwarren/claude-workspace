@@ -306,6 +306,33 @@ already carries an open, unmerged PR — payload carries `ticket_id`, no
 `attempt_ceiling`. `correlation_id` is `None` (per-client aggregate, not
 per-ticket). Consumers MUST tolerate unknown `skip_reason` values.
 
+### `gate.ssh_key_bypassed`
+
+**Emitter:** `_emit_ssh_key_bypass` (`cw.dispatch.gating`, called from `cw.dispatch.tick`)
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "probe_result": false,
+  "gate_enabled": false
+}
+```
+**Semantics:** GitHub #1437. Emitted when `ssh_key_gate_enabled` is `false`
+and the per-client `ssh-add -l` preflight probe (#927) reports the SSH
+agent key unavailable — the operator has explicitly disabled the gate, so
+the client dispatches anyway instead of being held PENDING, and this event
+records that the skip was suppressed. `probe_result` is the raw probe
+outcome (`false` means unavailable) and `gate_enabled` echoes the config
+flag that suppressed the skip. Earlier sibling of
+`gate.disk_pressure_bypassed` (#1887), which mirrors this bypass shape;
+forwarded to the operator-attention channel by default (same as
+`gate.auto_approved`), since an SSH-key-gate bypass is attention-worthy. No
+paired failure event: emitting this has no mutation of its own that can
+fail.
+
+`correlation_id` is `None` (per-client, not per-ticket — no `ticket_id` in
+the call).
+
 ### `gate.disk_pressure_bypassed`
 
 **Emitter:** `_emit_disk_pressure_bypass` (`cw.dispatch.gating`, called from `_apply_disk_pressure_gate`)
