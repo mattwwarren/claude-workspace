@@ -86,11 +86,11 @@ def _payload(
     }
 
 
-def _worktree(tmp_path: Path, name: str = "wt") -> Path:
+def _worktree(tmp_path: Path, name: str = "wt", lane: str | None = None) -> Path:
     """Create a worktree carrying a freshly-written cw-context.json."""
     worktree = tmp_path / name
     worktree.mkdir()
-    _write_hook_context_file(worktree)
+    _write_hook_context_file(worktree, lane=lane)
     return worktree
 
 
@@ -349,9 +349,7 @@ def test_block_emits_guard_busy_wait_blocked_event(tmp_path: Path) -> None:
     ``cw-context.json``'s ``"lane"`` key (#1946) and ``session_id``
     respectively, neither of which was previously asserted anywhere.
     """
-    worktree = tmp_path / "wt"
-    worktree.mkdir()
-    _write_hook_context_file(worktree, lane="fast")
+    worktree = _worktree(tmp_path, lane="fast")
 
     assert _invoke(worktree, "true").exit_code == _BLOCK_EXIT
 
