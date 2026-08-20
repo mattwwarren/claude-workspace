@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -29,9 +31,11 @@ from .conftest import (
     _make_escalation,
     _make_finding,
     _make_reviewer_doc,
+    commit_tracked_file,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 _URL = "https://github.com/acme/widgets/pull/42"
@@ -1401,3 +1405,665 @@ class TestReviewCheckVoidedCommand:
         assert result.exit_code == 0, result.output
         written = parse_voided_findings_block([out_path.read_text(encoding="utf-8")])
         assert written[0].voided_at != ""
+
+
+# --------------------------------------------------------------------------
+# #1924: consolidate-envelope integrity guards
+# --------------------------------------------------------------------------
+
+# The same file section as _CONSOLIDATE_DIFF but with its single hunk repeated
+# verbatim -- the shape a session produces when it reconstructs a diff from
+# memory and pastes the same hunk twice.
+_DUPLICATED_HUNK_DIFF = """diff --git a/src/cw/foo.py b/src/cw/foo.py
+index 111..222 100644
+--- a/src/cw/foo.py
++++ b/src/cw/foo.py
+@@ -1,2 +1,3 @@
+ unchanged = 0
++def broken():
++    pass
+@@ -1,2 +1,3 @@
+ unchanged = 0
++def broken():
++    pass
+"""
+
+# Two genuinely distinct hunks in one file -- the ordinary case the detector
+# must never flag.
+_TWO_HUNK_DIFF = """diff --git a/src/cw/foo.py b/src/cw/foo.py
+index 111..222 100644
+--- a/src/cw/foo.py
++++ b/src/cw/foo.py
+@@ -1,2 +1,3 @@
+ unchanged = 0
++def broken():
++    pass
+@@ -20,2 +21,3 @@
+ other = 1
++def second():
++    pass
+"""
+
+# Byte-identical hunk text under two different files. Legitimate (the same
+# one-line change applied to two modules), so the file path has to be part of
+# the dedup key.
+_SAME_HUNK_TWO_FILES_DIFF = """diff --git a/src/cw/foo.py b/src/cw/foo.py
+index 111..222 100644
+--- a/src/cw/foo.py
++++ b/src/cw/foo.py
+@@ -1,2 +1,3 @@
+ unchanged = 0
++def broken():
++    pass
+diff --git a/src/cw/bar.py b/src/cw/bar.py
+index 333..444 100644
+--- a/src/cw/bar.py
++++ b/src/cw/bar.py
+@@ -1,2 +1,3 @@
+ unchanged = 0
++def broken():
++    pass
+"""
+
+# A real (if truncated) diff whose body carries a literal "..." -- proves the
+# ellipsis token is matched whole-value-only, never as a substring.
+_DIFF_CONTAINING_ELLIPSIS = """diff --git a/src/cw/foo.py b/src/cw/foo.py
+index 111..222 100644
+--- a/src/cw/foo.py
++++ b/src/cw/foo.py
+@@ -1,2 +1,3 @@
+ unchanged = 0
++def broken(*args: object) -> None:
++    print("...")
+"""
+
+# 36 characters -- under _PLACEHOLDER_LENGTH_FLOOR, but carrying a real
+# `diff --git` header, so the conjunction the check tests does not hold.
+_SHORT_REAL_DIFF = "diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b"
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Run git in *repo* with a GIT_*-free env, returning stdout."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        check=True,
+        text=True,
+        env=env,
+    ).stdout
+
+
+class TestReviewConsolidateDuplicatedHunkDetection:
+    """#1924: the same hunk cannot appear twice for the same file."""
+
+    def test_duplicated_hunk_exits_nonzero_with_named_error(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(_consolidate_payload(diff=_DUPLICATED_HUNK_DIFF)),
+        )
+
+        assert result.exit_code == 1
+        assert "src/cw/foo.py" in result.output
+        assert '"blocking"' not in result.output
+
+    def test_distinct_hunks_same_file_not_flagged(self, runner: CliRunner) -> None:
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(_consolidate_payload(diff=_TWO_HUNK_DIFF)),
+        )
+
+        assert result.exit_code == 0, result.output
+
+    def test_identical_hunk_body_different_files_not_flagged(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(_consolidate_payload(diff=_SAME_HUNK_TWO_FILES_DIFF)),
+        )
+
+        assert result.exit_code == 0, result.output
+
+
+class TestReviewConsolidatePlaceholderDiff:
+    """#1924: a diff field that never carried a real diff is rejected."""
+
+    @pytest.mark.parametrize(
+        "diff_text",
+        ["<diff here>", "<insert diff>", "...", "", "not a diff"],
+        ids=[
+            "placeholder_token",
+            "insert_diff_token",
+            "ellipsis_only",
+            "empty",
+            "short_nonplaceholder_without_diff_git_header",
+        ],
+    )
+    def test_placeholder_diff_rejected(self, runner: CliRunner, diff_text: str) -> None:
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(_consolidate_payload(diff=diff_text)),
+        )
+
+        assert result.exit_code == 1
+        assert '"blocking"' not in result.output
+
+    def test_real_diff_containing_ellipsis_substring_not_rejected(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(_consolidate_payload(diff=_DIFF_CONTAINING_ELLIPSIS)),
+        )
+
+        assert result.exit_code == 0, result.output
+
+    def test_short_diff_with_real_header_not_rejected_despite_under_floor(
+        self, runner: CliRunner
+    ) -> None:
+        """The check rejects on (under floor) AND (no diff --git), not length."""
+        assert len(_SHORT_REAL_DIFF) < 40
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(_consolidate_payload(diff=_SHORT_REAL_DIFF)),
+        )
+
+        assert result.exit_code == 0, result.output
+
+
+def _write_doc(path: Path, **overrides: object) -> None:
+    """Write a valid ReviewerFindingsDocument to *path* as JSON."""
+    doc = _make_reviewer_doc(**overrides)
+    path.write_text(doc.model_dump_json(), encoding="utf-8")
+
+
+class TestReviewConsolidateDocumentsFrom:
+    """#1924: reviewer documents read from disk instead of retyped inline."""
+
+    def test_documents_from_directory_reads_json_lexicographically(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        # Creation order deliberately differs from lexicographic order.
+        _write_doc(docs_dir / "c-third.json", reviewer_role="Gamma Reviewer")
+        _write_doc(docs_dir / "a-first.json", reviewer_role="Alpha Reviewer")
+        _write_doc(docs_dir / "b-second.json", reviewer_role="Beta Reviewer")
+
+        payload = _consolidate_payload()
+        del payload["documents"]
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert [r["reviewer_role"] for r in verdict["agents_run"]] == [
+            "Alpha Reviewer",
+            "Beta Reviewer",
+            "Gamma Reviewer",
+        ]
+
+    def test_documents_from_byte_identical_to_hand_built_envelope(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs = [
+            _make_reviewer_doc(reviewer_role="Alpha Reviewer"),
+            _make_reviewer_doc(
+                _make_finding(line_start=2, line_end=2, evidence="def broken():"),
+                reviewer_role="Beta Reviewer",
+            ),
+        ]
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        for index, doc in enumerate(docs):
+            (docs_dir / f"{index}-doc.json").write_text(
+                doc.model_dump_json(), encoding="utf-8"
+            )
+
+        inline = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(
+                _consolidate_payload(
+                    documents=[d.model_dump(mode="json") for d in docs]
+                )
+            ),
+        )
+        from_disk_payload = _consolidate_payload()
+        del from_disk_payload["documents"]
+        from_disk = runner.invoke(
+            main,
+            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            input=json.dumps(from_disk_payload),
+        )
+
+        assert inline.exit_code == 0, inline.output
+        assert from_disk.exit_code == 0, from_disk.output
+        assert from_disk.output == inline.output
+
+    def test_documents_from_glob_pattern(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs_dir = tmp_path / "mixed"
+        docs_dir.mkdir()
+        _write_doc(docs_dir / "pfx-a.json", reviewer_role="Alpha Reviewer")
+        _write_doc(docs_dir / "pfx-b.json", reviewer_role="Beta Reviewer")
+        _write_doc(docs_dir / "other.json", reviewer_role="Ignored Reviewer")
+
+        payload = _consolidate_payload()
+        del payload["documents"]
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "--documents-from",
+                str(docs_dir / "pfx-*.json"),
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert [r["reviewer_role"] for r in verdict["agents_run"]] == [
+            "Alpha Reviewer",
+            "Beta Reviewer",
+        ]
+
+    def test_documents_from_nonexistent_directory_errors_naming_path(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "no-such-parent" / "review-findings"
+        payload = _consolidate_payload()
+        del payload["documents"]
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--documents-from", str(missing), "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 1
+        assert str(missing) in result.output
+
+    def test_documents_from_empty_directory_yields_empty_documents_not_error(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        failure = ReviewerRunFailure(
+            role="Test Reviewer", reason="unparseable_response"
+        )
+        payload = _consolidate_payload(
+            failed_reviewers=[failure.model_dump(mode="json")]
+        )
+        del payload["documents"]
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["review"]["agents_run"] == 0
+        assert len(verdict["agents_run"]) == 1
+
+    def test_documents_from_malformed_json_file_names_offending_file(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        _write_doc(docs_dir / "a-good.json", reviewer_role="Alpha Reviewer")
+        (docs_dir / "b-bad.json").write_text("{not valid json", encoding="utf-8")
+        _write_doc(docs_dir / "c-good.json", reviewer_role="Gamma Reviewer")
+
+        payload = _consolidate_payload()
+        del payload["documents"]
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 1
+        assert "b-bad.json" in result.output
+        assert "a-good.json" not in result.output
+
+    def test_documents_from_schema_invalid_file_names_offending_file(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        bad = _doc_payload(dict(_finding_kwargs(severity="BOGUS")))
+        (docs_dir / "b-bad.json").write_text(json.dumps(bad), encoding="utf-8")
+
+        payload = _consolidate_payload()
+        del payload["documents"]
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 1
+        assert "b-bad.json" in result.output
+
+    def test_documents_from_unreadable_match_names_offending_path(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """An OSError on read is named too, not just a JSON/schema failure."""
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        # A directory named `*.json` matches the glob but cannot be read.
+        (docs_dir / "b-dir.json").mkdir()
+
+        payload = _consolidate_payload()
+        del payload["documents"]
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 1
+        assert "b-dir.json" in result.output
+
+    def test_documents_from_ignores_documents_key_in_path_json(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        _write_doc(docs_dir / "a.json", reviewer_role="Alpha Reviewer")
+        ignored = _make_reviewer_doc(reviewer_role="Should Not Appear")
+
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            input=json.dumps(
+                _consolidate_payload(documents=[ignored.model_dump(mode="json")])
+            ),
+        )
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert [r["reviewer_role"] for r in verdict["agents_run"]] == ["Alpha Reviewer"]
+
+    def test_documents_from_path_json_without_documents_key_is_valid(
+        self, runner: CliRunner
+    ) -> None:
+        payload = _consolidate_payload()
+        del payload["documents"]
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["agents_run"] == []
+
+    def test_documents_from_bare_directory_vs_glob_pattern_disambiguation(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        _write_doc(docs_dir / "a.json", reviewer_role="Alpha Reviewer")
+        _write_doc(docs_dir / "b.json", reviewer_role="Beta Reviewer")
+        _write_doc(docs_dir / "pfx-c.json", reviewer_role="Gamma Reviewer")
+        payload = _consolidate_payload()
+        del payload["documents"]
+
+        # (a) A path that exists and is a directory -> <path>/*.json.
+        bare = runner.invoke(
+            main,
+            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            input=json.dumps(payload),
+        )
+        # (b) A path whose parent exists but which does not itself exist ->
+        #     evaluated as a glob against that parent.
+        globbed = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "--documents-from",
+                str(docs_dir / "pfx-*.json"),
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+
+        assert bare.exit_code == 0, bare.output
+        assert [r["reviewer_role"] for r in json.loads(bare.output)["agents_run"]] == [
+            "Alpha Reviewer",
+            "Beta Reviewer",
+            "Gamma Reviewer",
+        ]
+        assert globbed.exit_code == 0, globbed.output
+        assert [
+            r["reviewer_role"] for r in json.loads(globbed.output)["agents_run"]
+        ] == ["Gamma Reviewer"]
+
+
+def _branch_repo(
+    make_git_repo: Callable[..., Path], name: str
+) -> tuple[Path, str, str]:
+    """A repo with a `feature` branch one commit ahead of `main`.
+
+    Returns ``(repo, reviewed_sha, real_diff_text)`` where *real_diff_text* is
+    the verbatim ``git diff --no-color main...<reviewed_sha>`` output.
+    """
+    repo = make_git_repo(name)
+    _git(repo, "checkout", "-b", "feature")
+    commit_tracked_file(repo, "src/thing.py", "x = 1\ny = 2\n")
+    reviewed_sha = _git(repo, "rev-parse", "HEAD").strip()
+    real_diff = _git(repo, "diff", "--no-color", f"main...{reviewed_sha}")
+    return repo, reviewed_sha, real_diff
+
+
+class TestReviewConsolidateBaseFlag:
+    """#1924: --base proves the payload diff is the real diff."""
+
+    def test_base_absent_is_inert(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        baseline = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(_consolidate_payload()),
+        )
+        assert baseline.exit_code == 0, baseline.output
+
+        calls: list[object] = []
+
+        def _boom(*args: object, **kwargs: object) -> object:
+            calls.append(args)
+            msg = "subprocess.run must not be called without --base"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.cli.review.subprocess.run", _boom)
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(_consolidate_payload()),
+        )
+
+        assert calls == []
+        assert result.exit_code == 0, result.output
+        assert result.output == baseline.output
+
+    def test_base_matching_diff_passes(
+        self, runner: CliRunner, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, sha, real_diff = _branch_repo(make_git_repo, "match")
+        payload = _consolidate_payload(diff=real_diff, reviewed_sha=sha)
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "--worktree",
+                str(repo),
+                "--base",
+                "main",
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 0, result.output
+
+    def test_base_mismatched_diff_errors(
+        self, runner: CliRunner, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, sha, real_diff = _branch_repo(make_git_repo, "mismatch")
+        mutated = real_diff.replace("+y = 2", "+y = 3")
+        assert mutated != real_diff
+        payload = _consolidate_payload(diff=mutated, reviewed_sha=sha)
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "--worktree",
+                str(repo),
+                "--base",
+                "main",
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 1
+        assert '"blocking"' not in result.output
+
+    def test_base_unresolvable_ref_errors(
+        self, runner: CliRunner, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, sha, real_diff = _branch_repo(make_git_repo, "badref")
+        payload = _consolidate_payload(diff=real_diff, reviewed_sha=sha)
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "--worktree",
+                str(repo),
+                "--base",
+                "no-such-ref",
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 1
+        assert "no-such-ref" in result.output
+
+    def test_base_with_no_tree_evidence_still_checks(
+        self, runner: CliRunner, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """--no-tree-evidence nulls `resolved_worktree`; --base must not no-op."""
+        repo, sha, real_diff = _branch_repo(make_git_repo, "notree")
+        args = [
+            "review",
+            "consolidate",
+            "--worktree",
+            str(repo),
+            "--no-tree-evidence",
+            "--base",
+            "main",
+            "-",
+        ]
+
+        mismatched = runner.invoke(
+            main,
+            args,
+            input=json.dumps(
+                _consolidate_payload(
+                    diff=real_diff.replace("+y = 2", "+y = 3"), reviewed_sha=sha
+                )
+            ),
+        )
+        matching = runner.invoke(
+            main,
+            args,
+            input=json.dumps(_consolidate_payload(diff=real_diff, reviewed_sha=sha)),
+        )
+
+        assert mismatched.exit_code == 1
+        assert '"blocking"' not in mismatched.output
+        assert matching.exit_code == 0, matching.output
+
+
+class TestReviewConsolidateRegressionFixtures:
+    """#1924: the two incidents the guards exist to catch."""
+
+    def test_regression_duplicated_diff_reconstruction(self, runner: CliRunner) -> None:
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(
+                _consolidate_payload(diff=_CONSOLIDATE_DIFF + _CONSOLIDATE_DIFF)
+            ),
+        )
+
+        assert result.exit_code == 1
+        assert "src/cw/foo.py" in result.output
+        assert '"blocking"' not in result.output
+
+    def test_regression_paraphrased_evidence_hand_typed_envelope_still_rejects(
+        self, runner: CliRunner
+    ) -> None:
+        """Control: retyping the evidence one word off still fails the matcher."""
+        doc = _make_reviewer_doc(
+            _make_finding(line_start=2, line_end=2, evidence="def broke():"),
+            status="ok",
+        )
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(
+                _consolidate_payload(documents=[doc.model_dump(mode="json")])
+            ),
+        )
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["rejected"][0]["reason"] == "evidence_not_in_diff"
+
+    def test_regression_paraphrased_evidence_avoided_via_documents_from(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """The same finding, written verbatim to disk instead, is accepted."""
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        doc = _make_reviewer_doc(
+            _make_finding(line_start=2, line_end=2, evidence="def broken():"),
+            status="ok",
+        )
+        (docs_dir / "a.json").write_text(doc.model_dump_json(), encoding="utf-8")
+        payload = _consolidate_payload()
+        del payload["documents"]
+
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["rejected"] == []
+        assert len(verdict["accepted"]) == 1

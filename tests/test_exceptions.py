@@ -38,6 +38,35 @@ class TestExceptionHierarchy:
         err = DisclaimerNotAcceptedError("run interactively first")
         assert "interactively" in str(err)
 
+    def test_duplicated_hunk_error_is_cw_error(self) -> None:
+        """#1924: flat CwError subclass so `handle_errors` gives it exit 1."""
+        from cw.exceptions import DuplicatedHunkError
+
+        err = DuplicatedHunkError("src/cw/foo.py appears twice")
+        assert isinstance(err, CwError)
+        assert "src/cw/foo.py appears twice" in str(err)
+
+    def test_placeholder_diff_error_is_cw_error(self) -> None:
+        from cw.exceptions import PlaceholderDiffError
+
+        err = PlaceholderDiffError("diff is the literal '<diff here>'")
+        assert isinstance(err, CwError)
+        assert "<diff here>" in str(err)
+
+    def test_diff_base_mismatch_error_is_cw_error(self) -> None:
+        from cw.exceptions import DiffBaseMismatchError
+
+        err = DiffBaseMismatchError("payload diff differs from main...HEAD")
+        assert isinstance(err, CwError)
+        assert "main...HEAD" in str(err)
+
+    def test_documents_from_read_error_is_cw_error(self) -> None:
+        from cw.exceptions import DocumentsFromReadError
+
+        err = DocumentsFromReadError("could not read reviewer-1.json")
+        assert isinstance(err, CwError)
+        assert "reviewer-1.json" in str(err)
+
 
 class TestHookContextConflictError:
     """GitHub #1674: the error now carries the id of the conflicting session.
