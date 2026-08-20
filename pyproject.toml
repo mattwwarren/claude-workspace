@@ -160,6 +160,16 @@ ignore = [
     # these types across module boundaries.
     "TC001",
 ]
+"src/cw/review_findings/_models.py" = [
+    # `ReviewVerdict.review: Review` is a pydantic field annotation, so
+    # `cw.auto_dev_result.Review` must be importable at runtime for pydantic to
+    # resolve it at class-build time — a TYPE_CHECKING-only import would raise
+    # PydanticUndefinedAnnotation. Exactly the `src/cw/models/*.py` TC001 case
+    # above, and it only fires because the #1818 review_findings.py -> package
+    # split moved `derive_review_counts` (the module's one RUNTIME use of
+    # `Review`) into the sibling `_dedup` submodule.
+    "TC001",
+]
 "src/cw/tui.py" = [
     "TCH003",  # WatchRow Pydantic model needs runtime access to Path
 ]
