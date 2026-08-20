@@ -347,6 +347,19 @@ def _ul_record(text: str, timestamp: str | None = None) -> dict[str, object]:
     return record
 
 
+# Verbatim capture, dev-1751 impl worker, session
+# 286032f7-47ee-4985-a45d-e7a946aa1d9d, 2026-08-18T17:27:09.071Z (#1923).
+# Shared by tests/test_reconcile_phantom.py and
+# tests/test_reconcile_shared_sentinels.py so a correction to the captured
+# text only needs to land in one place.
+PROVIDER_OVERLOAD_TEXT = (
+    'Agent "Implement plan for ticket #1751" failed: Agent terminated early '
+    "due to an API error: API Error: 529 Overloaded. This is a server-side "
+    "issue, usually temporary — try again in a moment. If it persists, check "
+    "https://status.claude.com."
+)
+
+
 def _notification_record(text: str, kind: str = "user") -> dict[str, object]:
     """One task-notification record for ``_write_transcript_records`` (#1923).
 

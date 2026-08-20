@@ -56,6 +56,7 @@ from cw.reconcile import (
     revert_timed_out_tasks,
 )
 from tests._reconcile_helpers import (
+    PROVIDER_OVERLOAD_TEXT,
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
     _inflate_scope,
@@ -730,13 +731,6 @@ def test_detect_usage_limit_tail_none_when_no_record_has_timestamp(
 # #1923: provider-overload (API 529) diagnostic scanner — _detect_provider_overload
 # ---------------------------------------------------------------------------
 
-_PROVIDER_OVERLOAD_TEXT = (
-    'Agent "Implement plan for ticket #1751" failed: Agent terminated early '
-    "due to an API error: API Error: 529 Overloaded. This is a server-side "
-    "issue, usually temporary — try again in a moment. If it persists, check "
-    "https://status.claude.com."
-)
-
 
 def test_detect_provider_overload_returns_true_for_queue_operation_record(
     tmp_config_dir: Path,
@@ -757,7 +751,7 @@ def test_detect_provider_overload_returns_true_for_queue_operation_record(
     transcript = _write_transcript_records(
         home,
         worktree,
-        [_notification_record(_PROVIDER_OVERLOAD_TEXT, kind="queue-operation")],
+        [_notification_record(PROVIDER_OVERLOAD_TEXT, kind="queue-operation")],
     )
     _stamp_after_start(transcript, started_at)
 
@@ -783,7 +777,7 @@ def test_detect_provider_overload_returns_true_for_user_record(
     transcript = _write_transcript_records(
         home,
         worktree,
-        [_notification_record(_PROVIDER_OVERLOAD_TEXT, kind="user")],
+        [_notification_record(PROVIDER_OVERLOAD_TEXT, kind="user")],
     )
     _stamp_after_start(transcript, started_at)
 
@@ -858,7 +852,7 @@ def test_detect_provider_overload_ignores_assistant_typed_record(
     transcript = _write_transcript_records(
         home,
         worktree,
-        [_ul_record(_PROVIDER_OVERLOAD_TEXT)],
+        [_ul_record(PROVIDER_OVERLOAD_TEXT)],
     )
     _stamp_after_start(transcript, started_at)
 

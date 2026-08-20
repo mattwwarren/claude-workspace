@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from tests._reconcile_helpers import (
+    PROVIDER_OVERLOAD_TEXT,
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
     _auto_config,
@@ -1314,14 +1315,6 @@ def test_detect_phantom_candidates_usage_limit_stale_false(
     assert c.usage_limit_detected is False
 
 
-_PROVIDER_OVERLOAD_TEXT = (
-    'Agent "Implement plan for ticket #1751" failed: Agent terminated early '
-    "due to an API error: API Error: 529 Overloaded. This is a server-side "
-    "issue, usually temporary — try again in a moment. If it persists, check "
-    "https://status.claude.com."
-)
-
-
 def test_detect_phantom_candidates_provider_overload_detected_true(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -1345,7 +1338,7 @@ def test_detect_phantom_candidates_provider_overload_detected_true(
     transcript = _write_transcript_records(
         home,
         worktree,
-        [_notification_record(_PROVIDER_OVERLOAD_TEXT, kind="queue-operation")],
+        [_notification_record(PROVIDER_OVERLOAD_TEXT, kind="queue-operation")],
     )
     after_ts = started_at.timestamp() + 60
     os.utime(str(transcript), (after_ts, after_ts))
