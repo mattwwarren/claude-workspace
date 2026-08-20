@@ -342,8 +342,16 @@ def test_hash_command_normalizes_whitespace() -> None:
 
 
 def test_block_emits_guard_busy_wait_blocked_event(tmp_path: Path) -> None:
-    """A block records exactly one durable bus event naming reason + hash."""
-    worktree = _worktree(tmp_path)
+    """A block records exactly one durable bus event naming reason + hash.
+
+    Also asserts the ``lane``/``correlation_id`` fields docs/events.md
+    documents as part of the payload/correlation contract -- stamped from
+    ``cw-context.json``'s ``"lane"`` key (#1946) and ``session_id``
+    respectively, neither of which was previously asserted anywhere.
+    """
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _write_hook_context_file(worktree, lane="fast")
 
     assert _invoke(worktree, "true").exit_code == _BLOCK_EXIT
 
@@ -353,6 +361,8 @@ def test_block_emits_guard_busy_wait_blocked_event(tmp_path: Path) -> None:
     assert payload["reason"] == "bare_noop"
     assert payload["command_hash"] == _hash_command("true")
     assert payload["client"] == "client-a"
+    assert payload["lane"] == "fast"
+    assert events[0].correlation_id == "sess940g"
 
 
 def test_repeat_block_event_carries_threshold_and_window(tmp_path: Path) -> None:
