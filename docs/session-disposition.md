@@ -137,6 +137,18 @@ trusting `is_terminal_snapshot=true` on an old file at face value.
 | `blocked` | Triage `blocker.reason`, `blocker.retry_eligible`, `blocker.recovery_hint`. At FINALIZE, `blocker.reason: "agent_block"` auto-regresses the ticket to IMPL for self-heal (up to 2 times, #770). |
 | `stale_dispatch` | This ticket already has an open, unmerged PR from an earlier dispatch — the session found it and refused rather than duplicating work already in review (#1862). `blocker.details` names the PR. Land or close that PR, then `cw dev-queue requeue <T> -c <client>`. Do **not** re-dispatch first: you will just get the same refusal. |
 
+Since #1927 the `stale_dispatch` park carries its own PR-state source, so the
+manual `requeue` above is only the *default*-policy instruction. Each tick,
+`cw` registers the blocking PR named in `blocker.details` as a watched PR and
+hydrates it alongside every other tracked PR. Once that PR is observed
+`MERGED`, the park is re-validated exactly like the other stale-gate variants
+(ADR-0006): under `reap_policy: signal_only` (the default) the row stamps
+`stale_gate_detected_at` and emits `SESSION_REAP_PROPOSED` but stays
+`BLOCKED_ON_USER` — you still run the `requeue`; under `reap_policy: auto` for
+that lane the row self-releases to `PENDING` and re-dispatches with no
+operator action. Closing (rather than merging) the blocking PR is not
+observed as a clearing event — that case still needs the manual `requeue`.
+
 `stale_dispatch_gate` is not a sentinel status but appears in the same
 disposition field: it is the *code-side* twin of `stale_dispatch`, stamped
 when `cw`'s pre-dispatch open-PR gate refused to spawn a session at all

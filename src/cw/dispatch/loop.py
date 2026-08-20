@@ -50,6 +50,7 @@ from cw.native_daemon import get_native_daemon_client
 from cw.pr_hydrate import hydrate_pr_states
 from cw.reconcile import (
     _CAUSE_USAGE_LIMIT,
+    register_stale_dispatch_watched_prs,
     release_stale_gated_tasks,
     ticket_id_for_session,
 )
@@ -457,6 +458,37 @@ def _run_pr_state_hydration_guarded(config: OrchestratorConfig) -> None:
         _log.exception("pr-state hydration failed during tick; continuing")
 
 
+def _run_stale_dispatch_watch_registration_guarded() -> None:
+    """Run ``register_stale_dispatch_watched_prs``, swallowing any failure.
+
+    GitHub #1927. Third member of the same guarded-tick-step family as
+    ``_run_pr_state_hydration_guarded`` / ``_run_stale_gate_release_guarded``,
+    and deliberately sequenced between them: ``consume_completed_sessions``
+    stamps ``blocked_on_pr`` (under ``dev_queue_lock``), this pass registers
+    the watch for it, hydration fills that watch's ``pr_state`` on the SAME
+    tick, and the release pass then observes the merged fact -- so a park
+    whose PR is already merged clears in one tick rather than three.
+    """
+    try:
+        register_stale_dispatch_watched_prs()
+    except Exception:  # noqa: BLE001
+        # Sanctioned broad-catch per PYTHON-PATTERNS.md (4-part):
+        # 1. register_stale_dispatch_watched_prs shells out to
+        #    ``git remote get-url origin`` and writes dev_queue.json under
+        #    dev_queue_lock — failure modes include subprocess crash, lock
+        #    I/O, and store-parse surprises.
+        # 2. Logging: _log.exception captures the full traceback.
+        # 3. Non-critical: registration is best-effort backfill; skipping a
+        #    tick loses nothing, because the pass is a full retroactive
+        #    rescan — the next tick re-derives the identical candidate set
+        #    from unchanged on-disk state.
+        # 4. Paired test: tests/test_dispatch.py
+        #    TestRunDispatchLoopStaleDispatchWatchHook.
+        _log.exception(
+            "stale-dispatch watch registration failed during tick; continuing"
+        )
+
+
 def _run_stale_gate_release_guarded() -> None:
     """Run ``release_stale_gated_tasks``, swallowing any failure (GitHub #1713).
 
@@ -573,6 +605,7 @@ def _run_dispatch_loop_body(
                 )
 
             consume_completed_sessions()
+            _run_stale_dispatch_watch_registration_guarded()
             _run_pr_state_hydration_guarded(config)
             _run_stale_gate_release_guarded()
             _check_version_drift()

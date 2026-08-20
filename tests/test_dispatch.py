@@ -14068,6 +14068,79 @@ class TestRunDispatchLoopStaleGateHook:
         run_dispatch_loop(once=True, emit=None)
 
 
+class TestRunDispatchLoopStaleDispatchWatchHook:
+    """register_stale_dispatch_watched_prs fires once per loop iteration,
+    fault-tolerant (GitHub #1927), same shape as TestRunDispatchLoopStaleGateHook."""
+
+    def test_registration_called_once_per_iteration(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        calls: list[object] = []
+
+        def _record() -> list[str]:
+            calls.append(object())
+            return []
+
+        monkeypatch.setattr(
+            "cw.dispatch.loop.register_stale_dispatch_watched_prs", _record
+        )
+        run_dispatch_loop(once=True, emit=None)
+        assert len(calls) == 1
+
+    def test_registration_runs_before_hydration_and_release(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ordering is load-bearing: a watch registered after hydration would
+        sit un-hydrated until the NEXT tick, delaying every release by one."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        order: list[str] = []
+
+        monkeypatch.setattr(
+            "cw.dispatch.loop.register_stale_dispatch_watched_prs",
+            lambda: order.append("register") or [],
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.loop.hydrate_pr_states",
+            lambda _config: order.append("hydrate"),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.loop.release_stale_gated_tasks",
+            lambda: order.append("release") or [],
+        )
+        run_dispatch_loop(once=True, emit=None)
+        assert order == ["register", "hydrate", "release"]
+
+    def test_registration_exception_does_not_crash_loop(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+
+        def _boom() -> list[str]:
+            msg = "stale-dispatch-watch boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(
+            "cw.dispatch.loop.register_stale_dispatch_watched_prs", _boom
+        )
+        # Broad-catch idiom: registration is a full retroactive rescan, so a
+        # skipped tick loses nothing -- the next tick re-derives the same
+        # candidate set from unchanged on-disk state.
+        run_dispatch_loop(once=True, emit=None)
+
+
 # ---------------------------------------------------------------------------
 # TestFreshnessBlockAttentionLatch — per-client freshness-gate-block latch
 # (RFC 0007 §W2)

@@ -875,11 +875,13 @@ def _route_stage_failure(
     # stale_dispatch's blocking PR is this ticket's OWN earlier,
     # un-harvested-sentinel dispatch, discovered via a live
     # `gh pr list --head <branch>` query that never writes a pr_url onto
-    # any TicketTask row. Stamping blocked_on_pr here is therefore
-    # currently production-unreachable release groundwork for this
-    # disposition -- release_stale_gated_tasks's Variant B
-    # cross-reference scan (reconcile/tasks.py) has no row to match it
-    # against until #1927 (an independent PR-state source) lands.
+    # any TicketTask row. GitHub #1927 gives that number an independent
+    # state source instead of a row to match against: a per-tick rescan
+    # (cw.reconcile.stale_dispatch_watch) registers it as a client-tagged
+    # WatchedPr, which hydrates on the same serve tick and feeds
+    # release_stale_gated_tasks's Variant B cross-reference scan. The
+    # rescan is retroactive, so a row stamped here needs no cooperation
+    # from this call site beyond the stamp itself.
     if blocker_reason in (
         _PRIOR_PIPELINE_PR_OPEN_REASON,
         STALE_DISPATCH_BLOCKER_REASON,
