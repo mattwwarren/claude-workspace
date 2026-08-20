@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import shutil
@@ -294,7 +296,9 @@ def _write_project_config_yaml(root: Path, content: str) -> None:
 
 
 def _write_hook_context_file(
-    worktree: Path, workspace_path: Path | None = None
+    worktree: Path,
+    workspace_path: Path | None = None,
+    lane: str | None = None,
 ) -> None:
     """Materialize ``<worktree>/.claude/cw-context.json`` via the real writer.
 
@@ -303,6 +307,11 @@ def _write_hook_context_file(
     materializer. Using the real ``_write_hook_context`` (rather than a
     hand-written JSON literal) is deliberate: it keeps every hook test reading
     the exact context shape production writes, including new schema fields.
+
+    *lane* (#1946) forwards to the real writer's new ``lane`` parameter so
+    ``cw guard-busy-wait``'s per-lane config tests read the same ``"lane"``
+    key production stamps — an ad hoc parallel JSON writer in the test file
+    is exactly the fixture drift this helper's hoist exists to prevent.
     """
     from cw.spawn import _write_hook_context
 
@@ -315,7 +324,33 @@ def _write_hook_context_file(
         ticket_id="940",
         origin=SessionOrigin.DAEMON,
         workspace_path=workspace_path,
+        lane=lane,
     )
+
+
+@contextlib.contextmanager
+def _hold_context_lock(worktree: Path) -> Iterator[None]:
+    """Hold ``<worktree>/.claude/cw-context.json.lock`` exclusively (#1946).
+
+    Reproduces the contended-lock condition every hook write path must fail
+    open on. Hoisted from ``test_cli_agent_spawn_stamp.py``'s inline
+    ``fcntl.flock`` setup so the three consumers of
+    ``cw.cli._hook_io._write_cw_context_locked`` share one technique instead
+    of each re-deriving it — the same "don't duplicate the discipline"
+    reasoning that promoted the write primitive itself into ``_hook_io``.
+
+    Callers must also shorten ``cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT``
+    (patched where it is *defined*, never on a re-exporting module) so the
+    bounded retry budget expires quickly.
+    """
+    lock_path = worktree / ".claude" / "cw-context.json.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _invoke_hook_command(command: str, payload: dict[str, object]) -> Any:

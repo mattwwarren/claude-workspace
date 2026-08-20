@@ -822,6 +822,23 @@ class TestHookSettingsTemplate:
             for entry in pretooluse_entries
         )
 
+    def test_template_includes_busy_wait_guard_pretooluse(self) -> None:
+        """#1946: guard-busy-wait rides the SAME Bash entry as guard-cwd.
+
+        Encodes the shape directly: exactly one "Bash"-matched PreToolUse
+        entry exists, and both commands sit in that one entry's hooks list.
+        A second top-level "Bash" entry would be a different (unverified)
+        dispatch question about how Claude Code handles duplicate matchers.
+        """
+        from cw.spawn import _HOOK_SETTINGS_TEMPLATE
+
+        entries = _HOOK_SETTINGS_TEMPLATE["hooks"]["PreToolUse"]
+        bash_entries = [e for e in entries if e.get("matcher") == "Bash"]
+        assert len(bash_entries) == 1
+
+        commands = [hook["command"] for hook in bash_entries[0]["hooks"]]
+        assert commands == ["cw guard-cwd", "cw guard-busy-wait"]
+
     def test_hook_settings_template_includes_agent_spawn_pretooluse(self) -> None:
         """#1646: a subagent-tool PreToolUse entry sits alongside the Bash guard."""
         from cw.spawn import _AGENT_TOOL_MATCHER, _HOOK_SETTINGS_TEMPLATE
@@ -2791,10 +2808,10 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (5 after the #1646 addition)."""
+        """cw-context.json schema_version is current (6 after the #1946 addition)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 5
+        assert CW_CONTEXT_SCHEMA_VERSION == 6
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -2809,7 +2826,82 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 5
+        assert context["schema_version"] == 6
+
+
+class TestCwContextLaneStamp:
+    """_write_hook_context stamps the #1946 lane key the busy-wait guard reads."""
+
+    def test_write_hook_context_stamps_lane(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """An explicit lane lands in cw-context.json verbatim."""
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "wt-lane"
+        worktree.mkdir()
+        _write_hook_context(
+            worktree,
+            session_id="s1",
+            session_name="acme/impl",
+            client="acme",
+            purpose="impl",
+            ticket_id=None,
+            origin=SessionOrigin.DAEMON,
+            lane="my-lane",
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["lane"] == "my-lane"
+
+    def test_write_hook_context_lane_defaults_to_none(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """The lane-less call shape (cw.session) still writes the key as null.
+
+        The key is always present so a consumer never has to distinguish
+        "no lane" from "context predates the schema-v6 addition".
+        """
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "wt-no-lane"
+        worktree.mkdir()
+        _write_hook_context(
+            worktree,
+            session_id="s1",
+            session_name="acme/impl",
+            client="acme",
+            purpose="impl",
+            ticket_id=None,
+            origin=SessionOrigin.USER,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["lane"] is None
+
+    def test_spawn_create_impl_forwards_its_lane(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """spawn_create_impl's in-scope lane reaches the written context."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="lane-stamp-client")
+        worktree = make_git_repo("wt-1946-lane")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-1946 --headless",
+            label="auto-dev/GEN-1946",
+            native_daemon=FakeNativeDaemonClient(),
+            lane="fast",
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["lane"] == "fast"
 
 
 class TestAgentSpawnStampSeeding:
