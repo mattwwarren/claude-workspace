@@ -20,10 +20,22 @@ from cw.unavailability import (
     FAMILY_AUTH_FAILURE,
     FAMILY_GITHUB_5XX_OR_RATE_LIMIT,
     FAMILY_NETWORK_UNREACHABLE,
+    FAMILY_PROVIDER_OVERLOAD,
+    PROVIDER_UNAVAILABILITY_SIGNATURES,
     UNAVAILABILITY_SIGNATURES,
+    classify_provider_unavailability,
     classify_unavailability,
 )
 from tests.conftest import _cmd
+
+# Verbatim capture, dev-1751 impl worker, session
+# 286032f7-47ee-4985-a45d-e7a946aa1d9d, 2026-08-18T17:27:09.071Z (#1923).
+_CAPTURED_529_TEXT = (
+    'Agent "Implement plan for ticket #1751" failed: Agent terminated early '
+    "due to an API error: API Error: 529 Overloaded. This is a server-side "
+    "issue, usually temporary — try again in a moment. If it persists, check "
+    "https://status.claude.com."
+)
 
 
 class TestClassifyUnavailabilityFixtures:
@@ -136,3 +148,56 @@ class TestClassifyUnavailabilityStructural:
             assert signature in intake, (
                 f"{signature!r} missing from auto-dev-intake.md prose mirror"
             )
+
+    def test_classify_unavailability_does_not_match_529_signature(self) -> None:
+        """The existing classifier must stay blind to the 529 signature (#1923).
+
+        Proves the two tables don't silently collide -- classify_unavailability
+        (the pre-existing 3-family classifier) must return None for the
+        captured provider-overload text, which lives only in the new sibling
+        table.
+        """
+        assert classify_unavailability(_CAPTURED_529_TEXT) is None
+
+
+class TestClassifyProviderUnavailability:
+    """Sibling classifier for the provider-overload (API 529) family (#1923).
+
+    Deliberately separate from TestClassifyUnavailabilityFixtures /
+    UNAVAILABILITY_SIGNATURES -- see PROVIDER_UNAVAILABILITY_SIGNATURES'
+    module-level comment for why this is a new table, not a new member of
+    the existing one.
+    """
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (_CAPTURED_529_TEXT, FAMILY_PROVIDER_OVERLOAD),
+            (
+                "error: pathspec 'foo' did not match any file(s) known to git",
+                None,
+            ),
+        ],
+    )
+    def test_fixture(self, text: str, expected: str | None) -> None:
+        assert classify_provider_unavailability(text) == expected
+
+    def test_classify_provider_unavailability_is_case_sensitive(self) -> None:
+        assert classify_provider_unavailability("api error: 529 overloaded") is None
+        assert (
+            classify_provider_unavailability("API Error: 529 Overloaded")
+            == FAMILY_PROVIDER_OVERLOAD
+        )
+
+    def test_classify_provider_unavailability_does_not_match_existing_families(
+        self,
+    ) -> None:
+        """Genuine disjointness, not accidental non-overlap (#1923)."""
+        assert (
+            classify_provider_unavailability("...git@github.com: Permission denied (publickey).")
+            is None
+        )
+        assert classify_provider_unavailability("gh: Something Went Wrong (HTTP 500)") is None
+
+    def test_provider_unavailability_signatures_table_is_frozen(self) -> None:
+        assert isinstance(PROVIDER_UNAVAILABILITY_SIGNATURES, tuple)
