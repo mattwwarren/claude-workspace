@@ -346,12 +346,9 @@ outcome (`false` means unavailable) and `gate_enabled` echoes the config
 flag that suppressed the skip. Earlier sibling of
 `gate.disk_pressure_bypassed` (#1887), which mirrors this bypass shape;
 forwarded to the operator-attention channel by default (same as
-`gate.auto_approved`), since an SSH-key-gate bypass is attention-worthy. No
-paired failure event: emitting this has no mutation of its own that can
-fail.
+`gate.auto_approved`), since an SSH-key-gate bypass is attention-worthy.
 
-`correlation_id` is `None` (per-client, not per-ticket — no `ticket_id` in
-the call).
+`correlation_id` is `None` (per-client, not per-ticket).
 
 ### `gate.disk_pressure_bypassed`
 
