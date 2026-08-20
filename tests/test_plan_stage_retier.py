@@ -190,8 +190,7 @@ def test_scope_tier_stale_blocker_reason_row_and_stage_mapping() -> None:
     assert "#1815" in new_row
 
     assert (
-        f'`"{DEFERRED_STUB_UNRESOLVED}"`, or `"{SCOPE_TIER_STALE}"` → '
-        '`"stage1_plan"`'
+        f'`"{DEFERRED_STUB_UNRESOLVED}"`, or `"{SCOPE_TIER_STALE}"` → `"stage1_plan"`'
     ) in content
 
 
@@ -203,8 +202,6 @@ def test_scope_tier_stale_blocker_reason_row_and_stage_mapping() -> None:
 def test_scope_tier_marker_requirement_forward_references_step1g0() -> None:
     """The Step 1f.4-revision marker sentence names Step 1g.0's confirmed tuple."""
     section = _step1g_section()
-    window = _after(
-        section, "If the plan was loaded from Linear in Step 1a", span=350
-    )
+    window = _after(section, "If the plan was loaded from Linear in Step 1a", span=350)
     assert "Step 1g.0" in window
     assert "not an earlier cached one" in window
