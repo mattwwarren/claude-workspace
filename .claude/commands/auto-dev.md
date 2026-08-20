@@ -117,6 +117,7 @@ The rows below define the deterministic headless action for every interactive ga
 | S1 soundness review, MUST_FIX, interactive | AskUserQuestion: revise approach / override / skip ticket. On "revise" → Step 1f.4 |
 | S1 soundness review, MUST_FIX, headless OR persists after 1 revision | EXIT `blocked` with `blocker.reason: "plan_unsound"` (also posts blocking findings as a tracker comment, #1815) |
 | S1 plan reviewer agent BLOCK (either station) | EXIT `blocked` with `blocker.reason: "agent_block"` |
+| S1 tier re-verification (Step 1g.0), stamped tier stale vs. current classification | EXIT `blocked` with `blocker.reason: "scope_tier_stale"` (also posts blocking findings as a tracker comment, #1897) |
 | S1 scope-limit hit | EXIT `scope_exceeded` |
 | S1 forbidden-area hit | EXIT `forbidden_area` |
 | S2 impl checkpoint (any scope) | AUTO-CONTINUE — never gate |
@@ -977,6 +978,7 @@ When `status: "blocked"`, the `blocker.reason` field carries one of:
 | `plan_unsound` | Plan Soundness Reviewer returned a MUST_FIX (direction contradicts a codified `ARCHITECTURE.md` §7/§8 rule) in a headless run, or it persisted after a Step 1f.4 revision cycle — the chosen direction needs human judgment. No branch created. Also posts the persisting blocking findings as a tracker comment (#1815) |
 | `ambiguity_scan_unconverged` | Step 1c's ambiguity/premise scan parked for 2 consecutive rounds without converging — the round cap (`plan-stage-scan-round`, cap 2, tracked on `.cw/plan-draft.md`'s first line) was reached, so another park round would just re-ask what the operator has already been asked twice. No branch created. `blocker.stage` is `"stage1_plan"` and `retry_eligible: true`; the still-open item(s) and the round count at exhaustion (always 2) are named verbatim in `blocker.details`, folded into the same consolidated `## Pending Verification Scan` comment as any ambiguities, premises, and advisory findings raised that round (#1683) |
 | `deferred_stub_unresolved` | Step 1c's pre-branch stub check found a `## Deferred Premises` entry still marked `PENDING — agent must supply on next scan` after the scan that was required to classify it — the halt-check the plan depends on is un-enforced, so the round blocks instead of proceeding to any Step 4c outcome, AUTO-CONTINUE included. No branch created. `blocker.stage` is `"stage1_plan"` and `retry_eligible: true`; the unresolved stub(s) are named verbatim in `blocker.details` and folded into the same consolidated park comment (#1683) |
+| `scope_tier_stale` | Step 1g.0's tier re-verification, immediately before the `**Scope tier:**` stamp is written, found the tier last computed this invocation differs from the tier freshly recomputed from the plan's current state — a Step 1f.4 revision (or an accumulated resumed round) could otherwise carry an earlier round's stale tier through to the persisted stamp, silently skipping the Large-tier operator-approval gate at Checkpoint 1. No branch created. `blocker.stage` is `"stage1_plan"` and `retry_eligible: true`; `blocker.details` names both tiers, each with its full `(files, lines, forbidden_touched)` tuple. Also posts the mismatch as a tracker comment under `## Blocking Review Findings` (#1815, #1897) |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve |
 | `tool_denied` | The Claude Code auto-mode classifier denied a tool call mid-pipeline. Often classifier-flaky (see claude-workspace#183) so `retry_eligible: true` by default; the orchestrator may re-dispatch the ticket on a fresh session. Populate `blocker.tool_name` and `blocker.denial_reason` (verbatim classifier `Reason:` text). See Tool-Use Denial Exit section |
 
@@ -1002,7 +1004,7 @@ Optional keys (some `reason` values require them):
 - `scope_exceeded` / `forbidden_area` → whichever stage detected the violation (`"stage1_plan"` at planning, or the impl stage if later); mirror in `blocker.stage`
 - `empty_diff_blocked` → `"stage2_impl"` or `"stage3_review"` — whichever stage measured the empty branch; both are legal. Mirror it in `blocker.stage`
 - `stale_dispatch` → `"stage1_pre_flight"` for the Stage 0 intake self-check (the common case), or whichever later stage a resume path discovered the open PR at. Mirror it in `blocker.stage`
-- `blocked` with `blocker.reason: "plan_unreviewable"`, `"plan_unsound"`, `"ambiguity_scan_unconverged"`, or `"deferred_stub_unresolved"` → `"stage1_plan"`
+- `blocked` with `blocker.reason: "plan_unreviewable"`, `"plan_unsound"`, `"ambiguity_scan_unconverged"`, `"deferred_stub_unresolved"`, or `"scope_tier_stale"` → `"stage1_plan"`
 - `blocked` (other reasons) → whichever stage produced the BLOCK; mirror this in `blocker.stage`.
 
 **`worktree_path`** and **`branch`** — these are two distinct namespaces; do NOT conflate them.
