@@ -76,6 +76,39 @@ def test_headless_contract_mirrors_plan_scope_drift() -> None:
     assert "#1779" in content
 
 
+def test_headless_contract_backfills_five_stage1_blocker_reasons() -> None:
+    """docs/headless-contract.md must carry all five Stage-1 plan-gate
+    blocker.reason values from auto-dev.md's Gate-Collapse Table and
+    blocker.reason Values table: plan_unreviewable, plan_unsound,
+    ambiguity_scan_unconverged, deferred_stub_unresolved, and (since #1897
+    merged) scope_tier_stale (#1951)."""
+    content = _doc("docs/headless-contract.md")
+    gate_start = content.index("## 2. Gate-Collapse Table")
+    gate_end = content.index("## 3. Structured Output")
+    gate_window = content[gate_start:gate_end]
+
+    blocker_start = content.index(
+        '### 4.2 `blocker.reason` (when `status = "blocked"`)'
+    )
+    blocker_end = content.index("### 4.3 `next_actions` Vocabulary")
+    blocker_window = content[blocker_start:blocker_end]
+
+    reasons = [
+        "plan_unreviewable",
+        "plan_unsound",
+        "ambiguity_scan_unconverged",
+        "deferred_stub_unresolved",
+        "scope_tier_stale",
+    ]
+    for reason in reasons:
+        assert f'blocker.reason: "{reason}"' in gate_window, (
+            f"missing gate-collapse row for {reason}"
+        )
+        assert f"| `{reason}` |" in blocker_window, (
+            f"missing blocker.reason table row for {reason}"
+        )
+
+
 def test_plan_step1b_requires_files_modified_heading() -> None:
     """The gate parser has no anchor unless Step 1b mandates the heading."""
     content = _cmd("auto-dev-plan.md")
