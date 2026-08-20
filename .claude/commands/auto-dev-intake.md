@@ -53,6 +53,14 @@ equivalent:
 
 ---
 
+### Sentinel-Emission Discipline (applies to every EXIT below)
+
+Stage 0 exits standalone with a `blocked`/`stale_dispatch` sentinel in three places below (the Origin Sync Check's Step P3, the Step 3 fetch-failure handler, and the Step 3 open-PR self-check) — none of these chain into Stage 1. Whichever fires:
+
+**Validating is not emitting (#1890).** Before emitting any of the JSON payloads below, validate it with `cw result validate -` and wrap it in the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame — the bare JSON shown inline in each EXIT below is the payload, not the wire format. Validating is not emitting: never narrate emission as a separate act from performing it. The frame must be the final characters of this same message.
+
+**No interactive escalation, ever.** In headless mode there is no listener. Never escalate a pre-flight condition (origin divergence, an unreachable tracker, an already-open PR) by asking a question and ending your turn. Escalate exclusively via the sentinel's `blocker` field with `status: "blocked"` (or `status: "stale_dispatch"` for the open-PR case), as specified at each EXIT below.
+
 ## Pre-flight: Origin Sync Check
 
 Runs once per `/auto-dev` invocation, before Stage 0. Fails fast when the local `main` branch is not in sync with `origin/main`, so the pipeline does not spend impl + review tokens on a feature branch the Stage 4 merge gate will reject (#170: a full 25-minute impl + 5-reviewer run exited `merge_gate_blocked` for exactly this).

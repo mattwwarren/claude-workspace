@@ -778,7 +778,11 @@ def _stage1_completion_section() -> str:
 
 def _stage1_completion_json_block() -> str:
     section = _stage1_completion_section()
-    start = section.index("<<<AUTO_DEV_RESULT")
+    # Anchor on a line-start match (#1890): a backtick-quoted mention of the
+    # frame token in surrounding prose (e.g. "the literal `<<<AUTO_DEV_RESULT`
+    # / `AUTO_DEV_RESULT>>>` frame") is not the frame itself, only the actual
+    # frame opener is at the start of its own line.
+    start = section.index("\n<<<AUTO_DEV_RESULT") + 1
     end = section.index("AUTO_DEV_RESULT>>>", start)
     return section[start:end]
 
