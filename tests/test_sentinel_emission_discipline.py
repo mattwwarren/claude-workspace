@@ -12,8 +12,6 @@ sentinel. Both gaps are model-adherence, not schema — this pins the prose
 that closes them.
 """
 
-from pathlib import Path
-
 from tests.conftest import _cmd
 
 FRAME_DISCIPLINE_ANCHOR = "Validating is not emitting"
@@ -31,19 +29,27 @@ def _section(content: str, start_anchor: str, end_anchor: str | None) -> str:
 
 
 def _plan_completion() -> str:
-    return _section(_cmd("auto-dev-plan.md"), "## Stage 1 Completion (headless only)", None)
+    return _section(
+        _cmd("auto-dev-plan.md"), "## Stage 1 Completion (headless only)", None
+    )
 
 
 def _impl_completion() -> str:
-    return _section(_cmd("auto-dev-impl.md"), "## Stage 2 Completion (headless only)", None)
+    return _section(
+        _cmd("auto-dev-impl.md"), "## Stage 2 Completion (headless only)", None
+    )
 
 
 def _review_completion() -> str:
-    return _section(_cmd("auto-dev-review.md"), "## Stage 3 Completion (headless only)", None)
+    return _section(
+        _cmd("auto-dev-review.md"), "## Stage 3 Completion (headless only)", None
+    )
 
 
 def _finalize_completion() -> str:
-    return _section(_cmd("auto-dev-finalize.md"), "## Stage 4+5 Completion (headless only)", None)
+    return _section(
+        _cmd("auto-dev-finalize.md"), "## Stage 4+5 Completion (headless only)", None
+    )
 
 
 def _intake_discipline() -> str:
@@ -88,15 +94,23 @@ SECTIONS_WITH_ESCALATION_WARNING = {
 def test_frame_emission_discipline_present_in_every_terminating_section() -> None:
     for name, getter in SECTIONS_WITH_FRAME_DISCIPLINE.items():
         section = getter()
-        assert FRAME_DISCIPLINE_ANCHOR in section, f"{name} missing frame-emission discipline prose"
-        assert FRAME_DISCIPLINE_DETAIL in section, f"{name} missing 'final characters' detail"
+        assert FRAME_DISCIPLINE_ANCHOR in section, (
+            f"{name} missing frame-emission discipline prose"
+        )
+        assert FRAME_DISCIPLINE_DETAIL in section, (
+            f"{name} missing 'final characters' detail"
+        )
 
 
-def test_no_interactive_escalation_warning_present_in_every_terminating_section() -> None:
+def test_no_interactive_escalation_warning_present_in_every_terminating_section() -> (
+    None
+):
     for name, getter in SECTIONS_WITH_ESCALATION_WARNING.items():
         section = getter()
         assert NO_ESCALATION_ANCHOR in section, f"{name} missing 'no listener' warning"
-        assert NO_ESCALATION_DETAIL in section, f"{name} missing blocked-status routing detail"
+        assert NO_ESCALATION_DETAIL in section, (
+            f"{name} missing blocked-status routing detail"
+        )
 
 
 def test_intake_discipline_subsection_precedes_all_three_standalone_exits() -> None:
@@ -117,4 +131,6 @@ def test_plan_md_resolution_fields_preserved_verbatim() -> None:
     section = _plan_completion()
     for field in RESOLUTION_FIELDS:
         assert f'"{field}"' in section
-    assert "resolution_evidence` candidate" in section or "resolution_evidence`" in section
+    assert (
+        "resolution_evidence` candidate" in section or "resolution_evidence`" in section
+    )
