@@ -60,11 +60,16 @@ class WatchedPr(BaseModel):
 
     Registered when someone requests the operator's review on a PR the queue
     does not otherwise track — via ``cw review register <pr>`` (``source="cli"``)
-    or the ``review_requested`` webhook (``source="webhook"``). Persisted as a
-    top-level ``DevQueueStore.watched_prs`` entry (RFC 0011 S2), deliberately
-    NOT a ``TicketTask``: it carries no ``client``/``lane`` and never occupies a
-    dispatch lane slot. ``pr_state`` is hydrated by the serve-tick pass
-    (``cw.pr_hydrate._hydrate_watched_prs``) exactly like ``TicketTask.pr_state``.
+    or the ``review_requested`` webhook (``source="webhook"``) — or, since
+    GitHub #1927, when a ``stale_dispatch`` park needs an independent state
+    source for its OWN blocking PR (``source="stale_dispatch_park"``, registered
+    by ``cw.reconcile.stale_dispatch_watch``). Persisted as a top-level
+    ``DevQueueStore.watched_prs`` entry (RFC 0011 S2), deliberately NOT a
+    ``TicketTask``: it carries no ``lane`` and never occupies a dispatch lane
+    slot; ``client`` is present only for producers that need cross-reference
+    scoping (see the field comment below). ``pr_state`` is hydrated by the
+    serve-tick pass (``cw.pr_hydrate._hydrate_watched_prs``) exactly like
+    ``TicketTask.pr_state``.
 
     ``status`` reserves a ``"dismissed"`` terminal that no code sets this slice —
     the ``(repo, pr_number)`` dedup guard is scoped to ``"active"`` so a future
@@ -77,6 +82,15 @@ class WatchedPr(BaseModel):
     pr_number: int
     requested_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     requester_login: str | None = None
-    source: Literal["webhook", "cli"]
+    source: Literal["webhook", "cli", "stale_dispatch_park"]
     status: Literal["active", "dismissed"] = "active"
+    # GitHub #1927 — the owning dev-queue client, mirroring ``TicketTask.client``'s
+    # role for ``cw.reconcile.tasks._merged_pr_numbers_by_client``: that index is
+    # keyed per-client because a bare PR number is only unambiguous within one
+    # client's repo (#1269). ``None`` for the two pre-#1927 producers (webhook,
+    # cli), which register an operator's review request with no client context —
+    # those entries are excluded from the index rather than guessed at. No
+    # DEV_QUEUE_SCHEMA_VERSION bump accompanies this field: it is additive with a
+    # ``None`` default, so every persisted pre-#1927 blob still parses.
+    client: str | None = None
     pr_state: PrState | None = None

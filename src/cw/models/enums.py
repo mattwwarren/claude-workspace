@@ -393,6 +393,15 @@ class OrchestratorEventType(StrEnum):
     # and different payloads, so one event type would make an audit trail that
     # cannot say which mechanism fired.
     REVIEW_FINDING_DISPOSITION_SUPPRESSED = "review.finding_disposition_suppressed"
+    # GitHub #1927 -- a stale_dispatch park's WatchedPr registration found an
+    # active watch for the same (repo, pr_number) already owned by a
+    # DIFFERENT, non-None client. register_or_adopt_watched_pr refuses to
+    # silently drop the registration attempt (it would otherwise be
+    # indistinguishable from "already handled" and leave the park
+    # permanently unreleasable, with no signal) -- this event is the durable,
+    # observable record naming the park's client, the PR, and the colliding
+    # watch, in place of the mutation it declines to make.
+    WATCHED_PR_COLLISION = "watched_pr.collision"
 
 
 class DispatchSkipReason(StrEnum):

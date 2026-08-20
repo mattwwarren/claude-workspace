@@ -35,7 +35,9 @@ from cw.models import (
     SessionStatus,
     Stage,
     TicketTask,
+    WatchedPr,
 )
+from cw.pr_hydrate import hydrate_pr_states
 from cw.reconcile import (
     _DIRTY_WORKTREE_REASON,
     _NEVER_CLAIMED_COMPLETION_REASON,
@@ -45,6 +47,8 @@ from cw.reconcile import (
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
+from cw.reconcile.stale_dispatch_watch import register_stale_dispatch_watched_prs
+from cw.reconcile.tasks import _merged_pr_numbers_by_client
 from tests._reconcile_helpers import (
     _client_with_lane,
     _mk_daemon_completed_session,
@@ -1864,47 +1868,114 @@ def test_release_stale_gated_tasks_auto_policy_requeues_variant_b(
     assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_b"
 
 
+# GitHub #1862/#1902 — the verbatim agent sentinel shape a stale_dispatch park
+# is routed from; mirrors TestStaleDispatchSentinelRouting._last_result() in
+# tests/test_dispatch.py so the two stay recognizably the same payload.
+_STALE_DISPATCH_LAST_RESULT: dict[str, object] = {
+    "status": "stale_dispatch",
+    "blocker": {
+        "stage": "stage1_pre_flight",
+        "reason": "pr_already_open",
+        "details": "PR #1899 (dev/1862) is open and awaiting review.",
+    },
+    "commits": [],
+    "review": {"must_fix_initial": 0, "should_fix": 0},
+}
+_STALE_DISPATCH_PR_NUMBER = 1899
+_STALE_DISPATCH_SLUG = "foo/bar"
+
+
+def _park_stale_dispatch_via_routing(
+    ticket_id: str, client: str, workspace: Path
+) -> TicketTask:
+    """Park a RUNNING row through the REAL #1902 routing path and persist it.
+
+    No field is hand-set: ``apply_staged_decision`` stamps status,
+    disposition, blocked_reason, and ``blocked_on_pr`` exactly as production
+    does when an agent reports a ``stale_dispatch`` sentinel.
+    """
+    from cw.dispatch import apply_staged_decision
+
+    task = _make_ticket_task(
+        ticket_id=ticket_id,
+        client=client,
+        status=QueueItemStatus.RUNNING,
+        stage=Stage.IMPL,
+        session_id=f"sess-{ticket_id}",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    apply_staged_decision(
+        task,
+        "stale_dispatch",
+        dict(_STALE_DISPATCH_LAST_RESULT),
+        {client: ClientConfig(name=client, workspace_path=workspace)},
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    return task
+
+
+def _register_and_hydrate_merged_watch(
+    monkeypatch: pytest.MonkeyPatch, *, state: str = "MERGED"
+) -> None:
+    """Run the two real production passes that give the park a PR-state source.
+
+    ``register_stale_dispatch_watched_prs`` is called as a STANDALONE step
+    (not inline with the stamping above), so what this exercises is the
+    retroactive per-tick rescan of an already-parked row — binding A2's
+    "a park stamped before this feature existed must still be registered".
+    ``hydrate_pr_states`` then fills the watch's ``pr_state`` through the same
+    ``_derive_pr_state`` seam a real serve tick uses.
+    """
+    monkeypatch.setattr(
+        "cw.reconcile.stale_dispatch_watch._resolve_repo_slug",
+        lambda _git_dir: _STALE_DISPATCH_SLUG,
+    )
+    register_stale_dispatch_watched_prs()
+    monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: None)
+    monkeypatch.setattr(
+        "cw.pr_hydrate.fetch_pr_view",
+        lambda *_a, **_kw: {
+            "state": state,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [],
+            "reviewDecision": "",
+            "isDraft": False,
+            "reviewRequests": [],
+            "comments": [],
+        },
+    )
+    hydrate_pr_states(OrchestratorConfig())
+    # Pin what makes these tests load-bearing rather than incidental: the
+    # blocking PR's state reaches the release scan ONLY through the watch --
+    # no task row in the store carries that pr_url for the task-scan half of
+    # _merged_pr_numbers_by_client to find.
+    store = load_dev_queue()
+    assert all(t.pr_url is None for t in store.tasks)
+    assert len(store.watched_prs) == 1
+    assert store.watched_prs[0].pr_number == _STALE_DISPATCH_PR_NUMBER
+    assert store.watched_prs[0].pr_state is not None
+    assert store.watched_prs[0].pr_state.state == state
+
+
 def test_release_stale_gated_tasks_auto_policy_requeues_stale_dispatch_variant_b(
     tmp_config_dir: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """reap_policy=auto: a stale_dispatch/pr_already_open park (the agent-
-    reported GitHub #1862 sentinel, extended here per #1902) requeues to
-    PENDING once its blocked_on_pr is observed MERGED -- same release
-    mechanism as test_release_stale_gated_tasks_auto_policy_requeues_variant_b,
-    exercised through the second Variant B producer/reason pair.
+    reported GitHub #1862 sentinel, extended per #1902) requeues to PENDING
+    once its own blocking PR is observed MERGED.
 
-    Caveat (#1902 R3, binding): the ``blocking`` fixture below is
-    hand-constructed exactly like the sibling Variant A/B fixtures
-    (COMPLETED status, pr_url + pr_state=MERGED pre-set) -- it does not
-    come from any real production code path. Per the plan's R3 reachability
-    trace, no store row today is ever populated with a stale_dispatch
-    park's own self-PR pr_url: the self-check that produces this park
-    discovers the PR via a live ``gh pr list --head <branch>`` query, which
-    never writes to any TicketTask.pr_url. This test proves the release
-    *mechanism* is wired correctly for the extended predicate -- it does
-    NOT prove this release is reachable in production for the
-    stale_dispatch disposition today. See #1927, the tracking issue for the
-    independent PR-state source that would make it reachable.
+    End-to-end through the production path #1927 closed: the row is parked by
+    ``apply_staged_decision`` (not hand-built), the blocking PR's state comes
+    from a ``WatchedPr`` registered by a standalone retroactive rescan and
+    hydrated by the real ``hydrate_pr_states`` pass, and no other task row
+    carries that PR anywhere in the store.
     """
-    blocking = _make_ticket_task(
-        ticket_id="SG-SD-BLOCKER",
-        client="client-a",
-        status=QueueItemStatus.COMPLETED,
-        pr_url="https://github.com/foo/bar/pull/70",
-        pr_state=PrState(state="MERGED"),
-    )
-    blocked = _make_ticket_task(
-        ticket_id="SG-SD1",
-        client="client-a",
-        status=QueueItemStatus.BLOCKED_ON_USER,
-        disposition="stale_dispatch",
-        blocked_reason="pr_already_open",
-        blocked_on_pr=70,
-        session_id="sess-sd1",
-    )
-    save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
+    _park_stale_dispatch_via_routing("SG-SD1", "client-a", tmp_path)
     save_state(CwState(sessions=[]))
+    _register_and_hydrate_merged_watch(monkeypatch)
     monkeypatch.setattr(
         "cw.reconcile.tasks.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
@@ -1929,14 +2000,42 @@ def test_release_stale_gated_tasks_auto_policy_requeues_stale_dispatch_variant_b
     assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_b"
 
 
+def test_release_stale_gated_tasks_stale_dispatch_open_pr_not_released_end_to_end(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same production path, blocking PR still OPEN: no release, no stamp.
+
+    The no-false-release half of the #1927 contract — proves the new
+    ``WatchedPr`` source releases on MERGED specifically, not merely on the
+    watch existing.
+    """
+    _park_stale_dispatch_via_routing("SG-SD-OPEN", "client-a", tmp_path)
+    save_state(CwState(sessions=[]))
+    _register_and_hydrate_merged_watch(monkeypatch, state="OPEN")
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+
+    assert release_stale_gated_tasks() == []
+
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD-OPEN")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.blocked_on_pr == _STALE_DISPATCH_PR_NUMBER
+    assert reloaded.stale_gate_detected_at is None
+
+
 def test_release_stale_gated_tasks_stale_dispatch_still_open_pr_is_noop(
     tmp_config_dir: Path,
 ) -> None:
     """A stale_dispatch park whose blocking PR is still OPEN (not yet
     merged) must not be released -- the ticket's explicit no-false-release
-    case (#1902). The ``blocking`` fixture below is hand-constructed like
-    its sibling Variant A/B fixtures; no production code path populates a
-    row's pr_url for a stale_dispatch self-PR today (#1902 R3, #1927)."""
+    case (#1902). Narrow predicate-edge fixture: hand-built rows keep this
+    test focused on the cross-reference predicate itself; the end-to-end
+    production path is covered by
+    test_release_stale_gated_tasks_stale_dispatch_open_pr_not_released_end_to_end."""
     blocking = _make_ticket_task(
         ticket_id="SG-SD-BLOCKER2",
         client="client-a",
@@ -1965,30 +2064,15 @@ def test_release_stale_gated_tasks_stale_dispatch_still_open_pr_is_noop(
 
 def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps(
     tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default signal_only: a stale_dispatch Variant B park stamps
-    stale_gate_detected_at without mutating status, symmetric with
-    test_release_stale_gated_tasks_variant_b_signal_only_stamps. The
-    ``blocking`` fixture below is hand-constructed like its sibling
-    Variant A/B fixtures; no production code path populates a row's
-    pr_url for a stale_dispatch self-PR today (#1902 R3, #1927)."""
-    blocking = _make_ticket_task(
-        ticket_id="SG-SD-BLOCKER3",
-        client="client-a",
-        status=QueueItemStatus.COMPLETED,
-        pr_url="https://github.com/foo/bar/pull/72",
-        pr_state=PrState(state="MERGED"),
-    )
-    blocked = _make_ticket_task(
-        ticket_id="SG-SD3",
-        client="client-a",
-        status=QueueItemStatus.BLOCKED_ON_USER,
-        disposition="stale_dispatch",
-        blocked_reason="pr_already_open",
-        blocked_on_pr=72,
-    )
-    save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
+    """Default signal_only (ADR-0006): the same end-to-end production path as
+    the AUTO test above stamps ``stale_gate_detected_at`` and leaves
+    ``status`` untouched -- no destructive mutation without an opt-in."""
+    _park_stale_dispatch_via_routing("SG-SD3", "client-a", tmp_path)
     save_state(CwState(sessions=[]))
+    _register_and_hydrate_merged_watch(monkeypatch)
 
     released = release_stale_gated_tasks()
 
@@ -1996,7 +2080,7 @@ def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps(
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD3")
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
     assert reloaded.stale_gate_detected_at is not None
-    assert reloaded.blocked_on_pr == 72
+    assert reloaded.blocked_on_pr == _STALE_DISPATCH_PR_NUMBER
 
 
 def test_is_variant_b_gate_task_stale_dispatch_requires_matching_blocked_reason(
@@ -2005,10 +2089,9 @@ def test_is_variant_b_gate_task_stale_dispatch_requires_matching_blocked_reason(
     """Guards the predicate's second `and`: a stale_dispatch-disposition row
     with a mismatched blocked_reason must not be released, even with a
     non-null blocked_on_pr and a merged blocking PR available in the
-    cross-reference index. The ``blocking`` fixture below is
-    hand-constructed like its sibling Variant A/B fixtures; no production
-    code path populates a row's pr_url for a stale_dispatch self-PR today
-    (#1902 R3, #1927)."""
+    cross-reference index. Narrow predicate-edge fixture -- hand-built rows
+    are deliberate here (the production park always carries the matching
+    reason, so it cannot produce this row)."""
     blocking = _make_ticket_task(
         ticket_id="SG-SD-BLOCKER4",
         client="client-a",
@@ -2033,6 +2116,63 @@ def test_is_variant_b_gate_task_stale_dispatch_requires_matching_blocked_reason(
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD4")
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
     assert reloaded.blocked_on_pr == 73
+
+
+class TestMergedPrNumbersByClient:
+    """The Variant B cross-reference index, now fed by two sources (#1927):
+    task rows' hydrated ``pr_state`` and client-tagged ``WatchedPr`` entries.
+    """
+
+    def _watched(
+        self,
+        *,
+        pr_number: int = 90,
+        client: str | None = "client-a",
+        state: str = "MERGED",
+    ) -> WatchedPr:
+        return WatchedPr(
+            pr_url=f"https://github.com/foo/bar/pull/{pr_number}",
+            repo="foo/bar",
+            pr_number=pr_number,
+            client=client,
+            source="stale_dispatch_park",
+            pr_state=PrState(state=state),
+        )
+
+    def test_merged_client_tagged_watch_contributes(self) -> None:
+        store = DevQueueStore(watched_prs=[self._watched()])
+        assert _merged_pr_numbers_by_client(store) == {"client-a": {90}}
+
+    def test_unmerged_watch_excluded(self) -> None:
+        store = DevQueueStore(watched_prs=[self._watched(state="OPEN")])
+        assert _merged_pr_numbers_by_client(store) == {}
+
+    def test_watch_without_pr_state_excluded(self) -> None:
+        watched = self._watched()
+        watched.pr_state = None
+        assert _merged_pr_numbers_by_client(DevQueueStore(watched_prs=[watched])) == {}
+
+    def test_null_client_watch_excluded(self) -> None:
+        """An operator-registered (webhook/cli) watch carries no client
+        context, so its bare PR number cannot be scoped to one repo."""
+        store = DevQueueStore(watched_prs=[self._watched(client=None)])
+        assert _merged_pr_numbers_by_client(store) == {}
+
+    def test_other_client_watch_does_not_leak(self) -> None:
+        store = DevQueueStore(watched_prs=[self._watched(client="client-b")])
+        merged = _merged_pr_numbers_by_client(store)
+        assert merged.get("client-a", set()) == set()
+        assert merged == {"client-b": {90}}
+
+    def test_task_and_watch_sources_union_within_a_client(self) -> None:
+        task = _make_ticket_task(
+            ticket_id="SG-U1",
+            client="client-a",
+            pr_url="https://github.com/foo/bar/pull/91",
+            pr_state=PrState(state="MERGED"),
+        )
+        store = DevQueueStore(tasks=[task], watched_prs=[self._watched()])
+        assert _merged_pr_numbers_by_client(store) == {"client-a": {90, 91}}
 
 
 def test_release_stale_gated_tasks_variant_b_signal_only_stamps(

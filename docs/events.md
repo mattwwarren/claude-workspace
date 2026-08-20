@@ -1639,6 +1639,43 @@ already visible on the review comment.
 
 `correlation_id` is the `ticket_id`.
 
+### `watched_pr.collision`
+
+**Emitter:** `register_or_adopt_watched_pr` (`cw.dev_queue.crud`).
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "repo": "<str>",
+  "pr_number": "<int>",
+  "colliding_client": "<str>",
+  "colliding_source": "<str>"
+}
+```
+**Semantics:** GitHub #1927. A `stale_dispatch` park's `WatchedPr` registration
+found an active watch for the same `(repo, pr_number)` already owned by a
+DIFFERENT, non-`None` client. `register_watched_pr`'s existing
+`(repo, pr_number, active)` dedup has no `client` dimension, so a bare `False`
+return from it is indistinguishable from "already handled" — for this
+producer specifically, it can mean a second client's park can never be
+attributed a merged-PR fact and will hold its lane slot `BLOCKED_ON_USER`
+indefinitely. `register_or_adopt_watched_pr` refuses that silent outcome:
+when the existing watch is client-less (the common case — a pre-existing
+webhook/cli watch), it adopts it in place instead (no event, `client` is
+simply set); this event fires only for the genuine collision, where the
+existing watch already belongs to someone else.
+
+`correlation_id` is `client`.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
+(`orchestrator_config.py`): the condition requires two dev-queue clients
+mapped to the same repo colliding on the same PR number, which the codebase's
+`(client, repo)` injectivity premise (#1269) treats as configuration drift
+rather than a steady-state outcome. The event exists as the durable,
+queryable record (`cw event tail`/`cw event wait`); opting it into the
+default push-notification forward-set is a separate policy call left for a
+follow-up if this proves to fire in practice.
+
 ### Operator-attention channel (RFC 0008 W3, #1002)
 
 A server-side filter (`cw.cw_operator_events`) forwards a declarative subset

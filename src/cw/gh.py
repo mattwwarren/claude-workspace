@@ -33,6 +33,15 @@ _PR_VIEW_FIELDS = (
 TIMED_OUT_MERGED_LOOKBACK_DAYS = 7
 
 
+def github_pr_url(repo: str, pr_number: int) -> str:
+    """Build a PR's github.com URL from its ``owner/repo`` slug and number.
+
+    Shared by every ``WatchedPr`` producer (RFC 0011 S2) so the format lives
+    in exactly one place; round-trips through ``cw.pr_hydrate._PR_URL_RE``.
+    """
+    return f"https://github.com/{repo}/pull/{pr_number}"
+
+
 def _fetch_issue_pr_refs(
     ticket_id: str, timeout: int, *, cwd: Path | None = None
 ) -> list[dict[str, Any]] | None:

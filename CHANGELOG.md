@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`stale_dispatch` parks now self-register a `WatchedPr` for their own blocking PR, so they can self-release (#1927):** a `stale_dispatch` park (blocked behind its own earlier, un-harvested-sentinel PR) is discovered by a live `gh pr list --head <branch>` self-check that never writes a `pr_url` onto the `TicketTask` row, so `release_stale_gated_tasks`'s Variant B cross-reference had nothing to match the park's `blocked_on_pr` against and the park could never self-release. A new `cw.reconcile.stale_dispatch_watch` pass closes the gap by registering the blocking PR as a `WatchedPr` — a store-level PR watch already hydrated every serve tick by `_hydrate_watched_prs` (RFC 0011 S2, #1154) — and wires the registration into the dispatch tick. Because the existing `register_watched_pr` dedup key (`repo`, `pr_number`, `status == "active"`) has no client dimension, registration goes through a new `register_or_adopt_watched_pr` that adopts a client-less existing watch for the same PR or, on a genuine cross-client collision, refuses to mutate and instead emits a new `WATCHED_PR_COLLISION` (`watched_pr.collision`) event naming the park's client, the PR, and the colliding watch — never a silent no-op that would leave the park permanently unreleasable.
+
 ## [1.40.0] - 2026-08-20
 
 ### Added

@@ -610,9 +610,10 @@ class TicketTask(BaseModel):
     # #1862) has a blocker.details naming the blocking PR. Cross-referenced
     # by release_stale_gated_tasks against another task's hydrated pr_state
     # within the same client to detect when that blocking PR has merged --
-    # for the stale_dispatch producer specifically, see
-    # cw.reconcile.tasks._is_variant_b_gate_task's docstring for the current
-    # production-reachability caveat and #1927.
+    # or, for the stale_dispatch producer (whose blocking PR is this
+    # ticket's own and lives on no task row), against the client-tagged
+    # WatchedPr that cw.reconcile.stale_dispatch_watch registers for it
+    # (GitHub #1927).
     blocked_on_pr: int | None = None
 
     @field_validator("gate_recipes")

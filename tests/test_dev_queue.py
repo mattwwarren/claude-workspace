@@ -34,6 +34,7 @@ from cw.dev_queue import (
     transition_task_status,
     wait_for_terminal,
 )
+from cw.dev_queue.crud import register_or_adopt_watched_pr
 from cw.dev_queue.lifecycle import _advance_task_pointer, _stage_regress
 from cw.dispatch import (
     FRESHNESS_MAIN_BEHIND,
@@ -9551,6 +9552,96 @@ class TestRegisterWatchedPr:
         store = load_dev_queue()
         assert len(store.watched_prs) == 2
         assert any(w.status == "active" for w in store.watched_prs)
+
+
+class TestRegisterOrAdoptWatchedPr:
+    """register_or_adopt_watched_pr (GitHub #1927): the ``client``-aware
+    dedup ``register_watched_pr`` cannot provide on its own -- see the
+    function's docstring for the silent-collision bug this closes."""
+
+    def _watched(
+        self,
+        client: str | None,
+        pr_number: int = 70,
+        repo: str = "foo/bar",
+    ) -> WatchedPr:
+        return WatchedPr(
+            pr_url=f"https://github.com/{repo}/pull/{pr_number}",
+            repo=repo,
+            pr_number=pr_number,
+            client=client,
+            source="stale_dispatch_park",
+        )
+
+    def test_inserts_when_no_existing_watch(self, tmp_config_dir: Path) -> None:
+        assert register_or_adopt_watched_pr(self._watched("client-a")) == "inserted"
+        store = load_dev_queue()
+        assert len(store.watched_prs) == 1
+        assert store.watched_prs[0].client == "client-a"
+
+    def test_adopts_preexisting_null_client_watch_in_place(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """The common real-world collision: a pre-#1927 webhook/cli watch
+        already exists for the same (repo, pr_number). Tagging it in place
+        (rather than shadowing it) is what actually lets the park self-
+        release, not merely what avoids a crash."""
+        save_dev_queue(DevQueueStore(watched_prs=[self._watched(None)]))
+        assert register_or_adopt_watched_pr(self._watched("client-a")) == "adopted"
+        store = load_dev_queue()
+        assert len(store.watched_prs) == 1
+        assert store.watched_prs[0].client == "client-a"
+        assert store.watched_prs[0].source == "stale_dispatch_park"
+
+    def test_already_active_for_same_client_is_a_no_op(
+        self, tmp_config_dir: Path
+    ) -> None:
+        save_dev_queue(DevQueueStore(watched_prs=[self._watched("client-a")]))
+        assert (
+            register_or_adopt_watched_pr(self._watched("client-a")) == "already_active"
+        )
+        assert len(load_dev_queue().watched_prs) == 1
+
+    def test_collision_with_different_client_neither_inserts_nor_mutates(
+        self, tmp_config_dir: Path
+    ) -> None:
+        save_dev_queue(DevQueueStore(watched_prs=[self._watched("client-a")]))
+        assert register_or_adopt_watched_pr(self._watched("client-b")) == "collision"
+        store = load_dev_queue()
+        assert len(store.watched_prs) == 1
+        assert store.watched_prs[0].client == "client-a"
+
+    def test_collision_emits_watched_pr_collision_event(
+        self,
+        tmp_config_dir: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        events = capture_events(
+            "cw.dev_queue.crud", OrchestratorEventType.WATCHED_PR_COLLISION
+        )
+        save_dev_queue(
+            DevQueueStore(watched_prs=[self._watched("client-a", repo="acme/shared")])
+        )
+        register_or_adopt_watched_pr(self._watched("client-b", repo="acme/shared"))
+        assert len(events) == 1
+        etype, payload, corr = events[0]
+        assert etype == OrchestratorEventType.WATCHED_PR_COLLISION
+        assert corr == "client-b"
+        assert payload["client"] == "client-b"
+        assert payload["repo"] == "acme/shared"
+        assert payload["pr_number"] == 70
+        assert payload["colliding_client"] == "client-a"
+        assert payload["colliding_source"] == "stale_dispatch_park"
+
+    def test_adoption_emits_no_event(
+        self,
+        tmp_config_dir: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        events = capture_events("cw.dev_queue.crud")
+        save_dev_queue(DevQueueStore(watched_prs=[self._watched(None)]))
+        register_or_adopt_watched_pr(self._watched("client-a"))
+        assert events == []
 
 
 class TestLaneStatsUnaffectedByWatchedPr:

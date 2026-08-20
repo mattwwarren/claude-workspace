@@ -1104,6 +1104,34 @@ class TestWatchedPrModel:
         assert watched.pr_state is None
         assert isinstance(watched.requested_at, datetime)
 
+    def test_watched_pr_client_defaults_none_for_preexisting_blob(self) -> None:
+        """GitHub #1927: a persisted pre-#1927 blob has no ``client`` key.
+
+        No DEV_QUEUE_SCHEMA_VERSION bump accompanies the field (settled A1),
+        so backward parse compatibility is the load-bearing guarantee.
+        """
+        blob = {
+            "pr_url": "https://github.com/acme/widgets/pull/9",
+            "repo": "acme/widgets",
+            "pr_number": 9,
+            "source": "webhook",
+            "status": "active",
+        }
+        watched = WatchedPr.model_validate(blob)
+        assert watched.client is None
+
+    def test_watched_pr_stale_dispatch_park_source_round_trips(self) -> None:
+        watched = WatchedPr(
+            pr_url="https://github.com/acme/widgets/pull/9",
+            repo="acme/widgets",
+            pr_number=9,
+            client="acme",
+            source="stale_dispatch_park",
+        )
+        restored = WatchedPr.model_validate(watched.model_dump(mode="json"))
+        assert restored.source == "stale_dispatch_park"
+        assert restored.client == "acme"
+
     def test_watched_pr_rejects_bad_source(self) -> None:
         with pytest.raises(ValidationError):
             WatchedPr(

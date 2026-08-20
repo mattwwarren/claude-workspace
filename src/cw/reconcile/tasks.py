@@ -752,7 +752,7 @@ _VARIANT_A_BLOCKED_DISPOSITION = "blocked"
 # parked behind a DIFFERENT ticket's open PR (dispatch/routing.py Rule 5,
 # merge_gate_blocked/prior_pipeline_pr_open) -- see _is_variant_b_gate_task's
 # docstring for the full two-producer contract (GitHub #1902 widens this to
-# a second disposition/reason pair) and the #1927 reachability caveat.
+# a second disposition/reason pair, made production-reachable by #1927).
 _VARIANT_B_DISPOSITION = "merge_gate_blocked"
 
 _PROPOSED_ACTION_VARIANT_A = "release_stale_gate_variant_a"
@@ -784,11 +784,16 @@ def _is_variant_b_gate_task(task: TicketTask) -> bool:
     GitHub #1862/#1902 fast-follow). Both stamp task.blocked_on_pr via the
     identical _extract_blocked_on_pr regex over blocker.details.
 
-    NOTE (#1902 R3): for stale_dispatch specifically, no production code
-    path is currently known to populate a store row whose pr_url matches
-    this PR -- release_stale_gated_tasks's Variant B loop is therefore
-    unit-test-reachable but production-unreachable for this disposition
-    until #1927 closes that gap.
+    The two producers reach their blocking PR's state by different routes.
+    prior_pipeline_pr_open's PR belongs to a DIFFERENT ticket, whose own
+    store row carries it as a pr_url for the task scan in
+    _merged_pr_numbers_by_client to poll. stale_dispatch's PR is this
+    ticket's OWN earlier dispatch, found by a live `gh pr list --head` query
+    that writes no pr_url anywhere -- so #1927 gives it an independent
+    source instead: cw.reconcile.stale_dispatch_watch registers it as a
+    client-tagged WatchedPr, which hydrates on the same serve tick and folds
+    into the same per-client index. (Before #1927 this branch was
+    unit-test-reachable but production-unreachable -- see #1902 R3.)
     """
     if task.status != QueueItemStatus.BLOCKED_ON_USER:
         return False
@@ -819,12 +824,21 @@ def _index_variant_a_candidates(
 def _merged_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[int]]:
     """client -> set of PR numbers this store has observed MERGED (via pr_state).
 
-    Scans every task's hydrated ``pr_state`` (populated by cw.pr_hydrate's
-    per-tick poll, independent of the PR_MERGED event stream Variant A
-    consumes) -- the cross-reference source for Variant B, whose blocked row
-    carries no PR of its own to poll. Scoped per-client, matching the
-    Self-Verified Premise that a dev-queue client is bound to exactly one
-    repo, so a bare PR number is unambiguous within one client's task set.
+    Two independent sources, unioned per client:
+
+    * every task's hydrated ``pr_state`` (populated by cw.pr_hydrate's
+      per-tick poll, independent of the PR_MERGED event stream Variant A
+      consumes) -- reaches a blocking PR that some OTHER ticket's row owns;
+    * every client-tagged ``WatchedPr`` (GitHub #1927), hydrated on the same
+      tick by ``_hydrate_watched_prs`` -- reaches a blocking PR that NO task
+      row owns, which is exactly the ``stale_dispatch`` park's own earlier
+      self-PR (see ``cw.reconcile.stale_dispatch_watch``, the producer).
+
+    Both are scoped per-client, matching the Self-Verified Premise that a
+    dev-queue client is bound to exactly one repo, so a bare PR number is
+    unambiguous within one client. A ``client is None`` watch (the webhook/cli
+    operator-review producers) carries no client context and is therefore
+    excluded rather than attributed to a guessed client (#1269).
     """
     merged: dict[str, set[int]] = {}
     for t in store.tasks:
@@ -837,6 +851,12 @@ def _merged_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[int]]:
             continue
         _, pr_number = parsed
         merged.setdefault(t.client, set()).add(pr_number)
+    for w in store.watched_prs:
+        if w.client is None:
+            continue
+        if w.pr_state is None or w.pr_state.state != _GH_PR_STATE_MERGED:
+            continue
+        merged.setdefault(w.client, set()).add(w.pr_number)
     return merged
 
 
@@ -881,12 +901,13 @@ def release_stale_gated_tasks() -> list[str]:
       "prior_pipeline_pr_open", ``blocked_on_pr`` carrying the blocking PR's
       bare number) *or* behind its own earlier, un-harvested-sentinel PR
       (disposition ``STALE_DISPATCH_DISPOSITION``/blocked_reason=
-      "pr_already_open", GitHub #1902 fast-follow to #1862) -- see
-      ``_is_variant_b_gate_task``'s docstring for the current
-      production-reachability caveat on the latter (#1927). No event stream
+      "pr_already_open", GitHub #1902 fast-follow to #1862). No event stream
       names this row directly, so it is found by a dev-queue-wide
       cross-reference scan against every OTHER task's hydrated ``pr_state``
-      within the same client.
+      within the same client -- plus, since #1927, against every
+      client-tagged ``WatchedPr``, which is what makes the stale_dispatch
+      producer reachable at all (its self-PR lives on no task row; see
+      ``cw.reconcile.stale_dispatch_watch``).
 
     Per ``park_terminal_sibling_tasks``'s exact precedent (ADR-0006):
     ``SESSION_REAP_PROPOSED`` fires on EVERY detection regardless of
