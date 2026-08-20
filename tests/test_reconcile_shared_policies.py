@@ -1091,13 +1091,16 @@ class TestRouteEmittedSentinel:
         task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-live")
         assert task.status == QueueItemStatus.COMPLETED
 
-    def test_act_blocked_retry_eligible_routes_to_pending(
+    def test_act_blocked_provider_overload_routes_to_pending(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Sentinel status=blocked + retry_eligible=True → task reverts to PENDING."""
+        """Sentinel status=blocked + blocker.reason=provider_overload → task
+        reverts to PENDING, same stage (#1948). retry_eligible=False is set
+        deliberately -- proves routing keys off blocker.reason alone, not
+        retry_eligible, even when the latter is present-and-false."""
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -1117,7 +1120,7 @@ class TestRouteEmittedSentinel:
                 "tier": "small",
                 "files": 0,
                 "lines_estimate": 0,
-                "lines_actual": None,
+                "lines_actual": 42,
                 "forbidden_touched": False,
             },
             "plan_source": "generated",
@@ -1138,9 +1141,9 @@ class TestRouteEmittedSentinel:
             "friction_highlights": [],
             "blocker": {
                 "stage": "stage2_impl",
-                "reason": "impl_failed",
-                "retry_eligible": True,
-                "details": "agent timed out",
+                "reason": "provider_overload",
+                "retry_eligible": False,
+                "details": "API Error: 529 Overloaded",
                 "next_actions": ["redispatch_ticket"],
             },
             "next_actions": ["redispatch_ticket"],
@@ -1157,6 +1160,7 @@ class TestRouteEmittedSentinel:
                         client="client-a",
                         status=QueueItemStatus.RUNNING,
                         session_id="578-retry",
+                        stage=Stage.IMPL,
                     )
                 ]
             )
@@ -1177,6 +1181,8 @@ class TestRouteEmittedSentinel:
         task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-retry")
         assert task.status == QueueItemStatus.PENDING
         assert task.session_id is None
+        assert task.stage == Stage.IMPL
+        assert task.regress_attempts == 0
 
     def test_act_signal_only_does_not_gate_route_emitted_sentinel(
         self,

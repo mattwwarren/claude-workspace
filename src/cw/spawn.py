@@ -275,6 +275,22 @@ def _validate_worktree(path: Path) -> None:
 # a spurious increment with a spurious decrement. The anchored form was
 # verified against the same live harness: it fires for a subagent spawn and
 # does not fire for `Bash`.
+#
+# 2026-08-19 re-verification (#1947): the PostToolUse:Agent decrement this
+# matcher used to drive was confirmed HOLLOW by replaying a live async
+# `Agent(isolation="worktree")` spawn (session ea2f3d42, ticket #1902) --
+# `PostToolUse:Agent` fired at 13:12:09.513Z, ~3.9s after the matching
+# PreToolUse and paired with the `Async agent launched successfully.`
+# tool_result at 13:12:09.763Z (launch-return), while the harness's own
+# turn_duration record at 13:12:13.028Z still reported
+# `pendingBackgroundAgentCount: 1`. The stamp balanced to 0 while the
+# subagent was, per the harness's own accounting, still running. The
+# PostToolUse wiring for this matcher is removed; `cw signal-stop`
+# (`cli/stop_hook.py`) now snapshots/clears `agent_spawn_stamp.unresolved_count`
+# off the Stop hook payload's own `background_tasks` list instead -- a signal
+# that tracks the harness's live turn-accounting rather than a tool-call
+# return that races ahead of it. This matcher constant is now read only by
+# the PreToolUse entry below.
 _AGENT_TOOL_MATCHER = "^(Agent|Task)$"
 
 _HOOK_SETTINGS_TEMPLATE = {
@@ -296,20 +312,13 @@ _HOOK_SETTINGS_TEMPLATE = {
             },
             # #1646: stamp an unresolved-subagent-spawn marker before the
             # spawn starts. Never blocks -- there is no failure mode in which
-            # refusing a subagent spawn is the right answer.
+            # refusing a subagent spawn is the right answer. The matching
+            # PostToolUse decrement was removed by #1947 -- see the
+            # re-verification note above _AGENT_TOOL_MATCHER.
             {
                 "matcher": _AGENT_TOOL_MATCHER,
                 "hooks": [{"type": "command", "command": "cw agent-spawn-pre"}],
             },
-        ],
-        # #1646: clear the marker when the spawn returns. A worker that dies
-        # between the two leaves the marker set -- the durable evidence the
-        # phantom sweep reads. This is the first PostToolUse hook cw wires.
-        "PostToolUse": [
-            {
-                "matcher": _AGENT_TOOL_MATCHER,
-                "hooks": [{"type": "command", "command": "cw agent-spawn-post"}],
-            }
         ],
     }
 }

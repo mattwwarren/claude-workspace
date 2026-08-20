@@ -555,8 +555,9 @@ def test_new_blocker_reason_rows_and_stage_reached_mapping() -> None:
 
     assert (
         '- `blocked` with `blocker.reason: "plan_unreviewable"`, '
-        '`"plan_unsound"`, `"ambiguity_scan_unconverged"`, or '
-        '`"deferred_stub_unresolved"` → `"stage1_plan"`' in content
+        '`"plan_unsound"`, `"ambiguity_scan_unconverged"`, '
+        '`"deferred_stub_unresolved"`, or `"scope_tier_stale"` → '
+        '`"stage1_plan"`' in content
     )
 
 
