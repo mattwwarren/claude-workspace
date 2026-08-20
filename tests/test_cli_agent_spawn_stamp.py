@@ -170,6 +170,49 @@ def test_pre_hook_never_crashes_on_missing_cwd(tmp_path: Path) -> None:
     assert result.exit_code == 0
 
 
+def test_pre_hook_never_crashes_on_missing_context_file(tmp_path: Path) -> None:
+    """No cw-context.json at all under cwd → silent exit 0, nothing created.
+
+    Distinct from ``test_pre_hook_never_crashes_on_malformed_context`` (a
+    *present* but corrupt file): this exercises
+    ``_hook_io._write_cw_context_locked``'s ``not context_path.is_file()``
+    guard, reachable from a bare/legacy worktree that never got
+    ``spawn._write_hook_context`` seeded.
+    """
+    bare = tmp_path / "bare"
+    bare.mkdir()
+
+    result = _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, bare))
+
+    assert result.exit_code == 0
+    assert not (bare / HOOK_CONTEXT_RELATIVE_PATH).exists()
+
+
+def test_pre_hook_write_cw_context_locked_fails_open_on_write_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected error inside the locked write itself is swallowed.
+
+    Distinct from ``test_pre_hook_survives_unexpected_error`` (which patches
+    ``_adjust_unresolved_count`` wholesale, proving only the command-level
+    try/except): this patches ``atomic_write_text`` so the failure originates
+    *inside* ``_hook_io._write_cw_context_locked``'s own try/except, proving
+    that inner guard is what fails open -- the counter must not advance.
+    """
+
+    def _boom(_path: object, _text: str) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.cli._hook_io.atomic_write_text", _boom)
+    worktree = _stamped_worktree(tmp_path)
+
+    result = _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree))
+
+    assert result.exit_code == 0
+    assert _read_count(worktree) == 0
+
+
 def test_pre_hook_survives_unexpected_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
