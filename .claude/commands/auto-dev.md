@@ -69,6 +69,8 @@ Checkpoints (amber) are automation gates — AUTO-SKIP for Small + Linear-author
 
 Pass `--headless` to run the pipeline with no interactive prompts. Every `AskUserQuestion` call is replaced by the deterministic action in the gate-collapse table below.
 
+**No interactive escalation, ever (#1890).** In headless mode there is no listener. Never escalate a detected blocker by asking a question — via `AskUserQuestion` or an unprompted question in prose — and ending your turn; that leaves the session silently parked with nothing for the orchestrator to route (the #1750 failure shape: a correct blocker detection wasted by the wrong channel). Escalate every blocker exclusively via the sentinel's `blocker` field with `status: "blocked"`, using the gate-collapse table's deterministic action for whichever gate is firing.
+
 **Purpose:** autonomous orchestrator dispatch from `cw` (`mattwwarren/claude-workspace`). Issues cw#56–#59 are built against this contract and consume the structured output defined in the Appendix.
 
 **Cross-repo spec:** [`claude-workspace/docs/headless-contract.md`](https://github.com/mattwwarren/claude-workspace/blob/main/docs/headless-contract.md) reformulates this section + the Appendix as a parser-implementer reference. This file (`commands/auto-dev.md`) is the producer source of truth; the spec doc is the link target for cw and any other consumer.
@@ -877,6 +879,8 @@ printf '%s' "$SENTINEL_JSON" | cw result validate -
 # On failure: exits 1 and prints field.path: message lines to stderr
 # Fix all reported errors before proceeding to emit the framed block
 ```
+
+**Validating is not emitting (#1890).** `cw result validate -` confirms the JSON is well-formed — it does not emit the sentinel. Never narrate emission as a separate act from performing it (e.g. writing "Sentinel validated. Emitting the final result." and stopping there): the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the validated JSON, MUST be the final characters of this same message — not a description of what you are about to do next.
 
 ```
 <<<AUTO_DEV_RESULT

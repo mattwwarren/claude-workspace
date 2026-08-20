@@ -17,6 +17,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Reuses `cw.cli._hook_io._write_cw_context_locked` (extracted by #1947) as its state primitive rather than hand-rolling a parallel lock/read/write, becoming the third consumer of the discipline that module's own docstring anticipates. Also adds `tests/test_cli_hook_io.py`, closing a pre-existing gap: that module backed three hook commands with no direct test coverage of its primitives.
   - **Known limitation, deliberate:** the Bash tool's `tool_input` field names (`command`, `run_in_background`) are inferred, not captured — no Bash-tool `PreToolUse` payload exists in this repo, only the Agent-tool shape. Every read is `.get()`-based and type-checked, and an unexpected shape fails open with one loud stderr warning naming the mismatch, so a wrong inference degrades to "guard does not fire, and says so on every call" rather than "guard silently never fires". The `cw doctor` retrospective check and the progress-staleness liveness dimension the ticket also sketched stay deferred.
 
+- **`cw review consolidate` gains envelope-integrity guards and two flags
+  (#1924):** the hand-assembled consolidate envelope had no integrity check at
+  all, so a duplicated diff hunk or a paraphrased evidence quote reached the
+  evidence matcher as if it were the real thing. Two guards now screen every
+  payload unconditionally, before any consolidation: a placeholder-diff check
+  rejecting a `diff` that never carried a diff (an unresolved `<diff here>` /
+  `<insert diff>` / `...` token at any length, or text under a 40-character
+  floor that *also* carries no `diff --git` header — the conjunction, never
+  length alone, so a real but truncated diff still passes), and a
+  duplicated-hunk check rejecting the same hunk repeated for the same file,
+  keyed on `(path, hunk text)` so byte-identical hunks under two different
+  files stay legitimate. `--base <ref>` additionally verifies the payload's
+  diff text is byte-identical to the real `git diff <ref>...<reviewed_sha>`,
+  resolving the repo root from `--worktree` (falling back to the current
+  directory) via a local of its own — not `resolved_worktree`, which
+  `--no-tree-evidence` nulls, so the check cannot silently no-op when both
+  flags are passed. `--documents-from <dir-or-glob>` reads each reviewer's
+  findings document off disk instead of from an inline `documents` array (a
+  path that exists and is a directory is read as `<path>/*.json`, anything
+  else as a glob; matches consolidate in lexicographic filename order, and a
+  `documents` field still present on the payload is ignored). Zero matches is
+  valid — a round in which every reviewer failed writes no documents at all —
+  but a source whose parent directory does not exist is not, and any
+  unreadable, non-JSON, or schema-invalid file names itself in the error.
+  `documents` is now optional on the envelope. `.claude/commands/auto-dev-review.md`,
+  the sole producer, is rewired onto the new path: each `REVIEW_FINDINGS`
+  block is Written verbatim to `.cw/review-findings/<role-slug>.json` rather
+  than retyped into JSON, which is what made a one-word paraphrase of a
+  verbatim-substring `evidence` field possible in the first place.
+
 ## [1.39.0] - 2026-08-20
 
 ### Fixed

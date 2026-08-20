@@ -126,6 +126,7 @@ def _cmd(name: str) -> str:
         test_plan_persistence.py
         test_plan_stage_settlement.py
         test_scope_conformance_gate_docs.py
+        test_sentinel_emission_discipline.py
         test_unavailability.py
 
     ``test_auto_dev_intake_origin_sync_retry.py`` keeps its own copy: its

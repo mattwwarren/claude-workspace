@@ -50,7 +50,7 @@ cw event record stage.entered \
 - Data Safety (always when persisted-state mutation is present)
 - Product Manager (always — Mode 2 spec compliance)
 
-**Track `SPAWNED_ROLES`:** record the roster of roles actually dispatched (conditional members — Data Safety, any Large-scope conditional entry — count only when actually spawned). After each reviewer returns, extract its `<<<REVIEW_FINDINGS ... REVIEW_FINDINGS>>>` block (see the Output contract below) into that role's `ReviewerFindingsDocument`; a response with no well-formed block records a `ReviewerRunFailure {"role": "<role>", "reason": "unparseable_response"}` instead. These feed the `documents`/`failed_reviewers` arrays `cw review consolidate` validates at Checkpoint 3a — `review.agents_run` in the Stage 3 Completion sentinel is sourced from that call's `.review.agents_run`, not a manually tracked int (R3). Carry `SPAWNED_ROLES` and each role's captured document/failure unchanged across any Step 3b re-review cycles: Step 3a's own consolidate call is what gets frozen for the sentinel.
+**Track `SPAWNED_ROLES`:** record the roster of roles actually dispatched (conditional members — Data Safety, any Large-scope conditional entry — count only when actually spawned). After each reviewer returns, extract its `<<<REVIEW_FINDINGS ... REVIEW_FINDINGS>>>` block (see the Output contract below) and **Write it verbatim** to `.cw/review-findings/<role-slug>.json` per Checkpoint 3a step 1 (#1924); a response with no well-formed block writes no file and records a `ReviewerRunFailure {"role": "<role>", "reason": "unparseable_response"}` instead. These feed the `--documents-from` directory and the `failed_reviewers` array `cw review consolidate` validates at Checkpoint 3a — `review.agents_run` in the Stage 3 Completion sentinel is sourced from that call's `.review.agents_run`, not a manually tracked int (R3). Carry `SPAWNED_ROLES` and each role's captured document/failure unchanged across any Step 3b re-review cycles: Step 3a's own consolidate call is what gets frozen for the sentinel.
 
 Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for the orphan hazard this avoids):
 
@@ -132,16 +132,21 @@ REVIEW_FINDINGS>>>
 
 **Extract, assemble, and consolidate mechanically** — this is a `cw review consolidate` call, not a prose "deduplicate/sort/group" step:
 
-1. Extract each reviewer's `<<<REVIEW_FINDINGS ... REVIEW_FINDINGS>>>` block from its raw subagent response into `documents` (a JSON array of `ReviewerFindingsDocument` objects — one entry per role that produced a well-formed block). A role whose response has no well-formed `REVIEW_FINDINGS` block instead contributes a `ReviewerRunFailure {"role": "<role>", "reason": "unparseable_response"}` to `failed_reviewers` (see `SPAWNED_ROLES` tracking in Step 3a above).
-2. Assemble the consolidate-input envelope:
+1. **Write each reviewer's findings block to disk verbatim — never retype it into JSON (#1924).** First clear last round's files so a role that failed this round cannot contribute a stale document:
+   ```bash
+   rm -f .cw/review-findings/*.json
+   mkdir -p .cw/review-findings
+   ```
+   Then, for each role that produced a well-formed `<<<REVIEW_FINDINGS ... REVIEW_FINDINGS>>>` block, **Write** (the Write tool — not a heredoc) the block's JSON body, byte-for-byte as the reviewer emitted it, to `.cw/review-findings/<role-slug>.json`, where `<role-slug>` is the role name lowercased with spaces replaced by hyphens (`Code Quality Reviewer` → `code-quality-reviewer.json`). Copying the text is the whole point: `evidence` must be a verbatim substring of the diff, and re-typing it into an inline `documents` array is how a paraphrase gets in. A role whose response has no well-formed `REVIEW_FINDINGS` block writes no file and instead contributes a `ReviewerRunFailure {"role": "<role>", "reason": "unparseable_response"}` to `failed_reviewers` (see `SPAWNED_ROLES` tracking in Step 3a above).
+2. Assemble the consolidate-input envelope. It carries **no `documents` key** — the documents come from the directory written in step 1:
    ```json
-   {"documents": [...], "diff": "<the same diff text sent to reviewers>", "reviewed_sha": "<HEAD sha>", "failed_reviewers": [...]}
+   {"diff": "<the same diff text sent to reviewers>", "reviewed_sha": "<HEAD sha>", "failed_reviewers": [...]}
    ```
 3. Run:
    ```bash
-   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate -
+   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ -
    ```
-   A non-zero exit here is a hard pipeline error (the mechanical validation itself failed — e.g. malformed JSON or a schema violation) — not a normal adjudication path. Do not attempt to recover by re-running adjudication on the raw prose; treat it the same as any other unrecoverable Stage 3 tool failure.
+   A non-zero exit here is a hard pipeline error (the mechanical validation itself failed — e.g. malformed JSON, a schema violation, an unreadable `--documents-from` file, or one of the #1924 diff-integrity guards rejecting the payload: a placeholder `diff` that never carried a real diff, or the same hunk repeated for the same file because the diff was reconstructed by hand) — not a normal adjudication path. Do not attempt to recover by re-running adjudication on the raw prose; treat it the same as any other unrecoverable Stage 3 tool failure. When the diff was captured from a known base ref, add `--base <ref>` to have the payload's diff text verified byte-for-byte against the real `git diff <ref>...<reviewed_sha>` before anything is consolidated.
 3.5. **Consult the voided-findings record — `cw review check-voided` (#1814).** An operator who rejected a finding on a prior pass settled it permanently; a re-review re-deriving it must not re-park the ticket. Assemble `{"verdict": <the verdict step 3 just printed>, "ticket_id": "<ticket id>", "comment_bodies": [<each live-fetched ticket comment body, per the Orientation section's mandatory live fetch>], "new_voided_entries": []}` and run:
    ```bash
    printf '%s' "$CHECK_VOIDED_INPUT" | cw review check-voided -
@@ -463,6 +468,10 @@ After all Stage 3 steps complete successfully in headless mode (review clean or 
 **`review.deferred` is NOT one of the frozen three (#1805).** `must_fix_initial`/`should_fix`/`agents_run` are a cycle-0 baseline that must not move; `deferred` is by definition zero until adjudication and non-zero after. Source it from the `cw review adjudicate` output (Checkpoint 3a), which recomputes it while preserving the frozen three verbatim.
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-review <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
+
+**Validating is not emitting (#1890).** `cw result validate -` confirms the JSON is well-formed — it does not emit the sentinel. Never narrate emission as a separate act from performing it: the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the validated JSON, MUST be the final characters of this same message.
+
+**No interactive escalation, ever (#1890).** In headless mode there is no listener. Never escalate a MUST_FIX / `review_blocked` / `plan_deviation` / `review_operator_actionable` / `empty_diff_blocked` finding by asking a question and ending your turn — headless adjudication is already autonomous (Checkpoint 3a: "no AskUserQuestion"). Escalate exclusively via this sentinel's `blocker` field with `status: "blocked"`.
 
 ```bash
 printf '%s' "$SENTINEL_JSON" | cw result validate -

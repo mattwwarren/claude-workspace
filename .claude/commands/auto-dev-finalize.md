@@ -771,6 +771,10 @@ After PR creation, auto-merge enablement, and CI monitoring complete, emit the `
 
 **Only in standalone `/auto-dev-finalize <ticket-id> --headless` invocation. In the interactive monolith chain, `auto-dev.md` owns the `done` event and the final sentinel.**
 
+**Validating is not emitting (#1890).** `cw result validate -` confirms the JSON is well-formed — it does not emit the sentinel. Never narrate emission as a separate act from performing it: the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the validated JSON, MUST be the final characters of this same message.
+
+**No interactive escalation, ever (#1890).** In headless mode there is no listener. Never escalate a `merge_gate_blocked` finding, a CI failure, or review feedback by asking a question and ending your turn — Stage 5 headless already auto-skips CI polling. Escalate exclusively via this sentinel's `blocker` field with `status: "blocked"`.
+
 ```bash
 # Emit done event (pipeline path only)
 cw event record stage.entered \

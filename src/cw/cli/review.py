@@ -31,15 +31,25 @@ same outcome, no coordinating session required on that side.
 
 from __future__ import annotations
 
+import json
+import re
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 from pydantic import BaseModel, Field, ValidationError
 
 from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors, main
-from cw.exceptions import CwError
+from cw.exceptions import (
+    CwError,
+    DiffBaseMismatchError,
+    DocumentsFromReadError,
+    DuplicatedHunkError,
+    PlaceholderDiffError,
+)
 from cw.review_adjudication import (
     REJECTED_ENTRY_SEVERITY,
     Adjudication,
@@ -62,6 +72,201 @@ from cw.review_findings import (
     consolidate_verdict,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+# #1924 placeholder-diff detection. Whole-value-only tokens: a payload whose
+# `diff` strips down to exactly one of these never carried a diff at all.
+# Deliberately narrow, mirroring `_is_placeholder_sentinel_text`'s discipline
+# in `cw.auto_dev_result.parse` — do NOT broaden to "looks templated", since
+# silently rejecting a genuine diff is a strictly worse bug than the one this
+# catches.
+_PLACEHOLDER_DIFF_TOKENS = frozenset({"<diff here>", "<insert diff>", "..."})
+
+# Below this many stripped characters, text with no `diff --git` header at all
+# is a stub rather than a diff. The floor alone is never sufficient: a real but
+# heavily-truncated diff can be shorter than this, which is why the check
+# requires the CONJUNCTION of "under the floor" and "no header".
+_PLACEHOLDER_LENGTH_FLOOR = 40
+
+# This module's own header matchers, deliberately independent of
+# `cw.codex_review._diff`'s: that module owns a full unified-diff parser whose
+# per-file buffers are never hunk-separated (it never resets on a bare `@@`
+# line), so it cannot answer "did this hunk appear twice" and these guards must
+# scan the text themselves.
+_DIFF_GIT_HEADER_RE = re.compile(r"^diff --git ", re.MULTILINE)
+_DIFF_GIT_PATHS_RE = re.compile(r"^diff --git a/(?P<a>.+) b/(?P<b>.+)$")
+
+
+def _check_not_placeholder_diff(diff_text: str) -> None:
+    """Reject a ``diff`` field that never carried a real diff (#1924).
+
+    Two independent triggers: an exact (case-sensitive) match against
+    :data:`_PLACEHOLDER_DIFF_TOKENS` at any length, or the conjunction of
+    "shorter than :data:`_PLACEHOLDER_LENGTH_FLOOR`" and "carries no
+    ``diff --git`` header". A real diff containing ``...`` somewhere in a body
+    line is untouched — the token match is whole-value-only.
+    """
+    stripped = diff_text.strip()
+    if stripped in _PLACEHOLDER_DIFF_TOKENS:
+        msg = (
+            f"The payload's diff is the unresolved placeholder {stripped!r}, not "
+            "a real unified diff. Capture the diff with `git diff` and pass its "
+            "verbatim output."
+        )
+        raise PlaceholderDiffError(msg)
+    if (
+        len(stripped) < _PLACEHOLDER_LENGTH_FLOOR
+        and _DIFF_GIT_HEADER_RE.search(diff_text) is None
+    ):
+        msg = (
+            f"The payload's diff is {len(stripped)} characters and carries no "
+            "`diff --git` header, so it cannot be a real unified diff. Capture "
+            "the diff with `git diff` and pass its verbatim output."
+        )
+        raise PlaceholderDiffError(msg)
+
+
+def _diff_git_path(header_line: str) -> str:
+    """The b-side path named by a ``diff --git`` header, or the line itself."""
+    match = _DIFF_GIT_PATHS_RE.match(header_line)
+    return match.group("b") if match else header_line
+
+
+def _iter_file_sections(diff_text: str) -> Iterator[tuple[str, list[str]]]:
+    """Yield ``(path, body_lines)`` per ``diff --git`` section of *diff_text*."""
+    current_path: str | None = None
+    body: list[str] = []
+    for raw in diff_text.splitlines():
+        if raw.startswith("diff --git "):
+            if current_path is not None:
+                yield current_path, body
+            current_path = _diff_git_path(raw)
+            body = []
+            continue
+        if current_path is not None:
+            body.append(raw)
+    if current_path is not None:
+        yield current_path, body
+
+
+def _iter_hunks(body: list[str]) -> Iterator[str]:
+    """Yield each ``@@``-headed hunk of one file section as a single string."""
+    current: list[str] | None = None
+    for raw in body:
+        if raw.startswith("@@"):
+            if current is not None:
+                yield "\n".join(current)
+            current = [raw]
+            continue
+        if current is not None:
+            current.append(raw)
+    if current is not None:
+        yield "\n".join(current)
+
+
+def _check_no_duplicate_hunks(diff_text: str) -> None:
+    """Reject a diff repeating the same hunk for the same file (#1924).
+
+    The duplicate key is ``(file path, hunk header + body)``, so the same hunk
+    text under two different files — the same one-line change applied to two
+    modules — is legitimate and passes. ``seen`` spans the whole document, not
+    one section, so a diff concatenated with itself is caught even though each
+    copy is internally consistent.
+    """
+    seen: set[tuple[str, str]] = set()
+    for path, body in _iter_file_sections(diff_text):
+        for hunk in _iter_hunks(body):
+            key = (path, hunk)
+            if key in seen:
+                header = hunk.splitlines()[0]
+                msg = (
+                    f"The payload's diff repeats the same hunk for {path}: "
+                    f"{header!r} appears more than once with identical content. "
+                    "A diff reconstructed by hand is not evidence — re-capture "
+                    "it with `git diff`."
+                )
+                raise DuplicatedHunkError(msg)
+            seen.add(key)
+
+
+def _check_diff_matches_base(
+    diff_text: str, base: str, reviewed_sha: str, worktree: Path
+) -> None:
+    """Reject a payload whose diff is not ``git diff <base>...<sha>`` (#1924).
+
+    Exact string equality after trimming a single trailing newline from each
+    side — deliberately not a semantic diff comparison. The point is to prove
+    the payload text came out of git verbatim; anything that "means the same
+    thing" but does not match byte-for-byte was retyped.
+    """
+    completed = subprocess.run(
+        ["git", "diff", "--no-color", f"{base}...{reviewed_sha}"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"git exited {completed.returncode}"
+        msg = (
+            f"Could not compute `git diff {base}...{reviewed_sha}` in {worktree}: "
+            f"{detail}"
+        )
+        raise DiffBaseMismatchError(msg)
+    if diff_text.removesuffix("\n") != completed.stdout.removesuffix("\n"):
+        msg = (
+            f"The payload's diff does not match `git diff {base}...{reviewed_sha}` "
+            f"in {worktree} (payload {len(diff_text)} chars, git "
+            f"{len(completed.stdout)} chars). Pass the verbatim git output."
+        )
+        raise DiffBaseMismatchError(msg)
+
+
+def _resolve_documents_from_files(source: Path) -> list[Path]:
+    """The files ``--documents-from`` *source* selects, in filename order.
+
+    A path that exists and is a directory is read as ``<source>/*.json``
+    (non-recursive); anything else is evaluated as a glob pattern against
+    ``source.parent``. Zero matches is a valid outcome in either branch — a
+    round in which every reviewer failed writes no documents at all. A source
+    whose parent directory does not exist is not, since nothing could ever
+    match it.
+    """
+    if source.exists() and source.is_dir():
+        return sorted(source.glob("*.json"))
+    if not source.parent.is_dir():
+        msg = (
+            f"--documents-from path {source} cannot be read: its parent "
+            f"directory {source.parent} does not exist."
+        )
+        raise DocumentsFromReadError(msg)
+    return sorted(source.parent.glob(source.name))
+
+
+def _load_reviewer_document(path: Path) -> ReviewerFindingsDocument:
+    """Read one reviewer findings document, naming *path* on any failure."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        msg = f"--documents-from could not read {path}: {exc}"
+        raise DocumentsFromReadError(msg) from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        msg = f"--documents-from could not parse {path} as JSON: {exc}"
+        raise DocumentsFromReadError(msg) from exc
+    try:
+        return ReviewerFindingsDocument.model_validate(payload)
+    except ValidationError as exc:
+        msg = f"--documents-from rejected {path} as a reviewer document: {exc}"
+        raise DocumentsFromReadError(msg) from exc
+
+
+def _load_documents_from(source: Path) -> list[ReviewerFindingsDocument]:
+    """Every reviewer findings document *source* selects, in filename order."""
+    return [_load_reviewer_document(p) for p in _resolve_documents_from_files(source)]
+
 
 class _ConsolidateInput(BaseModel):
     """Request envelope for ``cw review consolidate`` (#1241).
@@ -71,9 +276,15 @@ class _ConsolidateInput(BaseModel):
     :func:`~cw.review_findings.consolidate_verdict` validates evidence
     against. Owned entirely by this CLI module — ``review_findings.py`` is
     consumed, not authored, by this ticket's scope (see plan Patterns Found).
+
+    ``documents`` defaults to ``[]`` since #1924: the preferred producer path
+    is ``--documents-from``, which reads each reviewer's findings document off
+    disk verbatim rather than having the coordinating session retype them into
+    an inline array. When that option is set, any ``documents`` still present
+    on this envelope is ignored.
     """
 
-    documents: list[ReviewerFindingsDocument]
+    documents: list[ReviewerFindingsDocument] = Field(default_factory=list)
     diff: str
     reviewed_sha: str
     failed_reviewers: list[ReviewerRunFailure] = Field(default_factory=list)
@@ -268,34 +479,99 @@ def review_register(pr_url: str) -> None:
         "set or inferred from the current directory."
     ),
 )
+@click.option(
+    "--documents-from",
+    default=None,
+    type=click.Path(path_type=Path),
+    help=(
+        "Read reviewer findings documents from this directory or "
+        "glob pattern instead of the PATH payload's documents field "
+        "(any documents there are ignored once this is set). A path "
+        "that exists and is a directory is read as <path>/*.json, "
+        "sorted lexicographically by filename; anything else is "
+        "evaluated as a glob pattern directly. Defaults to None, "
+        "which keeps documents sourced from the payload."
+    ),
+)
+@click.option(
+    "--base",
+    default=None,
+    type=str,
+    help=(
+        "Compare the payload's diff text against the real `git diff "
+        "<base>...<reviewed_sha>` output and reject the payload if "
+        "they differ, guarding against a hand-typed or corrupted "
+        "diff. Defaults to None, which skips this check entirely; "
+        "when set, resolves the repo root from --worktree, falling "
+        "back to the current directory."
+    ),
+)
 @handle_errors
 def review_consolidate(
-    path: str, worktree: Path | None, no_tree_evidence: bool
+    path: str,
+    worktree: Path | None,
+    no_tree_evidence: bool,
+    documents_from: Path | None,
+    base: str | None,
 ) -> None:
     """Validate, dedupe, and aggregate reviewer findings into a ReviewVerdict.
 
     PATH is a file path or '-' for stdin. Payload: {"documents": [...],
     "diff": "<raw unified diff text>", "reviewed_sha": "<sha>",
-    "failed_reviewers": [...]} (failed_reviewers optional, default []).
+    "failed_reviewers": [...]} (documents and failed_reviewers optional,
+    default []).
 
     --worktree sets the tree root used to accept non-diff-anchored findings
     that still exist on disk (defaults to the current directory).
     --no-tree-evidence disables that relaxation entirely, restoring
     diff-anchored-only evidence regardless of --worktree or cwd.
 
+    --documents-from reads each reviewer's findings document off disk instead
+    of from the payload, so a coordinating session Writes them verbatim rather
+    than retyping them into an inline array (the paraphrase risk #1924
+    closes). It takes a directory (read as <dir>/*.json) or a glob pattern;
+    matches are consolidated in lexicographic filename order, and the
+    payload's own documents field is ignored entirely when it is set.
+
+    --base verifies the payload's diff text is byte-identical to the real
+    `git diff <base>...<reviewed_sha>` output, resolved from --worktree (or
+    the current directory), and rejects the payload otherwise. It is
+    independent of --no-tree-evidence: the check runs identically either way.
+
+    The payload's diff is always screened for two integrity defects first,
+    with or without --base: a placeholder that never carried a diff, and the
+    same hunk repeated for the same file.
+
     On success: exits 0, prints the ReviewVerdict as JSON to stdout.
-    On failure: exits 1, prints 'field.path: message' lines to stderr.
+    On failure: exits 1, prints 'field.path: message' lines to stderr — or,
+    for an integrity-guard rejection, a plain error message.
     """
     parsed = _parse_payload_or_exit(path, _ConsolidateInput)
+
+    _check_not_placeholder_diff(parsed.diff)
+    _check_no_duplicate_hunks(parsed.diff)
+    if base is not None:
+        # Deliberately NOT `resolved_worktree`, which --no-tree-evidence nulls:
+        # the base check has nothing to do with tree-existence relaxation and
+        # must behave identically whether or not that flag is passed.
+        base_check_worktree = worktree if worktree is not None else Path.cwd()
+        _check_diff_matches_base(
+            parsed.diff, base, parsed.reviewed_sha, base_check_worktree
+        )
 
     if no_tree_evidence:
         resolved_worktree = None
     else:
         resolved_worktree = worktree if worktree is not None else Path.cwd()
 
+    documents = (
+        _load_documents_from(documents_from)
+        if documents_from is not None
+        else parsed.documents
+    )
     diff = _build_captured_diff(parsed.diff)
     verdict = consolidate_verdict(
-        parsed.documents,
+        documents,
         diff,
         parsed.reviewed_sha,
         worktree=resolved_worktree,
