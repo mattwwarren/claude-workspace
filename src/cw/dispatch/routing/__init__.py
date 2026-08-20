@@ -122,6 +122,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
+from cw.unavailability import FAMILY_PROVIDER_OVERLOAD
 
 if TYPE_CHECKING:
     from cw.models import (
@@ -691,6 +692,202 @@ def _route_stage_success(
     _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
 
 
+def _route_stage_failure(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    status: str,
+    last_result: dict[str, object] | None,
+    blocker: object | None,
+    blocker_reason: str | None,
+    disposition: str | None,
+    claim_unproductive: bool,
+) -> None:
+    """Rule 5 body: blocked/merge_gate_blocked/scope_exceeded/forbidden_area.
+
+    Extracted from ``_route_staged_decision``'s STAGE_FAILURE_STATUSES branch
+    (#1948) to keep that function under CLAUDE.md's PLR0912 branch ceiling --
+    mirrors the existing ``_route_stage_success``/``_route_scope_gated_approval``
+    per-rule extraction shape, not a new pattern. Every early ``return`` below
+    is a same-function early exit (skips the rest of *this* body only); the
+    caller's own ``elif status in STAGE_FAILURE_STATUSES: _route_stage_failure(...)``
+    unconditionally falls through to ``_route_staged_decision``'s single
+    ``return True`` regardless of which branch here fires, so no return value
+    is needed here.
+
+    Sub-rule 5a: "blocked" at FINALIZE with a regress-eligible blocker reason
+    and attempts below cap -> regress to IMPL for self-heal (#770).
+    scope_exceeded/forbidden_area have no blocker field (validator enforces
+    this) so they always fall through to BLOCKED_ON_USER. merge_gate_blocked
+    MAY carry one (schema.py's #777 exception), but 5a is gated on
+    status=="blocked" so it still cannot regress. blocker/blocker_reason are
+    read once by the caller, before the rule table (#1254). Also excludes an
+    earlier-stage report (GitHub #1676 follow-up, _is_earlier_stage_report):
+    "agent_block" reported at, say, stage1_plan never actually failed at
+    FINALIZE, so self-healing off it would mask the sentinel's real, earlier
+    failure behind a fresh, doomed-to-repeat IMPL dispatch.
+    """
+    if status == "blocked" and blocker_reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED:
+        # #1714: dedicated override -- see
+        # _park_must_fix_mechanically_rejected's docstring for why this
+        # reason cannot use the generic _hold_aware_disposition stamp
+        # computed above. The reason is never a member of
+        # FINALIZE_REGRESS_BLOCKER_REASONS ({"agent_block"}), so there is
+        # no ordering conflict with 5a below, but the branch is placed
+        # first and returns immediately so that fact does not have to hold
+        # forever.
+        _park_must_fix_mechanically_rejected(task)
+        return
+    if (
+        status == "blocked"
+        and task.stage == Stage.FINALIZE
+        and blocker_reason in FINALIZE_REGRESS_BLOCKER_REASONS
+        and task.regress_attempts < FINALIZE_REGRESS_CAP
+        and not _is_earlier_stage_report(task, last_result, clients)
+    ):
+        _log.info(
+            "dispatch: finalize gate blocked (%r) — regressing %r to IMPL"
+            " (regress attempt %d/%d)",
+            blocker_reason,
+            task.ticket_id,
+            task.regress_attempts + 1,
+            FINALIZE_REGRESS_CAP,
+        )
+        _stage_regress(task, Stage.IMPL)
+        record_event(
+            OrchestratorEventType.TICKET_REQUEUED,
+            {
+                "ticket_id": task.ticket_id,
+                "client": task.client,
+                "from_stage": Stage.FINALIZE,
+                "to_stage": Stage.IMPL,
+                "reason": "finalize_regress",
+                "blocker_reason": blocker_reason,
+                "regress_attempt": task.regress_attempts,
+            },
+        )
+        return
+    if status == "blocked" and blocker_reason == FAMILY_PROVIDER_OVERLOAD:
+        # #1948: worker-declared provider overload (API 529) is transient and
+        # provider-side; same-stage retry, NOT a _stage_regress -- task.stage
+        # is untouched (no pipeline boundary crossed), so none of
+        # _stage_regress's re-entry machinery (regress_attempts,
+        # regressed_into_stage, pending_operator_comment,
+        # finalize_regress_branch_head) applies. Narrow reason-keyed --
+        # blocker.retry_eligible is never read (operator's #1923-round-3
+        # resolution, carried forward: a generic read would silently start
+        # auto-reverting local_main_diverged_from_origin/operator_unavailable,
+        # which OPERATOR_UNAVAILABLE_BLOCKER_REASONS deliberately excludes).
+        # Bound: the global attempt ceiling (unproductive_attempts /
+        # claim.py's resolve_attempt_ceiling), deliberately NOT
+        # regress_attempts/FINALIZE_REGRESS_CAP -- that cap exists because
+        # _stage_regress already double-bounds against it (lifecycle.py:757);
+        # this branch performs no stage regress, so nothing else bounds it.
+        # unproductive=True hardcoded (not claim_unproductive): mirrors Rule
+        # 4/5's no_op/stale_dispatch hardcodes -- a provider outage killing
+        # the RUNNING exit is unproductive by definition regardless of
+        # whatever partial evidence landed before the API died.
+        prior_session_id = task.session_id
+        transition_task_status(task, QueueItemStatus.PENDING, unproductive=True)
+        task.session_id = None
+        task.stage_base_ref = None
+        record_event(
+            OrchestratorEventType.TICKET_REQUEUED,
+            {
+                "ticket_id": task.ticket_id,
+                "client": task.client,
+                "from_stage": task.stage,
+                "to_stage": task.stage,
+                "reason": "provider_overload_retry",
+                "blocker_reason": blocker_reason,
+                "session_id": prior_session_id,
+                "unproductive_attempts": task.unproductive_attempts,
+            },
+        )
+        return
+    breadcrumbs = str(blocker_reason) if blocker_reason is not None else ""
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": task.session_id or "",
+            "session_name": "",
+            "client": task.client,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": (
+                _AWAITING_OPERATOR_REASON
+                if blocker_reason in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+                else status
+            ),
+            "breadcrumbs": breadcrumbs,
+            "crashed": False,
+            "lane": task.lane,
+        },
+        correlation_id=task.ticket_id,
+    )
+    # GitHub #1713 Variant A: automerge_not_armed parks a real, already-
+    # created PR, but the schema forbids `pr` from being non-null on a
+    # `blocked` status -- the producer carries the PR's identity in the
+    # unmodeled `pr_info` object instead (see
+    # _extract_pr_url_or_info's docstring). Without this, task.pr_url
+    # never gets stamped and cw.pr_hydrate._is_candidate permanently
+    # skips the row -- it is never polled, so it can never observe its
+    # own PR merging.
+    gate_pr_url = (
+        _extract_pr_url_or_info(last_result)
+        if blocker_reason == _AUTOMERGE_NOT_ARMED_REASON
+        else None
+    )
+    # GitHub #1862: a stale_dispatch report legitimately carries zero
+    # commits and zero findings -- the session correctly refused to
+    # duplicate work already sitting in an open PR. Under the generic
+    # evidence-based computation that reads as unproductive, so repeated
+    # honest refusals would charge the ceiling and eventually re-park the
+    # row at attempt_cap_blocked, burying the specific signal this status
+    # exists to surface. Hardcoded False for the same reason Rule 4
+    # hardcodes it for no_op: a correct, evidence-producing terminal
+    # outcome, not a crashloop.
+    rule5_unproductive = False if status == "stale_dispatch" else claim_unproductive
+    transition_task_status(
+        task,
+        QueueItemStatus.BLOCKED_ON_USER,
+        disposition=disposition,
+        pr_url=gate_pr_url,
+        blocked_reason=blocker_reason,
+        unproductive=rule5_unproductive,  # #1750 Rule 5
+    )
+    # GitHub #1713 Variant B: prior_pipeline_pr_open blocks this ticket
+    # behind a DIFFERENT ticket's open PR -- this row has no PR of its
+    # own yet, so pr_url/pr_hydrate can't help. Stamp the blocking PR's
+    # bare number (regex-extracted from blocker.details, the only place
+    # the producer emits it -- see routing/pr_refs.py's
+    # _extract_blocked_on_pr) directly on task AFTER transition_task_status
+    # returns: that call's unconditional latch-clear (mirrors
+    # escalation_parked_at) zeroes blocked_on_pr as part of every
+    # transition, so stamping before the call would be immediately wiped.
+    #
+    # GitHub #1902 (fast-follow to #1862): a stale_dispatch sentinel's
+    # pr_already_open blocker.details names the blocking PR in the
+    # identical "PR #<N>" free-text shape, so the same
+    # _extract_blocked_on_pr regex applies unchanged -- second producer,
+    # not a new parser. NOTE: unlike prior_pipeline_pr_open (whose
+    # blocking PR belongs to a DIFFERENT ticket that already completed
+    # and so carries its pr_url on some other store row),
+    # stale_dispatch's blocking PR is this ticket's OWN earlier,
+    # un-harvested-sentinel dispatch, discovered via a live
+    # `gh pr list --head <branch>` query that never writes a pr_url onto
+    # any TicketTask row. Stamping blocked_on_pr here is therefore
+    # currently production-unreachable release groundwork for this
+    # disposition -- release_stale_gated_tasks's Variant B
+    # cross-reference scan (reconcile/tasks.py) has no row to match it
+    # against until #1927 (an independent PR-state source) lands.
+    if blocker_reason in (
+        _PRIOR_PIPELINE_PR_OPEN_REASON,
+        STALE_DISPATCH_BLOCKER_REASON,
+    ):
+        details = blocker.get("details") if isinstance(blocker, dict) else None
+        task.blocked_on_pr = _extract_blocked_on_pr(details)
+
+
 def _route_staged_decision(
     task: TicketTask,
     status: str | None,
@@ -847,143 +1044,20 @@ def _route_staged_decision(
             unproductive=False,
         )
     elif status in STAGE_FAILURE_STATUSES:
-        # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
-        # Sub-rule 5a: "blocked" at FINALIZE with a regress-eligible blocker
-        # reason and attempts below cap → regress to IMPL for self-heal (#770).
-        # scope_exceeded/forbidden_area have no blocker field (validator enforces
-        # this) so they always fall through to BLOCKED_ON_USER. merge_gate_blocked
-        # MAY carry one (schema.py's #777 exception), but 5a is gated on
-        # status=="blocked" so it still cannot regress. blocker/blocker_reason are
-        # read once above, before the rule table (#1254). Also excludes an
-        # earlier-stage report (GitHub #1676 follow-up, _is_earlier_stage_report):
-        # "agent_block" reported at, say, stage1_plan never actually failed at
-        # FINALIZE, so self-healing off it would mask the sentinel's real,
-        # earlier failure behind a fresh, doomed-to-repeat IMPL dispatch.
-        if (
-            status == "blocked"
-            and blocker_reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
-        ):
-            # #1714: dedicated override -- see
-            # _park_must_fix_mechanically_rejected's docstring for why this
-            # reason cannot use the generic _hold_aware_disposition stamp
-            # computed above. The reason is never a member of
-            # FINALIZE_REGRESS_BLOCKER_REASONS ({"agent_block"}), so there is
-            # no ordering conflict with 5a below, but the branch is placed
-            # first and returns immediately so that fact does not have to hold
-            # forever.
-            _park_must_fix_mechanically_rejected(task)
-            return True
-        if (
-            status == "blocked"
-            and task.stage == Stage.FINALIZE
-            and blocker_reason in FINALIZE_REGRESS_BLOCKER_REASONS
-            and task.regress_attempts < FINALIZE_REGRESS_CAP
-            and not _is_earlier_stage_report(task, last_result, clients)
-        ):
-            _log.info(
-                "dispatch: finalize gate blocked (%r) — regressing %r to IMPL"
-                " (regress attempt %d/%d)",
-                blocker_reason,
-                task.ticket_id,
-                task.regress_attempts + 1,
-                FINALIZE_REGRESS_CAP,
-            )
-            _stage_regress(task, Stage.IMPL)
-            record_event(
-                OrchestratorEventType.TICKET_REQUEUED,
-                {
-                    "ticket_id": task.ticket_id,
-                    "client": task.client,
-                    "from_stage": Stage.FINALIZE,
-                    "to_stage": Stage.IMPL,
-                    "reason": "finalize_regress",
-                    "blocker_reason": blocker_reason,
-                    "regress_attempt": task.regress_attempts,
-                },
-            )
-            return True
-        breadcrumbs = str(blocker_reason) if blocker_reason is not None else ""
-        record_event(
-            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-            {
-                "session_id": task.session_id or "",
-                "session_name": "",
-                "client": task.client,
-                "ticket_id": task.ticket_id,
-                "claude_session_id": None,
-                "paused_status": (
-                    _AWAITING_OPERATOR_REASON
-                    if blocker_reason in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
-                    else status
-                ),
-                "breadcrumbs": breadcrumbs,
-                "crashed": False,
-                "lane": task.lane,
-            },
-            correlation_id=task.ticket_id,
-        )
-        # GitHub #1713 Variant A: automerge_not_armed parks a real, already-
-        # created PR, but the schema forbids `pr` from being non-null on a
-        # `blocked` status -- the producer carries the PR's identity in the
-        # unmodeled `pr_info` object instead (see
-        # _extract_pr_url_or_info's docstring). Without this, task.pr_url
-        # never gets stamped and cw.pr_hydrate._is_candidate permanently
-        # skips the row -- it is never polled, so it can never observe its
-        # own PR merging.
-        gate_pr_url = (
-            _extract_pr_url_or_info(last_result)
-            if blocker_reason == _AUTOMERGE_NOT_ARMED_REASON
-            else None
-        )
-        # GitHub #1862: a stale_dispatch report legitimately carries zero
-        # commits and zero findings -- the session correctly refused to
-        # duplicate work already sitting in an open PR. Under the generic
-        # evidence-based computation that reads as unproductive, so repeated
-        # honest refusals would charge the ceiling and eventually re-park the
-        # row at attempt_cap_blocked, burying the specific signal this status
-        # exists to surface. Hardcoded False for the same reason Rule 4
-        # hardcodes it for no_op: a correct, evidence-producing terminal
-        # outcome, not a crashloop.
-        rule5_unproductive = False if status == "stale_dispatch" else claim_unproductive
-        transition_task_status(
+        # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area.
+        # Body extracted to _route_stage_failure (#1948) to keep this
+        # function's branch count under CLAUDE.md's PLR0912 ceiling -- see
+        # that function's docstring for the full rule-table rationale.
+        _route_stage_failure(
             task,
-            QueueItemStatus.BLOCKED_ON_USER,
-            disposition=disposition,
-            pr_url=gate_pr_url,
-            blocked_reason=blocker_reason,
-            unproductive=rule5_unproductive,  # #1750 Rule 5
+            clients,
+            status,
+            last_result,
+            blocker,
+            blocker_reason,
+            disposition,
+            claim_unproductive,
         )
-        # GitHub #1713 Variant B: prior_pipeline_pr_open blocks this ticket
-        # behind a DIFFERENT ticket's open PR -- this row has no PR of its
-        # own yet, so pr_url/pr_hydrate can't help. Stamp the blocking PR's
-        # bare number (regex-extracted from blocker.details, the only place
-        # the producer emits it -- see routing/pr_refs.py's
-        # _extract_blocked_on_pr) directly on task AFTER transition_task_status
-        # returns: that call's unconditional latch-clear (mirrors
-        # escalation_parked_at) zeroes blocked_on_pr as part of every
-        # transition, so stamping before the call would be immediately wiped.
-        #
-        # GitHub #1902 (fast-follow to #1862): a stale_dispatch sentinel's
-        # pr_already_open blocker.details names the blocking PR in the
-        # identical "PR #<N>" free-text shape, so the same
-        # _extract_blocked_on_pr regex applies unchanged -- second producer,
-        # not a new parser. NOTE: unlike prior_pipeline_pr_open (whose
-        # blocking PR belongs to a DIFFERENT ticket that already completed
-        # and so carries its pr_url on some other store row),
-        # stale_dispatch's blocking PR is this ticket's OWN earlier,
-        # un-harvested-sentinel dispatch, discovered via a live
-        # `gh pr list --head <branch>` query that never writes a pr_url onto
-        # any TicketTask row. Stamping blocked_on_pr here is therefore
-        # currently production-unreachable release groundwork for this
-        # disposition -- release_stale_gated_tasks's Variant B
-        # cross-reference scan (reconcile/tasks.py) has no row to match it
-        # against until #1927 (an independent PR-state source) lands.
-        if blocker_reason in (
-            _PRIOR_PIPELINE_PR_OPEN_REASON,
-            STALE_DISPATCH_BLOCKER_REASON,
-        ):
-            details = blocker.get("details") if isinstance(blocker, dict) else None
-            task.blocked_on_pr = _extract_blocked_on_pr(details)
     else:
         # Rule 6: None/not dict/missing status -- conservative fallback
         # Why: unparseable sentinel must never silently advance/complete
