@@ -157,6 +157,9 @@ from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
 )
+from cw.reconcile.stale_dispatch_watch import (
+    register_stale_dispatch_watched_prs,
+)
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
@@ -248,6 +251,7 @@ __all__ = [
     "park_terminal_sibling_tasks",
     "reconcile",
     "record_session_liveness_changes",
+    "register_stale_dispatch_watched_prs",
     "release_stale_gated_tasks",
     "resolve_attempt_ceiling",
     "resolve_concierge_recipe_enabled",
