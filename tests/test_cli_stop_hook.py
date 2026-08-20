@@ -170,6 +170,72 @@ def test_signal_stop_clears_agent_spawn_stamp_when_bg_tasks_drain(
     assert stamp[AGENT_SPAWN_LAST_STAMPED_AT_KEY] is not None
 
 
+def test_signal_stop_clear_logs_when_retiring_a_nonzero_stamp(
+    tmp_config_dir: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Clearing a nonzero stamp leaves an audit trail (#1947 review finding).
+
+    The clear write is otherwise silent (same fail-open contract as every
+    hook write here), but ``agent_spawn_stamp`` is the sole disk evidence
+    gating BLOCKED_ON_USER vs a PENDING revert on the phantom sweep, so a
+    transition worth an operator's attention gets a log line.
+    """
+    worktree = tmp_path / "wt-clear-logged"
+    worktree.mkdir()
+    _write_hook_context_file(worktree)
+
+    pre_result = _invoke_hook_command(
+        "agent-spawn-pre",
+        {"cwd": str(worktree), "hook_event_name": "PreToolUse", "tool_name": "Agent"},
+    )
+    assert pre_result.exit_code == 0
+    assert _read_stamp(worktree)[AGENT_SPAWN_UNRESOLVED_COUNT_KEY] == 1
+
+    with caplog.at_level("INFO", logger="cw.cli.stop_hook"):
+        result = _invoke_hook_command(
+            "signal-stop",
+            {
+                "session_id": "claude-uuid-drain-logged",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            },
+        )
+    assert result.exit_code == 0, result.output
+    assert _read_stamp(worktree)[AGENT_SPAWN_UNRESOLVED_COUNT_KEY] == 0
+    assert any(
+        "agent_spawn_stamp cleared" in record.message for record in caplog.records
+    )
+
+
+def test_signal_stop_clear_does_not_log_when_stamp_already_zero(
+    tmp_config_dir: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No spurious log line on the ordinary, already-resolved fast path.
+
+    Every Stop with empty ``background_tasks`` reaches the clear write, even
+    when there was nothing to retire -- this asserts the log only fires on
+    an actual nonzero-to-zero transition, not on every clear invocation.
+    """
+    worktree = tmp_path / "wt-clear-quiet"
+    worktree.mkdir()
+    _write_hook_context_file(worktree)
+    assert _read_stamp(worktree)[AGENT_SPAWN_UNRESOLVED_COUNT_KEY] == 0
+
+    with caplog.at_level("INFO", logger="cw.cli.stop_hook"):
+        result = _invoke_hook_command(
+            "signal-stop",
+            {
+                "session_id": "claude-uuid-drain-quiet",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            },
+        )
+    assert result.exit_code == 0, result.output
+    assert not any(
+        "agent_spawn_stamp cleared" in record.message for record in caplog.records
+    )
+
+
 def test_signal_stop_stamp_write_fails_open_on_lock_contention(
     tmp_config_dir: Path,
     tmp_path: Path,

@@ -39,6 +39,7 @@ from cw.models import (
     OrchestratorEventType,
     SessionOrigin,
     SessionStatus,
+    extract_unresolved_spawn_count,
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
@@ -364,7 +365,20 @@ def _clear_agent_spawn_stamp(context: dict[str, object]) -> dict[str, object]:
     turn that is NOT deferring for pending background work. This is what
     retires a snapshot written by a prior deferred turn once the harness's
     own accounting shows nothing outstanding -- see :func:`signal_stop`.
+
+    #1947 review: logs when this actually retires a nonzero count -- this
+    write otherwise vanishes silently (same fail-open contract as every
+    other hook write here), but the field it mutates is the sole disk
+    evidence gating BLOCKED_ON_USER vs a PENDING revert on the phantom
+    sweep, so a transition worth an operator's attention deserves a trail.
     """
+    prior_count = extract_unresolved_spawn_count(context)
+    if prior_count > 0:
+        logger.info(
+            "agent_spawn_stamp cleared: unresolved_count %d -> 0 "
+            "(background_tasks drained)",
+            prior_count,
+        )
     return _snapshot_agent_spawn_stamp(context, 0)
 
 
