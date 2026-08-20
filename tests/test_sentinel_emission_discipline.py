@@ -131,6 +131,4 @@ def test_plan_md_resolution_fields_preserved_verbatim() -> None:
     section = _plan_completion()
     for field in RESOLUTION_FIELDS:
         assert f'"{field}"' in section
-    assert (
-        "resolution_evidence` candidate" in section or "resolution_evidence`" in section
-    )
+    assert "resolution_evidence`" in section
