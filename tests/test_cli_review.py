@@ -1761,6 +1761,26 @@ class TestReviewConsolidateDocumentsFrom:
         assert result.exit_code == 1
         assert "b-bad.json" in result.output
 
+    def test_documents_from_unreadable_match_names_offending_path(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """An OSError on read is named too, not just a JSON/schema failure."""
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        # A directory named `*.json` matches the glob but cannot be read.
+        (docs_dir / "b-dir.json").mkdir()
+
+        payload = _consolidate_payload()
+        del payload["documents"]
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 1
+        assert "b-dir.json" in result.output
+
     def test_documents_from_ignores_documents_key_in_path_json(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
