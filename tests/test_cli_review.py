@@ -1545,9 +1545,7 @@ class TestReviewConsolidatePlaceholderDiff:
             "short_nonplaceholder_without_diff_git_header",
         ],
     )
-    def test_placeholder_diff_rejected(
-        self, runner: CliRunner, diff_text: str
-    ) -> None:
+    def test_placeholder_diff_rejected(self, runner: CliRunner, diff_text: str) -> None:
         result = runner.invoke(
             main,
             ["review", "consolidate", "-"],
@@ -1781,9 +1779,7 @@ class TestReviewConsolidateDocumentsFrom:
 
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
-        assert [r["reviewer_role"] for r in verdict["agents_run"]] == [
-            "Alpha Reviewer"
-        ]
+        assert [r["reviewer_role"] for r in verdict["agents_run"]] == ["Alpha Reviewer"]
 
     def test_documents_from_path_json_without_documents_key_is_valid(
         self, runner: CliRunner
@@ -1830,16 +1826,20 @@ class TestReviewConsolidateDocumentsFrom:
         )
 
         assert bare.exit_code == 0, bare.output
-        assert [
-            r["reviewer_role"] for r in json.loads(bare.output)["agents_run"]
-        ] == ["Alpha Reviewer", "Beta Reviewer", "Gamma Reviewer"]
+        assert [r["reviewer_role"] for r in json.loads(bare.output)["agents_run"]] == [
+            "Alpha Reviewer",
+            "Beta Reviewer",
+            "Gamma Reviewer",
+        ]
         assert globbed.exit_code == 0, globbed.output
         assert [
             r["reviewer_role"] for r in json.loads(globbed.output)["agents_run"]
         ] == ["Gamma Reviewer"]
 
 
-def _branch_repo(make_git_repo: Callable[..., Path], name: str) -> tuple[Path, str, str]:
+def _branch_repo(
+    make_git_repo: Callable[..., Path], name: str
+) -> tuple[Path, str, str]:
     """A repo with a `feature` branch one commit ahead of `main`.
 
     Returns ``(repo, reviewed_sha, real_diff_text)`` where *real_diff_text* is
@@ -1990,9 +1990,7 @@ class TestReviewConsolidateBaseFlag:
 class TestReviewConsolidateRegressionFixtures:
     """#1924: the two incidents the guards exist to catch."""
 
-    def test_regression_duplicated_diff_reconstruction(
-        self, runner: CliRunner
-    ) -> None:
+    def test_regression_duplicated_diff_reconstruction(self, runner: CliRunner) -> None:
         result = runner.invoke(
             main,
             ["review", "consolidate", "-"],
