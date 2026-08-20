@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Provider-overload (API 529) classifier and reconcile diagnostics (#1923):** `src/cw/unavailability.py` gains a sibling `FAMILY_PROVIDER_OVERLOAD` / `PROVIDER_UNAVAILABILITY_SIGNATURES` table and `classify_provider_unavailability()`, covering the Anthropic API 529-overload signature captured live in dev-1751. Kept separate from the existing `UNAVAILABILITY_SIGNATURES` table since that table's prose drift-guard test requires every signature appear verbatim in files scoped to git/gh subprocess failures, not API errors. The reconcile phantom sweep now surfaces this as a diagnostics-only `provider_overload_detected` field on `ReapCandidate` (DAEMON-only), reported in the `SESSION_PHANTOM_REVERTED` event payload and documented in `docs/events.md`. It carries zero routing weight — `resolve_reap_policy`, `_route_phantom_by_policy`, and `reap_policy: signal_only` are all untouched. Layer 1/3 of the #1923 SPLIT plan; retry-routing (Layer 2) split out to #1948.
+
 ### Fixed
 
 - **auto-dev dispatch rules no longer assume a synchronous Agent tool (#1944):**

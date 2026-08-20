@@ -111,6 +111,7 @@ def _emit_phantom_terminal_events(
                     "worktree_dirty": candidate.worktree_dirty,
                     "worktree_path": wt_path_str,
                     "queue_status": queue_status,
+                    "provider_overload_detected": candidate.provider_overload_detected,
                 },
                 correlation_id=candidate.ticket_id,
             )
