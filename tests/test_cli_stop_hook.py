@@ -36,7 +36,11 @@ from cw.models import (
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
 )
-from tests.conftest import _invoke_hook_command, _make_daemon_session, _write_hook_context_file
+from tests.conftest import (
+    _invoke_hook_command,
+    _make_daemon_session,
+    _write_hook_context_file,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -182,7 +186,9 @@ def test_signal_stop_stamp_write_fails_open_on_lock_contention(
     """
     import fcntl
 
-    monkeypatch.setattr("cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True)
+    monkeypatch.setattr(
+        "cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
+    )
 
     worktree = tmp_path / "wt-locked"
     worktree.mkdir()

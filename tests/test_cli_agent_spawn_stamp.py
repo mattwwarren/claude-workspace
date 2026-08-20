@@ -1,20 +1,25 @@
-"""Tests for the ``cw agent-spawn-pre`` / ``cw agent-spawn-post`` hooks (#1646).
+"""Tests for the ``cw agent-spawn-pre`` hook (#1646, split by #1947).
 
-The pair stamps an "unresolved subagent spawn" counter into the worktree's
-``.claude/cw-context.json``: ``agent-spawn-pre`` increments it when a subagent
-tool call starts, ``agent-spawn-post`` decrements it when that call returns. A
-crash between the two leaves the counter above zero, which the phantom sweep
-reads as durable evidence that the worker died mid-spawn (rather than the
-generic "surface vanished" phantom).
+Originally a Pre/Post pair: ``agent-spawn-pre`` increments the "unresolved
+subagent spawn" counter in the worktree's ``.claude/cw-context.json`` before
+a subagent tool call starts, ``agent-spawn-post`` decremented it when that
+call returned. #1947 removed the Post half — replaying a live async
+``Agent(isolation="worktree")`` spawn showed ``PostToolUse:Agent`` fires at
+launch-return (the ``Async agent launched successfully.`` tool_result), not
+subagent completion, so the pair balanced back to 0 while the harness's own
+turn accounting still reported the background agent pending. ``cw
+signal-stop`` (``cli/stop_hook.py``, tested in ``tests/test_cli_stop_hook.py``)
+now owns clearing/snapshotting the counter instead, driven off the hook
+payload's own ``background_tasks`` list.
 
-Both commands mirror ``cw guard-cwd``'s fail-open contract: unreadable stdin,
-a missing/malformed context, or a contended lock all yield a silent exit 0.
-Unlike the guard they never block a tool call at all — there is no failure mode
-in which refusing a subagent spawn is the right answer.
+``agent-spawn-pre`` mirrors ``cw guard-cwd``'s fail-open contract: unreadable
+stdin, a missing/malformed context, or a contended lock all yield a silent
+exit 0. It never blocks a tool call at all — there is no failure mode in
+which refusing a subagent spawn is the right answer.
 
 Hook payload fixtures in this file are redacted copies of a **real** captured
-``PreToolUse``/``PostToolUse`` payload (captured 2026-08-12 against Claude Code
-via a temporary catch-all hook in a live dispatch worktree), not hand-authored
+``PreToolUse`` payload (captured 2026-08-12 against Claude Code via a
+temporary catch-all hook in a live dispatch worktree), not hand-authored
 from prose. That capture is also what settled the matcher name: the subagent
 tool reports ``"tool_name": "Agent"``, not ``"Task"``.
 """
@@ -26,12 +31,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.cli.agent_spawn_stamp import (
-    _LOCK_TIMEOUT_SECS_DEFAULT,
-    _context_lock,
-    _last_stamped_at,
-    _unresolved_count,
-)
+from cw.cli._hook_io import _LOCK_TIMEOUT_SECS_DEFAULT, _context_lock
+from cw.cli.agent_spawn_stamp import _last_stamped_at, _unresolved_count
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
@@ -65,22 +66,6 @@ _PRE_PAYLOAD: dict[str, object] = {
         "run_in_background": False,
     },
     "tool_use_id": "toolu_0000000000000000000000",
-}
-
-# Redacted capture of the matching PostToolUse payload. ``tool_response`` is
-# truncated to the keys present in the capture's shape rather than removed —
-# the handler ignores it, and an invented-clean payload would not.
-_POST_PAYLOAD: dict[str, object] = {
-    **_PRE_PAYLOAD,
-    "hook_event_name": "PostToolUse",
-    "tool_response": {
-        "status": "completed",
-        "agentId": "0000000000000000b",
-        "agentType": "Explore",
-        "content": [{"type": "text", "text": "PROBE"}],
-        "totalDurationMs": 1467,
-    },
-    "duration_ms": 2970,
 }
 
 
@@ -131,41 +116,13 @@ def test_pretooluse_stamps_last_stamped_at(tmp_path: Path) -> None:
     assert context[AGENT_SPAWN_STAMP_KEY]["last_stamped_at"] is not None
 
 
-def test_posttooluse_clears_unresolved_marker(tmp_path: Path) -> None:
-    """Pre then Post returns the counter to 0 — the resolved-spawn happy path."""
-    worktree = _stamped_worktree(tmp_path)
-
-    _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree))
-    assert _read_count(worktree) == 1
-    result = _invoke_hook_command("agent-spawn-post", _payload(_POST_PAYLOAD, worktree))
-
-    assert result.exit_code == 0
-    assert _read_count(worktree) == 0
-
-
-def test_posttooluse_absent_leaves_marker_set(tmp_path: Path) -> None:
-    """Only Pre runs → the marker stays set (the crash/pause signature).
-
-    This single test covers BOTH failure shapes the ticket names — an agent
-    that explicitly pauses on a subagent tool call, and one that silently drops
-    it with no ``tool_result`` ever recorded. The hook layer can observe
-    neither prose nor tool results; it only ever sees whether its own Post
-    fired, so both shapes produce this identical on-disk signature.
-    """
-    worktree = _stamped_worktree(tmp_path)
-
-    _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree))
-
-    assert _read_count(worktree) == 1
-
-
 def test_pre_hook_accumulates_across_parallel_spawns(tmp_path: Path) -> None:
-    """Two Pre calls before any Post reach 2 — a boolean marker would lose one.
+    """Two Pre calls before any clear reach 2 — a boolean marker would lose one.
 
     Claude Code can dispatch several subagent ``tool_use`` blocks in a single
-    assistant turn, so two Pre hooks can fire before either Post does. The
-    counter shape (rather than a flag) is what keeps the second spawn's Pre
-    from being swallowed by the first's Post.
+    assistant turn, so two Pre hooks can fire before the next Stop clears the
+    counter. The counter shape (rather than a flag) is what keeps the second
+    spawn's Pre from being swallowed by the first.
 
     Invoked sequentially rather than from threads on purpose: ``CliRunner``
     swaps ``sys.stdin`` process-wide, so concurrent in-process invocations
@@ -180,16 +137,6 @@ def test_pre_hook_accumulates_across_parallel_spawns(tmp_path: Path) -> None:
     assert _read_count(worktree) == 2
 
 
-def test_post_hook_floors_counter_at_zero(tmp_path: Path) -> None:
-    """A Post with no matching prior Pre must not drive the counter negative."""
-    worktree = _stamped_worktree(tmp_path)
-
-    result = _invoke_hook_command("agent-spawn-post", _payload(_POST_PAYLOAD, worktree))
-
-    assert result.exit_code == 0
-    assert _read_count(worktree) == 0
-
-
 def test_pre_hook_never_crashes_on_malformed_stdin() -> None:
     """Non-JSON stdin → silent exit 0 (a hook must never crash)."""
     from click.testing import CliRunner
@@ -199,17 +146,6 @@ def test_pre_hook_never_crashes_on_malformed_stdin() -> None:
     result = CliRunner().invoke(main, ["agent-spawn-pre"], input="not json at all")
 
     assert result.exit_code == 0
-
-
-def test_post_hook_never_crashes_on_missing_context(tmp_path: Path) -> None:
-    """No cw-context.json under cwd → silent exit 0, nothing created."""
-    bare = tmp_path / "bare"
-    bare.mkdir()
-
-    result = _invoke_hook_command("agent-spawn-post", _payload(_POST_PAYLOAD, bare))
-
-    assert result.exit_code == 0
-    assert not (bare / HOOK_CONTEXT_RELATIVE_PATH).exists()
 
 
 def test_pre_hook_never_crashes_on_malformed_context(tmp_path: Path) -> None:
@@ -259,11 +195,17 @@ def test_pre_hook_fails_open_on_lock_exhaustion(
     live worker's own turn, so a plain blocking ``LOCK_EX`` would hang the
     worker itself on contention. Exhaustion must fail open (skip the stamp),
     never block.
+
+    Patches ``cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT`` (#1947 moved the
+    lock primitive there so ``cw signal-stop`` can share it) rather than the
+    re-exported name on ``cw.cli.agent_spawn_stamp`` — ``_context_lock``
+    reads the module-global where it is *defined*, so patching the
+    re-exported copy would silently be a no-op.
     """
     import fcntl
 
     monkeypatch.setattr(
-        "cw.cli.agent_spawn_stamp._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
+        "cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
     )
     worktree = _stamped_worktree(tmp_path)
     lock_path = worktree / ".claude" / "cw-context.json.lock"
@@ -309,7 +251,7 @@ def test_last_stamped_at_tolerates_every_odd_shape() -> None:
     """The timestamp reader degrades to None rather than propagating junk.
 
     It feeds the decrement path's carry-forward, so a non-str value here would
-    otherwise be written straight back into the context on the next Post.
+    otherwise be written straight back into the context on the next write.
     """
     assert _last_stamped_at({}) is None
     assert _last_stamped_at({AGENT_SPAWN_STAMP_KEY: "not-a-dict"}) is None
@@ -319,52 +261,6 @@ def test_last_stamped_at_tolerates_every_odd_shape() -> None:
         _last_stamped_at({AGENT_SPAWN_STAMP_KEY: {"last_stamped_at": "2026-01-01"}})
         == "2026-01-01"
     )
-
-
-def test_post_hook_survives_unexpected_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The Post handler swallows a crash too — same contract as Pre.
-
-    Asserted separately rather than assumed from the Pre test: the two
-    commands carry their own independent try/except, so one could lose it
-    without the other's test noticing.
-    """
-
-    def _boom(_delta: int) -> None:
-        msg = "unexpected"
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr("cw.cli.agent_spawn_stamp._adjust_unresolved_count", _boom)
-
-    result = _invoke_hook_command("agent-spawn-post", _payload(_POST_PAYLOAD, tmp_path))
-
-    assert result.exit_code == 0
-
-
-def test_post_hook_preserves_last_stamped_at_on_decrement(tmp_path: Path) -> None:
-    """Decrement carries the original timestamp forward, it does not refresh it.
-
-    ``last_stamped_at`` answers "when did the oldest unresolved spawn begin",
-    which is what an operator reading a parked row needs; refreshing it on the
-    way down would erase exactly that.
-    """
-    worktree = _stamped_worktree(tmp_path)
-
-    _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree))
-    _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree))
-    context = json.loads(
-        (worktree / HOOK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
-    )
-    stamped_at = context[AGENT_SPAWN_STAMP_KEY]["last_stamped_at"]
-
-    _invoke_hook_command("agent-spawn-post", _payload(_POST_PAYLOAD, worktree))
-
-    context = json.loads(
-        (worktree / HOOK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
-    )
-    assert context[AGENT_SPAWN_STAMP_KEY]["last_stamped_at"] == stamped_at
-    assert _read_count(worktree) == 1
 
 
 def test_lock_timeout_default_is_bounded() -> None:
