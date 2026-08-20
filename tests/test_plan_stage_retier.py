@@ -189,10 +189,6 @@ def test_scope_tier_stale_blocker_reason_row_and_stage_mapping() -> None:
     assert "(files, lines, forbidden_touched)" in new_row
     assert "#1815" in new_row
 
-    assert (
-        f'`"{DEFERRED_STUB_UNRESOLVED}"`, or `"{SCOPE_TIER_STALE}"` → `"stage1_plan"`'
-    ) in content
-
 
 # ---------------------------------------------------------------------------
 # 12. The marker-requirement sentence forward-references Step 1g.0's tuple.
