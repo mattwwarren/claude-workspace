@@ -381,6 +381,18 @@ cw event record stage.errored \
 
 After plan is approved (or auto-skipped with existing plan) AND Plan Quality Review has passed (Step 1f):
 
+**Step 1g.0 — Tier re-verification before stamp (#1897).** Immediately before writing the `**Scope tier:**` line below, re-run Step 1d's classification (files/lines/forbidden-area touches) against the plan text exactly as it stands at this moment — after any Step 1f.4 revision cycle (standard or format-only) and after every `## Adopted Assumptions` / `## Self-Verified Premises` / `## Deferred Premises` / `## Settled Plan Items` section folded in across every resumed round this ticket has been through. This is the one point downstream of Step 1d where a revision cycle or an accumulated resumed round could otherwise carry an earlier round's stale classification through to the persisted stamp — this pipeline auto-approves a resumed Small-tier draft (Checkpoint 1) and Large-tier is the only path requiring operator approval evidence, so a stale-Small stamp on a plan that has actually grown Large silently skips that gate.
+
+Recompute the tier alone (via the Step 1d.3 boundary — `≤10 files AND ≤500 lines AND no forbidden-area touches` = small; otherwise large) from the plan's current `(files, lines, forbidden_touched)` state, and compare it against the tier last computed this invocation — a mechanical one-line comparison, not a re-run of any agent. Proceed silently whenever the recomputed tier is unchanged, regardless of any files/lines/forbidden_touched drift within that tier (a routine Step 1f.4 revision that grows the diff by a few lines without crossing the boundary is not a mismatch). If the recomputed tier differs from the last-computed tier:
+- **Headless:** do NOT persist the stale-tiered stamp. EXIT `blocked` with `blocker.reason: "scope_tier_stale"`, `blocker.stage: "stage1_plan"`, `blocker.details` naming both tiers (last-computed vs. freshly recomputed, with the full `(files, lines, forbidden_touched)` tuple for each), and `retry_eligible: true`. Before exiting, write the plan's current text to `.cw/plan-draft.md`. Post the mismatch as a tracker comment under the `## Blocking Review Findings` header, using the fixed sub-section heading `### Step 1g.0 Tier Re-verification — MUST_FIX` (#1815 convention). Emit `stage.errored` before the `blocked` sentinel.
+- **Interactive:** AskUserQuestion: proceed with corrected tier / re-plan from scratch / abandon ticket.
+
+```bash
+cw event record stage.errored \
+  --correlation-id "$TICKET" \
+  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_reviewed\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"scope_tier_stale\"}" || true
+```
+
 **FIRST, persist the plan file (#943 — the stage's primary artifact, not optional):** Write the full reviewed plan text verbatim — including both signoff markers below — to `.cw/plan.md` in the worktree, BEFORE posting to the tracker and BEFORE emitting the sentinel. Stage 2 (`auto-dev-impl.md`) hard-requires this file; a plan that exists only as a tracker comment leaves the ticket unimplementable. Verify the write (`test -s .cw/plan.md`) as part of this step.
 
 **Then, best-effort clear the draft:** if `.cw/plan.md` was written successfully, delete `.cw/plan-draft.md` if present — a stale draft would otherwise resurface on the next Step 1a resume check even though the plan it drafted has been approved and superseded. Deletion is best-effort: if it fails, log and continue — a failed deletion must NOT fail Step 1g.
@@ -404,7 +416,7 @@ Use today's date and each station's current marker version. By the time Step 1g 
 
 This is the one reliable, machine-greppable location the three downstream readers (`auto-dev-impl.md:59`, `auto-dev-review.md`'s tier-resolution step, `auto-dev-finalize.md:31` — all already loosely matching this shape via "or similar Stage-1c marker") depend on, rather than relying on free-text presentation happening to be greppable. Exactly one occurrence must exist in the persisted plan — a later stage that rewrites it (see `auto-dev-review.md`'s one-time tier downgrade) replaces it in place rather than appending a second occurrence.
 
-If the plan was loaded from Linear in Step 1a and already contained a current marker, preserve it as-is. If the plan was revised in Step 1f.4, stamp with today's date.
+If the plan was loaded from Linear in Step 1a and already contained a current marker, preserve it as-is. If the plan was revised in Step 1f.4, stamp with today's date, and use the tuple Step 1g.0 confirmed, not an earlier cached one.
 
 If Step 1c surfaced ambiguities AND the user resolved them (interactive path), OR a later ticket comment resolved a previously-posted ambiguity/premise per Step 1a's "later non-pipeline comment" merge branch (headless re-entry), include the resolved answers in the Linear comment under a `## Decisions` section, so the same questions don't get re-asked in a future re-run.
 

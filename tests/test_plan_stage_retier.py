@@ -138,7 +138,7 @@ def test_scope_tier_stale_posts_blocking_findings_comment() -> None:
 
 def test_scope_tier_stale_interactive_asks_instead_of_blocking() -> None:
     """Interactive mode has a distinct AskUserQuestion bullet, after Headless."""
-    window = _after(_step1g_section(), STEP1G0_ANCHOR, span=2200)
+    window = _after(_step1g_section(), STEP1G0_ANCHOR, span=2300)
     assert "**Headless:**" in window
     assert "**Interactive:** AskUserQuestion" in window
     assert window.index("**Headless:**") < window.index("**Interactive:**")
