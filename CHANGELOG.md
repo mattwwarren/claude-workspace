@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.39.0] - 2026-08-20
+
 ### Fixed
 
 - **#1646 agent-spawn stamp reconfirmed hollow under the async `Agent` tool; `PostToolUse:Agent` wiring removed (#1947):** replaying a live async `Agent(isolation="worktree")` spawn (session `ea2f3d42`/ticket #1902) showed `PostToolUse:Agent` fires at launch-return (`13:12:09.513Z`, paired with the `Async agent launched successfully.` tool_result) — ~3.9s after `PreToolUse:Agent` and ~3.5s *before* the harness's own `turn_duration` record still reported `pendingBackgroundAgentCount: 1`. The `agent_spawn_stamp.unresolved_count` pair balanced back to 0 while the subagent was, per the harness's own accounting, still running, so the phantom sweep's `unresolved_subagent_spawn` signal never fired for this incident (no `session.reap_proposed` event exists for it). `PostToolUse:Agent`/`cw agent-spawn-post` are removed; `cw signal-stop` (`cli/stop_hook.py`) now snapshots/clears the counter off the Stop hook payload's own `background_tasks` list instead — a signal that tracks the harness's live turn-accounting rather than a tool-call return that races ahead of it. The shared lock-then-read-then-write plumbing (`cw.cli.agent_spawn_stamp._context_lock` and friends) moved to `cw.cli._hook_io._write_cw_context_locked` so both `cw agent-spawn-pre` and `cw signal-stop` share one discipline against the same file. `cw.reconcile._shared`'s read side (`extract_unresolved_spawn_count`) is unchanged. See #1886.
