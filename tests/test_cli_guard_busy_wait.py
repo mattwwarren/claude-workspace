@@ -533,6 +533,82 @@ def test_missing_lane_key_in_context_falls_back_to_global(tmp_path: Path) -> Non
     assert _invoke(worktree, "true").exit_code == _BLOCK_EXIT
 
 
+def test_non_matching_lane_declared_falls_back_to_global(tmp_path: Path) -> None:
+    """A client whose declared lanes don't include ours resolves the global."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    clients_file().write_text(
+        "clients:\n"
+        "  client-a:\n"
+        f"    workspace_path: {workspace}\n"
+        "    lanes:\n"
+        "      - name: other\n"
+        "        busy_wait_guard_enabled: false\n"
+        "      - name: fast\n"
+        "        busy_wait_guard_enabled: false\n",
+        encoding="utf-8",
+    )
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _write_hook_context_file(worktree, lane="unlisted")
+
+    assert _invoke(worktree, "true").exit_code == _BLOCK_EXIT
+
+
+def test_noop_on_non_string_cwd(tmp_path: Path) -> None:
+    """A payload whose ``cwd`` is not a string is unclassifiable -- exit 0."""
+    payload = {**_BASH_PRE_PAYLOAD, "cwd": 42}
+
+    assert _invoke_hook_command("guard-busy-wait", payload).exit_code == 0
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param("not-a-dict", id="non_dict_entry"),
+        pytest.param({"command_hash": "abc"}, id="missing_ts"),
+        pytest.param({"command_hash": "abc", "ts": 12345}, id="non_string_ts"),
+        pytest.param({"command_hash": "abc", "ts": "not-a-timestamp"}, id="bad_ts"),
+    ],
+)
+def test_malformed_window_entries_are_pruned_not_crashed(
+    tmp_path: Path, entry: object
+) -> None:
+    """A hand-edited or corrupted window entry is dropped, never raised on."""
+    worktree = _worktree(tmp_path)
+    context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    context[_BUSY_WAIT_STATE_KEY] = {_BUSY_WAIT_RECENT_COMMANDS_KEY: [entry, entry]}
+    context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
+
+    assert _invoke(worktree, "git status").exit_code == 0
+    assert [e[_BUSY_WAIT_COMMAND_HASH_KEY] for e in _recent(worktree)] == [
+        _hash_command("git status")
+    ]
+
+
+def test_naive_timestamp_entry_is_read_as_utc(tmp_path: Path) -> None:
+    """A tz-naive stored timestamp counts, rather than being silently dropped.
+
+    Nothing this code writes is naive, but a context hand-edited by an
+    operator diagnosing a false positive plausibly is -- and dropping the
+    entry would quietly reset that command's window.
+    """
+    worktree = _worktree(tmp_path)
+    context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    command_hash = _hash_command("git status")
+    with freeze_time("2026-08-20T12:00:00+00:00"):
+        naive = [
+            {_BUSY_WAIT_COMMAND_HASH_KEY: command_hash, "ts": "2026-08-20T11:59:00"},
+            {_BUSY_WAIT_COMMAND_HASH_KEY: command_hash, "ts": "2026-08-20T11:59:30"},
+        ]
+        context[_BUSY_WAIT_STATE_KEY] = {_BUSY_WAIT_RECENT_COMMANDS_KEY: naive}
+        context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
+
+        assert _invoke(worktree, "git status").exit_code == _BLOCK_EXIT
+
+
 def test_unknown_client_in_context_falls_back_to_global(tmp_path: Path) -> None:
     """A context naming a client absent from clients.yaml uses the global."""
     worktree = tmp_path / "wt"
