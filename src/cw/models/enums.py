@@ -214,6 +214,14 @@ class OrchestratorEventType(StrEnum):
     # RFC 0008 W2 liveness producer (#1001): latched transcript-staleness
     # bucket crossings from the reconcile idle-watchdog pass.
     SESSION_LIVENESS_CHANGED = "session.liveness_changed"
+    # #1946 -- emitted by the `cw guard-busy-wait` PreToolUse hook subprocess
+    # every time it blocks a Bash call. A block is a refusal the worker sees
+    # only as stderr inside its own transcript; without a durable record a
+    # false positive is invisible to the operator and indistinguishable from
+    # a worker that simply never made the call. Same emitter class as
+    # `cw signal-stop` (cli/stop_hook.py), which already records from a hook
+    # subprocess. See docs/events.md.
+    GUARD_BUSY_WAIT_BLOCKED = "guard.busy_wait_blocked"
     # RFC 0008 capstone (#1015) — daemon-side gate concierge. CONCIERGE_RECOVERED
     # is the mechanical-recovery-reactor's audit trail (emitted before every
     # recipe's mutation); OPERATOR_ESCALATION is the durable-escalation-latch's

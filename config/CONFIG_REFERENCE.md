@@ -57,7 +57,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `operator_github_login` | string \| null | `null` | Override the runtime-resolved GitHub login used for counterparty/self-identity resolution (RFC 0011 S1). Rare multi-account case; the runtime `gh api user` login is authoritative when unset. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
-| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below), `attempt_ceiling: int | false | null = null` (#1751 — lane override for the global attempt ceiling; `null` defers to `global_attempt_ceiling` in `orchestrator.yaml`, `false` disables the ceiling for this lane; see [Per-Lane Attempt Ceiling](#per-lane-attempt-ceiling-1751) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below), `attempt_ceiling: int | false | null = null` (#1751 — lane override for the global attempt ceiling; `null` defers to `global_attempt_ceiling` in `orchestrator.yaml`, `false` disables the ceiling for this lane; see [Per-Lane Attempt Ceiling](#per-lane-attempt-ceiling-1751) below), `busy_wait_guard_enabled: bool | null = null` / `busy_wait_guard_repeat_threshold: int | null = null` / `busy_wait_guard_window_seconds: int | null = null` (#1946 — lane overrides for the `cw guard-busy-wait` PreToolUse hook; `null` on any of the three defers to the matching global in `orchestrator.yaml`; see [Busy-Wait Guard](#busy-wait-guard-1946) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
 | `pipeline` | PipelineConfig | standard 4-stage pipeline, no per-stage models | Per-stage executor configuration (RFC 0005): `stages` (default `[plan, impl, review, finalize]`) and `executors` (default `{}`). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
@@ -419,6 +419,74 @@ opposite of what an operator writing it means:
   attempt), not "enabled".
 
 Use a positive integer, `false`, or omit the key.
+
+### Busy-Wait Guard (#1946)
+
+`cw guard-busy-wait` is a `PreToolUse` hook wired into every DAEMON-spawned
+worker's `.claude/settings.local.json` (alongside `cw guard-cwd`, on the same
+`Bash` matcher). It blocks a Bash tool call — exit 2, with the reason fed back
+to the agent on stderr — when the call is a busy-wait rather than work:
+
+- a bare `true` or `:` no-op,
+- a bare `sleep N` with no follow-on work (`sleep 5 && ./run_tests.sh` passes),
+- the same command repeated `busy_wait_guard_repeat_threshold` times inside a
+  rolling `busy_wait_guard_window_seconds` window.
+
+Why it exists: Agent-tool spawns are asynchronous unconditionally, so a worker
+that wants to "wait" for one has no blocking primitive and reaches for a no-op
+poll loop instead (#1944 observed one headless review pass spending 173 of its
+234 Bash calls on `true`). After ADR-0014 removed every kill timer, the only
+automated stuck-worker signal left is the transcript-staleness liveness sweep
+— and a poll loop keeps the transcript fresh, so the spinning worker
+classifies as LIVE and `session.needs_attention` never fires. The correct
+behavior is to end the turn; the spawn's completion notification resumes it.
+
+Every block also records a `guard.busy_wait_blocked` event (see
+[docs/events.md](../docs/events.md)) carrying the reason and a hash of the
+command, so a false positive is visible to the operator rather than buried in
+one worker's transcript. **The stored state is a truncated SHA-256 hash of the
+whitespace-normalized command, never the command text** — shell commands
+routinely carry secrets inline, and repeat detection needs only equality.
+
+Global defaults live in `orchestrator.yaml`; each is overridable per lane, in
+both directions (a lane can turn the guard off against an enabled global, or
+on against a disabled one — the same shape `reap_policy` uses):
+
+```yaml
+# ~/.claude-workspace/orchestrator.yaml
+busy_wait_guard_enabled: true          # default
+busy_wait_guard_repeat_threshold: 3    # default
+busy_wait_guard_window_seconds: 300    # default
+```
+
+```yaml
+# ~/.config/cw/clients.yaml
+clients:
+  my-project:
+    workspace_path: /home/user/projects/my-project
+    lanes:
+      # A lane whose workers legitimately poll an external system.
+      - name: integration
+        busy_wait_guard_enabled: false
+      # A lane that should trip sooner, on a tighter window.
+      - name: fast
+        busy_wait_guard_repeat_threshold: 2
+        busy_wait_guard_window_seconds: 120
+```
+
+`null` (or an omitted key) on any of the three lane fields means "no override
+— inherit the global", the same meaning `null` carries for `reap_policy`.
+
+Config is re-read on every hook invocation (each is its own subprocess), so an
+edit takes effect on the worker's next Bash call with no restart. The lane is
+resolved from the `lane` key in the worker's `.claude/cw-context.json`
+(schema v6); a context written before v6, or a USER-origin session with no
+lane, resolves the global defaults.
+
+The guard fails open on every unexpected condition — unreadable stdin, a
+missing or malformed context, a contended lock, a config that will not load.
+A guard that crashed or blocked spuriously would wedge every Bash call in
+every worker, which is strictly worse than not guarding.
 
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 

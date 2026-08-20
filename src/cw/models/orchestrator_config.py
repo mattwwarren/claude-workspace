@@ -191,6 +191,19 @@ class LaneConfig(BaseModel):
     paused: bool = False
     description: str = ""
     reap_policy: ReapPolicy | None = None
+    # Lane-level overrides for the `cw guard-busy-wait` PreToolUse guard
+    # (#1946). Shaped on reap_policy above, NOT on codex_fix_loop_enabled's
+    # opt-in-only Literal[True]: a lane must be able to turn the guard OFF
+    # against an enabled global (a lane whose workers legitimately poll) and
+    # ON against a disabled one, so the override is bidirectional. None on any
+    # of the three = inherit the OrchestratorConfig default. Resolved by
+    # cw.cli.guard_busy_wait._resolve_settings, which mirrors
+    # resolve_reap_policy's lane-then-global fallthrough rather than importing
+    # it (that function's signature is reconcile-specific -- it takes a
+    # ReapCandidate, which no hook subprocess ever has).
+    busy_wait_guard_enabled: bool | None = None
+    busy_wait_guard_repeat_threshold: int | None = Field(default=None, ge=2)
+    busy_wait_guard_window_seconds: int | None = Field(default=None, ge=1)
     pipeline: StagePipelineConfig | None = None
     # Lane-level operator-signoff override (RFC 0007 Phase 3). None defers to
     # OrchestratorConfig.default_signoff. See GitHub #990.
@@ -504,6 +517,29 @@ class OrchestratorConfig(BaseModel):
     # sessions to BLOCKED_ON_USER for operator review; ``auto`` restores the
     # pre-#554 self-healing behavior. See ADR-0006 invariant 4 and GitHub #554.
     reap_policy: ReapPolicy = ReapPolicy.SIGNAL_ONLY
+    # Global defaults for the `cw guard-busy-wait` PreToolUse guard (#1946),
+    # overridable per lane (LaneConfig.busy_wait_guard_*). Default-ON, unlike
+    # reap_policy's fail-safe default: the failure this guard prevents is a
+    # worker holding its turn open with no-op Bash polls, which after ADR-0014
+    # removed every kill timer keeps the transcript fresh enough that the
+    # staleness sweep classifies the spinning worker as LIVE and
+    # session.needs_attention never fires (#1944). The guard's own failure
+    # mode is bounded the other way -- it fails open on every unexpected
+    # shape -- so the asymmetry runs opposite to reap_policy's.
+    #
+    # Why no coercion validator: the hook wraps its whole classification in a
+    # fail-open try/except, so a malformed config raising out of
+    # load_orchestrator_config already degrades to "guard does not fire",
+    # which is the same non-destructive end state a coercion validator would
+    # manufacture -- with the loud ConfigValidationError still reaching every
+    # other cw command that reads the same file.
+    busy_wait_guard_enabled: bool = True
+    # ge=2: repeat_threshold - 1 is the guard's block threshold
+    # (_repeat_threshold_tripped); a value <= 1 collapses that to >= 0, which
+    # is always true and blocks every non-bare-noop Bash call on its first
+    # occurrence -- the opposite of the fail-open design goal.
+    busy_wait_guard_repeat_threshold: int = Field(default=3, ge=2)
+    busy_wait_guard_window_seconds: int = Field(default=300, ge=1)
     # Elapsed seconds before reconcile attempts to route an emitted-but-unrouted
     # sentinel (signal_stop never fired). A re-check delay, not a disposition
     # timer: an emitted sentinel is positive evidence the worker completed.

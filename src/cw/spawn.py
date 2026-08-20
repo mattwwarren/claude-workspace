@@ -64,7 +64,13 @@ _log = logging.getLogger(__name__)
 #     and read by the phantom sweep, so a worker that died with a sub-agent
 #     spawn still in flight parks under its own disposition instead of the
 #     generic phantom_surface).
-CW_CONTEXT_SCHEMA_VERSION = 5
+# v6: added `lane` (#1946 — the dispatch lane this worker's task sits in, so
+#     the `cw guard-busy-wait` PreToolUse hook can resolve its per-lane config
+#     override from inside the hook subprocess. The hook has no cw session or
+#     queue row in hand, only this file; without the key every worker would
+#     resolve the global default and the per-lane knob would be unreachable.
+#     Null for USER-origin sessions, which have no lane.)
+CW_CONTEXT_SCHEMA_VERSION = 6
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -305,10 +311,22 @@ _HOOK_SETTINGS_TEMPLATE = {
         # cwd resolves to the operator main checkout (workspace_path in
         # cw-context.json), preventing the #925/#766 isolation breach. Fail-open
         # (exit 0) on any missing/malformed context so it never blocks legit work.
+        # The second command on the Bash matcher is `cw guard-busy-wait`
+        # (#1946): it blocks a bare `true`/`:`/`sleep` no-op, and an identical
+        # command repeated past the configured threshold inside a rolling
+        # window. Appended to THIS entry's hooks list rather than declared as
+        # a second "Bash"-matched entry — one matcher, two commands, is the
+        # shape the template already uses for Stop and the shape whose
+        # dispatch behavior is exercised by the existing suite. Fail-open like
+        # its neighbour, and disable-able per lane or globally via
+        # busy_wait_guard_enabled in orchestrator.yaml.
         "PreToolUse": [
             {
                 "matcher": "Bash",
-                "hooks": [{"type": "command", "command": "cw guard-cwd"}],
+                "hooks": [
+                    {"type": "command", "command": "cw guard-cwd"},
+                    {"type": "command", "command": "cw guard-busy-wait"},
+                ],
             },
             # #1646: stamp an unresolved-subagent-spawn marker before the
             # spawn starts. Never blocks -- there is no failure mode in which
@@ -338,6 +356,7 @@ def _write_hook_context(
     wall_clock_budget_seconds: int | None = None,
     default_branch: str = "main",
     workspace_path: Path | None = None,
+    lane: str | None = None,
 ) -> None:
     """Write hook config + correlation context into the worktree pre-spawn.
 
@@ -421,6 +440,12 @@ def _write_hook_context(
         "session_id": session_id,
         "session_name": session_name,
         "client": client,
+        # Why (#1946): the `cw guard-busy-wait` PreToolUse hook runs as a bare
+        # subprocess with only this file for context — it has no cw session or
+        # dev_queue row to read the lane from. Stamping it here is what makes
+        # the guard's per-lane config override (LaneConfig.busy_wait_guard_*)
+        # resolvable at all. Null for USER-origin sessions, which have no lane.
+        "lane": lane,
         "purpose": purpose,
         "ticket_id": ticket_id,
         "headless": headless,
@@ -576,6 +601,7 @@ def spawn_create_impl(
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         default_branch=client.default_branch,
         workspace_path=client.workspace_path,
+        lane=lane,
     )
 
     final_extra: list[str] = []
