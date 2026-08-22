@@ -308,161 +308,20 @@ def test_has_terminal_sentinel_unit(
     assert _has_terminal_sentinel(base) is False
 
 
-def test_awaiting_subagent_true_when_tail_is_pending_tool_use(
-    tmp_config_dir: Path, tmp_path: Path
-) -> None:
-    """Last assistant turn is a tool_use with no tool_result yet → awaiting."""
-    from cw.reconcile import _awaiting_subagent
-
-    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    transcript = project_dir / "sess-uuid.jsonl"
-    tu_ts = "2026-01-01T00:04:00Z"
-    transcript.write_text(
-        json.dumps(
-            {
-                "type": "assistant",
-                "timestamp": tu_ts,
-                "message": {
-                    "stop_reason": "tool_use",
-                    "content": [{"type": "tool_use", "name": "Agent"}],
-                },
-            }
-        )
-        + "\n"
-    )
-    sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
-        assert _awaiting_subagent(sess, now) is True
-
-
-def test_awaiting_subagent_false_when_tool_result_delivered(
-    tmp_config_dir: Path, tmp_path: Path
-) -> None:
-    """tool_use followed by tool_result → NOT awaiting (genuine hang)."""
-    from cw.reconcile import _awaiting_subagent
-
-    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    transcript = project_dir / "sess-uuid.jsonl"
-    lines = [
-        {
-            "type": "assistant",
-            "timestamp": "2026-01-01T00:04:00Z",
-            "message": {
-                "stop_reason": "tool_use",
-                "content": [{"type": "tool_use", "name": "Agent"}],
-            },
-        },
-        {
-            "type": "user",
-            "timestamp": "2026-01-01T00:04:01Z",
-            "message": {"content": [{"type": "tool_result"}]},
-        },
-    ]
-    transcript.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
-    sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
-        assert _awaiting_subagent(sess, now) is False
-
-
-def test_awaiting_subagent_false_when_pending_tool_use_too_old(
-    tmp_config_dir: Path, tmp_path: Path
-) -> None:
-    """Pending tool_use older than SUBAGENT_LIVENESS_WINDOW → hung subagent."""
-    from cw.reconcile import SUBAGENT_LIVENESS_WINDOW_SECONDS, _awaiting_subagent
-
-    # Window is 1800 s (30 min) as of #544; tool_use exactly at the boundary
-    # (1800 s old) is expired (< is strict).
-    assert SUBAGENT_LIVENESS_WINDOW_SECONDS == 1800
-    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    transcript = project_dir / "sess-uuid.jsonl"
-    transcript.write_text(
-        json.dumps(
-            {
-                "type": "assistant",
-                "timestamp": "2026-01-01T00:30:00Z",  # exactly 1800 s before now
-                "message": {
-                    "stop_reason": "tool_use",
-                    "content": [{"type": "tool_use", "name": "Agent"}],
-                },
-            }
-        )
-        + "\n"
-    )
-    sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
-        assert _awaiting_subagent(sess, now) is False
-
-
-def test_awaiting_subagent_true_for_20_min_old_tool_use(
-    tmp_config_dir: Path, tmp_path: Path
-) -> None:
-    """Pending tool_use ~20 min old is within the 1800 s window → alive (#544).
-
-    A large refactor running a single tool call for 20-30 min must NOT be reaped.
-    The liveness window was raised from 900→1800 s specifically to cover this case.
+def test_awaiting_subagent_and_window_constant_removed_from_reconcile() -> None:
+    """#1969: _awaiting_subagent and its window constant no longer exist on
+    cw.reconcile's import/__all__ surface. liveness.py's distress check now
+    reads the agent_spawn_stamp counter directly via
+    _read_unresolved_subagent_spawn (the sibling call site #1947 already
+    migrated in phantom/_detect.py) instead of inferring subagent liveness
+    from transcript tool_use/tool_result pairing.
     """
-    from cw.reconcile import _awaiting_subagent
+    import cw.reconcile as reconcile_pkg
 
-    # now=01:00:00, tool_use at 00:40:00 → 20 min = 1200 s < 1800 → alive
-    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    transcript = project_dir / "sess-uuid.jsonl"
-    transcript.write_text(
-        json.dumps(
-            {
-                "type": "assistant",
-                "timestamp": "2026-01-01T00:40:00Z",  # 20 min = 1200 s before now
-                "message": {
-                    "stop_reason": "tool_use",
-                    "content": [{"type": "tool_use", "name": "Agent"}],
-                },
-            }
-        )
-        + "\n"
-    )
-    sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
-        assert _awaiting_subagent(sess, now) is True
-
-
-def test_awaiting_subagent_false_for_35_min_old_tool_use(
-    tmp_config_dir: Path, tmp_path: Path
-) -> None:
-    """Pending tool_use ~35 min old is beyond the 1800 s window → reaped (#544).
-
-    The guard must not become permanent: a tool_use older than 1800 s indicates
-    a genuinely hung subagent and the watchdog should still reap it.
-    """
-    from cw.reconcile import _awaiting_subagent
-
-    # now=01:00:00, tool_use at 00:25:00 → 35 min = 2100 s > 1800 → expired
-    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    transcript = project_dir / "sess-uuid.jsonl"
-    transcript.write_text(
-        json.dumps(
-            {
-                "type": "assistant",
-                "timestamp": "2026-01-01T00:25:00Z",  # 35 min = 2100 s before now
-                "message": {
-                    "stop_reason": "tool_use",
-                    "content": [{"type": "tool_use", "name": "Agent"}],
-                },
-            }
-        )
-        + "\n"
-    )
-    sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
-        assert _awaiting_subagent(sess, now) is False
+    assert not hasattr(reconcile_pkg, "_awaiting_subagent")
+    assert "_awaiting_subagent" not in reconcile_pkg.__all__
+    assert not hasattr(reconcile_pkg, "SUBAGENT_LIVENESS_WINDOW_SECONDS")
+    assert "SUBAGENT_LIVENESS_WINDOW_SECONDS" not in reconcile_pkg.__all__
 
 
 # ---------------------------------------------------------------------------
@@ -1009,109 +868,6 @@ def test_iter_assistant_records_returns_empty_on_missing_file(
     from cw.reconcile._shared import _iter_assistant_records
 
     assert list(_iter_assistant_records(tmp_path / "does-not-exist.jsonl")) == []
-
-
-def test_awaiting_subagent_skips_blank_lines_and_bad_json(
-    tmp_config_dir: Path, tmp_path: Path
-) -> None:
-    """Blank lines and malformed JSON in transcript are skipped gracefully."""
-    from cw.reconcile import _awaiting_subagent
-
-    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    transcript = project_dir / "sess-uuid.jsonl"
-    # blank line, bad JSON, then valid tool_use with no result
-    transcript.write_text(
-        "\n"
-        "not-json\n"
-        + json.dumps(
-            {
-                "type": "assistant",
-                "timestamp": "2026-01-01T00:04:00Z",
-                "message": {
-                    "stop_reason": "tool_use",
-                    "content": [{"type": "tool_use", "name": "Agent"}],
-                },
-            }
-        )
-        + "\n"
-    )
-    sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
-        assert _awaiting_subagent(sess, now) is True
-
-
-def test_awaiting_subagent_skips_non_list_content(
-    tmp_config_dir: Path, tmp_path: Path
-) -> None:
-    """Entries with non-list content field are skipped without error."""
-    from cw.reconcile import _awaiting_subagent
-
-    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    transcript = project_dir / "sess-uuid.jsonl"
-    # entry with non-list content — should be skipped, not crash
-    transcript.write_text(
-        json.dumps(
-            {
-                "type": "assistant",
-                "timestamp": "2026-01-01T00:04:00Z",
-                "message": {"content": "not-a-list"},
-            }
-        )
-        + "\n"
-    )
-    sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
-        # Nothing to track — returns False (no pending tool_use)
-        assert _awaiting_subagent(sess, now) is False
-
-
-def test_awaiting_subagent_handles_invalid_timestamp(
-    tmp_config_dir: Path, tmp_path: Path
-) -> None:
-    """Invalid ISO timestamp on tool_use → last_tool_use_ts stays None → False."""
-    from cw.reconcile import _awaiting_subagent
-
-    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    transcript = project_dir / "sess-uuid.jsonl"
-    transcript.write_text(
-        json.dumps(
-            {
-                "type": "assistant",
-                "timestamp": "not-a-valid-timestamp",
-                "message": {
-                    "stop_reason": "tool_use",
-                    "content": [{"type": "tool_use", "name": "Agent"}],
-                },
-            }
-        )
-        + "\n"
-    )
-    sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
-        # invalid ts → last_tool_use_ts = None → returns False
-        assert _awaiting_subagent(sess, now) is False
-
-
-def test_awaiting_subagent_returns_false_on_oserror(
-    tmp_config_dir: Path, tmp_path: Path
-) -> None:
-    """OSError while reading transcript → fail-open False."""
-    from cw.reconcile import _awaiting_subagent
-
-    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    # Point at a file that does not exist
-    sess = _make_daemon_session(claude_session_id="no-such-file")
-    # project_dir exists but the specific .jsonl doesn't
-    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
-        assert _awaiting_subagent(sess, now) is False
 
 
 def test_reconcile_tolerates_malformed_json_from_claude_agents(
@@ -1936,73 +1692,6 @@ def test_transcript_recently_active_finds_dotted_worktree(
     # With the correct encoding the transcript is found → recently active.
     assert _transcript_recently_active(sess, now, window_seconds=60), (
         "Expected transcript to be found for dotted worktree path; "
-        f"project_dir={project_dir!r} exists={project_dir.is_dir()}"
-    )
-
-
-def test_awaiting_subagent_finds_dotted_worktree(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """_awaiting_subagent returns True for a ~/.cw/-style worktree with pending
-    tool_use.
-
-    Regression for Issue #463: single-replace caused _awaiting_subagent to hit
-    its early-exit (project_dir not found), returning False and letting the
-    watchdog fire on a session mid-subagent.
-    """
-    from cw.reconcile import _awaiting_subagent
-
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-
-    worktree = tmp_path / ".dot-cw" / "wt" / "def456" / "auto-dev-2"
-    worktree.mkdir(parents=True, exist_ok=True)
-
-    project_dir = claude_project_dir(worktree)
-    project_dir.mkdir(parents=True, exist_ok=True)
-
-    session_uuid = "test-uuid-subagent"
-    transcript = project_dir / f"{session_uuid}.jsonl"
-
-    # Transcript ends with a tool_use with no following tool_result → awaiting.
-    tool_use_ts = datetime(2026, 1, 1, 0, 15, 0, tzinfo=UTC).isoformat()
-    record = json.dumps(
-        {
-            "type": "assistant",
-            "timestamp": tool_use_ts,
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "id": "toolu_01", "name": "Task", "input": {}}
-                ],
-            },
-        }
-    )
-    transcript.write_text(record + "\n")
-
-    sess = Session(
-        id="dotted-subagent-sess",
-        name="client-a/auto-dev/DOTTED-2",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=tmp_path / "ws"
-        ).workspace_path,
-        worktree_path=worktree,
-        surface_ref="live-ref",
-        started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
-        claude_session_id=session_uuid,
-    )
-
-    # now is within SUBAGENT_LIVENESS_WINDOW_SECONDS of the tool_use timestamp
-    now = datetime(2026, 1, 1, 0, 16, 0, tzinfo=UTC)
-    assert _awaiting_subagent(sess, now), (
-        "Expected _awaiting_subagent=True for dotted worktree path; "
         f"project_dir={project_dir!r} exists={project_dir.is_dir()}"
     )
 
@@ -2948,59 +2637,6 @@ def test_locate_no_surface_ref_no_csid(
     # Should NOT fall back to unscoped glob — returns None.
     result = _locate_session_transcript(sess)
     assert result is None
-
-
-def test_awaiting_subagent_stale_transcript_returns_false(
-    tmp_path: Path,
-    tmp_config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Stale transcript (mtime <= started_at) with pending tool_use → False.
-
-    Before #541, _awaiting_subagent used an unscoped *.jsonl glob with no
-    mtime guard in the surface_ref branch.  A stale transcript with a pending
-    tool_use tail would have returned True (false-positive watchdog suppression).
-    Now the mtime guard applies uniformly via _locate_session_transcript.
-    """
-    from cw.reconcile import _awaiting_subagent
-
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-
-    started_at = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 12, 5, 0, tzinfo=UTC)
-    worktree = tmp_path / "wt-stale-subagent"
-    sess = _make_locate_session(
-        worktree=worktree,
-        started_at=started_at,
-        surface_ref="abcd1234",
-        claude_session_id=None,
-    )
-
-    encoded = str(worktree).replace("/", "-").replace(".", "-")
-    project_dir = home / ".claude" / "projects" / encoded
-    project_dir.mkdir(parents=True)
-
-    # Write a transcript with a pending tool_use tail.
-    record = json.dumps(
-        {
-            "type": "assistant",
-            "timestamp": now.isoformat(),
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": "tu1", "name": "Bash"}],
-            },
-        }
-    )
-    transcript = project_dir / "abcd1234-stale.jsonl"
-    transcript.write_text(record + "\n")
-    # Stamp BEFORE started_at — stale transcript guard should fire.
-    stale_ts = started_at.timestamp() - 3600
-    os.utime(str(transcript), (stale_ts, stale_ts))
-
-    # Must return False: stale transcript → helper returns None → fail-open.
-    assert _awaiting_subagent(sess, now) is False
 
 
 def test_csid_from_transcript_via_helper(
