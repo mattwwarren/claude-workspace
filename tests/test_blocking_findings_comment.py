@@ -19,7 +19,7 @@ session transcript. This adds a single shared, greppable header,
 
 from pathlib import Path
 
-from tests.conftest import _cmd
+from tests.conftest import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).parent.parent
@@ -129,6 +129,21 @@ def _checkpoint3a_section() -> str:
     return content[start:end]
 
 
+def _blocking_findings_rule_section() -> str:
+    """The blocking-findings comment rule's header/body/trigger definition.
+
+    #1879 relocated it to ``auto-dev-review-appendix.md``: the rule only ever
+    fires on one of three exceptional exits (mechanically-rejected MUST_FIX,
+    the cycle-5 hard exit, or the 4a ``plan_deviation`` exit), so it is
+    rare-path. Checkpoint 3a in the core doc keeps the obligation and the
+    trigger sentence; the literals below follow the content to its new home.
+    """
+    content = _appendix("review")
+    start = content.index("## Blocking-findings comment rule:")
+    end = content.index("\n## ", start)
+    return content[start:end]
+
+
 # ---------------------------------------------------------------------------
 # 1. Step 1a excludes the new header from plan detection (AC3 / #1650 idiom).
 # ---------------------------------------------------------------------------
@@ -213,8 +228,9 @@ def test_blocking_findings_rule_still_forbids_posting_plan_text() -> None:
 
 
 def test_checkpoint3a_declares_blocking_findings_comment_rule() -> None:
-    """Checkpoint 3a's rule names the header, cross-references the same surface."""
-    section = _checkpoint3a_section()
+    """The rule names the header, cross-references the same surface."""
+    assert RULE_REFERENCE in _checkpoint3a_section()
+    section = _blocking_findings_rule_section()
     assert HEADER in section
     assert "the same surface" in section
     assert "reviewer_role" in section
@@ -238,8 +254,13 @@ def test_review_blocked_mechanical_reject_exit_posts_blocking_findings() -> None
 
 
 def test_review_blocked_cycle5_hard_exit_posts_blocking_findings() -> None:
-    """The cycle-5 hard-exit headless bullet posts a tracker comment."""
-    content = _cmd("auto-dev-review.md")
+    """The cycle-5 hard-exit headless bullet posts a tracker comment.
+
+    #1879 moved the cycle-5 hard exit into the appendix alongside the rest of
+    Step 3b.5's escalation handling (cycle 3+ is rare-path); the assertion
+    follows it there.
+    """
+    content = _appendix("review")
     window = _after(content, CYCLE5_HARD_EXIT_ANCHOR, span=400)
     assert RULE_REFERENCE in window
     assert "Checkpoint 3a" in window
@@ -252,11 +273,12 @@ def test_review_blocked_cycle5_hard_exit_posts_blocking_findings() -> None:
 
 def test_review_blocked_both_sites_share_same_header() -> None:
     """The header is declared exactly once; both exit sites reference the rule."""
-    content = _cmd("auto-dev-review.md")
-    assert content.count(HEADER) == 1
+    core = _cmd("auto-dev-review.md")
+    appendix = _appendix("review")
+    assert core.count(HEADER) + appendix.count(HEADER) == 1
 
-    mechanical_window = _after(content, MECHANICAL_REJECT_ANCHOR, span=300)
-    cycle5_window = _after(content, CYCLE5_HARD_EXIT_ANCHOR, span=400)
+    mechanical_window = _after(core, MECHANICAL_REJECT_ANCHOR, span=300)
+    cycle5_window = _after(appendix, CYCLE5_HARD_EXIT_ANCHOR, span=400)
     assert RULE_REFERENCE in mechanical_window
     assert RULE_REFERENCE in cycle5_window
 
@@ -310,8 +332,8 @@ def test_headless_contract_review_blocked_description_updated() -> None:
 
 
 def test_blocking_findings_rule_names_plan_deviation_trigger() -> None:
-    """The Checkpoint 3a rule paragraph names a third trigger condition."""
-    section = _checkpoint3a_section()
+    """The rule paragraph names a third trigger condition."""
+    section = _blocking_findings_rule_section()
     assert "plan_deviation" in section
     # Severity scope of the third trigger is deliberately NOT MUST_FIX-only:
     # 4a's NON_DEFERRABLE test is not itself severity-scoped.

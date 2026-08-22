@@ -18,7 +18,7 @@ under the fixed header ``## Operator-Actionable Review Findings``.
 
 from pathlib import Path
 
-from tests.conftest import _cmd
+from tests.conftest import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).parent.parent
@@ -64,6 +64,20 @@ def _checkpoint3a_closing_paragraph() -> str:
     content = _cmd("auto-dev-review.md")
     start = content.index(CHECKPOINT_3A_CLOSING_ANCHOR)
     end = content.index("### Step 3b: Fix Loop")
+    return content[start:end]
+
+
+def _operator_actionable_rule_section() -> str:
+    """The operator-actionable comment rule's header/format/trigger definition.
+
+    #1879 relocated it to ``auto-dev-review-appendix.md``: bucket 4 landing
+    non-empty is the exceptional case, so the rule is rare-path. Checkpoint 3a
+    in the core doc keeps the obligation and the trigger sentence; the
+    literals below follow the content to its new home.
+    """
+    content = _appendix("review")
+    start = content.index("## Operator-actionable findings comment rule:")
+    end = content.index("\n## ", start)
     return content[start:end]
 
 
@@ -161,16 +175,18 @@ def test_adjudication_json_shape_lists_operator_action_outcome() -> None:
 
 
 def test_operator_actionable_comment_rule_declared_once() -> None:
-    content = _cmd("auto-dev-review.md")
-    assert content.count(HEADER) == 1
-    section = _checkpoint3a_section()
+    core = _cmd("auto-dev-review.md")
+    appendix = _appendix("review")
+    assert core.count(HEADER) + appendix.count(HEADER) == 1
+    assert RULE_REFERENCE in _checkpoint3a_section()
+    section = _operator_actionable_rule_section()
     assert HEADER in section
     assert RULE_REFERENCE in section
 
 
 def test_operator_actionable_comment_rule_documents_checklist_format() -> None:
     """Adopted Assumption 3: GitHub-native task-list syntax, role noted inline."""
-    section = _checkpoint3a_section()
+    section = _operator_actionable_rule_section()
     window = _after(section, HEADER, span=1200)
     assert "- [ ]" in window
     assert "suggested_fix" in window
@@ -179,7 +195,7 @@ def test_operator_actionable_comment_rule_documents_checklist_format() -> None:
 
 def test_operator_actionable_comment_rule_appends_friction_sentinel() -> None:
     """Adopted Assumption 4: mirrors the `blocking findings posted:` idiom."""
-    section = _checkpoint3a_section()
+    section = _operator_actionable_rule_section()
     assert SENTINEL in section
     window = _after(section, SENTINEL, span=200)
     assert "friction_highlights" in window
@@ -187,7 +203,7 @@ def test_operator_actionable_comment_rule_appends_friction_sentinel() -> None:
 
 def test_operator_actionable_comment_trigger_is_decoupled_from_blocker_reason() -> None:
     """Round-5 Q1: the comment posts on the ADJUDICATIONS entry, not the exit."""
-    section = _checkpoint3a_section()
+    section = _operator_actionable_rule_section()
     window = _after(section, HEADER, span=1400)
     assert "ADJUDICATIONS" in window
     assert "blocker.reason" in window
@@ -237,8 +253,9 @@ def test_step3c_override_routes_to_blocked_on_user() -> None:
 
 
 def test_blocking_findings_header_still_declared_exactly_once() -> None:
-    content = _cmd("auto-dev-review.md")
-    assert content.count(BLOCKING_HEADER) == 1
+    core = _cmd("auto-dev-review.md")
+    appendix = _appendix("review")
+    assert core.count(BLOCKING_HEADER) + appendix.count(BLOCKING_HEADER) == 1
 
 
 # ---------------------------------------------------------------------------
