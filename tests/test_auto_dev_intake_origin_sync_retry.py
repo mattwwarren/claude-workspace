@@ -38,12 +38,33 @@ def _cmd() -> str:
     return (COMMANDS / "auto-dev-intake.md").read_text()
 
 
+def _appendix() -> str:
+    return (COMMANDS / "auto-dev-intake-appendix.md").read_text()
+
+
 def _origin_sync_section() -> str:
-    """Full Pre-flight: Origin Sync Check block, P1 through end of P3."""
-    content = _cmd()
-    start = content.index("## Pre-flight: Origin Sync Check")
-    end = content.index("## Stage 0: Ticket Intake")
+    """The Origin Sync Check's divergence-handling block, Step P2 through P3.
+
+    #1879 relocated Steps P2 and P3 out of ``auto-dev-intake.md`` and into its
+    companion appendix: Step P1 (fetch and compare) runs on every invocation
+    and stays in the core doc, but the divergence branch below it fires only
+    when local ``main`` has actually drifted from ``origin/main``, so it is
+    rare-path content. Every assertion in this file is re-pointed at the new
+    location; none was dropped or loosened.
+    """
+    content = _appendix()
+    start = content.index("## Origin Sync Check divergence handling")
+    end = content.index("\n## ", start)
     return content[start:end]
+
+
+def test_core_doc_keeps_step_p1_and_the_appendix_trigger() -> None:
+    """Detection stays on the common path; only the divergence branch moved."""
+    core = _cmd()
+    assert "### Step P1: Fetch and compare" in core
+    assert "Origin Sync Check divergence handling (Steps P2 and P3)" in core
+    assert "### Step P2 (interactive)" not in core
+    assert "### Step P3 (headless)" not in core
 
 
 def _step_p2_section() -> str:

@@ -12,7 +12,7 @@ sentinel. Both gaps are model-adherence, not schema — this pins the prose
 that closes them.
 """
 
-from tests.conftest import _cmd
+from tests.conftest import _appendix, _cmd
 
 FRAME_DISCIPLINE_ANCHOR = "Validating is not emitting"
 FRAME_DISCIPLINE_DETAIL = "final characters of this same message"
@@ -114,14 +114,36 @@ def test_no_interactive_escalation_warning_present_in_every_terminating_section(
 
 
 def test_intake_discipline_subsection_precedes_all_three_standalone_exits() -> None:
+    """The discipline text is read before any of Stage 0's three standalone EXITs.
+
+    #1879 moved all three EXIT sentinels into ``auto-dev-intake-appendix.md``
+    (each fires only on a rare condition -- origin divergence, a failed fetch,
+    a pre-existing open PR). The ordering property still has to hold on the
+    core file the worker actually reads first, so it is asserted here against
+    the appendix-Read trigger sentence that now stands in each EXIT's place.
+    """
     content = _cmd("auto-dev-intake.md")
     discipline_pos = content.index("### Sentinel-Emission Discipline")
-    p3_exit_pos = content.index('"reason": "local_main_diverged_from_origin"')
-    fetch_failure_exit_pos = content.index('"reason": "operator_unavailable"')
-    open_pr_exit_pos = content.index('"reason": "pr_already_open"')
+    p3_exit_pos = content.index("Origin Sync Check divergence handling")
+    fetch_failure_exit_pos = content.index("Fetch-failure signature mirror")
+    open_pr_exit_pos = content.index("Open-PR self-check (#1862)")
     assert discipline_pos < p3_exit_pos
     assert discipline_pos < fetch_failure_exit_pos
     assert discipline_pos < open_pr_exit_pos
+
+
+def test_intake_appendix_retains_all_three_exit_sentinel_reasons() -> None:
+    """The three relocated EXIT sentinels keep their exact ``reason`` literals.
+
+    Companion to the test above: the ordering assertion moved to the core
+    doc's trigger sentences, so the literals themselves are pinned here at
+    their new home. Together the two tests assert everything the single
+    pre-#1879 test asserted.
+    """
+    appendix = _appendix("intake")
+    assert '"reason": "local_main_diverged_from_origin"' in appendix
+    assert '"reason": "operator_unavailable"' in appendix
+    assert '"reason": "pr_already_open"' in appendix
 
 
 def test_plan_md_resolution_fields_preserved_verbatim() -> None:

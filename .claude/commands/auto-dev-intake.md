@@ -78,72 +78,12 @@ BEHIND=$(git -C "$REPO" rev-list --count main..origin/main)
 
 If `LOCAL_MAIN == ORIGIN_MAIN`, continue to Stage 0.
 
-If they differ, branch on mode:
-
-### Step P2 (interactive)
-
-`AskUserQuestion`: how to resolve the divergence.
-
-| Option | Action |
-|---|---|
-| Sync now | If ahead-only: `git -C "$REPO" push origin main`. If behind-only: `git -C "$REPO" pull --ff-only`. If both: fall through to "proceed anyway" — the human decides. |
-| Proceed anyway | Continue to Stage 0 with local main as the fork point; the Stage 4 merge gate still catches the divergence. |
-| Abandon ticket | Exit without spawning any agents. No sentinel emit. |
-
-### Step P3 (headless)
-
-If `AHEAD == 0` and `BEHIND > 0` (behind-only divergence, the shape
-`fast_forward_main`'s own guards would allow), do not declare divergence
-yet: the dispatch-tick auto-ff (`_resolve_freshness` in
-`src/cw/dispatch/gating.py`) advances the base checkout's `main`
-concurrently. Give it a bounded window before falling through.
-
-#### Behind-only wait-and-recheck
-
-```bash
-for _ in 1 2 3; do
-  sleep 30
-  LOCAL_MAIN=$(git -C "$REPO" rev-parse main)
-  if [ "$LOCAL_MAIN" = "$ORIGIN_MAIN" ]; then
-    break
-  fi
-done
-```
-
-No re-fetch. Checkpoints land at T+30s, T+60s, T+90s. **Changing this loop's
-cadence or adding a fetch** is rare — the rationale lives in
-`.claude/commands/auto-dev-intake-appendix.md`, section "Behind-only
-wait-and-recheck: why no re-fetch". Read it now if that applies.
-
-- If `LOCAL_MAIN == ORIGIN_MAIN` after any iteration → continue to Stage 0
-  (divergence resolved itself; no sentinel emitted).
-- If still diverged after 3 iterations (T+90s, matching
-  `TICK_STALE_SECONDS`'s 3x-`tick_interval_seconds` convention) → fall
-  through to the blocked sentinel below, unchanged.
-
-If `AHEAD > 0` (ahead-only, or both ahead and behind) — no wait. Proceed
-directly to the blocked sentinel below.
-
-EXIT with the structured `blocked` sentinel before any agent is spawned:
-
-```json
-{
-  "status": "blocked",
-  "stage_reached": "stage1_pre_flight",
-  "blocker": {
-    "stage": "pre_flight",
-    "reason": "local_main_diverged_from_origin",
-    "details": "local_main=<sha>, origin_main=<sha>, ahead=<n>, behind=<n>",
-    "message": "Local main is not in sync with origin/main; pipeline aborted before impl",
-    "recovery_hint": "Push or rebase local main, then re-dispatch",
-    "retry_eligible": true,
-    "retry_delay_seconds": null
-  },
-  "next_actions": ["sync_local_main"]
-}
-```
-
-`retry_eligible: true` per ADR-0002 — the orchestrator MAY re-dispatch once the divergence is resolved (typically one `git push origin main` or `git pull --ff-only`). `retry_delay_seconds: null` because no time-based backoff helps; the gate clears when the human acts. `local_main_diverged_from_origin` is an open-enum addition to `blocker.reason` (headless-contract.md §4.2 — `reason` is open by design); consumers surface it verbatim, no parser change needed.
+**If they differ**, divergence handling is rare — the full procedure (Step P2
+interactive, Step P3 headless with its bounded behind-only wait-and-recheck, and
+the exact `blocked` / `local_main_diverged_from_origin` sentinel to EXIT with)
+lives in `.claude/commands/auto-dev-intake-appendix.md`, section
+"Origin Sync Check divergence handling (Steps P2 and P3)". Read it now; do not
+improvise the wait cadence or the sentinel from this summary alone.
 
 ---
 
@@ -169,61 +109,15 @@ rules below are tracker-aware.
    `list_comments(<id>)` is a **mandatory op that MUST run before Step 0d** so the
    comments are in hand before context is materialized. Proceed to Stage 1.
 
-   **Step 3 fetch-failure handling (fatal, #1156 — RFC 0011 A2):** if the primary
-   fetch above exits non-zero or returns error text instead of issue data, match
-   that error text against the signature table below before doing anything else.
-   **Editing, adding to, or reconciling this signature list** is rare — its
-   provenance and drift guard are in
-   `.claude/commands/auto-dev-intake-appendix.md`, section "Fetch-failure
-   signature mirror: provenance and sentinel rationale". Read it now if that
-   applies; do not add or remove a signature from memory.
-
-   - Auth-failure:
-     - `Permission denied (publickey)`
-     - `could not read Username`
-     - `Host key verification failed`
-     - `Authentication failed`
-   - Network-unreachable:
-     - `Could not resolve host`
-     - `Network is unreachable`
-     - `Temporary failure in name resolution`
-     - `Failed to connect to`
-     - `Could not connect to server`
-   - GitHub 5xx / secondary-rate-limit:
-     - `secondary rate limit`
-     - `HTTP 502`
-     - `HTTP 503`
-     - `HTTP 500`
-
-   (`MCP-github-unreachable` is deliberately not mirrored — no verified
-   signature exists yet.)
-
-   On a family match, EXIT before spawning any agent and **before** the
-   `stage.entered` (`s0_intake`) emission below, with the structured `blocked`
-   sentinel:
-
-   ```json
-   {
-     "status": "blocked",
-     "stage_reached": "stage1_pre_flight",
-     "blocker": {
-       "stage": "pre_flight",
-       "reason": "operator_unavailable",
-       "details": "<matched signature + fetch op, e.g. 'gh issue view: Could not resolve host'>",
-       "message": "Ticket fetch failed: operator/dependency currently unreachable",
-       "recovery_hint": "Resolve the underlying network/auth/GitHub-availability issue, then re-dispatch",
-       "retry_eligible": true,
-       "retry_delay_seconds": null
-     },
-     "next_actions": ["manual_intervention"]
-   }
-   ```
-
-   `next_actions` **must** be `["manual_intervention"]` — `sync_local_main`, the
-   only other legal member of `_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS`
-   (`auto_dev_result/schema.py`), is the Origin Sync surface and wrong here.
-   `reason: "operator_unavailable"` is already in
-   `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` — no schema change required.
+   **Step 3 fetch-failure handling (fatal, #1156 — RFC 0011 A2):** a fetch that
+   exits non-zero or returns error text instead of issue data is rare — the
+   signature table to match that error text against, and the exact `blocked` /
+   `operator_unavailable` sentinel to EXIT with (before spawning any agent and
+   **before** the `stage.entered` (`s0_intake`) emission below), live in
+   `.claude/commands/auto-dev-intake-appendix.md`, section
+   "Fetch-failure signature mirror: provenance, signature table, and sentinel".
+   Read it now if the fetch failed; do not add, remove, or improvise a
+   signature or a sentinel field from memory.
 
    **Step 3 open-PR self-check (#1862) — run after a successful fetch, before
    Step 0d.** Check whether this ticket already has an open PR before doing any
@@ -241,37 +135,14 @@ rules below are tracker-aware.
    PR — fall through and continue the run.
 
    On a genuine hit, EXIT before spawning any agent with the structured
-   `stale_dispatch` sentinel:
-
-   ```json
-   {
-     "status": "stale_dispatch",
-     "stage_reached": "stage1_pre_flight",
-     "branch": null,
-     "pr": null,
-     "blocker": {
-       "stage": "stage1_pre_flight",
-       "reason": "pr_already_open",
-       "details": "<PR number, URL, and review state, e.g. 'PR #1899 (https://github.com/o/r/pull/1899) is open, reviewDecision=REVIEW_REQUIRED'>",
-       "message": "Ticket already has an open, unmerged PR from an earlier dispatch",
-       "recovery_hint": "Land or close the PR, then unblock the ticket (cw dev-queue unblock)",
-       "retry_eligible": false,
-       "retry_delay_seconds": null
-     },
-     "next_actions": []
-   }
-   ```
-
-   `pr` **must** stay null and `next_actions` **must** be empty
-   (`stale_dispatch` is a terminal-reject status). Not a substitute for `cw`'s
-   own pre-dispatch gate (`disposition: "stale_dispatch_gate"`).
-
-   **Firing this branch, or changing any of its field values,** is rare — the
-   full rationale (why the race happens, the fail-open reliability rule, and why
-   `no_op`/`blocked` are both wrong here) lives in
-   `.claude/commands/auto-dev-intake-appendix.md`, section "Open-PR self-check
-   (#1862): rationale, reliability rule, and status choice". Read it now if this
-   condition applies; do not improvise the sentinel from this summary alone.
+   `stale_dispatch` / `pr_already_open` sentinel. Firing this branch is rare —
+   the exact sentinel and the full rationale (why the race happens, the
+   fail-open reliability rule, and why `no_op`/`blocked` are both wrong here)
+   live in `.claude/commands/auto-dev-intake-appendix.md`, section
+   "Open-PR self-check (#1862): rationale, reliability rule, and status
+   choice". Read it now if this condition applies; do not improvise the
+   sentinel from this summary alone. Not a substitute for `cw`'s own
+   pre-dispatch gate (`disposition: "stale_dispatch_gate"`).
 
    **Headless only — initialize correlation context and emit `stage.entered` (`s0_intake`):**
    ```bash
@@ -317,14 +188,13 @@ CWCTXEOF
 - **`github-issues` mode:** use the `comments` returned by the Step 3 fetch (`gh issue view <n> --json title,body,state,url,comments`), which already carries `createdAt` and `author.login`; do not re-fetch.
 - **`linear` mode:** `list_comments(<id>)` is a **mandatory op that MUST run before Step 0d** — run it explicitly and populate `comments` from its result. Do NOT rely on model initiative to decide whether comments are worth fetching.
 
-**WARN on comments-fetch failure:** if the comments fetch exits non-zero or returns malformed JSON, emit an attention signal and continue with `comments: []`:
-```bash
-cw event record session.needs_attention \
-  --payload '{"reason": "comments_fetch_failed", "ticket_id": "<n>", "session_id": "<from .claude/cw-context.json>"}'
-```
-Do NOT emit `stage.errored` for this: `STAGE_ERRORED` events are ignored by `orchestrate.py`'s `_derive_last_stage_by_session`, so it would never surface as operator attention. `session.needs_attention` is the signal the operator sees.
-
-**Known limitation (intentionally not WARNed):** a comments fetch that **succeeds but returns empty for a ticket that actually has comments** is NOT detectable from within this stage without a second independent source of the true comment count. The `comments_fetch_failed` WARN above covers only hard failures (non-zero exit / malformed JSON).
+**WARN on comments-fetch failure:** a comments fetch that exits non-zero or
+returns malformed JSON is rare — emit an attention signal and continue with
+`comments: []`. The exact `cw event record` call, why `stage.errored` is the
+wrong event here, and the one failure shape this WARN cannot detect live in
+`.claude/commands/auto-dev-intake-appendix.md`, section "Comments-fetch failure:
+the WARN event and what it cannot detect". Read it now if the comments fetch
+failed; do not improvise the event name or payload from memory.
 
 Stamp `materialized_by_session` with the current `session_id` (from `.claude/cw-context.json`). This is what makes the idempotency guard below requeue-safe.
 

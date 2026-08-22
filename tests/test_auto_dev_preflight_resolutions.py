@@ -6,7 +6,7 @@ Pure-markdown assertions over the auto-dev pipeline instruction files. Mirrors t
 
 from pathlib import Path
 
-from tests.conftest import _cmd
+from tests.conftest import _appendix, _cmd
 
 ROOT = Path(__file__).parent.parent
 AGENTS = ROOT / ".claude" / "agents"
@@ -246,16 +246,23 @@ def test_plan_cached_comments_is_snapshot_only() -> None:
 
 
 def test_intake_warn_names_needs_attention() -> None:
-    """The intake WARN names the session.needs_attention event and its reason."""
-    window = _nearby(_cmd("auto-dev-intake.md"), "comments_fetch_failed")
+    """The intake WARN names the session.needs_attention event and its reason.
+
+    #1879 relocated the WARN's event call to ``auto-dev-intake-appendix.md``:
+    it fires only when a comments fetch hard-fails, which is rare-path. The
+    core doc keeps the trigger sentence; the literals are asserted at their
+    new location rather than dropped.
+    """
+    window = _nearby(_appendix("intake"), "comments_fetch_failed")
     assert "session.needs_attention" in window
+    assert "Comments-fetch failure" in _cmd("auto-dev-intake.md")
 
 
 def test_intake_warn_documents_empty_undetectable() -> None:
     """Intake documents that a fetch-succeeds-but-empty case is not detectable."""
     assert (
         "NOT detectable from within this stage without a second independent source"
-        in _cmd("auto-dev-intake.md")
+        in _appendix("intake")
     )
 
 
