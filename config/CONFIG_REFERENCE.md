@@ -584,6 +584,25 @@ liveness_attention_renotify_interval_minutes: 60
 # exactly once.
 freshness_block_attention_threshold: 5
 
+# Fixed interval (minutes) for the dispatch loop's cross-client staleness
+# watchdog (#1875). Serves two purposes deliberately, not two knobs:
+#   1. the per-client re-notify debounce for
+#      session.needs_attention(paused_status="dispatch_loop_stale") — a client
+#      whose last dispatch.tick is stale while it still has pending work pages
+#      immediately on first detection, then again every N minutes until it
+#      recovers; and
+#   2. the minimum interval between the watchdog's own scans. The scan reads
+#      and parses the ENTIRE events inbox (read_events' since_ts filters the
+#      returned list, not the read cost), so running it on every 30s tick
+#      against an unrotated inbox is real hot-loop cost.
+# Splitting these into two knobs would only let them be set inconsistently:
+# scanning more often than the debounce cannot produce an extra page, and
+# scanning less often silently caps the page rate below the configured
+# debounce. Same fixed-interval shape as
+# lane_starved_notify_interval_minutes and
+# liveness_attention_renotify_interval_minutes above — not exponential.
+dispatch_stale_notify_interval_minutes: 15
+
 # Maximum consecutive sentinel-stage-mismatch vetoes the phantom sweep grants a
 # single already_refused session before letting the pending CRASH_COMPLETE
 # proceed (#1449). Counts only vetoes that fire while the
