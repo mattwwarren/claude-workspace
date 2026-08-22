@@ -182,15 +182,13 @@ def _last_content_entry_timestamp(transcript_path: Path) -> datetime | None:
     liveness checks to false-positive on a stalled session (GitHub #1076).
 
     A content-bearing record is a ``user`` or ``assistant`` record whose
-    ``message`` field is a ``dict`` — the same guard already used inline by
-    ``_awaiting_subagent`` (:mod:`cw.reconcile._shared`); any block type
-    (text, tool_use, tool_result) within such a message counts as activity.
+    ``message`` field is a ``dict``; any block type (text, tool_use,
+    tool_result) within such a message counts as activity.
 
-    Performs a full forward linear scan of the file (mirrors
-    ``_awaiting_subagent``'s existing full-scan cost profile — no tail-read,
-    no offset cache) so that the LAST content-bearing record with a
-    parseable ``"timestamp"`` wins. A content-bearing record with a missing
-    or malformed timestamp is skipped, not scan-aborting.
+    Performs a full forward linear scan of the file (no tail-read, no offset
+    cache) so that the LAST content-bearing record with a parseable
+    ``"timestamp"`` wins. A content-bearing record with a missing or
+    malformed timestamp is skipped, not scan-aborting.
 
     Returns ``None`` when the file is missing, an ``OSError`` occurs while
     reading, or no content-bearing record anywhere in the file has a

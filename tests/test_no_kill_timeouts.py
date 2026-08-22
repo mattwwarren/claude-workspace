@@ -34,7 +34,10 @@ from cw.reconcile.liveness import record_session_liveness_changes
 from tests._reconcile_helpers import (
     _mk_headless_daemon_session,
     _shipped_salvage_payload,
+    _write_transcript_records,
 )
+from tests.conftest import _invoke_hook_command, _write_hook_context_file
+from tests.test_cli_agent_spawn_stamp import _PRE_PAYLOAD, _payload
 
 _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 _NOW = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
@@ -195,6 +198,125 @@ def test_no_distress_when_session_already_emitted_sentinel(
     assert sess.liveness_bucket is LivenessBucket.STALE_45M
     assert _distress_events() == []
     assert push_calls == []
+
+
+def _balanced_agent_pairs(n: int, *, base_time: datetime) -> list[dict[str, object]]:
+    """Build *n* resolved Agent tool_use/tool_result pairs (#1969, instance #9).
+
+    ``PostToolUse:Agent`` fires at launch-return, not subagent completion
+    (docs/spikes/claude-bg-wakeup-drop-findings.md, #1947), so a real parent
+    transcript shows a *resolved* pair for a subagent spawn that is, in
+    reality, still outstanding. A transcript-tail pairing check sees nothing
+    pending here by construction.
+    """
+    records: list[dict[str, object]] = []
+    for i in range(n):
+        ts = (base_time + timedelta(seconds=i)).isoformat()
+        records.append(
+            {
+                "type": "assistant",
+                "timestamp": ts,
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": f"toolu_{i}", "name": "Agent"}
+                    ],
+                },
+            }
+        )
+        records.append(
+            {
+                "type": "user",
+                "timestamp": ts,
+                "message": {
+                    "content": [{"type": "tool_result", "tool_use_id": f"toolu_{i}"}]
+                },
+            }
+        )
+    return records
+
+
+def test_no_distress_when_agent_spawn_stamp_is_outstanding(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    """Real-incident shape (#1969, instance #9): the parent transcript shows N
+    *resolved* Agent tool_use/tool_result pairs at its tail, so a transcript-
+    pairing liveness check sees nothing pending and would false-fire distress.
+    The ``agent_spawn_stamp`` counter -- driven off the Stop hook's own
+    ``background_tasks`` snapshot (#1947) -- still shows an outstanding
+    subagent spawn; distress must not fire.
+    """
+    worktree = tmp_path / "wt"
+    sess = _mk_headless_daemon_session("T-1", worktree, _STARTED_AT)
+    records = _balanced_agent_pairs(2, base_time=_NOW - timedelta(minutes=46))
+    transcript = _write_transcript_records(home, worktree, records)
+    stale_ts = (_NOW - timedelta(minutes=46)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    _write_hook_context_file(worktree)
+    for _ in range(2):
+        _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree))
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state)
+
+    assert sess.liveness_bucket is LivenessBucket.STALE_45M
+    assert _distress_events() == []
+    assert push_calls == []
+
+
+def test_distress_still_fires_when_agent_spawn_stamp_is_clear(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    """Positive control for the regression above: same resolved-pair transcript
+    shape, but the ``agent_spawn_stamp`` counter is clear (no outstanding
+    spawn). Distress must still fire -- the fix suppresses distress only on
+    genuine evidence of an outstanding subagent, not unconditionally."""
+    worktree = tmp_path / "wt"
+    sess = _mk_headless_daemon_session("T-1", worktree, _STARTED_AT)
+    records = _balanced_agent_pairs(2, base_time=_NOW - timedelta(minutes=46))
+    transcript = _write_transcript_records(home, worktree, records)
+    stale_ts = (_NOW - timedelta(minutes=46)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    _write_hook_context_file(worktree)  # unresolved_count starts at 0
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state)
+
+    assert sess.liveness_bucket is LivenessBucket.STALE_45M
+    events = _distress_events()
+    assert len(events) == 1
+    assert "no pending subagent" in str(events[0]["breadcrumbs"])
+    assert push_calls == [(sess.name, sess.client)]
+
+
+def test_distress_fires_for_stale_synchronous_tool_use_with_no_agent_spawn_stamp(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    """A trailing *unmatched* synchronous tool_use (not an Agent spawn) with no
+    ``agent_spawn_stamp`` entry at all is still classified as distress -- a
+    genuinely hung synchronous tool call is not evidence of a pending
+    subagent."""
+    worktree = tmp_path / "wt"
+    sess = _mk_headless_daemon_session("T-1", worktree, _STARTED_AT)
+    record: dict[str, object] = {
+        "type": "assistant",
+        "timestamp": (_NOW - timedelta(minutes=46)).isoformat(),
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "tu1", "name": "Bash"}],
+        },
+    }
+    transcript = _write_transcript_records(home, worktree, [record])
+    stale_ts = (_NOW - timedelta(minutes=46)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state)
+
+    assert sess.liveness_bucket is LivenessBucket.STALE_45M
+    events = _distress_events()
+    assert len(events) == 1
+    assert events[0]["session_id"] == sess.id
 
 
 def test_no_distress_below_top_bucket(
