@@ -26,7 +26,7 @@ from cw.unavailability import (
     classify_provider_unavailability,
     classify_unavailability,
 )
-from tests.conftest import _appendix, _cmd
+from tests.conftest import _appendix
 
 # Verbatim capture, dev-1751 impl worker, session
 # 286032f7-47ee-4985-a45d-e7a946aa1d9d, 2026-08-18T17:27:09.071Z (#1923).
