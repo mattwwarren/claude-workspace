@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 
 from cw.config import load_state, save_state, sessions_lock
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
-from cw.dispatch import TICK_STALE_SECONDS
+from cw.dispatch import TICK_STALE_SECONDS, _stale_pending_clients
 from cw.dispatch_state import load_executor_blocked_markers
 from cw.doctor import _deps
 from cw.doctor._shared import CheckResult
@@ -123,6 +123,12 @@ def _check_loop_liveness() -> list[CheckResult]:
     sidecar ``cw dev-queue status`` annotates ``[BLOCKED]`` from; suppression
     rather than annotation because this function's contract is binary
     warn/no-warn with no informational middle state.
+
+    The stale+pending+unblocked predicate itself lives in
+    :func:`~cw.dispatch.lanes._stale_pending_clients` (#1875), shared with the
+    dispatch loop's proactive watchdog: this check is the on-demand half of
+    the same detection, and a second copy of the loop body would let the
+    marker-suppression rule drift on one side only.
     """
     tick_data: dict[str, TickSummary] = latest_tick_summary_by_client()
     if not tick_data:
@@ -133,23 +139,26 @@ def _check_loop_liveness() -> list[CheckResult]:
     markers = load_executor_blocked_markers()
     blocked_clients = {marker.client for marker in markers.values()}
     now = datetime.now(UTC)
-    results: list[CheckResult] = []
-    for client, tick in tick_data.items():
-        age = (now - tick.tick_at).total_seconds()
-        stale_and_pending = age > TICK_STALE_SECONDS and tick.pending > 0
-        if stale_and_pending and client not in blocked_clients:
-            results.append(
-                CheckResult(
-                    f"loop-liveness/{client}",
-                    ok=True,
-                    warn=True,
-                    detail=(
-                        f"no dispatch tick for {client} in {int(age)}s"
-                        f" ({tick.pending} pending) — loop may have exited."
-                        " Run `cw dev-queue run`."
-                    ),
-                )
-            )
+    stale = _stale_pending_clients(
+        tick_data,
+        stale_after_seconds=TICK_STALE_SECONDS,
+        blocked_clients=blocked_clients,
+        now=now,
+    )
+    results: list[CheckResult] = [
+        CheckResult(
+            f"loop-liveness/{client}",
+            ok=True,
+            warn=True,
+            detail=(
+                f"no dispatch tick for {client}"
+                f" in {int((now - tick.tick_at).total_seconds())}s"
+                f" ({tick.pending} pending) — loop may have exited."
+                " Run `cw dev-queue run`."
+            ),
+        )
+        for client, tick in stale.items()
+    ]
     if not results:
         results.append(
             CheckResult(
