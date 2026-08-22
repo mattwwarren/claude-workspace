@@ -36,8 +36,8 @@ from cw.reconcile import _deps
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
     _SESSION_UNRESPONSIVE_REASON,
-    _awaiting_subagent,
     _has_terminal_sentinel,
+    _read_unresolved_subagent_spawn,
     _transcript_age_seconds,
     ticket_id_for_session,
 )
@@ -207,14 +207,14 @@ def _detect_liveness_candidates(
             continue
         # Distress evaluation (signal-only): only entering/staying at the top
         # bucket qualifies, and only when the quietness is not explained by an
-        # already-emitted sentinel or a pending subagent at the transcript
-        # tail. Re-evaluated fresh on every renotify check, not latched from
-        # the initial fire. All reads — detect-phase purity preserved
-        # (ADR-0006 inv. 1).
+        # already-emitted sentinel or an outstanding agent_spawn_stamp entry
+        # (no sentinel, no outstanding subagent spawn). Re-evaluated fresh on
+        # every renotify check, not latched from the initial fire. All reads
+        # — detect-phase purity preserved (ADR-0006 inv. 1).
         distress = (
             new_bucket is LivenessBucket.STALE_45M
             and not _has_terminal_sentinel(session)
-            and not _awaiting_subagent(session, now)
+            and not _read_unresolved_subagent_spawn(session.worktree_path)
         )
         if is_renotify and not distress:
             # Debounce window elapsed but no longer distress-eligible this

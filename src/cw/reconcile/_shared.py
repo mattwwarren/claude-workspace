@@ -104,8 +104,9 @@ AUTO_DEV_LABEL_PREFIX = "auto-dev/"
 # actively making progress. If the newest .jsonl under the session's project
 # dir was written within this window, the watchdog skips the session (GitHub
 # #340). Conservative default: 2 min = well below the 15-min budget.
-# 5 min — widened from 2 min (#384): covers short inter-turn gaps;
-# subagent gaps handled by _awaiting_subagent below.
+# 5 min — widened from 2 min (#384): covers short inter-turn gaps; subagent
+# gaps are handled separately by the liveness sweep's agent_spawn_stamp check
+# (_read_unresolved_subagent_spawn below, #1969).
 TRANSCRIPT_LIVENESS_WINDOW_SECONDS = 300
 
 # Recency bound for treating a detected usage-limit message as the *current*
@@ -122,15 +123,6 @@ USAGE_LIMIT_BACKOFF_WINDOW_SECONDS = TRANSCRIPT_LIVENESS_WINDOW_SECONDS
 # cutoff and suppresses auto-retry. 60s admits only a limit message essentially
 # at the transcript tail; this site also fails CLOSED (fail_open=False).
 USAGE_LIMIT_SALVAGE_WINDOW_SECONDS = 60
-
-# A worker awaiting a subagent leaves the parent transcript quiet (subagent output
-# only lands on return). Treat a pending tool_use at the transcript tail as alive
-# for up to this long before concluding the subagent itself is hung. See #384.
-# 1800 (30 min) — widened from 900 (#544): a large refactor can run a single tool
-# call quietly for 20-30 min; reaping at 15 min false-killed live workers (#543).
-# Data-safety: benefit-of-the-doubt is only extended when a *recent* pending
-# tool_use is present (strong alive signal). No pending tool_use → reaped normally.
-SUBAGENT_LIVENESS_WINDOW_SECONDS = 1800
 
 # Paused-status value written to SESSION_NEEDS_ATTENTION events for sessions
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
@@ -151,6 +143,14 @@ _EXTERNAL_COUNTERPARTY_IDLE_REASON = "external_counterparty_idle"
 # paused_status written to SESSION_NEEDS_ATTENTION when a client's
 # consecutive freshness-gate-block latch trips (RFC 0007 §W2).
 _FRESHNESS_BLOCK_ESCALATED_REASON = "freshness_gate_blocked"
+# paused_status written to SESSION_NEEDS_ATTENTION by the dispatch loop's
+# proactive staleness watchdog: a client's last DISPATCH_TICK is older than
+# TICK_STALE_SECONDS while it still has pending work and carries no live
+# executor-blocked marker (#1875). Client-scoped like
+# _FRESHNESS_BLOCK_ESCALATED_REASON above, but recurring on a fixed interval
+# rather than a one-shot latch -- the condition it reports (this client's
+# dispatch loop is not ticking) does not clear itself.
+_DISPATCH_LOOP_STALE_REASON = "dispatch_loop_stale"
 # paused_status written to SESSION_NEEDS_ATTENTION when a session's
 # consecutive salvage-skip latch trips (closes #974).
 _SALVAGE_SKIP_ESCALATED_REASON = "salvage_skip_escalated"
@@ -1522,68 +1522,6 @@ def _transcript_age_seconds(
         return (now - ts).total_seconds()
     except OSError:
         return None
-
-
-def _awaiting_subagent(session: Session, now: datetime) -> bool:
-    """Return True if the worker is mid-tool/subagent (parent tail pending).
-
-    A subagent's output only lands in the parent transcript when it returns,
-    so the parent goes quiet during execution and mtime-based liveness
-    false-positives. Detect the in-flight case: the last assistant turn is a
-    ``tool_use`` with no following ``tool_result``, and that turn is within
-    ``SUBAGENT_LIVENESS_WINDOW_SECONDS`` of *now* (a pending tool_use older than
-    that is a hung subagent — not alive). See GitHub #384.
-
-    Fail-open to False (permit the watchdog to proceed) on any read/parse error.
-    """
-    # Why: _locate_session_transcript applies the mtime > started_at guard
-    # uniformly (#541).  A stale transcript (from a prior run in a reused
-    # worktree) that previously could cause a false-positive "subagent pending"
-    # signal now returns None → this function returns False (fail-open).
-    # The behavior change is intentional and conservative.
-    transcript = _locate_session_transcript(session)
-    if transcript is None:
-        return False
-    try:
-        if not transcript.is_file():
-            return False
-
-        last_tool_use_ts: datetime | None = None
-        saw_result_after_tool_use = True
-        for raw in transcript.read_text().splitlines():
-            if not raw.strip():
-                continue
-            try:
-                entry = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            etype = entry.get("type")
-            message = entry.get("message")
-            content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(content, list):
-                continue
-            if etype == "assistant" and any(
-                isinstance(b, dict) and b.get("type") == "tool_use" for b in content
-            ):
-                ts = entry.get("timestamp")
-                if isinstance(ts, str):
-                    try:
-                        last_tool_use_ts = datetime.fromisoformat(ts)
-                    except ValueError:
-                        last_tool_use_ts = None
-                saw_result_after_tool_use = False
-            elif etype == "user" and any(
-                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-            ):
-                saw_result_after_tool_use = True
-
-        if saw_result_after_tool_use or last_tool_use_ts is None:
-            return False
-        return (
-            now - last_tool_use_ts
-        ).total_seconds() < SUBAGENT_LIVENESS_WINDOW_SECONDS
-    except OSError:
-        return False
 
 
 def _apply_salvaged_completion(

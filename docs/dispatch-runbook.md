@@ -811,6 +811,38 @@ reason. Wait for the annotation to clear; only a tick line still reading
   from concierge's auto-requeue (§11.1) for the same reason the override
   exists.
 
+### Dispatch-loop staleness page (`dispatch_loop_stale`)
+
+A `session.needs_attention` with `paused_status=dispatch_loop_stale` (#1875)
+says: **this client has pending work, its last `dispatch.tick` is older than
+90s, and it is not sitting behind a live executor-blocked marker.** It recurs
+every `dispatch_stale_notify_interval_minutes` (default 15) until the
+condition clears. `breadcrumbs` carries `pending=<n> age_s=<n>`; the client
+is in the `client` field (`ticket_id` is null — this signal is client-scoped,
+not ticket-scoped).
+
+Triage in this order — the page does *not* tell you which of these it is:
+
+1. **Did the loop process die?** `cw doctor` (its `loop-liveness` check is the
+   on-demand form of this exact predicate) plus a process check for the
+   `cw dev-queue serve` / `run` process. Dead → restart it:
+   `cw dev-queue run`.
+2. **Is a scoped `serve` starving this client?** If a loop is running but was
+   started as `cw dev-queue serve -c OTHER`, it holds the #1362 singleton
+   lock and will never tick this client. Look for the boot-time
+   `scoped serve (client=…)` WARNING in that process's log. Fix by restarting
+   it unscoped, or rescoping it once the scoped client drains.
+3. **Is it legitimately blocked?** A paused lane or a tripped circuit breaker
+   halts dispatch without stopping the ticks, so this page usually means the
+   loop itself is not running — but a lane paused *and* a loop that exited is
+   a real combination. `cw dev-queue status` shows `[PAUSED]` lanes;
+   `cw lane resume <CLIENT> <lane>` clears one.
+
+Do **not** treat a recurrence as a new incident: the recurrence cadence is the
+signal deliberately re-firing while the condition persists, exactly like the
+`lane_circuit_paused` page above. The debounce stamp clears itself the moment
+the client ticks again, so the next genuine episode pages immediately.
+
 ### Quota walls: probe before pausing
 
 Worker transcripts ending in "You've hit your session limit" are evidence of

@@ -1,7 +1,16 @@
 """Per-lane circuit breaker and per-client lane dispatch for the dispatch loop.
 
 Part of the ``cw.dispatch`` package split (#1310): the lane circuit breaker,
-the client-freshness-block latch, and the per-client lane walk."""
+the client-freshness-block latch, and the per-client lane walk.
+
+Also home to the cross-client dispatch-loop staleness watchdog (#1875) --
+:func:`_stale_pending_clients` (the predicate ``cw doctor``'s
+``_check_loop_liveness`` also consumes) and
+:func:`_notify_stale_clients_with_pending` (the recurring operator page the
+dispatch loop drives it from). It lives beside the lane-starved signal it is
+modelled on rather than in ``loop``: both are "pending work is stranded and
+nobody is looking" attention signals sharing the
+``concurrency_override_lock()`` debounce shape."""
 
 from __future__ import annotations
 
@@ -16,6 +25,7 @@ from cw.config import (
     concurrency_override_lock,
 )
 from cw.dispatch.host_capacity import HostCapacityContext
+from cw.dispatch_state import load_executor_blocked_markers
 from cw.events import record_event
 from cw.models import (
     ClientConcurrencyOverride,
@@ -26,7 +36,9 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
 )
+from cw.orchestrate import latest_tick_summary_by_client
 from cw.reconcile import (
+    _DISPATCH_LOOP_STALE_REASON,
     _FRESHNESS_BLOCK_ESCALATED_REASON,
 )
 
@@ -40,6 +52,7 @@ if TYPE_CHECKING:
         OrchestratorConfig,
     )
     from cw.native_daemon import NativeDaemonClient
+    from cw.orchestrate import TickSummary
 from cw.dispatch.claim import (
     _claim_next_pending,
     _lane_occupants_for_client,
@@ -175,6 +188,156 @@ def _maybe_notify_lane_starved(
                 "breadcrumbs": f"pending={pending_count}",
                 "crashed": False,
                 "lane": lane_name,
+            },
+            correlation_id=None,
+        )
+
+
+def _stale_pending_clients(
+    tick_data: dict[str, TickSummary],
+    *,
+    stale_after_seconds: int,
+    blocked_clients: set[str],
+    now: datetime,
+) -> dict[str, TickSummary]:
+    """Return the subset of *tick_data* that is stale AND has pending work.
+
+    A client qualifies when its last ``dispatch.tick`` is older than
+    *stale_after_seconds*, it still has ``pending > 0``, and it is NOT in
+    *blocked_clients* (the set derived from live executor-blocked markers).
+
+    Extracted from ``cw.doctor.loop_health._check_loop_liveness`` (#1875) so
+    the on-demand doctor check and the dispatch loop's proactive watchdog
+    share one predicate. The marker suppression is the part that must not
+    drift: a stale tick with a review in flight is expected, not actionable
+    (#1742), and a second copy of this loop body would eventually page for it.
+
+    Pure: no I/O, no locks. *now* is injected rather than read so both
+    callers -- and their tests -- fix the same instant across the whole scan.
+    """
+    return {
+        client: tick
+        for client, tick in tick_data.items()
+        if (now - tick.tick_at).total_seconds() > stale_after_seconds
+        and tick.pending > 0
+        and client not in blocked_clients
+    }
+
+
+def _claim_stale_notify_slots(
+    stale: dict[str, TickSummary],
+    *,
+    notify_interval_minutes: int,
+    now: datetime,
+) -> list[str]:
+    """Re-arm the per-client staleness debounce; return who is due to page.
+
+    Holds ``concurrency_override_lock()`` for the whole load→decide→save
+    cycle, then returns; the caller emits AFTER the lock is released,
+    mirroring :func:`_maybe_notify_lane_starved`. Clients absent from *stale*
+    (recovered since the last pass) have their stamp cleared back to ``None``
+    in the same cycle -- see the field's docstring in
+    ``cw.models.orchestrator_config`` for why a stale window must not be
+    inherited by the next episode.
+
+    Non-atomic with the emit: the debounce claim commits to disk here,
+    before the caller's ``record_event`` loop runs. If ``record_event``
+    raises partway through that loop, an already-claimed client's page is
+    silently skipped for this cycle. Bounded and self-healing -- the client
+    stays in *stale* on the next scan and re-claims normally -- which is why
+    :func:`~cw.dispatch.loop._run_stale_client_watchdog_guarded` treats the
+    whole call as non-critical and broad-catches around it (#1875).
+    """
+    due: list[str] = []
+    with concurrency_override_lock():
+        overrides = _load_concurrency_overrides()
+        changed = False
+        for client in stale:
+            override = overrides.clients.get(client, ClientConcurrencyOverride())
+            next_eligible_at = override.dispatch_stale_notify_next_eligible_at
+            if next_eligible_at is not None and now < next_eligible_at:
+                continue
+            due.append(client)
+            overrides.clients[client] = override.model_copy(
+                update={
+                    "dispatch_stale_notify_next_eligible_at": now
+                    + timedelta(minutes=notify_interval_minutes)
+                }
+            )
+            changed = True
+        for client, override in list(overrides.clients.items()):
+            if (
+                client not in stale
+                and override.dispatch_stale_notify_next_eligible_at is not None
+            ):
+                overrides.clients[client] = override.model_copy(
+                    update={"dispatch_stale_notify_next_eligible_at": None}
+                )
+                changed = True
+        if changed:
+            _save_concurrency_overrides(overrides)
+    return due
+
+
+def _notify_stale_clients_with_pending(
+    *,
+    stale_after_seconds: int,
+    notify_interval_minutes: int,
+) -> None:
+    """Page the operator for every client whose dispatch loop stopped ticking.
+
+    The proactive half of ``cw doctor``'s on-demand ``loop-liveness`` check
+    (#1875): the same predicate, run from inside the dispatch loop, emitting
+    a recurring ``session.needs_attention`` instead of a ``CheckResult`` an
+    operator only sees if they think to run ``cw doctor``.
+
+    Deliberately NOT scoped by the loop's ``client_filter``. A
+    ``cw dev-queue serve -c X`` process holds the #1362 singleton lock while
+    ticking only X, so every OTHER client's queue silently starves; because
+    this scan is fleet-wide, that process still pages for them. That
+    transitive coverage is the point -- the boot-time WARNING in
+    ``cw.dispatch.loop`` is only the immediate, log-only complement to it.
+
+    Emits the canonical 9-field SESSION_NEEDS_ATTENTION payload (see
+    ``docs/events.md``) with the firing instant folded into ``session_id``,
+    for the same reason :func:`_maybe_notify_lane_starved` does: with a
+    stable id, ``_terminal_dedup_key`` (``(event_type, session_id,
+    paused_status)``) would collapse every recurrence for a client into one
+    shown event under ``cw event tail --dedup-terminal``. ``pending`` and the
+    tick age ride in ``breadcrumbs`` rather than as extra top-level keys --
+    unlike the lane signal's ``lane``, this condition is client-scoped and
+    ``client`` is already canonical, so there is no analogous identifier to
+    add.
+    """
+    tick_data = latest_tick_summary_by_client()
+    if not tick_data:
+        return
+    markers = load_executor_blocked_markers()
+    blocked_clients = {marker.client for marker in markers.values()}
+    now = datetime.now(UTC)
+    stale = _stale_pending_clients(
+        tick_data,
+        stale_after_seconds=stale_after_seconds,
+        blocked_clients=blocked_clients,
+        now=now,
+    )
+    due = _claim_stale_notify_slots(
+        stale, notify_interval_minutes=notify_interval_minutes, now=now
+    )
+    for client in due:
+        tick = stale[client]
+        age_s = int((now - tick.tick_at).total_seconds())
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": f"dispatch-loop-stale:{client}@{now.isoformat()}",
+                "session_name": "",
+                "client": client,
+                "ticket_id": None,
+                "claude_session_id": None,
+                "paused_status": _DISPATCH_LOOP_STALE_REASON,
+                "breadcrumbs": f"pending={tick.pending} age_s={age_s}",
+                "crashed": False,
             },
             correlation_id=None,
         )

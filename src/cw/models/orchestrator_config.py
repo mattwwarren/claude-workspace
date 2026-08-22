@@ -57,6 +57,19 @@ class ClientConcurrencyOverride(BaseModel):
     # (RFC 0007 §W2). Incremented once per tick the client is skipped with
     # skip_reason=FRESHNESS_GATE, reset to 0 on the next non-stale tick.
     consecutive_freshness_blocks: int = 0
+    # Debounce stamp for the recurring dispatch-loop-staleness
+    # session.needs_attention signal (#1875). Deliberately the same shape as
+    # LaneConcurrencyOverride.lane_starved_notify_next_eligible_at above --
+    # checked as a plain ``now < next_eligible_at`` gate under
+    # concurrency_override_lock() and re-armed on every fire, on a FIXED
+    # interval (OrchestratorConfig.dispatch_stale_notify_interval_minutes),
+    # not an exponential backoff: the operator wants "page me again in N
+    # minutes while this client's loop is still not ticking", not a growing
+    # delay. Cleared back to None on the first pass that observes the client
+    # recovered (a fresh tick, or its pending queue drained), so a later
+    # staleness episode notifies immediately rather than inheriting this
+    # episode's debounce window.
+    dispatch_stale_notify_next_eligible_at: datetime | None = None
 
 
 class ConcurrencyOverrides(BaseModel):
@@ -475,6 +488,25 @@ class OrchestratorConfig(BaseModel):
     # starved lane's operator page should recur at a steady cadence until the
     # operator acts, not decay into silence.
     lane_starved_notify_interval_minutes: int = 15
+    # Fixed interval (minutes) for the dispatch loop's proactive staleness
+    # watchdog (#1875). Serves TWO purposes on purpose, not two knobs:
+    #
+    #   1. the per-client re-notify debounce for
+    #      session.needs_attention(paused_status="dispatch_loop_stale"),
+    #      gated by ClientConcurrencyOverride.
+    #      dispatch_stale_notify_next_eligible_at; and
+    #   2. the minimum interval between the watchdog's own inbox SCANS
+    #      (cw.dispatch.loop._run_stale_client_watchdog_guarded).
+    #
+    # (2) exists because the scan calls latest_tick_summary_by_client(),
+    # which reads and parses the ENTIRE events inbox -- read_events' since_ts
+    # filter shrinks the returned list, not the read/parse cost -- so running
+    # it on every 30s tick against an unrotated inbox is real hot-loop cost.
+    # A separate scan-interval knob would only let an operator set the two
+    # inconsistently: scanning more often than the debounce cannot produce an
+    # extra page, and scanning less often would silently cap the page rate
+    # below the configured debounce.
+    dispatch_stale_notify_interval_minutes: int = 15
     # Retention window (hours) for per-session executor-diagnostics bundles
     # under state_dir()/sessions/<id>/diagnostics/. dispatch_tick's cleanup
     # pass rmtree's any bundle whose newest file is older than this. See
