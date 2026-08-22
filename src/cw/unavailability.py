@@ -43,7 +43,7 @@ FAMILY_AUTH_FAILURE = "auth_failure"
 
 # (signature substring, family) pairs, checked in order, first match wins.
 # Auth-failure entries are #1049's original four signatures, unchanged
-# (auto-dev-finalize.md:263-266) -- do not reorder/reword without updating
+# (auto-dev-finalize.md:229-232) -- do not reorder/reword without updating
 # the prose mirror.
 UNAVAILABILITY_SIGNATURES: tuple[tuple[str, str], ...] = (
     ("Permission denied (publickey)", FAMILY_AUTH_FAILURE),
