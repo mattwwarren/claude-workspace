@@ -3,15 +3,31 @@ override (#1794) — mirrors tests/test_scope_conformance_gate_docs.py's pairing
 of a script-behavior test file with a prose-wiring test file.
 """
 
-from tests.conftest import _cmd
+from tests.conftest import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 
 def _guard_section() -> str:
-    content = _cmd("auto-dev-impl.md")
-    start = content.index("### Pre-Stage Detector Guard")
-    end = content.index("**Headless only — before spawning Stage 2 agent")
+    """The detector guard's resume dispositions + staleness/regress check.
+
+    #1879 relocated this block to ``auto-dev-impl-appendix.md``: it applies
+    only when ``detect_current_stage()`` reports that the ticket already
+    carries branch work, which a fresh dispatch never does. The core doc keeps
+    the detector call and the trigger sentence; every assertion below follows
+    the content to its new home rather than being dropped.
+    """
+    content = _appendix("impl")
+    start = content.index("## Pre-Stage Detector Guard: resume dispositions")
+    end = content.index("\n## ", start)
     return content[start:end]
+
+
+def test_core_doc_keeps_detector_call_and_appendix_trigger() -> None:
+    """Detection stays on the common path; only the resume branch moved."""
+    content = _cmd("auto-dev-impl.md")
+    assert "run `detect_current_stage()`" in content
+    assert "Pre-Stage Detector Guard: resume dispositions" in content
+    assert "never re-implement over existing branch work by default" in content
 
 
 def test_guard_invokes_staleness_script() -> None:

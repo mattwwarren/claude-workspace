@@ -19,11 +19,10 @@ complete (GEN-5485). This adds a `linear` sub-branch to the Orientation
 paragraph, additive only -- the GitHub sub-branch is untouched.
 """
 
-from tests.conftest import _cmd
+from tests.conftest import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
-ORIENTATION_START = "**Orientation:**"
-ORIENTATION_END = "**Comments are live, not cached"
+ORIENTATION_START = "## Orientation: tracker-aware plan recovery"
 
 GH_ME_RESOLVE = "ME=$(gh api user --jq .login)"
 GH_JQ_FILTER = (
@@ -43,10 +42,26 @@ MARKER = "<!-- plan-spec-reviewed"
 
 
 def _orientation_section() -> str:
-    content = _cmd("auto-dev-impl.md")
+    """The Orientation paragraph's ``.cw/plan.md``-absent recovery fallback.
+
+    #1879 relocated this block to ``auto-dev-impl-appendix.md``: per-stage
+    dispatch carries Stage 1's plan file forward in the same worktree, so a
+    missing ``.cw/plan.md`` is a rare recovery path, not the common one. The
+    core doc keeps the ``.cw/plan.md`` read and the trigger sentence; every
+    assertion below follows the content rather than being dropped.
+    """
+    content = _appendix("impl")
     start = content.index(ORIENTATION_START)
-    end = content.index(ORIENTATION_END)
+    end = content.index("\n## ", start)
     return content[start:end]
+
+
+def test_core_doc_keeps_plan_read_and_appendix_trigger() -> None:
+    """Reading the plan stays common-path; only the fallback moved."""
+    content = _cmd("auto-dev-impl.md")
+    assert "Read `.cw/plan.md` for the approved plan from Stage 1" in content
+    assert "Orientation: tracker-aware plan recovery" in content
+    assert "do not exit `plan_missing` from this summary alone" in content
 
 
 def test_orientation_branches_by_tracker_for_plan_recovery() -> None:
