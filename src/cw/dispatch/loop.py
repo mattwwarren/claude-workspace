@@ -47,6 +47,7 @@ from cw.models import (
     QueueItemStatus,
 )
 from cw.native_daemon import get_native_daemon_client
+from cw.orchestrate import latest_tick_summary_by_client
 from cw.pr_hydrate import hydrate_pr_states
 from cw.reconcile import (
     _CAUSE_USAGE_LIMIT,
@@ -66,6 +67,7 @@ if TYPE_CHECKING:
         OrchestratorEvent,
     )
     from cw.native_daemon import NativeDaemonClient
+from cw.dispatch.lanes import _notify_stale_clients_with_pending
 from cw.dispatch.routing import _accumulate_task_cost, apply_staged_decision
 from cw.dispatch.tick import dispatch_tick
 
@@ -517,6 +519,124 @@ def _run_stale_gate_release_guarded() -> None:
         _log.exception("stale-gate release failed during tick; continuing")
 
 
+def _run_stale_client_watchdog_guarded(
+    config: OrchestratorConfig, next_scan_at: datetime | None
+) -> datetime | None:
+    """Run the stale-client watchdog, at most once per gate interval (#1875).
+
+    Returns the instant the next scan becomes eligible; the caller threads it
+    back in on the following tick. Fourth member of the guarded-tick-step
+    family (``_run_pr_state_hydration_guarded`` et al) but the only one
+    carrying a call-frequency gate, because
+    :func:`~cw.dispatch.lanes._notify_stale_clients_with_pending` calls
+    ``latest_tick_summary_by_client()``, which reads and parses the ENTIRE
+    events inbox on every call -- ``cw.events.read_events``'s
+    ``since_ts``/``event_types``/``limit`` arguments filter the parsed result,
+    not the read/parse cost (see ``src/cw/events.py``). At the default 30s
+    tick cadence against an unrotated multi-tens-of-MB inbox that is real
+    hot-loop cost.
+
+    The gate is process-lifetime local state threaded through the loop body,
+    the same shape as its ``warned_stale``/``warned_fetch_fail`` siblings --
+    NOT a ``since_ts`` window, which would fail twice over: it would not
+    reduce ``read_events``' cost (above), and it would actively break
+    detection, because a client stale for longer than the window has zero
+    DISPATCH_TICK events in range and simply vanishes from
+    ``latest_tick_summary_by_client()``'s result -- silently suppressing the
+    long-stale case this ticket is about.
+
+    The gate advances even when the call raises, so a persistently-failing
+    watchdog cannot wedge the loop into retrying it every single tick.
+    """
+    now = datetime.now(UTC)
+    if next_scan_at is not None and now < next_scan_at:
+        return next_scan_at
+    try:
+        _notify_stale_clients_with_pending(
+            stale_after_seconds=TICK_STALE_SECONDS,
+            notify_interval_minutes=config.dispatch_stale_notify_interval_minutes,
+        )
+    except Exception:  # noqa: BLE001
+        # Sanctioned broad-catch per PYTHON-PATTERNS.md (4-part):
+        # 1. The watchdog reads the events inbox and the executor-blocked
+        #    marker sidecar, writes the concurrency-override store under a
+        #    lock, and emits an event — failure modes include I/O, lock
+        #    contention, and JSON/payload surprises.
+        # 2. Logging: _log.exception captures the full traceback.
+        # 3. Non-critical: a missed staleness page only delays operator
+        #    notice; the next scan re-derives the identical stale set from
+        #    current on-disk state, and the loop must keep ticking regardless.
+        # 4. Paired test: tests/test_dispatch.py
+        #    TestRunDispatchLoopStaleClientWatchdogHook.
+        _log.exception("stale-client watchdog failed during tick; continuing")
+    return now + timedelta(minutes=config.dispatch_stale_notify_interval_minutes)
+
+
+def _warn_if_scoped_serve_starves_siblings(scoped_client: str | None) -> None:
+    """WARN once at boot when a scoped ``serve`` strands other clients (#1875).
+
+    ``dispatch_tick``'s ``client_filter`` narrowing means a
+    ``cw dev-queue serve -c X`` process never ticks any client but X, while
+    the #1362 singleton lock stops a second loop from covering the rest — so
+    every other client's queue silently starves for as long as this process
+    runs. Log-only, mirroring :func:`run_dispatch_loop`'s ``--force`` bypass
+    WARNING: the durable, machine-actionable signal is the watchdog's
+    recurring ``dispatch_loop_stale`` attention event, which this line only
+    front-runs so an operator watching stdout learns immediately rather than
+    after the first staleness interval.
+
+    Single-shot at process start, so deliberately NOT behind
+    :func:`_run_stale_client_watchdog_guarded`'s scan gate — one inbox read
+    per boot is not the per-tick cost that gate exists to bound.
+    """
+    if scoped_client is None:
+        return
+    tick_data = latest_tick_summary_by_client()
+    starved = sorted(
+        client
+        for client, tick in tick_data.items()
+        if client != scoped_client and tick.pending > 0
+    )
+    if starved:
+        _log.warning(
+            "dispatch: scoped serve (client=%s) holds the #1362 singleton lock"
+            " while %s have pending work and will not be dispatched until this"
+            " process exits or is rescoped",
+            scoped_client,
+            ", ".join(starved),
+        )
+
+
+def _run_boot_passes(client: str | None) -> None:
+    """Run the once-per-process passes that precede the first tick.
+
+    Extracted from :func:`_run_dispatch_loop_body` (PLR0915) when #1875 added
+    the third of them. All three run under the singleton lock (#1362), before
+    any tick, and are independent of one another:
+
+    * the orphaned-codex reap (#1727) — a codex session still ACTIVE at
+      process start means the prior process died mid-review (crash/SIGKILL),
+      the one case the loop's shutdown join cannot reach since that thread
+      died with its process;
+    * the executor-blocked marker clear (#1742) — any marker still on disk is
+      orphaned, because no daemon thread survives a process restart. Kept
+      separate from the reap above on purpose: parking an orphaned session and
+      clearing a stale marker are different concerns;
+    * the scoped-serve starvation WARNING (#1875).
+    """
+    orphaned_codex = reap_orphaned_codex_sessions_at_boot()
+    if orphaned_codex:
+        _log.warning(
+            "dispatch: %d codex session(s) were ACTIVE at process start;"
+            " parked for operator inspection",
+            orphaned_codex,
+        )
+    clear_all_executor_blocked_markers()
+    # An operator typing `serve -c X` into an already-loaded fleet gets told
+    # immediately, not one staleness interval later.
+    _warn_if_scoped_serve_starves_siblings(client)
+
+
 def _run_dispatch_loop_body(
     *,
     max_parallel: int | None,
@@ -536,24 +656,7 @@ def _run_dispatch_loop_body(
     has deliberately bypassed) the lock.
     """
     config = load_effective_config()
-
-    # Boot pass (#1727): a codex session still ACTIVE at process start means
-    # the prior process died mid-review (crash/SIGKILL) — the one case the
-    # shutdown join below cannot reach, since the thread died with its process.
-    # Runs once, before the first tick, under the singleton lock (#1362).
-    orphaned_codex = reap_orphaned_codex_sessions_at_boot()
-    if orphaned_codex:
-        _log.warning(
-            "dispatch: %d codex session(s) were ACTIVE at process start;"
-            " parked for operator inspection",
-            orphaned_codex,
-        )
-
-    # Any marker on disk at this point is orphaned — no daemon thread survives
-    # a process restart (#1742). Sibling of the reap above, deliberately kept
-    # separate: parking an orphaned session and clearing a stale marker are
-    # independent concerns.
-    clear_all_executor_blocked_markers()
+    _run_boot_passes(client)
 
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     # Track stale-warn deduplication across all ticks within this run.
@@ -570,6 +673,11 @@ def _run_dispatch_loop_body(
     # per-client, not fleet-wide, since each client's worktree_base may sit
     # on its own mount.
     warned_disk_pressure: set[str] = set()
+    # Scan-frequency gate for the cross-client staleness watchdog (#1875);
+    # process-lifetime local like the warn-dedup sets above. See
+    # _run_stale_client_watchdog_guarded for why the gate is a call-frequency
+    # bound rather than a read-window narrowing.
+    stale_watchdog_next_scan_at: datetime | None = None
     # Back-off window: loaded from the persisted sidecar so a loop restart after
     # a code merge honours an active backoff rather than re-opening the spawn gate
     # immediately (#804).
@@ -608,6 +716,9 @@ def _run_dispatch_loop_body(
             _run_stale_dispatch_watch_registration_guarded()
             _run_pr_state_hydration_guarded(config)
             _run_stale_gate_release_guarded()
+            stale_watchdog_next_scan_at = _run_stale_client_watchdog_guarded(
+                config, stale_watchdog_next_scan_at
+            )
             _check_version_drift()
             result = dispatch_tick(
                 config,

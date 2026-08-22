@@ -30,6 +30,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.orchestrate import TickSummary
 from cw.review_findings import (
     CapturedDiff,
     Confidence,
@@ -267,6 +268,28 @@ def _make_ticket_task(**overrides: object) -> TicketTask:
     }
     kwargs.update(overrides)
     return TicketTask.model_validate(kwargs)
+
+
+def _make_tick_summary(**overrides: object) -> TickSummary:
+    """Canonical ``TickSummary`` builder with keyword overrides (#1875).
+
+    Follows the same dict-merge + ``model_validate`` idiom as
+    ``_make_daemon_session`` / ``_make_ticket_task``. Shared so the doctor's
+    on-demand loop-liveness check and the dispatch loop's proactive staleness
+    watchdog -- which exercise the *same* stale+pending predicate
+    (``cw.dispatch._stale_pending_clients``) -- never drift onto two
+    independently-maintained builders for it.
+    """
+    kwargs: dict[str, object] = {
+        "claimed": 0,
+        "pending": 0,
+        "running": 0,
+        "cap": 3,
+        "skip_reason": "none",
+        "tick_at": datetime.now(UTC),
+    }
+    kwargs.update(overrides)
+    return TickSummary.model_validate(kwargs)
 
 
 def _patch_cw_dist_not_found(monkeypatch: pytest.MonkeyPatch) -> None:

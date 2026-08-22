@@ -632,9 +632,10 @@ without task revert).
 **Emitter:** `revert_timed_out_tasks`, `revert_completed_silent_tasks`, and
 the liveness sweep's distress check (`record_session_liveness_changes`) in
 `cw.reconcile`; `apply_staged_decision`, `dispatch_tick` (via
-`_record_client_freshness_block`) in `cw.dispatch`. (The former idle-watchdog
-/ salvage / salvage-skip emitters were removed with the process-kill
-timeouts, ADR-0014.)
+`_record_client_freshness_block`), and the dispatch loop's per-tick staleness
+watchdog (via `_notify_stale_clients_with_pending`) in `cw.dispatch`. (The
+former idle-watchdog / salvage / salvage-skip emitters were removed with the
+process-kill timeouts, ADR-0014.)
 **Payload:**
 ```json
 {
@@ -691,6 +692,32 @@ open enum; consumers MUST tolerate unknown values. Known values:
   reason (e.g. `"main_behind_origin"`). Surfaces via `board.py`'s
   client-header badge only — invisible to the per-ticket row badge and to
   `cw orchestrate status` (no `ticket_id` to key off of).
+- `"dispatch_loop_stale"` — the dispatch loop's proactive staleness watchdog
+  (`cw.dispatch.lanes._notify_stale_clients_with_pending`, #1875) observed a
+  client whose last `dispatch.tick` is older than `TICK_STALE_SECONDS` while
+  it still has pending work and carries no live executor-blocked marker —
+  i.e. the same predicate `cw doctor`'s `loop-liveness` check reports
+  on-demand, now emitted proactively. **Client-scoped, not session-scoped:**
+  `session_name` is empty, `ticket_id` and `claude_session_id` are `null`,
+  and `session_id` is the synthetic
+  `dispatch-loop-stale:<client>@<iso8601>`. The firing instant is folded into
+  `session_id` for the same reason `lane_circuit_paused` does it:
+  `_terminal_dedup_key` is `(event_type, session_id, paused_status)`, so a
+  stable id would collapse every recurrence under `cw event tail
+  --dedup-terminal`. `breadcrumbs` carries `"pending=<int> age_s=<int>"`.
+  Recurs every `dispatch_stale_notify_interval_minutes` (default 15) while
+  the condition persists, gated by
+  `ClientConcurrencyOverride.dispatch_stale_notify_next_eligible_at`; the
+  stamp clears the moment the client recovers, so the next episode pages
+  immediately. The scan is deliberately fleet-wide, never narrowed by the
+  loop's `--client` scope — that is what makes a `cw dev-queue serve -c X`
+  process still page for the siblings it is starving.
+  **Surfacing is armed-monitor / event-bus only, by design this ticket:**
+  no `board.py` badge at all, no `cw dev-queue status` badge, no
+  `cw orchestrate status` row. This is a narrower surface than
+  `"freshness_gate_blocked"` above, which at least gets a `board.py`
+  client-header badge. Operator recovery is §7's "Dispatch-loop staleness
+  page" in `docs/dispatch-runbook.md`.
 - `"salvage_skip_escalated"` — *historical (ADR-0014)*: the salvage-skip
   latch escalation. No longer produced; may exist in old logs.
 - `"blocked"` — fires from two sources sharing the literal: Rule 5's
@@ -775,8 +802,8 @@ open enum; consumers MUST tolerate unknown values. Known values:
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for most emissions (via `fire_push_notification`)
-— **except** `"freshness_gate_blocked"` and `"salvage_skip_escalated"`, which
-deliberately do not push. This mirrors the existing `gh_check_blocked`
+— **except** `"freshness_gate_blocked"`, `"salvage_skip_escalated"`, and
+`"dispatch_loop_stale"`, which deliberately do not push. This mirrors the existing `gh_check_blocked`
 paused_status (verified: its `_emit_phantom_terminal_events` call site,
 `cw.reconcile.phantom._events`, does not call `fire_push_notification`
 either).

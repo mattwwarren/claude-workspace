@@ -19,7 +19,11 @@ from cw.doctor import (
     format_report,
     run_doctor,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests.conftest import (
+    _make_daemon_session,
+    _make_tick_summary,
+    _make_ticket_task,
+)
 
 if TYPE_CHECKING:
     import pytest
@@ -4908,18 +4912,6 @@ class TestWedgeDeadSessionBlockedOnUser:
 class TestCheckLoopLiveness:
     """Tests for _check_loop_liveness."""
 
-    def _make_tick_summary(self, *, pending: int, tick_at: datetime) -> object:
-        from cw.orchestrate import TickSummary
-
-        return TickSummary(
-            claimed=0,
-            pending=pending,
-            running=0,
-            cap=3,
-            skip_reason="none",
-            tick_at=tick_at,
-        )
-
     def test_stale_tick_with_pending_warns(
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
@@ -4931,9 +4923,7 @@ class TestCheckLoopLiveness:
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
             "cw.doctor.loop_health.latest_tick_summary_by_client",
-            lambda: {
-                "test-client": self._make_tick_summary(pending=2, tick_at=stale_at)
-            },
+            lambda: {"test-client": _make_tick_summary(pending=2, tick_at=stale_at)},
         )
         results = _check_loop_liveness()
         warn_results = [r for r in results if r.warn]
@@ -4952,9 +4942,7 @@ class TestCheckLoopLiveness:
         fresh_at = datetime.now(UTC) - timedelta(seconds=10)
         monkeypatch.setattr(
             "cw.doctor.loop_health.latest_tick_summary_by_client",
-            lambda: {
-                "test-client": self._make_tick_summary(pending=2, tick_at=fresh_at)
-            },
+            lambda: {"test-client": _make_tick_summary(pending=2, tick_at=fresh_at)},
         )
         results = _check_loop_liveness()
         assert not any(r.warn for r in results)
@@ -4985,9 +4973,7 @@ class TestCheckLoopLiveness:
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
             "cw.doctor.loop_health.latest_tick_summary_by_client",
-            lambda: {
-                "test-client": self._make_tick_summary(pending=0, tick_at=stale_at)
-            },
+            lambda: {"test-client": _make_tick_summary(pending=0, tick_at=stale_at)},
         )
         results = _check_loop_liveness()
         assert not any(r.warn for r in results)
@@ -5021,9 +5007,7 @@ class TestCheckLoopLiveness:
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
             "cw.doctor.loop_health.latest_tick_summary_by_client",
-            lambda: {
-                "test-client": self._make_tick_summary(pending=2, tick_at=stale_at)
-            },
+            lambda: {"test-client": _make_tick_summary(pending=2, tick_at=stale_at)},
         )
         self._save_marker("test-client")
         results = _check_loop_liveness()
@@ -5040,15 +5024,49 @@ class TestCheckLoopLiveness:
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
             "cw.doctor.loop_health.latest_tick_summary_by_client",
-            lambda: {
-                "test-client": self._make_tick_summary(pending=2, tick_at=stale_at)
-            },
+            lambda: {"test-client": _make_tick_summary(pending=2, tick_at=stale_at)},
         )
         self._save_marker("other-client")
         results = _check_loop_liveness()
         warn_results = [r for r in results if r.warn]
         assert len(warn_results) == 1
         assert "test-client" in warn_results[0].name
+
+    def test_check_loop_liveness_delegates_to_shared_predicate(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """The on-demand check reuses ``_stale_pending_clients`` (#1875).
+
+        The dispatch loop's proactive watchdog computes the identical
+        stale+pending+not-executor-blocked predicate. A spy here is the guard
+        against the two re-diverging into copy-pasted loop bodies: if this
+        check stops delegating, the marker-suppression rule can drift on one
+        side only and the watchdog starts spamming false positives.
+        """
+        from datetime import timedelta
+
+        from cw.dispatch import TICK_STALE_SECONDS, _stale_pending_clients
+        from cw.doctor import _check_loop_liveness
+
+        stale_at = datetime.now(UTC) - timedelta(seconds=200)
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.latest_tick_summary_by_client",
+            lambda: {"test-client": _make_tick_summary(pending=2, tick_at=stale_at)},
+        )
+        calls: list[dict[str, Any]] = []
+        real = _stale_pending_clients
+
+        def _spy(tick_data: Any, **kwargs: Any) -> Any:
+            calls.append({"tick_data": tick_data, **kwargs})
+            return real(tick_data, **kwargs)
+
+        monkeypatch.setattr("cw.doctor.loop_health._stale_pending_clients", _spy)
+        results = _check_loop_liveness()
+
+        assert len(calls) == 1
+        assert calls[0]["stale_after_seconds"] == TICK_STALE_SECONDS
+        assert calls[0]["blocked_clients"] == set()
+        assert [r.warn for r in results] == [True]
 
     def test_run_doctor_includes_liveness_check(
         self,

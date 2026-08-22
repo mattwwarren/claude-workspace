@@ -41,17 +41,21 @@ from cw.dispatch import (
     FRESHNESS_MAIN_DIRTY_CHECKOUT,
     FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
+    TICK_STALE_SECONDS,
     DispatchTickResult,
     _accumulate_task_cost,
     _cached_codex_capability_diagnosis,
     _codex_capability_gate,
+    _notify_stale_clients_with_pending,
     _park_running_task_blocked_on_user,
     _reset_codex_capability_cache,
     _resolve_dispatch_skip_reason,
+    _stale_pending_clients,
     consume_completed_sessions,
     dispatch_tick,
     run_dispatch_loop,
 )
+from cw.dispatch.loop import _run_stale_client_watchdog_guarded
 from cw.dispatch_state import (
     AvailabilityProbeCache,
     load_availability_probe_cache,
@@ -95,7 +99,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests.conftest import _make_daemon_session, _make_tick_summary, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -14139,6 +14143,585 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
         # skipped tick loses nothing -- the next tick re-derives the same
         # candidate set from unchanged on-disk state.
         run_dispatch_loop(once=True, emit=None)
+
+
+# ---------------------------------------------------------------------------
+# Dispatch-loop staleness watchdog + scoped-serve starvation warning (#1875)
+# ---------------------------------------------------------------------------
+
+
+_STALE_NOW = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
+
+
+def _stop_loop_after_ticks(monkeypatch: pytest.MonkeyPatch, ticks: int) -> None:
+    """Let ``run_dispatch_loop`` run *ticks* iterations, then KeyboardInterrupt.
+
+    Same idiom as the usage-limit backoff tests above: the only way to
+    observe multi-iteration behaviour is to let the loop run unbounded and
+    break out of it from inside ``dispatch_tick``.
+    """
+    seen = 0
+
+    def _counting_tick(*_args: object, **_kwargs: object) -> DispatchTickResult:
+        nonlocal seen
+        seen += 1
+        if seen > ticks:
+            raise KeyboardInterrupt
+        return DispatchTickResult(spawned=0)
+
+    monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", _counting_tick)
+
+
+def _save_blocked_marker(client_name: str, ticket_id: str = "1875") -> None:
+    """Persist a live executor-blocked marker for *client_name* (#1742)."""
+    from cw.dispatch_state import ExecutorBlockedMarker, save_executor_blocked_marker
+
+    save_executor_blocked_marker(
+        ExecutorBlockedMarker(
+            client=client_name,
+            ticket_id=ticket_id,
+            executor="codex",
+            reviewer_role=None,
+            started_at=datetime.now(UTC),
+            session_id=f"sid-{ticket_id}",
+        )
+    )
+
+
+class TestStalePendingClientsPredicate:
+    """``_stale_pending_clients``: the shared stale+pending+unblocked predicate.
+
+    Extracted from ``cw.doctor``'s ``_check_loop_liveness`` (#1875) so the
+    on-demand doctor check and the dispatch loop's proactive watchdog can
+    never drift onto two copies of the marker-suppression rule. Pure
+    function — no loop, no locks, no events.
+    """
+
+    def test_stale_pending_unblocked_client_is_returned(self) -> None:
+        tick = _make_tick_summary(
+            pending=2, tick_at=_STALE_NOW - timedelta(seconds=200)
+        )
+        assert _stale_pending_clients(
+            {"test-client": tick},
+            stale_after_seconds=90,
+            blocked_clients=set(),
+            now=_STALE_NOW,
+        ) == {"test-client": tick}
+
+    def test_fresh_tick_is_excluded(self) -> None:
+        tick = _make_tick_summary(pending=2, tick_at=_STALE_NOW - timedelta(seconds=10))
+        assert (
+            _stale_pending_clients(
+                {"test-client": tick},
+                stale_after_seconds=90,
+                blocked_clients=set(),
+                now=_STALE_NOW,
+            )
+            == {}
+        )
+
+    def test_zero_pending_is_excluded(self) -> None:
+        """A stale-but-idle client is expected, not actionable."""
+        tick = _make_tick_summary(
+            pending=0, tick_at=_STALE_NOW - timedelta(seconds=200)
+        )
+        assert (
+            _stale_pending_clients(
+                {"test-client": tick},
+                stale_after_seconds=90,
+                blocked_clients=set(),
+                now=_STALE_NOW,
+            )
+            == {}
+        )
+
+    def test_executor_blocked_client_is_excluded(self) -> None:
+        """Marker suppression (#1742) survives the extraction verbatim."""
+        tick = _make_tick_summary(
+            pending=2, tick_at=_STALE_NOW - timedelta(seconds=200)
+        )
+        assert (
+            _stale_pending_clients(
+                {"test-client": tick},
+                stale_after_seconds=90,
+                blocked_clients={"test-client"},
+                now=_STALE_NOW,
+            )
+            == {}
+        )
+
+    def test_client_absent_from_tick_data_never_appears(self) -> None:
+        """A client that has never emitted DISPATCH_TICK is simply absent."""
+        assert (
+            _stale_pending_clients(
+                {},
+                stale_after_seconds=90,
+                blocked_clients={"never-ticked"},
+                now=_STALE_NOW,
+            )
+            == {}
+        )
+
+
+class TestNotifyStaleClientsWithPending:
+    """The proactive watchdog's per-client recurring attention signal (#1875).
+
+    Not scoped by ``client_filter``: a ``cw dev-queue serve -c X`` process
+    still pages for every OTHER client's stale-with-pending tick, which is
+    the starvation this ticket reports.
+    """
+
+    @staticmethod
+    def _stub_ticks(
+        monkeypatch: pytest.MonkeyPatch, tick_data: dict[str, object]
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.dispatch.lanes.latest_tick_summary_by_client",
+            lambda: tick_data,
+        )
+
+    @staticmethod
+    def _attention_events(consumer: str) -> list[object]:
+        return list(
+            read_events(
+                consumer=consumer,
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+        )
+
+    def test_first_detection_emits_canonical_payload(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Field-by-field assertion on the emitted attention event."""
+        from freezegun import freeze_time
+
+        with freeze_time(_STALE_NOW):
+            self._stub_ticks(
+                monkeypatch,
+                {
+                    "test-client": _make_tick_summary(
+                        pending=2, tick_at=_STALE_NOW - timedelta(seconds=200)
+                    )
+                },
+            )
+            _notify_stale_clients_with_pending(
+                stale_after_seconds=90, notify_interval_minutes=15
+            )
+            events = read_events(
+                consumer="test-1875-first",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["session_id"].startswith("dispatch-loop-stale:test-client@")
+        # The firing instant is folded into session_id so `cw event tail
+        # --dedup-terminal` cannot collapse recurrences (the #1630 R2a lesson).
+        datetime.fromisoformat(
+            payload["session_id"].removeprefix("dispatch-loop-stale:test-client@")
+        )
+        assert payload["session_name"] == ""
+        assert payload["client"] == "test-client"
+        assert payload["ticket_id"] is None
+        assert payload["claude_session_id"] is None
+        assert payload["paused_status"] == "dispatch_loop_stale"
+        assert payload["breadcrumbs"] == "pending=2 age_s=200"
+        assert payload["crashed"] is False
+        assert set(payload) == {
+            "session_id",
+            "session_name",
+            "client",
+            "ticket_id",
+            "claude_session_id",
+            "paused_status",
+            "breadcrumbs",
+            "crashed",
+        }
+
+    def test_second_call_within_interval_does_not_reemit(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from freezegun import freeze_time
+
+        with freeze_time(_STALE_NOW) as frozen:
+            self._stub_ticks(
+                monkeypatch,
+                {
+                    "test-client": _make_tick_summary(
+                        pending=2, tick_at=_STALE_NOW - timedelta(seconds=200)
+                    )
+                },
+            )
+            _notify_stale_clients_with_pending(
+                stale_after_seconds=90, notify_interval_minutes=15
+            )
+            frozen.tick(delta=timedelta(minutes=2))
+            _notify_stale_clients_with_pending(
+                stale_after_seconds=90, notify_interval_minutes=15
+            )
+            events = read_events(
+                consumer="test-1875-debounce",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+        assert len(events) == 1
+
+    def test_reemits_after_interval_elapses(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from freezegun import freeze_time
+
+        with freeze_time(_STALE_NOW) as frozen:
+            self._stub_ticks(
+                monkeypatch,
+                {
+                    "test-client": _make_tick_summary(
+                        pending=2, tick_at=_STALE_NOW - timedelta(seconds=200)
+                    )
+                },
+            )
+            _notify_stale_clients_with_pending(
+                stale_after_seconds=90, notify_interval_minutes=15
+            )
+            frozen.tick(delta=timedelta(minutes=15, seconds=1))
+            _notify_stale_clients_with_pending(
+                stale_after_seconds=90, notify_interval_minutes=15
+            )
+            events = read_events(
+                consumer="test-1875-recur",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+        assert len(events) == 2
+        assert len({ev.payload["session_id"] for ev in events}) == 2
+
+    def test_recovered_client_clears_its_debounce_stamp(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A recovered client re-notifies immediately on its next episode.
+
+        Mirrors ``cw lane resume``'s clearing of
+        ``lane_starved_notify_next_eligible_at`` (#1630): a stale debounce
+        window inherited from a prior episode would silence the first page
+        of the next one.
+        """
+        from freezegun import freeze_time
+
+        stale_ticks: dict[str, object] = {
+            "test-client": _make_tick_summary(
+                pending=2, tick_at=_STALE_NOW - timedelta(seconds=200)
+            )
+        }
+        with freeze_time(_STALE_NOW) as frozen:
+            self._stub_ticks(monkeypatch, stale_ticks)
+            _notify_stale_clients_with_pending(
+                stale_after_seconds=90, notify_interval_minutes=15
+            )
+            assert (
+                _load_concurrency_overrides()
+                .clients["test-client"]
+                .dispatch_stale_notify_next_eligible_at
+                is not None
+            )
+
+            # Loop recovers: a fresh tick lands, so the client leaves the
+            # stale set and its stamp is cleared in the same pass.
+            frozen.tick(delta=timedelta(minutes=1))
+            self._stub_ticks(
+                monkeypatch,
+                {
+                    "test-client": _make_tick_summary(
+                        pending=2, tick_at=datetime.now(UTC)
+                    )
+                },
+            )
+            _notify_stale_clients_with_pending(
+                stale_after_seconds=90, notify_interval_minutes=15
+            )
+            assert (
+                _load_concurrency_overrides()
+                .clients["test-client"]
+                .dispatch_stale_notify_next_eligible_at
+                is None
+            )
+
+            # Next staleness episode pages immediately, not 14 minutes later.
+            self._stub_ticks(monkeypatch, stale_ticks)
+            _notify_stale_clients_with_pending(
+                stale_after_seconds=90, notify_interval_minutes=15
+            )
+            events = read_events(
+                consumer="test-1875-recovered",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+        assert len(events) == 2
+
+    def test_executor_blocked_client_is_never_emitted_for(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live executor-blocked marker suppresses the page (#1742)."""
+        self._stub_ticks(
+            monkeypatch,
+            {
+                "test-client": _make_tick_summary(
+                    pending=2, tick_at=datetime.now(UTC) - timedelta(seconds=200)
+                )
+            },
+        )
+        _save_blocked_marker("test-client")
+        _notify_stale_clients_with_pending(
+            stale_after_seconds=90, notify_interval_minutes=15
+        )
+        assert (
+            read_events(
+                consumer="test-1875-blocked",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+            == []
+        )
+
+    def test_empty_tick_data_is_a_silent_noop(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub_ticks(monkeypatch, {})
+        _notify_stale_clients_with_pending(
+            stale_after_seconds=90, notify_interval_minutes=15
+        )
+        assert (
+            read_events(
+                consumer="test-1875-empty",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+            == []
+        )
+
+
+class TestRunDispatchLoopStaleClientWatchdogHook:
+    """The watchdog is wired into the tick body behind a scan-frequency gate.
+
+    R4: ``_notify_stale_clients_with_pending`` calls
+    ``latest_tick_summary_by_client()``, which reads and parses the ENTIRE
+    events inbox (``cw.events.read_events`` filters the parsed result, not
+    the read cost). Running it unconditionally on every 30s tick against an
+    unrotated inbox is the hot-loop cost this gate exists to bound.
+
+    Note the boot-time scoped-serve warning
+    (:class:`TestWarnIfScopedServeStarvesSiblings`) is single-shot per
+    process and deliberately NOT subject to this gate.
+    """
+
+    def test_watchdog_runs_on_the_first_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.dispatch.loop._notify_stale_clients_with_pending",
+            lambda **kwargs: calls.append(kwargs),
+        )
+        run_dispatch_loop(once=True, emit=None)
+        assert len(calls) == 1
+        assert calls[0] == {
+            "stale_after_seconds": TICK_STALE_SECONDS,
+            "notify_interval_minutes": (
+                OrchestratorConfig().dispatch_stale_notify_interval_minutes
+            ),
+        }
+
+    def test_second_tick_within_gate_interval_skips_the_scan(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two back-to-back ticks produce exactly one inbox scan."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
+        calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.dispatch.loop._notify_stale_clients_with_pending",
+            lambda **kwargs: calls.append(kwargs),
+        )
+        _stop_loop_after_ticks(monkeypatch, 2)
+        with contextlib.suppress(KeyboardInterrupt):
+            run_dispatch_loop(emit=None)
+        assert len(calls) == 1
+
+    def test_tick_after_gate_interval_rescans(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Advancing the clock past the gate re-arms the scan."""
+        from freezegun import freeze_time
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.dispatch.loop._notify_stale_clients_with_pending",
+            lambda **kwargs: calls.append(kwargs),
+        )
+        config = OrchestratorConfig()
+        with freeze_time(_STALE_NOW) as frozen:
+            next_at = _run_stale_client_watchdog_guarded(config, None)
+            assert len(calls) == 1
+            next_at = _run_stale_client_watchdog_guarded(config, next_at)
+            assert len(calls) == 1
+            frozen.tick(
+                delta=timedelta(
+                    minutes=config.dispatch_stale_notify_interval_minutes,
+                    seconds=1,
+                )
+            )
+            _run_stale_client_watchdog_guarded(config, next_at)
+        assert len(calls) == 2
+
+    def test_watchdog_exception_does_not_crash_loop_and_gate_still_advances(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A persistently-throwing watchdog can't wedge the loop into
+        rescanning every tick — the gate advances on the failure path too."""
+        from freezegun import freeze_time
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+
+        def _boom(**_kwargs: object) -> None:
+            msg = "stale-client watchdog boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(
+            "cw.dispatch.loop._notify_stale_clients_with_pending", _boom
+        )
+        # Broad-catch idiom: a missed staleness page must never crash the tick
+        # loop -- the next scan re-derives the identical stale set.
+        run_dispatch_loop(once=True, emit=None)
+
+        config = OrchestratorConfig()
+        with freeze_time(_STALE_NOW):
+            next_at = _run_stale_client_watchdog_guarded(config, None)
+        assert next_at == _STALE_NOW + timedelta(
+            minutes=config.dispatch_stale_notify_interval_minutes
+        )
+
+
+class TestWarnIfScopedServeStarvesSiblings:
+    """Boot-time WARNING when a scoped ``serve -c X`` starves siblings (#1875).
+
+    ``dispatch_tick``'s ``client_filter`` narrowing means a scoped process
+    never ticks any other client, while the #1362 singleton lock stops a
+    second loop from covering them. Log-only, mirroring the ``--force``
+    bypass WARNING: the durable machine-actionable signal is the watchdog's
+    recurring ``dispatch_loop_stale`` event.
+
+    Single-shot per process at boot, so deliberately NOT subject to the R4
+    scan-frequency gate that guards the per-tick watchdog.
+    """
+
+    @staticmethod
+    def _stub_ticks(
+        monkeypatch: pytest.MonkeyPatch, tick_data: dict[str, object]
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.dispatch.loop.latest_tick_summary_by_client",
+            lambda: tick_data,
+        )
+
+    def test_scoped_serve_warns_naming_starved_siblings(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        self._stub_ticks(
+            monkeypatch,
+            {
+                "test-client": _make_tick_summary(pending=0),
+                "review-bingo": _make_tick_summary(pending=3),
+                "acme": _make_tick_summary(pending=1),
+            },
+        )
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        run_dispatch_loop(client="test-client", once=True, emit=None)
+
+        starvation_lines = [
+            r.message for r in caplog.records if "scoped serve" in r.message
+        ]
+        assert len(starvation_lines) == 1
+        assert "test-client" in starvation_lines[0]
+        assert "acme, review-bingo" in starvation_lines[0]
+
+    def test_unscoped_serve_never_warns(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        self._stub_ticks(monkeypatch, {"review-bingo": _make_tick_summary(pending=3)})
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        run_dispatch_loop(once=True, emit=None)
+        assert not [r for r in caplog.records if "scoped serve" in r.message]
+
+    def test_scoped_serve_with_no_starved_siblings_never_warns(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        self._stub_ticks(
+            monkeypatch,
+            {
+                "test-client": _make_tick_summary(pending=5),
+                "review-bingo": _make_tick_summary(pending=0),
+            },
+        )
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        run_dispatch_loop(client="test-client", once=True, emit=None)
+        assert not [r for r in caplog.records if "scoped serve" in r.message]
+
+    def test_scoped_client_never_names_itself_as_starved(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The scoped client's own pending work is being dispatched, not starved."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        self._stub_ticks(
+            monkeypatch,
+            {
+                "test-client": _make_tick_summary(pending=9),
+                "acme": _make_tick_summary(pending=1),
+            },
+        )
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        run_dispatch_loop(client="test-client", once=True, emit=None)
+
+        starvation_lines = [
+            r.message for r in caplog.records if "scoped serve" in r.message
+        ]
+        assert len(starvation_lines) == 1
+        assert "acme" in starvation_lines[0]
+        assert starvation_lines[0].count("test-client") == 1
 
 
 # ---------------------------------------------------------------------------

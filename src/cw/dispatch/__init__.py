@@ -79,6 +79,7 @@ from cw.dispatch.lanes import (
     _ClientDispatchResult,
     _dispatch_client_lanes,
     _maybe_notify_lane_starved,
+    _notify_stale_clients_with_pending,
     _pending_in_lane,
     _record_client_freshness_block,
     _record_lane_spawn_error,
@@ -86,6 +87,7 @@ from cw.dispatch.lanes import (
     _reset_lane_spawn_errors,
     _resolve_dispatch_skip_reason,
     _resolve_low_precedence_skip_reason,
+    _stale_pending_clients,
 )
 from cw.dispatch.loop import (
     _CW_PACKAGE_NAME,
@@ -222,6 +224,7 @@ __all__ = [
     "_lane_stats_for_client",
     "_maybe_emit_finalize_regress_repeat_signal",
     "_maybe_notify_lane_starved",
+    "_notify_stale_clients_with_pending",
     "_park_branch_staleness_gate",
     "_park_empty_diff_gate",
     "_park_review_health_gate",
@@ -262,6 +265,7 @@ __all__ = [
     "_should_gate_for_signoff",
     "_spawn_claimed_task",
     "_stage_advance_unchecked",
+    "_stale_pending_clients",
     "_sweep_expired_diagnostics",
     "_walk_stage_pointer_forward",
     "apply_staged_decision",
