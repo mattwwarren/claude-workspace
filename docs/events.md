@@ -1321,6 +1321,41 @@ when a gate fires) -- far higher volume than any currently-forwarded member.
 
 `correlation_id` is the `ticket_id`.
 
+### `requeue.review_delivery_degraded`
+
+**Emitter:** `requeue_ticket` in `cw.dev_queue.requeue` (deliverability
+resolved by `_review_reentry_deliverable`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "reason": "<str>",
+  "backend": "<str>",
+  "tracker": "<str | null>"
+}
+```
+**Semantics:** GitHub #1730. Emitted when a requeue lands the ticket at
+`Stage.REVIEW` — genuinely a review-stage re-entry of a previously-parked
+ticket, the moment an operator's tracker send-back comment is supposed to
+reach the reviewer — but the resolved REVIEW-stage executor backend cannot
+deliver operator tracker comments: `codex` paired with any tracker other
+than `github-issues`, or a backend with no comment-delivery path at all
+(`claude-native` always delivers). Namespaced by its owning module
+(`dev_queue/requeue.py`), same convention as `dispatch.scope_routing_decision`.
+This DEGRADES rather than blocks — `requeue_ticket` proceeds with the
+requeue regardless (`requeue.py`'s documented asymmetry: impl hard-exits on
+a missing plan, review/finalize degrade; #1730/#1717 comment 6 rejected a
+hard-fail guard here) — making this event the *only* signal that the
+operator's send-back never reached the reviewer. `backend`/`tracker` are
+always populated (even when deliverable, since the caller resolves them
+unconditionally) so they thread verbatim into this payload without a second,
+possibly-drifting resolution call. `correlation_id` is the `ticket_id`.
+Unlike `dispatch.scope_routing_decision`, this **is** in
+`_DEFAULT_OPERATOR_EVENT_TYPES` — an automated pipeline action proceeding
+with no operator confirmation of delivery is attention-worthy, and it has no
+companion "delivery succeeded" event to pair with (self-contained).
+
 ### `session.park_vetoed` — historical (ADR-0014)
 
 **Emitter:** none since the process-kill-timeout removal (was
@@ -1408,6 +1443,39 @@ counter resets for free per pipeline episode, since each episode constructs a
 brand-new `Session`.
 
 `correlation_id` is the `ticket_id`.
+
+### `session.sentinel_liveness_vetoed`
+
+**Emitter:** `_route_blocked_result_to_task` in `cw.reconcile._shared`
+(called from `_apply_sentinel_to_task`, itself invoked from the Stop hook
+and reconcile's local/idle/phantom sweeps)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "session_id": "<str>",
+  "transcript_age_seconds": "<float>",
+  "blocker_reason": "<str>"
+}
+```
+**Semantics:** GitHub #1406. Emitted instead of landing a RUNNING task
+terminal `FAILED` when an unparseable/unrecognized-reason `BlockedResult`
+(the catch-all: `status_unknown`, `multiple_result_blocks`, or any
+unrecognized `blocker.reason` — not the deterministic-parse-failure or
+`validation_failed` branches, which are unconditional) arrives but the
+session's transcript is still actively advancing
+(`0 <= transcript_age_seconds < TRANSCRIPT_LIVENESS_WINDOW_SECONDS`, 300s).
+Sibling closure to #1281's `session.sentinel_stage_mismatch_vetoed` (same
+incident shape, a different route to it): a malformed sentinel frame is
+evidence the *frame* was broken, not that the run is over. Unlike the other
+two vetoes, this one re-queues the task to PENDING and clears
+`target.session_id` rather than leaving it RUNNING against the same session
+— a fresh session is dispatched on retry, so there is no persisted veto
+counter/cap bounding repeat vetoes against the same session.
+`transcript_age_seconds` is the measured staleness at veto time;
+`blocker_reason` is the sentinel's verbatim (unrecognized) `blocker.reason`.
+`correlation_id` is the `ticket_id`. Not in `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
 ### `gate.auto_approved`
 
