@@ -26,7 +26,7 @@ from cw.unavailability import (
     classify_provider_unavailability,
     classify_unavailability,
 )
-from tests.conftest import _cmd
+from tests.conftest import _appendix
 
 # Verbatim capture, dev-1751 impl worker, session
 # 286032f7-47ee-4985-a45d-e7a946aa1d9d, 2026-08-18T17:27:09.071Z (#1923).
@@ -135,18 +135,23 @@ class TestClassifyUnavailabilityStructural:
     def test_unavailability_signatures_mirrored_in_prose(self) -> None:
         """Drift guard: every shipped signature must appear verbatim in both
 
-        prose mirrors (auto-dev-finalize.md, auto-dev-intake.md). Adapted from
-        test_plan_spec_marker_matches_gh_marker since there's no Python
-        constant on the prose side to compare directly.
+        prose mirrors. Adapted from test_plan_spec_marker_matches_gh_marker
+        since there's no Python constant on the prose side to compare directly.
+
+        #1879 moved the intake-side mirror out of ``auto-dev-intake.md`` and
+        into its companion appendix: the table is consulted only when a ticket
+        fetch has already failed, so it is rare-path content the worker should
+        not load on every run. The assertion follows the content -- it is
+        re-pointed at the appendix, not weakened or dropped.
         """
-        finalize = _cmd("auto-dev-finalize.md")
-        intake = _cmd("auto-dev-intake.md")
+        finalize = _appendix("finalize")
+        intake_appendix = _appendix("intake")
         for signature, _family in UNAVAILABILITY_SIGNATURES:
             assert signature in finalize, (
-                f"{signature!r} missing from auto-dev-finalize.md prose mirror"
+                f"{signature!r} missing from auto-dev-finalize-appendix.md prose mirror"
             )
-            assert signature in intake, (
-                f"{signature!r} missing from auto-dev-intake.md prose mirror"
+            assert signature in intake_appendix, (
+                f"{signature!r} missing from auto-dev-intake-appendix.md prose mirror"
             )
 
     def test_classify_unavailability_does_not_match_529_signature(self) -> None:

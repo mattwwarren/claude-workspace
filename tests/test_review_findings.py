@@ -1432,8 +1432,8 @@ class Test9491MustFixCaseReconstruction:
       diff-resident string form at any offset.
     - Verdict is corroborated by three independent sources: (1) the reviewer
       contract itself mandates verbatim evidence —
-      ``.claude/commands/auto-dev-review.md:115`` (``"evidence": "<verbatim
-      diff substring>"``) and ``:123`` ("`evidence` MUST be a verbatim
+      ``.claude/commands/auto-dev-review.md:121`` (``"evidence": "<verbatim
+      diff substring>"``) and ``:129`` ("`evidence` MUST be a verbatim
       substring of the diff text at the claimed lines — `cw review
       consolidate` (Checkpoint 3a) rejects any finding whose evidence
       doesn't literally appear there."); (2) ``_classify_finding``'s own

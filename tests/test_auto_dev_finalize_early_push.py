@@ -33,7 +33,7 @@ import typing
 from pathlib import Path
 
 from cw.auto_dev_result import _STAGE_REACHED_CANONICAL, StageReached
-from tests.conftest import _cmd
+from tests.conftest import _appendix, _cmd
 
 ROOT = Path(__file__).parent.parent
 DOCS = ROOT / "docs"
@@ -93,21 +93,27 @@ def test_step4c2_push_failure_blocks_before_invoking_prep_pr() -> None:
 
 
 def test_classifier_no_longer_claims_only_push_site() -> None:
-    content = _cmd("auto-dev-finalize.md")
-    assert "the only push site" not in content
+    assert "the only push site" not in _cmd("auto-dev-finalize.md")
+    assert "the only push site" not in _appendix("finalize")
 
 
 def test_classifier_enumerates_all_push_sites() -> None:
-    content = _cmd("auto-dev-finalize.md")
+    """#1879 relocated the classifier's signature table, sentinel, and push-site
+    enumeration to ``auto-dev-finalize-appendix.md``: a healthy run matches no
+    signature, so the whole block is rare-path. The core doc keeps the
+    inspect-the-returned-text instruction and the trigger sentence."""
+    content = _appendix("finalize")
     assert "Step 4c.2" in content
     assert "Step 1 sync-with-base" in content
     assert "ship-it.md" in content
+    assert "Unavailability classifier" in _cmd("auto-dev-finalize.md")
 
 
 def test_no_new_stage_tag_introduced() -> None:
     finalize_content = _cmd("auto-dev-finalize.md")
     prep_pr_content = _cmd("prep-pr.md")
     assert "stage4c_pre_prep_pr_push" not in finalize_content
+    assert "stage4c_pre_prep_pr_push" not in _appendix("finalize")
     assert "stage4c_pre_prep_pr_push" not in prep_pr_content
 
 

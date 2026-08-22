@@ -15,7 +15,7 @@ before any human-gated exit and posts ONE ``## Pending Verification Scan``
 comment, so tickets converge in two rounds instead of 3-6.
 """
 
-from tests.conftest import _cmd
+from tests.conftest import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 PARK_ANCHOR = "**Consolidated park (single-exit rule, #1650).**"
@@ -43,7 +43,15 @@ def _checkpoint1_section() -> str:
 
 
 def _park_block() -> str:
-    return _after(_step1c_headless_section(), PARK_ANCHOR, span=3600)
+    """The consolidated-park procedure.
+
+    #1879 relocated it to ``auto-dev-plan-appendix.md``: a park only happens
+    when a gate decides to exit for a human, which a converging round never
+    does, so it is rare-path. Step 1c in the core doc keeps the trigger
+    condition and the appendix pointer; every assertion below follows the
+    content rather than being dropped.
+    """
+    return _after(_appendix("plan"), PARK_ANCHOR, span=3600)
 
 
 # ---------------------------------------------------------------------------

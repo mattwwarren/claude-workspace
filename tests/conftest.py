@@ -138,6 +138,22 @@ def _cmd(name: str) -> str:
     return (_COMMANDS_ROOT / name).read_text(encoding="utf-8")
 
 
+def _appendix(stage: str) -> str:
+    """Return the text of ``.claude/commands/auto-dev-<stage>-appendix.md`` (#1879).
+
+    Sibling of ``_cmd`` for the core+appendix split. #1879 moved each stage
+    doc's genuinely rare-path procedures (fetch-failure handling, divergence
+    handling, the fix loop, CI-wait polling, ...) out of the core file the
+    worker loads on every run and into a companion appendix the worker reads
+    only when the named trigger condition fires. Guard tests whose pinned
+    literals moved with their content assert against this reader instead of
+    ``_cmd``; no assertion was dropped in the move.
+    """
+    return (_COMMANDS_ROOT / f"auto-dev-{stage}-appendix.md").read_text(
+        encoding="utf-8"
+    )
+
+
 def _stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
     """Write an executable ``gh`` stub into a fresh bin dir and return it (#1799).
 

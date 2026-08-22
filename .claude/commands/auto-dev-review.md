@@ -61,7 +61,7 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
 
 **Never busy-wait.** Do not hold the turn open with no-op `Bash` calls (`true`, `sleep`, repeated status polls) to avoid ending it. Each poll costs a full model round-trip and buys nothing — one observed review pass spent 173 of its 234 Bash calls on `true`. Worse, busy-waiting camouflages a stuck worker: ADR-0014 removed every kill timer, so the only automated stuck-worker signal left is the liveness distress sweep (`src/cw/reconcile/liveness.py`), which keys on transcript staleness — no-op polls keep the transcript fresh, pin the session at LIVE, and `SESSION_NEEDS_ATTENTION` never fires.
 
-**Parent turns and subagent turns are not symmetric.** A parent's turn-end is a *pause* — the completion notification resumes it. A **subagent's** turn-end is a *return*: its final text becomes the result, and any work it left running in the background does not survive to a later turn. So a subagent must finish what it started inside its own turn — a subagent that backgrounds a long command and then ends its turn reports "done" while the command is still running. `run_in_background` remains a real and valid `Bash` parameter; it is only the Agent-tool spawn that no longer has it.
+**Parent turns and subagent turns are not symmetric.** A parent's turn-end is a *pause*; a **subagent's** turn-end is a *return* — so a subagent must finish what it started inside its own turn, since a backgrounding subagent reports "done" while the work is still running. The fuller pause-vs-return rationale lives in `.claude/commands/auto-dev-review-appendix.md`, section "Parent turns and subagent turns are not symmetric". Read it now if you want that fuller framing while drafting a reviewer or fix-agent prompt.
 
 **Sandbox warning**: reviewer subagents spawned without `isolation: "worktree"` have inconsistent file access depending on sandbox state. **Inline the full diff directly in each reviewer's prompt** (captured from the main session) so reviewers evaluate purely from prompt content. Do not assume read access "just works."
 
@@ -165,9 +165,8 @@ REVIEW_FINDINGS>>>
    - Log `.stripped_escalations` (escalations whose evidence quote wasn't in the diff — the finding itself survives and is adjudicated normally).
    - **Freeze** `.review.must_fix_initial`, `.review.should_fix`, and `.review.agents_run` from this *first* `cw review consolidate` call for the final sentinel. A Step 3b re-review re-invokes `cw review consolidate` on the updated diff purely to re-check `blocking`, never to overwrite these frozen numbers.
 
-**Blocking-findings comment rule (#1815).** When Stage 3 exits `blocked` with `blocker.reason: "review_blocked"` — the mechanically-rejected MUST_FIX path (#1714) above or the cycle-5 hard exit in Step 3b.5 — post the still-unresolved MUST_FIX finding(s) as a tracker comment under the fixed header `## Blocking Review Findings`, the same surface `auto-dev-plan.md` uses for its `plan_unreviewable`/`plan_unsound` exits. Source the body from the structured finding data (`file`/`line_start`/`line_end`/`summary`/`suggested_fix`, plus `reviewer_role`) — one `### <reviewer_role> — MUST_FIX` sub-section per finding. No PR exists yet, so the comment posts to the ticket. Sentinel: append `blocking findings posted: review_blocked` to `friction_highlights`, mirroring `auto-dev-plan.md`'s idiom.
-
-**Third trigger (#1817): the `plan_deviation` exit.** The same rule, header, and structured-finding source also cover Stage 3's `blocker.reason: "plan_deviation"` exit (the 4a Exit rule below). Delta vs. the two `review_blocked` sites above, which stay MUST_FIX-worded (#1714's guarantee is MUST_FIX-specific there): the `plan_deviation` trigger posts whatever NON_DEFERRABLE finding(s) caused the exit, **regardless of severity**, because 4a's NON_DEFERRABLE test is not severity-scoped.
+**Blocking-findings comment rule (#1815, third trigger #1817).** A round that exits `blocked` with `blocker.reason: "review_blocked"` (the mechanically-rejected MUST_FIX path above, or the cycle-5 hard exit in Step 3b.5) or with `blocker.reason: "plan_deviation"` (the 4a Exit rule below) MUST post the offending finding(s) as a tracker comment before exiting. **Reaching any of those three exits is rare** — the fixed comment header, the per-finding sub-section shape, the structured-finding source fields, the `friction_highlights` sentinel, and the severity-scope delta between the `review_blocked` and `plan_deviation` triggers live in `.claude/commands/auto-dev-review-appendix.md`, section
+"Blocking-findings comment rule: header, body shape, and the three triggers". Read it now if this round is heading for any of those exits; do not improvise the header or the body shape from this summary alone.
 
 **Non-deferrable pre-pass (run BEFORE bucket assignment):**
 
@@ -193,15 +192,8 @@ Adjudication assigns each finding a disposition. The coordinating session — ne
 
 **Invariant:** every finding ends *fixed*, *rejected-with-reason*, *ticketed*, or *handed to the operator as an explicit action*. A reviewer finding that simply vanishes is a process failure.
 
-**Operator-actionable findings comment rule (#1817).** Whenever `ADJUDICATIONS` contains any `outcome: "operator_action"` entry, post those findings as a tracker comment under the fixed header `## Operator-Actionable Review Findings` — a literal markdown checklist, one line per entry, so the operator can tick items off in place:
-
-```
-- [ ] <summary> — <suggested_fix> *(<reviewer_role>)*
-```
-
-Source the body from the structured finding data, as the blocking-findings comment rule does. The entry's `rationale` is REQUIRED and must name the concrete action the operator has to take — file ticket X, link the ticket discharging criterion Y — so a checklist reader never has to open the transcript. No PR exists yet, so the comment posts to the ticket. Sentinel: append `operator actionable findings posted: review_operator_actionable` to `friction_highlights`, mirroring the `blocking findings posted: <reason>` idiom above.
-
-**Its trigger is `ADJUDICATIONS`, not `blocker.reason`.** The rule fires purely on the presence of an `operator_action` entry, whatever `blocker.reason` the stage exits with. That decouples the racing-exits case: a pass carrying both an operator-actionable finding and a separate NON_DEFERRABLE finding records `plan_deviation` as the exit reason and still posts this comment. Two comments, one exit reason, no precedence ladder.
+**Operator-actionable findings comment rule (#1817).** Whenever `ADJUDICATIONS` contains any `outcome: "operator_action"` entry, those findings MUST be posted as a tracker comment. **Bucket 4 landing non-empty is rare** — the fixed comment header, the markdown-checklist line format, the REQUIRED-rationale requirement, the `friction_highlights` sentinel, and why the trigger is `ADJUDICATIONS` rather than `blocker.reason` live in `.claude/commands/auto-dev-review-appendix.md`, section
+"Operator-actionable findings comment rule: header, checklist format, and trigger". Read it now if any finding was bucketed operator-actionable; do not improvise the header or the checklist line from this summary alone.
 
 The **action list** (bucket 1) — not "MUST_FIX only" — drives Step 3b. An accepted SHOULD_FIX is fixed; a rejected or deferred one leaves the action list, recorded. If every finding lands in REJECT/DEFER the action list is empty and the pipeline continues.
 
@@ -256,11 +248,13 @@ Rejected (intentional / documented tradeoff):
 DEFERRED-REVIEW-FINDINGS -->
 ```
 
-A round-stamped entry additionally carries `[round <N>, <recorded_at>] ` in front of its `Rejected` bullet, and trailing `round:` / `recorded_at:` lines inside its `DEFERRED-REVIEW-FINDINGS` entry. Both are omitted for an unstamped entry, so the bare shape above stays exactly what a pre-#1840 file looks like.
-
-The `Rejected` section is omitted when there are no rejections, the `DEFERRED-REVIEW-FINDINGS` block when there are no deferrals, and the file is not written at all when every finding was fixed and there is no prior content to preserve — all three handled by the command, not by you.
-
-**A `.cw/deferred-findings.md` left over from before #1840** (no round/date stamps anywhere) is read and merged like any other prior content — it is not an error, and its entries are never back-filled with a synthetic round. The command hard-errors (exit 1, plain message) only on content matching *neither* the current nor the pre-#1840 shape — foreign text, a truncated block, a half-written round/date pair. That is a refusal to overwrite records it cannot read, not a transient failure: inspect or remove the file by hand, then re-run.
+**Round stamping, a pre-#1840 legacy file, or a hard-error refusal to overwrite
+`.cw/deferred-findings.md`** is rare — the stamped-entry shape, the
+omit-when-empty rules, and the refusal semantics live in
+`.claude/commands/auto-dev-review-appendix.md`, section "`.cw/deferred-findings.md`:
+round stamping, legacy files, and hard-error refusal". Read it now if the command
+errors on this file or you must reason about an unstamped entry; do not
+hand-repair the file from memory.
 
 **Headless:** adjudication is autonomous — **no AskUserQuestion.** The session adjudicates deterministically, records rationale for every REJECT/DEFER in `.cw/deferred-findings.md`, and proceeds. Interactive mode MAY surface the adjudication for confirmation but defaults to the same dispositions.
 
@@ -271,15 +265,11 @@ The `Rejected` section is omitted when there are no rejections, the `DEFERRED-RE
 - All SHOULD_FIX land in REJECT/DEFER → action list empty → AUTO-CONTINUE to S4 (rejections recorded, deferrals queued in `.cw/deferred-findings.md`).
 - Log the disposition: "N SHOULD_FIX adjudicated — <a> fixed, <b> rejected, <c> deferred".
 
-**Small scope + MUST_FIX → AskUserQuestion (interactive only):**
-- Present MUST_FIX findings (with file, line, description, suggested fix)
-- Present SHOULD_FIX findings if any
-- "MUST_FIX findings block shipping. Fix and re-review, skip fixes and ship anyway, skip ticket, or abort?"
-
-**Large scope (any result) → AskUserQuestion (interactive only):**
-- Present full consolidated review report
-- If MUST_FIX: "Fix these issues and re-review, or abort?"
-- If clean or SHOULD_FIX only: "Review complete. Proceed to PR creation?"
+**An interactive run reaching the Small+MUST_FIX or Large-scope approval gate**
+is rare (headless never does) — both prompts live in
+`.claude/commands/auto-dev-review-appendix.md`, section "Interactive-only
+adjudication gates". Read it now if this is an interactive run and either
+applies.
 
 **Headless:** Always run reviewers, then adjudicate every finding per Checkpoint 3a (autonomous — no AskUserQuestion; record rationale for every REJECT/DEFER in `.cw/deferred-findings.md`). Non-empty action list → run fix loop (expected 2 cycles, hard-cap at 5; cycles 3+ or scope growth append to `friction_highlights` and set `health.fix_loop_escalated: true`). Empty action list (every finding fixed / rejected / deferred) + small → emit `stage.entered` (`s3_review_complete`) then AUTO-CONTINUE to S4:
 ```bash
@@ -291,7 +281,7 @@ Clean/SHOULD_FIX + large → EXIT `review_pending_approval`. MUST_FIX persists a
 
 ### Step 3b: Fix Loop (when MUST_FIX needs fixing)
 
-**Important**: you cannot attach a new subagent to the original implementation worktree — subagents without `isolation: "worktree"` inherit the main session's sandbox (which typically excludes other worktrees), and `isolation: "worktree"` always creates a *new* worktree. The correct pattern is **push-then-recheckout**.
+**Important**: the correct pattern is **push-then-recheckout** — never attach a new subagent to the original implementation worktree. **Questioning why** is rare; the sandbox reasoning lives in `.claude/commands/auto-dev-review-appendix.md`, section "Why the fix loop uses push-then-recheckout".
 
 Prerequisite: the implementation branch must already be on origin (Step 2's agent pushes it) — if not, escalate BLOCK before starting the fix loop.
 
@@ -370,50 +360,22 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
    ```
    Then pass the updated full diff (`git diff <FORK_POINT>...origin/<branch-name>`) and the fix-commit diff inlined in each reviewer's prompt (see Step 3a sandbox warning). Do NOT rely on reviewers reading files from disk. Each re-spawned reviewer prompt MUST include both the Friction Protocol block and the Health Check block, identical to the initial Step 3a spawn.
 
-5. **Cycle budget:** 2 cycles is the expected baseline. If MUST_FIX persists past cycle 2, the loop may continue with escalation visibility, hard-capped at 5 total cycles. Escalation behavior differs between modes — see below.
+5. **Cycle budget:** 2 cycles is the expected baseline. If MUST_FIX persists past cycle 2, the loop may continue with escalation visibility, hard-capped at 5 total cycles. **Entering cycle 3+, growing scope mid-fix, or exhausting the cap** is rare — the escalation triggers, the per-mode escalation behaviour, the cycle-5 hard exit, and the cap-value maintenance note live in `.claude/commands/auto-dev-review-appendix.md`, section
+   "Fix loop cycle budget: escalation triggers and the cycle-5 hard exit". Read it now if this round entered cycle 3 or the fix-loop friction report flagged scope growth; do not improvise the escalation record or the hard-exit sentinel from this summary alone.
 
-   **Escalation triggers** (any of these counts as "an escalation event"):
-   - Cycle 3, 4, or 5 entered (i.e., MUST_FIX persisted past the expected 2)
-   - Fix-loop diff touches files outside the original Stage 1 approved plan's file list
-   - Fix-loop diff promotes scope tier from Small → Large (file count > 10 OR line count > 500 OR forbidden area touched)
-
-   The fix-loop agent's friction report MUST flag scope growth explicitly so the main session can decide whether the cycle counts as an escalation event. Do not let the agent silently grow scope.
-
-   **Interactive — on each escalation event:** log a one-line notice describing the trigger (e.g. `⚠ Fix loop entered cycle 3 (expected baseline is 2)`). Do NOT block on AskUserQuestion — the user can stop the pipeline between agent dispatches, and the cycle-5 hard gate is the final decision point. A deliberate trade-off against prompt fatigue: interactive cycles 3-4 run with notice-only visibility.
-
-   **Headless — on each escalation event:** append a string to `friction_highlights` (e.g. `"fix_loop_cycle_3_entered"`, `"fix_loop_scope_growth: <files>"`) AND set `health.fix_loop_escalated: true` in the structured output. Continue the loop without any AskUserQuestion. (`health.fix_loop_escalated` is distinct from `health.downgrade_applied`, which only the Headless Mode health aggregation rule sets for confidence-driven status downgrades.)
-
-   **Hard exit (cycle 5 failed to clear MUST_FIX) — applies in both modes:**
-   - **Interactive:** AskUserQuestion: "MUST_FIX issues persist after 5 fix cycles: [details]. Continue manually from worktree, skip ticket, or abort pipeline?"
-   - **Headless:** EXIT `blocked` with `blocker.reason: "review_blocked"`. The `friction_highlights` field will contain the per-cycle escalation notes from cycles 3–5; the human reviewer sees them in the structured output. Also post the still-unresolved MUST_FIX findings — verbatim — as a tracker comment per the blocking-findings comment rule above (Checkpoint 3a).
-
-   > **Maintenance note:** the cap values (`expected 2`, `hard-cap at 5`) appear in 6 locations: this Step 3b.5 (multiple), the Checkpoint 3a Headless callout, the gate-collapse table rows for `S3 action list non-empty`, `S3 action list non-empty after 5 fix cycles`, and `S3 fix-loop cycle 3+`, and the `blocker.reason` table description for `review_blocked`. If you tune either value, update all locations atomically.
-
-**Fallback — direct execution**: if the isolation fix agent also hits sandbox failures (Read/Write/Bash denied inside its own new worktree), the main session applies the fix directly from its own worktree:
-
-```bash
-# From the main session's worktree
-git fetch origin <branch-name>
-git checkout -B <branch-name> origin/<branch-name>   # -B: idempotent — cw provisions this worktree on <branch-name> (#712), so plain -b would fail "already exists"
-git merge origin/main --no-edit                      # refresh with main (see Step 3b.2 rationale)
-# apply edits via Read/Edit/Write tools
-# run quality gates
-git add -- <changed files>
-git commit -m "..."
-git push origin HEAD:refs/heads/<branch-name>        # explicit refspec — robust if local branch was renamed
-test "$(git rev-parse origin/<branch-name>)" = "$(git rev-parse HEAD)"  # verify the push landed
-git checkout <original-branch>   # restore main session state
-```
-
-Slower than delegation but guaranteed to work — a last resort after two subagent attempts have failed on sandbox issues.
+**The isolation fix agent also hitting sandbox failures** (Read/Write/Bash denied
+inside its own new worktree, after two subagent attempts) is rare — the
+direct-execution fallback the main session then runs lives in
+`.claude/commands/auto-dev-review-appendix.md`, section "Fallback — direct
+execution from the main session's worktree". Read it now if that condition holds;
+do not improvise the git sequence from memory.
 
 **Pre-exit invariant (required, no exceptions):** Before ending the review session at any point — normal completion, error, context boundary, or after the fallback path above — run:
 ```bash
 git status --porcelain
 ```
-If the output is non-empty (staged or unstaged changes exist), you MUST either:
-- **Commit and push** the staged changes (if they represent completed work), then emit the sentinel as normal, OR
-- **Emit a `blocked` sentinel** using the full sentinel template from Stage 3 Completion (scroll down to it), with `blocker.reason: "dirty_tree_no_sentinel"`, `scope.tier: "small"` (required by the schema validator even on blocked — `auto_dev_result/schema.py`'s §3.3 validator rejects null at stage3_review), `blocker.details: "staged or unstaged changes exist but could not be committed and pushed before session end — emitting blocked rather than exiting silently with a dirty index and no sentinel"`, and `health.lowest_agent_confidence` set to a non-null value (the same §3.3 validator in `auto_dev_result/schema.py` requires it for stage3_review; omitting it causes schema rejection → `validation_failed` retries rather than `BLOCKED_ON_USER`).
+Empty output is the common path — proceed to the normal exit. **Non-empty output (staged or unstaged changes exist) is rare** and you MUST NOT exit on it without acting: the two permitted dispositions (commit-and-push, or a `dirty_tree_no_sentinel` blocked sentinel with the exact fields the schema validator requires) live in `.claude/commands/auto-dev-review-appendix.md`, section
+"Pre-exit invariant: what to do when the tree is dirty". Read it now if `git status --porcelain` printed anything; do not improvise the sentinel fields from this summary alone.
 
 Never exit with a dirty tree and no sentinel: to the dispatcher a sentinel-less exit is identical to "never ran", so it resets the task to the plan stage and discards origin commits — an infinite plan→impl→review→silent-exit loop.
 
@@ -457,7 +419,7 @@ After all Stage 3 steps complete successfully in headless mode (review clean or 
 3. Fallback: re-derive from the diff itself using the canonical Stage-1c thresholds — run `git diff --stat $FORK_POINT...origin/<branch-name>` and count changed files and lines. **Small** = ≤10 files AND ≤500 lines AND no forbidden-area touches; **Large** otherwise. (Account for any Step 3b scope growth.)
 4. If no source yields `"small"` or `"large"`, **do NOT emit a `stage_complete` or `review_pending_approval` sentinel** — emit `blocked` instead with `blocker.reason: "scope_tier_unresolvable"`, `scope.tier: "small"` (required by the schema validator even on blocked — `auto_dev_result/schema.py`'s §3.3 validator rejects null at stage3_review), and `blocker.details: "scope.tier unresolvable — .cw/plan.md has no tier marker, .claude/cw-context.json queue_metadata.scope_hint is null, and diff stat was unavailable. Sentinel emitted with tier=null would fail schema validation and cause validation_failed retries rather than BLOCKED_ON_USER."`.
 
-> **Maintenance note:** the `**Scope tier:** ...` marker format and its single-canonical-location convention are shared across 4 files: `auto-dev-plan.md` Step 1g (writer), `auto-dev-impl.md:59` (reader), this file's step 1.5 above (reader + conditional in-place rewriter), and `auto-dev-finalize.md:31` (reader). If the marker format is tuned, update all four locations atomically.
+> **Maintenance note:** the `**Scope tier:** ...` marker format and its single-canonical-location convention are shared across 4 files: `auto-dev-plan.md` Step 1g (writer), `auto-dev-impl.md:53` (reader), this file's step 1.5 above (reader + conditional in-place rewriter), and `auto-dev-finalize.md:31` (reader). If the marker format is tuned, update all four locations atomically.
 
 `scope.tier` must always be a concrete `"small"` or `"large"` in the emitted sentinel — the schema validator requires it beyond pre-impl. Fall back to `"small"` when emitting the `scope_tier_unresolvable` blocked sentinel above.
 

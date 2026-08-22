@@ -8,7 +8,7 @@ require the ``## Files Modified`` heading the parser anchors on.
 
 from pathlib import Path
 
-from tests.conftest import _cmd
+from tests.conftest import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,22 +35,34 @@ def test_impl_step2_5_gate2_invokes_scope_conformance_script() -> None:
 
 
 def test_impl_step2_5_gate2_blocks_with_plan_scope_drift_reason() -> None:
-    """Exit 1 from the gate script must map to the new blocker reason."""
-    content = _cmd("auto-dev-impl.md")
+    """Exit 1 from the gate script must map to the new blocker reason.
+
+    #1879 relocated gate 2's non-exit-0 dispositions to
+    ``auto-dev-impl-appendix.md`` — drift is the exceptional outcome, so the
+    branch is rare-path. The core doc keeps the script invocation and the
+    common-path exit-0 verdict; the literals below are asserted at their new
+    home rather than dropped.
+    """
+    content = _appendix("impl")
     assert 'blocker.reason: "plan_scope_drift"' in content
     assert '"stage2_impl"' in content
 
 
 def test_impl_step2_5_below_threshold_still_uses_impl_scope_growth_friction() -> None:
     """Regression guard: the non-blocking within-allowance path must survive."""
-    content = _cmd("auto-dev-impl.md")
-    assert "impl_scope_growth" in content
+    assert "impl_scope_growth" in _appendix("impl")
 
 
 def test_impl_step2_5_populates_lines_actual_on_the_drift_exit() -> None:
     """stage_reached=stage2_impl requires a non-null scope.lines_actual."""
+    assert "scope.lines_actual" in _appendix("impl")
+
+
+def test_impl_core_doc_keeps_gate2_common_path_and_appendix_trigger() -> None:
+    """Exit 0 stays on the common path; only the exceptional branches moved."""
     content = _cmd("auto-dev-impl.md")
-    assert "scope.lines_actual" in content
+    assert "exit 0 with an empty `extra_files`" in content
+    assert "scope-conformance disposition by exit code (#1779)" in content
 
 
 def test_gate_collapse_table_distinguishes_drift_from_growth() -> None:
@@ -134,8 +146,9 @@ def test_impl_step2_5_gate2_validates_json_verdict_before_trusting_exit_1() -> N
     """Exit 1 alone (e.g. a transient `uv run` failure) must not be trusted as
     genuine drift — the prose must require a JSON-verdict check with a
     `triggered` key before building `plan_scope_drift` blocker.details (#1779
-    fix cycle 1)."""
-    content = _cmd("auto-dev-impl.md")
+    fix cycle 1). Re-pointed at the appendix by #1879 along with the rest of
+    gate 2's rare-path disposition."""
+    content = _appendix("impl")
     assert "valid JSON verdict" in content
     assert '"triggered" key' in content or "a `triggered` key" in content
     assert "tooling failure, not drift" in content

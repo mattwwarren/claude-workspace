@@ -24,7 +24,7 @@ What is pinned here:
 from __future__ import annotations
 
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
-from tests.conftest import _cmd
+from tests.conftest import _appendix, _cmd
 
 _SECTION_HEADING = "Semantic auto-resolve attempt (operator direction, #1850)"
 _TEMPLATE_HEADING = "**Sentinel template — `merge_conflict_post_push` blocker:**"
@@ -61,8 +61,15 @@ def test_rebase_fallthrough_comment_retargeted_to_semantic_resolve() -> None:
 
 
 def test_blocker_template_json_shape_unchanged() -> None:
-    content = _finalize()
-    template = content[content.index(_TEMPLATE_HEADING) :]
+    """#1879 relocated the template's JSON body to
+    ``auto-dev-finalize-appendix.md`` — it is reached only when both the
+    auto-rebase and the semantic auto-resolve failed or were refused, so it is
+    rare-path. The ``_TEMPLATE_HEADING`` marker stays in the core doc (it is
+    also the end anchor of the indivisible #1850 semantic-resolve section,
+    which did not move), and the JSON shape is asserted at its new home.
+    """
+    template = _appendix("finalize")
+    assert _TEMPLATE_HEADING in _finalize()
     for field in (
         '"stage": "stage5_post_create"',
         '"reason": "merge_conflict_post_push"',
