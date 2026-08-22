@@ -239,6 +239,14 @@ def _claim_stale_notify_slots(
     in the same cycle -- see the field's docstring in
     ``cw.models.orchestrator_config`` for why a stale window must not be
     inherited by the next episode.
+
+    Non-atomic with the emit: the debounce claim commits to disk here,
+    before the caller's ``record_event`` loop runs. If ``record_event``
+    raises partway through that loop, an already-claimed client's page is
+    silently skipped for this cycle. Bounded and self-healing -- the client
+    stays in *stale* on the next scan and re-claims normally -- which is why
+    :func:`~cw.dispatch.loop._run_stale_client_watchdog_guarded` treats the
+    whole call as non-critical and broad-catches around it (#1875).
     """
     due: list[str] = []
     with concurrency_override_lock():
