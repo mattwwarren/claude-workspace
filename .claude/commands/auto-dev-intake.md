@@ -110,9 +110,10 @@ for _ in 1 2 3; do
 done
 ```
 
-No re-fetch: `ORIGIN_MAIN` was captured in Step P1 and the shared `main` ref
-is what advances (via the base checkout, not this worktree), so a local
-`rev-parse` observes it. Checkpoints land at T+30s, T+60s, T+90s.
+No re-fetch. Checkpoints land at T+30s, T+60s, T+90s. **Changing this loop's
+cadence or adding a fetch** is rare — the rationale lives in
+`.claude/commands/auto-dev-intake-appendix.md`, section "Behind-only
+wait-and-recheck: why no re-fetch". Read it now if that applies.
 
 - If `LOCAL_MAIN == ORIGIN_MAIN` after any iteration → continue to Stage 0
   (divergence resolved itself; no sentinel emitted).
@@ -171,9 +172,11 @@ rules below are tracker-aware.
    **Step 3 fetch-failure handling (fatal, #1156 — RFC 0011 A2):** if the primary
    fetch above exits non-zero or returns error text instead of issue data, match
    that error text against the signature table below before doing anything else.
-   This list is a PROSE MIRROR of `src/cw/unavailability.py`'s
-   `UNAVAILABILITY_SIGNATURES`; keep the two copies in sync — see
-   `test_unavailability_signatures_mirrored_in_prose` for the drift guard:
+   **Editing, adding to, or reconciling this signature list** is rare — its
+   provenance and drift guard are in
+   `.claude/commands/auto-dev-intake-appendix.md`, section "Fetch-failure
+   signature mirror: provenance and sentinel rationale". Read it now if that
+   applies; do not add or remove a signature from memory.
 
    - Auth-failure:
      - `Permission denied (publickey)`
@@ -193,11 +196,10 @@ rules below are tracker-aware.
      - `HTTP 500`
 
    (`MCP-github-unreachable` is deliberately not mirrored — no verified
-   signature exists yet; see the `src/cw/unavailability.py` module docstring.)
+   signature exists yet.)
 
    On a family match, EXIT before spawning any agent and **before** the
-   `stage.entered` (`s0_intake`) emission below — a fetch that never succeeded
-   has no stage-entry to correlate against — with the structured `blocked`
+   `stage.entered` (`s0_intake`) emission below, with the structured `blocked`
    sentinel:
 
    ```json
@@ -221,15 +223,11 @@ rules below are tracker-aware.
    only other legal member of `_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS`
    (`auto_dev_result/schema.py`), is the Origin Sync surface and wrong here.
    `reason: "operator_unavailable"` is already in
-   `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` — no schema change required. A fetch
-   failure matching no signature is not handled by this block.
+   `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` — no schema change required.
 
    **Step 3 open-PR self-check (#1862) — run after a successful fetch, before
-   Step 0d.** A dispatch can succeed, push a branch, and open a PR while its
-   queue row is never advanced past PLAN/IMPL (the session died before its
-   sentinel landed, or the sentinel was never harvested). The next dispatch then
-   re-plans and re-implements a ticket whose work is already sitting in an open,
-   unmerged PR. Check for that before doing any planning work:
+   Step 0d.** Check whether this ticket already has an open PR before doing any
+   planning work:
 
    ```bash
    gh pr list --head "<branch-prefix>/<ticket-id>" --state open \
@@ -237,13 +235,10 @@ rules below are tracker-aware.
    ```
 
    Use the effective branch prefix (`--branch-prefix` if given, else the
-   client's `feature_branch_prefix`, default `dev`) — the same key `cw` itself
-   probes. A non-empty result means this ticket already has an open PR.
-
-   Treat only a *reliable* answer as a hit: a non-zero exit, a timeout, or a
-   missing `gh` binary is **not** evidence of a PR — fall through and continue
-   the run, exactly as `cw`'s own gate fails open. Do not gate a refusal on an
-   unreliable signal.
+   client's `feature_branch_prefix`, default `dev`). A non-empty result means
+   this ticket already has an open PR. Treat only a *reliable* answer as a hit:
+   a non-zero exit, a timeout, or a missing `gh` binary is **not** evidence of a
+   PR — fall through and continue the run.
 
    On a genuine hit, EXIT before spawning any agent with the structured
    `stale_dispatch` sentinel:
@@ -267,19 +262,16 @@ rules below are tracker-aware.
    }
    ```
 
-   `pr` **must** stay null — this run did not create that PR, and the schema
-   rejects a non-null `pr` on this status. The discovered PR's identity belongs
-   in `blocker.details`; that string is the operator's whole triage signal.
-   `next_actions` **must** be empty (`stale_dispatch` is a terminal-reject
-   status). Do NOT report `no_op` (nothing is complete — the PR is unmerged) or
-   `blocked` (nothing is broken — the PR is healthy, just not this session's to
-   duplicate).
+   `pr` **must** stay null and `next_actions` **must** be empty
+   (`stale_dispatch` is a terminal-reject status). Not a substitute for `cw`'s
+   own pre-dispatch gate (`disposition: "stale_dispatch_gate"`).
 
-   Not a substitute for `cw`'s own pre-dispatch gate, which catches the same
-   condition before a session is even spawned (`disposition:
-   "stale_dispatch_gate"`); this check covers the paths that gate does not —
-   an interactive `/auto-dev` run, and a resume that re-enters intake with the
-   row already claimed.
+   **Firing this branch, or changing any of its field values,** is rare — the
+   full rationale (why the race happens, the fail-open reliability rule, and why
+   `no_op`/`blocked` are both wrong here) lives in
+   `.claude/commands/auto-dev-intake-appendix.md`, section "Open-PR self-check
+   (#1862): rationale, reliability rule, and status choice". Read it now if this
+   condition applies; do not improvise the sentinel from this summary alone.
 
    **Headless only — initialize correlation context and emit `stage.entered` (`s0_intake`):**
    ```bash
@@ -296,16 +288,11 @@ rules below are tracker-aware.
    ```
    `$CW_SESSION` and `$TICKET` are used by every subsequent stage event emission. Source is `cw-context.json` (written by `cw` dispatch before spawning): the `CW_SESSION_ID` env var does not propagate through `claude --bg` (RFC 0001 §Row 10 gap).
 
-4. **Batch mode:**
-   - Call the tracker's batch-select op with the provided filters (`list_issues`
-     for `linear`; `gh issue list --json number,title,labels,state [--label …]`
-     for `github-issues`). Omitted filters default: `state` → `"Todo"`,
-     `assignee` → `"me"`.
-   - For each issue, read the description to check for existing plan content and
-     estimate a scope hint from its keywords.
-   - Present a numbered list (`N. <ID>: <title> [~<Small|Large>, has plan|no plan]`).
-   - **AskUserQuestion:** "Select tickets to process (e.g., '1,3' or 'all'), or 'abort':"
-   - Build an ordered queue from the selection. Order matters — tickets process in the order specified.
+4. **Batch mode** (filter flags given, interactive only) is rare — the full
+   procedure lives in `.claude/commands/auto-dev-intake-appendix.md`, section
+   "Batch mode (interactive only)". Read it now if `$ARGUMENTS` carried filter
+   flags; do not improvise the selection flow from memory. Batch mode in
+   headless is undefined.
 
 ### Step 0d: Materialize `.cw/context.json`
 
@@ -343,6 +330,8 @@ Stamp `materialized_by_session` with the current `session_id` (from `.claude/cw-
 
 **Idempotency (requeue-safe):** skip re-fetch and re-write **only** if ALL of the following hold: `.cw/context.json` exists, its `ticket_id` matches, AND its `materialized_by_session` equals the current `session_id` (from `.claude/cw-context.json`). Otherwise — a different/missing `materialized_by_session` means a **new session is running against a reused worktree (i.e. a `requeue`)** — you MUST re-fetch the ticket (`gh issue view <n> --json title,body,comments`) and **overwrite** `.cw/context.json` so newly-added operator comments and resolutions reach this run. Read the existing file and compare both fields before deciding to skip.
 
-> **Why:** `requeue` reuses the worktree (`create_worktree(..., allow_dirty_reuse=True)`), so a stale `.cw/context.json` survives across runs; a `ticket_id`-only guard skipped re-fetch on every requeue and operator resolutions never reached the plan stage (#837). Keying the skip on the writing session re-fetches on requeue while keeping the within-session fetch-once optimization.
-
-**Note:** `.cw/context.json` is distinct from `.claude/cw-context.json` (written by `cw dispatch`; `session_id` and `ticket_id` only). Per-stage files read `.cw/context.json` for full ticket orientation; the `CW_SESSION`/`TICKET` bootstrap reads `.claude/cw-context.json`.
+**Changing this idempotency guard, or debugging a stale `.cw/context.json`,** is
+rare — the rationale (#837) and the `.cw/context.json` vs `.claude/cw-context.json`
+distinction live in `.claude/commands/auto-dev-intake-appendix.md`, section
+"`.cw/context.json` idempotency: why the guard keys on the writing session
+(#837)". Read it now if either applies.
