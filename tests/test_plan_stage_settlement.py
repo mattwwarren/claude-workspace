@@ -25,7 +25,7 @@ the reviewer always receives the complete live-fetched stream.
 import re
 from pathlib import Path
 
-from tests.conftest import _cmd
+from tests.conftest import _appendix, _cmd
 from tests.test_ambiguity_scan_adopted_assumptions import (
     _step1c_prompt_must_include_window,
 )
@@ -90,10 +90,28 @@ def _step1c_headless_section() -> str:
 
 
 def _step1c0_block() -> str:
-    section = _step1c_section()
-    start = section.index(STEP1C0_ANCHOR)
-    end = section.index(SOURCE_LIST_ANCHOR, start)
+    """Step 1c.0's round-cap read + settlement-folding procedure.
+
+    #1879 relocated it to ``auto-dev-plan-appendix.md``: the block states its
+    own rarity ("Fires only when Step 1a.0's resume branch fired this
+    dispatch"), and a fresh dispatch -- the common path -- skips it entirely.
+    The core doc keeps the trigger condition and the appendix pointer; every
+    assertion below follows the content rather than being dropped.
+    """
+    section = _appendix("plan")
+    start = section.index("## Step 1c.0: round-cap read and settlement folding")
+    end = section.index("\n## ", start)
     return section[start:end]
+
+
+def _plan_prose() -> str:
+    """Core doc + its appendix, for whole-file absence/denylist scans.
+
+    #1879 split the prose across two files; a scan that proves an exploit
+    shape is absent must cover both, or the split itself would silently
+    narrow the guard.
+    """
+    return _cmd("auto-dev-plan.md") + "\n" + _appendix("plan")
 
 
 def _step4b_section() -> str:
@@ -170,9 +188,11 @@ def test_step1c0_new_step_exists_before_source_ambiguity_list() -> None:
 
 def test_step1c0_fires_only_on_resumed_rounds() -> None:
     """Step 1c.0 is scoped to dispatches where Step 1a.0's resume branch fired."""
-    block = _step1c0_block()
-    assert "Fires only when Step 1a.0's resume branch fired this dispatch" in block
-    assert "on a fresh (non-resumed) dispatch skip straight to step 1 below" in block
+    for scope in (_cmd("auto-dev-plan.md"), _step1c0_block()):
+        assert "Fires only when Step 1a.0's resume branch fired this dispatch" in scope
+    core = _cmd("auto-dev-plan.md")
+    assert "on a fresh (non-resumed) dispatch" in core
+    assert "skip straight to step 1 below" in core
 
 
 def test_cap_value_is_two() -> None:
@@ -330,7 +350,7 @@ def test_pm_prompt_receives_full_stream_plus_settled_identity_list() -> None:
 
 def test_no_redaction_paragraph_states_full_stream_always() -> None:
     """Step 1c.0 states the reviewer always gets the complete, unredacted stream."""
-    section = _step1c_section()
+    section = _step1c0_block()
     window = _after(section, "**No redaction, anywhere (R3).**", span=1200)
     assert "complete, unredacted live-fetched stream, always" in window
     assert (
@@ -427,7 +447,7 @@ def test_four_historical_rounds_structurally_impossible() -> None:
     an inherent limit of this repo's grep-the-instructions test convention,
     not something this test can close on its own.
     """
-    content = _cmd("auto-dev-plan.md")
+    content = _plan_prose()
     block = _step1c0_block()
 
     # (1) No "trust the whole comment body" shape anywhere in the file (not
