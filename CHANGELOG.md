@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Dispatch loop staleness watchdog + scoped-serve starvation WARNING (#1875):** the dispatch loop now detects when a client's tick summary goes stale while pending work is stranded and pages the operator via a recurring `session.needs_attention(paused_status="dispatch_loop_stale")` signal, debounced on a fixed interval (`OrchestratorConfig.dispatch_stale_notify_interval_minutes`, default 15) rather than exponential backoff, so the page keeps recurring while the loop stays stuck instead of decaying into silence. The same interval also throttles the watchdog's own inbox scans, since each scan parses the entire events inbox. A scoped `cw dev-queue run --client <name>` serve that starves other clients of scan coverage now also logs a WARNING. `cw doctor`'s `_check_loop_liveness` was refactored to delegate to the same shared `_stale_pending_clients` predicate the watchdog uses, so the two staleness checks can no longer drift apart. See `docs/dispatch-runbook.md` for the recovery runbook.
+
 ### Fixed
 
 - **Liveness distress reads `agent_spawn_stamp` instead of transcript pairing (#1969):** removed the generic "any pending `tool_use`" suppression from the reconcile liveness path (`_awaiting_subagent`). It was inert — under default config and every live client's `liveness_buckets_minutes`, the 30-minute suppression window and the 45-minute distress-eligibility bucket share the same clock, so distress is never evaluated while a pending `tool_use` is still inside the suppression window. Liveness distress now reads the `agent_spawn_stamp` written to `cw-context.json` directly rather than re-deriving subagent liveness from transcript `tool_use`/`tool_result` pairing.
