@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.43.0] - 2026-08-22
+
+### Changed
+
+- **auto-dev pipeline docs split into core + appendix under per-doc size caps (#1879):** all five stage docs (`.claude/commands/auto-dev-{intake,plan,impl,review,finalize}.md`) now pair a common-path core with a rare-path appendix (`auto-dev-<stage>-appendix.md`) loaded only on named trigger conditions, cutting the per-invocation context cost of every pipeline stage. Guard tests were re-pointed to follow relocated content — every previously pinned literal stays asserted at its new location (a shared `_appendix()` reader joins `_cmd()` in `tests/conftest.py`), with no assertion weakened or dropped. Common-path contract text stays in the core docs (operative rules restored where the first split cut too deep), and residual over-cap docs carry caps re-scoped to measured floor +10%, documented on the ticket. The only source change is a citation-comment refresh in `src/cw/unavailability.py` pointing the auth-failure signature mirror at its relocated appendix home; no behavior change.
+
 ## [1.42.0] - 2026-08-22
 
 ### Added
