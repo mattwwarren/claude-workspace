@@ -200,9 +200,7 @@ def test_no_distress_when_session_already_emitted_sentinel(
     assert push_calls == []
 
 
-def _balanced_agent_pairs(
-    n: int, *, base_time: datetime
-) -> list[dict[str, object]]:
+def _balanced_agent_pairs(n: int, *, base_time: datetime) -> list[dict[str, object]]:
     """Build *n* resolved Agent tool_use/tool_result pairs (#1969, instance #9).
 
     ``PostToolUse:Agent`` fires at launch-return, not subagent completion
@@ -231,9 +229,7 @@ def _balanced_agent_pairs(
                 "type": "user",
                 "timestamp": ts,
                 "message": {
-                    "content": [
-                        {"type": "tool_result", "tool_use_id": f"toolu_{i}"}
-                    ]
+                    "content": [{"type": "tool_result", "tool_use_id": f"toolu_{i}"}]
                 },
             }
         )
@@ -302,7 +298,7 @@ def test_distress_fires_for_stale_synchronous_tool_use_with_no_agent_spawn_stamp
     subagent."""
     worktree = tmp_path / "wt"
     sess = _mk_headless_daemon_session("T-1", worktree, _STARTED_AT)
-    record = {
+    record: dict[str, object] = {
         "type": "assistant",
         "timestamp": (_NOW - timedelta(minutes=46)).isoformat(),
         "message": {
