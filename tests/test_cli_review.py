@@ -1706,10 +1706,17 @@ class TestReviewConsolidateDocumentsFrom:
         failure = ReviewerRunFailure(
             role="Test Reviewer", reason="unparseable_response"
         )
+        # A non-empty inline `documents` entry the CLI must ignore once
+        # --documents-from is set: if the flag were silently dropped and the
+        # code fell through to `parsed.documents`, this reviewer would leak
+        # into the verdict even though the (empty) directory contributed
+        # nothing. This is what makes the assertions below load-bearing —
+        # see #1957.
+        ignored_doc = _make_reviewer_doc(reviewer_role="Should Not Appear")
         payload = _consolidate_payload(
-            failed_reviewers=[failure.model_dump(mode="json")]
+            documents=[ignored_doc.model_dump(mode="json")],
+            failed_reviewers=[failure.model_dump(mode="json")],
         )
-        del payload["documents"]
         result = runner.invoke(
             main,
             ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
@@ -1719,7 +1726,7 @@ class TestReviewConsolidateDocumentsFrom:
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert verdict["review"]["agents_run"] == 0
-        assert len(verdict["agents_run"]) == 1
+        assert [r["reviewer_role"] for r in verdict["agents_run"]] == ["Test Reviewer"]
 
     def test_documents_from_malformed_json_file_names_offending_file(
         self, runner: CliRunner, tmp_path: Path
