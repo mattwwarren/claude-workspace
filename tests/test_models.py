@@ -1307,6 +1307,42 @@ class TestConsecutiveSkipLatches:
         assert session.consecutive_park_vetoes == 0
 
 
+class TestDispatchStaleNotifyFields:
+    """#1875: the dispatch-loop staleness watchdog's debounce + interval fields.
+
+    Mirrors the ``lane_starved_notify_*`` pair (#1630) they are modelled on:
+    a per-client persisted ``next_eligible_at`` stamp plus a fixed
+    interval-minutes knob on ``OrchestratorConfig``.
+    """
+
+    def test_client_override_stale_notify_stamp_defaults_none(self) -> None:
+        from cw.models import ClientConcurrencyOverride
+
+        assert (
+            ClientConcurrencyOverride().dispatch_stale_notify_next_eligible_at is None
+        )
+
+    def test_client_override_stale_notify_stamp_round_trips(self) -> None:
+        from cw.models import ClientConcurrencyOverride
+
+        stamp = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
+        override = ClientConcurrencyOverride(
+            dispatch_stale_notify_next_eligible_at=stamp
+        )
+        restored = ClientConcurrencyOverride.model_validate_json(
+            override.model_dump_json()
+        )
+        assert restored.dispatch_stale_notify_next_eligible_at == stamp
+
+    def test_orchestrator_config_stale_notify_interval_default(self) -> None:
+        assert OrchestratorConfig().dispatch_stale_notify_interval_minutes == 15
+
+    def test_orchestrator_config_stale_notify_interval_round_trips(self) -> None:
+        config = OrchestratorConfig(dispatch_stale_notify_interval_minutes=45)
+        restored = OrchestratorConfig.model_validate_json(config.model_dump_json())
+        assert restored.dispatch_stale_notify_interval_minutes == 45
+
+
 class TestInboxPruneThresholds:
     """Issue #856: OrchestratorConfig defaults for the inbox-size doctor check."""
 
