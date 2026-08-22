@@ -77,12 +77,13 @@ unconditionally: waiting for the impl agent means **ending the parent turn** and
 on its completion notification, which is safe in headless. **Never** hold the turn open
 with no-op `Bash` calls (`true`, `sleep`, repeated polls).
 
-**Being tempted to busy-wait, or writing the impl agent's own turn-ending
-instructions,** is rare — the full reasoning (why headless turn-ending is safe,
-why the poll defeats the liveness sweep, and why a subagent's turn-end is a
-*return* rather than a pause) lives in
+**A subagent's turn-end is a *return*, not a pause: the impl agent must finish
+its build/test commands inside its own turn rather than backgrounding them and
+returning.** The fuller reasoning (why headless turn-ending of the *parent* is
+safe, and why a busy-wait poll defeats the liveness sweep) lives in
 `.claude/commands/auto-dev-impl-appendix.md`, section "Async dispatch: why never
-to busy-wait on the impl agent". Read it now if either applies.
+to busy-wait on the impl agent (verified 2026-08-19)". Read it now if you want
+that fuller framing.
 
 ### Worktree Isolation Guard (headless) — #402
 
