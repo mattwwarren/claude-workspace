@@ -61,7 +61,7 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
 
 **Never busy-wait.** Do not hold the turn open with no-op `Bash` calls (`true`, `sleep`, repeated status polls) to avoid ending it. Each poll costs a full model round-trip and buys nothing — one observed review pass spent 173 of its 234 Bash calls on `true`. Worse, busy-waiting camouflages a stuck worker: ADR-0014 removed every kill timer, so the only automated stuck-worker signal left is the liveness distress sweep (`src/cw/reconcile/liveness.py`), which keys on transcript staleness — no-op polls keep the transcript fresh, pin the session at LIVE, and `SESSION_NEEDS_ATTENTION` never fires.
 
-**Parent turns and subagent turns are not symmetric.** A parent's turn-end is a *pause* — the completion notification resumes it. A **subagent's** turn-end is a *return*: its final text becomes the result, and any work it left running in the background does not survive to a later turn. So a subagent must finish what it started inside its own turn — a subagent that backgrounds a long command and then ends its turn reports "done" while the command is still running. `run_in_background` remains a real and valid `Bash` parameter; it is only the Agent-tool spawn that no longer has it.
+**Parent turns and subagent turns are not symmetric.** **Writing a subagent's own turn-ending instructions** is rare — the asymmetry (and why a backgrounding subagent reports "done" too early) lives in `.claude/commands/auto-dev-review-appendix.md`, section "Parent turns and subagent turns are not symmetric". Read it now if you are drafting a reviewer or fix-agent prompt that could background work.
 
 **Sandbox warning**: reviewer subagents spawned without `isolation: "worktree"` have inconsistent file access depending on sandbox state. **Inline the full diff directly in each reviewer's prompt** (captured from the main session) so reviewers evaluate purely from prompt content. Do not assume read access "just works."
 
@@ -256,11 +256,13 @@ Rejected (intentional / documented tradeoff):
 DEFERRED-REVIEW-FINDINGS -->
 ```
 
-A round-stamped entry additionally carries `[round <N>, <recorded_at>] ` in front of its `Rejected` bullet, and trailing `round:` / `recorded_at:` lines inside its `DEFERRED-REVIEW-FINDINGS` entry. Both are omitted for an unstamped entry, so the bare shape above stays exactly what a pre-#1840 file looks like.
-
-The `Rejected` section is omitted when there are no rejections, the `DEFERRED-REVIEW-FINDINGS` block when there are no deferrals, and the file is not written at all when every finding was fixed and there is no prior content to preserve — all three handled by the command, not by you.
-
-**A `.cw/deferred-findings.md` left over from before #1840** (no round/date stamps anywhere) is read and merged like any other prior content — it is not an error, and its entries are never back-filled with a synthetic round. The command hard-errors (exit 1, plain message) only on content matching *neither* the current nor the pre-#1840 shape — foreign text, a truncated block, a half-written round/date pair. That is a refusal to overwrite records it cannot read, not a transient failure: inspect or remove the file by hand, then re-run.
+**Round stamping, a pre-#1840 legacy file, or a hard-error refusal to overwrite
+`.cw/deferred-findings.md`** is rare — the stamped-entry shape, the
+omit-when-empty rules, and the refusal semantics live in
+`.claude/commands/auto-dev-review-appendix.md`, section "`.cw/deferred-findings.md`:
+round stamping, legacy files, and hard-error refusal". Read it now if the command
+errors on this file or you must reason about an unstamped entry; do not
+hand-repair the file from memory.
 
 **Headless:** adjudication is autonomous — **no AskUserQuestion.** The session adjudicates deterministically, records rationale for every REJECT/DEFER in `.cw/deferred-findings.md`, and proceeds. Interactive mode MAY surface the adjudication for confirmation but defaults to the same dispositions.
 
@@ -271,15 +273,11 @@ The `Rejected` section is omitted when there are no rejections, the `DEFERRED-RE
 - All SHOULD_FIX land in REJECT/DEFER → action list empty → AUTO-CONTINUE to S4 (rejections recorded, deferrals queued in `.cw/deferred-findings.md`).
 - Log the disposition: "N SHOULD_FIX adjudicated — <a> fixed, <b> rejected, <c> deferred".
 
-**Small scope + MUST_FIX → AskUserQuestion (interactive only):**
-- Present MUST_FIX findings (with file, line, description, suggested fix)
-- Present SHOULD_FIX findings if any
-- "MUST_FIX findings block shipping. Fix and re-review, skip fixes and ship anyway, skip ticket, or abort?"
-
-**Large scope (any result) → AskUserQuestion (interactive only):**
-- Present full consolidated review report
-- If MUST_FIX: "Fix these issues and re-review, or abort?"
-- If clean or SHOULD_FIX only: "Review complete. Proceed to PR creation?"
+**An interactive run reaching the Small+MUST_FIX or Large-scope approval gate**
+is rare (headless never does) — both prompts live in
+`.claude/commands/auto-dev-review-appendix.md`, section "Interactive-only
+adjudication gates". Read it now if this is an interactive run and either
+applies.
 
 **Headless:** Always run reviewers, then adjudicate every finding per Checkpoint 3a (autonomous — no AskUserQuestion; record rationale for every REJECT/DEFER in `.cw/deferred-findings.md`). Non-empty action list → run fix loop (expected 2 cycles, hard-cap at 5; cycles 3+ or scope growth append to `friction_highlights` and set `health.fix_loop_escalated: true`). Empty action list (every finding fixed / rejected / deferred) + small → emit `stage.entered` (`s3_review_complete`) then AUTO-CONTINUE to S4:
 ```bash
@@ -291,7 +289,7 @@ Clean/SHOULD_FIX + large → EXIT `review_pending_approval`. MUST_FIX persists a
 
 ### Step 3b: Fix Loop (when MUST_FIX needs fixing)
 
-**Important**: you cannot attach a new subagent to the original implementation worktree — subagents without `isolation: "worktree"` inherit the main session's sandbox (which typically excludes other worktrees), and `isolation: "worktree"` always creates a *new* worktree. The correct pattern is **push-then-recheckout**.
+**Important**: the correct pattern is **push-then-recheckout** — never attach a new subagent to the original implementation worktree. **Questioning why** is rare; the sandbox reasoning lives in `.claude/commands/auto-dev-review-appendix.md`, section "Why the fix loop uses push-then-recheckout".
 
 Prerequisite: the implementation branch must already be on origin (Step 2's agent pushes it) — if not, escalate BLOCK before starting the fix loop.
 
@@ -389,23 +387,12 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
 
    > **Maintenance note:** the cap values (`expected 2`, `hard-cap at 5`) appear in 6 locations: this Step 3b.5 (multiple), the Checkpoint 3a Headless callout, the gate-collapse table rows for `S3 action list non-empty`, `S3 action list non-empty after 5 fix cycles`, and `S3 fix-loop cycle 3+`, and the `blocker.reason` table description for `review_blocked`. If you tune either value, update all locations atomically.
 
-**Fallback — direct execution**: if the isolation fix agent also hits sandbox failures (Read/Write/Bash denied inside its own new worktree), the main session applies the fix directly from its own worktree:
-
-```bash
-# From the main session's worktree
-git fetch origin <branch-name>
-git checkout -B <branch-name> origin/<branch-name>   # -B: idempotent — cw provisions this worktree on <branch-name> (#712), so plain -b would fail "already exists"
-git merge origin/main --no-edit                      # refresh with main (see Step 3b.2 rationale)
-# apply edits via Read/Edit/Write tools
-# run quality gates
-git add -- <changed files>
-git commit -m "..."
-git push origin HEAD:refs/heads/<branch-name>        # explicit refspec — robust if local branch was renamed
-test "$(git rev-parse origin/<branch-name>)" = "$(git rev-parse HEAD)"  # verify the push landed
-git checkout <original-branch>   # restore main session state
-```
-
-Slower than delegation but guaranteed to work — a last resort after two subagent attempts have failed on sandbox issues.
+**The isolation fix agent also hitting sandbox failures** (Read/Write/Bash denied
+inside its own new worktree, after two subagent attempts) is rare — the
+direct-execution fallback the main session then runs lives in
+`.claude/commands/auto-dev-review-appendix.md`, section "Fallback — direct
+execution from the main session's worktree". Read it now if that condition holds;
+do not improvise the git sequence from memory.
 
 **Pre-exit invariant (required, no exceptions):** Before ending the review session at any point — normal completion, error, context boundary, or after the fallback path above — run:
 ```bash
@@ -457,7 +444,7 @@ After all Stage 3 steps complete successfully in headless mode (review clean or 
 3. Fallback: re-derive from the diff itself using the canonical Stage-1c thresholds — run `git diff --stat $FORK_POINT...origin/<branch-name>` and count changed files and lines. **Small** = ≤10 files AND ≤500 lines AND no forbidden-area touches; **Large** otherwise. (Account for any Step 3b scope growth.)
 4. If no source yields `"small"` or `"large"`, **do NOT emit a `stage_complete` or `review_pending_approval` sentinel** — emit `blocked` instead with `blocker.reason: "scope_tier_unresolvable"`, `scope.tier: "small"` (required by the schema validator even on blocked — `auto_dev_result/schema.py`'s §3.3 validator rejects null at stage3_review), and `blocker.details: "scope.tier unresolvable — .cw/plan.md has no tier marker, .claude/cw-context.json queue_metadata.scope_hint is null, and diff stat was unavailable. Sentinel emitted with tier=null would fail schema validation and cause validation_failed retries rather than BLOCKED_ON_USER."`.
 
-> **Maintenance note:** the `**Scope tier:** ...` marker format and its single-canonical-location convention are shared across 4 files: `auto-dev-plan.md` Step 1g (writer), `auto-dev-impl.md:59` (reader), this file's step 1.5 above (reader + conditional in-place rewriter), and `auto-dev-finalize.md:31` (reader). If the marker format is tuned, update all four locations atomically.
+> **Maintenance note:** the `**Scope tier:** ...` marker format and its single-canonical-location convention are shared across 4 files: `auto-dev-plan.md` Step 1g (writer), `auto-dev-impl.md:53` (reader), this file's step 1.5 above (reader + conditional in-place rewriter), and `auto-dev-finalize.md:31` (reader). If the marker format is tuned, update all four locations atomically.
 
 `scope.tier` must always be a concrete `"small"` or `"large"` in the emitted sentinel — the schema validator requires it beyond pre-impl. Fall back to `"small"` when emitting the `scope_tier_unresolvable` blocked sentinel above.
 
