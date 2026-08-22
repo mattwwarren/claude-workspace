@@ -105,16 +105,7 @@ Spawn a **Plan** agent (`subagent_type: "Plan", model: "sonnet"`) and wait for i
 
 After a plan is in hand (extracted or generated), run an ambiguity scan against the ticket BEFORE scope classification. This runs in every case, including the auto-skip path — a pre-approved plan is not a plan free of ambiguity.
 
-**This step is non-negotiable.** Do NOT do an "inline scan" instead. None of these are valid reasons to skip the agent spawn:
-
-| Rationalization | Why it's wrong |
-|---|---|
-| "Ticket is highly prescriptive — file paths, exact code, test cases" | Detail creates false confidence; implicit assumptions go unstated precisely because the author thought everything was covered. |
-| "User said move without pausing / don't ask questions" | That governs clarifying questions to the user. The PM Reviewer runs in background and asks nothing of anyone. |
-| "I can scan it faster myself" | The agent is cheap; a missed ambiguity is rework or a wrong implementation. |
-| "Ticket is short / scope is small" | Small scope ≠ unambiguous scope. |
-
-If you catch yourself drafting prose that explains *why* the agent isn't needed this time, that IS the signal — spawn it.
+**This step is non-negotiable.** Do NOT do an "inline scan" instead. If you catch yourself drafting prose that explains *why* the agent isn't needed this time, that IS the signal — spawn it. **Being tempted to skip the spawn** is rare — the four rationalizations and why each is wrong live in `.claude/commands/auto-dev-plan-appendix.md`, section "Why an inline ambiguity scan is never a substitute for the agent spawn". Read it now if you are weighing a skip; the rule above is binding either way.
 
 **Settlement marker grammar (`plan-stage-settled`, #1683).** A settled plan item is recorded as one HTML-comment line appended to `.cw/plan-draft.md`, immediately after the round-counter line. Settlement markers live only in `.cw/plan-draft.md`: no tracker comment this pipeline writes — `## Pending Verification Scan` included — may carry a settlement marker of any kind. The grammar is closed and exhaustive; these three forms are the ENTIRE grammar, and nothing else is valid:
 
@@ -258,13 +249,11 @@ From the plan (existing or generated), classify scope:
 
 ### Checkpoint 1 (Plan Approval)
 
-**If plan was auto-skipped** (existing plan found): Skip this checkpoint entirely.
-
-**If plan was generated or built on partial:** present ticket summary, plan source, file list + estimated scope, scope classification, Phase 1 test approach, Phase 2 implementation approach, and friction highlights (skip if NONE). Then **AskUserQuestion:** "Approve plan, adjust, or skip ticket?"
-
-- **Approve** → proceed to Stage 2
-- **Adjust** → re-plan with user's adjustments, re-present
-- **Skip** → move to next ticket in queue
+**An interactive run reaching this checkpoint** is rare (headless takes the
+clause table below instead) — the auto-skip rule, the presentation contents, and
+the Approve/Adjust/Skip semantics live in
+`.claude/commands/auto-dev-plan-appendix.md`, section "Checkpoint 1 — interactive
+plan-approval gate". Read it now if this is an interactive run.
 
 **Headless** (clauses evaluated in order; first match wins): If plan agent reported `pre-flight: already satisfied` → EXIT `no_op` (see Step 1e) — this preempts every clause below, including scope and forbidden-area rejections, since there is nothing to implement. Otherwise: if plan in Linear or resumed from `.cw/plan-draft.md` → AUTO-SKIP plan-approval question (Step 1c's ambiguity scan still runs and may exit `ambiguities_pending_resolution`). **Large-scope carve-out on the resumed-draft path (#1650):** when the plan was resumed from `.cw/plan-draft.md` AND Step 1d classifies it Large, the AUTO-SKIP additionally requires approval evidence in the live-fetched comments — an operator reply approving the plan posted after the prior round's `## Pending Verification Scan` comment (the `### Approval requested` ask). Absent that evidence, EXIT `plan_pending_approval` again (persist the draft, reference the existing park comment rather than re-posting the full draft — do not re-run the advisory stations just to re-ask). A resumed draft that was parked for approval must not slip through approval by being resumed. If plan generated + small → AUTO-APPROVE and proceed (Step 1c still gates on ambiguities). If plan generated + large → EXIT `plan_pending_approval` **through the Step 1c consolidated park** (post the single enriched `## Pending Verification Scan` comment — advisory station findings, `### Approval requested`, and the full draft — no branch; ambiguity scan results ride along in the same comment when present; persist the draft to `.cw/plan-draft.md` per the Step 1c draft-persistence rule before exiting). If `--scope-limit small` rejects → EXIT `scope_exceeded`. If `--forbidden` rejects → EXIT `forbidden_area`.
 
@@ -296,12 +285,7 @@ exact sentinel shape and the fail-open rule for an unreliable `gh` answer.
 
 ### Step 1f: Plan Quality Review
 
-Fires after Checkpoint 1 (approval), after the Step 1e `no_op` short-circuit, and after Step 1c ambiguity resolutions are merged into the plan body. Two stations, two lenses, run in parallel:
-
-- **Plan Reviewer** — *is the plan specified well enough to implement?* Catches under-specification.
-- **Plan Soundness Reviewer** — *is the plan's chosen direction sound?* Catches a well-specified plan that builds the wrong thing — a direction contradicting a codified `ARCHITECTURE.md` §7/§8 rule, or matching a known high-blast-radius shape.
-
-With Step 1c (Product Manager Reviewer Mode 1 — "did the ticket leave gaps?"), these are the plan-time pre-review: requirements, specification, direction. All three run.
+Fires after Checkpoint 1 (approval), after the Step 1e `no_op` short-circuit, and after Step 1c ambiguity resolutions are merged into the plan body. Two stations, two lenses, run in parallel. **Deciding what each lens owns, or why both run alongside Step 1c,** is rare — see `.claude/commands/auto-dev-plan-appendix.md`, section "Step 1f — the two review lenses and how they compose with Step 1c".
 
 **Step 1f.1 — Signoff marker check (cheap, runs first):**
 
@@ -415,7 +399,7 @@ Use today's date and each station's current marker version. By the time Step 1g 
 **Scope tier:** <small|large> (<N> files, ~<M> lines, forbidden_touched=<bool>)
 ```
 
-This is the one reliable, machine-greppable location the three downstream readers (`auto-dev-impl.md:59`, `auto-dev-review.md`'s tier-resolution step, `auto-dev-finalize.md:31` — all already loosely matching this shape via "or similar Stage-1c marker") depend on, rather than relying on free-text presentation happening to be greppable. Exactly one occurrence must exist in the persisted plan — a later stage that rewrites it (see `auto-dev-review.md`'s one-time tier downgrade) replaces it in place rather than appending a second occurrence.
+This is the one reliable, machine-greppable location the three downstream readers (`auto-dev-impl.md:53`, `auto-dev-review.md`'s tier-resolution step, `auto-dev-finalize.md:31` — all already loosely matching this shape via "or similar Stage-1c marker") depend on, rather than relying on free-text presentation happening to be greppable. Exactly one occurrence must exist in the persisted plan — a later stage that rewrites it (see `auto-dev-review.md`'s one-time tier downgrade) replaces it in place rather than appending a second occurrence.
 
 If the plan was loaded from Linear in Step 1a and already contained a current marker, preserve it as-is. If the plan was revised in Step 1f.4, stamp with today's date, and use the tuple Step 1g.0 confirmed, not an earlier cached one.
 
