@@ -554,6 +554,47 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 See the "Known legacy gap" note under `task.deleted`: the `ticket.*` family
 carries `correlation_id=None` — read `payload["ticket_id"]` to correlate.
 
+### `focus.set`
+
+**Emitter:** `focus_set` (`cw focus set`) in `cw.cli.focus`
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "client": "<str>",
+  "lane": "<str | null>"
+}
+```
+**Semantics:** GitHub #1644. Audit trail for `cw focus set <client>[/<lane>]`,
+which points a Claude Code session at a client (and optionally a lane) for
+`cw statusline render` to read. `session_id` is the resolved
+`--session`/`$CLAUDE_CODE_SESSION_ID` value; `client`/`lane` are the
+already-validated CLI values, never a re-read of the focus store the command
+just wrote. `lane` is `null` when the operator targets a bare client with no
+lane suffix. No `correlation_id` is passed (defaults to `null`) — focus is a
+session-scoped operator pointer, not a ticket-scoped event. Not in
+`_DEFAULT_OPERATOR_EVENT_TYPES`: a low-volume operator-command audit record,
+not an attention signal.
+
+### `focus.cleared`
+
+**Emitter:** `focus_clear` (`cw focus clear`) in `cw.cli.focus`
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "client": "<str | null>",
+  "lane": "<str | null>"
+}
+```
+**Semantics:** GitHub #1644. Audit trail for `cw focus clear`, which drops a
+session's focus entry. `client`/`lane` report what was cleared (captured via
+`get_focus` before the delete) — both are `null` when the session had no
+focus entry to begin with; the command is idempotent but still emits
+unconditionally, mirroring `lane pause`/`resume`'s no-prior-state-check
+convention. No `correlation_id` (same rationale as `focus.set`). Not in
+`_DEFAULT_OPERATOR_EVENT_TYPES`.
+
 ### `session.phantom_reverted`
 
 **Emitter:** `reconcile` in `cw.reconcile` (phantom sweep)
@@ -736,10 +777,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
 A push notification is fired for most emissions (via `fire_push_notification`)
 — **except** `"freshness_gate_blocked"` and `"salvage_skip_escalated"`, which
 deliberately do not push. This mirrors the existing `gh_check_blocked`
-paused_status (verified: its `_emit_stalled_events` call site does not call
-`fire_push_notification` either) — note this sentence was already stale
-before this ticket for that pre-existing case; only the two new values'
-qualifier is in scope here.
+paused_status (verified: its `_emit_phantom_terminal_events` call site,
+`cw.reconcile.phantom._events`, does not call `fire_push_notification`
+either).
 
 **Operator-channel forward may be buffered (RFC 0011 A6, #1162):** the event
 itself is always recorded exactly as above, on every emission — the
@@ -1280,6 +1320,41 @@ when a gate fires) -- far higher volume than any currently-forwarded member.
 
 `correlation_id` is the `ticket_id`.
 
+### `requeue.review_delivery_degraded`
+
+**Emitter:** `requeue_ticket` in `cw.dev_queue.requeue` (deliverability
+resolved by `_review_reentry_deliverable`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "reason": "<str>",
+  "backend": "<str>",
+  "tracker": "<str | null>"
+}
+```
+**Semantics:** GitHub #1730. Emitted when a requeue lands the ticket at
+`Stage.REVIEW` — genuinely a review-stage re-entry of a previously-parked
+ticket, the moment an operator's tracker send-back comment is supposed to
+reach the reviewer — but the resolved REVIEW-stage executor backend cannot
+deliver operator tracker comments: `codex` paired with any tracker other
+than `github-issues`, or a backend with no comment-delivery path at all
+(`claude-native` always delivers). Namespaced by its owning module
+(`dev_queue/requeue.py`), same convention as `dispatch.scope_routing_decision`.
+This DEGRADES rather than blocks — `requeue_ticket` proceeds with the
+requeue regardless (`requeue.py`'s documented asymmetry: impl hard-exits on
+a missing plan, review/finalize degrade; #1730/#1717 comment 6 rejected a
+hard-fail guard here) — making this event the *only* signal that the
+operator's send-back never reached the reviewer. `backend`/`tracker` are
+always populated (even when deliverable, since the caller resolves them
+unconditionally) so they thread verbatim into this payload without a second,
+possibly-drifting resolution call. `correlation_id` is the `ticket_id`.
+Unlike `dispatch.scope_routing_decision`, this **is** in
+`_DEFAULT_OPERATOR_EVENT_TYPES` — an automated pipeline action proceeding
+with no operator confirmation of delivery is attention-worthy, and it has no
+companion "delivery succeeded" event to pair with (self-contained).
+
 ### `session.park_vetoed` — historical (ADR-0014)
 
 **Emitter:** none since the process-kill-timeout removal (was
@@ -1367,6 +1442,39 @@ counter resets for free per pipeline episode, since each episode constructs a
 brand-new `Session`.
 
 `correlation_id` is the `ticket_id`.
+
+### `session.sentinel_liveness_vetoed`
+
+**Emitter:** `_route_blocked_result_to_task` in `cw.reconcile._shared`
+(called from `_apply_sentinel_to_task`, itself invoked from the Stop hook
+and reconcile's local/idle/phantom sweeps)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "session_id": "<str>",
+  "transcript_age_seconds": "<float>",
+  "blocker_reason": "<str>"
+}
+```
+**Semantics:** GitHub #1406. Emitted instead of landing a RUNNING task
+terminal `FAILED` when an unparseable/unrecognized-reason `BlockedResult`
+(the catch-all: `status_unknown`, `multiple_result_blocks`, or any
+unrecognized `blocker.reason` — not the deterministic-parse-failure or
+`validation_failed` branches, which are unconditional) arrives but the
+session's transcript is still actively advancing
+(`0 <= transcript_age_seconds < TRANSCRIPT_LIVENESS_WINDOW_SECONDS`, 300s).
+Sibling closure to #1281's `session.sentinel_stage_mismatch_vetoed` (same
+incident shape, a different route to it): a malformed sentinel frame is
+evidence the *frame* was broken, not that the run is over. Unlike the other
+two vetoes, this one re-queues the task to PENDING and clears
+`target.session_id` rather than leaving it RUNNING against the same session
+— a fresh session is dispatched on retry, so there is no persisted veto
+counter/cap bounding repeat vetoes against the same session.
+`transcript_age_seconds` is the measured staleness at veto time;
+`blocker_reason` is the sentinel's verbatim (unrecognized) `blocker.reason`.
+`correlation_id` is the `ticket_id`. Not in `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
 ### `gate.auto_approved`
 
