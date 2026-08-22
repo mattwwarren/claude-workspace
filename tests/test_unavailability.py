@@ -144,11 +144,11 @@ class TestClassifyUnavailabilityStructural:
         not load on every run. The assertion follows the content -- it is
         re-pointed at the appendix, not weakened or dropped.
         """
-        finalize = _cmd("auto-dev-finalize.md")
+        finalize = _appendix("finalize")
         intake_appendix = _appendix("intake")
         for signature, _family in UNAVAILABILITY_SIGNATURES:
             assert signature in finalize, (
-                f"{signature!r} missing from auto-dev-finalize.md prose mirror"
+                f"{signature!r} missing from auto-dev-finalize-appendix.md prose mirror"
             )
             assert signature in intake_appendix, (
                 f"{signature!r} missing from auto-dev-intake-appendix.md prose mirror"

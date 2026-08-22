@@ -161,14 +161,140 @@ Options:
 
 ---
 
-## Unavailability classifier: push sites and mirror provenance
+## Post-push merge conflict: the `merge_conflict_post_push` sentinel
 
-The classifier covers three push sites the subagent's returned text can reflect,
-in the order a single run hits them: (1) Step 4c.2's post-merge push (#1414),
+Reached from Step 4c.5 of the core doc, and only when the single auto-rebase attempt and the semantic auto-resolve both failed or were refused. A cleanly-mergeable PR never reaches here.
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage5_post_create",
+  "scope": {
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' above>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": false
+  },
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' above>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path — ~/.cw/wt/<hash>/auto-dev-<ticket>>",
+  "pr_info": {
+    "number": <pr_number>,
+    "url": "<pr_url>",
+    "auto_merge": <bool>,
+    "base": "main"
+  },
+  "review": null,
+  "health": {
+    "lowest_agent_confidence": "<HIGH | MEDIUM | LOW from health check>",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage5_post_create",
+    "reason": "merge_conflict_post_push",
+    "details": "PR #<N> opened with conflicts after sibling merges to origin/main between /prep-pr's sync-with-main and PR open. One auto-rebase attempted and failed; conflicted files: <list>",
+    "exception_type": null,
+    "message": "PR is open but conflicts with main; auto-rebase failed",
+    "recovery_hint": "Manual rebase in the impl worktree, OR close PR #<N> and re-dispatch the ticket",
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  },
+  "next_actions": ["manual_intervention"]
+}
+```
+
+**Critical: every field above is required.** `scope`, `plan_source`, and `health` MUST carry real values from earlier stages. Emitting `null` or omitting them fails consumer schema validation and synthesizes a `validation_failed` blocker that masks the real `merge_conflict_post_push` reason.
+
+**Producer note:** `merge_conflict_post_push` is an open-enum addition to `blocker.reason` (headless-contract.md §4.2 — `reason` is open by design). Consumers surface it verbatim; no parser change needed.
+
+**Defense-in-depth handoff:** the blocker is `retry_eligible: true` because `/review-monitor` auto-engages on orphaned CONFLICTING PRs authored by `@me`. If it rebases successfully the orchestrator can re-dispatch this ticket; if it also fails, `recovery_hint` hands over to a human.
+
+---
+
+## Unavailability classifier: signature table, sentinel, and push sites
+
+Reached from Step 4c.2 of the core doc, and only when the `/prep-pr` subagent
+returned text that looks like an unavailability failure. A healthy run never
+matches, so this whole block is rare-path. Match any signature below verbatim;
+do not add or remove one from memory.
+
+- Auth-failure (#1049's original four, unchanged):
+  - `Permission denied (publickey)`
+  - `could not read Username`
+  - `Host key verification failed`
+  - `Authentication failed`
+- Network-unreachable:
+  - `Could not resolve host`
+  - `Network is unreachable`
+  - `Temporary failure in name resolution`
+  - `Failed to connect to`
+  - `Could not connect to server`
+- GitHub 5xx / secondary-rate-limit:
+  - `secondary rate limit`
+  - `HTTP 502`
+  - `HTTP 503`
+  - `HTTP 500`
+
+If any signature is present, emit the structured `blocked` sentinel below and stop — do NOT proceed to the verify-script gate or Step 4c.5.
+
+**Sentinel template — `push_auth_failed` blocker:**
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage4b_pr_create",
+  "scope": {
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' in the core doc>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": false
+  },
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' in the core doc>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path — ~/.cw/wt/<hash>/auto-dev-<ticket>>",
+  "pr": null,
+  "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
+  "health": {
+    "lowest_agent_confidence": "<HIGH | MEDIUM | LOW from health check>",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage4b_pr_create",
+    "reason": "push_auth_failed",
+    "details": "<matched signature + which push site, e.g. 'ship-it.md initial push: Permission denied (publickey)', 'Step 4c.2 post-merge push: Could not resolve host', or 'prep-pr.md Step 1 sync-with-base push: Authentication failed'>",
+    "exception_type": null,
+    "message": "git push failed authentication (SSH key locked or credentials expired)",
+    "recovery_hint": "Unlock the SSH key (or refresh credentials) and requeue the ticket",
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  },
+  "next_actions": []
+}
+```
+
+**Do not add `push_auth_failed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result/schema.py`, currently `{"agent_block"}`). A locked SSH key is not fixed by re-running implementation; regressing FINALIZE→IMPL would burn `FINALIZE_REGRESS_CAP` attempts against a still-locked key. Park for the operator via the sentinel above.
+
+**cw-side classification (RFC 0011 A1, #1155):** `push_auth_failed` is retro-classified under `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`, so cw tags its park `paused_status: "awaiting_operator_availability"` rather than generic `"blocked"` — a cw-side (`dispatch/routing.py`) routing change only, no producer change required.
+
+**Push sites covered.** Three, in the order a single run hits them: (1) Step 4c.2's post-merge push (#1414),
 (2) `/prep-pr`'s own Step 1 sync-with-base push (#1414), and (3) the delegated
 project's `ship-it.md` initial `git push -u origin "$BRANCH"` (#1049).
 
-The signature list in the core doc is a PROSE MIRROR of
+The signature list above is a PROSE MIRROR of
 `src/cw/unavailability.py`'s `UNAVAILABILITY_SIGNATURES`; keep the two copies in
 sync — `test_unavailability_signatures_mirrored_in_prose` is the drift guard.
 `MCP-github-unreachable` is deliberately not mirrored: no verified signature
@@ -181,3 +307,71 @@ main session, which reuses this same signature list.
 (headless-contract.md §4.2 — `reason` is open by design, the same precedent as
 `merge_conflict_post_push`). Consumers surface it verbatim; no parser change is
 needed.
+
+---
+
+## Step 4c re-verification failure: the `automerge_not_armed` sentinel
+
+Reached from Step 4c's main-session re-verification in the core doc, and only
+when `prep_pr_finalize.py verify --require-automerge` reported the
+`automerge-enabled` check failed. The verify passing is the common path.
+
+**Sentinel template — `automerge_not_armed` blocker:**
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage5_post_create",
+  "scope": {
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' in the core doc>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": false
+  },
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' in the core doc>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path — ~/.cw/wt/<hash>/auto-dev-<ticket>>",
+  "pr": null,
+  "pr_info": {
+    "number": <pr_number>,
+    "url": "<pr_url>",
+    "auto_merge": false,
+    "base": "main"
+  },
+  "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
+  "health": {
+    "lowest_agent_confidence": "<HIGH | MEDIUM | LOW from health check>",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage5_post_create",
+    "reason": "automerge_not_armed",
+    "details": "Step 4c re-verification: prep_pr_finalize.py verify --require-automerge reported automerge-enabled check failed (autoMergeRequest read back null) for PR #<N>",
+    "exception_type": null,
+    "message": "gh pr merge --auto reported success but auto-merge was never actually armed",
+    "recovery_hint": "Run `gh pr merge <pr-number> --auto --squash` manually and re-verify, or merge the PR directly",
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  },
+  "next_actions": ["manual_intervention"]
+}
+```
+
+**Do not add `automerge_not_armed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`src/cw/auto_dev_result/schema.py:83`, currently `{"agent_block"}`). A failed auto-merge arm is not fixed by re-running implementation; regressing FINALIZE→IMPL would burn `FINALIZE_REGRESS_CAP` attempts against a PR that already exists and just needs re-arming. Park for the operator via the sentinel above.
+
+**Producer note:** `automerge_not_armed` is an open-enum addition to `blocker.reason` (headless-contract.md §4.2 — `reason` is open by design). Consumers surface it verbatim; no parser change needed.
+
+---
+
+## Step 4c.2: the `auto` permission-mode limitation, and the no-`/ship-it` block
+
+**Permission mode (known limitation, #636 — deferred):** headless workers run under `claude --bg --permission-mode auto` (`native_daemon.py` `_DEFAULT_PERMISSION_MODE`), so the `auto` classifier fires on `gh pr create` inside a worktree-isolated subagent and, with no TTY to approve, blocks `/prep-pr`. The allowlist `Bash(gh pr:*)` does NOT suppress it, and setting `bypassPermissions` on *this subagent spawn alone* is ineffective — the worker's own `auto` mode is the source. The effective fix (spawning the worker with a non-`auto` `permission_mode`) is **deferred** to RFC 0005's FINALIZE/REVIEW stages (#622/#621); until then a classifier block surfaces as a BLOCK for manual ship.
+
+**If the agent returns BLOCK due to "no project `/ship-it`":** The project hasn't been set up for automated PR creation. AskUserQuestion: "Project has no `.claude/commands/ship-it.md`. Create one manually and resume, skip this ticket (leave branch pushed), or abort pipeline?"
