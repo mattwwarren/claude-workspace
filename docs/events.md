@@ -777,10 +777,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
 A push notification is fired for most emissions (via `fire_push_notification`)
 — **except** `"freshness_gate_blocked"` and `"salvage_skip_escalated"`, which
 deliberately do not push. This mirrors the existing `gh_check_blocked`
-paused_status (verified: its `_emit_stalled_events` call site does not call
-`fire_push_notification` either) — note this sentence was already stale
-before this ticket for that pre-existing case; only the two new values'
-qualifier is in scope here.
+paused_status (verified: its `_emit_phantom_terminal_events` call site,
+`cw.reconcile.phantom._events`, does not call `fire_push_notification`
+either).
 
 **Operator-channel forward may be buffered (RFC 0011 A6, #1162):** the event
 itself is always recorded exactly as above, on every emission — the
