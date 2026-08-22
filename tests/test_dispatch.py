@@ -14671,9 +14671,7 @@ class TestWarnIfScopedServeStarvesSiblings:
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
-        self._stub_ticks(
-            monkeypatch, {"review-bingo": _make_tick_summary(pending=3)}
-        )
+        self._stub_ticks(monkeypatch, {"review-bingo": _make_tick_summary(pending=3)})
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
         run_dispatch_loop(once=True, emit=None)
         assert not [r for r in caplog.records if "scoped serve" in r.message]

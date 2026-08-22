@@ -4923,9 +4923,7 @@ class TestCheckLoopLiveness:
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
             "cw.doctor.loop_health.latest_tick_summary_by_client",
-            lambda: {
-                "test-client": _make_tick_summary(pending=2, tick_at=stale_at)
-            },
+            lambda: {"test-client": _make_tick_summary(pending=2, tick_at=stale_at)},
         )
         results = _check_loop_liveness()
         warn_results = [r for r in results if r.warn]
@@ -4944,9 +4942,7 @@ class TestCheckLoopLiveness:
         fresh_at = datetime.now(UTC) - timedelta(seconds=10)
         monkeypatch.setattr(
             "cw.doctor.loop_health.latest_tick_summary_by_client",
-            lambda: {
-                "test-client": _make_tick_summary(pending=2, tick_at=fresh_at)
-            },
+            lambda: {"test-client": _make_tick_summary(pending=2, tick_at=fresh_at)},
         )
         results = _check_loop_liveness()
         assert not any(r.warn for r in results)
@@ -4977,9 +4973,7 @@ class TestCheckLoopLiveness:
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
             "cw.doctor.loop_health.latest_tick_summary_by_client",
-            lambda: {
-                "test-client": _make_tick_summary(pending=0, tick_at=stale_at)
-            },
+            lambda: {"test-client": _make_tick_summary(pending=0, tick_at=stale_at)},
         )
         results = _check_loop_liveness()
         assert not any(r.warn for r in results)
@@ -5013,9 +5007,7 @@ class TestCheckLoopLiveness:
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
             "cw.doctor.loop_health.latest_tick_summary_by_client",
-            lambda: {
-                "test-client": _make_tick_summary(pending=2, tick_at=stale_at)
-            },
+            lambda: {"test-client": _make_tick_summary(pending=2, tick_at=stale_at)},
         )
         self._save_marker("test-client")
         results = _check_loop_liveness()
@@ -5032,9 +5024,7 @@ class TestCheckLoopLiveness:
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
             "cw.doctor.loop_health.latest_tick_summary_by_client",
-            lambda: {
-                "test-client": _make_tick_summary(pending=2, tick_at=stale_at)
-            },
+            lambda: {"test-client": _make_tick_summary(pending=2, tick_at=stale_at)},
         )
         self._save_marker("other-client")
         results = _check_loop_liveness()
