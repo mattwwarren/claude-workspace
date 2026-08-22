@@ -151,6 +151,14 @@ _EXTERNAL_COUNTERPARTY_IDLE_REASON = "external_counterparty_idle"
 # paused_status written to SESSION_NEEDS_ATTENTION when a client's
 # consecutive freshness-gate-block latch trips (RFC 0007 §W2).
 _FRESHNESS_BLOCK_ESCALATED_REASON = "freshness_gate_blocked"
+# paused_status written to SESSION_NEEDS_ATTENTION by the dispatch loop's
+# proactive staleness watchdog: a client's last DISPATCH_TICK is older than
+# TICK_STALE_SECONDS while it still has pending work and carries no live
+# executor-blocked marker (#1875). Client-scoped like
+# _FRESHNESS_BLOCK_ESCALATED_REASON above, but recurring on a fixed interval
+# rather than a one-shot latch -- the condition it reports (this client's
+# dispatch loop is not ticking) does not clear itself.
+_DISPATCH_LOOP_STALE_REASON = "dispatch_loop_stale"
 # paused_status written to SESSION_NEEDS_ATTENTION when a session's
 # consecutive salvage-skip latch trips (closes #974).
 _SALVAGE_SKIP_ESCALATED_REASON = "salvage_skip_escalated"
