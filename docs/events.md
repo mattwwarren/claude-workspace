@@ -554,6 +554,47 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 See the "Known legacy gap" note under `task.deleted`: the `ticket.*` family
 carries `correlation_id=None` — read `payload["ticket_id"]` to correlate.
 
+### `focus.set`
+
+**Emitter:** `focus_set` (`cw focus set`) in `cw.cli.focus`
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "client": "<str>",
+  "lane": "<str | null>"
+}
+```
+**Semantics:** GitHub #1644. Audit trail for `cw focus set <client>[/<lane>]`,
+which points a Claude Code session at a client (and optionally a lane) for
+`cw statusline render` to read. `session_id` is the resolved
+`--session`/`$CLAUDE_CODE_SESSION_ID` value; `client`/`lane` are the
+already-validated CLI values, never a re-read of the focus store the command
+just wrote. `lane` is `null` when the operator targets a bare client with no
+lane suffix. No `correlation_id` is passed (defaults to `null`) — focus is a
+session-scoped operator pointer, not a ticket-scoped event. Not in
+`_DEFAULT_OPERATOR_EVENT_TYPES`: a low-volume operator-command audit record,
+not an attention signal.
+
+### `focus.cleared`
+
+**Emitter:** `focus_clear` (`cw focus clear`) in `cw.cli.focus`
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "client": "<str | null>",
+  "lane": "<str | null>"
+}
+```
+**Semantics:** GitHub #1644. Audit trail for `cw focus clear`, which drops a
+session's focus entry. `client`/`lane` report what was cleared (captured via
+`get_focus` before the delete) — both are `null` when the session had no
+focus entry to begin with; the command is idempotent but still emits
+unconditionally, mirroring `lane pause`/`resume`'s no-prior-state-check
+convention. No `correlation_id` (same rationale as `focus.set`). Not in
+`_DEFAULT_OPERATOR_EVENT_TYPES`.
+
 ### `session.phantom_reverted`
 
 **Emitter:** `reconcile` in `cw.reconcile` (phantom sweep)
