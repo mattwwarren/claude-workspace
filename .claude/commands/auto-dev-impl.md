@@ -16,12 +16,9 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 ---
 
-> **Model selection (scope-based):** The implementation agent's model is **resolved from the
-> ticket's scope tier** — **Small → `model: "sonnet"`, Large → `model: "opus"`** — NOT
-> unconditionally Opus. Resolve the tier via the ladder in "Resolve the impl model from scope
-> tier" below **before** spawning, and pass the resolved `$IMPL_MODEL` to every spawn variant.
-> Do not use `model: inherit` (it propagates the operator's Opus default into every fan-out).
-> See CLAUDE.md §"Model Selection for Subagents".
+> **Model selection (scope-based):** resolve `$IMPL_MODEL` from the ticket's scope tier via
+> "Resolve the impl model from scope tier" below **before** spawning — never `model: inherit`
+> (it propagates the operator's Opus default into every fan-out).
 
 ## Stage 2: Implement (Agent in Worktree)
 
@@ -38,17 +35,14 @@ else
 fi
 ```
 
-Alternatively: inspect `.claude/cw-context.json` for the `"headless"` field's **value**.
-The field is always written (interactive USER-origin sessions get `headless: false`, not
-an absent field), so detection must key on truthiness, not presence, and fail open to
-interactive when the file is missing, unreadable, or the field is absent/false — the
-authoritative check `_is_headless()` implements (`src/cw/reconcile/_shared.py:493-505`).
+Fail open to interactive when the file is missing, unreadable, or the field is
+absent/false — the authoritative check `_is_headless()` implements.
 
-The `isolation: "worktree"` flag on the Agent() call creates a **second, nested worktree
-inside the main checkout** (`<main_repo>/.claude/worktrees/<slug>`). When cw dispatch
-already provided an isolated worktree as the session cwd, that nested worktree is
-redundant and makes the main checkout path trivially derivable — the #766 leak pattern
-(worker `cd`s to main checkout and commits there).
+**Needing the value-based `"headless"` check, or the reason a nested worktree is
+harmful,** is rare — both live in `.claude/commands/auto-dev-impl-appendix.md`,
+section "Dispatch detection: the alternative check and the #766 nested-worktree
+leak". Read it now if the presence check above is ambiguous; do not improvise
+the detection rule from memory.
 
 ### Resolve the impl model from scope tier
 
@@ -78,21 +72,20 @@ resolved above — Sonnet for Small scope, Opus for Large):
   `worktree_path` in `.claude/cw-context.json` is the authoritative anchor for all git
   operations.
 
-**Async dispatch note (verified 2026-08-19).** The Agent tool is asynchronous unconditionally —
-`run_in_background` is no longer one of its parameters and there is no way to block on a spawn.
-Waiting for the impl agent means **ending the parent turn** and resuming on its completion
-notification. That is safe in headless: the Stop hook payload lists the in-flight subagent in
-`background_tasks` (`{"type": "subagent", "status": "running", ...}`) and `cw signal-stop` defers
-session completion while that list is non-empty (`src/cw/cli/stop_hook.py:364`), so the run is not
-orphaned. **Never** hold the turn open with no-op `Bash` calls (`true`, `sleep`, repeated polls) —
-each is a wasted model round-trip, and busy-waiting camouflages a stuck worker: ADR-0014 removed
-every kill timer, so the only automated stuck-worker signal left is the liveness distress sweep
-(`src/cw/reconcile/liveness.py`), which keys on transcript staleness — no-op polls keep the
-transcript fresh, pin the session at LIVE, and `SESSION_NEEDS_ATTENTION` never fires. The
-asymmetry matters when writing the impl agent's own prompt: a parent's turn-end is a pause, but a **subagent's** turn-end
-is a *return* — work it leaves running in the background does not survive, so the impl agent must
-finish its build/test commands inside its own turn rather than backgrounding them and returning.
-(`run_in_background` is still a valid `Bash` parameter; only the Agent spawn lost it.)
+**Async dispatch note (verified 2026-08-19).** The Agent tool is asynchronous
+unconditionally: waiting for the impl agent means **ending the parent turn** and resuming
+on its completion notification. That is safe in headless — the Stop hook payload lists the
+in-flight subagent in `background_tasks` (`{"type": "subagent", "status": "running", ...}`)
+and `cw signal-stop` defers session completion while that list is non-empty
+(`src/cw/cli/stop_hook.py:364`). **Never** hold the turn open with no-op `Bash` calls
+(`true`, `sleep`, repeated polls): ADR-0014 removed every kill timer, so the only automated
+stuck-worker signal left is the liveness distress sweep, and no-op polls suppress it.
+
+**Being tempted to busy-wait, or writing the impl agent's own turn-ending
+instructions,** is rare — the full reasoning (why the poll defeats the liveness
+sweep, and why a subagent's turn-end is a *return* rather than a pause) lives in
+`.claude/commands/auto-dev-impl-appendix.md`, section "Async dispatch: why never
+to busy-wait on the impl agent". Read it now if either applies.
 
 ### Worktree Isolation Guard (headless) — #402
 
@@ -105,11 +98,11 @@ or `cd`-then-git invocation in this stage MUST target that worktree (or the
 trap-cleaned temp worktree created below), **never** the client's
 `workspace_path` (the operator's live checkout).
 
-This codifies the invariant behind the #402 isolation breach (a worker's
-`git checkout` resolved "the workspace" to the operator's main checkout).
-The interactive "continue manually from the worktree" fallback — and any
-direct-git fallback assuming the main session's checkout is the work tree —
-**does not apply in headless mode**:
+**Being tempted by any direct-git fallback onto another checkout** is rare — the
+#402 breach this codifies is described in
+`.claude/commands/auto-dev-impl-appendix.md`, section "Worktree isolation: the
+#402 breach this codifies". Read it now if that temptation arises; the rules
+below are binding regardless:
 
 - If the isolation worktree or `worktree_path` is unreachable, or any step is
   tempted to fall back to direct git on another checkout, **do NOT fall back**
@@ -327,9 +320,12 @@ This step replaces "trust the agent's `Could work be incomplete?: NO`" with "ver
 
 ### Implementation Failure Escalation
 
-If any agent returns friction level **BLOCK**: surface the blocker immediately via AskUserQuestion and do NOT proceed to the next stage.
-
-If the implementation agent fails tests/lint/mypy after 2 attempts: surface the failure details via AskUserQuestion — "Continue manually from worktree, skip ticket, or abort pipeline?" — and do NOT loop indefinitely.
+**An interactive run hitting a BLOCK, or a second failed tests/lint/mypy
+attempt,** is rare — the escalation procedure lives in
+`.claude/commands/auto-dev-impl-appendix.md`, section "Implementation failure
+escalation (interactive only)". Read it now if this is an interactive run and
+either condition applies. In headless mode neither branch applies: escalate
+exclusively through the sentinel's `blocker` field.
 
 ### S2 Completion Marker
 
@@ -339,7 +335,7 @@ The final implementation commit on the branch MUST include the trailer:
 
 This is the durable signal the resume detector uses to advance past S2 — attach it via `git commit --trailer "Auto-Dev-Stage: impl-complete"`, to the last commit only when the implementation spans several.
 
-Squash-merge to main hides the trailer from main's history but it remains on the branch's commits, which is where the detector reads. On resume, a branch with this trailer + no PR → `s3_review_pending`; a branch without it → `s2_implementing` (resume in-flight).
+On resume, a branch with this trailer + no PR → `s3_review_pending`; a branch without it → `s2_implementing` (resume in-flight). **Reasoning about the trailer's survival across a squash-merge** is rare — see `.claude/commands/auto-dev-impl-appendix.md`, section "S2 completion marker: why the trailer survives squash-merge".
 
 The Stage 2 agent prompt MUST include this trailer requirement, added to the "Instruction to stage and commit changes with a conventional commit message" bullet:
 
