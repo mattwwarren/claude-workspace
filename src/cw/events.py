@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import json
 import logging
+import os
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -360,7 +361,22 @@ def _apply_cursor(
     return parsed, False
 
 
-def _read_lines_after_offset(offset: int) -> tuple[list[str], int]:
+class _InboxRead(NamedTuple):
+    """One consistent observation of the inbox: its bytes and its identity.
+
+    ``size``/``ino`` come from an ``fstat`` on the *same* descriptor the lines
+    were read from, so they cannot describe a different file than the bytes do.
+    Taking them from a separate ``stat`` call reopens the replace-between-calls
+    window the inode check exists to close.
+    """
+
+    lines: list[str]
+    offset: int
+    size: int
+    ino: int
+
+
+def _read_lines_after_offset(offset: int) -> _InboxRead:
     """Return whole lines appended past *offset*, plus the new consumed offset.
 
     This is the primitive that makes following cheap (#1979): the follow loops
@@ -382,40 +398,43 @@ def _read_lines_after_offset(offset: int) -> tuple[list[str], int]:
     """
     try:
         with inbox_path().open("rb") as handle:
+            stat = os.fstat(handle.fileno())
             handle.seek(offset)
             chunk = handle.read()
     except FileNotFoundError:
         # Follower started before the first record_event; poll until it exists.
-        return [], offset
+        return _InboxRead([], offset, 0, 0)
     except OSError:
         # Anything else (permissions, disk fault) is not a "not yet" condition.
         # Swallowing it silently would leave a daemon looking healthy while it
         # never sees another event again, so say so and let the caller retry.
         logger.exception("failed reading inbox at offset %d", offset)
-        return [], offset
+        return _InboxRead([], offset, 0, 0)
 
     newline = chunk.rfind(b"\n")
     if newline == -1:
-        return [], offset
+        return _InboxRead([], offset, stat.st_size, stat.st_ino)
 
     complete = chunk[: newline + 1]
     # Cutting at b"\n" is always a valid UTF-8 boundary: 0x0A never appears as
     # a continuation byte, so no multi-byte character can be split here.
-    return complete.decode("utf-8").splitlines(), offset + len(complete)
+    lines = complete.decode("utf-8").splitlines()
+    return _InboxRead(lines, offset + len(complete), stat.st_size, stat.st_ino)
 
 
 def _resolve_follow_start(
     since_cursor: str | None,
-) -> tuple[list[OrchestratorEvent], int]:
+) -> tuple[list[OrchestratorEvent], _InboxRead]:
     """Resolve *since_cursor* to a byte offset with one full read.
 
     Followers pay this whole-inbox cost once at startup; every later poll goes
     through :func:`_read_lines_after_offset`. Returns the events after the
-    cursor — unfiltered, since callers apply their own filters — and the
-    consumed byte offset.
+    cursor — unfiltered, since callers apply their own filters — and the read
+    that produced them, so a caller can seed follow state from a single
+    consistent observation rather than a separate ``stat``.
     """
-    lines, offset = _read_lines_after_offset(0)
-    parsed = _parse_lines(lines)
+    read = _read_lines_after_offset(0)
+    parsed = _parse_lines(read.lines)
     after_cursor, found = _apply_cursor(parsed, since_cursor)
     # An empty inbox has lost nothing, so it warrants no warning — read_events
     # short-circuits on `if not raw_text` before cursor resolution for the same
@@ -424,7 +443,7 @@ def _resolve_follow_start(
         logger.warning(
             "cursor %s not found in inbox; replaying from start", since_cursor
         )
-    return after_cursor, offset
+    return after_cursor, read
 
 
 def read_events(
@@ -485,7 +504,10 @@ def read_events(
     # Why: callers are idempotent — orchestrate_retire guards on sess.status ==
     # COMPLETED, dispatch consumer skips non-RUNNING tasks, and event tail is
     # display-only — so replaying from the start is safe.
-    if not found:
+    # `and parsed` matches _resolve_follow_start: an inbox that parsed to
+    # nothing (empty, or a single tolerated torn line) has lost no cursor, and
+    # "replaying from start" would be a false alarm in a daemon's logs.
+    if not found and parsed:
         logger.warning("cursor %s not found in inbox; replaying from start", cursor)
 
     events = [
@@ -538,17 +560,26 @@ class _FollowState(NamedTuple):
     cursor: str | None
 
 
-def _stat_inbox() -> tuple[int, int]:
-    """Return ``(size, inode)`` for the inbox, or ``(0, 0)`` when unreadable.
+def _stat_inbox() -> tuple[int, int] | None:
+    """Return ``(size, inode)``, ``(0, 0)`` when absent, or ``None`` on failure.
 
-    An absent inbox and an unstattable one are deliberately the same answer:
-    a follower started before the first ``record_event`` must poll until the
-    file appears rather than failing.
+    Three outcomes, not two. An absent inbox is ``(0, 0)`` — a follower started
+    before the first ``record_event`` polls until the file appears. But a stat
+    that *fails* (permissions, a network filesystem hiccup) is ``None``, not
+    ``(0, 0)``: reporting it as "size 0, inode 0" is indistinguishable from a
+    replaced file, which would fire a false "inbox replaced" warning, force a
+    full re-resolve, and store a zeroed identity that makes the *next* poll
+    re-resolve a second time — silently, because the zeroed inode also defeats
+    the first-poll warning guard. Mirrors the distinction
+    :func:`_read_lines_after_offset` already draws.
     """
     try:
         stat = inbox_path().stat()
-    except OSError:
+    except FileNotFoundError:
         return 0, 0
+    except OSError:
+        logger.exception("failed to stat inbox")
+        return None
     return stat.st_size, stat.st_ino
 
 
@@ -569,7 +600,12 @@ def _poll_follow_state(
     ones that follower has never seen. Skipping to the new EOF instead would
     silently drop them.
     """
-    size, ino = _stat_inbox()
+    stat = _stat_inbox()
+    if stat is None:
+        # Transient failure. Change nothing and retry on the next poll —
+        # anything else would misreport a failed stat as a replaced file.
+        return [], state
+    size, ino = stat
 
     if ino != state.ino or size < state.offset:
         if state.ino:  # not the first poll — a real replacement, worth saying
@@ -582,17 +618,17 @@ def _poll_follow_state(
                 size,
                 state.cursor,
             )
-        events, offset = _resolve_follow_start(state.cursor)
+        events, read = _resolve_follow_start(state.cursor)
         cursor = events[-1].id if events else state.cursor
-        return events, _FollowState(offset, size, ino, cursor)
+        return events, _FollowState(read.offset, read.size, read.ino, cursor)
 
     if size == state.seen_size:
         return [], state._replace(seen_size=size)
 
-    lines, offset = _read_lines_after_offset(state.offset)
-    events = _parse_lines(lines)
+    read = _read_lines_after_offset(state.offset)
+    events = _parse_lines(read.lines)
     cursor = events[-1].id if events else state.cursor
-    return events, _FollowState(offset, size, ino, cursor)
+    return events, _FollowState(read.offset, read.size, read.ino, cursor)
 
 
 def _event_matches_wait(
@@ -646,9 +682,10 @@ def wait_for_event(
     matched = False
 
     # No cursor: wait_for_event matches against pre-existing history too.
-    size, ino = _stat_inbox()
-    new_events, offset = _resolve_follow_start(None)
-    state = _FollowState(offset, size, ino, new_events[-1].id if new_events else None)
+    new_events, read = _resolve_follow_start(None)
+    state = _FollowState(
+        read.offset, read.size, read.ino, new_events[-1].id if new_events else None
+    )
 
     while True:
         for ev in new_events:
@@ -708,10 +745,12 @@ def tail_events_follow(
     Exits when the caller sends a ``GeneratorExit`` (or raises
     ``KeyboardInterrupt`` / ``BrokenPipeError`` in the iterating loop).
     """
-    size, ino = _stat_inbox()
-    new_events, offset = _resolve_follow_start(since_cursor)
+    new_events, read = _resolve_follow_start(since_cursor)
     state = _FollowState(
-        offset, size, ino, new_events[-1].id if new_events else since_cursor
+        read.offset,
+        read.size,
+        read.ino,
+        new_events[-1].id if new_events else since_cursor,
     )
 
     while True:

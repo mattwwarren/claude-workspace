@@ -1266,10 +1266,8 @@ def test_cli_event_tail_follow_returns_on_exhausted_stream(
 # ---------------------------------------------------------------------------
 
 
-def test_stat_inbox_oserror_treated_as_absent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A stat() OSError is reported as (0, 0), same as an absent inbox.
+def test_stat_inbox_absent_is_zeros(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An absent inbox is (0, 0) — a follower polls until it appears.
 
     Replaces the #954 _poll_inbox_growth guard test: that helper was superseded
     by _stat_inbox / _poll_follow_state in #1979, but the invariant it pinned
@@ -1277,13 +1275,53 @@ def test_stat_inbox_oserror_treated_as_absent(
     """
     from cw.events import _stat_inbox
 
+    class _MissingPath:
+        def stat(self) -> object:
+            raise FileNotFoundError
+
+    monkeypatch.setattr("cw.events.inbox_path", _MissingPath)
+
+    assert _stat_inbox() == (0, 0)
+
+
+def test_stat_inbox_transient_failure_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed stat is None, NOT (0, 0) — it is not a replaced file.
+
+    Collapsing the two would make a permissions blip or an NFS hiccup
+    indistinguishable from a truncation: a false "inbox replaced" warning, a
+    full re-resolve, and a zeroed identity that forces a second re-resolve on
+    the next poll — that one silent, since a zero inode also defeats the
+    first-poll warning guard.
+    """
+    from cw.events import _stat_inbox
+
     class _RaisingPath:
         def stat(self) -> object:
-            raise OSError
+            raise PermissionError
 
     monkeypatch.setattr("cw.events.inbox_path", _RaisingPath)
 
-    assert _stat_inbox() == (0, 0)
+    assert _stat_inbox() is None
+
+
+def test_poll_follow_state_transient_stat_failure_changes_nothing(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient stat failure must not be mistaken for a replacement."""
+    import cw.events as events_mod
+
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    events, read = events_mod._resolve_follow_start(None)
+    state = events_mod._FollowState(read.offset, read.size, read.ino, events[-1].id)
+
+    monkeypatch.setattr(events_mod, "_stat_inbox", lambda: None)
+
+    new_events, new_state = events_mod._poll_follow_state(state)
+
+    assert new_events == []
+    assert new_state == state  # identity preserved, not zeroed
 
 
 def test_tail_events_follow_size_decrease_warns_and_continues(
@@ -3132,14 +3170,14 @@ def test_read_lines_after_offset_returns_only_appended(tmp_events_dir: Path) -> 
     inbox.write_text('{"a": 1}\n{"b": 2}\n')
     first_size = inbox.stat().st_size
 
-    lines, offset = _read_lines_after_offset(0)
-    assert lines == ['{"a": 1}', '{"b": 2}']
-    assert offset == first_size
+    read = _read_lines_after_offset(0)
+    assert read.lines == ['{"a": 1}', '{"b": 2}']
+    assert read.offset == first_size
 
     inbox.write_text('{"a": 1}\n{"b": 2}\n{"c": 3}\n')
-    lines, offset = _read_lines_after_offset(first_size)
-    assert lines == ['{"c": 3}']
-    assert offset == inbox.stat().st_size
+    read = _read_lines_after_offset(first_size)
+    assert read.lines == ['{"c": 3}']
+    assert read.offset == inbox.stat().st_size
 
 
 def test_read_lines_after_offset_leaves_torn_trailing_line(
@@ -3157,15 +3195,15 @@ def test_read_lines_after_offset_leaves_torn_trailing_line(
     inbox = tmp_events_dir / "inbox.jsonl"
     inbox.write_text('{"a": 1}\n{"b": 2')  # torn: no trailing newline
 
-    lines, offset = _read_lines_after_offset(0)
-    assert lines == ['{"a": 1}']
-    assert offset == len('{"a": 1}\n')
+    read = _read_lines_after_offset(0)
+    assert read.lines == ['{"a": 1}']
+    assert read.offset == len('{"a": 1}\n')
 
     # Writer completes the line; the next poll picks it up whole.
     inbox.write_text('{"a": 1}\n{"b": 2}\n')
-    lines, offset = _read_lines_after_offset(offset)
-    assert lines == ['{"b": 2}']
-    assert offset == inbox.stat().st_size
+    read = _read_lines_after_offset(read.offset)
+    assert read.lines == ['{"b": 2}']
+    assert read.offset == inbox.stat().st_size
 
 
 def test_read_lines_after_offset_no_newline_consumes_nothing(
@@ -3177,7 +3215,9 @@ def test_read_lines_after_offset_no_newline_consumes_nothing(
     inbox = tmp_events_dir / "inbox.jsonl"
     inbox.write_text('{"partial"')
 
-    assert _read_lines_after_offset(0) == ([], 0)
+    read = _read_lines_after_offset(0)
+    assert read.lines == []
+    assert read.offset == 0
 
 
 def test_read_lines_after_offset_absent_inbox(tmp_events_dir: Path) -> None:
@@ -3185,7 +3225,12 @@ def test_read_lines_after_offset_absent_inbox(tmp_events_dir: Path) -> None:
     from cw.events import _read_lines_after_offset
 
     assert not (tmp_events_dir / "inbox.jsonl").exists()
-    assert _read_lines_after_offset(0) == ([], 0)
+
+    read = _read_lines_after_offset(0)
+
+    assert read.lines == []
+    assert read.offset == 0
+    assert (read.size, read.ino) == (0, 0)
 
 
 def _three_events() -> list[OrchestratorEvent]:
@@ -3260,14 +3305,14 @@ def test_read_lines_after_offset_survives_multibyte_utf8(
     inbox.write_text(first + "\n")
     boundary = inbox.stat().st_size
 
-    lines, offset = _read_lines_after_offset(0)
-    assert lines == [first]
-    assert offset == boundary
+    read = _read_lines_after_offset(0)
+    assert read.lines == [first]
+    assert read.offset == boundary
 
     inbox.write_text(first + "\n" + second + "\n")
-    lines, offset = _read_lines_after_offset(boundary)
-    assert lines == [second]
-    assert offset == inbox.stat().st_size
+    read = _read_lines_after_offset(boundary)
+    assert read.lines == [second]
+    assert read.offset == inbox.stat().st_size
 
 
 def test_tail_events_follow_torn_append_settles_to_idle(
@@ -3292,7 +3337,7 @@ def test_tail_events_follow_torn_append_settles_to_idle(
     reads: list[int] = []
     real_reader = events_mod._read_lines_after_offset
 
-    def counting_reader(offset: int) -> tuple[list[str], int]:
+    def counting_reader(offset: int) -> object:
         reads.append(offset)
         return real_reader(offset)
 
@@ -3311,9 +3356,10 @@ def test_tail_events_follow_torn_append_settles_to_idle(
     with pytest.raises(KeyboardInterrupt):
         list(tail_events_follow(since_cursor=None, since_ts=None, event_types=None))
 
-    # Startup read, then at most one read that observes the torn tail. The
-    # remaining polls must be pure stat() no-ops, NOT repeated re-reads.
-    assert len(reads) <= 2, f"torn tail re-read on every poll: {reads}"
+    # Exactly one read: the startup read, which already observed the torn tail
+    # and captured seen_size past it. Every later poll must be a pure stat()
+    # no-op. Anything more means the torn tail is being re-read.
+    assert reads == [0], f"torn tail re-read after startup: {reads}"
 
 
 def test_tail_events_follow_reresolves_when_inbox_replaced(
@@ -3386,10 +3432,10 @@ def test_wait_for_event_does_not_reread_history(
     bytes_read: list[int] = []
     real_reader = events_mod._read_lines_after_offset
 
-    def counting_reader(offset: int) -> tuple[list[str], int]:
-        lines, new_offset = real_reader(offset)
-        bytes_read.append(new_offset - offset)
-        return lines, new_offset
+    def counting_reader(offset: int) -> object:
+        read = real_reader(offset)
+        bytes_read.append(read.offset - offset)
+        return read
 
     monkeypatch.setattr(events_mod, "_read_lines_after_offset", counting_reader)
 
@@ -3483,10 +3529,10 @@ def test_tail_events_follow_does_not_reread_history(
     bytes_read: list[int] = []
     real_reader = events_mod._read_lines_after_offset
 
-    def counting_reader(offset: int) -> tuple[list[str], int]:
-        lines, new_offset = real_reader(offset)
-        bytes_read.append(new_offset - offset)
-        return lines, new_offset
+    def counting_reader(offset: int) -> object:
+        read = real_reader(offset)
+        bytes_read.append(read.offset - offset)
+        return read
 
     monkeypatch.setattr(events_mod, "_read_lines_after_offset", counting_reader)
 
@@ -3601,3 +3647,90 @@ def test_tail_events_follow_after_prune_delivers_unseen_survivors(
     # discarded them. Nothing is delivered twice.
     assert payloads == [0, 1, 2, 3, 4, 8, 9, "post"]
     assert len(payloads) == len(set(map(str, payloads)))
+
+
+def test_tail_events_follow_inbox_created_midrun_logs_no_replacement(
+    tmp_events_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An inbox appearing for the first time is not a "replacement".
+
+    Every daemon started before the first record_event takes this path in
+    normal operation: _stat_inbox reports (0, 0) for absent, so the first real
+    inode is an inode *change*. The `if state.ino:` guard is what keeps that
+    from logging a false "inbox replaced or truncated" on ordinary startup.
+    Mutation-tested: without the guard this test fails.
+    """
+    assert not (tmp_events_dir / "inbox.jsonl").exists()
+
+    call_count = 0
+
+    def sleep_side_effect(*args: object, **kwargs: object) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": "first"})
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleep_side_effect)
+
+    yielded: list[OrchestratorEvent] = []
+    with (
+        caplog.at_level(logging.WARNING, logger="cw.events"),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        yielded.extend(
+            tail_events_follow(since_cursor=None, since_ts=None, event_types=None)
+        )
+
+    assert [e.payload.get("n") for e in yielded] == ["first"]
+    assert not [
+        r for r in caplog.records if "inbox replaced or truncated" in r.message
+    ], "first sighting of the inbox logged as a replacement"
+
+
+def test_resolve_follow_start_empty_inbox_logs_no_cursor_miss(
+    tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An inbox that parsed to nothing has lost no cursor, so it must not warn.
+
+    "cursor not found; replaying from start" is an incident-shaped message. An
+    empty inbox is not an incident, and nothing is being replayed — the
+    returned list is empty either way. Mutation-tested: reverting the guard to
+    a bare `if not found:` fails this test.
+    """
+    from cw.events import _resolve_follow_start
+
+    (tmp_events_dir / "inbox.jsonl").write_text("")
+
+    with caplog.at_level(logging.WARNING, logger="cw.events"):
+        events, read = _resolve_follow_start("some-cursor-that-does-not-exist")
+
+    assert events == []
+    assert read.offset == 0
+    assert not [r for r in caplog.records if "cursor" in r.message], (
+        "empty inbox warned about a missing cursor"
+    )
+
+
+def test_read_events_empty_inbox_logs_no_cursor_miss(
+    tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """read_events applies the same guard as its _apply_cursor sibling.
+
+    Both callers of _apply_cursor must agree on the empty-parse edge case;
+    read_events backs dispatch and consumer polling, so a spurious "replaying
+    from start" there is a false alarm in a daemon's logs.
+    """
+    inbox = tmp_events_dir / "inbox.jsonl"
+    inbox.write_text('{"torn": ')  # tolerated torn line -> parses to nothing
+
+    with caplog.at_level(logging.WARNING, logger="cw.events"):
+        events = read_events(since_cursor="some-cursor-that-does-not-exist")
+
+    assert events == []
+    assert not [r for r in caplog.records if "not found in inbox" in r.message], (
+        "inbox that parsed to nothing warned about a missing cursor"
+    )
