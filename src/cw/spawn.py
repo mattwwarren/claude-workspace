@@ -112,6 +112,14 @@ _ROSTER_POLL_TIMEOUT_SECS: float = 10.0
 _SPAWN_FAIL_REASON_UNREGISTERED = "spawn_unregistered"
 
 
+# Why: this function's completeness for a given (client, ticket_id) depends
+# entirely on session_retention.prune_sessions()'s dev-queue exemption
+# (#1983) — it never scans archives itself. A spawn only happens because a
+# live dev-queue row exists for this ticket, and the exemption guarantees
+# every terminal session matching that row's (client, ticket_id) stays in
+# sessions.json regardless of age. If that exemption is ever removed or
+# narrowed, this function silently starts returning truncated retry
+# history with no error — check session_retention.py before changing it.
 def _collect_prior_attempts_summary(
     ticket_id: str, *, client: str
 ) -> list[dict[str, object]]:

@@ -3595,6 +3595,37 @@ class TestPriorAttemptsSummary:
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
         assert context["world_state_snapshot"]["prior_attempts_summary"] == []
 
+    def test_collect_prior_attempts_summary_unchanged_read_path_for_mixed_ages(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """#1983 lock-in: the read path is comment-only-changed, still hot-file only.
+
+        No prune_sessions() involved — an old and a recent terminal session for
+        the same (client, ticket_id) are both returned, ascending by
+        completed_at, exactly as before the retention work.
+        """
+        from cw.spawn import _collect_prior_attempts_summary
+
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="1983-A",
+            completed_at=datetime(2026, 6, 1, tzinfo=UTC),
+            last_result={"status": "blocked"},
+        )
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="1983-A",
+            completed_at=datetime(2025, 1, 1, tzinfo=UTC),
+            last_result={"status": "no_op"},
+        )
+
+        summaries = _collect_prior_attempts_summary("1983-A", client="test-client")
+        assert [s["status"] for s in summaries] == ["no_op", "blocked"]
+
     def test_timed_out_session_with_sentinel_produces_summary(
         self,
         tmp_config_dir: Path,

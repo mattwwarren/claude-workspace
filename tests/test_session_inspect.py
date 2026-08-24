@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +17,7 @@ from cw.cli import main
 from cw.cli.session_inspect import (
     _SESSION_WAIT_EXIT_HARD_TIMEOUT,
     _SESSION_WAIT_EXIT_TIMED_OUT,
+    _resolve_session,
 )
 from cw.config import load_state, save_state
 from cw.models import (
@@ -29,6 +30,7 @@ from cw.models import (
     SessionStatus,
     Stage,
 )
+from cw.session_retention import prune_sessions
 from tests.conftest import _make_daemon_session, _make_diff
 
 
@@ -551,3 +553,122 @@ class TestSessionResult:
         runner = CliRunner()
         result = runner.invoke(main, ["session", "result", "noexist"])
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# #1983: archive-aware session resolution + session list archive notice
+# ---------------------------------------------------------------------------
+
+
+def _seed_and_archive(
+    tmp_path: Path,
+    *,
+    session_id: str,
+    prune_at: datetime,
+) -> None:
+    """Seed one very old COMPLETED session and prune it into a dated archive."""
+    session = _make_session(
+        tmp_path,
+        session_id=session_id,
+        name=f"client-a/auto-dev/T-{session_id}",
+        status=SessionStatus.COMPLETED,
+        started_at=prune_at - timedelta(days=400),
+        completed_at=prune_at - timedelta(days=400),
+    )
+    _seed(session)
+    with freeze_time(prune_at):
+        prune_sessions()
+
+
+class TestResolveSessionArchiveFallback:
+    def test_resolve_session_falls_back_to_archive_on_hot_miss(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_and_archive(
+            tmp_path,
+            session_id="arc00001",
+            prune_at=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
+        )
+        assert load_state().sessions == []
+
+        found = _resolve_session("arc00001")
+        assert found is not None
+        assert found.id == "arc00001"
+
+    def test_resolve_session_scans_newest_archive_first_stops_on_hit(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_and_archive(
+            tmp_path,
+            session_id="arc00001",
+            prune_at=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
+        )
+        _seed_and_archive(
+            tmp_path,
+            session_id="arc00002",
+            prune_at=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+        )
+
+        found = _resolve_session("arc")
+        assert found is not None
+        assert found.id == "arc00002"
+
+    def test_resolve_session_returns_none_when_absent_in_hot_and_archives(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_and_archive(
+            tmp_path,
+            session_id="arc00001",
+            prune_at=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
+        )
+        assert _resolve_session("zzzzzzzz") is None
+
+    def test_session_show_resolves_an_archived_session(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_and_archive(
+            tmp_path,
+            session_id="arc00001",
+            prune_at=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "show", "arc00001", "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["id"] == "arc00001"
+
+
+class TestSessionListArchiveNotice:
+    def test_session_list_status_completed_prints_notice_when_archives_exist(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_and_archive(
+            tmp_path,
+            session_id="arc00001",
+            prune_at=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "list", "--status", "completed"])
+        assert result.exit_code == 0, result.output
+        assert "archived session file" in result.output
+
+    def test_session_list_status_completed_no_notice_when_no_archives(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed(_make_session(tmp_path, status=SessionStatus.COMPLETED))
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "list", "--status", "completed"])
+        assert result.exit_code == 0, result.output
+        assert "archived session file" not in result.output
+
+    def test_session_list_default_status_never_prints_notice(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_and_archive(
+            tmp_path,
+            session_id="arc00001",
+            prune_at=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "list"])
+        assert result.exit_code == 0, result.output
+        assert "archived session file" not in result.output
