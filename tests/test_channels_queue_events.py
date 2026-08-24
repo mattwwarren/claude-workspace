@@ -77,11 +77,15 @@ def _reset_channel_state() -> Generator[None]:
         _server_mod._cursors.clear()
         _server_mod._event_offset[0] = 0
     _server_mod._poller_started[0] = False
+    _server_mod._last_sessions_stat[0] = None
+    _server_mod._last_dev_queue_stat[0] = None
     yield
     with _server_mod._file_lock:
         _server_mod._cursors.clear()
         _server_mod._event_offset[0] = 0
     _server_mod._poller_started[0] = False
+    _server_mod._last_sessions_stat[0] = None
+    _server_mod._last_dev_queue_stat[0] = None
 
 
 @pytest.fixture(autouse=True)
@@ -1383,6 +1387,250 @@ class TestPollerTickIsolation:
         config = OrchestratorConfig()
         _server_mod._poller_tick(config)
         assert calls == [config]
+
+
+# ---------------------------------------------------------------------------
+# TestPollerTickChangeDetectionGuard (#1981)
+# ---------------------------------------------------------------------------
+
+
+class TestPollerTickChangeDetectionGuard:
+    """_poller_tick skips load->compute->save when neither state file changed."""
+
+    def test_unchanged_tick_skips_poll_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+
+        save_state(CwState())
+        save_dev_queue(DevQueueStore())
+
+        calls = 0
+        real_poll_once = _server_mod._poll_once
+
+        def _counting_poll_once(
+            old: QueueSnapshot,
+        ) -> tuple[QueueSnapshot, list[dict[str, Any]]]:
+            nonlocal calls
+            calls += 1
+            return real_poll_once(old)
+
+        monkeypatch.setattr(_server_mod, "_poll_once", _counting_poll_once)
+
+        # First tick's cache starts empty -> always "changed". Second tick
+        # sees identical stats for both files -> skipped.
+        _server_mod._poller_tick(OrchestratorConfig())
+        _server_mod._poller_tick(OrchestratorConfig())
+
+        assert calls == 1
+
+    def test_unchanged_tick_performs_no_load_state_or_load_dev_queue_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import cw.config as config_mod
+        import cw.dev_queue as dev_queue_mod
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+
+        save_state(CwState())
+        save_dev_queue(DevQueueStore())
+
+        load_state_calls = 0
+        load_dev_queue_calls = 0
+        real_load_state = config_mod.load_state
+        real_load_dev_queue = dev_queue_mod.load_dev_queue
+
+        def _counting_load_state() -> CwState:
+            nonlocal load_state_calls
+            load_state_calls += 1
+            return real_load_state()
+
+        def _counting_load_dev_queue() -> DevQueueStore:
+            nonlocal load_dev_queue_calls
+            load_dev_queue_calls += 1
+            return real_load_dev_queue()
+
+        monkeypatch.setattr(config_mod, "load_state", _counting_load_state)
+        monkeypatch.setattr(
+            dev_queue_mod, "load_dev_queue", _counting_load_dev_queue
+        )
+
+        _server_mod._poller_tick(OrchestratorConfig())
+        assert load_state_calls == 1
+        assert load_dev_queue_calls == 1
+
+        _server_mod._poller_tick(OrchestratorConfig())
+        assert load_state_calls == 1
+        assert load_dev_queue_calls == 1
+
+    def test_changed_state_file_triggers_poll_and_same_deltas_as_before(
+        self,
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[_make_task("T-guard", "acme", QueueItemStatus.PENDING)]
+            )
+        )
+        save_state(CwState())
+
+        q = subscribe()
+        try:
+            # Baseline tick: drains the ticket_enqueued notification for
+            # T-guard so the assertions below see only the transition delta.
+            _server_mod._poller_tick(OrchestratorConfig())
+            baseline = q.get_nowait()
+            assert (
+                json.loads(baseline["message"])["event"] == "queue.ticket_enqueued"
+            )
+
+            save_dev_queue(
+                DevQueueStore(
+                    tasks=[
+                        _make_task(
+                            "T-guard",
+                            "acme",
+                            QueueItemStatus.RUNNING,
+                            session_id="sess-guard",
+                        )
+                    ]
+                )
+            )
+            _server_mod._poller_tick(OrchestratorConfig())
+
+            claimed = q.get_nowait()
+            payload = json.loads(claimed["message"])
+            assert payload["event"] == "queue.ticket_claimed"
+            assert payload["ticket_id"] == "T-guard"
+            assert payload["client"] == "acme"
+            assert payload["session_id"] == "sess-guard"
+        finally:
+            unsubscribe(q)
+
+    def test_dev_queue_change_alone_triggers_poll_even_if_sessions_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+
+        save_state(CwState())
+        save_dev_queue(DevQueueStore())
+
+        calls = 0
+        real_poll_once = _server_mod._poll_once
+
+        def _counting_poll_once(
+            old: QueueSnapshot,
+        ) -> tuple[QueueSnapshot, list[dict[str, Any]]]:
+            nonlocal calls
+            calls += 1
+            return real_poll_once(old)
+
+        monkeypatch.setattr(_server_mod, "_poll_once", _counting_poll_once)
+
+        _server_mod._poller_tick(OrchestratorConfig())
+        assert calls == 1
+
+        # sessions.json is left untouched; only the dev-queue store changes.
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[_make_task("T-devq", "acme", QueueItemStatus.PENDING)]
+            )
+        )
+        _server_mod._poller_tick(OrchestratorConfig())
+        assert calls == 2
+
+    def test_missing_state_files_are_always_treated_as_changed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = 0
+        real_poll_once = _server_mod._poll_once
+
+        def _counting_poll_once(
+            old: QueueSnapshot,
+        ) -> tuple[QueueSnapshot, list[dict[str, Any]]]:
+            nonlocal calls
+            calls += 1
+            return real_poll_once(old)
+
+        monkeypatch.setattr(_server_mod, "_poll_once", _counting_poll_once)
+
+        # Neither save_state nor save_dev_queue is called: both files are
+        # absent under tmp_config_dir. FileNotFoundError must never collapse
+        # into a false "unchanged" via None == None.
+        _server_mod._poller_tick(OrchestratorConfig())
+        _server_mod._poller_tick(OrchestratorConfig())
+
+        assert calls == 2
+
+    def test_stat_oserror_other_than_missing_is_treated_as_changed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pathlib import Path
+
+        from cw.config import save_state, state_file
+        from cw.dev_queue import save_dev_queue
+
+        save_state(CwState())
+        save_dev_queue(DevQueueStore())
+
+        calls = 0
+        real_poll_once = _server_mod._poll_once
+
+        def _counting_poll_once(
+            old: QueueSnapshot,
+        ) -> tuple[QueueSnapshot, list[dict[str, Any]]]:
+            nonlocal calls
+            calls += 1
+            return real_poll_once(old)
+
+        monkeypatch.setattr(_server_mod, "_poll_once", _counting_poll_once)
+
+        _server_mod._poller_tick(OrchestratorConfig())
+        assert calls == 1
+
+        sessions_path = state_file()
+        real_stat = Path.stat
+
+        def _raising_stat(self: Path, *args: object, **kwargs: object) -> object:
+            if self == sessions_path:
+                msg = "denied"
+                raise PermissionError(msg)
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", _raising_stat)
+
+        _server_mod._poller_tick(OrchestratorConfig())
+        assert calls == 2
+
+    def test_operator_bridge_still_called_on_unchanged_tick(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+
+        save_state(CwState())
+        save_dev_queue(DevQueueStore())
+
+        calls: list[OrchestratorConfig] = []
+
+        def _capture(config: OrchestratorConfig) -> None:
+            calls.append(config)
+
+        monkeypatch.setattr(
+            "cw.cw_operator_events.poll_and_forward_operator_channel", _capture
+        )
+
+        config = OrchestratorConfig()
+        _server_mod._poller_tick(config)
+        _server_mod._poller_tick(config)
+
+        # Guard must never starve the bridge -- it is called on both ticks
+        # regardless of whether the queue-side load/poll/save ran.
+        assert calls == [config, config]
 
 
 # ---------------------------------------------------------------------------
