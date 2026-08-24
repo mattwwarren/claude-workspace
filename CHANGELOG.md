@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Event-bus followers read only appended bytes instead of the whole inbox on every poll (#1979):** `read_events()` read and fully parsed the entire `events/inbox.jsonl` on every call and applied the cursor as a *post-parse* filter, so a follower poll cost O(entire inbox) no matter how many events were actually new — including when the answer was none. Against a 17.0 MiB / 42,797-event inbox, a poll returning zero events cost 543 ms of CPU and a 17 MiB read; at the 50 ms follow interval a single follower demanded roughly twelve cores' worth of work and simply pegged one. Four daemons on one machine accumulated ~917 GiB of re-reads in ten hours, all served from page cache, which is why it presented as sustained CPU (and laptop fan) rather than disk load. `tail_events_follow` and `wait_for_event` now resolve their starting cursor to a byte offset with one full read at startup and read incrementally from there: the same zero-event poll is 3.7 us and reads nothing, and a poll carrying one new event is 12.3 us for 404 bytes. Operators who have never pruned should still run `cw event prune --keep <n>`; the read path no longer scales with history, but every other `read_events` caller still does (see #1980).
+
+  - **Delivery is preserved across a prune, not skipped.** When the inbox is replaced or truncated the byte offset stops referring to anything, so position is re-resolved from the last delivered event id and the surviving events the follower has not seen are replayed. `prune_events` keeps a *suffix*, so a follower whose cursor was pruned away has necessarily not seen anything that survived — replaying is correct and cannot duplicate. Skipping to the new EOF would have silently dropped those events, which for `cw event wait` means a script blocked on `session.completed` hanging to its timeout and concluding the session never finished.
+  - **Replacement is detected by inode, not by size.** `prune_events` rewrites via `atomic_write_text` (temp file + `Path.replace`), so a rewrite is a new inode. Size arithmetic alone cannot see a replace-then-regrow that lands above the old offset, and seeking there would land mid-line and raise `JSONDecodeError` out of a loop that only catches `KeyboardInterrupt`/`BrokenPipeError`. Bytes and identity now come from one `fstat` on the descriptor that produced them, so they cannot describe different files.
+  - **A failed `stat` is not a replaced file.** Transient stat failures (permissions, a network filesystem hiccup) are reported distinctly from "absent" and leave follow state untouched, instead of being mistaken for a truncation and forcing repeated full re-resolves.
+  - Scope: `read_events(since_ts=...)` callers (`board.py`'s event feed, the dispatch loop's usage-limit cohort scan) and `cw_queue_events_server.py`'s snapshot reader are unchanged and still pay a full read — tracked in #1981-#1984.
+
 ## [1.43.0] - 2026-08-22
 
 ### Changed
