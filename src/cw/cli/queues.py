@@ -10,7 +10,7 @@ from typing import Any
 import click
 
 from cw import queue_peek as _queue_peek
-from cw.cli._base import handle_errors, main
+from cw.cli._base import handle_errors, main, parse_iso_before
 from cw.events import (
     advance_cursor,
     init_cursor_at_end,
@@ -557,22 +557,6 @@ def event_wait(
         raise click.exceptions.Exit(0) from None
 
 
-def _parse_before(before: str) -> datetime:
-    """Parse the --before value as an ISO 8601 timestamp. Raises CwError on failure."""
-    try:
-        before_ts = datetime.fromisoformat(before)
-    except ValueError as exc:
-        msg = f"Cannot parse --before value '{before}' as ISO timestamp."
-        raise CwError(msg) from exc
-    if before_ts.tzinfo is None:
-        click.echo(
-            f"Warning: --before '{before}' has no timezone; assuming UTC",
-            err=True,
-        )
-        before_ts = before_ts.replace(tzinfo=UTC)
-    return before_ts
-
-
 @event.command(name="prune")
 @click.option(
     "--before",
@@ -612,7 +596,7 @@ def event_prune(
         msg = "--keep must be non-negative."
         raise CwError(msg)
 
-    before_ts = _parse_before(before) if before is not None else None
+    before_ts = parse_iso_before(before) if before is not None else None
     result = prune_events(before=before_ts, keep=keep, archive=not delete_flag)
 
     if as_json:

@@ -11,6 +11,7 @@ from cw.cli._base import _relative_time, handle_errors
 from cw.config import load_state
 from cw.models import TERMINAL_SESSION_STATUSES, Session, SessionStatus
 from cw.reconcile import ticket_id_for_session
+from cw.session_retention import archive_file_count, find_session_by_id
 
 _WAIT_POLL_INTERVAL: int = 5
 _WAIT_DEFAULT_TIMEOUT: int = 300
@@ -20,17 +21,21 @@ _SESSION_WAIT_EXIT_HARD_TIMEOUT: int = 124
 _SESSION_LIST_HEADERS = ["ID", "CLIENT", "PURPOSE", "STATUS", "NAME", "STARTED"]
 _SESSION_LIST_WIDTHS = [10, 16, 10, 12, 30, 12]
 
+# --status values whose result set can be silently truncated by session
+# retention (#1983). `session list` deliberately does NOT merge archived
+# sessions into its output — that would reintroduce the unbounded scan
+# retention exists to remove — so it warns instead.
+_ARCHIVE_NOTICE_STATUSES = frozenset(s.value for s in TERMINAL_SESSION_STATUSES)
+
 
 def _resolve_session(session_ref: str) -> Session | None:
-    """Prefix-match a session by short id or claude_session_id."""
-    state = load_state()
-    for s in state.sessions:
-        if s.id.startswith(session_ref):
-            return s
-    for s in state.sessions:
-        if s.claude_session_id and s.claude_session_id.startswith(session_ref):
-            return s
-    return None
+    """Prefix-match a session by short id or claude_session_id.
+
+    Delegates to find_session_by_id, which checks sessions.json first
+    and falls back to a newest-first scan of sessions.<date>.json
+    archives on a complete hot-file miss (#1983).
+    """
+    return find_session_by_id(session_ref)
 
 
 def _session_to_dict(session: Session) -> dict[str, object]:
@@ -175,6 +180,15 @@ def session_list(
 
     if ticket is not None:
         sessions = [s for s in sessions if ticket_id_for_session(s.name) == ticket]
+
+    if status in _ARCHIVE_NOTICE_STATUSES:
+        archived = archive_file_count()
+        if archived:
+            click.echo(
+                f"{archived} archived session files not shown; "
+                "see sessions.<date>.json",
+                err=True,
+            )
 
     if output_json:
         click.echo(json.dumps([_session_to_dict(s) for s in sessions]))

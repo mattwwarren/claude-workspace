@@ -41,6 +41,15 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
     an older (or briefly-diverged) version of cw. Unknown or renamed fields
     are coerced; unknown enum values are reset to a safe default with a
     warning rather than raising a validation error.
+
+    The per-session normalisation walk is **version-gated** (#1983): it runs
+    only when the on-disk ``schema_version`` is below
+    :data:`~cw.models.CW_STATE_SCHEMA_VERSION`. Once a file has round-tripped
+    through ``save_state`` at the current version, every field the
+    ``_fill_*_default`` helpers inject is already present — Pydantic's own
+    model defaults wrote them — so walking N sessions on every ``load_state``
+    is pure cost on the hottest read path in cw. ``schema_version`` is still
+    stamped unconditionally, outside the loop.
     """
     sessions = raw.get("sessions")
     if "sessions" in raw and not isinstance(sessions, list):
@@ -51,7 +60,7 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
     # Capture the on-disk version before we bump it so per-step guards
     # can condition on "is this an upgrade from version X?".
     on_disk_version = int(raw.get("schema_version") or 0)
-    if isinstance(sessions, list):
+    if isinstance(sessions, list) and on_disk_version < CW_STATE_SCHEMA_VERSION:
         for session_raw in sessions:
             if not isinstance(session_raw, dict):
                 continue
@@ -86,8 +95,12 @@ def _migrate_zellij_fields(session_raw: dict[str, Any]) -> None:
     """Rename the pre-0.4 zellij_pane field and drop zellij_tab.
 
     Migration armor — do not delete. Users in the wild still have
-    `sessions.json` files from the Zellij era; the rename runs every load
-    so upgrades stay transparent.
+    `sessions.json` files from the Zellij era. Since #1983 the rename runs
+    only on the upgrade pass (on-disk schema_version below
+    CW_STATE_SCHEMA_VERSION), not on every load: a Zellij-era file is by
+    definition below the current version, so it is still caught the first
+    time this version of cw reads it, and the resulting ``save_state`` stamps
+    it current so the walk never repeats.
     """
     if "zellij_pane" in session_raw and "surface_ref" not in session_raw:
         session_raw["surface_ref"] = session_raw.pop("zellij_pane")

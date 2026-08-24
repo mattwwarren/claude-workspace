@@ -1544,6 +1544,75 @@ class TestMigrateCwState:
         _backup_state_file(migrated)
         assert backup.stat().st_mtime == first_mtime
 
+    # -- #1983: lazy migration (version-gated per-session walk) ------------
+
+    def test_current_schema_version_skips_migration_walk(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A file already at the current version is not walked per-session."""
+        raw = {
+            "schema_version": CW_STATE_SCHEMA_VERSION,
+            "sessions": [{"id": "s1", "origin": "delegate"}],
+        }
+        with caplog.at_level("WARNING", logger="cw._config_migrate"):
+            migrated = migrate_cw_state(raw)
+        # Untouched: the origin coercion never ran.
+        assert migrated["sessions"][0]["origin"] == "delegate"
+        assert "parent_session_id" not in migrated["sessions"][0]
+        assert not any("unknown origin" in rec.message for rec in caplog.records)
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_below_current_schema_version_still_runs_full_walk(self) -> None:
+        """Regression guard: an older file still gets the full normalisation."""
+        raw = {
+            "schema_version": CW_STATE_SCHEMA_VERSION - 1,
+            "sessions": [{"id": "s1", "origin": "delegate"}],
+        }
+        migrated = migrate_cw_state(raw)
+        assert migrated["sessions"][0]["origin"] == SessionOrigin.USER.value
+        assert migrated["sessions"][0]["parent_session_id"] is None
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_migration_walk_call_count_independent_of_session_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """At the current version, per-session helpers run zero times for N=50."""
+        calls: list[dict[str, object]] = []
+
+        def spy(session_raw: dict[str, object]) -> None:
+            calls.append(session_raw)
+
+        monkeypatch.setattr(cw._config_migrate, "_coerce_session_origin", spy)
+        raw = {
+            "schema_version": CW_STATE_SCHEMA_VERSION,
+            "sessions": [{"id": f"s{i}"} for i in range(50)],
+        }
+        migrate_cw_state(raw)
+        assert calls == []
+
+    def test_load_state_skips_walk_for_current_version_file(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """load_state on a current-version file does no per-session normalisation."""
+        import json
+
+        calls: list[dict[str, object]] = []
+
+        def spy(session_raw: dict[str, object]) -> None:
+            calls.append(session_raw)
+
+        session = _make_daemon_session(id="lazy0001")
+        save_state(CwState(sessions=[session]))
+
+        state_path = tmp_config_dir / ".local" / "share" / "cw" / "sessions.json"
+        on_disk = json.loads(state_path.read_text())
+        assert on_disk["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+        monkeypatch.setattr(cw._config_migrate, "_coerce_session_origin", spy)
+        loaded = load_state()
+        assert calls == []
+        assert [s.id for s in loaded.sessions] == ["lazy0001"]
+
 
 class TestOrchestratorConfigUsageLimitBackoff:
     """OrchestratorConfig.usage_limit_backoff_seconds field."""
