@@ -6,8 +6,8 @@ operator-facing queue mutations (``add_ticket``, ``register_watched_pr``,
 ``move_ticket``, ``clear_tickets``, ``prune_tickets`` and its read-only
 preview ``select_prunable_tickets``), the read/resolution helpers
 (``resolve_client``, ``list_tickets``, ``_newest_by_created_at``,
-``_find_ticket``), and the ``task.deleted`` event chokepoint
-(``_emit_task_deleted``).
+``_find_ticket``), the shared prune age-basis (``_prune_age_basis``), and
+the ``task.deleted`` event chokepoint (``_emit_task_deleted``).
 
 Layering: imports ``lifecycle.transition_task_status`` at module level for the
 cancel paths. ``lifecycle.wait_for_terminal`` reaches back into ``_find_ticket``
@@ -416,6 +416,22 @@ def clear_tickets(client: str, status: QueueItemStatus | None = None) -> int:
     return len(removed_tasks)
 
 
+def _prune_age_basis(task: TicketTask) -> datetime:
+    """Single source for prune's ``completed_at or created_at`` age rule (#382).
+
+    A CANCELLED row always has ``completed_at is None``
+    (``lifecycle._RESET_DISPOSITION_STATUSES`` clears it on every CANCELLED
+    transition), so keying on ``completed_at`` alone would make every
+    CANCELLED row permanently unprunable -- ``created_at`` is the fallback.
+
+    Both ``_select_prune_candidates`` (what gets deleted) and the CLI's
+    ``_print_prune_summary`` (the AGE_DAYS the operator reads before passing
+    ``--confirm``) call this instead of re-deriving the rule, so the two can
+    never diverge on what "age" means for a destructive command.
+    """
+    return task.completed_at or task.created_at
+
+
 def _select_prune_candidates(
     store: DevQueueStore,
     statuses: frozenset[QueueItemStatus],
@@ -444,10 +460,7 @@ def _select_prune_candidates(
        *all_clients* -- refused as an incompatible combination).
     4. *older_than_days* must be >= 0.
 
-    Age basis is ``completed_at or created_at``: a CANCELLED row always has
-    ``completed_at is None`` (``lifecycle._RESET_DISPOSITION_STATUSES``
-    clears it on every CANCELLED transition), so keying on ``completed_at``
-    alone would make every CANCELLED row permanently unprunable.
+    Age basis: see ``_prune_age_basis``.
     """
     if client is None and not all_clients:
         msg = "Must specify a client, or pass all_clients=True."
@@ -480,7 +493,7 @@ def _select_prune_candidates(
         for t in store.tasks
         if t.status in statuses
         and (all_clients or t.client == client)
-        and (t.completed_at or t.created_at) < cutoff
+        and _prune_age_basis(t) < cutoff
     ]
 
 

@@ -2177,6 +2177,26 @@ class TestPruneTickets:
         assert [t.ticket_id for t in removed] == ["TKT-CANC-OLD"]
         assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-CANC-NEW"]
 
+    def test_completed_at_takes_precedence_over_created_at(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """When both timestamps are present, completed_at wins -- not the
+        older of the two, not created_at (GitHub #382, F2). A row with a very
+        old created_at but a recent completed_at must be kept: a regression
+        that swapped the `or` operands, or used min()/max() instead, would
+        prune it by created_at and fail this assertion."""
+        task = _aged_task(
+            5,
+            ticket_id="TKT-PREC",
+            created_at=datetime.now(UTC) - timedelta(days=200),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        removed = prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 90, "genhealth")
+
+        assert removed == []
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-PREC"]
+
     def test_running_blocked_signoff_never_prunable_even_when_named(
         self, tmp_dev_queue: Path
     ) -> None:

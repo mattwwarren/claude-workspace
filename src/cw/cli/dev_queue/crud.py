@@ -13,6 +13,7 @@ from cw.cli._base import handle_errors
 from cw.config import get_client, load_orchestrator_config, load_state
 from cw.dev_queue import (
     DEFAULT_PRUNE_OLDER_THAN_DAYS,
+    _prune_age_basis,
     add_ticket,
     approve_ticket,
     cancel_ticket,
@@ -596,9 +597,9 @@ def _print_prune_summary(tasks: list[TicketTask]) -> None:
 
     Mirrors ``tasks.py``'s ``_print_tasks_human`` column-table convention;
     module-private to this file since that helper is itself module-private.
-    AGE_DAYS uses the same ``completed_at or created_at`` age basis
-    ``_select_prune_candidates`` filters on, so a row's displayed age cannot
-    disagree with the reason it was selected.
+    AGE_DAYS uses ``_prune_age_basis`` -- the same age basis
+    ``_select_prune_candidates`` filters on -- so a row's displayed age
+    cannot disagree with the reason it was selected.
     """
     if not tasks:
         return
@@ -609,7 +610,7 @@ def _print_prune_summary(tasks: list[TicketTask]) -> None:
     click.echo("-" * len(header))
     now = datetime.now(UTC)
     for t in tasks:
-        age_days = (now - (t.completed_at or t.created_at)).days
+        age_days = (now - _prune_age_basis(t)).days
         row = [
             t.ticket_id[:12],
             t.client[:16],
