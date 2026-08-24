@@ -3737,6 +3737,21 @@ def test_read_events_empty_inbox_logs_no_cursor_miss(
     )
 
 
+def _reset_auto_prune_cache(
+    monkeypatch: pytest.MonkeyPatch, *, config: OrchestratorConfig | None = None
+) -> None:
+    """Reset (or prime) the module-level auto-prune config cache for a test.
+
+    The cache is a mutable singleton instance (``_AutoPruneConfigCache``), not
+    a pair of reassignable module globals -- its attributes are patched in
+    place rather than the module-level name itself.
+    """
+    from cw import events as events_module
+
+    monkeypatch.setattr(events_module._AUTO_PRUNE_CONFIG_CACHE, "config", config)
+    monkeypatch.setattr(events_module._AUTO_PRUNE_CONFIG_CACHE, "loaded_at", 0.0)
+
+
 # ---------------------------------------------------------------------------
 # _prune_events_locked extraction (#1980)
 # ---------------------------------------------------------------------------
@@ -3764,9 +3779,7 @@ class TestPruneEventsLockedExtraction:
         for i in range(3):
             events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
 
-        result = events_module._prune_events_locked(
-            before=None, keep=1, archive=True
-        )
+        result = events_module._prune_events_locked(before=None, keep=1, archive=True)
 
         assert result.kept_count == 1
         assert result.archived_count == 2
@@ -3849,6 +3862,11 @@ class TestAutoPruneOnAppend:
     Patching cw.config.load_orchestrator_config would not affect that
     already-bound reference.
     """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_auto_prune_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The module-level config cache otherwise persists across tests."""
+        _reset_auto_prune_cache(monkeypatch)
 
     def test_record_event_does_not_prune_below_threshold(
         self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -3982,8 +4000,7 @@ class TestAutoPruneOnAppend:
         """
         from cw import events as events_module
 
-        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE", None)
-        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE_AT", 0.0)
+        _reset_auto_prune_cache(monkeypatch)
 
         def raise_load() -> OrchestratorConfig:
             msg = "config unreadable"
@@ -4011,8 +4028,7 @@ class TestAutoPruneOnAppend:
         primed = _auto_config(
             event_inbox_retention_bytes=999_999_999, event_inbox_retention_count=1
         )
-        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE", primed)
-        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE_AT", 0.0)
+        _reset_auto_prune_cache(monkeypatch, config=primed)
         monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_TTL_SECONDS", 0.0)
 
         def raise_load() -> OrchestratorConfig:
@@ -4032,8 +4048,7 @@ class TestAutoPruneOnAppend:
         """The config loader is not called once per record_event within the TTL."""
         from cw import events as events_module
 
-        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE", None)
-        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE_AT", 0.0)
+        _reset_auto_prune_cache(monkeypatch)
 
         call_count = 0
 
@@ -4063,6 +4078,11 @@ class TestAutoPruneFollowerComposition:
     triggered from inside record_event, including under concurrent load.
     """
 
+    @pytest.fixture(autouse=True)
+    def _isolate_auto_prune_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The module-level config cache otherwise persists across tests."""
+        _reset_auto_prune_cache(monkeypatch)
+
     def test_follower_sees_no_skip_no_replay_across_auto_prune_boundary(
         self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -4089,8 +4109,7 @@ class TestAutoPruneFollowerComposition:
                 ),
             )
             # Force the cache to pick up the new config on the next check.
-            monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE", None)
-            monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE_AT", 0.0)
+            _reset_auto_prune_cache(monkeypatch)
 
         def append(writer: str, n: int) -> None:
             ev = events_record_event(
@@ -4169,8 +4188,7 @@ class TestAutoPruneFollowerComposition:
                     event_inbox_retention_count=retention_count,
                 ),
             )
-            monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE", None)
-            monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE_AT", 0.0)
+            _reset_auto_prune_cache(monkeypatch)
 
         def append(n: int) -> None:
             ev = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": n})

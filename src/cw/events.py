@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from pydantic import BaseModel, ValidationError
 
 from cw.atomic import atomic_write_text
-from cw.config import events_dir
+from cw.config import events_dir, load_orchestrator_config
 from cw.exceptions import CwError
-from cw.models import OrchestratorEvent, OrchestratorEventType
+from cw.models import OrchestratorConfig, OrchestratorEvent, OrchestratorEventType
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
@@ -81,7 +81,79 @@ def record_event(
         inbox.parent.mkdir(parents=True, exist_ok=True)
         with inbox.open("a") as f:
             f.write(event.model_dump_json() + "\n")
+            size = f.tell()
+        _maybe_auto_prune_locked(size)
     return event
+
+
+class _AutoPruneConfigCache:
+    """Mutable holder for the cached config.
+
+    A plain pair of module-level scalars would need ``global`` to update
+    (PLW0603, disallowed by this repo's zero-violation ruff gate) -- mutating
+    attributes on a module-level singleton instance instead avoids reassigning
+    the module-level name itself.
+    """
+
+    def __init__(self) -> None:
+        self.config: OrchestratorConfig | None = None
+        self.loaded_at: float = 0.0
+
+
+_AUTO_PRUNE_CONFIG_CACHE = _AutoPruneConfigCache()
+_AUTO_PRUNE_CONFIG_TTL_SECONDS = 30.0  # matches tick_interval_seconds's default cadence
+
+
+def _load_auto_prune_config_cached() -> OrchestratorConfig:
+    """Return the cached OrchestratorConfig, reloading at most once per TTL.
+
+    Mirrors ``_run_poller``'s ``last_good_config`` fallback shape
+    (``cw_queue_events_server.py:302-325``) exactly: on a load failure, reuse
+    the last successfully-parsed config rather than raising, because
+    ``record_event`` has 114+ call sites and must never fail because a config
+    file was momentarily unparseable (GitHub #1980, "Ambiguity Resolutions --
+    round 1", Q2). On a cold start with no cache populated yet, fall back to
+    ``OrchestratorConfig()`` safe defaults, exactly as ``_run_poller`` falls
+    back before its first successful load.
+    """
+    cache = _AUTO_PRUNE_CONFIG_CACHE
+    now = time.monotonic()
+    if cache.config is None or now - cache.loaded_at > _AUTO_PRUNE_CONFIG_TTL_SECONDS:
+        try:
+            cache.config = load_orchestrator_config()
+            cache.loaded_at = now
+        except Exception:
+            # Why: a config reload failure must never fail record_event,
+            # which has 114+ call sites -- fall back to the last config that
+            # loaded successfully (or safe defaults, pre-first-load),
+            # mirroring _run_poller's last_good_config precedent exactly. Do
+            # NOT advance cache.loaded_at here: unlike _run_poller (which
+            # retries every tick unconditionally), this cache is TTL-gated,
+            # so leaving the timestamp alone makes the very next call retry
+            # the load immediately rather than being stuck on a stale/absent
+            # cache for the full TTL.
+            logger.exception("auto-prune config reload failed, using last-known-good")
+    return cache.config if cache.config is not None else OrchestratorConfig()
+
+
+def _maybe_auto_prune_locked(size_bytes: int) -> None:
+    """Prune the inbox in-band if it has grown past the configured threshold.
+
+    Called from record_event while _inbox_lock is already held. Best-effort:
+    a failure here must not prevent the event that was just appended from
+    being considered recorded, so failures are logged and swallowed.
+    """
+    config = _load_auto_prune_config_cached()
+    if not config.event_inbox_auto_prune_enabled:
+        return
+    if size_bytes <= config.event_inbox_retention_bytes:
+        return
+    try:
+        _prune_events_locked(
+            before=None, keep=config.event_inbox_retention_count, archive=True
+        )
+    except Exception:
+        logger.exception("auto-prune of event inbox failed; continuing")
 
 
 class PruneResult(BaseModel):
@@ -559,11 +631,14 @@ class _FollowState(NamedTuple):
       size keeps reporting them. Comparing size against *offset* would then
       report "changed" on every poll forever and the follower would never
       reach its idle path.
-    * *ino* — inode being read. ``prune_events`` rewrites the inbox via
-      ``atomic_write_text`` (temp file + ``Path.replace``), so a rewrite is
-      a *new* inode. Size arithmetic alone cannot see a replace-then-regrow
-      that lands above the old offset, and seeking into an unrelated file
-      lands mid-line.
+    * *ino* — inode being read. ``prune_events``/``_prune_events_locked``
+      rewrite the inbox via ``atomic_write_text`` (temp file +
+      ``Path.replace``), so a rewrite is a *new* inode -- whether triggered
+      by the operator-invoked ``cw event prune`` CLI or by ``record_event``'s
+      in-band auto-prune trigger (#1980); this class has no notion of who
+      triggered the rewrite. Size arithmetic alone cannot see a
+      replace-then-regrow that lands above the old offset, and seeking into
+      an unrelated file lands mid-line.
     * *cursor* — id of the last event delivered, used to re-establish
       position when the offset stops meaning anything.
     """
@@ -613,6 +688,14 @@ def _poll_follow_state(
     before it was pruned too — which makes the surviving events exactly the
     ones that follower has never seen. Skipping to the new EOF instead would
     silently drop them.
+
+    A rewrite detected here may now originate from ``record_event``'s in-band
+    auto-prune trigger (#1980), not only from the operator-invoked
+    ``cw event prune`` CLI — the rewrite can therefore land at any moment,
+    including mid-poll or mid-write from a concurrent ``record_event`` call.
+    The detection above is keyed off ``(ino, size)`` observed via
+    ``_stat_inbox()``, not off who triggered the rewrite, so it composes
+    unchanged with either origin.
     """
     stat = _stat_inbox()
     if stat is None:
