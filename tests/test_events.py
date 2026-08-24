@@ -3115,3 +3115,225 @@ def test_cli_event_tail_collapse_repeats_help_text_documents_flag(
     result = runner.invoke(main, ["event", "tail", "--help"])
     assert result.exit_code == 0, result.output
     assert "--collapse-repeats" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Byte-offset follow reads (#1979)
+# ---------------------------------------------------------------------------
+
+
+def test_read_lines_after_offset_returns_only_appended(tmp_events_dir: Path) -> None:
+    """Only bytes past the offset are read; the offset advances past them."""
+    from cw.events import _read_lines_after_offset
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    inbox.write_text('{"a": 1}\n{"b": 2}\n')
+    first_size = inbox.stat().st_size
+
+    lines, offset = _read_lines_after_offset(0)
+    assert lines == ['{"a": 1}', '{"b": 2}']
+    assert offset == first_size
+
+    inbox.write_text('{"a": 1}\n{"b": 2}\n{"c": 3}\n')
+    lines, offset = _read_lines_after_offset(first_size)
+    assert lines == ['{"c": 3}']
+    assert offset == inbox.stat().st_size
+
+
+def test_read_lines_after_offset_leaves_torn_trailing_line(
+    tmp_events_dir: Path,
+) -> None:
+    """A partial final line is not consumed, and is picked up once completed.
+
+    The old whole-file read relied on _parse_lines' malformed-trailing-line
+    tolerance to survive a torn append, which *discarded* the event once the
+    writer finished it. Trimming at the last newline instead means the torn
+    line is simply not consumed yet.
+    """
+    from cw.events import _read_lines_after_offset
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    inbox.write_text('{"a": 1}\n{"b": 2')  # torn: no trailing newline
+
+    lines, offset = _read_lines_after_offset(0)
+    assert lines == ['{"a": 1}']
+    assert offset == len('{"a": 1}\n')
+
+    # Writer completes the line; the next poll picks it up whole.
+    inbox.write_text('{"a": 1}\n{"b": 2}\n')
+    lines, offset = _read_lines_after_offset(offset)
+    assert lines == ['{"b": 2}']
+    assert offset == inbox.stat().st_size
+
+
+def test_read_lines_after_offset_no_newline_consumes_nothing(
+    tmp_events_dir: Path,
+) -> None:
+    """A chunk with no newline at all advances nothing."""
+    from cw.events import _read_lines_after_offset
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    inbox.write_text('{"partial"')
+
+    assert _read_lines_after_offset(0) == ([], 0)
+
+
+def test_read_lines_after_offset_absent_inbox(tmp_events_dir: Path) -> None:
+    """An absent inbox returns no lines and leaves the offset untouched."""
+    from cw.events import _read_lines_after_offset
+
+    assert not (tmp_events_dir / "inbox.jsonl").exists()
+    assert _read_lines_after_offset(0) == ([], 0)
+
+
+def test_apply_cursor_positions_on_unfiltered_stream(tmp_events_dir: Path) -> None:
+    """_apply_cursor slices strictly after the cursor and reports found/missing."""
+    from cw.events import _apply_cursor
+
+    events = [
+        OrchestratorEvent(type=OrchestratorEventType.PR_REGISTERED) for _ in range(3)
+    ]
+
+    after, found = _apply_cursor(events, events[0].id)
+    assert found is True
+    assert [e.id for e in after] == [events[1].id, events[2].id]
+
+    after, found = _apply_cursor(events, events[-1].id)
+    assert found is True
+    assert after == []
+
+    after, found = _apply_cursor(events, "nonexistent-id")
+    assert found is False
+    assert after == events
+
+    after, found = _apply_cursor(events, None)
+    assert found is True
+    assert after == events
+
+
+def test_tail_events_follow_does_not_reread_history(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1979 perf contract: polls read new bytes only, not the whole inbox.
+
+    This is the regression guard for the defect itself. Before the byte-offset
+    read, every poll re-read and re-parsed the entire inbox to answer "what is
+    new?", so the bytes read per poll grew without bound with history.
+    """
+    import cw.events as events_mod
+
+    for i in range(50):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+    inbox = tmp_events_dir / "inbox.jsonl"
+    history_size = inbox.stat().st_size
+
+    bytes_read: list[int] = []
+    real_reader = events_mod._read_lines_after_offset
+
+    def counting_reader(offset: int) -> tuple[list[str], int]:
+        lines, new_offset = real_reader(offset)
+        bytes_read.append(new_offset - offset)
+        return lines, new_offset
+
+    monkeypatch.setattr(events_mod, "_read_lines_after_offset", counting_reader)
+
+    call_count = 0
+
+    def sleep_side_effect(*args: object, **kwargs: object) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": "new"})
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleep_side_effect)
+
+    yielded: list[OrchestratorEvent] = []
+    with pytest.raises(KeyboardInterrupt):
+        yielded.extend(
+            tail_events_follow(since_cursor=None, since_ts=None, event_types=None)
+        )
+
+    # One startup read covering history, then a poll reading ONLY the new event.
+    assert bytes_read[0] == history_size
+    assert 0 < bytes_read[1] < history_size
+    assert sum(bytes_read[1:]) < history_size
+    assert [e.payload.get("n") for e in yielded][-1] == "new"
+
+
+def test_tail_events_follow_streams_appends_without_replaying(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each appended event is yielded exactly once across successive polls."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": "pre"})
+
+    call_count = 0
+
+    def sleep_side_effect(*args: object, **kwargs: object) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 3:
+            events_record_event(
+                OrchestratorEventType.PR_REGISTERED, {"n": f"new-{call_count}"}
+            )
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleep_side_effect)
+
+    yielded: list[OrchestratorEvent] = []
+    with pytest.raises(KeyboardInterrupt):
+        yielded.extend(
+            tail_events_follow(since_cursor=None, since_ts=None, event_types=None)
+        )
+
+    assert [e.payload.get("n") for e in yielded] == ["pre", "new-1", "new-2", "new-3"]
+
+
+def test_tail_events_follow_after_prune_does_not_replay(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prune (inbox shrink) resets the offset to EOF rather than replaying.
+
+    This is the shrink branch's stated intent ("avoids the cursor-not-found
+    replay path"), which the old cursor-based read did not actually deliver:
+    the pruned-away cursor triggered exactly that replay.
+    """
+    for i in range(5):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+    call_count = 0
+
+    def sleep_side_effect(*args: object, **kwargs: object) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Append past the follower's position AND prune below it in the
+            # same gap, so events it already streamed are gone from the inbox
+            # while newer ones it has never seen remain. This is the only
+            # shape that reaches the cursor-not-found branch: prune keeps the
+            # newest events, so a caught-up follower's cursor survives an
+            # ordinary prune and the replay path never fires.
+            for j in range(5, 10):
+                events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": j})
+            prune_events(keep=2)  # keeps n=8, n=9; drops the follower's cursor
+            return
+        if call_count == 2:
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": "post"})
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleep_side_effect)
+
+    yielded: list[OrchestratorEvent] = []
+    with pytest.raises(KeyboardInterrupt):
+        yielded.extend(
+            tail_events_follow(since_cursor=None, since_ts=None, event_types=None)
+        )
+
+    payloads = [e.payload.get("n") for e in yielded]
+    # The five pre-existing events stream once at startup. The prune drops the
+    # follower's position, but must not cause the surviving history (n=8, n=9)
+    # to be replayed — only the genuinely new append arrives.
+    assert payloads == [0, 1, 2, 3, 4, "post"]

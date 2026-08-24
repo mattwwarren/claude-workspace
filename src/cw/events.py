@@ -339,6 +339,80 @@ def _parse_lines(lines: list[str]) -> list[OrchestratorEvent]:
     return results
 
 
+def _apply_cursor(
+    parsed: list[OrchestratorEvent], cursor: str | None
+) -> tuple[list[OrchestratorEvent], bool]:
+    """Return the events strictly after *cursor*, plus whether it was found.
+
+    Positioning is applied to the *unfiltered* stream so a cursor event that
+    would itself fail the caller's filters still anchors the position. When
+    the cursor is absent the full list is returned with ``False``, leaving the
+    replay decision (and its warning) to the caller.
+    """
+    if cursor is None:
+        return parsed, True
+    for i, event in enumerate(parsed):
+        if event.id == cursor:
+            return parsed[i + 1 :], True
+    return parsed, False
+
+
+def _read_lines_after_offset(offset: int) -> tuple[list[str], int]:
+    """Return whole lines appended past *offset*, plus the new consumed offset.
+
+    This is the primitive that makes following cheap (#1979): the follow loops
+    previously answered "what is new?" by re-reading and re-parsing the entire
+    inbox on every poll, because ``read_events`` applies its cursor *after*
+    parsing. Cost is now proportional to the bytes appended, not to history.
+
+    Only whole lines are consumed: the offset advances to the last newline in
+    the chunk, so a torn append (a writer caught mid-``write``) stays
+    unconsumed and is picked up intact on the next poll rather than being
+    parsed as corruption.
+
+    No lock is taken. ``record_event`` appends under ``_inbox_lock`` and
+    ``prune_events`` rewrites via ``atomic_write_text`` (temp file +
+    ``Path.replace``), so a reader either sees a consistent prefix of the
+    current inode or picks up the replacement on its next ``stat`` — the
+    shrink branch of :func:`_poll_inbox_growth` covers the latter.
+    """
+    try:
+        with inbox_path().open("rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read()
+    except OSError:
+        return [], offset
+
+    newline = chunk.rfind(b"\n")
+    if newline == -1:
+        return [], offset
+
+    complete = chunk[: newline + 1]
+    # Cutting at b"\n" is always a valid UTF-8 boundary: 0x0A never appears as
+    # a continuation byte, so no multi-byte character can be split here.
+    return complete.decode("utf-8").splitlines(), offset + len(complete)
+
+
+def _resolve_follow_start(
+    since_cursor: str | None,
+) -> tuple[list[OrchestratorEvent], int]:
+    """Resolve *since_cursor* to a byte offset with one full read.
+
+    Followers pay this whole-inbox cost once at startup; every later poll goes
+    through :func:`_read_lines_after_offset`. Returns the events after the
+    cursor — unfiltered, since callers apply their own filters — and the
+    consumed byte offset.
+    """
+    lines, offset = _read_lines_after_offset(0)
+    parsed = _parse_lines(lines)
+    after_cursor, found = _apply_cursor(parsed, since_cursor)
+    if not found:
+        logger.warning(
+            "cursor %s not found in inbox; replaying from start", since_cursor
+        )
+    return after_cursor, offset
+
+
 def read_events(
     consumer: str | None = None,
     *,
@@ -391,44 +465,26 @@ def read_events(
     lines = raw_text.splitlines()
     parsed = _parse_lines(lines)
 
-    events: list[OrchestratorEvent] = []
-    past_cursor = cursor is None  # If no cursor, start from beginning
-
-    for event in parsed:
-        # Cursor-based skip: advance past the cursor event, then include from there
-        if not past_cursor:
-            if event.id == cursor:
-                past_cursor = True
-            continue
-
-        if not _event_matches(
-            event,
-            since_ts=since_ts,
-            event_types=event_types,
-            client_names=client_names,
-            lane_names=lane_names,
-        ):
-            continue
-
-        events.append(event)
+    after_cursor, found = _apply_cursor(parsed, cursor)
 
     # Cursor-not-found fallback: replay from the beginning.
     # Why: callers are idempotent — orchestrate_retire guards on sess.status ==
     # COMPLETED, dispatch consumer skips non-RUNNING tasks, and event tail is
     # display-only — so replaying from the start is safe.
-    if cursor is not None and not past_cursor:
+    if not found:
         logger.warning("cursor %s not found in inbox; replaying from start", cursor)
-        events = [
-            event
-            for event in parsed
-            if _event_matches(
-                event,
-                since_ts=since_ts,
-                event_types=event_types,
-                client_names=client_names,
-                lane_names=lane_names,
-            )
-        ]
+
+    events = [
+        event
+        for event in after_cursor
+        if _event_matches(
+            event,
+            since_ts=since_ts,
+            event_types=event_types,
+            client_names=client_names,
+            lane_names=lane_names,
+        )
+    ]
 
     if limit is not None:
         # events[-limit:] is correct for limit > 0; limit=0 is a Python trap
@@ -529,31 +585,32 @@ def wait_for_event(
         TimeoutError: If no match arrives within *timeout* seconds.
     """
     deadline = time.monotonic() + timeout
-    last_cursor: str | None = None
-    last_size: int | None = None
     matched = False
 
+    # No cursor: wait_for_event matches against pre-existing history too.
+    initial, offset = _resolve_follow_start(None)
+    new_events = initial
+
     while True:
-        should_read, last_size = _poll_inbox_growth(last_size)
-        if should_read:
-            new_events = read_events(
-                since_cursor=last_cursor,
+        for ev in new_events:
+            if not _event_matches(
+                ev,
+                since_ts=None,
                 event_types=event_types,
-            )
-            for ev in new_events:
-                # Advance cursor past all type-matched events, not just
-                # correlation/session/client matches, so they are not re-scanned.
-                last_cursor = ev.id
-                if _event_matches_wait(
-                    ev,
-                    correlation_id=correlation_id,
-                    session_id=session_id,
-                    client=client,
-                ):
-                    matched = True
-                    yield ev
-                    if not follow:
-                        return
+                client_names=None,
+                lane_names=None,
+            ):
+                continue
+            if _event_matches_wait(
+                ev,
+                correlation_id=correlation_id,
+                session_id=session_id,
+                client=client,
+            ):
+                matched = True
+                yield ev
+                if not follow:
+                    return
 
         if time.monotonic() >= deadline:
             if not matched:
@@ -562,6 +619,14 @@ def wait_for_event(
             return
 
         time.sleep(poll_interval)
+
+        should_read, current_size = _poll_inbox_growth(offset)
+        if should_read:
+            lines, offset = _read_lines_after_offset(offset)
+            new_events = _parse_lines(lines)
+        else:
+            offset = current_size
+            new_events = []
 
 
 def tail_events_follow(
@@ -575,30 +640,46 @@ def tail_events_follow(
 ) -> Generator[OrchestratorEvent]:
     """Yield new events as they arrive, polling the inbox for changes.
 
+    Resolves *since_cursor* to a byte offset with a single full read at
+    startup, then reads only the bytes appended past that offset on each poll
+    (#1979).  ``_poll_inbox_growth``'s ``last_size`` argument *is* that
+    consumed offset — the two were already equal under the previous
+    whole-inbox read, which is why that guard's docstring calls it "the
+    bytes-consumed offset".
+
     Uses the shared ``_poll_inbox_growth`` guard as a cheap change-detection
-    check over the inbox byte size; calls ``read_events`` only when the size
-    grows.  A size decrease (defensive, append-only inbox) warns and resets the
-    baseline without reading.  Does not hold the inbox lock during sleep.  Does
-    not advance any consumer cursor — that remains one-shot only.
+    check over the inbox byte size; reads only when the size changes.  A size
+    decrease (``prune_events`` rewrites the inbox) warns, resets the offset to
+    the new EOF, and does not replay — the shrink branch's stated intent.
+    Holds no lock at any point.  Does not advance any consumer cursor — that
+    remains one-shot only.
 
     Exits when the caller sends a ``GeneratorExit`` (or raises
     ``KeyboardInterrupt`` / ``BrokenPipeError`` in the iterating loop).
     """
-    last_cursor = since_cursor
-    last_size: int | None = None
+    initial, offset = _resolve_follow_start(since_cursor)
+    new_events = initial
 
     while True:
-        should_read, last_size = _poll_inbox_growth(last_size)
-        if should_read:
-            new_events = read_events(
-                since_cursor=last_cursor,
+        for event in new_events:
+            if _event_matches(
+                event,
                 since_ts=since_ts,
                 event_types=event_types,
                 client_names=client_names,
                 lane_names=lane_names,
-            )
-            for ev in new_events:
-                yield ev
-                last_cursor = ev.id
+            ):
+                yield event
 
         time.sleep(poll_interval)
+
+        should_read, current_size = _poll_inbox_growth(offset)
+        if should_read:
+            lines, offset = _read_lines_after_offset(offset)
+            new_events = _parse_lines(lines)
+        else:
+            # Unchanged (no-op) or shrunk (prune rewrote the inbox): adopt the
+            # current size as the new offset. On a shrink that lands at the
+            # new EOF and does not replay — the shrink branch's stated intent.
+            offset = current_size
+            new_events = []
