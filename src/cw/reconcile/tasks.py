@@ -8,6 +8,7 @@ TIMED_OUT session's PR merged. See GitHub #421, #488, #637.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import STALE_DISPATCH_BLOCKER_REASON
@@ -21,7 +22,11 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import advance_cursor, read_events, record_event
-from cw.gh import _GH_PR_STATE_MERGED, TIMED_OUT_MERGED_LOOKBACK_DAYS
+from cw.gh import (
+    _GH_PR_STATE_MERGED,
+    TIMED_OUT_MERGED_LOOKBACK_DAYS,
+    resolve_merged_via_pr_state,
+)
 from cw.models import (
     DevQueueStore,
     OrchestratorConfig,
@@ -287,6 +292,8 @@ def _is_dangling_client(client_name: str, clients: dict[str, ClientConfig]) -> b
 def _filter_merged_candidates(
     candidates: list[tuple[Session, str]],
     clients: dict[str, ClientConfig],
+    task_by_ticket: dict[tuple[str, str], TicketTask],
+    max_age_seconds: int,
 ) -> list[tuple[Session, str]]:
     """One gh call per candidate to keep only merged-PR tickets (Phase 2).
 
@@ -298,6 +305,10 @@ def _filter_merged_candidates(
     *clients* is used to resolve each session's
     :attr:`ClientConfig.feature_branch_prefix` so the branch key matches what
     the staged pipeline provisions (GitHub #728).
+
+    GitHub #975: *task_by_ticket* / *max_age_seconds* let each candidate's
+    merged verdict come from its task's fresh persisted pr_state first,
+    falling back to the gh call only when stale/absent.
     """
     to_complete: list[tuple[Session, str]] = []
     for session, ticket_id in candidates:
@@ -305,8 +316,14 @@ def _filter_merged_candidates(
             continue
         branch = feature_branch_key(session.client, ticket_id, clients)
         cwd = _client_cwd(session.client, clients)
-        merged, gh_available = _deps.pr_is_merged_for_ticket(
-            ticket_id, branch=branch, cwd=cwd
+        merged, gh_available = resolve_merged_via_pr_state(
+            ticket_id,
+            session.client,
+            task_by_ticket,
+            max_age_seconds=max_age_seconds,
+            gh_fallback=partial(
+                _deps.pr_is_merged_for_ticket, ticket_id, branch=branch, cwd=cwd
+            ),
         )
         if not gh_available:
             # gh binary absent — skip all remaining candidates.
@@ -369,9 +386,15 @@ def complete_timed_out_merged_tasks() -> list[str]:
 
     # Load clients once for branch-key resolution (feature_branch_prefix SSOT, #728).
     clients = load_clients()
+    orchestrator_config = load_orchestrator_config()
 
     # Phase 2: One gh call per surviving candidate (outside any lock).
-    to_complete = _filter_merged_candidates(candidates, clients)
+    to_complete = _filter_merged_candidates(
+        candidates,
+        clients,
+        task_by_ticket,
+        orchestrator_config.pr_hydration_interval_seconds,
+    )
     if not to_complete:
         return []
 

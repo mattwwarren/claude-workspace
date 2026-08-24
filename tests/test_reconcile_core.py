@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -23,6 +23,7 @@ from cw.models import (
     CwState,
     DevQueueStore,
     OrchestratorEventType,
+    PrState,
     QueueItemStatus,
     Session,
     SessionOrigin,
@@ -44,7 +45,7 @@ from tests._reconcile_helpers import (
     _write_idle_transcript_with_text,
     _write_transcript_records,
 )
-from tests.conftest import _make_daemon_session
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 
 def test_reconcile_matches_short_id_against_full_uuid_session_id(
@@ -150,6 +151,132 @@ def test_reconcile_reverts_daemon_session_ticket_to_pending(
     )
     assert len(events) == 1
     assert events[0].payload.get("ticket_id") == "TKT-1"
+
+
+def test_reconcile_prepass_uses_fresh_merged_pr_state_without_gh_call(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub #975: a phantom DAEMON session whose task carries a fresh
+    MERGED pr_state is treated as merged (completed_reason=NORMAL, not
+    CRASHED) WITHOUT any _deps.pr_is_merged_for_ticket call."""
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+    sess = _mk_session("sess-daemon", "dead-ref")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/TKT-MERGED"
+    save_state(CwState(sessions=[sess]))
+
+    task = _make_ticket_task(
+        ticket_id="TKT-MERGED",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        pr_state=PrState(
+            state="MERGED", hydrated_at=datetime.now(UTC) - timedelta(seconds=10)
+        ),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    def _should_not_be_called(_tid: str, **_kw: object) -> tuple[bool | None, bool]:
+        msg = "pr_is_merged_for_ticket must not be called when pr_state is fresh"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket", _should_not_be_called
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+    reconcile()
+
+    reloaded = load_state()
+    session = reloaded.find_by_name_or_id("sess-daemon")
+    assert session is not None
+    assert session.status == SessionStatus.COMPLETED
+    assert session.completed_reason == CompletionReason.NORMAL
+
+
+def test_reconcile_prepass_uses_fresh_open_pr_state_without_gh_call(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub #975: fresh OPEN pr_state -> not merged, and no gh call is made."""
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+    sess = _mk_session("sess-daemon", "dead-ref")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/TKT-OPEN"
+    save_state(CwState(sessions=[sess]))
+
+    task = _make_ticket_task(
+        ticket_id="TKT-OPEN",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        pr_state=PrState(
+            state="OPEN", hydrated_at=datetime.now(UTC) - timedelta(seconds=10)
+        ),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    def _should_not_be_called(_tid: str, **_kw: object) -> tuple[bool | None, bool]:
+        msg = "pr_is_merged_for_ticket must not be called when pr_state is fresh"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket", _should_not_be_called
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+    reconcile()
+
+    reloaded = load_state()
+    session = reloaded.find_by_name_or_id("sess-daemon")
+    assert session is not None
+    assert session.status == SessionStatus.COMPLETED
+    assert session.completed_reason == CompletionReason.CRASHED
+
+
+def test_reconcile_prepass_falls_back_to_gh_when_pr_state_stale(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub #975: stale pr_state falls back to the ordinary gh call path
+    unchanged (existing pre-#975 behavior)."""
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+    sess = _mk_session("sess-daemon", "dead-ref")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/TKT-STALE"
+    save_state(CwState(sessions=[sess]))
+
+    task = _make_ticket_task(
+        ticket_id="TKT-STALE",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        pr_state=PrState(
+            state="MERGED", hydrated_at=datetime.now(UTC) - timedelta(seconds=300)
+        ),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    calls: list[str] = []
+
+    def _capture(_tid: str, **_kw: object) -> tuple[bool | None, bool]:
+        calls.append(_tid)
+        return True, True
+
+    monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+    reconcile()
+
+    assert calls == ["TKT-STALE"]
+    reloaded = load_state()
+    session = reloaded.find_by_name_or_id("sess-daemon")
+    assert session is not None
+    assert session.completed_reason == CompletionReason.NORMAL
 
 
 def test_reconcile_clears_session_id_on_revert(

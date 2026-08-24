@@ -19,6 +19,9 @@ server module binds its historic underscored module-level names to them as
 plain public-attribute reads (e.g. ``_lock = _bus.lock``), which keeps every
 existing import site and in-place test mutation working without tripping ruff's
 SLF001 private-member-access rule (R2).
+
+``load_offset_from_file`` determines the current offset via a bounded reverse
+read from EOF rather than parsing the whole channel log (#1986).
 """
 
 from __future__ import annotations
@@ -29,12 +32,113 @@ import logging
 import os
 import queue
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from cw.atomic import atomic_write_text
 from cw.config import state_dir
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
 logger = logging.getLogger(__name__)
+
+_REVERSE_READ_CHUNK_BYTES = 65536  # 64 KiB per backward seek
+
+
+def _read_reverse_chunk(f: BinaryIO, end: int, size: int) -> bytes:
+    """Read up to ``size`` bytes of ``f`` ending at byte offset ``end``.
+
+    A thin, separately-nameable wrapper around the seek+read pair so tests can
+    monkeypatch it to count bytes actually pulled off disk (the low-level I/O
+    primitive ``_iter_line_groups_reverse`` drives in its backward walk).
+    """
+    start = max(0, end - size)
+    f.seek(start)
+    return f.read(end - start)
+
+
+def _decode_reverse_candidate(raw: bytes) -> str | None:
+    """Decode+strip one candidate line; ``None`` if blank or undecodable.
+
+    A crash mid-``append_event`` can truncate the trailing line mid multi-byte
+    UTF-8 character, which raises ``UnicodeDecodeError`` here — well before
+    ``json.loads`` would ever see it. Treated the same as a malformed line:
+    warn and let the caller keep walking backward.
+    """
+    if not raw.strip():
+        return None
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        logger.warning("skipping undecodable line: %r", raw)
+        return None
+    return text or None
+
+
+def _iter_line_groups_reverse(path: Path) -> Iterator[list[str]]:
+    """Yield groups of decoded, non-blank lines from ``path``, EOF to BOF.
+
+    Each group is exactly the complete lines recovered from one backward
+    ``_REVERSE_READ_CHUNK_BYTES`` read (or the final BOF flush) — no extra
+    disk I/O is needed to produce a group beyond what was already pulled. A
+    line spanning a chunk boundary is reassembled via a carry buffer and
+    attributed to the group in which its leading boundary is found.
+    """
+    with path.open("rb") as f:
+        pos = f.seek(0, os.SEEK_END)
+        carry = b""
+        while pos > 0:
+            chunk = _read_reverse_chunk(f, pos, _REVERSE_READ_CHUNK_BYTES)
+            pos -= len(chunk)
+            data = chunk + carry
+            raw_lines = data.split(b"\n")
+            carry = raw_lines[0]
+            group = [
+                line
+                for raw in reversed(raw_lines[1:])
+                if (line := _decode_reverse_candidate(raw)) is not None
+            ]
+            if group:
+                yield group
+        line = _decode_reverse_candidate(carry)
+        if line is not None:
+            yield [line]
+
+
+def _last_offset_from_reverse_scan(path: Path, events_file: str) -> int | None:
+    """Return the max valid offset within the first non-empty read group.
+
+    ``append_event`` assigns offsets under ``file_lock``, but that lock is a
+    ``threading.Lock`` — thread-scoped, not process-scoped. Two processes
+    appending to the same channel log (e.g. a lingering server during a
+    crash-restart) can interleave writes so the file is *not* offset-monotonic
+    in file position, even though each process's own writes are. Returning the
+    first valid offset found walking backward can therefore return a value
+    lower than the true max, which would make the next ``append_event`` reuse
+    an offset already on disk and replay events to subscribers.
+
+    Returns ``None`` if BOF is reached with no valid record.
+    """
+    for group in _iter_line_groups_reverse(path):
+        offsets: list[int] = []
+        for line in group:
+            try:
+                record: dict[str, Any] = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("%s: skipping malformed line: %r", events_file, line)
+                continue
+            offset = record.get("offset")
+            if isinstance(offset, int):
+                offsets.append(offset)
+        if offsets:
+            # Why: take the max over the whole group already read off disk,
+            # not the first record found in it — stays bounded (no extra
+            # I/O; the group is already in memory) while staying correct
+            # under cross-process interleaving. Do not "simplify" this back
+            # to first-found (#1986 round 2).
+            return max(offsets)
+    return None
 
 
 class EventBus:
@@ -136,24 +240,21 @@ class EventBus:
                 return {}
 
     def load_offset_from_file(self) -> int:
-        """Determine current offset from the events file on disk."""
+        """Determine current offset via a bounded reverse read from EOF (#1986).
+
+        Rather than parsing the whole channel log to compute max(offset) + 1,
+        this walks backward from EOF in ``_REVERSE_READ_CHUNK_BYTES`` chunks,
+        stopping as soon as one chunk yields any valid record and returning
+        the max offset within that chunk — see
+        ``_last_offset_from_reverse_scan`` for why the max over the read
+        chunk, not the first record found, is required for correctness.
+        """
         with self.file_lock:
             path = state_dir() / self.events_file
             if not path.exists():
                 return 0
-            max_offset = -1
-            for raw_line in path.read_text().splitlines():
-                stripped = raw_line.strip()
-                if not stripped:
-                    continue
-                try:
-                    record: dict[str, Any] = json.loads(stripped)
-                    offset = record.get("offset", -1)
-                    if isinstance(offset, int) and offset > max_offset:
-                        max_offset = offset
-                except json.JSONDecodeError:
-                    continue
-            return max_offset + 1
+            found = _last_offset_from_reverse_scan(path, self.events_file)
+            return found + 1 if found is not None else 0
 
     def subscribe_with_cursor(
         self, client_id: str

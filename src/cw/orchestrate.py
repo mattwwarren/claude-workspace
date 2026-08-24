@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from cw.atomic import atomic_write_text
 from cw.config import (
+    load_orchestrator_config,
     load_state,
     review_monitor_dir,
     save_state,
@@ -42,22 +43,25 @@ from cw.config import (
 from cw.dev_queue import load_dev_queue
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError
+from cw.gh import pr_state_is_fresh
 from cw.models import (
     DEFAULT_LANE,
     CompletionReason,
     OrchestratorEvent,
     OrchestratorEventType,
+    PrState,
     QueueItemStatus,
     Session,
     SessionStatus,
     TicketTask,
 )
+from cw.pr_hydrate import _parse_pr_url
 from cw.reconcile._shared import _transcript_age_seconds
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from cw.models import CwState
+    from cw.models import CwState, DevQueueStore
 
 logger = logging.getLogger(__name__)
 
@@ -663,11 +667,53 @@ def _count_unresolved(thread_status: dict[str, Any]) -> int:
     return count
 
 
+# GitHub #975: PrState.mergeable's gh-native strings, mapped onto the bool
+# MonitoredPR.mergeable expects. Any other value (e.g. "UNKNOWN", None) is
+# treated as "no confident overlay" -- see _fresh_pr_states_by_repo_pr's
+# caller, which leaves the review-monitor JSON value untouched in that case.
+_MERGEABLE_BOOL_MAP: dict[str, bool] = {"MERGEABLE": True, "CONFLICTING": False}
+
+
+def _fresh_pr_states_by_repo_pr(
+    store: DevQueueStore, *, max_age_seconds: int
+) -> dict[tuple[str, int], PrState]:
+    """(repo, pr_number) -> freshly-hydrated PrState across tasks + watched PRs.
+
+    GitHub #975 -- lets _load_monitored_prs prefer cw's own more-frequent
+    serve-tick hydration (GitHub #929) over review-monitor's independently
+    polled JSON for the same PR. Mirrors
+    cw.reconcile.tasks._merged_pr_numbers_by_client's dual-source traversal
+    (tasks + client-tagged watched_prs), gated additionally on freshness via
+    cw.gh.pr_state_is_fresh since, unlike that function, a stale overlay here
+    must NOT be preferred over review-monitor's own live JSON read.
+    """
+    fresh: dict[tuple[str, int], PrState] = {}
+    for t in store.tasks:
+        if t.pr_state is None or not pr_state_is_fresh(t.pr_state, max_age_seconds):
+            continue
+        if not t.pr_url:
+            continue
+        parsed = _parse_pr_url(t.pr_url)
+        if parsed is None:
+            continue
+        fresh[parsed] = t.pr_state
+    for w in store.watched_prs:
+        if w.pr_state is None or not pr_state_is_fresh(w.pr_state, max_age_seconds):
+            continue
+        fresh[(w.repo, w.pr_number)] = w.pr_state
+    return fresh
+
+
 def _load_monitored_prs() -> list[MonitoredPR]:
     """Read review-monitor state files and summarise active PRs."""
     monitor_dir = review_monitor_dir()
     if not monitor_dir.exists():
         return []
+    orchestrator_config = load_orchestrator_config()
+    fresh_pr_states = _fresh_pr_states_by_repo_pr(
+        load_dev_queue(),
+        max_age_seconds=orchestrator_config.pr_hydration_interval_seconds,
+    )
     monitored: list[MonitoredPR] = []
     for path in sorted(monitor_dir.glob("*.json")):
         try:
@@ -682,16 +728,21 @@ def _load_monitored_prs() -> list[MonitoredPR]:
                 pr_number = int(pr_data.get("pr_number", 0))
             except (TypeError, ValueError):
                 continue
+            repo = str(pr_data.get("repo", ""))
             thread_status: dict[str, Any] = pr_data.get("thread_status", {})
+            mergeable: bool | None = pr_data.get("mergeable")
+            state = fresh_pr_states.get((repo, pr_number))
+            if state is not None and state.mergeable in _MERGEABLE_BOOL_MAP:
+                mergeable = _MERGEABLE_BOOL_MAP[state.mergeable]
             monitored.append(
                 MonitoredPR(
-                    repo=str(pr_data.get("repo", "")),
+                    repo=repo,
                     pr_number=pr_number,
                     role=str(pr_data.get("role", "author")),
                     status=str(pr_data.get("status", "watching")),
                     unresolved_threads=_count_unresolved(thread_status),
                     ci_status=pr_data.get("ci_status"),
-                    mergeable=pr_data.get("mergeable"),
+                    mergeable=mergeable,
                 )
             )
     return monitored

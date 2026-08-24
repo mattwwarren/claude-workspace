@@ -3079,6 +3079,78 @@ class TestCheckTimedOutMerged:
         results = _check_timed_out_merged(state, {})
         assert not any(r.warn for r in results)
 
+    def test_fresh_merged_pr_state_warns_without_gh_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """GitHub #975: a matching task with a fresh MERGED pr_state warns
+        without calling pr_is_merged_for_ticket."""
+        from datetime import timedelta
+
+        from cw.dev_queue import save_dev_queue
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState, DevQueueStore, PrState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-merged")
+        state = CwState(sessions=[session])
+
+        now = datetime.now(UTC)
+        task = _make_ticket_task(
+            ticket_id="to-merged",
+            client="client-a",
+            pr_state=PrState(state="MERGED", hydrated_at=now - timedelta(seconds=10)),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        def _should_not_be_called(*_args: object, **_kwargs: object) -> object:
+            msg = "pr_is_merged_for_ticket must not be called when pr_state is fresh"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.pr_is_merged_for_ticket", _should_not_be_called
+        )
+        results = _check_timed_out_merged(state, {})
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert "to-merged" in warn_results[0].detail
+
+    def test_fresh_non_merged_pr_state_no_warn_without_gh_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """GitHub #975: a matching task with a fresh non-MERGED pr_state does
+        not warn and does not call pr_is_merged_for_ticket."""
+        from datetime import timedelta
+
+        from cw.dev_queue import save_dev_queue
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState, DevQueueStore, PrState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-open")
+        state = CwState(sessions=[session])
+
+        now = datetime.now(UTC)
+        task = _make_ticket_task(
+            ticket_id="to-open",
+            client="client-a",
+            pr_state=PrState(state="OPEN", hydrated_at=now - timedelta(seconds=10)),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        def _should_not_be_called(*_args: object, **_kwargs: object) -> object:
+            msg = "pr_is_merged_for_ticket must not be called when pr_state is fresh"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.pr_is_merged_for_ticket", _should_not_be_called
+        )
+        results = _check_timed_out_merged(state, {})
+        assert not any(r.warn for r in results)
+
     def test_gh_unavailable_warns(
         self,
         monkeypatch: pytest.MonkeyPatch,
