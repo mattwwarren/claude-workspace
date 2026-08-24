@@ -4050,6 +4050,90 @@ class TestAutoPruneOnAppend:
         remaining = read_events()
         assert [e.payload["n"] for e in remaining] == [7, 8, 9]
 
+    def test_auto_prune_archives_before_inbox_rewrite_survives_rewrite_failure(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Archive-append happens before the inbox rewrite -- pin the ordering.
+
+        If the inbox rewrite (atomic_write_text) fails AFTER the
+        archive-append has already succeeded, the archive must already hold
+        the pruned batch: a crash between the two steps then loses nothing,
+        per the #1980 review's archive-first ordering fix
+        (operator-adjudicated). record_event itself must still survive --
+        the auto-prune trigger is best-effort.
+        """
+        from cw import events as events_module
+
+        monkeypatch.setattr(
+            events_module,
+            "load_orchestrator_config",
+            lambda: _auto_config(
+                event_inbox_retention_bytes=10**9, event_inbox_retention_count=3
+            ),
+        )
+        for i in range(5):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+        monkeypatch.setattr(
+            events_module,
+            "load_orchestrator_config",
+            lambda: _auto_config(
+                event_inbox_retention_bytes=50, event_inbox_retention_count=3
+            ),
+        )
+        _reset_auto_prune_cache(monkeypatch)
+
+        def raise_after_archive(*args: object, **kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(events_module, "atomic_write_text", raise_after_archive)
+
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 99})
+
+        archive_files = list(tmp_events_dir.glob("inbox.*.jsonl"))
+        assert archive_files, "archive file expected despite the rewrite failure"
+        archived_ns = [
+            json.loads(line)["payload"]["n"]
+            for line in archive_files[0].read_text().splitlines()
+            if line.strip()
+        ]
+        assert archived_ns == [0, 1, 2], (
+            "archive must hold the pruned batch before the failed rewrite"
+        )
+
+    def test_auto_prune_success_logs_archived_kept_and_path(
+        self,
+        tmp_events_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A successful auto-prune logs archived/kept counts and the archive path.
+
+        Pins the success-path observability fix (#1980 review,
+        operator-directed): an automatic, unattended prune must leave a
+        discoverable trace.
+        """
+        from cw import events as events_module
+
+        monkeypatch.setattr(
+            events_module,
+            "load_orchestrator_config",
+            lambda: _auto_config(
+                event_inbox_retention_bytes=50, event_inbox_retention_count=3
+            ),
+        )
+
+        with caplog.at_level(logging.INFO, logger="cw.events"):
+            for i in range(10):
+                events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert any("auto-pruned event inbox" in r.message for r in info_records)
+        assert any(
+            "archived=" in r.message and "kept=3" in r.message for r in info_records
+        )
+
     def test_auto_prune_config_is_cached_not_reloaded_every_append(
         self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
