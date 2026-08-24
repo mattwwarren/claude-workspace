@@ -1353,6 +1353,55 @@ class TestInboxPruneThresholds:
         assert OrchestratorConfig().inbox_line_count_warn == 15_000
 
 
+class TestEventInboxAutoPruneDefaults:
+    """#1980: OrchestratorConfig defaults for the event-inbox auto-prune trigger."""
+
+    def test_orchestrator_config_default_event_inbox_auto_prune_enabled(self) -> None:
+        assert OrchestratorConfig().event_inbox_auto_prune_enabled is True
+
+    def test_orchestrator_config_default_event_inbox_retention_bytes(self) -> None:
+        assert OrchestratorConfig().event_inbox_retention_bytes == 5_000_000
+
+    def test_orchestrator_config_default_event_inbox_retention_count(self) -> None:
+        assert OrchestratorConfig().event_inbox_retention_count == 2000
+
+
+class TestEventInboxRetentionRatioValidator:
+    """#1980 review: warn (never fail) when retention_bytes can't hold
+    retention_count events, so auto-prune can't thrash on every append."""
+
+    def test_warns_when_bytes_below_plausible_footprint(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            OrchestratorConfig(
+                event_inbox_retention_bytes=50, event_inbox_retention_count=3
+            )
+        assert any("event_inbox_retention_bytes" in r.message for r in caplog.records)
+
+    def test_no_warning_for_default_config(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            OrchestratorConfig()
+        assert not [
+            r for r in caplog.records if "event_inbox_retention_bytes" in r.message
+        ]
+
+    def test_no_warning_when_auto_prune_disabled(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            OrchestratorConfig(
+                event_inbox_auto_prune_enabled=False,
+                event_inbox_retention_bytes=50,
+                event_inbox_retention_count=3,
+            )
+        assert not [
+            r for r in caplog.records if "event_inbox_retention_bytes" in r.message
+        ]
+
+
 class TestOperatorChannelForward:
     """RFC 0008 W3 (#1002): operator-attention forward-set config surface."""
 

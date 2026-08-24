@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from pydantic import BaseModel, ValidationError
 
 from cw.atomic import atomic_write_text
-from cw.config import events_dir
+from cw.config import events_dir, load_orchestrator_config
 from cw.exceptions import CwError
-from cw.models import OrchestratorEvent, OrchestratorEventType
+from cw.models import OrchestratorConfig, OrchestratorEvent, OrchestratorEventType
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
@@ -63,6 +63,14 @@ def record_event(
 ) -> OrchestratorEvent:
     """Append a new event to the inbox and return it.
 
+    May trigger an in-band auto-prune (#1980): once the inbox exceeds
+    ``event_inbox_retention_bytes``, this call also rewrites the inbox down
+    to the newest ``event_inbox_retention_count`` events before returning,
+    under the same ``_inbox_lock`` acquisition. See
+    :func:`_maybe_auto_prune_locked` for the trigger and
+    :func:`_prune_events_locked` for the composition contract with
+    ``_poll_follow_state``'s inode-change detection.
+
     Args:
         event_type: The orchestrator event type.
         payload: Arbitrary JSON-serialisable payload dict.
@@ -81,7 +89,86 @@ def record_event(
         inbox.parent.mkdir(parents=True, exist_ok=True)
         with inbox.open("a") as f:
             f.write(event.model_dump_json() + "\n")
+            size = f.tell()
+        _maybe_auto_prune_locked(size)
     return event
+
+
+class _AutoPruneConfigCache:
+    """Mutable holder for the cached config.
+
+    A plain pair of module-level scalars would need ``global`` to update
+    (PLW0603, disallowed by this repo's zero-violation ruff gate) -- mutating
+    attributes on a module-level singleton instance instead avoids reassigning
+    the module-level name itself.
+    """
+
+    def __init__(self) -> None:
+        self.config: OrchestratorConfig | None = None
+        self.loaded_at: float = 0.0
+
+
+_AUTO_PRUNE_CONFIG_CACHE = _AutoPruneConfigCache()
+_AUTO_PRUNE_CONFIG_TTL_SECONDS = 30.0  # matches tick_interval_seconds's default cadence
+
+
+def _load_auto_prune_config_cached() -> OrchestratorConfig:
+    """Return the cached OrchestratorConfig, reloading at most once per TTL.
+
+    Mirrors ``_run_poller``'s ``last_good_config`` fallback shape
+    (``cw_queue_events_server.py:302-325``) exactly: on a load failure, reuse
+    the last successfully-parsed config rather than raising, because
+    ``record_event`` has 114+ call sites and must never fail because a config
+    file was momentarily unparseable (GitHub #1980, "Ambiguity Resolutions --
+    round 1", Q2). On a cold start with no cache populated yet, fall back to
+    ``OrchestratorConfig()`` safe defaults, exactly as ``_run_poller`` falls
+    back before its first successful load.
+    """
+    cache = _AUTO_PRUNE_CONFIG_CACHE
+    now = time.monotonic()
+    if cache.config is None or now - cache.loaded_at > _AUTO_PRUNE_CONFIG_TTL_SECONDS:
+        try:
+            cache.config = load_orchestrator_config()
+            cache.loaded_at = now
+        except Exception:
+            # Why: a config reload failure must never fail record_event,
+            # which has 114+ call sites -- fall back to the last config that
+            # loaded successfully (or safe defaults, pre-first-load),
+            # mirroring _run_poller's last_good_config precedent exactly. Do
+            # NOT advance cache.loaded_at here: unlike _run_poller (which
+            # retries every tick unconditionally), this cache is TTL-gated,
+            # so leaving the timestamp alone makes the very next call retry
+            # the load immediately rather than being stuck on a stale/absent
+            # cache for the full TTL.
+            logger.exception("auto-prune config reload failed, using last-known-good")
+    return cache.config if cache.config is not None else OrchestratorConfig()
+
+
+def _maybe_auto_prune_locked(size_bytes: int) -> None:
+    """Prune the inbox in-band if it has grown past the configured threshold.
+
+    Called from record_event while _inbox_lock is already held. Best-effort:
+    a failure here must not prevent the event that was just appended from
+    being considered recorded, so failures are logged and swallowed.
+    """
+    config = _load_auto_prune_config_cached()
+    if not config.event_inbox_auto_prune_enabled:
+        return
+    if size_bytes <= config.event_inbox_retention_bytes:
+        return
+    try:
+        result = _prune_events_locked(
+            before=None, keep=config.event_inbox_retention_count, archive=True
+        )
+    except Exception:
+        logger.exception("auto-prune of event inbox failed; continuing")
+        return
+    logger.info(
+        "auto-pruned event inbox: archived=%d kept=%d archive_path=%s",
+        result.archived_count,
+        result.kept_count,
+        result.archive_path,
+    )
 
 
 class PruneResult(BaseModel):
@@ -166,53 +253,76 @@ def prune_events(
         raise CwError(msg)
 
     with _inbox_lock():
-        inbox = inbox_path()
-        raw_text = inbox.read_text() if inbox.exists() else ""
-        if not raw_text:
-            return PruneResult(
-                archived_count=0, deleted_count=0, archive_path=None, kept_count=0
-            )
+        return _prune_events_locked(before=before, keep=keep, archive=archive)
 
-        events = _parse_lines(raw_text.splitlines())
-        if before is not None:
-            kept_events, pruned_events = _partition_events_by_before(events, before)
-        elif keep is not None:
-            kept_events, pruned_events = _partition_events_by_keep(events, keep)
-        else:  # pragma: no cover - unreachable, guarded by validation above
-            msg = "prune_events: exactly one of 'before' or 'keep' must be given."
-            raise CwError(msg)
 
-        new_text = "".join(e.model_dump_json() + "\n" for e in kept_events)
-        atomic_write_text(inbox, new_text)
+def _prune_events_locked(
+    *, before: datetime | None, keep: int | None, archive: bool
+) -> PruneResult:
+    """Prune the inbox. Caller MUST already hold ``_inbox_lock()``.
 
-        archived_count = 0
-        deleted_count = 0
-        archive_path: str | None = None
-        if pruned_events:
-            if archive:
-                path = _archive_path_for_today()
-                path.parent.mkdir(parents=True, exist_ok=True)
-                # Why: this append is not atomic with the inbox rewrite above.
-                # A crash between the two would drop the pruned events from
-                # both files. Accepted: the archive is a best-effort audit
-                # copy, not the durable source of truth (inbox.jsonl is), and
-                # atomicity here would require a second temp-file+rename step
-                # for marginal benefit on an operator-invoked, non-hot-path
-                # command.
-                with path.open("a") as f:
-                    for ev in pruned_events:
-                        f.write(ev.model_dump_json() + "\n")
-                archived_count = len(pruned_events)
-                archive_path = str(path)
-            else:
-                deleted_count = len(pruned_events)
-
+    ``_inbox_lock`` is not reentrant (see :func:`prune_events`); this helper
+    exists so :func:`record_event`'s auto-prune trigger can reuse the prune
+    logic from inside its own already-held lock. Does not validate
+    ``before``/``keep`` exclusivity -- callers are responsible (see
+    :func:`prune_events` for the validated public entry point).
+    """
+    inbox = inbox_path()
+    raw_text = inbox.read_text() if inbox.exists() else ""
+    if not raw_text:
         return PruneResult(
-            archived_count=archived_count,
-            deleted_count=deleted_count,
-            archive_path=archive_path,
-            kept_count=len(kept_events),
+            archived_count=0, deleted_count=0, archive_path=None, kept_count=0
         )
+
+    events = _parse_lines(raw_text.splitlines())
+    if before is not None:
+        kept_events, pruned_events = _partition_events_by_before(events, before)
+    elif keep is not None:
+        kept_events, pruned_events = _partition_events_by_keep(events, keep)
+    else:  # pragma: no cover - unreachable, guarded by validation above
+        msg = "prune_events: exactly one of 'before' or 'keep' must be given."
+        raise CwError(msg)
+
+    archived_count = 0
+    deleted_count = 0
+    archive_path: str | None = None
+    if pruned_events:
+        if archive:
+            path = _archive_path_for_today()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Why: archive-append happens before the inbox rewrite below, not
+            # after. This ordering is deliberate (#1980 review): a crash
+            # between the two steps then loses nothing -- the archive already
+            # holds the pruned batch and the inbox is untouched, so a retry
+            # at worst double-archives on the next successful prune. The
+            # reverse order was the original shape here, accepted when this
+            # path was only reachable via an operator-invoked, non-hot-path
+            # `cw event prune` -- a human present to notice a crash and
+            # re-run. record_event's auto-prune trigger removed both
+            # properties: this sequence is now reachable automatically,
+            # unattended, from record_event's 114+ call sites, for as long as
+            # the process stays above the retention threshold. Duplicate
+            # records in a best-effort append-only audit log are benign;
+            # permanently vanished ones are not -- that asymmetry is why
+            # archive-first is correct now that a human isn't there to catch
+            # the old ordering's failure mode.
+            with path.open("a") as f:
+                for ev in pruned_events:
+                    f.write(ev.model_dump_json() + "\n")
+            archived_count = len(pruned_events)
+            archive_path = str(path)
+        else:
+            deleted_count = len(pruned_events)
+
+    new_text = "".join(e.model_dump_json() + "\n" for e in kept_events)
+    atomic_write_text(inbox, new_text)
+
+    return PruneResult(
+        archived_count=archived_count,
+        deleted_count=deleted_count,
+        archive_path=archive_path,
+        kept_count=len(kept_events),
+    )
 
 
 def load_cursor(consumer: str) -> str | None:
@@ -545,11 +655,14 @@ class _FollowState(NamedTuple):
       size keeps reporting them. Comparing size against *offset* would then
       report "changed" on every poll forever and the follower would never
       reach its idle path.
-    * *ino* — inode being read. ``prune_events`` rewrites the inbox via
-      ``atomic_write_text`` (temp file + ``Path.replace``), so a rewrite is
-      a *new* inode. Size arithmetic alone cannot see a replace-then-regrow
-      that lands above the old offset, and seeking into an unrelated file
-      lands mid-line.
+    * *ino* — inode being read. ``prune_events``/``_prune_events_locked``
+      rewrite the inbox via ``atomic_write_text`` (temp file +
+      ``Path.replace``), so a rewrite is a *new* inode -- whether triggered
+      by the operator-invoked ``cw event prune`` CLI or by ``record_event``'s
+      in-band auto-prune trigger (#1980); this class has no notion of who
+      triggered the rewrite. Size arithmetic alone cannot see a
+      replace-then-regrow that lands above the old offset, and seeking into
+      an unrelated file lands mid-line.
     * *cursor* — id of the last event delivered, used to re-establish
       position when the offset stops meaning anything.
     """
@@ -599,6 +712,14 @@ def _poll_follow_state(
     before it was pruned too — which makes the surviving events exactly the
     ones that follower has never seen. Skipping to the new EOF instead would
     silently drop them.
+
+    A rewrite detected here may now originate from ``record_event``'s in-band
+    auto-prune trigger (#1980), not only from the operator-invoked
+    ``cw event prune`` CLI — the rewrite can therefore land at any moment,
+    including mid-poll or mid-write from a concurrent ``record_event`` call.
+    The detection above is keyed off ``(ino, size)`` observed via
+    ``_stat_inbox()``, not off who triggered the rewrite, so it composes
+    unchanged with either origin.
     """
     stat = _stat_inbox()
     if stat is None:
