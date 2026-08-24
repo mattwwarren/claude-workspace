@@ -44,9 +44,11 @@ def _archive_files() -> list[Path]:
 def _archived_ids() -> list[str]:
     ids: list[str] = []
     for path in _archive_files():
-        for line in path.read_text().splitlines():
-            if line.strip():
-                ids.append(json.loads(line)["id"])
+        ids.extend(
+            json.loads(line)["id"]
+            for line in path.read_text().splitlines()
+            if line.strip()
+        )
     return ids
 
 
@@ -262,9 +264,7 @@ class TestPruneSessions:
             )
         )
         save_dev_queue(
-            DevQueueStore(
-                tasks=[_make_ticket_task(ticket_id=ticket_id, client=client)]
-            )
+            DevQueueStore(tasks=[_make_ticket_task(ticket_id=ticket_id, client=client)])
         )
 
         with freeze_time(_NOW):
@@ -305,9 +305,7 @@ class TestPruneSessions:
 
 
 class TestFindSessionById:
-    def test_find_session_by_id_hits_hot_file_first(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_find_session_by_id_hits_hot_file_first(self, tmp_config_dir: Path) -> None:
         """A session still in sessions.json resolves without touching archives."""
         _seed_sessions(
             _make_daemon_session(id="hot00001", name="client-a/auto-dev/T-hot")

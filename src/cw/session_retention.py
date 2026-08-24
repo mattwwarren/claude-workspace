@@ -139,9 +139,7 @@ def prune_sessions(
         state = load_state()
         queue = load_dev_queue()
         live_keys = {(t.client, t.ticket_id) for t in queue.tasks}
-        cutoff = before or (
-            datetime.now(UTC) - timedelta(days=_SESSION_RETENTION_DAYS)
-        )
+        cutoff = before or (datetime.now(UTC) - timedelta(days=_SESSION_RETENTION_DAYS))
 
         kept: list[Session] = []
         candidates: list[Session] = []

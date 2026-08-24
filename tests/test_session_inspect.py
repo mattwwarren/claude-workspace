@@ -20,7 +20,6 @@ from cw.cli.session_inspect import (
     _resolve_session,
 )
 from cw.config import load_state, save_state
-from cw.session_retention import prune_sessions
 from cw.models import (
     CompletionReason,
     LastResultSource,
@@ -31,6 +30,7 @@ from cw.models import (
     SessionStatus,
     Stage,
 )
+from cw.session_retention import prune_sessions
 from tests.conftest import _make_daemon_session, _make_diff
 
 
