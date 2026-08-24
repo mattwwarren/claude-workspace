@@ -452,16 +452,12 @@ class TestPrIsMergedFromState:
     def test_fresh_merged_state_returns_true(self) -> None:
         now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         pr_state = PrState(state="MERGED", hydrated_at=now - timedelta(seconds=10))
-        assert (
-            pr_is_merged_from_state(pr_state, max_age_seconds=150, now=now) is True
-        )
+        assert pr_is_merged_from_state(pr_state, max_age_seconds=150, now=now) is True
 
     def test_fresh_open_state_returns_false(self) -> None:
         now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         pr_state = PrState(state="OPEN", hydrated_at=now - timedelta(seconds=10))
-        assert (
-            pr_is_merged_from_state(pr_state, max_age_seconds=150, now=now) is False
-        )
+        assert pr_is_merged_from_state(pr_state, max_age_seconds=150, now=now) is False
 
     def test_stale_state_returns_none_regardless_of_value(self) -> None:
         now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
@@ -482,7 +478,8 @@ class TestResolveMergedViaPrState:
         task_by_ticket = {("acme", "T-1"): task}
 
         def _should_not_be_called() -> tuple[bool | None, bool]:
-            raise AssertionError("gh_fallback must not be called when state is fresh")
+            msg = "gh_fallback must not be called when state is fresh"
+            raise AssertionError(msg)
 
         result = resolve_merged_via_pr_state(
             "T-1",
@@ -503,7 +500,8 @@ class TestResolveMergedViaPrState:
         task_by_ticket = {("acme", "T-2"): task}
 
         def _should_not_be_called() -> tuple[bool | None, bool]:
-            raise AssertionError("gh_fallback must not be called when state is fresh")
+            msg = "gh_fallback must not be called when state is fresh"
+            raise AssertionError(msg)
 
         result = resolve_merged_via_pr_state(
             "T-2",
@@ -519,9 +517,7 @@ class TestResolveMergedViaPrState:
         task = _make_ticket_task(
             ticket_id="T-3",
             client="acme",
-            pr_state=PrState(
-                state="MERGED", hydrated_at=now - timedelta(seconds=200)
-            ),
+            pr_state=PrState(state="MERGED", hydrated_at=now - timedelta(seconds=200)),
         )
         task_by_ticket = {("acme", "T-3"): task}
         calls: list[tuple[()]] = []

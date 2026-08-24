@@ -3105,9 +3105,8 @@ class TestCheckTimedOutMerged:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         def _should_not_be_called(*_args: object, **_kwargs: object) -> object:
-            raise AssertionError(
-                "pr_is_merged_for_ticket must not be called when pr_state is fresh"
-            )
+            msg = "pr_is_merged_for_ticket must not be called when pr_state is fresh"
+            raise AssertionError(msg)
 
         monkeypatch.setattr(
             "cw.doctor.loop_health.pr_is_merged_for_ticket", _should_not_be_called
@@ -3143,9 +3142,8 @@ class TestCheckTimedOutMerged:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         def _should_not_be_called(*_args: object, **_kwargs: object) -> object:
-            raise AssertionError(
-                "pr_is_merged_for_ticket must not be called when pr_state is fresh"
-            )
+            msg = "pr_is_merged_for_ticket must not be called when pr_state is fresh"
+            raise AssertionError(msg)
 
         monkeypatch.setattr(
             "cw.doctor.loop_health.pr_is_merged_for_ticket", _should_not_be_called

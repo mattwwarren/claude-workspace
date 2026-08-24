@@ -689,9 +689,7 @@ def _fresh_pr_states_by_repo_pr(
     """
     fresh: dict[tuple[str, int], PrState] = {}
     for t in store.tasks:
-        if t.pr_state is None or not pr_state_is_fresh(
-            t.pr_state, max_age_seconds
-        ):
+        if t.pr_state is None or not pr_state_is_fresh(t.pr_state, max_age_seconds):
             continue
         if not t.pr_url:
             continue
@@ -713,7 +711,8 @@ def _load_monitored_prs() -> list[MonitoredPR]:
         return []
     orchestrator_config = load_orchestrator_config()
     fresh_pr_states = _fresh_pr_states_by_repo_pr(
-        load_dev_queue(), max_age_seconds=orchestrator_config.pr_hydration_interval_seconds
+        load_dev_queue(),
+        max_age_seconds=orchestrator_config.pr_hydration_interval_seconds,
     )
     monitored: list[MonitoredPR] = []
     for path in sorted(monitor_dir.glob("*.json")):

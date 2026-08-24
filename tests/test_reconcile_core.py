@@ -177,9 +177,8 @@ def test_reconcile_prepass_uses_fresh_merged_pr_state_without_gh_call(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     def _should_not_be_called(_tid: str, **_kw: object) -> tuple[bool | None, bool]:
-        raise AssertionError(
-            "pr_is_merged_for_ticket must not be called when pr_state is fresh"
-        )
+        msg = "pr_is_merged_for_ticket must not be called when pr_state is fresh"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(
         "cw.reconcile._deps.pr_is_merged_for_ticket", _should_not_be_called
@@ -219,9 +218,8 @@ def test_reconcile_prepass_uses_fresh_open_pr_state_without_gh_call(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     def _should_not_be_called(_tid: str, **_kw: object) -> tuple[bool | None, bool]:
-        raise AssertionError(
-            "pr_is_merged_for_ticket must not be called when pr_state is fresh"
-        )
+        msg = "pr_is_merged_for_ticket must not be called when pr_state is fresh"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(
         "cw.reconcile._deps.pr_is_merged_for_ticket", _should_not_be_called
