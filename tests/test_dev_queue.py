@@ -2712,6 +2712,29 @@ class TestCLIDevQueuePrune:
         assert result.exit_code != 0
         assert "bogus" in result.output
 
+    def test_status_empty_after_parse_errors(self, tmp_dev_queue: Path) -> None:
+        """A --status that parses to no statuses at all is rejected rather than
+        silently selecting nothing (or, worse, everything)."""
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="CLI-EMPTY")]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "prune",
+                "--client",
+                "genhealth",
+                "--status",
+                ",",
+                "--confirm",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "must name at least one status" in result.output
+        assert len(load_dev_queue().tasks) == 1
+
     def test_all_clients_flag_scopes_across_clients(self, tmp_dev_queue: Path) -> None:
         tasks = [
             _aged_task(100, ticket_id="CLI-A", client="genhealth"),

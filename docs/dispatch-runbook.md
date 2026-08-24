@@ -490,6 +490,46 @@ common wedge conditions:
 
 Run `cw doctor --reap --json` for machine-readable output.
 
+### Bulk cleanup of stale terminal rows (`cw dev-queue prune`)
+
+`cw dev-queue remove` handles one ticket at a time. To retire a backlog of
+long-terminal rows in one pass, use `cw dev-queue prune`, which deletes rows
+whose `completed_at` (or `created_at`, for rows that never got one — e.g.
+CANCELLED) is strictly older than `--older-than` days:
+
+```bash
+# Preview only — this is the default; nothing is deleted without --confirm
+cw dev-queue prune --client <client>
+
+# Same preview, said out loud
+cw dev-queue prune --client <client> --dry-run
+
+# Actually delete
+cw dev-queue prune --client <client> --older-than 90 --confirm
+
+# Widen the status set, or cross the tenant boundary
+cw dev-queue prune --client <client> --status completed,failed,cancelled --confirm
+cw dev-queue prune --all-clients --confirm
+```
+
+- **Nothing is deleted unless you pass `--confirm`.** `--dry-run` wins if both
+  are given. A `--confirm` run computes its candidate set once under the same
+  dev-queue lock the dispatch loop takes, and prints exactly the rows it
+  removed — it cannot silently delete more than it reports.
+- **`--client` is required unless you pass `--all-clients`.** Prune never
+  scopes across every client just because you forgot a flag.
+- **RUNNING, BLOCKED_ON_USER, and AWAITING_OPERATOR_SIGNOFF rows are never
+  pruned, at any age** — that is live or operator-parked work. Naming one in
+  `--status` is an error, not a silent skip. Release those the normal way
+  (`drain --held`, `approve`, `requeue`) first.
+- **PENDING is opt-in only**: prunable solely when you name `--status pending`
+  *and* a single `--client`. It is never in the default status set
+  (`completed`) and is refused outright with `--all-clients`.
+- Every removed row emits a `task.deleted` event with `reason=operator_prune`,
+  so the deletion is auditable in `cw event` history.
+
+This is unrelated to `cw event prune`, which trims the event log itself.
+
 ---
 
 ## 7. Patterns
