@@ -76,13 +76,14 @@ def _decode_reverse_candidate(raw: bytes) -> str | None:
     return text or None
 
 
-def _iter_lines_reverse(path: Path) -> Iterator[str]:
-    """Yield decoded, stripped, non-blank lines from ``path``, EOF to BOF.
+def _iter_line_groups_reverse(path: Path) -> Iterator[list[str]]:
+    """Yield groups of decoded, non-blank lines from ``path``, EOF to BOF.
 
-    Reads backward in ``_REVERSE_READ_CHUNK_BYTES`` chunks so a caller that
-    only needs the last few lines (e.g. ``load_offset_from_file``) does not
-    pay for a full read of a multi-megabyte channel log. A line spanning a
-    chunk boundary is reassembled via a carry buffer before it is decoded.
+    Each group is exactly the complete lines recovered from one backward
+    ``_REVERSE_READ_CHUNK_BYTES`` read (or the final BOF flush) — no extra
+    disk I/O is needed to produce a group beyond what was already pulled. A
+    line spanning a chunk boundary is reassembled via a carry buffer and
+    attributed to the group in which its leading boundary is found.
     """
     with path.open("rb") as f:
         pos = f.seek(0, os.SEEK_END)
@@ -93,33 +94,50 @@ def _iter_lines_reverse(path: Path) -> Iterator[str]:
             data = chunk + carry
             raw_lines = data.split(b"\n")
             carry = raw_lines[0]
-            for raw in reversed(raw_lines[1:]):
-                line = _decode_reverse_candidate(raw)
-                if line is not None:
-                    yield line
+            group = [
+                line
+                for raw in reversed(raw_lines[1:])
+                if (line := _decode_reverse_candidate(raw)) is not None
+            ]
+            if group:
+                yield group
         line = _decode_reverse_candidate(carry)
         if line is not None:
-            yield line
+            yield [line]
 
 
 def _last_offset_from_reverse_scan(path: Path, events_file: str) -> int | None:
-    """Return the offset of the last valid record, walking backward from EOF.
+    """Return the max valid offset within the first non-empty read group.
 
-    ``append_event`` assigns offsets under a single-writer lock and appends in
-    strictly increasing-offset order, so the last valid record's offset is
-    always the max offset over all valid records — the reverse walk can stop
-    at the first one it finds. Returns ``None`` if BOF is reached with no
-    valid record.
+    ``append_event`` assigns offsets under ``file_lock``, but that lock is a
+    ``threading.Lock`` — thread-scoped, not process-scoped. Two processes
+    appending to the same channel log (e.g. a lingering server during a
+    crash-restart) can interleave writes so the file is *not* offset-monotonic
+    in file position, even though each process's own writes are. Returning the
+    first valid offset found walking backward can therefore return a value
+    lower than the true max, which would make the next ``append_event`` reuse
+    an offset already on disk and replay events to subscribers.
+
+    # Why: take the max over the whole group already read off disk, not the
+    # first record found in it — this stays bounded (no extra I/O; the group
+    # is already in memory) while staying correct under the interleaving
+    # above. Do not "simplify" this back to first-found (#1986 round 2).
+
+    Returns ``None`` if BOF is reached with no valid record.
     """
-    for line in _iter_lines_reverse(path):
-        try:
-            record: dict[str, Any] = json.loads(line)
-        except json.JSONDecodeError:
-            logger.warning("%s: skipping malformed line: %r", events_file, line)
-            continue
-        offset = record.get("offset")
-        if isinstance(offset, int):
-            return offset
+    for group in _iter_line_groups_reverse(path):
+        offsets: list[int] = []
+        for line in group:
+            try:
+                record: dict[str, Any] = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("%s: skipping malformed line: %r", events_file, line)
+                continue
+            offset = record.get("offset")
+            if isinstance(offset, int):
+                offsets.append(offset)
+        if offsets:
+            return max(offsets)
     return None
 
 
@@ -225,10 +243,11 @@ class EventBus:
         """Determine current offset via a bounded reverse read from EOF (#1986).
 
         Rather than parsing the whole channel log to compute max(offset) + 1,
-        this walks backward from EOF in ``_REVERSE_READ_CHUNK_BYTES`` chunks
-        looking for the last valid record — see
-        ``_last_offset_from_reverse_scan`` for why the last valid record's
-        offset equals the max offset over all valid records.
+        this walks backward from EOF in ``_REVERSE_READ_CHUNK_BYTES`` chunks,
+        stopping as soon as one chunk yields any valid record and returning
+        the max offset within that chunk — see
+        ``_last_offset_from_reverse_scan`` for why the max over the read
+        chunk, not the first record found, is required for correctness.
         """
         with self.file_lock:
             path = state_dir() / self.events_file

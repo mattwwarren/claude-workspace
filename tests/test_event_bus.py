@@ -431,6 +431,29 @@ class TestEventBusLoadOffsetBoundedReverseRead:
         assert result == 1
         assert any(rec.levelno == logging.WARNING for rec in caplog.records)
 
+    def test_out_of_order_offsets_within_window_returns_max_not_first_found(
+        self,
+    ) -> None:
+        """#1986 round 2: file_lock is thread-scoped, not process-scoped.
+
+        Two processes appending to the same channel log can interleave so the
+        file is not offset-monotonic in file position. The last line written
+        is not necessarily the highest offset, so the reverse scan must take
+        the max over the whole read window rather than stopping at the first
+        valid record it finds walking backward.
+        """
+        bus = _make_bus()
+        path = state_dir() / _EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        offsets_in_file_order = [0, 1, 2, 5, 3]
+        path.write_text(
+            "\n".join(
+                json.dumps({"offset": o, "message": "x"}) for o in offsets_in_file_order
+            )
+            + "\n"
+        )
+        assert bus.load_offset_from_file() == 6
+
     def test_bounded_io_not_proportional_to_file_size(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
