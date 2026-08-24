@@ -19,6 +19,8 @@ from cw.event_bus import EventBus
 from cw.models import OrchestratorConfig, QueueItemStatus, SessionStatus
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from starlette.applications import Starlette
     from starlette.requests import Request
     from starlette.responses import Response
@@ -237,6 +239,25 @@ def _check_wedge() -> dict[str, Any] | None:
     return None
 
 
+def _stat_for_change_detection(path: Path) -> tuple[int, int] | None:
+    """Return (st_mtime_ns, st_size) for *path*, or None if it can't be stat'd.
+
+    None -- covering a missing file (FileNotFoundError) and any other
+    OSError (permissions, a transient I/O fault) -- is treated by the
+    caller as "changed": the guard below only skips a poll when it can
+    positively prove nothing moved, never when it merely failed to check
+    (#1981). This is the opposite policy from cw.events._stat_inbox's
+    (which treats an unstatable inbox as "no change, retry next poll") --
+    here, wrongly skipping a real change means losing queue.*/session
+    deltas, which is worse than one extra full reload.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
 def _poll_once(old: QueueSnapshot) -> tuple[QueueSnapshot, list[dict[str, Any]]]:
     """Load current state, compute deltas, return new snapshot + events."""
     from cw.config import load_state
@@ -270,26 +291,59 @@ def _poll_once(old: QueueSnapshot) -> tuple[QueueSnapshot, list[dict[str, Any]]]
 def _poller_tick(config: OrchestratorConfig) -> None:
     """Run one poll tick: broadcast queue.* deltas, then bridge to the operator channel.
 
-    The operator-bridge call sits in its OWN try/except, OUTSIDE ``_file_lock``
-    and after the queue.* broadcast loop above, so a bug in the bridge can
-    never block or suppress the queue.* broadcasts that already fired
-    (RFC 0008 W3, #1002). Logs ``"operator-bridge error"`` -- distinct from
-    this function's own caller's ``"poller error"`` message -- so the two
-    failure modes are distinguishable in logs.
+    Before touching sessions.json or the dev-queue store, stat() both and
+    compare against the last tick that actually ran one. When neither
+    changed, the load->compute->save cycle is skipped entirely -- on an
+    idle system that is the large majority of ticks (#1981). It can't
+    literally return early, because the operator-bridge call below MUST
+    still run every tick regardless of the guard -- see the ordering note
+    below.
+
+    The (mtime_ns, size) equality check is a coarse proxy for "unchanged":
+    coarse filesystem mtime resolution, or two distinct serialized states
+    that happen to share size and mtime, could in theory collide and mask
+    a real transition -- and because the delta logic is edge-triggered,
+    a masked transition drops rather than delays the next queue.* notification.
+    This was a known, consciously accepted tradeoff for #1981's scope; no
+    forced-reload backstop is required.
+
+    The operator-bridge call sits in its OWN try/except, OUTSIDE
+    ``_file_lock`` and after the queue.* broadcast loop above, so a bug in
+    the bridge can never block or suppress the queue.* broadcasts that
+    already fired (RFC 0008 W3, #1002), AND an unchanged queue tick must
+    never starve the bridge either -- it polls a different file (the
+    operator events inbox) on its own schedule. Logs
+    ``"operator-bridge error"`` -- distinct from this function's own
+    caller's ``"poller error"`` message -- so the two failure modes are
+    distinguishable in logs.
     """
-    with _file_lock:
-        # Guard load→compute→save with _file_lock: prevents concurrent poll
-        # cycles from reading the same stale snapshot and emitting duplicate
-        # queue.* events (#433 fix 4).
-        current_snap = _load_snapshot()
-        new_snap, events = _poll_once(current_snap)
-        if events or (
-            new_snap.task_statuses != current_snap.task_statuses
-            or new_snap.session_statuses != current_snap.session_statuses
-        ):
-            _save_snapshot(new_snap)
-    for event in events:
-        broadcast(_build_queue_notification(event))
+    from cw.config import dev_queue_file, state_file
+
+    sessions_stat = _stat_for_change_detection(state_file())
+    dev_queue_stat = _stat_for_change_detection(dev_queue_file())
+    unchanged = (
+        sessions_stat is not None
+        and dev_queue_stat is not None
+        and sessions_stat == _last_sessions_stat[0]
+        and dev_queue_stat == _last_dev_queue_stat[0]
+    )
+
+    if not unchanged:
+        with _file_lock:
+            # Guard load→compute→save with _file_lock: prevents concurrent
+            # poll cycles from reading the same stale snapshot and emitting
+            # duplicate queue.* events (#433 fix 4).
+            current_snap = _load_snapshot()
+            new_snap, events = _poll_once(current_snap)
+            if events or (
+                new_snap.task_statuses != current_snap.task_statuses
+                or new_snap.session_statuses != current_snap.session_statuses
+            ):
+                _save_snapshot(new_snap)
+        for event in events:
+            broadcast(_build_queue_notification(event))
+        _last_sessions_stat[0] = sessions_stat
+        _last_dev_queue_stat[0] = dev_queue_stat
 
     try:
         from cw.cw_operator_events import poll_and_forward_operator_channel
@@ -326,6 +380,8 @@ def _run_poller() -> None:
 
 
 _poller_started: list[bool] = [False]
+_last_sessions_stat: list[tuple[int, int] | None] = [None]
+_last_dev_queue_stat: list[tuple[int, int] | None] = [None]
 
 
 def _start_poller() -> None:
