@@ -63,6 +63,14 @@ def record_event(
 ) -> OrchestratorEvent:
     """Append a new event to the inbox and return it.
 
+    May trigger an in-band auto-prune (#1980): once the inbox exceeds
+    ``event_inbox_retention_bytes``, this call also rewrites the inbox down
+    to the newest ``event_inbox_retention_count`` events before returning,
+    under the same ``_inbox_lock`` acquisition. See
+    :func:`_maybe_auto_prune_locked` for the trigger and
+    :func:`_prune_events_locked` for the composition contract with
+    ``_poll_follow_state``'s inode-change detection.
+
     Args:
         event_type: The orchestrator event type.
         payload: Arbitrary JSON-serialisable payload dict.
@@ -149,11 +157,18 @@ def _maybe_auto_prune_locked(size_bytes: int) -> None:
     if size_bytes <= config.event_inbox_retention_bytes:
         return
     try:
-        _prune_events_locked(
+        result = _prune_events_locked(
             before=None, keep=config.event_inbox_retention_count, archive=True
         )
     except Exception:
         logger.exception("auto-prune of event inbox failed; continuing")
+        return
+    logger.info(
+        "auto-pruned event inbox: archived=%d kept=%d archive_path=%s",
+        result.archived_count,
+        result.kept_count,
+        result.archive_path,
+    )
 
 
 class PruneResult(BaseModel):
@@ -268,9 +283,6 @@ def _prune_events_locked(
         msg = "prune_events: exactly one of 'before' or 'keep' must be given."
         raise CwError(msg)
 
-    new_text = "".join(e.model_dump_json() + "\n" for e in kept_events)
-    atomic_write_text(inbox, new_text)
-
     archived_count = 0
     deleted_count = 0
     archive_path: str | None = None
@@ -278,13 +290,22 @@ def _prune_events_locked(
         if archive:
             path = _archive_path_for_today()
             path.parent.mkdir(parents=True, exist_ok=True)
-            # Why: this append is not atomic with the inbox rewrite above.
-            # A crash between the two would drop the pruned events from
-            # both files. Accepted: the archive is a best-effort audit
-            # copy, not the durable source of truth (inbox.jsonl is), and
-            # atomicity here would require a second temp-file+rename step
-            # for marginal benefit on an operator-invoked, non-hot-path
-            # command.
+            # Why: archive-append happens before the inbox rewrite below, not
+            # after. This ordering is deliberate (#1980 review): a crash
+            # between the two steps then loses nothing -- the archive already
+            # holds the pruned batch and the inbox is untouched, so a retry
+            # at worst double-archives on the next successful prune. The
+            # reverse order was the original shape here, accepted when this
+            # path was only reachable via an operator-invoked, non-hot-path
+            # `cw event prune` -- a human present to notice a crash and
+            # re-run. record_event's auto-prune trigger removed both
+            # properties: this sequence is now reachable automatically,
+            # unattended, from record_event's 114+ call sites, for as long as
+            # the process stays above the retention threshold. Duplicate
+            # records in a best-effort append-only audit log are benign;
+            # permanently vanished ones are not -- that asymmetry is why
+            # archive-first is correct now that a human isn't there to catch
+            # the old ordering's failure mode.
             with path.open("a") as f:
                 for ev in pruned_events:
                     f.write(ev.model_dump_json() + "\n")
@@ -292,6 +313,9 @@ def _prune_events_locked(
             archive_path = str(path)
         else:
             deleted_count = len(pruned_events)
+
+    new_text = "".join(e.model_dump_json() + "\n" for e in kept_events)
+    atomic_write_text(inbox, new_text)
 
     return PruneResult(
         archived_count=archived_count,

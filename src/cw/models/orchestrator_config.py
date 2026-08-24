@@ -561,6 +561,39 @@ class OrchestratorConfig(BaseModel):
     event_inbox_auto_prune_enabled: bool = True
     event_inbox_retention_bytes: int = 5_000_000
     event_inbox_retention_count: int = 2000
+
+    @model_validator(mode="after")
+    def _validate_event_inbox_retention_ratio(self) -> OrchestratorConfig:
+        """Warn (never fail) when the byte trigger can't outlive its own prune.
+
+        If event_inbox_retention_bytes is smaller than the retained events'
+        plausible footprint, every append immediately re-crosses the
+        threshold after a prune, turning the amortized-O(1)-per-append
+        auto-prune into an O(current size)-per-append thrash. 50 bytes/event
+        is a deliberately conservative floor -- the ticket's own measured
+        density is ~415 bytes/event (GitHub #1980) -- so this only fires on
+        configs that can't possibly hold event_inbox_retention_count events,
+        not on merely-aggressive ones. Warn rather than raise: tests
+        deliberately construct tiny thresholds (e.g. 50 bytes) to force a
+        prune on every append, a valid and supported use, not a
+        misconfiguration.
+        """
+        min_plausible_bytes = self.event_inbox_retention_count * 50
+        if (
+            self.event_inbox_auto_prune_enabled
+            and self.event_inbox_retention_bytes < min_plausible_bytes
+        ):
+            logging.getLogger(__name__).warning(
+                "OrchestratorConfig: event_inbox_retention_bytes=%d is "
+                "smaller than event_inbox_retention_count=%d's plausible "
+                "footprint (%d bytes) -- auto-prune may thrash on every "
+                "append",
+                self.event_inbox_retention_bytes,
+                self.event_inbox_retention_count,
+                min_plausible_bytes,
+            )
+        return self
+
     # Gating policy for destructive reap actions (stop daemon, revert task to
     # PENDING, remove worktree). Default ``signal_only`` routes stalled/phantom
     # sessions to BLOCKED_ON_USER for operator review; ``auto`` restores the

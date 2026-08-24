@@ -4019,14 +4019,21 @@ class TestAutoPruneOnAppend:
     ) -> None:
         """Warm cache: a later reload failure keeps using the last-good config.
 
-        Primes the cache with a real config, then makes the next load raise
-        past the TTL -- the *previously cached* values must still govern the
-        prune decision (last_good_config reuse), not the safe defaults.
+        Primes the cache with a real, low-threshold config, then makes the
+        next load raise past the TTL -- record_event's prune decision must
+        still be governed by the *cached* config (last_good_config reuse),
+        not OrchestratorConfig() safe defaults. event_inbox_retention_bytes=50
+        is far below the 5_000_000 default: if the fallback incorrectly used
+        the default instead of the cached config, no prune would fire and the
+        assertion below would fail -- mirroring the cold-start sibling test's
+        structure, but exercised through record_event's real call path
+        (record_event -> _maybe_auto_prune_locked -> this cache) rather than
+        the private cache helper directly.
         """
         from cw import events as events_module
 
         primed = _auto_config(
-            event_inbox_retention_bytes=999_999_999, event_inbox_retention_count=1
+            event_inbox_retention_bytes=50, event_inbox_retention_count=3
         )
         _reset_auto_prune_cache(monkeypatch, config=primed)
         monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_TTL_SECONDS", 0.0)
@@ -4037,10 +4044,11 @@ class TestAutoPruneOnAppend:
 
         monkeypatch.setattr(events_module, "load_orchestrator_config", raise_load)
 
-        config = events_module._load_auto_prune_config_cached()
+        for i in range(10):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
 
-        assert config is primed
-        assert config.event_inbox_retention_bytes == 999_999_999
+        remaining = read_events()
+        assert [e.payload["n"] for e in remaining] == [7, 8, 9]
 
     def test_auto_prune_config_is_cached_not_reloaded_every_append(
         self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -4072,10 +4080,15 @@ class TestAutoPruneOnAppend:
 
 class TestAutoPruneFollowerComposition:
     """#1980 R5: the highest-risk interaction -- an in-band auto-prune firing
-    mid-poll or mid-write from a concurrent record_event, not a discrete
-    operator-invoked `cw event prune`. The shrink/replace detection in
-    _poll_follow_state is asserted to compose correctly with a rewrite
-    triggered from inside record_event, including under concurrent load.
+    mid-poll or mid-write from record_event, not a discrete operator-invoked
+    `cw event prune`. The shrink/replace detection in _poll_follow_state is
+    asserted to compose correctly with a rewrite triggered from inside
+    record_event, interleaved with a second writer's unrelated appends
+    around the crossing.
+
+    "Concurrent"/"multiple writers" here means interleaved via sequential
+    function calls, not real threading/asyncio -- no test in this class
+    drives an actual race between an appender and a poller.
     """
 
     @pytest.fixture(autouse=True)
@@ -4091,8 +4104,9 @@ class TestAutoPruneFollowerComposition:
         Drives _resolve_follow_start / _poll_follow_state directly (rather
         than the tail_events_follow generator) so the follower's
         _FollowState.ino is directly inspectable across the auto-prune
-        boundary, and interleaves a second, concurrent writer's unrelated
-        events around the crossing -- "under load", per the ticket's ask.
+        boundary, and interleaves a second writer's unrelated events around
+        the crossing -- sequential multi-writer composition, not a real
+        concurrent/threaded race (see the class docstring).
         """
         from cw import events as events_module
 
