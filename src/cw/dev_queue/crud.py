@@ -1,12 +1,13 @@
-"""Dev-queue CRUD: enqueue, remove, cancel, move, clear, resolve, find.
+"""Dev-queue CRUD: enqueue, remove, cancel, move, clear, prune, resolve, find.
 
 Extracted from the flat ``cw.dev_queue`` module (#1318, part 2). Owns the
 operator-facing queue mutations (``add_ticket``, ``register_watched_pr``,
 ``remove_ticket``, ``cancel_ticket``, ``cancel_task_for_session``,
-``move_ticket``, ``clear_tickets``), the read/resolution helpers
+``move_ticket``, ``clear_tickets``, ``prune_tickets`` and its read-only
+preview ``select_prunable_tickets``), the read/resolution helpers
 (``resolve_client``, ``list_tickets``, ``_newest_by_created_at``,
-``_find_ticket``), and the ``task.deleted`` event chokepoint
-(``_emit_task_deleted``).
+``_find_ticket``), the shared prune age-basis (``_prune_age_basis``), and
+the ``task.deleted`` event chokepoint (``_emit_task_deleted``).
 
 Layering: imports ``lifecycle.transition_task_status`` at module level for the
 cancel paths. ``lifecycle.wait_for_terminal`` reaches back into ``_find_ticket``
@@ -15,6 +16,7 @@ here via a deferred import to keep this edge one-way.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 from cw.config import get_client
@@ -22,7 +24,13 @@ from cw.dev_queue.lifecycle import _raise_stage_high_water, transition_task_stat
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError, LaneMoveError, LaneNotFoundError, RequeueStageError
-from cw.models import DEFAULT_STAGE, OrchestratorEventType, QueueItemStatus, Stage
+from cw.models import (
+    DEFAULT_STAGE,
+    OCCUPIED_LANE_STATUSES,
+    OrchestratorEventType,
+    QueueItemStatus,
+    Stage,
+)
 
 if TYPE_CHECKING:
     from cw.models import (
@@ -45,6 +53,21 @@ _UNMOVABLE_STATUSES: frozenset[QueueItemStatus] = frozenset(
 _APPROVABLE_STATUSES: frozenset[QueueItemStatus] = frozenset(
     [QueueItemStatus.BLOCKED_ON_USER, QueueItemStatus.AWAITING_OPERATOR_SIGNOFF]
 )
+
+# Default age cutoff for `cw dev-queue prune` (#382). A module-level constant,
+# deliberately NOT an OrchestratorConfig field -- the operator names the window
+# per invocation via --older-than, and a config knob would only add a second
+# place for it to drift.
+DEFAULT_PRUNE_OLDER_THAN_DAYS: int = 90
+
+# Why no `_PRUNABLE_STATUSES` allow-list here: QueueItemStatus is exhausted by
+# OCCUPIED_LANE_STATUSES (never prunable at any age, per #382's binding
+# resolution) + PENDING (the stricter-gated carve-out) + COMPLETED/FAILED/
+# CANCELLED. A private allow-list of those last three would be the same
+# partition read from the other side, and OCCUPIED_LANE_STATUSES
+# (cw.models.enums) is already the codebase's single source of truth for it --
+# so _select_prune_candidates gates on that constant directly rather than
+# minting an equivalent one that could drift from it.
 
 
 def _validate_stage_in_pipeline(
@@ -213,13 +236,15 @@ def register_or_adopt_watched_pr(
 
 
 def _emit_task_deleted(
-    removed: TicketTask, reason: Literal["operator_remove", "operator_clear"]
+    removed: TicketTask,
+    reason: Literal["operator_remove", "operator_clear", "operator_prune"],
 ) -> None:
     """Emit a ``task.deleted`` event for a single removed row.
 
-    Shared chokepoint for both row-removal sites (RFC 0008 W1, closes #978):
-    called from ``remove_ticket`` (``operator_remove``) and ``clear_tickets``
-    (``operator_clear``), once per removed row.
+    Shared chokepoint for every row-removal site (RFC 0008 W1, closes #978):
+    called from ``remove_ticket`` (``operator_remove``), ``clear_tickets``
+    (``operator_clear``), and ``prune_tickets`` (``operator_prune``, #382),
+    once per removed row.
     """
     # Why: emit inline under dev_queue_lock — one task.deleted per removed
     # row (not per API call). record_event nests _inbox_lock INSIDE
@@ -389,6 +414,147 @@ def clear_tickets(client: str, status: QueueItemStatus | None = None) -> int:
         for task in removed_tasks:
             _emit_task_deleted(task, "operator_clear")
     return len(removed_tasks)
+
+
+def _prune_age_basis(task: TicketTask) -> datetime:
+    """Single source for prune's ``completed_at or created_at`` age rule (#382).
+
+    A CANCELLED row always has ``completed_at is None``
+    (``lifecycle._RESET_DISPOSITION_STATUSES`` clears it on every CANCELLED
+    transition), so keying on ``completed_at`` alone would make every
+    CANCELLED row permanently unprunable -- ``created_at`` is the fallback.
+
+    Both ``_select_prune_candidates`` (what gets deleted) and the CLI's
+    ``_print_prune_summary`` (the AGE_DAYS the operator reads before passing
+    ``--confirm``) call this instead of re-deriving the rule, so the two can
+    never diverge on what "age" means for a destructive command.
+    """
+    return task.completed_at or task.created_at
+
+
+def _select_prune_candidates(
+    store: DevQueueStore,
+    statuses: frozenset[QueueItemStatus],
+    older_than_days: int,
+    client: str | None,
+    *,
+    all_clients: bool,
+) -> list[TicketTask]:
+    """Shared filter: statuses/client/age-cutoff (#382).
+
+    Used by both the read-only preview path and the real delete (from a
+    single call each -- see ``prune_tickets``) so the two can never disagree
+    on selection.
+
+    Validation order (each raises ``CwError``):
+
+    1. Exactly one of *client*/*all_clients* must be given -- a bare
+       ``client=None, all_clients=False`` call is refused outright; this is
+       a defense-in-depth mirror of the CLI's own required-client gate for
+       any other library caller.
+    2. Any status in ``OCCUPIED_LANE_STATUSES`` (RUNNING, BLOCKED_ON_USER,
+       AWAITING_OPERATOR_SIGNOFF) is refused outright, regardless of age,
+       client, or all_clients -- never prunable.
+    3. PENDING is a carve-out: prunable only when named explicitly in
+       *statuses* together with a single *client* (never with
+       *all_clients* -- refused as an incompatible combination).
+    4. *older_than_days* must be >= 0.
+
+    Age basis: see ``_prune_age_basis``.
+    """
+    if client is None and not all_clients:
+        msg = "Must specify a client, or pass all_clients=True."
+        raise CwError(msg)
+    if client is not None and all_clients:
+        msg = "client and all_clients are mutually exclusive."
+        raise CwError(msg)
+    disallowed = statuses & OCCUPIED_LANE_STATUSES
+    if disallowed:
+        names = ", ".join(sorted(s.value for s in disallowed))
+        msg = (
+            f"Cannot prune status(es) {names}: RUNNING, BLOCKED_ON_USER, and"
+            " AWAITING_OPERATOR_SIGNOFF rows are never pruned, at any age --"
+            " they are live or operator-parked work (#382)."
+        )
+        raise CwError(msg)
+    if QueueItemStatus.PENDING in statuses and all_clients:
+        msg = (
+            "--all-clients is incompatible with --status pending: crossing"
+            " the tenant boundary and pruning non-terminal PENDING rows"
+            " together has no legitimate use (#382)."
+        )
+        raise CwError(msg)
+    if older_than_days < 0:
+        msg = f"--older-than must be >= 0 (got {older_than_days})."
+        raise CwError(msg)
+    cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
+    return [
+        t
+        for t in store.tasks
+        if t.status in statuses
+        and (all_clients or t.client == client)
+        and _prune_age_basis(t) < cutoff
+    ]
+
+
+def select_prunable_tickets(
+    statuses: frozenset[QueueItemStatus],
+    older_than_days: int = DEFAULT_PRUNE_OLDER_THAN_DAYS,
+    client: str | None = None,
+    *,
+    all_clients: bool = False,
+) -> list[TicketTask]:
+    """Read-only snapshot of the tasks ``prune_tickets`` would remove (#382).
+
+    Unlocked (mirrors ``drain.select_held_tickets`` -- ADR-0005's read-only
+    carve-out). Used only by the CLI's ``--dry-run`` and default-preview
+    paths, which never mutate. NOT used by the ``--confirm`` path -- see
+    ``prune_tickets`` for why the two must not share a call in a single
+    ``--confirm`` invocation.
+    """
+    store = load_dev_queue()
+    return _select_prune_candidates(
+        store, statuses, older_than_days, client, all_clients=all_clients
+    )
+
+
+def prune_tickets(
+    statuses: frozenset[QueueItemStatus],
+    older_than_days: int = DEFAULT_PRUNE_OLDER_THAN_DAYS,
+    client: str | None = None,
+    *,
+    all_clients: bool = False,
+) -> list[TicketTask]:
+    """Remove TicketTasks matching *statuses* past *older_than_days* (#382).
+
+    Mirrors ``clear_tickets``'s locking/emission shape. Computes the
+    candidate set exactly ONCE, inside a single ``_lock()`` acquisition --
+    one ``load_dev_queue()`` call, one ``_select_prune_candidates()`` call,
+    one ``save_dev_queue()`` call -- and deletes exactly that computed set.
+    This is deliberate: a design that instead called
+    ``select_prunable_tickets()`` first (unlocked, for a preview) and then
+    ``prune_tickets()`` second (which re-derives fresh under lock) reopens a
+    TOCTOU window between the two calls, in which a concurrent dispatch tick
+    or another prune/clear invocation could grow the deleted set beyond
+    whatever was rendered to the operator. The CLI must call this function
+    alone for the ``--confirm`` path -- never ``select_prunable_tickets()``
+    first.
+
+    Returns the removed tasks (not a bare count, unlike ``clear_tickets`` --
+    the CLI's summary table needs per-row detail). Raises ``CwError`` per
+    ``_select_prune_candidates``.
+    """
+    with _lock():
+        store = load_dev_queue()
+        removed_tasks = _select_prune_candidates(
+            store, statuses, older_than_days, client, all_clients=all_clients
+        )
+        removed_ids = {id(t) for t in removed_tasks}
+        store.tasks = [t for t in store.tasks if id(t) not in removed_ids]
+        save_dev_queue(store)
+        for task in removed_tasks:
+            _emit_task_deleted(task, "operator_prune")
+    return removed_tasks
 
 
 def resolve_client(

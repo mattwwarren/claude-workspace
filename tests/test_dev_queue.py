@@ -5,16 +5,18 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 from click.testing import CliRunner
+from freezegun import freeze_time
 
 from cw.atomic import _BACKUP_SUFFIX
 from cw.cli import main
 from cw.config import clients_file, load_orchestrator_config
 from cw.dev_queue import (
+    DEFAULT_PRUNE_OLDER_THAN_DAYS,
     _find_ticket,
     _lock,
     add_ticket,
@@ -26,11 +28,13 @@ from cw.dev_queue import (
     load_plan,
     migrate_dev_queue,
     plan_path,
+    prune_tickets,
     register_watched_pr,
     remove_ticket,
     resolve_client,
     save_dev_queue,
     save_plan,
+    select_prunable_tickets,
     transition_task_status,
     wait_for_terminal,
 )
@@ -49,6 +53,7 @@ from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
     DEV_QUEUE_SCHEMA_VERSION,
+    OCCUPIED_LANE_STATUSES,
     ClientConfig,
     DevQueueStore,
     DispatchPlan,
@@ -2095,6 +2100,357 @@ class TestClearTickets:
 
 
 # ---------------------------------------------------------------------------
+# TestPruneTickets
+# ---------------------------------------------------------------------------
+
+
+def _aged_task(days: int, **overrides: object) -> TicketTask:
+    """A ``_make_ticket_task`` whose age basis is *days* old (GitHub #382).
+
+    Stamps both ``created_at`` and ``completed_at`` unless an override says
+    otherwise, so the row's age is unambiguous regardless of which field the
+    ``completed_at or created_at`` age basis lands on.
+    """
+    stamp = datetime.now(UTC) - timedelta(days=days)
+    kwargs: dict[str, object] = {
+        "client": "genhealth",
+        "status": QueueItemStatus.COMPLETED,
+        "created_at": stamp,
+        "completed_at": stamp,
+    }
+    kwargs.update(overrides)
+    return _make_ticket_task(**kwargs)
+
+
+class TestPruneTickets:
+    """Tests for prune_tickets() (GitHub #382)."""
+
+    def test_prunes_completed_older_than_cutoff(self, tmp_dev_queue: Path) -> None:
+        """Default 90-day cutoff removes the 100-day row, keeps the 10-day one."""
+        old = _aged_task(100, ticket_id="TKT-OLD")
+        recent = _aged_task(10, ticket_id="TKT-NEW")
+        save_dev_queue(DevQueueStore(tasks=[old, recent]))
+
+        removed = prune_tickets(
+            frozenset([QueueItemStatus.COMPLETED]),
+            DEFAULT_PRUNE_OLDER_THAN_DAYS,
+            "genhealth",
+        )
+
+        assert [t.ticket_id for t in removed] == ["TKT-OLD"]
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-NEW"]
+
+    def test_boundary_exactly_older_than_days_not_pruned(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """Age comparison is strictly-older: exactly-N-days-old is kept."""
+        with freeze_time("2026-08-24T12:00:00Z"):
+            exact = _aged_task(30, ticket_id="TKT-EXACT")
+            save_dev_queue(DevQueueStore(tasks=[exact]))
+
+            removed = prune_tickets(
+                frozenset([QueueItemStatus.COMPLETED]), 30, "genhealth"
+            )
+
+        assert removed == []
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-EXACT"]
+
+    def test_cancelled_falls_back_to_created_at(self, tmp_dev_queue: Path) -> None:
+        """A CANCELLED row always has completed_at=None, so created_at is the
+        age basis (Touch-point Contract #2) -- old ones prune, recent don't."""
+        old = _aged_task(
+            100,
+            ticket_id="TKT-CANC-OLD",
+            status=QueueItemStatus.CANCELLED,
+            completed_at=None,
+        )
+        recent = _aged_task(
+            5,
+            ticket_id="TKT-CANC-NEW",
+            status=QueueItemStatus.CANCELLED,
+            completed_at=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[old, recent]))
+
+        removed = prune_tickets(frozenset([QueueItemStatus.CANCELLED]), 90, "genhealth")
+
+        assert [t.ticket_id for t in removed] == ["TKT-CANC-OLD"]
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-CANC-NEW"]
+
+    def test_completed_at_takes_precedence_over_created_at(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """When both timestamps are present, completed_at wins -- not the
+        older of the two, not created_at (GitHub #382, F2). A row with a very
+        old created_at but a recent completed_at must be kept: a regression
+        that swapped the `or` operands, or used min()/max() instead, would
+        prune it by created_at and fail this assertion."""
+        task = _aged_task(
+            5,
+            ticket_id="TKT-PREC",
+            created_at=datetime.now(UTC) - timedelta(days=200),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        removed = prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 90, "genhealth")
+
+        assert removed == []
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-PREC"]
+
+    def test_running_blocked_signoff_never_prunable_even_when_named(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """Every OCCUPIED_LANE_STATUSES member is refused when named, and is
+        untouched by the default (COMPLETED-only) status set."""
+        tasks = [
+            _aged_task(400, ticket_id=f"TKT-{status.value}", status=status)
+            for status in sorted(OCCUPIED_LANE_STATUSES)
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+
+        for status in OCCUPIED_LANE_STATUSES:
+            with pytest.raises(CwError, match=status.value):
+                prune_tickets(frozenset([status]), 1, "genhealth")
+
+        default_set = frozenset([QueueItemStatus.COMPLETED])
+        assert prune_tickets(default_set, 1, "genhealth") == []
+        assert len(load_dev_queue().tasks) == len(tasks)
+
+    def test_disallowed_status_raises_cw_error(self, tmp_dev_queue: Path) -> None:
+        """A RUNNING status in the set aborts before any mutation."""
+        task = _aged_task(400, ticket_id="TKT-RUN", status=QueueItemStatus.RUNNING)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(CwError, match="never pruned"):
+            prune_tickets(
+                frozenset([QueueItemStatus.RUNNING, QueueItemStatus.COMPLETED]),
+                1,
+                "genhealth",
+            )
+
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-RUN"]
+
+    def test_client_filter_scopes_to_one_client(self, tmp_dev_queue: Path) -> None:
+        mine = _aged_task(100, ticket_id="TKT-MINE", client="genhealth")
+        theirs = _aged_task(100, ticket_id="TKT-THEIRS", client="other")
+        save_dev_queue(DevQueueStore(tasks=[mine, theirs]))
+
+        removed = prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 90, "genhealth")
+
+        assert [t.ticket_id for t in removed] == ["TKT-MINE"]
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-THEIRS"]
+
+    def test_client_none_prunes_across_all_clients(self, tmp_dev_queue: Path) -> None:
+        """all_clients=True must be passed explicitly -- a bare client=None is
+        no longer a legal call (see the next test)."""
+        mine = _aged_task(100, ticket_id="TKT-MINE", client="genhealth")
+        theirs = _aged_task(100, ticket_id="TKT-THEIRS", client="other")
+        save_dev_queue(DevQueueStore(tasks=[mine, theirs]))
+
+        removed = prune_tickets(
+            frozenset([QueueItemStatus.COMPLETED]), 90, None, all_clients=True
+        )
+
+        assert {t.ticket_id for t in removed} == {"TKT-MINE", "TKT-THEIRS"}
+        assert load_dev_queue().tasks == []
+
+    def test_client_none_without_all_clients_raises_cw_error(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """Defense-in-depth mirror of the CLI's required-client gate."""
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="TKT-X")]))
+
+        with pytest.raises(CwError, match="Must specify a client"):
+            prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 90, None)
+
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_client_and_all_clients_together_raises_cw_error(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="TKT-X")]))
+
+        with pytest.raises(CwError, match="mutually exclusive"):
+            prune_tickets(
+                frozenset([QueueItemStatus.COMPLETED]),
+                90,
+                "genhealth",
+                all_clients=True,
+            )
+
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_pending_prunable_with_status_pending_and_client(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """The PENDING carve-out: named explicitly + a single client."""
+        pending = _aged_task(
+            100,
+            ticket_id="TKT-PEND",
+            status=QueueItemStatus.PENDING,
+            completed_at=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[pending]))
+
+        removed = prune_tickets(frozenset([QueueItemStatus.PENDING]), 90, "genhealth")
+
+        assert [t.ticket_id for t in removed] == ["TKT-PEND"]
+        assert load_dev_queue().tasks == []
+
+    def test_pending_excluded_by_default_status(self, tmp_dev_queue: Path) -> None:
+        """PENDING is opt-in by literal flag only -- never by the default set."""
+        pending = _aged_task(
+            400,
+            ticket_id="TKT-PEND",
+            status=QueueItemStatus.PENDING,
+            completed_at=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[pending]))
+
+        removed = prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 1, "genhealth")
+
+        assert removed == []
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-PEND"]
+
+    def test_pending_with_all_clients_raises_cw_error(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """PENDING + all_clients is refused even though all_clients alone is
+        an otherwise-valid tenancy selector."""
+        pending = _aged_task(
+            100,
+            ticket_id="TKT-PEND",
+            status=QueueItemStatus.PENDING,
+            completed_at=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[pending]))
+
+        with pytest.raises(CwError, match="incompatible"):
+            prune_tickets(
+                frozenset([QueueItemStatus.PENDING]), 90, None, all_clients=True
+            )
+
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_returns_removed_tasks_not_count(self, tmp_dev_queue: Path) -> None:
+        old = _aged_task(100, ticket_id="TKT-OLD")
+        save_dev_queue(DevQueueStore(tasks=[old]))
+
+        removed = prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 90, "genhealth")
+
+        assert isinstance(removed, list)
+        assert all(isinstance(t, TicketTask) for t in removed)
+        assert [t.ticket_id for t in removed] == ["TKT-OLD"]
+
+    def test_emits_task_deleted_operator_prune_per_task(
+        self,
+        tmp_dev_queue: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """prune_tickets emits one task.deleted (reason=operator_prune) per row."""
+        events = capture_events("cw.dev_queue.crud", OrchestratorEventType.TASK_DELETED)
+        tasks = [
+            _aged_task(100, ticket_id="TKT-P1"),
+            _aged_task(100, ticket_id="TKT-P2"),
+            _aged_task(1, ticket_id="TKT-P3"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+
+        prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 90, "genhealth")
+
+        assert len(events) == 2
+        assert {p["ticket_id"] for _, p, _ in events} == {"TKT-P1", "TKT-P2"}
+        assert all(p["reason"] == "operator_prune" for _, p, _ in events)
+        assert {corr for _, _, corr in events} == {"TKT-P1", "TKT-P2"}
+
+    def test_negative_older_than_raises_cw_error(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="TKT-X")]))
+
+        with pytest.raises(CwError, match="must be >= 0"):
+            prune_tickets(frozenset([QueueItemStatus.COMPLETED]), -1, "genhealth")
+
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_prune_tickets_derives_candidates_exactly_once(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """prune_tickets must not re-derive the candidate set after computing it
+        once under ``_lock()`` -- a second call would reopen the TOCTOU window
+        the single-lock design exists to close (#382 Q3); a row that appeared in
+        the store after this single call would not be picked up, because there
+        is no second call to pick it up."""
+        from cw.dev_queue import crud
+
+        real = crud._select_prune_candidates
+        calls: list[int] = []
+
+        def _spy(
+            store: DevQueueStore,
+            statuses: frozenset[QueueItemStatus],
+            older_than_days: int,
+            client: str | None,
+            *,
+            all_clients: bool,
+        ) -> list[TicketTask]:
+            calls.append(1)
+            return real(
+                store, statuses, older_than_days, client, all_clients=all_clients
+            )
+
+        monkeypatch.setattr(crud, "_select_prune_candidates", _spy)
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="TKT-ONCE")]))
+
+        prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 90, "genhealth")
+
+        assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestSelectPrunableTickets
+# ---------------------------------------------------------------------------
+
+
+class TestSelectPrunableTickets:
+    """Tests for select_prunable_tickets() (GitHub #382)."""
+
+    def test_preview_does_not_mutate(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            _aged_task(100, ticket_id="TKT-OLD"),
+            _aged_task(1, ticket_id="TKT-NEW"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+
+        selected = select_prunable_tickets(
+            frozenset([QueueItemStatus.COMPLETED]), 90, "genhealth"
+        )
+
+        assert [t.ticket_id for t in selected] == ["TKT-OLD"]
+        assert {t.ticket_id for t in load_dev_queue().tasks} == {"TKT-OLD", "TKT-NEW"}
+
+    def test_preview_same_filter_as_prune(self, tmp_dev_queue: Path) -> None:
+        """Both functions route through the same private filter, so their
+        selections -- including the PENDING carve-out -- cannot disagree."""
+        statuses = frozenset([QueueItemStatus.COMPLETED, QueueItemStatus.PENDING])
+        tasks = [
+            _aged_task(100, ticket_id="TKT-DONE"),
+            _aged_task(
+                100,
+                ticket_id="TKT-PEND",
+                status=QueueItemStatus.PENDING,
+                completed_at=None,
+            ),
+            _aged_task(1, ticket_id="TKT-NEW"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+
+        previewed = select_prunable_tickets(statuses, 90, "genhealth")
+        removed = prune_tickets(statuses, 90, "genhealth")
+
+        assert {t.ticket_id for t in previewed} == {t.ticket_id for t in removed}
+        assert {t.ticket_id for t in previewed} == {"TKT-DONE", "TKT-PEND"}
+
+
+# ---------------------------------------------------------------------------
 # TestCLIDevQueueRemove
 # ---------------------------------------------------------------------------
 
@@ -2217,6 +2573,288 @@ class TestCLIDevQueueClear:
         )
         assert result.exit_code != 0
         assert "Invalid value" in result.output or "invalid choice" in result.output
+
+
+# ---------------------------------------------------------------------------
+# TestCLIDevQueuePrune
+# ---------------------------------------------------------------------------
+
+
+class TestCLIDevQueuePrune:
+    """Tests for `cw dev-queue prune` (GitHub #382)."""
+
+    def test_default_invocation_previews_only(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="CLI-PR1")]))
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["dev-queue", "prune", "--client", "genhealth"])
+
+        assert result.exit_code == 0, result.output
+        assert "CLI-PR1" in result.output
+        assert "would be pruned" in result.output
+        assert "--confirm" in result.output
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_dry_run_flag_previews_only(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="CLI-PR2")]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main, ["dev-queue", "prune", "--client", "genhealth", "--dry-run"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "dry-run" in result.output
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_dry_run_and_confirm_together_previews_only(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="CLI-PR3")]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "prune",
+                "--client",
+                "genhealth",
+                "--dry-run",
+                "--confirm",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "dry-run" in result.output
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_confirm_flag_actually_prunes(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            _aged_task(100, ticket_id="CLI-PR4"),
+            _aged_task(1, ticket_id="CLI-KEEP"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main, ["dev-queue", "prune", "--client", "genhealth", "--confirm"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Pruned 1 dev-queue task(s)." in result.output
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["CLI-KEEP"]
+
+    def test_status_pending_with_client_and_confirm_prunes(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        pending = _aged_task(
+            100,
+            ticket_id="CLI-PEND",
+            status=QueueItemStatus.PENDING,
+            completed_at=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[pending]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "prune",
+                "--client",
+                "genhealth",
+                "--status",
+                "pending",
+                "--confirm",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Pruned 1 dev-queue task(s)." in result.output
+        assert load_dev_queue().tasks == []
+
+    def test_all_clients_and_status_pending_mutually_exclusive(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """The gate fires on the read path too -- no --confirm needed."""
+        save_dev_queue(DevQueueStore(tasks=[]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            ["dev-queue", "prune", "--all-clients", "--status", "pending"],
+        )
+
+        assert result.exit_code != 0
+        assert "incompatible" in result.output
+
+    def test_status_comma_list_multiple_statuses(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            _aged_task(100, ticket_id="CLI-DONE"),
+            _aged_task(100, ticket_id="CLI-FAIL", status=QueueItemStatus.FAILED),
+            _aged_task(
+                100,
+                ticket_id="CLI-CANC",
+                status=QueueItemStatus.CANCELLED,
+                completed_at=None,
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "prune",
+                "--client",
+                "genhealth",
+                "--status",
+                "completed,failed",
+                "--confirm",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Pruned 2 dev-queue task(s)." in result.output
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["CLI-CANC"]
+
+    def test_status_invalid_enum_value_errors(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            ["dev-queue", "prune", "--client", "genhealth", "--status", "bogus"],
+        )
+
+        assert result.exit_code != 0
+        assert "bogus" in result.output
+
+    def test_status_empty_after_parse_errors(self, tmp_dev_queue: Path) -> None:
+        """A --status that parses to no statuses at all is rejected rather than
+        silently selecting nothing (or, worse, everything)."""
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="CLI-EMPTY")]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "prune",
+                "--client",
+                "genhealth",
+                "--status",
+                ",",
+                "--confirm",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "must name at least one status" in result.output
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_all_clients_flag_scopes_across_clients(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            _aged_task(100, ticket_id="CLI-A", client="genhealth"),
+            _aged_task(100, ticket_id="CLI-B", client="other"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main, ["dev-queue", "prune", "--all-clients", "--confirm"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Pruned 2 dev-queue task(s)." in result.output
+        assert load_dev_queue().tasks == []
+
+    def test_client_missing_and_all_clients_missing_errors(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gate surfaces before any library call runs."""
+
+        def _boom(*_args: object, **_kwargs: object) -> list[TicketTask]:
+            msg = "library must not be reached"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.cli.dev_queue.crud.select_prunable_tickets", _boom)
+        monkeypatch.setattr("cw.cli.dev_queue.crud.prune_tickets", _boom)
+        save_dev_queue(DevQueueStore(tasks=[]))
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["dev-queue", "prune"])
+
+        assert result.exit_code != 0
+        assert "Must pass either --client or --all-clients." in result.output
+
+    def test_client_and_all_clients_together_errors_cli(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            ["dev-queue", "prune", "--client", "genhealth", "--all-clients"],
+        )
+
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output
+
+    def test_older_than_override(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(20, ticket_id="CLI-20D")]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "prune",
+                "--client",
+                "genhealth",
+                "--older-than",
+                "10",
+                "--confirm",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Pruned 1 dev-queue task(s)." in result.output
+        assert load_dev_queue().tasks == []
+
+    def test_nothing_to_prune_message(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(1, ticket_id="CLI-FRESH")]))
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["dev-queue", "prune", "--client", "genhealth"])
+
+        assert result.exit_code == 0, result.output
+        assert "Nothing to prune." in result.output
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_confirm_flag_never_calls_select_prunable_tickets(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The --confirm branch performs exactly one library call
+        (prune_tickets), never a preceding unlocked preview (#382 Q3)."""
+
+        def _boom(*_args: object, **_kwargs: object) -> list[TicketTask]:
+            msg = "select_prunable_tickets must not run on the --confirm path"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.cli.dev_queue.crud.select_prunable_tickets", _boom)
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="CLI-ONE")]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main, ["dev-queue", "prune", "--client", "genhealth", "--confirm"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert load_dev_queue().tasks == []
 
 
 # ---------------------------------------------------------------------------

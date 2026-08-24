@@ -10,8 +10,8 @@ module is now a package of focused submodules:
   load & save).
 * ``lifecycle`` — task status transitions, disposition/terminal-status
   constants, stage-pointer helpers, and the terminal-wait poll loop.
-* ``crud`` — operator-facing queue mutations (add/remove/cancel/move/clear)
-  and the ticket-resolution helpers (resolve/list/find).
+* ``crud`` — operator-facing queue mutations (add/remove/cancel/move/clear/
+  prune) and the ticket-resolution helpers (resolve/list/find).
 * ``approval`` — the plan/review approval + operator-signoff-clearing gates.
 * ``requeue`` — re-run a stage, regress, or clear a salvage park.
 * ``drain`` — batch-resume every Rule-5 availability park (RFC 0011 A4).
@@ -26,17 +26,21 @@ from __future__ import annotations
 from cw.dev_queue.approval import _approve_ticket_locked, approve_ticket
 from cw.dev_queue.attention import task_attention_state
 from cw.dev_queue.crud import (
+    DEFAULT_PRUNE_OLDER_THAN_DAYS,
     _find_ticket,
     _newest_by_created_at,
+    _prune_age_basis,
     add_ticket,
     cancel_task_for_session,
     cancel_ticket,
     clear_tickets,
     list_tickets,
     move_ticket,
+    prune_tickets,
     register_watched_pr,
     remove_ticket,
     resolve_client,
+    select_prunable_tickets,
 )
 from cw.dev_queue.drain import (
     DRAIN_DISPOSITIONS,
@@ -91,6 +95,7 @@ from cw.exceptions import LaneNotFoundError
 __all__ = [
     "AWAITING_OPERATOR_DISPOSITION",
     "BRANCH_STALENESS_GATE_DISPOSITION",
+    "DEFAULT_PRUNE_OLDER_THAN_DAYS",
     "DRAIN_DISPOSITIONS",
     "EMPTY_DIFF_GATE_DISPOSITION",
     "FINALIZE_GATE_HELD_DISPOSITION",
@@ -116,6 +121,7 @@ __all__ = [
     "_marker_version",
     "_newest_by_created_at",
     "_plan_body_signoff_ok",
+    "_prune_age_basis",
     "_result_blocker_reason",
     "_stage_regress",
     "_stamp_salvage_stage",
@@ -133,6 +139,7 @@ __all__ = [
     "migrate_dev_queue",
     "move_ticket",
     "plan_path",
+    "prune_tickets",
     "register_watched_pr",
     "remove_ticket",
     "requeue_ticket",
@@ -140,6 +147,7 @@ __all__ = [
     "save_dev_queue",
     "save_plan",
     "select_held_tickets",
+    "select_prunable_tickets",
     "task_attention_state",
     "transition_task_status",
     "unblock_ticket",

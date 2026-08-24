@@ -9,7 +9,7 @@ below is what registers those commands. Submodules:
 - ``_group`` — the ``dev_queue`` group object plus the ``_WAIT_EXIT_*`` /
   status-rendering constants shared across submodules.
 - ``crud`` — queue mutation commands (add, move, approve, requeue, unblock,
-  remove, cancel, clear).
+  remove, cancel, clear, prune).
 - ``status`` — aggregate status table + lane breakdown rendering.
 - ``run`` — dispatch-driving commands (run, serve, plan).
 - ``wait`` — the sentinel-aware ``dev-queue wait`` loop and its emit helpers.
