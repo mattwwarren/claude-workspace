@@ -4131,7 +4131,10 @@ class TestAutoPruneOnAppend:
         info_records = [r for r in caplog.records if r.levelno == logging.INFO]
         assert any("auto-pruned event inbox" in r.message for r in info_records)
         assert any(
-            "archived=" in r.message and "kept=3" in r.message for r in info_records
+            "archived=" in r.message
+            and "kept=3" in r.message
+            and "archive_path=" in r.message
+            for r in info_records
         )
 
     def test_auto_prune_config_is_cached_not_reloaded_every_append(
