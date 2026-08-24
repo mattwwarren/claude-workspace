@@ -97,10 +97,12 @@ def _append_to_archive(sessions: list[Session]) -> Path:
     path = _archive_path_for_today()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Why: this append is not atomic with the sessions.json rewrite in
-    # prune_sessions. A crash between the two would drop the pruned sessions
-    # from both files. Accepted for the same reason as the events archive
-    # (cw.events.prune_events): the archive is a best-effort cold copy, not a
-    # source of truth, and this is an operator-invoked, non-hot-path command.
+    # prune_sessions, which calls this before save_state(). A crash between
+    # the two leaves the archived sessions still present in sessions.json
+    # too, so a retried prune re-appends them (duplication, not loss).
+    # Accepted for the same reason as the events archive (cw.events.
+    # prune_events): the archive is a best-effort cold copy, not a source of
+    # truth, and this is an operator-invoked, non-hot-path command.
     with path.open("a") as f:
         for session in sessions:
             f.write(session.model_dump_json() + "\n")

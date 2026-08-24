@@ -55,6 +55,27 @@ def handle_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
+def parse_iso_before(before: str) -> datetime:
+    """Parse a --before value as an ISO 8601 timestamp. Raises CwError on failure.
+
+    Shared by ``cw event prune`` (cli/queues.py) and ``cw session prune``
+    (cli/session_prune.py) — extracted here (#1983) after both commands
+    independently carried an identical private copy.
+    """
+    try:
+        before_ts = datetime.fromisoformat(before)
+    except ValueError as exc:
+        msg = f"Cannot parse --before value '{before}' as ISO timestamp."
+        raise CwError(msg) from exc
+    if before_ts.tzinfo is None:
+        click.echo(
+            f"Warning: --before '{before}' has no timezone; assuming UTC",
+            err=True,
+        )
+        before_ts = before_ts.replace(tzinfo=UTC)
+    return before_ts
+
+
 def _complete_client(
     _ctx: click.Context,
     _param: click.Parameter,
