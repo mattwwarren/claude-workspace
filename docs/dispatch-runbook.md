@@ -326,6 +326,57 @@ This section covers the **single-ticket blocking wait**. For multi-ticket wave
 monitoring use the `cw-queue-peek` skill; for terminal/attention state use `cw
 event tail` or the `cw-session-watch` skill (see the breadcrumb under §2).
 
+### 4.0 Two kinds of monitoring — you need both
+
+Every mechanism in this section and in §2 is a **negative** check: it reports a
+failure the pipeline noticed and named (`session.needs_attention`,
+`session.timed_out`, `reap_proposed`, a non-zero `wait` exit code). That leaves
+one gap, and it is the gap most likely to waste an afternoon.
+
+**A worker that spawns and then stalls emits nothing.** It claims the ticket,
+registers in the daemon roster, increments `attempts`, reports `RUNNING`, and
+then produces no further output. No attention event fires, because nothing
+failed in a way the pipeline can name. On a status table it is indistinguishable
+from a healthy worker doing slow work.
+
+The **positive** check is `cw queue peek`:
+
+```bash
+cw queue peek --client <client>
+```
+
+Read `idle_m` (minutes since the session's last transcript **record**) against
+`age_m` (minutes since spawn):
+
+- `idle_m` well below `age_m` → the worker is producing output. Healthy.
+- `idle_m ≈ age_m` → it has done nothing since spawning. This is the signature
+  of a stalled or dead worker regardless of what the queue row says.
+- Peek renders its own `WAIT` / `STOP-OR-PEEK` / `STOP` recommendation from
+  these, plus branch and PR state.
+
+Run it at checkpoints — after a gate, after a merge, before reporting that a
+wave is healthy — not on a timer. Event-driven monitoring covers the named
+failures; peek covers the unnamed one.
+
+This checkpoint discipline is a stopgap: `cw` already emits
+`session.liveness_changed` with staleness buckets, but no attention monitor
+subscribes to it yet (#2004). Once that lands, a stalled worker pages you and
+this becomes a confirmation step rather than the only line of defense.
+
+> **Do not hand-roll a liveness check.** `peek` already computes `idle_m`
+> correctly from parsed transcript records. Substitutes based on file mtimes
+> are wrong in two ways that both fail *silently*: a file's `mtime` can advance
+> after its last record was written (so a silent session reads as live — see
+> #1795), and `find -newermt` parses its argument in **local** time, so passing
+> a UTC timestamp on a non-UTC host produces a cutoff hours in the future that
+> matches nothing and yields a confident, false all-clear.
+
+If you are driving the event bus directly rather than through a skill, note
+that `cw event tail --lane <lane>` scopes the stream to that lane and drops
+every other lane's events. That is intended for two operators sharing a client;
+if you are the only one watching, omit it — a lane filter can only lose you
+events.
+
 Primary wave-level monitoring is now subscribe-first — see §2's operator
 channel flow; this section is the single-ticket blocking-wait contract.
 
