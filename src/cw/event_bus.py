@@ -51,7 +51,7 @@ def _read_reverse_chunk(f: BinaryIO, end: int, size: int) -> bytes:
 
     A thin, separately-nameable wrapper around the seek+read pair so tests can
     monkeypatch it to count bytes actually pulled off disk (the low-level I/O
-    primitive ``_iter_lines_reverse`` drives in its backward walk).
+    primitive ``_iter_line_groups_reverse`` drives in its backward walk).
     """
     start = max(0, end - size)
     f.seek(start)
@@ -118,11 +118,6 @@ def _last_offset_from_reverse_scan(path: Path, events_file: str) -> int | None:
     lower than the true max, which would make the next ``append_event`` reuse
     an offset already on disk and replay events to subscribers.
 
-    # Why: take the max over the whole group already read off disk, not the
-    # first record found in it — this stays bounded (no extra I/O; the group
-    # is already in memory) while staying correct under the interleaving
-    # above. Do not "simplify" this back to first-found (#1986 round 2).
-
     Returns ``None`` if BOF is reached with no valid record.
     """
     for group in _iter_line_groups_reverse(path):
@@ -137,6 +132,11 @@ def _last_offset_from_reverse_scan(path: Path, events_file: str) -> int | None:
             if isinstance(offset, int):
                 offsets.append(offset)
         if offsets:
+            # Why: take the max over the whole group already read off disk,
+            # not the first record found in it — stays bounded (no extra
+            # I/O; the group is already in memory) while staying correct
+            # under cross-process interleaving. Do not "simplify" this back
+            # to first-found (#1986 round 2).
             return max(offsets)
     return None
 
