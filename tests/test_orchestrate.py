@@ -14,23 +14,27 @@ from freezegun import freeze_time
 
 from cw.cli import main
 from cw.config import load_state, save_state
-from cw.dev_queue import add_ticket
+from cw.dev_queue import add_ticket, save_dev_queue
 from cw.dispatch import FRESHNESS_MAIN_BEHIND, FRESHNESS_NON_MAIN_HEAD
 from cw.events import read_events, record_event
 from cw.exceptions import CwError
+from cw.gh import github_pr_url
 from cw.models import (
     DEFAULT_LANE,
     CompletionReason,
     CwState,
+    DevQueueStore,
     DispatchSkipReason,
     OrchestratorEvent,
     OrchestratorEventType,
+    PrState,
     QueueItemStatus,
     Session,
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
     TicketTask,
+    WatchedPr,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.orchestrate import (
@@ -41,6 +45,7 @@ from cw.orchestrate import (
     TickSummary,
     WorkerEntry,
     _aggregate_feed,
+    _load_monitored_prs,
     clear_completed_pr_sessions,
     orchestrator_parent,
     orchestrator_status,
@@ -49,7 +54,7 @@ from cw.orchestrate import (
     save_dispatch_record,
 )
 from cw.reconcile import ProposedAction
-from tests.conftest import _make_daemon_session
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 _RunnerFn = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -721,6 +726,122 @@ class TestOrchestratorStatus:
         # null guard: must serialize to null, not be excluded
         assert pr_json["ci_status"] is None
         assert pr_json["mergeable"] is None
+
+
+class TestMonitoredPrPrStateOverlay:
+    """_load_monitored_prs overlays a fresh persisted pr_state.mergeable onto
+    the review-monitor JSON value (GitHub #975)."""
+
+    def test_fresh_task_pr_state_mergeable_overlays_true(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        review_dir = tmp_orchestrate_dirs / "review-monitor"
+        repo = "owner/repo"
+        pr_number = 42
+        _write_monitor_file(review_dir, repo, pr_number, mergeable=False)
+
+        now = datetime.now(UTC)
+        task = _make_ticket_task(
+            ticket_id="T-1",
+            client="test-client",
+            pr_url=github_pr_url(repo, pr_number),
+            pr_state=PrState(
+                mergeable="MERGEABLE", hydrated_at=now - timedelta(seconds=10)
+            ),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        monitored = _load_monitored_prs()
+        assert len(monitored) == 1
+        assert monitored[0].mergeable is True
+        # ci_status is left exactly as review-monitor reported it (None here).
+        assert monitored[0].ci_status is None
+
+    def test_fresh_task_pr_state_conflicting_overlays_false(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        review_dir = tmp_orchestrate_dirs / "review-monitor"
+        repo = "owner/repo"
+        pr_number = 43
+        _write_monitor_file(review_dir, repo, pr_number, mergeable=True)
+
+        now = datetime.now(UTC)
+        task = _make_ticket_task(
+            ticket_id="T-2",
+            client="test-client",
+            pr_url=github_pr_url(repo, pr_number),
+            pr_state=PrState(
+                mergeable="CONFLICTING", hydrated_at=now - timedelta(seconds=10)
+            ),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        monitored = _load_monitored_prs()
+        assert len(monitored) == 1
+        assert monitored[0].mergeable is False
+
+    def test_stale_pr_state_leaves_json_value_unchanged(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        review_dir = tmp_orchestrate_dirs / "review-monitor"
+        repo = "owner/repo"
+        pr_number = 44
+        _write_monitor_file(review_dir, repo, pr_number, mergeable=True)
+
+        now = datetime.now(UTC)
+        task = _make_ticket_task(
+            ticket_id="T-3",
+            client="test-client",
+            pr_url=github_pr_url(repo, pr_number),
+            pr_state=PrState(
+                mergeable="CONFLICTING", hydrated_at=now - timedelta(seconds=300)
+            ),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        monitored = _load_monitored_prs()
+        assert len(monitored) == 1
+        assert monitored[0].mergeable is True
+
+    def test_no_matching_task_leaves_json_value_unchanged(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        review_dir = tmp_orchestrate_dirs / "review-monitor"
+        repo = "owner/repo"
+        pr_number = 45
+        _write_monitor_file(review_dir, repo, pr_number, mergeable=False)
+
+        monitored = _load_monitored_prs()
+        assert len(monitored) == 1
+        assert monitored[0].mergeable is False
+
+    def test_fresh_watched_pr_state_overlays_correctly(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        """A WatchedPr (not a TicketTask) supplying the fresh pr_state for the
+        same (repo, pr_number) also overlays correctly."""
+        review_dir = tmp_orchestrate_dirs / "review-monitor"
+        repo = "owner/repo"
+        pr_number = 46
+        _write_monitor_file(review_dir, repo, pr_number, mergeable=False)
+
+        now = datetime.now(UTC)
+        watched = WatchedPr(
+            pr_url=github_pr_url(repo, pr_number),
+            repo=repo,
+            pr_number=pr_number,
+            source="cli",
+            client="test-client",
+            pr_state=PrState(
+                mergeable="MERGEABLE",
+                hydrated_at=now - timedelta(seconds=10),
+            ),
+        )
+        save_dev_queue(DevQueueStore(watched_prs=[watched]))
+
+        monitored = _load_monitored_prs()
+        assert len(monitored) == 1
+        assert monitored[0].mergeable is True
 
 
 # ---------------------------------------------------------------------------
