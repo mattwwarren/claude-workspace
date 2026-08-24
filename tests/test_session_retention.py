@@ -368,6 +368,28 @@ class TestFindSessionById:
                 )
                 prune_sessions()
 
+    def test_find_session_by_id_tolerates_blank_lines_in_an_archive(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A blank line (e.g. a torn append) does not break the archive scan."""
+        _seed_sessions(
+            _make_daemon_session(
+                id="blank001",
+                name="client-a/auto-dev/T-blank",
+                status=SessionStatus.COMPLETED,
+                completed_at=_OLD,
+                started_at=_OLD,
+            )
+        )
+        with freeze_time(_NOW):
+            prune_sessions()
+        archive = _archive_files()[0]
+        archive.write_text("\n" + archive.read_text() + "\n\n")
+
+        found = find_session_by_id("blank001")
+        assert found is not None
+        assert found.id == "blank001"
+
     def test_find_session_by_id_returns_none_when_absent_everywhere(
         self, tmp_config_dir: Path
     ) -> None:
