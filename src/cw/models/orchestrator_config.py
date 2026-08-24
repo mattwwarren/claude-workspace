@@ -544,6 +544,23 @@ class OrchestratorConfig(BaseModel):
     # itself. See GitHub #856.
     inbox_size_warn_bytes: int = 5_000_000
     inbox_line_count_warn: int = 15_000
+    # Auto-prune trigger (#1980): checked in record_event's append path, under
+    # _inbox_lock, using the byte size already available from the append write
+    # (no extra read). Distinct from inbox_size_warn_bytes/inbox_line_count_warn
+    # above (#856), which are doctor-only warnings and never mutate the inbox.
+    #
+    # event_inbox_retention_bytes intentionally shares its default with
+    # inbox_size_warn_bytes above (both 5_000_000) so auto-prune fires at the
+    # exact point the doctor would otherwise have warned -- the doctor check
+    # becomes a backstop that only fires when auto-prune is disabled or broken.
+    # Do NOT derive this value from inbox_size_warn_bytes in code: they are two
+    # independent fields that happen to share a default, kept separate so a
+    # future reader who changes one field is prompted to consider the other.
+    # Defaults are the operator-approved binding values from GitHub #1980's
+    # "Ambiguity Resolutions — round 1" comment (Q1).
+    event_inbox_auto_prune_enabled: bool = True
+    event_inbox_retention_bytes: int = 5_000_000
+    event_inbox_retention_count: int = 2000
     # Gating policy for destructive reap actions (stop daemon, revert task to
     # PENDING, remove worktree). Default ``signal_only`` routes stalled/phantom
     # sessions to BLOCKED_ON_USER for operator review; ``auto`` restores the
