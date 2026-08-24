@@ -15,6 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **A failed `stat` is not a replaced file.** Transient stat failures (permissions, a network filesystem hiccup) are reported distinctly from "absent" and leave follow state untouched, instead of being mistaken for a truncation and forcing repeated full re-resolves.
   - Scope: `read_events(since_ts=...)` callers (`board.py`'s event feed, the dispatch loop's usage-limit cohort scan) and `cw_queue_events_server.py`'s snapshot reader are unchanged and still pay a full read — tracked in #1981-#1984.
 
+- **`load_offset_from_file` parsed the entire channel log on every call instead of reading backward from EOF (#1986):** `EventBus.load_offset_from_file` now walks backward from EOF in bounded 64 KiB chunks and stops as soon as one chunk yields a valid record, instead of reading and JSON-parsing the whole file to find `max(offset) + 1`. Because `file_lock` is a `threading.Lock` (thread-scoped, not process-scoped), two processes appending to the same channel log can interleave writes so the file is not strictly offset-monotonic in file position — the offset returned is the max over the bounded read window already pulled off disk, not the first valid record found walking backward, so a lower, stale offset can never be handed back to the next `append_event` and cause a replay. A malformed line or a line truncated mid multi-byte UTF-8 character (crash mid-write) is skipped with a warning rather than aborting the scan. Follow-ups: the sidecar offset index (#1990) and channel-log retention (#1991) are tracked separately.
+
 ## [1.43.0] - 2026-08-22
 
 ### Changed
