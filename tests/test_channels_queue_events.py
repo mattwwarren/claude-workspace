@@ -1452,9 +1452,7 @@ class TestPollerTickChangeDetectionGuard:
             return real_load_dev_queue()
 
         monkeypatch.setattr(config_mod, "load_state", _counting_load_state)
-        monkeypatch.setattr(
-            dev_queue_mod, "load_dev_queue", _counting_load_dev_queue
-        )
+        monkeypatch.setattr(dev_queue_mod, "load_dev_queue", _counting_load_dev_queue)
 
         _server_mod._poller_tick(OrchestratorConfig())
         assert load_state_calls == 1
@@ -1483,9 +1481,7 @@ class TestPollerTickChangeDetectionGuard:
             # T-guard so the assertions below see only the transition delta.
             _server_mod._poller_tick(OrchestratorConfig())
             baseline = q.get_nowait()
-            assert (
-                json.loads(baseline["message"])["event"] == "queue.ticket_enqueued"
-            )
+            assert json.loads(baseline["message"])["event"] == "queue.ticket_enqueued"
 
             save_dev_queue(
                 DevQueueStore(
@@ -1536,9 +1532,7 @@ class TestPollerTickChangeDetectionGuard:
 
         # sessions.json is left untouched; only the dev-queue store changes.
         save_dev_queue(
-            DevQueueStore(
-                tasks=[_make_task("T-devq", "acme", QueueItemStatus.PENDING)]
-            )
+            DevQueueStore(tasks=[_make_task("T-devq", "acme", QueueItemStatus.PENDING)])
         )
         _server_mod._poller_tick(OrchestratorConfig())
         assert calls == 2
@@ -1569,6 +1563,7 @@ class TestPollerTickChangeDetectionGuard:
     def test_stat_oserror_other_than_missing_is_treated_as_changed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        import os
         from pathlib import Path
 
         from cw.config import save_state, state_file
@@ -1594,12 +1589,22 @@ class TestPollerTickChangeDetectionGuard:
 
         sessions_path = state_file()
         real_stat = Path.stat
+        raised = False
 
-        def _raising_stat(self: Path, *args: object, **kwargs: object) -> object:
-            if self == sessions_path:
+        def _raising_stat(
+            self: Path, *, follow_symlinks: bool = True
+        ) -> os.stat_result:
+            # Raise only on the FIRST stat() of the sessions path -- that is
+            # the change-detection guard's own call, made before _poll_once
+            # runs. Subsequent calls (load_state()'s internal path.exists()
+            # once the guard decides to poll) must succeed, or the "tick
+            # still performs a full poll" assertion below can't be reached.
+            nonlocal raised
+            if self == sessions_path and not raised:
+                raised = True
                 msg = "denied"
                 raise PermissionError(msg)
-            return real_stat(self, *args, **kwargs)
+            return real_stat(self, follow_symlinks=follow_symlinks)
 
         monkeypatch.setattr(Path, "stat", _raising_stat)
 
