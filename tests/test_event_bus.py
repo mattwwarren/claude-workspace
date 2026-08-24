@@ -15,10 +15,13 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+import cw.event_bus as event_bus_mod
 from cw.config import state_dir
 from cw.event_bus import EventBus
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import pytest
 
 _EVENTS_FILE = "queue-channel-events.jsonl"
@@ -311,6 +314,219 @@ class TestEventBusLoaders:
             + "\n"
         )
         assert bus.load_offset_from_file() == 6
+
+
+def _write_padded_jsonl(path: Path, target_bytes: int) -> int:
+    """Write monotonically-offset JSON lines until at least target_bytes on disk.
+
+    Returns the expected ``load_offset_from_file()`` result (the offset of the
+    last line written, plus one).
+    """
+    written = 0
+    offset = 0
+    with path.open("w") as f:
+        while written < target_bytes:
+            line = json.dumps({"offset": offset, "pad": "x" * 200}) + "\n"
+            f.write(line)
+            written += len(line)
+            offset += 1
+    return offset
+
+
+class TestEventBusLoadOffsetBoundedReverseRead:
+    """#1986: load_offset_from_file must not full-parse the channel log.
+
+    These tests exercise the bounded reverse-read path directly through the
+    public ``load_offset_from_file()`` API, and (for the I/O-bound tests)
+    through the byte-counting-wrapper technique established in
+    ``tests/test_events.py`` (``test_wait_for_event_does_not_reread_history``,
+    ``test_tail_events_follow_does_not_reread_history``).
+    """
+
+    def test_falls_back_on_truncated_trailing_line(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        bus = _make_bus()
+        path = state_dir() / _EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"offset": 0, "message": "a"})
+            + "\n"
+            + json.dumps({"offset": 1, "message": "b"})
+            + "\n"
+            + '{"offset": 2, "mess'  # truncated, no trailing newline
+        )
+        with caplog.at_level(logging.WARNING):
+            result = bus.load_offset_from_file()
+        assert result == 2
+        assert any("skipping malformed line" in rec.message for rec in caplog.records)
+
+    def test_falls_back_through_multiple_malformed_trailing_lines(self) -> None:
+        bus = _make_bus()
+        path = state_dir() / _EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"offset": 0, "message": "a"})
+            + "\n"
+            + "garbage1\n"
+            + "garbage2\n"
+        )
+        assert bus.load_offset_from_file() == 1
+
+    def test_all_lines_malformed_returns_zero(self) -> None:
+        bus = _make_bus()
+        path = state_dir() / _EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not-json\n\n   \nalso not json\n")
+        assert bus.load_offset_from_file() == 0
+
+    def test_last_valid_json_missing_offset_field_falls_back(self) -> None:
+        bus = _make_bus()
+        path = state_dir() / _EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"offset": 3, "message": "a"})
+            + "\n"
+            + json.dumps({"offset": "not-an-int", "message": "b"})
+            + "\n"
+            + json.dumps({"message": "c"})  # no offset field at all
+            + "\n"
+        )
+        assert bus.load_offset_from_file() == 4
+
+    def test_handles_line_spanning_chunk_boundary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(event_bus_mod, "_REVERSE_READ_CHUNK_BYTES", 16)
+        bus = _make_bus()
+        path = state_dir() / _EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"offset": 7, "message": "x" * 300}) + "\n")
+        assert bus.load_offset_from_file() == 8
+
+    def test_trailing_blank_lines_and_whitespace_are_skipped(self) -> None:
+        bus = _make_bus()
+        path = state_dir() / _EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"offset": 4, "message": "a"}) + "\n\n   \n\n")
+        assert bus.load_offset_from_file() == 5
+
+    def test_falls_back_on_truncated_mid_multibyte_utf8_trailing_line(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        bus = _make_bus()
+        path = state_dir() / _EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        second = json.dumps({"offset": 1, "note": "café"}, ensure_ascii=False)
+        second_bytes = second.encode("utf-8")
+        # "é" encodes as 0xC3 0xA9; keep only the leading byte so the trailing
+        # line ends mid-character, as a crash mid-append_event would leave it.
+        cut_at = second_bytes.index("é".encode()) + 1
+        truncated = second_bytes[:cut_at]
+        with path.open("wb") as f:
+            f.write((json.dumps({"offset": 0, "message": "a"}) + "\n").encode("utf-8"))
+            f.write(truncated)  # no trailing newline
+        with caplog.at_level(logging.WARNING):
+            result = bus.load_offset_from_file()
+        assert result == 1
+        assert any(rec.levelno == logging.WARNING for rec in caplog.records)
+
+    def test_out_of_order_offsets_within_window_returns_max_not_first_found(
+        self,
+    ) -> None:
+        """#1986 round 2: file_lock is thread-scoped, not process-scoped.
+
+        Two processes appending to the same channel log can interleave so the
+        file is not offset-monotonic in file position. The last line written
+        is not necessarily the highest offset, so the reverse scan must take
+        the max over the whole read window rather than stopping at the first
+        valid record it finds walking backward.
+        """
+        bus = _make_bus()
+        path = state_dir() / _EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        offsets_in_file_order = [0, 1, 2, 5, 3]
+        path.write_text(
+            "\n".join(
+                json.dumps({"offset": o, "message": "x"}) for o in offsets_in_file_order
+            )
+            + "\n"
+        )
+        assert bus.load_offset_from_file() == 6
+
+    def test_bounded_io_not_proportional_to_file_size(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bus = _make_bus()
+        path = state_dir() / _EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        bytes_read: list[int] = []
+        real_reader = event_bus_mod._read_reverse_chunk
+
+        def counting_reader(f: Any, end: int, size: int) -> bytes:
+            chunk = real_reader(f, end, size)
+            bytes_read.append(len(chunk))
+            return chunk
+
+        monkeypatch.setattr(event_bus_mod, "_read_reverse_chunk", counting_reader)
+
+        for target_bytes in (1_000_000, 20_000_000):
+            bytes_read.clear()
+            expected = _write_padded_jsonl(path, target_bytes)
+            result = bus.load_offset_from_file()
+            total = sum(bytes_read)
+            assert result == expected
+            assert total <= 4 * event_bus_mod._REVERSE_READ_CHUNK_BYTES, (
+                f"read {total} bytes for a {path.stat().st_size}-byte file "
+                f"(target {target_bytes})"
+            )
+
+    def test_bounded_io_against_live_sized_channel_logs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bounded I/O against synthetic files sized like real channel logs.
+
+        ~27MB / ~15MB approximate the observed on-disk sizes of
+        queue-channel-events.jsonl and operator-channel-events.jsonl — the
+        two live logs this loader runs against every daemon startup.
+        """
+        bytes_read: list[int] = []
+        real_reader = event_bus_mod._read_reverse_chunk
+
+        def counting_reader(f: Any, end: int, size: int) -> bytes:
+            chunk = real_reader(f, end, size)
+            bytes_read.append(len(chunk))
+            return chunk
+
+        monkeypatch.setattr(event_bus_mod, "_read_reverse_chunk", counting_reader)
+
+        cases = [
+            (_make_bus(), 27_000_000),
+            (
+                EventBus(
+                    events_file="operator-channel-events.jsonl",
+                    cursors_file="operator-channel-cursors.json",
+                    log_label="operator-events",
+                ),
+                15_000_000,
+            ),
+        ]
+        for bus, target_bytes in cases:
+            path = state_dir() / bus.events_file
+            path.parent.mkdir(parents=True, exist_ok=True)
+            expected = _write_padded_jsonl(path, target_bytes)
+            bytes_read.clear()
+            result = bus.load_offset_from_file()
+            total = sum(bytes_read)
+            assert result == expected
+            # Before/after evidence for #1986: pre-fix cost == file size
+            # (full parse); post-fix cost is bounded by chunk size regardless
+            # of file size.
+            assert total <= 4 * event_bus_mod._REVERSE_READ_CHUNK_BYTES, (
+                f"{bus.events_file}: read {total} bytes for a "
+                f"{path.stat().st_size}-byte file (target {target_bytes})"
+            )
 
 
 class TestEventBusPathsResolvedAtCallTime:
