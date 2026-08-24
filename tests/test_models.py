@@ -1353,6 +1353,19 @@ class TestInboxPruneThresholds:
         assert OrchestratorConfig().inbox_line_count_warn == 15_000
 
 
+class TestEventInboxAutoPruneDefaults:
+    """#1980: OrchestratorConfig defaults for the event-inbox auto-prune trigger."""
+
+    def test_orchestrator_config_default_event_inbox_auto_prune_enabled(self) -> None:
+        assert OrchestratorConfig().event_inbox_auto_prune_enabled is True
+
+    def test_orchestrator_config_default_event_inbox_retention_bytes(self) -> None:
+        assert OrchestratorConfig().event_inbox_retention_bytes == 5_000_000
+
+    def test_orchestrator_config_default_event_inbox_retention_count(self) -> None:
+        assert OrchestratorConfig().event_inbox_retention_count == 2000
+
+
 class TestOperatorChannelForward:
     """RFC 0008 W3 (#1002): operator-attention forward-set config surface."""
 

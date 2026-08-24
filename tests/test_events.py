@@ -29,7 +29,8 @@ from cw.events import (
 )
 from cw.events import record_event as events_record_event
 from cw.exceptions import CwError
-from cw.models import OrchestratorEvent, OrchestratorEventType
+from cw.models import OrchestratorConfig, OrchestratorEvent, OrchestratorEventType
+from tests._reconcile_helpers import _auto_config
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -3734,3 +3735,483 @@ def test_read_events_empty_inbox_logs_no_cursor_miss(
     assert not [r for r in caplog.records if "not found in inbox" in r.message], (
         "inbox that parsed to nothing warned about a missing cursor"
     )
+
+
+# ---------------------------------------------------------------------------
+# _prune_events_locked extraction (#1980)
+# ---------------------------------------------------------------------------
+
+
+class TestPruneEventsLockedExtraction:
+    """#1980 Phase 1: pin _prune_events_locked's extracted-helper contract.
+
+    R2: prune_events must remain the sole acquirer of _inbox_lock() for the
+    validate -> lock -> prune sequence; the extracted _prune_events_locked
+    must only ever be called from inside an already-held lock.
+    """
+
+    def test_prune_events_locked_exists_and_is_unlocked(
+        self, tmp_events_dir: Path
+    ) -> None:
+        """The unlocked helper mutates the inbox correctly with no lock held.
+
+        Documents the contract that the caller -- not the helper -- owns the
+        lock: record_event's auto-prune trigger calls this from inside its
+        own already-held _inbox_lock().
+        """
+        from cw import events as events_module
+
+        for i in range(3):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+        result = events_module._prune_events_locked(
+            before=None, keep=1, archive=True
+        )
+
+        assert result.kept_count == 1
+        assert result.archived_count == 2
+        assert len(read_events()) == 1
+
+    def test_prune_events_public_wrapper_still_validates(
+        self, tmp_events_dir: Path
+    ) -> None:
+        """prune_events() still raises CwError for both/neither before+keep.
+
+        Regression guard: validation must stay in the public wrapper, not
+        move into _prune_events_locked.
+        """
+        with pytest.raises(CwError):
+            prune_events(before=datetime.now(UTC), keep=1)
+        with pytest.raises(CwError):
+            prune_events()
+        with pytest.raises(CwError):
+            prune_events(keep=-1)
+
+    def test_prune_events_still_acquires_lock_exactly_once(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """prune_events acquires _inbox_lock exactly once post-extraction."""
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
+
+        from cw import events as events_module
+
+        original_lock = events_module._inbox_lock
+        call_count = 0
+
+        @contextlib.contextmanager
+        def counting_lock() -> Generator[None]:
+            nonlocal call_count
+            call_count += 1
+            with original_lock():
+                yield
+
+        monkeypatch.setattr(events_module, "_inbox_lock", counting_lock)
+
+        result = prune_events(keep=1)
+
+        assert call_count == 1
+        assert result.kept_count == 1
+
+    def test_prune_events_behavior_unchanged_after_extraction(
+        self, tmp_events_dir: Path
+    ) -> None:
+        """prune_events(keep=N) output is unchanged by the extraction refactor."""
+        for i in range(5):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+        result = prune_events(keep=2)
+
+        assert result.archived_count == 3
+        assert result.deleted_count == 0
+        assert result.kept_count == 2
+        assert result.archive_path is not None
+        archive_lines = [
+            ln
+            for ln in Path(result.archive_path).read_text().splitlines()
+            if ln.strip()
+        ]
+        assert len(archive_lines) == 3
+
+
+# ---------------------------------------------------------------------------
+# record_event auto-prune trigger (#1980)
+# ---------------------------------------------------------------------------
+
+
+class TestAutoPruneOnAppend:
+    """#1980: record_event's in-band auto-prune trigger.
+
+    Config in every test is built via the shared _auto_config(**kwargs)
+    factory (tests/_reconcile_helpers.py) and installed by monkeypatching
+    cw.events.load_orchestrator_config -- the name bound inside events.py by
+    its own `from cw.config import load_orchestrator_config` import.
+    Patching cw.config.load_orchestrator_config would not affect that
+    already-bound reference.
+    """
+
+    def test_record_event_does_not_prune_below_threshold(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No prune fires while the inbox stays under the byte threshold."""
+        from cw import events as events_module
+
+        monkeypatch.setattr(
+            events_module,
+            "load_orchestrator_config",
+            lambda: _auto_config(event_inbox_retention_bytes=10_000_000),
+        )
+
+        for i in range(20):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+        assert len(read_events()) == 20
+
+    def test_record_event_triggers_prune_above_byte_threshold(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Crossing the byte threshold prunes in-band to the retention count.
+
+        event_inbox_retention_bytes=50 is smaller than a single serialized
+        event line, so every append past the retention count re-triggers the
+        check -- the inbox converges deterministically to exactly the newest
+        `event_inbox_retention_count` events, with an archive written (stays
+        on by default).
+        """
+        from cw import events as events_module
+
+        monkeypatch.setattr(
+            events_module,
+            "load_orchestrator_config",
+            lambda: _auto_config(
+                event_inbox_retention_bytes=50, event_inbox_retention_count=3
+            ),
+        )
+
+        for i in range(30):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+        remaining = read_events()
+        assert [e.payload["n"] for e in remaining] == [27, 28, 29]
+        assert list(tmp_events_dir.glob("inbox.*.jsonl")), "archive file expected"
+
+    def test_auto_prune_does_not_emit_an_event(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An auto-prune never appends its own audit event to the inbox.
+
+        If it did, the inbox would settle at retention_count + 1 (or more)
+        rather than exactly retention_count, since record_event would
+        recursively observe its own prune event.
+        """
+        from cw import events as events_module
+
+        monkeypatch.setattr(
+            events_module,
+            "load_orchestrator_config",
+            lambda: _auto_config(
+                event_inbox_retention_bytes=50, event_inbox_retention_count=3
+            ),
+        )
+
+        for i in range(10):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+        assert len(read_events()) == 3
+
+    def test_auto_prune_disabled_via_config(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """event_inbox_auto_prune_enabled=False suppresses the trigger entirely."""
+        from cw import events as events_module
+
+        monkeypatch.setattr(
+            events_module,
+            "load_orchestrator_config",
+            lambda: _auto_config(
+                event_inbox_auto_prune_enabled=False,
+                event_inbox_retention_bytes=50,
+                event_inbox_retention_count=3,
+            ),
+        )
+
+        for i in range(10):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+        assert len(read_events()) == 10
+
+    def test_record_event_survives_auto_prune_failure(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure inside the prune step must not break record_event itself.
+
+        Best-effort resilience per PYTHON-PATTERNS.md: the event that
+        triggered the check must still be recorded even if the prune it
+        triggers explodes.
+        """
+        from cw import events as events_module
+
+        monkeypatch.setattr(
+            events_module,
+            "load_orchestrator_config",
+            lambda: _auto_config(
+                event_inbox_retention_bytes=50, event_inbox_retention_count=3
+            ),
+        )
+
+        def boom(**kwargs: object) -> None:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(events_module, "_prune_events_locked", boom)
+
+        for i in range(5):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+        remaining = read_events()
+        assert [e.payload["n"] for e in remaining] == [0, 1, 2, 3, 4]
+
+    def test_record_event_survives_config_load_failure_cold_start(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cold start: the first config load raises -> safe-defaults fallback.
+
+        No cache populated yet, so _load_auto_prune_config_cached's fallback
+        for this call must be OrchestratorConfig() safe defaults, not a
+        raised exception -- and record_event itself must still succeed.
+        """
+        from cw import events as events_module
+
+        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE", None)
+        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE_AT", 0.0)
+
+        def raise_load() -> OrchestratorConfig:
+            msg = "config unreadable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(events_module, "load_orchestrator_config", raise_load)
+
+        config = events_module._load_auto_prune_config_cached()
+        assert config == OrchestratorConfig()
+
+        event = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+        assert event.id in [e.id for e in read_events()]
+
+    def test_record_event_survives_config_load_failure_warm_cache(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Warm cache: a later reload failure keeps using the last-good config.
+
+        Primes the cache with a real config, then makes the next load raise
+        past the TTL -- the *previously cached* values must still govern the
+        prune decision (last_good_config reuse), not the safe defaults.
+        """
+        from cw import events as events_module
+
+        primed = _auto_config(
+            event_inbox_retention_bytes=999_999_999, event_inbox_retention_count=1
+        )
+        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE", primed)
+        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE_AT", 0.0)
+        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_TTL_SECONDS", 0.0)
+
+        def raise_load() -> OrchestratorConfig:
+            msg = "config unreadable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(events_module, "load_orchestrator_config", raise_load)
+
+        config = events_module._load_auto_prune_config_cached()
+
+        assert config is primed
+        assert config.event_inbox_retention_bytes == 999_999_999
+
+    def test_auto_prune_config_is_cached_not_reloaded_every_append(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The config loader is not called once per record_event within the TTL."""
+        from cw import events as events_module
+
+        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE", None)
+        monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE_AT", 0.0)
+
+        call_count = 0
+
+        def counting_load() -> OrchestratorConfig:
+            nonlocal call_count
+            call_count += 1
+            return _auto_config(event_inbox_retention_bytes=10_000_000)
+
+        monkeypatch.setattr(events_module, "load_orchestrator_config", counting_load)
+
+        for i in range(10):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+        assert call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Auto-prune x follower composition (#1980, R5)
+# ---------------------------------------------------------------------------
+
+
+class TestAutoPruneFollowerComposition:
+    """#1980 R5: the highest-risk interaction -- an in-band auto-prune firing
+    mid-poll or mid-write from a concurrent record_event, not a discrete
+    operator-invoked `cw event prune`. The shrink/replace detection in
+    _poll_follow_state is asserted to compose correctly with a rewrite
+    triggered from inside record_event, including under concurrent load.
+    """
+
+    def test_follower_sees_no_skip_no_replay_across_auto_prune_boundary(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No gaps, no duplicates, exactly one detected rewrite.
+
+        Drives _resolve_follow_start / _poll_follow_state directly (rather
+        than the tail_events_follow generator) so the follower's
+        _FollowState.ino is directly inspectable across the auto-prune
+        boundary, and interleaves a second, concurrent writer's unrelated
+        events around the crossing -- "under load", per the ticket's ask.
+        """
+        from cw import events as events_module
+
+        inbox_file = tmp_events_dir / "inbox.jsonl"
+        all_appended: list[OrchestratorEvent] = []
+
+        def set_config(*, retention_bytes: int, retention_count: int) -> None:
+            monkeypatch.setattr(
+                events_module,
+                "load_orchestrator_config",
+                lambda: _auto_config(
+                    event_inbox_retention_bytes=retention_bytes,
+                    event_inbox_retention_count=retention_count,
+                ),
+            )
+            # Force the cache to pick up the new config on the next check.
+            monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE", None)
+            monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE_AT", 0.0)
+
+        def append(writer: str, n: int) -> None:
+            ev = events_record_event(
+                OrchestratorEventType.PR_REGISTERED, {"writer": writer, "n": n}
+            )
+            all_appended.append(ev)
+
+        # Effectively disabled while the inbox is seeded and the follower starts.
+        set_config(retention_bytes=10**9, retention_count=5)
+
+        append("main", 0)  # gives the inbox a real inode before the follower starts
+        new_events, read = events_module._resolve_follow_start(None)
+        state = events_module._FollowState(
+            read.offset, read.size, read.ino, new_events[-1].id
+        )
+        delivered = list(new_events)
+        inos_seen = [state.ino]
+
+        append("main", 1)
+        append("main", 2)
+        new_events, state = events_module._poll_follow_state(state)
+        delivered.extend(new_events)
+        inos_seen.append(state.ino)
+
+        event_size = inbox_file.stat().st_size // 3
+
+        # Arm a threshold that the next couple of appends will cross, with
+        # more than `retention_count` events already on disk by then -- a
+        # real truncation, not a no-op prune.
+        set_config(retention_bytes=event_size * 5, retention_count=5)
+
+        append("main", 3)
+        append("concurrent", 3)  # concurrent writer, ahead of the crossing
+        append("main", 4)  # this append crosses the threshold -> auto-prune fires
+
+        # Disarm immediately so nothing else crosses again during this test.
+        set_config(retention_bytes=10**9, retention_count=5)
+        append("concurrent", 4)  # concurrent writer, after the crossing
+
+        new_events, state = events_module._poll_follow_state(state)
+        delivered.extend(new_events)
+        inos_seen.append(state.ino)
+
+        append("main", 5)
+        new_events, state = events_module._poll_follow_state(state)
+        delivered.extend(new_events)
+        inos_seen.append(state.ino)
+
+        delivered_ids = [e.id for e in delivered]
+        appended_ids = [e.id for e in all_appended]
+        assert delivered_ids == appended_ids  # no gaps, no duplicates, in order
+        assert len(delivered_ids) == len(set(delivered_ids))
+        # Exactly one rewrite (the auto-prune) was detected as an inode change.
+        assert len(set(inos_seen)) == 2
+
+    def test_multiple_followers_survive_concurrent_auto_prune(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two independent follow cursors both survive the same auto-prune.
+
+        Guards against a fix that happens to work for a single follower's
+        state but not N -- each follower's re-resolve is keyed off its own
+        cursor, not shared mutable state.
+        """
+        from cw import events as events_module
+
+        inbox_file = tmp_events_dir / "inbox.jsonl"
+        all_appended: list[OrchestratorEvent] = []
+
+        def set_config(*, retention_bytes: int, retention_count: int) -> None:
+            monkeypatch.setattr(
+                events_module,
+                "load_orchestrator_config",
+                lambda: _auto_config(
+                    event_inbox_retention_bytes=retention_bytes,
+                    event_inbox_retention_count=retention_count,
+                ),
+            )
+            monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE", None)
+            monkeypatch.setattr(events_module, "_AUTO_PRUNE_CONFIG_CACHE_AT", 0.0)
+
+        def append(n: int) -> None:
+            ev = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": n})
+            all_appended.append(ev)
+
+        set_config(retention_bytes=10**9, retention_count=5)
+
+        append(0)
+        new_events, read = events_module._resolve_follow_start(None)
+        state_a = events_module._FollowState(
+            read.offset, read.size, read.ino, new_events[-1].id
+        )
+        state_b = events_module._FollowState(
+            read.offset, read.size, read.ino, new_events[-1].id
+        )
+        delivered_a = list(new_events)
+        delivered_b = list(new_events)
+
+        append(1)
+        append(2)
+        new_events, state_a = events_module._poll_follow_state(state_a)
+        delivered_a.extend(new_events)
+        new_events, state_b = events_module._poll_follow_state(state_b)
+        delivered_b.extend(new_events)
+
+        event_size = inbox_file.stat().st_size // 3
+        set_config(retention_bytes=event_size * 5, retention_count=5)
+
+        append(3)
+        append(4)  # crosses the threshold -> auto-prune fires
+
+        set_config(retention_bytes=10**9, retention_count=5)
+        append(5)
+
+        new_events, state_a = events_module._poll_follow_state(state_a)
+        delivered_a.extend(new_events)
+        new_events, state_b = events_module._poll_follow_state(state_b)
+        delivered_b.extend(new_events)
+
+        appended_ids = [e.id for e in all_appended]
+        for delivered in (delivered_a, delivered_b):
+            delivered_ids = [e.id for e in delivered]
+            assert delivered_ids == appended_ids
+            assert len(delivered_ids) == len(set(delivered_ids))
