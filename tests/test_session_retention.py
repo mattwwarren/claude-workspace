@@ -303,6 +303,40 @@ class TestPruneSessions:
         assert result.archived_count == 1
         assert load_state().sessions == []
 
+    def test_prune_sessions_fails_closed_when_dev_queue_load_raises(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A load_dev_queue() failure aborts before any mutation (#1983 review F2).
+
+        The dev-queue exemption's fail-closed guarantee rests entirely on
+        ``load_dev_queue()`` being called, inside the lock, before
+        ``save_state()``. This locks that statement order down: if
+        ``load_dev_queue`` raises, ``sessions.json`` must be left byte-for-byte
+        untouched rather than silently falling back to "nothing looks live"
+        and archiving everything.
+        """
+        seeded = _make_daemon_session(
+            id="failclo1",
+            name="client-a/auto-dev/T-failclosed",
+            status=SessionStatus.COMPLETED,
+            completed_at=_OLD,
+            started_at=_OLD,
+        )
+        _seed_sessions(seeded)
+        before = load_state().sessions
+
+        def _raise() -> DevQueueStore:
+            msg = "dev queue store unreadable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.session_retention.load_dev_queue", _raise)
+
+        with freeze_time(_NOW), pytest.raises(RuntimeError, match="unreadable"):
+            prune_sessions()
+
+        assert load_state().sessions == before
+        assert _archive_files() == []
+
 
 class TestFindSessionById:
     def test_find_session_by_id_hits_hot_file_first(self, tmp_config_dir: Path) -> None:
@@ -328,6 +362,33 @@ class TestFindSessionById:
         found = find_session_by_id("deadbeef")
         assert found is not None
         assert found.id == "cs000001"
+
+    def test_find_session_by_id_prefers_id_match_over_earlier_claude_session_id_match(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A cross-field prefix collision resolves by field priority, not list order.
+
+        Regression for #1983 review F1: an earlier single-pass implementation
+        let list position decide a collision between one session's
+        claude_session_id and a later session's id. The old (and restored)
+        two-pass ``_resolve_session`` behavior checks every id first, so the
+        id match wins even though it comes second in the list.
+        """
+        _seed_sessions(
+            _make_daemon_session(
+                id="byfield1",
+                name="client-a/auto-dev/T-cs-collide",
+                claude_session_id="collide99",
+            ),
+            _make_daemon_session(
+                id="collide99",
+                name="client-a/auto-dev/T-id-collide",
+                claude_session_id=None,
+            ),
+        )
+        found = find_session_by_id("collide9")
+        assert found is not None
+        assert found.id == "collide99"
 
     def test_find_session_by_id_scans_newest_archive_first(
         self, tmp_config_dir: Path

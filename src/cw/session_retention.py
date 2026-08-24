@@ -168,13 +168,23 @@ def prune_sessions(
     )
 
 
-def _matches_prefix(session: Session, prefix: str) -> bool:
-    """True when *prefix* matches the session's id or claude_session_id."""
-    if session.id.startswith(prefix):
-        return True
-    return bool(
-        session.claude_session_id and session.claude_session_id.startswith(prefix)
-    )
+def _find_by_prefix(sessions: list[Session], prefix: str) -> Session | None:
+    """Resolve *prefix* against *sessions*, id-matches before claude_session_id.
+
+    Two full passes, not one interleaved pass: the old ``_resolve_session``
+    (pre-#1983) checked every session's ``id`` first, and only fell back to
+    ``claude_session_id`` if no ``id`` matched anywhere in the list — field
+    priority decided a cross-field collision, not list position. A single
+    interleaved pass would let list position decide instead, silently
+    changing which session a colliding prefix resolves to (#1983 review F1).
+    """
+    for session in sessions:
+        if session.id.startswith(prefix):
+            return session
+    for session in sessions:
+        if session.claude_session_id and session.claude_session_id.startswith(prefix):
+            return session
+    return None
 
 
 def find_session_by_id(prefix: str) -> Session | None:
@@ -186,18 +196,21 @@ def find_session_by_id(prefix: str) -> Session | None:
     ``iter_all_sessions()`` primitive: deliberately not offered, because a
     full-scan helper would reintroduce the unbounded read this module exists
     to remove. Bounded: each archive file is read at most once per call, and
-    the scan stops at the first match.
+    the scan stops at the first match per collection (id-priority within
+    that collection — see :func:`_find_by_prefix`).
     """
     state = load_state()
-    for session in state.sessions:
-        if _matches_prefix(session, prefix):
-            return session
+    hot_match = _find_by_prefix(state.sessions, prefix)
+    if hot_match is not None:
+        return hot_match
 
     for archive_path in _archive_files_newest_first():
-        for line in archive_path.read_text().splitlines():
-            if not line.strip():
-                continue
-            session = Session.model_validate(json.loads(line))
-            if _matches_prefix(session, prefix):
-                return session
+        archived: list[Session] = [
+            Session.model_validate(json.loads(line))
+            for line in archive_path.read_text().splitlines()
+            if line.strip()
+        ]
+        archive_match = _find_by_prefix(archived, prefix)
+        if archive_match is not None:
+            return archive_match
     return None
