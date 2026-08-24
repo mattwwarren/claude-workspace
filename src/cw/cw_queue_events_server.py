@@ -299,6 +299,14 @@ def _poller_tick(config: OrchestratorConfig) -> None:
     still run every tick regardless of the guard -- see the ordering note
     below.
 
+    The (mtime_ns, size) equality check is a coarse proxy for "unchanged":
+    coarse filesystem mtime resolution, or two distinct serialized states
+    that happen to share size and mtime, could in theory collide and mask
+    a real transition -- and because the delta logic is edge-triggered,
+    a masked transition drops rather than delays the next queue.* notification.
+    This was a known, consciously accepted tradeoff for #1981's scope; no
+    forced-reload backstop is required.
+
     The operator-bridge call sits in its OWN try/except, OUTSIDE
     ``_file_lock`` and after the queue.* broadcast loop above, so a bug in
     the bridge can never block or suppress the queue.* broadcasts that
