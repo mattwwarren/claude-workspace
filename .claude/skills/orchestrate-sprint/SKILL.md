@@ -177,9 +177,25 @@ you'll just starve yourself of attention bandwidth.
 Arm the attention monitor **via the Monitor tool, with `persistent: true`**:
 
 ```
-Monitor(command: "bash ~/.claude/skills/orchestrate-sprint/scripts/attention_monitor.sh <client> [<lane>]",
+Monitor(command: "bash ~/.claude/skills/orchestrate-sprint/scripts/attention_monitor.sh <client>",
         description: "cw attention events for <client>", persistent: true)
 ```
+
+**Pass the client and STOP. Do not pass a lane** unless a second orchestrator
+is running against this same client right now. The script's full signature is
+`attention_monitor.sh [CLIENT] [LANE]`, and that second argument does not mean
+"the lane I am dispatching into" — it scopes the entire event stream to that
+lane, silently discarding every event from every other lane. It exists for one
+narrow case: two orchestrators sharing a client, each needing only its own
+lane's events.
+
+Getting this wrong reads exactly like health. You dispatch into `default`,
+arm the monitor with `default` because that is the lane you are working, and
+then a ticket you sent to `debt` wedges and never pages you. (Real incident:
+`#382` sat 105 minutes in a stalled session while the orchestrator reported
+"monitor armed, silence means healthy" — the monitor was lane-scoped to
+`default` and the ticket was in `debt`.) If you are the only orchestrator on
+this client — the normal case — a lane argument can only lose you events.
 
 A `persistent: true` Monitor survives a `/clear` resume in the same process —
 so on resume, check for a leftover attention Monitor (via the Monitor tool's
@@ -207,6 +223,25 @@ the WAIT/PEEK/STOP verdict on any session running long. **Silence means healthy 
 but only once you've confirmed the monitor is armed via the Monitor tool.** With
 that confirmed, the monitor covers the failure signatures, so no news genuinely
 is good news (don't poll on top of it).
+
+**The one thing silence does NOT cover: a worker that spawns and then stalls.**
+Every event this monitor watches is a *failure* event — something the pipeline
+noticed and named. A session that claims a ticket, registers in the roster,
+reports RUNNING, and then does nothing emits none of them: no
+`needs_attention`, no `timed_out`, no `reap_proposed`. It is indistinguishable
+from a healthy session that is simply busy, for as long as you are willing to
+believe it.
+
+So run `cw queue peek --client <client>` at each natural checkpoint — after a
+gate, after a merge, before you tell the operator things are fine. It computes
+`idle_m` (minutes since the session's last transcript *record*) alongside
+`age_m`, and `idle_m ≈ age_m` is the signature of a worker that never did
+anything. That is a positive-liveness check; the monitor is a negative one, and
+you need both. **Do not hand-roll a liveness check** — peek already computes the
+number correctly, and an ad-hoc `find`-based substitute is easy to get subtly
+wrong (`find -newermt` parses its argument in *local* time, so passing a UTC
+timestamp on a non-UTC box yields a cutoff hours in the future that matches
+nothing and reports a confident, false all-clear).
 
 ### Phase 5 — Triage attention events
 
@@ -285,6 +320,12 @@ the work probably wants to be a ticket.
 - **Arming the monitor with a backgrounded `Bash` instead of the Monitor tool.**
   Its stdout goes to a file nothing reads — every attention event dies unseen and
   "silence" is a lie. Arm it via the Monitor tool with `persistent: true` (Phase 4).
+- **Passing a lane to `attention_monitor.sh` when you are the only orchestrator.**
+  It scopes the stream to that lane and silently drops every other lane's events.
+  Pass the client and stop (Phase 4).
+- **Treating monitor silence as proof a worker is alive.** Every event it watches
+  is a failure event; a spawned-then-stalled worker emits none. Run
+  `cw queue peek` at checkpoints and read `idle_m` vs `age_m` (Phase 4).
 - **Polling on top of the monitor.** The event bus is push; trust the silence —
   but only after confirming it's armed via the Monitor tool (see above).
 - **Dribbling decisions.** Five one-question round-trips for what could've been
