@@ -1119,6 +1119,111 @@ class TestCompleteTimedOutMergedTasks:
         )
         assert len(events) == 0
 
+    def test_fresh_merged_pr_state_completes_without_gh_call(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #975: a fresh MERGED pr_state on the task auto-completes it
+        without any _deps.pr_is_merged_for_ticket call."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-FRESH-MERGED"
+        session = _mk_timed_out_daemon_session(
+            "sess-fresh-merged", ticket_id, completed_at=now - timedelta(hours=2)
+        )
+        save_state(CwState(sessions=[session]))
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="client-a",
+            attempts=1,
+            pr_state=PrState(state="MERGED", hydrated_at=now - timedelta(seconds=10)),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        def _should_not_be_called(_tid: str, **_kw: object) -> tuple[bool | None, bool]:
+            msg = "pr_is_merged_for_ticket must not be called when pr_state is fresh"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket", _should_not_be_called
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == [ticket_id]
+        store = load_dev_queue()
+        completed_task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert completed_task.status == QueueItemStatus.COMPLETED
+
+    def test_fresh_non_merged_pr_state_stays_pending_without_gh_call(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #975: fresh non-MERGED pr_state -> stays PENDING, no gh call."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-FRESH-OPEN"
+        session = _mk_timed_out_daemon_session(
+            "sess-fresh-open", ticket_id, completed_at=now - timedelta(hours=2)
+        )
+        save_state(CwState(sessions=[session]))
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="client-a",
+            attempts=1,
+            pr_state=PrState(state="OPEN", hydrated_at=now - timedelta(seconds=10)),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        def _should_not_be_called(_tid: str, **_kw: object) -> tuple[bool | None, bool]:
+            msg = "pr_is_merged_for_ticket must not be called when pr_state is fresh"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket", _should_not_be_called
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == []
+        store = load_dev_queue()
+        pending_task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert pending_task.status == QueueItemStatus.PENDING
+
+    def test_stale_pr_state_falls_back_to_gh_call(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #975: stale pr_state falls back to the ordinary gh call
+        path unchanged (pre-#975 behavior)."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-STALE-STATE"
+        session = _mk_timed_out_daemon_session(
+            "sess-stale-state", ticket_id, completed_at=now - timedelta(hours=2)
+        )
+        save_state(CwState(sessions=[session]))
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="client-a",
+            attempts=1,
+            pr_state=PrState(state="MERGED", hydrated_at=now - timedelta(seconds=300)),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        calls: list[str] = []
+
+        def _capture(_tid: str, **_kw: object) -> tuple[bool | None, bool]:
+            calls.append(_tid)
+            return True, True
+
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert calls == [ticket_id]
+        assert completed == [ticket_id]
+
     def test_outside_lookback_window(
         self,
         tmp_config_dir: Path,

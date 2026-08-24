@@ -23,16 +23,21 @@ import contextlib
 import json
 import subprocess as _sp
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING
 
-from cw.config import load_state, save_state, sessions_lock
+from cw.config import load_orchestrator_config, load_state, save_state, sessions_lock
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.dispatch import TICK_STALE_SECONDS, _stale_pending_clients
 from cw.dispatch_state import load_executor_blocked_markers
 from cw.doctor import _deps
 from cw.doctor._shared import CheckResult
 from cw.events import read_events, record_event
-from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
+from cw.gh import (
+    TIMED_OUT_MERGED_LOOKBACK_DAYS,
+    pr_is_merged_for_ticket,
+    resolve_merged_via_pr_state,
+)
 from cw.models import (
     CompletionReason,
     DispatchSkipReason,
@@ -48,7 +53,7 @@ from cw.reconcile import feature_branch_key, ticket_id_for_session
 if TYPE_CHECKING:
     from typing import Any
 
-    from cw.models import ClientConfig, CwState
+    from cw.models import ClientConfig, CwState, TicketTask
     from cw.orchestrate import TickSummary
 
 
@@ -217,6 +222,11 @@ def _check_timed_out_merged(
     results: list[CheckResult] = []
     gh_missing = False
 
+    orchestrator_config = load_orchestrator_config()
+    task_by_ticket: dict[tuple[str, str], TicketTask] = {
+        (t.client, t.ticket_id): t for t in _deps.load_dev_queue().tasks
+    }
+
     for session in state.sessions:
         if session.status != SessionStatus.TIMED_OUT:
             continue
@@ -230,7 +240,13 @@ def _check_timed_out_merged(
             continue
 
         branch = feature_branch_key(session.client, ticket_id, clients)
-        merged, gh_available = pr_is_merged_for_ticket(ticket_id, branch=branch)
+        merged, gh_available = resolve_merged_via_pr_state(
+            ticket_id,
+            session.client,
+            task_by_ticket,
+            max_age_seconds=orchestrator_config.pr_hydration_interval_seconds,
+            gh_fallback=partial(pr_is_merged_for_ticket, ticket_id, branch=branch),
+        )
         if not gh_available and not gh_missing:
             results.append(
                 CheckResult(

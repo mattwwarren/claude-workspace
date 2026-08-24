@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
@@ -20,7 +21,12 @@ from cw.gh import (
     post_issue_comment,
     pr_exists_for_branch,
     pr_is_merged_for_ticket,
+    pr_is_merged_from_state,
+    pr_state_is_fresh,
+    resolve_merged_via_pr_state,
 )
+from cw.models import PrState
+from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
     import pytest
@@ -414,6 +420,138 @@ class TestPrIsMergedForTicket:
         merged, gh_available = pr_is_merged_for_ticket("GEN-403")
         assert merged is None
         assert gh_available is True
+
+
+class TestPrStateIsFresh:
+    """Tests for pr_state_is_fresh (GitHub #975)."""
+
+    def test_fresh_within_window_returns_true(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        pr_state = PrState(hydrated_at=now - timedelta(seconds=10))
+        assert pr_state_is_fresh(pr_state, 150, now=now) is True
+
+    def test_stale_beyond_window_returns_false(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        pr_state = PrState(hydrated_at=now - timedelta(seconds=200))
+        assert pr_state_is_fresh(pr_state, 150, now=now) is False
+
+    def test_boundary_elapsed_equals_max_age_is_stale(self) -> None:
+        """Strict `<`, matching cw.pr_hydrate._throttled -- elapsed == max_age
+        is NOT fresh."""
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        pr_state = PrState(hydrated_at=now - timedelta(seconds=150))
+        assert pr_state_is_fresh(pr_state, 150, now=now) is False
+
+
+class TestPrIsMergedFromState:
+    """Tests for pr_is_merged_from_state (GitHub #975)."""
+
+    def test_none_pr_state_returns_none(self) -> None:
+        assert pr_is_merged_from_state(None, max_age_seconds=150) is None
+
+    def test_fresh_merged_state_returns_true(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        pr_state = PrState(state="MERGED", hydrated_at=now - timedelta(seconds=10))
+        assert pr_is_merged_from_state(pr_state, max_age_seconds=150, now=now) is True
+
+    def test_fresh_open_state_returns_false(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        pr_state = PrState(state="OPEN", hydrated_at=now - timedelta(seconds=10))
+        assert pr_is_merged_from_state(pr_state, max_age_seconds=150, now=now) is False
+
+    def test_stale_state_returns_none_regardless_of_value(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        pr_state = PrState(state="MERGED", hydrated_at=now - timedelta(seconds=200))
+        assert pr_is_merged_from_state(pr_state, max_age_seconds=150, now=now) is None
+
+
+class TestResolveMergedViaPrState:
+    """Tests for resolve_merged_via_pr_state (GitHub #975)."""
+
+    def test_fresh_merged_skips_gh_fallback(self) -> None:
+        now = datetime.now(UTC)
+        task = _make_ticket_task(
+            ticket_id="T-1",
+            client="acme",
+            pr_state=PrState(state="MERGED", hydrated_at=now - timedelta(seconds=10)),
+        )
+        task_by_ticket = {("acme", "T-1"): task}
+
+        def _should_not_be_called() -> tuple[bool | None, bool]:
+            msg = "gh_fallback must not be called when state is fresh"
+            raise AssertionError(msg)
+
+        result = resolve_merged_via_pr_state(
+            "T-1",
+            "acme",
+            task_by_ticket,
+            max_age_seconds=150,
+            gh_fallback=_should_not_be_called,
+        )
+        assert result == (True, True)
+
+    def test_fresh_open_skips_gh_fallback(self) -> None:
+        now = datetime.now(UTC)
+        task = _make_ticket_task(
+            ticket_id="T-2",
+            client="acme",
+            pr_state=PrState(state="OPEN", hydrated_at=now - timedelta(seconds=10)),
+        )
+        task_by_ticket = {("acme", "T-2"): task}
+
+        def _should_not_be_called() -> tuple[bool | None, bool]:
+            msg = "gh_fallback must not be called when state is fresh"
+            raise AssertionError(msg)
+
+        result = resolve_merged_via_pr_state(
+            "T-2",
+            "acme",
+            task_by_ticket,
+            max_age_seconds=150,
+            gh_fallback=_should_not_be_called,
+        )
+        assert result == (False, True)
+
+    def test_stale_pr_state_falls_back_to_gh(self) -> None:
+        now = datetime.now(UTC)
+        task = _make_ticket_task(
+            ticket_id="T-3",
+            client="acme",
+            pr_state=PrState(state="MERGED", hydrated_at=now - timedelta(seconds=200)),
+        )
+        task_by_ticket = {("acme", "T-3"): task}
+        calls: list[tuple[()]] = []
+
+        def _fallback() -> tuple[bool | None, bool]:
+            calls.append(())
+            return None, True
+
+        result = resolve_merged_via_pr_state(
+            "T-3",
+            "acme",
+            task_by_ticket,
+            max_age_seconds=150,
+            gh_fallback=_fallback,
+        )
+        assert result == (None, True)
+        assert len(calls) == 1
+
+    def test_absent_task_falls_back_to_gh(self) -> None:
+        calls: list[tuple[()]] = []
+
+        def _fallback() -> tuple[bool | None, bool]:
+            calls.append(())
+            return True, True
+
+        result = resolve_merged_via_pr_state(
+            "T-4",
+            "acme",
+            {},
+            max_age_seconds=150,
+            gh_fallback=_fallback,
+        )
+        assert result == (True, True)
+        assert len(calls) == 1
 
 
 class TestPrExistsForBranch:

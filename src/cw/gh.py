@@ -7,12 +7,16 @@ import re
 import subprocess as _sp
 import tempfile
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote as _urlquote
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
+
+    from cw.models import PrState
+    from cw.models.tasks import TicketTask
 
 _GH_PR_STATE_MERGED = "MERGED"
 _PR_EXISTS_TIMEOUT = 10
@@ -257,6 +261,71 @@ def pr_is_merged_for_ticket(
             return True, True
 
     return False, True
+
+
+def pr_state_is_fresh(
+    pr_state: PrState, max_age_seconds: int, *, now: datetime | None = None
+) -> bool:
+    """True if *pr_state* was hydrated less than *max_age_seconds* ago.
+
+    Same strict-`<` arithmetic as cw.pr_hydrate._throttled, reused here
+    so callers can gate a persisted pr_state read on the same staleness
+    window as the hydration pass itself (GitHub #975).
+    """
+    now = now or datetime.now(UTC)
+    return (now - pr_state.hydrated_at).total_seconds() < max_age_seconds
+
+
+def pr_is_merged_from_state(
+    pr_state: PrState | None, *, max_age_seconds: int, now: datetime | None = None
+) -> bool | None:
+    """Return the merged verdict from a fresh persisted PrState, else None.
+
+    GitHub #975: lets a caller that already holds a task's/watched-PR's
+    hydrated pr_state (from cw.pr_hydrate's serve-tick pass, GitHub #929)
+    skip pr_is_merged_for_ticket's own gh subprocess call entirely when
+    that state is fresh. None means "no confident answer available from
+    persisted state" (absent or stale) -- caller must fall back to
+    pr_is_merged_for_ticket.
+    """
+    if pr_state is None:
+        return None
+    if not pr_state_is_fresh(pr_state, max_age_seconds, now=now):
+        return None
+    return pr_state.state == _GH_PR_STATE_MERGED
+
+
+def resolve_merged_via_pr_state(
+    ticket_id: str,
+    client: str,
+    task_by_ticket: dict[tuple[str, str], TicketTask],
+    max_age_seconds: int,
+    gh_fallback: Callable[[], tuple[bool | None, bool]],
+) -> tuple[bool | None, bool]:
+    """Resolve a ticket's merged verdict from persisted pr_state, else gh_fallback.
+
+    GitHub #975: the single shared seam for "check task_by_ticket's fresh
+    pr_state first, fall back to a gh subprocess call when stale/absent" --
+    used identically by reconcile/core.py's pre-pass,
+    reconcile/tasks.py's _filter_merged_candidates, and
+    doctor/loop_health.py's _check_timed_out_merged.
+
+    gh_fallback is a zero-arg callable -- each call site passes a
+    functools.partial binding its own ticket_id/branch/cwd args and its
+    own pr_is_merged_for_ticket-shaped reference (reconcile's _deps
+    indirection or doctor/loop_health.py's direct cw.gh import) -- so
+    this function stays agnostic of pr_is_merged_for_ticket's own
+    signature and every call site keeps its existing monkeypatch seam
+    intact.
+    """
+    task = task_by_ticket.get((client, ticket_id))
+    from_state = pr_is_merged_from_state(
+        task.pr_state if task is not None else None,
+        max_age_seconds=max_age_seconds,
+    )
+    if from_state is not None:
+        return from_state, True
+    return gh_fallback()
 
 
 def _fetch_branch_exists_on_origin(

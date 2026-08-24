@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Merged-PR checks route through persisted `pr_state` before falling back to a `gh` call (#975):** `reconcile()`'s pre-pass, `complete_timed_out_merged_tasks`'s `_filter_merged_candidates`, `cw doctor`'s `_check_timed_out_merged`, and `_load_monitored_prs`'s mergeable overlay now resolve a ticket's merged/mergeable verdict from the dev-queue's fresh hydrated `pr_state` (GitHub #929) first, via three new `cw.gh` helpers (`pr_state_is_fresh`, `pr_is_merged_from_state`, `resolve_merged_via_pr_state`), skipping a redundant `gh` subprocess call whenever that state is fresh under the same staleness window `cw.pr_hydrate._throttled` uses. Falls back to the existing `pr_is_merged_for_ticket` gh call when no fresh state is available; `ci_status` is left exactly as review-monitor reported it.
+
 ### Fixed
 
 - **Event-bus followers read only appended bytes instead of the whole inbox on every poll (#1979):** `read_events()` read and fully parsed the entire `events/inbox.jsonl` on every call and applied the cursor as a *post-parse* filter, so a follower poll cost O(entire inbox) no matter how many events were actually new — including when the answer was none. Against a 17.0 MiB / 42,797-event inbox, a poll returning zero events cost 543 ms of CPU and a 17 MiB read; at the 50 ms follow interval a single follower demanded roughly twelve cores' worth of work and simply pegged one. Four daemons on one machine accumulated ~917 GiB of re-reads in ten hours, all served from page cache, which is why it presented as sustained CPU (and laptop fan) rather than disk load. `tail_events_follow` and `wait_for_event` now resolve their starting cursor to a byte offset with one full read at startup and read incrementally from there: the same zero-event poll is 3.7 us and reads nothing, and a poll carrying one new event is 12.3 us for 404 bytes. Operators who have never pruned should still run `cw event prune --keep <n>`; the read path no longer scales with history, but every other `read_events` caller still does (see #1980).
