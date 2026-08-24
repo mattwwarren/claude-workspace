@@ -12,6 +12,7 @@ import json
 import logging
 import subprocess
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING
 
 from cw.config import (
@@ -22,6 +23,7 @@ from cw.config import (
     sessions_lock,
 )
 from cw.dev_queue import load_dev_queue
+from cw.gh import resolve_merged_via_pr_state
 from cw.models import SessionOrigin
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
@@ -67,7 +69,7 @@ from cw.reconcile.tasks import (
 )
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig, CwState, OrchestratorConfig
+    from cw.models import ClientConfig, CwState, OrchestratorConfig, TicketTask
 
 _log = logging.getLogger(__name__)
 
@@ -177,6 +179,13 @@ def reconcile() -> ReconcileReport:
     pre_state = load_state()
     # Load clients once for branch-key resolution (feature_branch_prefix SSOT, #728).
     _clients = load_clients()
+    # GitHub #975: loaded a second time this tick (also loaded later inside
+    # _reconcile_locked) -- deliberate, to avoid threading a new parameter
+    # through _reconcile_locked's signature/control-flow.
+    _orchestrator_config = load_orchestrator_config()
+    _task_by_ticket: dict[tuple[str, str], TicketTask] = {
+        (t.client, t.ticket_id): t for t in load_dev_queue().tasks
+    }
     # (client, ticket_id) pairs, for consumers that must not match a merged
     # ticket against a *different* client's same-numbered ticket (#1054) —
     # ticket_id strings are not globally unique across clients. merged_ticket_ids
@@ -204,8 +213,14 @@ def reconcile() -> ReconcileReport:
             _gh_blocked_tids.append(_ticket_id)
             continue
         _cwd = _client_cwd(_session.client, _clients)
-        _merged, _gh_avail = _deps.pr_is_merged_for_ticket(
-            _ticket_id, branch=_branch, cwd=_cwd
+        _merged, _gh_avail = resolve_merged_via_pr_state(
+            _ticket_id,
+            _session.client,
+            _task_by_ticket,
+            max_age_seconds=_orchestrator_config.pr_hydration_interval_seconds,
+            gh_fallback=partial(
+                _deps.pr_is_merged_for_ticket, _ticket_id, branch=_branch, cwd=_cwd
+            ),
         )
         if not _gh_avail:
             _gh_available = False
