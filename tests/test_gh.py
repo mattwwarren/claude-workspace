@@ -473,7 +473,7 @@ class TestResolveMergedViaPrState:
     """Tests for resolve_merged_via_pr_state (GitHub #975)."""
 
     def test_fresh_merged_skips_gh_fallback(self) -> None:
-        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        now = datetime.now(UTC)
         task = _make_ticket_task(
             ticket_id="T-1",
             client="acme",
@@ -494,7 +494,7 @@ class TestResolveMergedViaPrState:
         assert result == (True, True)
 
     def test_fresh_open_skips_gh_fallback(self) -> None:
-        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        now = datetime.now(UTC)
         task = _make_ticket_task(
             ticket_id="T-2",
             client="acme",
@@ -515,7 +515,7 @@ class TestResolveMergedViaPrState:
         assert result == (False, True)
 
     def test_stale_pr_state_falls_back_to_gh(self) -> None:
-        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        now = datetime.now(UTC)
         task = _make_ticket_task(
             ticket_id="T-3",
             client="acme",
