@@ -166,53 +166,67 @@ def prune_events(
         raise CwError(msg)
 
     with _inbox_lock():
-        inbox = inbox_path()
-        raw_text = inbox.read_text() if inbox.exists() else ""
-        if not raw_text:
-            return PruneResult(
-                archived_count=0, deleted_count=0, archive_path=None, kept_count=0
-            )
+        return _prune_events_locked(before=before, keep=keep, archive=archive)
 
-        events = _parse_lines(raw_text.splitlines())
-        if before is not None:
-            kept_events, pruned_events = _partition_events_by_before(events, before)
-        elif keep is not None:
-            kept_events, pruned_events = _partition_events_by_keep(events, keep)
-        else:  # pragma: no cover - unreachable, guarded by validation above
-            msg = "prune_events: exactly one of 'before' or 'keep' must be given."
-            raise CwError(msg)
 
-        new_text = "".join(e.model_dump_json() + "\n" for e in kept_events)
-        atomic_write_text(inbox, new_text)
+def _prune_events_locked(
+    *, before: datetime | None, keep: int | None, archive: bool
+) -> PruneResult:
+    """Prune the inbox. Caller MUST already hold ``_inbox_lock()``.
 
-        archived_count = 0
-        deleted_count = 0
-        archive_path: str | None = None
-        if pruned_events:
-            if archive:
-                path = _archive_path_for_today()
-                path.parent.mkdir(parents=True, exist_ok=True)
-                # Why: this append is not atomic with the inbox rewrite above.
-                # A crash between the two would drop the pruned events from
-                # both files. Accepted: the archive is a best-effort audit
-                # copy, not the durable source of truth (inbox.jsonl is), and
-                # atomicity here would require a second temp-file+rename step
-                # for marginal benefit on an operator-invoked, non-hot-path
-                # command.
-                with path.open("a") as f:
-                    for ev in pruned_events:
-                        f.write(ev.model_dump_json() + "\n")
-                archived_count = len(pruned_events)
-                archive_path = str(path)
-            else:
-                deleted_count = len(pruned_events)
-
+    ``_inbox_lock`` is not reentrant (see :func:`prune_events`); this helper
+    exists so :func:`record_event`'s auto-prune trigger can reuse the prune
+    logic from inside its own already-held lock. Does not validate
+    ``before``/``keep`` exclusivity -- callers are responsible (see
+    :func:`prune_events` for the validated public entry point).
+    """
+    inbox = inbox_path()
+    raw_text = inbox.read_text() if inbox.exists() else ""
+    if not raw_text:
         return PruneResult(
-            archived_count=archived_count,
-            deleted_count=deleted_count,
-            archive_path=archive_path,
-            kept_count=len(kept_events),
+            archived_count=0, deleted_count=0, archive_path=None, kept_count=0
         )
+
+    events = _parse_lines(raw_text.splitlines())
+    if before is not None:
+        kept_events, pruned_events = _partition_events_by_before(events, before)
+    elif keep is not None:
+        kept_events, pruned_events = _partition_events_by_keep(events, keep)
+    else:  # pragma: no cover - unreachable, guarded by validation above
+        msg = "prune_events: exactly one of 'before' or 'keep' must be given."
+        raise CwError(msg)
+
+    new_text = "".join(e.model_dump_json() + "\n" for e in kept_events)
+    atomic_write_text(inbox, new_text)
+
+    archived_count = 0
+    deleted_count = 0
+    archive_path: str | None = None
+    if pruned_events:
+        if archive:
+            path = _archive_path_for_today()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Why: this append is not atomic with the inbox rewrite above.
+            # A crash between the two would drop the pruned events from
+            # both files. Accepted: the archive is a best-effort audit
+            # copy, not the durable source of truth (inbox.jsonl is), and
+            # atomicity here would require a second temp-file+rename step
+            # for marginal benefit on an operator-invoked, non-hot-path
+            # command.
+            with path.open("a") as f:
+                for ev in pruned_events:
+                    f.write(ev.model_dump_json() + "\n")
+            archived_count = len(pruned_events)
+            archive_path = str(path)
+        else:
+            deleted_count = len(pruned_events)
+
+    return PruneResult(
+        archived_count=archived_count,
+        deleted_count=deleted_count,
+        archive_path=archive_path,
+        kept_count=len(kept_events),
+    )
 
 
 def load_cursor(consumer: str) -> str | None:
