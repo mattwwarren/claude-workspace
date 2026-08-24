@@ -2172,9 +2172,7 @@ class TestPruneTickets:
         )
         save_dev_queue(DevQueueStore(tasks=[old, recent]))
 
-        removed = prune_tickets(
-            frozenset([QueueItemStatus.CANCELLED]), 90, "genhealth"
-        )
+        removed = prune_tickets(frozenset([QueueItemStatus.CANCELLED]), 90, "genhealth")
 
         assert [t.ticket_id for t in removed] == ["TKT-CANC-OLD"]
         assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-CANC-NEW"]
@@ -2194,7 +2192,8 @@ class TestPruneTickets:
             with pytest.raises(CwError, match=status.value):
                 prune_tickets(frozenset([status]), 1, "genhealth")
 
-        assert prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 1, "genhealth") == []
+        default_set = frozenset([QueueItemStatus.COMPLETED])
+        assert prune_tickets(default_set, 1, "genhealth") == []
         assert len(load_dev_queue().tasks) == len(tasks)
 
     def test_disallowed_status_raises_cw_error(self, tmp_dev_queue: Path) -> None:
@@ -2568,9 +2567,7 @@ class TestCLIDevQueuePrune:
         save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="CLI-PR1")]))
         runner = CliRunner()
 
-        result = runner.invoke(
-            main, ["dev-queue", "prune", "--client", "genhealth"]
-        )
+        result = runner.invoke(main, ["dev-queue", "prune", "--client", "genhealth"])
 
         assert result.exit_code == 0, result.output
         assert "CLI-PR1" in result.output
@@ -2740,9 +2737,7 @@ class TestCLIDevQueuePrune:
             msg = "library must not be reached"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.select_prunable_tickets", _boom
-        )
+        monkeypatch.setattr("cw.cli.dev_queue.crud.select_prunable_tickets", _boom)
         monkeypatch.setattr("cw.cli.dev_queue.crud.prune_tickets", _boom)
         save_dev_queue(DevQueueStore(tasks=[]))
         runner = CliRunner()
@@ -2807,9 +2802,7 @@ class TestCLIDevQueuePrune:
             msg = "select_prunable_tickets must not run on the --confirm path"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.select_prunable_tickets", _boom
-        )
+        monkeypatch.setattr("cw.cli.dev_queue.crud.select_prunable_tickets", _boom)
         save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="CLI-ONE")]))
         runner = CliRunner()
 
