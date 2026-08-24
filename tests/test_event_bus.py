@@ -366,7 +366,10 @@ class TestEventBusLoadOffsetBoundedReverseRead:
         path = state_dir() / _EVENTS_FILE
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"offset": 0, "message": "a"}) + "\n" + "garbage1\n" + "garbage2\n"
+            json.dumps({"offset": 0, "message": "a"})
+            + "\n"
+            + "garbage1\n"
+            + "garbage2\n"
         )
         assert bus.load_offset_from_file() == 1
 
@@ -418,7 +421,7 @@ class TestEventBusLoadOffsetBoundedReverseRead:
         second_bytes = second.encode("utf-8")
         # "é" encodes as 0xC3 0xA9; keep only the leading byte so the trailing
         # line ends mid-character, as a crash mid-append_event would leave it.
-        cut_at = second_bytes.index("é".encode("utf-8")) + 1
+        cut_at = second_bytes.index("é".encode()) + 1
         truncated = second_bytes[:cut_at]
         with path.open("wb") as f:
             f.write((json.dumps({"offset": 0, "message": "a"}) + "\n").encode("utf-8"))

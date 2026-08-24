@@ -32,13 +32,13 @@ import logging
 import os
 import queue
 import threading
-from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 from cw.atomic import atomic_write_text
 from cw.config import state_dir
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
