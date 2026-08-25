@@ -207,6 +207,17 @@ def test_liveness_deescalation_then_reescalation_both_surfaced() -> None:
     assert len(out) == 3
 
 
+def test_liveness_recovery_then_restall_same_bucket_both_surfaced() -> None:
+    sid = "sess-recover0000000"
+    events = [
+        _liveness_event(session_id=sid, new_bucket="stale_30m"),
+        _liveness_event(session_id=sid, new_bucket="live"),
+        _liveness_event(session_id=sid, new_bucket="stale_30m"),
+    ]
+    out = _run_filter(events)
+    assert len(out) == 2
+
+
 def test_liveness_distinct_sessions_not_cross_suppressed() -> None:
     events = [
         _liveness_event(session_id="sess-aaaa00000000000", new_bucket="stale_30m"),

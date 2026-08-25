@@ -119,6 +119,12 @@ for ln in sys.stdin:
     if t == "session.liveness_changed":
         nb = p.get("new_bucket")
         if nb not in _SURFACED_LIVENESS_BUCKETS:
+            # A recovery ("live"/"stale_15m") ends the stall this session
+            # was in. Clear its latch so the *next* surfaced bucket is
+            # treated as a new stall, not a duplicate of the one that
+            # just resolved -- otherwise a genuine re-stall into the same
+            # bucket after a recovery is silently swallowed.
+            _last_surfaced_bucket.pop(str(p.get("session_id") or ""), None)
             continue
         sid_key = str(p.get("session_id") or "")
         if _last_surfaced_bucket.get(sid_key) == nb:
