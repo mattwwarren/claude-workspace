@@ -97,6 +97,20 @@ _PLACEHOLDER_LENGTH_FLOOR = 40
 _DIFF_GIT_HEADER_RE = re.compile(r"^diff --git ", re.MULTILINE)
 _DIFF_GIT_PATHS_RE = re.compile(r"^diff --git a/(?P<a>.+) b/(?P<b>.+)$")
 
+# Shared verbatim by consolidate's and verify-fixes's --no-base-check options
+# (#1988) so the two commands' escape-hatch documentation cannot silently
+# diverge -- the same drift-by-duplication shape _require_base_xor_no_base_check
+# already closes for the guard logic.
+_NO_BASE_CHECK_HELP = (
+    "Skip --base verification entirely: the payload's diff will "
+    "NOT be checked against real git history, and findings may "
+    "be adjudicated against an artifact nobody verified. For "
+    "non-git-backed synthetic payloads (tests) and human "
+    "post-hoc recovery debugging only — never for pipeline use, "
+    "which always passes --base. Mutually exclusive with "
+    "--base; exactly one of the two must be given."
+)
+
 
 def _check_not_placeholder_diff(diff_text: str) -> None:
     """Reject a ``diff`` field that never carried a real diff (#1924).
@@ -198,7 +212,8 @@ def _check_diff_matches_base(
     Exact string equality after trimming a single trailing newline from each
     side — deliberately not a semantic diff comparison. The point is to prove
     the payload text came out of git verbatim; anything that "means the same
-    thing" but does not match byte-for-byte was retyped.
+    thing" but does not match byte-for-byte was retyped. Called from both
+    ``review_consolidate`` (#1924) and ``review_verify_fixes`` (#1988).
     """
     completed = subprocess.run(
         ["git", "diff", "--no-color", f"{base}...{reviewed_sha}"],
@@ -221,6 +236,41 @@ def _check_diff_matches_base(
             f"{len(completed.stdout)} chars). Pass the verbatim git output."
         )
         raise DiffBaseMismatchError(msg)
+
+
+def _require_base_xor_no_base_check(base: str | None, no_base_check: bool) -> None:
+    """Enforce --base/--no-base-check as a required alternatives pair (#1988).
+
+    Why not click's own `required=True` (the dev-queue-prune precedent,
+    src/cw/cli/dev_queue/crud.py): --base and --no-base-check are
+    alternatives, so requiring either outright would forbid the other.
+    This reproduces the same guarantee -- you cannot silently omit
+    diff-integrity verification -- as a UsageError raised before any
+    payload parsing runs. Shared by ``review_consolidate`` and
+    ``review_verify_fixes`` so the two commands cannot silently diverge.
+    """
+    if base is None and not no_base_check:
+        msg = "Must pass either --base <ref> or --no-base-check."
+        raise click.UsageError(msg)
+    if base is not None and no_base_check:
+        msg = "--base and --no-base-check are mutually exclusive."
+        raise click.UsageError(msg)
+
+
+def _run_base_check_if_requested(
+    diff: str, base: str | None, reviewed_sha: str, worktree: Path | None
+) -> None:
+    """Run --base verification when requested; no-op when base is None (#1988).
+
+    Shared by ``review_consolidate`` and ``review_verify_fixes`` so worktree
+    resolution and the check invocation cannot silently diverge between the
+    two commands -- the same drift-by-duplication shape
+    ``_require_base_xor_no_base_check`` already closes for the guard logic.
+    """
+    if base is None:
+        return
+    base_check_worktree = worktree if worktree is not None else Path.cwd()
+    _check_diff_matches_base(diff, base, reviewed_sha, base_check_worktree)
 
 
 def _resolve_documents_from_files(source: Path) -> list[Path]:
@@ -304,10 +354,19 @@ class _AdjudicateInput(BaseModel):
 
 
 class _VerifyFixesInput(BaseModel):
-    """Request envelope for ``cw review verify-fixes`` (#1805)."""
+    """Request envelope for ``cw review verify-fixes`` (#1805).
+
+    ``reviewed_sha`` (#1988) is the fix-cycle branch tip the payload's
+    ``diff`` was captured against — only consumed when ``--base`` is passed,
+    as the second argument to the ``git diff <base>...<reviewed_sha>``
+    verification. It is independent of ``verdict.reviewed_sha`` (the
+    Checkpoint-3a sha the verdict was frozen at); the command never
+    cross-checks the two.
+    """
 
     verdict: ReviewVerdict
     diff: str
+    reviewed_sha: str
 
 
 class _CheckVoidedInput(BaseModel):
@@ -501,10 +560,16 @@ def review_register(pr_url: str) -> None:
         "Compare the payload's diff text against the real `git diff "
         "<base>...<reviewed_sha>` output and reject the payload if "
         "they differ, guarding against a hand-typed or corrupted "
-        "diff. Defaults to None, which skips this check entirely; "
-        "when set, resolves the repo root from --worktree, falling "
-        "back to the current directory."
+        "diff. Resolves the repo root from --worktree, falling back "
+        "to the current directory. Mutually exclusive with "
+        "--no-base-check; exactly one of the two must be given."
     ),
+)
+@click.option(
+    "--no-base-check",
+    is_flag=True,
+    default=False,
+    help=_NO_BASE_CHECK_HELP,
 )
 @handle_errors
 def review_consolidate(
@@ -513,6 +578,7 @@ def review_consolidate(
     no_tree_evidence: bool,
     documents_from: Path | None,
     base: str | None,
+    no_base_check: bool,
 ) -> None:
     """Validate, dedupe, and aggregate reviewer findings into a ReviewVerdict.
 
@@ -537,6 +603,9 @@ def review_consolidate(
     `git diff <base>...<reviewed_sha>` output, resolved from --worktree (or
     the current directory), and rejects the payload otherwise. It is
     independent of --no-tree-evidence: the check runs identically either way.
+    Exactly one of --base/--no-base-check must be given; --no-base-check
+    skips this check entirely and is for tests and human recovery debugging
+    only, never for pipeline use.
 
     The payload's diff is always screened for two integrity defects first,
     with or without --base: a placeholder that never carried a diff, and the
@@ -544,20 +613,19 @@ def review_consolidate(
 
     On success: exits 0, prints the ReviewVerdict as JSON to stdout.
     On failure: exits 1, prints 'field.path: message' lines to stderr — or,
-    for an integrity-guard rejection, a plain error message.
+    for an integrity-guard rejection, a plain error message; exits 2 if
+    neither or both of --base/--no-base-check are given.
     """
+    _require_base_xor_no_base_check(base, no_base_check)
+
     parsed = _parse_payload_or_exit(path, _ConsolidateInput)
 
     _check_not_placeholder_diff(parsed.diff)
     _check_no_duplicate_hunks(parsed.diff)
-    if base is not None:
-        # Deliberately NOT `resolved_worktree`, which --no-tree-evidence nulls:
-        # the base check has nothing to do with tree-existence relaxation and
-        # must behave identically whether or not that flag is passed.
-        base_check_worktree = worktree if worktree is not None else Path.cwd()
-        _check_diff_matches_base(
-            parsed.diff, base, parsed.reviewed_sha, base_check_worktree
-        )
+    # Deliberately NOT `resolved_worktree`, which --no-tree-evidence nulls:
+    # the base check has nothing to do with tree-existence relaxation and
+    # must behave identically whether or not that flag is passed.
+    _run_base_check_if_requested(parsed.diff, base, parsed.reviewed_sha, worktree)
 
     if no_tree_evidence:
         resolved_worktree = None
@@ -784,22 +852,70 @@ def review_check_voided(path: str, voided_findings_out: Path | None) -> None:
 
 @review.command(name="verify-fixes")
 @click.argument("path")
+@click.option(
+    "--worktree",
+    default=None,
+    type=click.Path(path_type=Path),
+    help=(
+        "Worktree root used to run the --base git-diff verification "
+        "(defaults to the current directory)."
+    ),
+)
+@click.option(
+    "--base",
+    default=None,
+    type=str,
+    help=(
+        "Compare the payload's diff text against the real `git diff "
+        "<base>...<reviewed_sha>` output and reject the payload if "
+        "they differ, guarding against a hand-typed or corrupted "
+        "diff. `base` is the sha the reviewed verdict was frozen at "
+        "(e.g. the Checkpoint-3a tip); `reviewed_sha` is the "
+        "payload's own fix-cycle branch tip. Resolves the repo root "
+        "from --worktree, falling back to the current directory. "
+        "Mutually exclusive with --no-base-check; exactly one of "
+        "the two must be given."
+    ),
+)
+@click.option(
+    "--no-base-check",
+    is_flag=True,
+    default=False,
+    help=_NO_BASE_CHECK_HELP,
+)
 @handle_errors
-def review_verify_fixes(path: str) -> None:
+def review_verify_fixes(
+    path: str,
+    worktree: Path | None,
+    base: str | None,
+    no_base_check: bool,
+) -> None:
     """Downgrade 'fixed' dispositions the fix-cycle diff does not substantiate.
 
     PATH is a file path or '-' for stdin. Payload: {"verdict": <the adjudicated
-    ReviewVerdict>, "diff": "<raw unified diff text of the fix cycles>"}.
+    ReviewVerdict>, "diff": "<raw unified diff text of the fix cycles>",
+    "reviewed_sha": "<fix-cycle branch tip>"}.
 
     A "fixed" finding whose cited file/line the diff never touched becomes
     "dropped", with the reason in `disposition_detail`. Record-only: no gate
     is re-evaluated and no fix cycle is triggered — the caller surfaces the
     downgrade in friction_highlights.
 
+    --base verifies the payload's diff text is byte-identical to the real
+    `git diff <base>...<reviewed_sha>` output, resolved from --worktree (or
+    the current directory), and rejects the payload otherwise. Exactly one
+    of --base/--no-base-check must be given; --no-base-check skips this
+    check entirely and is for tests and human recovery debugging only,
+    never for pipeline use.
+
     On success: exits 0, prints the downgraded ReviewVerdict as JSON to stdout.
-    On failure: exits 1, prints 'field.path: message' lines to stderr.
+    On failure: exits 1, prints 'field.path: message' lines to stderr; exits
+    2 if neither or both of --base/--no-base-check are given.
     """
+    _require_base_xor_no_base_check(base, no_base_check)
+
     parsed = _parse_payload_or_exit(path, _VerifyFixesInput)
+    _run_base_check_if_requested(parsed.diff, base, parsed.reviewed_sha, worktree)
     verdict = verify_fixed_dispositions(
         parsed.verdict, _build_captured_diff(parsed.diff)
     )

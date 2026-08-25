@@ -138,15 +138,15 @@ REVIEW_FINDINGS>>>
    mkdir -p .cw/review-findings
    ```
    Then, for each role that produced a well-formed `<<<REVIEW_FINDINGS ... REVIEW_FINDINGS>>>` block, **Write** (the Write tool — not a heredoc) the block's JSON body, byte-for-byte as the reviewer emitted it, to `.cw/review-findings/<role-slug>.json`, where `<role-slug>` is the role name lowercased with spaces replaced by hyphens (`Code Quality Reviewer` → `code-quality-reviewer.json`). Copying the text is the whole point: `evidence` must be a verbatim substring of the diff, and re-typing it into an inline `documents` array is how a paraphrase gets in. A role whose response has no well-formed `REVIEW_FINDINGS` block writes no file and instead contributes a `ReviewerRunFailure {"role": "<role>", "reason": "unparseable_response"}` to `failed_reviewers` (see `SPAWNED_ROLES` tracking in Step 3a above).
-2. Assemble the consolidate-input envelope. It carries **no `documents` key** — the documents come from the directory written in step 1:
+2. Assemble the consolidate-input envelope. It carries **no `documents` key** — the documents come from the directory written in step 1. Capture `CHECKPOINT_3A_SHA="<HEAD sha>"` alongside it — the same sha as `reviewed_sha` below — so Step 3c has a concrete value to carry forward instead of re-deriving it:
    ```json
    {"diff": "<the same diff text sent to reviewers>", "reviewed_sha": "<HEAD sha>", "failed_reviewers": [...]}
    ```
-3. Run:
+3. Run, always passing `--base "$FORK_POINT"` (the same fork point every reviewer's diff was captured from at Step 3a — never `--no-base-check`, which is for tests and human recovery debugging only):
    ```bash
-   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ -
+   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ --base "$FORK_POINT" -
    ```
-   A non-zero exit here is a hard pipeline error (the mechanical validation itself failed — e.g. malformed JSON, a schema violation, an unreadable `--documents-from` file, or one of the #1924 diff-integrity guards rejecting the payload: a placeholder `diff` that never carried a real diff, or the same hunk repeated for the same file because the diff was reconstructed by hand) — not a normal adjudication path. Do not attempt to recover by re-running adjudication on the raw prose; treat it the same as any other unrecoverable Stage 3 tool failure. When the diff was captured from a known base ref, add `--base <ref>` to have the payload's diff text verified byte-for-byte against the real `git diff <ref>...<reviewed_sha>` before anything is consolidated.
+   A non-zero exit here is a hard pipeline error (the mechanical validation itself failed — e.g. malformed JSON, a schema violation, an unreadable `--documents-from` file, one of the #1924 diff-integrity guards rejecting the payload — a placeholder `diff` that never carried a real diff, or the same hunk repeated for the same file because the diff was reconstructed by hand — or a `DiffBaseMismatchError` from the `--base` check: the payload's diff text did not match the real `git diff $FORK_POINT...$CHECKPOINT_3A_SHA` output) — not a normal adjudication path. Do not attempt to recover by re-running adjudication on the raw prose; treat it the same as any other unrecoverable Stage 3 tool failure.
 3.5. **Consult the voided-findings record — `cw review check-voided` (#1814).** An operator who rejected a finding on a prior pass settled it permanently; a re-review re-deriving it must not re-park the ticket. Assemble `{"verdict": <the verdict step 3 just printed>, "ticket_id": "<ticket id>", "comment_bodies": [<each live-fetched ticket comment body, per the Orientation section's mandatory live fetch>], "new_voided_entries": []}` and run:
    ```bash
    printf '%s' "$CHECK_VOIDED_INPUT" | cw review check-voided -
@@ -408,12 +408,13 @@ Run this once the round's final verdict is settled — after the fix loop conver
 
 ```bash
 git fetch origin <branch-name>
-FIX_DIFF="$(git diff <the sha the Checkpoint-3a verdict was frozen at>...origin/<branch-name>)"
-# envelope: {"verdict": <the adjudicated verdict from Checkpoint 3a / Step 3b>, "diff": "$FIX_DIFF"}
-printf '%s' "$VERIFY_INPUT" | cw review verify-fixes -
+FIX_TIP_SHA="$(git rev-parse origin/<branch-name>)"
+FIX_DIFF="$(git diff "$CHECKPOINT_3A_SHA"...origin/<branch-name>)"
+# envelope: {"verdict": <the adjudicated verdict from Checkpoint 3a / Step 3b>, "diff": "$FIX_DIFF", "reviewed_sha": "$FIX_TIP_SHA"}
+printf '%s' "$VERIFY_INPUT" | cw review verify-fixes --base "$CHECKPOINT_3A_SHA" -
 ```
 
-The diff boundary is cumulative — every commit since the verdict was frozen, not just the last fix cycle — so a fix landed in cycle 1 still counts in cycle 3.
+The diff boundary is cumulative — every commit since the verdict was frozen, not just the last fix cycle — so a fix landed in cycle 1 still counts in cycle 3. Always pass `--base "$CHECKPOINT_3A_SHA"` (the sha `CHECKPOINT_3A_SHA` captured at Checkpoint 3a step 2) — never `--no-base-check`, which is for tests and human recovery debugging only. A non-zero exit here — including a `DiffBaseMismatchError` from the `--base` check, or a `UsageError` if the flag itself was somehow dropped — is a hard pipeline error exactly like Checkpoint 3a step 3's: it must not be treated as "no downgrades this round," and must not be logged-and-continued.
 
 Any `disposition: "fixed"` whose cited file/line that diff never touched is downgraded to `"dropped"`, with the reason in `disposition_detail`. **Use this command's output as the round's authoritative record**, and for each downgrade append a `friction_highlights` entry, e.g. `"fixed_disposition_downgraded_to_dropped: <file>:<line>"`.
 
