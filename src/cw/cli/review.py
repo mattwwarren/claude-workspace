@@ -97,6 +97,20 @@ _PLACEHOLDER_LENGTH_FLOOR = 40
 _DIFF_GIT_HEADER_RE = re.compile(r"^diff --git ", re.MULTILINE)
 _DIFF_GIT_PATHS_RE = re.compile(r"^diff --git a/(?P<a>.+) b/(?P<b>.+)$")
 
+# Shared verbatim by consolidate's and verify-fixes's --no-base-check options
+# (#1988) so the two commands' escape-hatch documentation cannot silently
+# diverge -- the same drift-by-duplication shape _require_base_xor_no_base_check
+# already closes for the guard logic.
+_NO_BASE_CHECK_HELP = (
+    "Skip --base verification entirely: the payload's diff will "
+    "NOT be checked against real git history, and findings may "
+    "be adjudicated against an artifact nobody verified. For "
+    "non-git-backed synthetic payloads (tests) and human "
+    "post-hoc recovery debugging only — never for pipeline use, "
+    "which always passes --base. Mutually exclusive with "
+    "--base; exactly one of the two must be given."
+)
+
 
 def _check_not_placeholder_diff(diff_text: str) -> None:
     """Reject a ``diff`` field that never carried a real diff (#1924).
@@ -241,6 +255,22 @@ def _require_base_xor_no_base_check(base: str | None, no_base_check: bool) -> No
     if base is not None and no_base_check:
         msg = "--base and --no-base-check are mutually exclusive."
         raise click.UsageError(msg)
+
+
+def _run_base_check_if_requested(
+    diff: str, base: str | None, reviewed_sha: str, worktree: Path | None
+) -> None:
+    """Run --base verification when requested; no-op when base is None (#1988).
+
+    Shared by ``review_consolidate`` and ``review_verify_fixes`` so worktree
+    resolution and the check invocation cannot silently diverge between the
+    two commands -- the same drift-by-duplication shape
+    ``_require_base_xor_no_base_check`` already closes for the guard logic.
+    """
+    if base is None:
+        return
+    base_check_worktree = worktree if worktree is not None else Path.cwd()
+    _check_diff_matches_base(diff, base, reviewed_sha, base_check_worktree)
 
 
 def _resolve_documents_from_files(source: Path) -> list[Path]:
@@ -539,15 +569,7 @@ def review_register(pr_url: str) -> None:
     "--no-base-check",
     is_flag=True,
     default=False,
-    help=(
-        "Skip --base verification entirely: the payload's diff will "
-        "NOT be checked against real git history, and findings may "
-        "be adjudicated against an artifact nobody verified. For "
-        "non-git-backed synthetic payloads (tests) and human "
-        "post-hoc recovery debugging only — never for pipeline use, "
-        "which always passes --base. Mutually exclusive with "
-        "--base; exactly one of the two must be given."
-    ),
+    help=_NO_BASE_CHECK_HELP,
 )
 @handle_errors
 def review_consolidate(
@@ -600,14 +622,10 @@ def review_consolidate(
 
     _check_not_placeholder_diff(parsed.diff)
     _check_no_duplicate_hunks(parsed.diff)
-    if base is not None:
-        # Deliberately NOT `resolved_worktree`, which --no-tree-evidence nulls:
-        # the base check has nothing to do with tree-existence relaxation and
-        # must behave identically whether or not that flag is passed.
-        base_check_worktree = worktree if worktree is not None else Path.cwd()
-        _check_diff_matches_base(
-            parsed.diff, base, parsed.reviewed_sha, base_check_worktree
-        )
+    # Deliberately NOT `resolved_worktree`, which --no-tree-evidence nulls:
+    # the base check has nothing to do with tree-existence relaxation and
+    # must behave identically whether or not that flag is passed.
+    _run_base_check_if_requested(parsed.diff, base, parsed.reviewed_sha, worktree)
 
     if no_tree_evidence:
         resolved_worktree = None
@@ -863,15 +881,7 @@ def review_check_voided(path: str, voided_findings_out: Path | None) -> None:
     "--no-base-check",
     is_flag=True,
     default=False,
-    help=(
-        "Skip --base verification entirely: the payload's diff will "
-        "NOT be checked against real git history, and findings may "
-        "be adjudicated against an artifact nobody verified. For "
-        "non-git-backed synthetic payloads (tests) and human "
-        "post-hoc recovery debugging only — never for pipeline use, "
-        "which always passes --base. Mutually exclusive with "
-        "--base; exactly one of the two must be given."
-    ),
+    help=_NO_BASE_CHECK_HELP,
 )
 @handle_errors
 def review_verify_fixes(
@@ -905,11 +915,7 @@ def review_verify_fixes(
     _require_base_xor_no_base_check(base, no_base_check)
 
     parsed = _parse_payload_or_exit(path, _VerifyFixesInput)
-    if base is not None:
-        base_check_worktree = worktree if worktree is not None else Path.cwd()
-        _check_diff_matches_base(
-            parsed.diff, base, parsed.reviewed_sha, base_check_worktree
-        )
+    _run_base_check_if_requested(parsed.diff, base, parsed.reviewed_sha, worktree)
     verdict = verify_fixed_dispositions(
         parsed.verdict, _build_captured_diff(parsed.diff)
     )
