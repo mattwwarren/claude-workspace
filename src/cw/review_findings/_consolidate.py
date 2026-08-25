@@ -54,6 +54,30 @@ def _select_rejected_must_fix(rejected: list[RejectedFinding]) -> list[RejectedF
     return [rf for rf in rejected if rf.raw.get("severity") == "MUST_FIX"]
 
 
+def _count_rejected_by_severity(rejected: list[RejectedFinding]) -> dict[str, int]:
+    """Tally *rejected* by the severity each finding claimed for itself (#2000).
+
+    A sibling of :func:`_select_rejected_must_fix`, deliberately NOT a
+    generalization of it: that function selects the MUST_FIX subset backing
+    #1714's force-block and must keep doing exactly that, unchanged. This one
+    answers a different question — how many findings, at which severities, did
+    validation delete before adjudication ever saw them.
+
+    ``raw`` is the pre-validation ``Finding.model_dump()``, read defensively
+    via ``.get()`` for the same reason: a rejected payload is by definition one
+    that failed validation, so its ``severity`` may be missing or not even a
+    string. Anything unusable is tallied under ``"unknown"`` rather than
+    dropped — an uncountable rejection is still a rejection, and silently
+    losing it here would reintroduce the exact invisibility this counter
+    exists to close.
+    """
+    counts: dict[str, int] = {}
+    for rf in rejected:
+        severity = str(rf.raw.get("severity", "unknown"))
+        counts[severity] = counts.get(severity, 0) + 1
+    return counts
+
+
 def consolidate_verdict(
     documents: list[ReviewerFindingsDocument],
     diff: CapturedDiff,
@@ -84,6 +108,13 @@ def consolidate_verdict(
     independently of ``blocking``/``must_fix``, which continue to read accepted
     findings only: a mechanically-rejected finding must block the pipeline for
     an operator without ever entering the autofix loop.
+
+    ``rejected_count``/``rejected_count_by_severity`` (#2000) tally the SAME
+    ``rejected`` list at every severity — see
+    :func:`_count_rejected_by_severity`. They are stamped on the verdict AND
+    threaded into the nested ``review`` block, so the count survives into the
+    terminal ``AUTO_DEV_RESULT`` sentinel rather than living only in the
+    on-disk artifact a human would have to go read.
 
     ``review.agents_run`` (the int count, distinct from the
     ``verdict.agents_run`` list above) counts only roles that actually
@@ -157,8 +188,19 @@ def consolidate_verdict(
     )
 
     accepted_findings = dedupe_findings(candidates)
+    # #2000: computed ONCE, from the same `all_rejected` list `rejected_must_fix`
+    # is selected from, and threaded into both the nested `Review` (which
+    # becomes `AutoDevResult.review`, what an unattended orchestrator reads) and
+    # the `ReviewVerdict` constructor below. One computation, two consumers --
+    # so the two numbers are identical by construction, not by convention.
+    rejected_count = len(all_rejected)
+    rejected_by_severity = _count_rejected_by_severity(all_rejected)
     review = derive_review_counts(
-        accepted_findings, fix_cycles_used=fix_cycles_used, agents_run=len(documents)
+        accepted_findings,
+        fix_cycles_used=fix_cycles_used,
+        agents_run=len(documents),
+        rejected_count=rejected_count,
+        rejected_count_by_severity=rejected_by_severity,
     )
     must_fix = [
         af.finding
@@ -175,6 +217,8 @@ def consolidate_verdict(
         review=review,
         stripped_escalations=all_stripped,
         rejected_must_fix=_select_rejected_must_fix(all_rejected),
+        rejected_count=rejected_count,
+        rejected_count_by_severity=rejected_by_severity,
     )
 
 

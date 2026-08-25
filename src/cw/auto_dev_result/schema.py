@@ -364,6 +364,20 @@ class Review(BaseModel):
     # this field remain explicitly unknown. Finalized fix-loop results always
     # populate a concrete bool.
     had_real_commit: bool | None = None
+    # #2000: the same quantity as `ReviewVerdict.rejected_count` /
+    # `rejected_count_by_severity` (`review_findings/_models.py`) — findings
+    # that validation deleted before adjudication ever saw them, at every
+    # severity — threaded here so an orchestrator reading only the terminal
+    # AUTO_DEV_RESULT sentinel (not the underlying
+    # `.claude/review-verdict.json` artifact) sees it too. Without it, a pass
+    # that mechanically deleted findings reports `must_fix_initial: 0` and is
+    # indistinguishable from one that genuinely found nothing. Additive and
+    # purely advisory, defaulting to `0`/`{}` so every pre-#2000 payload
+    # parses unchanged — same shape of change as `agents_run` (v5) and
+    # `had_real_commit`, and no `schema_version` bump (docs/headless-
+    # contract.md §8, Note A13).
+    rejected_count: int = 0
+    rejected_count_by_severity: dict[str, int] = Field(default_factory=dict)
 
 
 class AgentHealthEntry(BaseModel):

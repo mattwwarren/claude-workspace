@@ -69,6 +69,8 @@ def derive_review_counts(
     *,
     fix_cycles_used: int = 0,
     agents_run: int = 0,
+    rejected_count: int = 0,
+    rejected_count_by_severity: dict[str, int] | None = None,
 ) -> Review:
     """Aggregate accepted findings into a :class:`Review` count block.
 
@@ -78,6 +80,17 @@ def derive_review_counts(
     gate-feeding aggregates, regardless of disposition — ``deferred`` is
     filtered to ``severity in {MUST_FIX, SHOULD_FIX}`` first, same as the
     other two.
+
+    ``rejected_count``/``rejected_count_by_severity`` (#2000) are advisory
+    pass-throughs on exactly the same footing as ``agents_run``: values the
+    caller has already computed, carried onto the returned :class:`Review` so
+    they reach the terminal ``AUTO_DEV_RESULT`` sentinel. They are NOT derived
+    here — ``findings`` is the accepted list and by construction contains no
+    rejection — and taking the pre-computed numbers rather than a
+    ``list[RejectedFinding]`` is what keeps this module from importing that
+    model and re-implementing ``_consolidate``'s counting helper. Defaulting
+    to ``0``/``None`` (→ ``{}``) keeps every caller that has no rejection
+    concept, and every pre-#2000 call site, working unchanged.
     """
     deferred = sum(
         1
@@ -101,4 +114,6 @@ def derive_review_counts(
         fix_cycles_used=fix_cycles_used,
         deferred=deferred,
         agents_run=agents_run,
+        rejected_count=rejected_count,
+        rejected_count_by_severity=rejected_count_by_severity or {},
     )
