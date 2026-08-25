@@ -216,24 +216,27 @@ one-line format; you could inline that `cw event tail … --json` in the Monitor
 command directly if you don't need the pretty output.
 
 It is a persistent watch on the `session.needs_attention` / `operator.escalation`
-/ `timed_out` / `reap_proposed` / `phantom_reverted` event bus for your client,
-deduped so a parked session doesn't spam. Events arrive to *you*; you triage; you
+/ `timed_out` / `reap_proposed` / `phantom_reverted` / `session.liveness_changed`
+(`stale_30m`/`stale_45m` only) event bus for your client, deduped so a parked
+session doesn't spam. Events arrive to *you*; you triage; you
 push the operator only what changes what they'd do next. Use `/cw-queue-peek` for
 the WAIT/PEEK/STOP verdict on any session running long. **Silence means healthy —
 but only once you've confirmed the monitor is armed via the Monitor tool.** With
 that confirmed, the monitor covers the failure signatures, so no news genuinely
 is good news (don't poll on top of it).
 
-**The one thing silence does NOT cover: a worker that spawns and then stalls.**
-Every event this monitor watches is a *failure* event — something the pipeline
-noticed and named. A session that claims a ticket, registers in the roster,
-reports RUNNING, and then does nothing emits none of them: no
-`needs_attention`, no `timed_out`, no `reap_proposed`. It is indistinguishable
-from a healthy session that is simply busy, for as long as you are willing to
-believe it.
+**A worker that spawns and then stalls (#2004 narrowed this gap).** The
+monitor now also subscribes to `session.liveness_changed`, filtered to
+`stale_30m`/`stale_45m`, so a session that claims a ticket, registers in the
+roster, reports RUNNING, and then does nothing eventually pages you once the
+reconcile liveness sweep crosses a bucket boundary. That leaves a narrower
+residual gap: the window before the first `stale_30m` crossing (and before the
+first liveness-sweep tick runs at all), during which the session is
+indistinguishable from a healthy one that is simply busy.
 
-So run `cw queue peek --client <client>` at each natural checkpoint — after a
-gate, after a merge, before you tell the operator things are fine. It computes
+So still run `cw queue peek --client <client>` at each natural checkpoint —
+after a gate, after a merge, before you tell the operator things are fine —
+as a **confirmation** step rather than the only line of defense. It computes
 `idle_m` (minutes since the session's last transcript *record*) alongside
 `age_m`, and `idle_m ≈ age_m` is the signature of a worker that never did
 anything. That is a positive-liveness check; the monitor is a negative one, and
@@ -347,9 +350,12 @@ delegation.
 - **Passing a lane to `attention_monitor.sh` when you are the only orchestrator.**
   It scopes the stream to that lane and silently drops every other lane's events.
   Pass the client and stop (Phase 4).
-- **Treating monitor silence as proof a worker is alive.** Every event it watches
-  is a failure event; a spawned-then-stalled worker emits none. Run
-  `cw queue peek` at checkpoints and read `idle_m` vs `age_m` (Phase 4).
+- **Treating monitor silence as proof a worker is alive.** The monitor now
+  subscribes to `session.liveness_changed` (`stale_30m`/`stale_45m`), so a
+  spawned-then-stalled worker eventually pages — but the residual gap
+  (pre-`stale_30m`, or before the first liveness-sweep tick) still needs
+  confirmation. Run `cw queue peek` at checkpoints and read `idle_m` vs
+  `age_m` (Phase 4).
 - **Polling on top of the monitor.** The event bus is push; trust the silence —
   but only after confirming it's armed via the Monitor tool (see above).
 - **Dribbling decisions.** Five one-question round-trips for what could've been

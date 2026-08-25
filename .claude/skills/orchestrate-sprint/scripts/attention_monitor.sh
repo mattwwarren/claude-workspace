@@ -12,6 +12,13 @@
 # signals. dispatch.tick and ticket.needs_sync are excluded as noise — at steady
 # state they dominate the bus and tell you nothing actionable.
 #
+# session.liveness_changed is the only *positive*-style signal in the list —
+# a stall, not a named failure. It is filtered (below) to stale_30m/stale_45m
+# only: live/stale_15m transitions are expected noise during a legitimate
+# quiet stretch (#1795's ~20m review-stage guidance), and showing every flap
+# there would teach operators to skip this channel, reproducing the exact
+# blindness this subscription exists to close (#2004).
+#
 # Starting from "now" (--since) avoids replaying the (large) historical backlog
 # of needs_attention events on arm. With --follow this then waits for new ones.
 #
@@ -48,6 +55,7 @@ cw event tail --follow --client "$CLIENT" --dedup-terminal \
   --type session.reap_proposed \
   --type session.stage_timed_out_retried \
   --type session.phantom_reverted \
+  --type session.liveness_changed \
   --json \
 | python3 -u -c '
 import sys, json
@@ -76,6 +84,27 @@ _BLOCKER_REASON_PAUSED_STATUSES = {
 # ("blocker.reason verbatim") accurate.
 _FINALIZE_REGRESS_REPEAT_PAUSED_STATUS = "finalize_regress_repeat"
 
+# Only these LivenessBucket values page the operator (#2004). "live" and
+# "stale_15m" are not actionable -- a session legitimately goes quiet
+# during a long reviewer fan-out (the ~20m review-stage guidance in #1795),
+# and showing every flap there teaches operators to skip this channel,
+# reproducing the exact blindness this subscription exists to close. Per-
+# stage entry thresholds (OrchestratorConfig.liveness_first_bucket_by_stage)
+# mean "stale_30m" is not a fixed wall-clock duration across stages --
+# render stale_minutes, never imply a duration from the bucket name alone.
+_SURFACED_LIVENESS_BUCKETS = {"stale_30m", "stale_45m"}
+
+# Process-lifetime dedup for session.liveness_changed lines only --
+# --dedup-terminal (the _TERMINAL_EVENT_TYPES set in cli/queues.py) does not
+# cover this type, and its (type, session_id, paused_status, renotify_marker)
+# key would be wrong for it: paused_status/renotify_marker are always
+# absent on a liveness payload, so extending that set would collapse
+# every liveness line after the first for a session -- including a real
+# 30m->45m escalation. Track the last *surfaced* bucket per session here
+# instead; resets when the monitor process is rearmed, same as the
+# seen_terminal set in _follow_loop (src/cw/cli/queues.py).
+_last_surfaced_bucket = {}
+
 for ln in sys.stdin:
     ln = ln.strip()
     if not ln:
@@ -87,12 +116,28 @@ for ln in sys.stdin:
     p = e.get("payload", {}) or {}
     t = e.get("type", "?")
     tk = p.get("ticket_id") or "?"
-    why = p.get("paused_status") or p.get("reason") or p.get("proposed_action") or ""
+    if t == "session.liveness_changed":
+        nb = p.get("new_bucket")
+        if nb not in _SURFACED_LIVENESS_BUCKETS:
+            # A recovery ("live"/"stale_15m") ends the stall this session
+            # was in. Clear its latch so the *next* surfaced bucket is
+            # treated as a new stall, not a duplicate of the one that
+            # just resolved -- otherwise a genuine re-stall into the same
+            # bucket after a recovery is silently swallowed.
+            _last_surfaced_bucket.pop(str(p.get("session_id") or ""), None)
+            continue
+        sid_key = str(p.get("session_id") or "")
+        if _last_surfaced_bucket.get(sid_key) == nb:
+            continue
+        _last_surfaced_bucket[sid_key] = nb
+    why = p.get("paused_status") or p.get("reason") or p.get("proposed_action") or p.get("new_bucket") or ""
     bits = []
     if p.get("stage"):
         bits.append("stage=" + str(p.get("stage")))
     if p.get("attempts") is not None:
         bits.append("att=" + str(p.get("attempts")))
+    if p.get("stale_minutes") is not None:
+        bits.append("stale_m=%.1f" % float(p.get("stale_minutes")))
     if (
         p.get("paused_status") in _BLOCKER_REASON_PAUSED_STATUSES
         or p.get("paused_status") == _FINALIZE_REGRESS_REPEAT_PAUSED_STATUS
