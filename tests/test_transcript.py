@@ -1,12 +1,16 @@
-"""Tests for cw._transcript.locate_transcript."""
+"""Tests for cw._transcript.locate_transcript and find_new_subagent_transcript."""
 
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import os
 from pathlib import Path
 
-from cw._transcript import locate_transcript
+import pytest
+
+from cw._transcript import find_new_subagent_transcript, locate_transcript
+from tests.conftest import _write_idle_transcript
 
 _EPOCH = dt.datetime.fromtimestamp(0, tz=dt.UTC)
 _NOW = dt.datetime(2026, 6, 20, 12, 0, 0, tzinfo=dt.UTC)
@@ -18,6 +22,26 @@ def _touch(path: Path, mtime: float | None = None) -> Path:
     path.touch()
     if mtime is not None:
         os.utime(path, (mtime, mtime))
+    return path
+
+
+def _seed_transcript(
+    home: Path,
+    worktree: Path,
+    filename: str,
+    *,
+    mtime: dt.datetime,
+) -> Path:
+    """Write a transcript under *worktree*'s project dir at a controlled mtime.
+
+    Reuses ``tests.conftest._write_idle_transcript`` (the suite's canonical
+    "write a .jsonl transcript under the encoded project dir" helper) rather
+    than hand-rolling a parallel writer, then stamps the mtime the way
+    ``tests/test_reconcile_liveness.py`` does.
+    """
+    path = _write_idle_transcript(home, worktree, filename=filename)
+    ts = mtime.timestamp()
+    os.utime(str(path), (ts, ts))
     return path
 
 
@@ -144,6 +168,156 @@ class TestLocateTranscript:
                 surface_ref="abcd",
                 started_at=_EPOCH,
             )
+            assert result is None
+        finally:
+            proj.chmod(0o755)
+
+
+class TestFindNewSubagentTranscript:
+    """Unit tests for ``find_new_subagent_transcript`` (#2012).
+
+    The dispatch-verification leaf behind ``cw agent-spawn-verify``: did a
+    subagent transcript that is neither the caller's own nor a pre-existing
+    sibling appear in this worktree's project dir after the dispatch stamp?
+    """
+
+    _MAIN_CSID = "aaaa1111-0000-0000-0000-000000000000"
+
+    def test_none_when_only_excluded_transcript_is_new(self, tmp_path: Path) -> None:
+        """The caller's own (actively-growing) transcript never counts."""
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        own = _seed_transcript(
+            home, worktree, f"{self._MAIN_CSID}.jsonl", mtime=_NOW + dt.timedelta(1)
+        )
+
+        result = find_new_subagent_transcript(
+            own.parent, since=_NOW, exclude_stem=self._MAIN_CSID
+        )
+
+        assert result is None
+
+    def test_returns_new_subagent_transcript(self, tmp_path: Path) -> None:
+        """A fresh non-excluded ``*.jsonl`` under the project dir is the hit."""
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        own = _seed_transcript(
+            home, worktree, f"{self._MAIN_CSID}.jsonl", mtime=_NOW + dt.timedelta(1)
+        )
+        expected = _seed_transcript(
+            home,
+            worktree,
+            "subagents/bbbb2222-0000-0000-0000-000000000000.jsonl",
+            mtime=_NOW + dt.timedelta(minutes=1),
+        )
+
+        result = find_new_subagent_transcript(
+            own.parent, since=_NOW, exclude_stem=self._MAIN_CSID
+        )
+
+        assert result == expected
+
+    def test_ignores_transcript_older_than_since(self, tmp_path: Path) -> None:
+        """A pre-existing sibling (mtime <= since) is not this dispatch's."""
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        own = _seed_transcript(
+            home, worktree, f"{self._MAIN_CSID}.jsonl", mtime=_NOW + dt.timedelta(1)
+        )
+        _seed_transcript(home, worktree, "stale-sibling.jsonl", mtime=_PAST)
+
+        result = find_new_subagent_transcript(
+            own.parent, since=_NOW, exclude_stem=self._MAIN_CSID
+        )
+
+        assert result is None
+
+    def test_returns_newest_when_several_candidates(self, tmp_path: Path) -> None:
+        """Deterministic pick: the newest qualifying candidate, not glob order."""
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        older = _seed_transcript(
+            home, worktree, "sub-a.jsonl", mtime=_NOW + dt.timedelta(minutes=1)
+        )
+        newest = _seed_transcript(
+            home, worktree, "sub-b.jsonl", mtime=_NOW + dt.timedelta(minutes=5)
+        )
+
+        result = find_new_subagent_transcript(
+            older.parent, since=_NOW, exclude_stem=self._MAIN_CSID
+        )
+
+        assert result == newest
+
+    def test_none_exclude_stem_matches_any_new_transcript(self, tmp_path: Path) -> None:
+        """exclude_stem=None (no ``$CLAUDE_CODE_SESSION_ID``) excludes nothing."""
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        expected = _seed_transcript(
+            home, worktree, "sub-a.jsonl", mtime=_NOW + dt.timedelta(minutes=1)
+        )
+
+        result = find_new_subagent_transcript(
+            expected.parent, since=_NOW, exclude_stem=None
+        )
+
+        assert result == expected
+
+    def test_missing_project_dir_returns_none(self, tmp_path: Path) -> None:
+        """A project dir that does not exist → None (matches sibling helpers)."""
+        result = find_new_subagent_transcript(
+            tmp_path / "nonexistent", since=_NOW, exclude_stem=None
+        )
+
+        assert result is None
+
+    def test_unstattable_candidate_is_skipped_not_fatal(self, tmp_path: Path) -> None:
+        """A dangling symlink among the candidates must not discard a real hit.
+
+        Real shape, not a mock: a transcript rotated or deleted mid-glob leaves
+        exactly this — a name the glob yields whose ``stat()`` then raises.
+        """
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        expected = _seed_transcript(
+            home, worktree, "sub-a.jsonl", mtime=_NOW + dt.timedelta(minutes=1)
+        )
+        (expected.parent / "dangling.jsonl").symlink_to(expected.parent / "gone.jsonl")
+
+        result = find_new_subagent_transcript(
+            expected.parent, since=_NOW, exclude_stem=None
+        )
+
+        assert result == expected
+
+    def test_glob_oserror_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OSError raised by the walk itself → None, never propagated."""
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        seeded = _seed_transcript(
+            home, worktree, "sub-a.jsonl", mtime=_NOW + dt.timedelta(minutes=1)
+        )
+
+        def _boom(*_args: object, **_kwargs: object) -> object:
+            raise OSError(errno.EIO, "simulated I/O error")
+
+        monkeypatch.setattr(Path, "rglob", _boom)
+
+        result = find_new_subagent_transcript(
+            seeded.parent, since=_NOW, exclude_stem=None
+        )
+
+        assert result is None
+
+    def test_oserror_returns_none(self, tmp_path: Path) -> None:
+        """An unreadable project dir → None, never raises."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        proj.chmod(0o000)
+        try:
+            result = find_new_subagent_transcript(proj, since=_NOW, exclude_stem=None)
             assert result is None
         finally:
             proj.chmod(0o755)

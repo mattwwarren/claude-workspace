@@ -2404,6 +2404,141 @@ class TestReadUnresolvedSubagentSpawn:
 
         assert _read_unresolved_subagent_spawn(None) is False
 
+    def test_read_unresolved_unchanged_by_last_stamped_at(self, tmp_path: Path) -> None:
+        """Regression guard (#2012): the age refactor must not move this reader.
+
+        ``_read_unresolved_subagent_spawn`` keeps its crash-detection contract
+        — any outstanding stamp reads True regardless of how old it is — so
+        the phantom sweep's callers see byte-identical behavior.
+        """
+        from cw.reconcile._shared import _read_unresolved_subagent_spawn
+
+        ancient = (datetime(2020, 1, 1, tzinfo=UTC)).isoformat()
+        self._write_context(
+            tmp_path,
+            {
+                "agent_spawn_stamp": {
+                    "unresolved_count": 1,
+                    "last_stamped_at": ancient,
+                }
+            },
+        )
+        assert _read_unresolved_subagent_spawn(tmp_path) is True
+
+
+class TestUnresolvedSubagentSpawnAgeSeconds:
+    """Unit tests for ``_unresolved_subagent_spawn_age_seconds`` (#2012).
+
+    The age sibling of ``_read_unresolved_subagent_spawn``: it answers "how
+    long has this worktree's oldest unresolved subagent spawn been
+    outstanding", which is what bounds the liveness sweep's distress
+    suppression. Fail-open (``None``) in the same direction as its sibling —
+    an unreadable/unparseable stamp reads as "no bound available", which the
+    caller treats as "do not suppress", never as "suppress forever".
+    """
+
+    _write_context = staticmethod(TestReadUnresolvedSubagentSpawn._write_context)
+
+    def test_none_when_count_is_zero(self, tmp_path: Path) -> None:
+        """No outstanding spawn → no age to report."""
+        from cw.reconcile._shared import _unresolved_subagent_spawn_age_seconds
+
+        self._write_context(
+            tmp_path,
+            {
+                "agent_spawn_stamp": {
+                    "unresolved_count": 0,
+                    "last_stamped_at": datetime(2026, 1, 1, tzinfo=UTC).isoformat(),
+                }
+            },
+        )
+        now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+        assert _unresolved_subagent_spawn_age_seconds(tmp_path, now) is None
+
+    def test_returns_elapsed_seconds_for_outstanding_spawn(
+        self, tmp_path: Path
+    ) -> None:
+        """count > 0 with a parseable stamp → seconds since last_stamped_at."""
+        from cw.reconcile._shared import _unresolved_subagent_spawn_age_seconds
+
+        stamped_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        self._write_context(
+            tmp_path,
+            {
+                "agent_spawn_stamp": {
+                    "unresolved_count": 1,
+                    "last_stamped_at": stamped_at.isoformat(),
+                }
+            },
+        )
+        now = stamped_at + timedelta(minutes=42)
+
+        assert _unresolved_subagent_spawn_age_seconds(tmp_path, now) == 42 * 60
+
+    def test_naive_last_stamped_at_treated_as_utc(self, tmp_path: Path) -> None:
+        """A tz-naive stamp must not raise on the aware/naive subtraction."""
+        from cw.reconcile._shared import _unresolved_subagent_spawn_age_seconds
+
+        stamped_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        self._write_context(
+            tmp_path,
+            {
+                "agent_spawn_stamp": {
+                    "unresolved_count": 1,
+                    "last_stamped_at": stamped_at.replace(tzinfo=None).isoformat(),
+                }
+            },
+        )
+        now = stamped_at + timedelta(minutes=5)
+
+        assert _unresolved_subagent_spawn_age_seconds(tmp_path, now) == 5 * 60
+
+    def test_none_when_last_stamped_at_missing(self, tmp_path: Path) -> None:
+        """An outstanding spawn with no timestamp is unbounded → None."""
+        from cw.reconcile._shared import _unresolved_subagent_spawn_age_seconds
+
+        self._write_context(tmp_path, {"agent_spawn_stamp": {"unresolved_count": 1}})
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+
+        assert _unresolved_subagent_spawn_age_seconds(tmp_path, now) is None
+
+    def test_none_when_last_stamped_at_unparseable(self, tmp_path: Path) -> None:
+        """A malformed timestamp fails open, never raises."""
+        from cw.reconcile._shared import _unresolved_subagent_spawn_age_seconds
+
+        self._write_context(
+            tmp_path,
+            {
+                "agent_spawn_stamp": {
+                    "unresolved_count": 1,
+                    "last_stamped_at": "not-a-timestamp",
+                }
+            },
+        )
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+
+        assert _unresolved_subagent_spawn_age_seconds(tmp_path, now) is None
+
+    def test_none_on_malformed_context(self, tmp_path: Path) -> None:
+        """A corrupt cw-context.json → None, matching the sibling's fail-open."""
+        from cw.reconcile._shared import _unresolved_subagent_spawn_age_seconds
+
+        (tmp_path / ".claude").mkdir(parents=True)
+        (tmp_path / HOOK_CONTEXT_RELATIVE_PATH).write_text(
+            "{ truncated", encoding="utf-8"
+        )
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+
+        assert _unresolved_subagent_spawn_age_seconds(tmp_path, now) is None
+
+    def test_none_on_missing_worktree_path(self) -> None:
+        """worktree_path=None (USER-origin sessions) → None."""
+        from cw.reconcile._shared import _unresolved_subagent_spawn_age_seconds
+
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+
+        assert _unresolved_subagent_spawn_age_seconds(None, now) is None
+
 
 # ---------------------------------------------------------------------------
 # _locate_session_transcript tests (GitHub #541)

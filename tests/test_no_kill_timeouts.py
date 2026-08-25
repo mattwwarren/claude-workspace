@@ -245,6 +245,15 @@ def test_no_distress_when_agent_spawn_stamp_is_outstanding(
     The ``agent_spawn_stamp`` counter -- driven off the Stop hook's own
     ``background_tasks`` snapshot (#1947) -- still shows an outstanding
     subagent spawn; distress must not fire.
+
+    Post-#2012 that suppression is age-bounded
+    (``fix_loop_await_deadline_minutes``), and this case stays on the
+    suppressed side because the real ``agent-spawn-pre`` hook stamps
+    ``last_stamped_at`` with wall-clock now while the sweep runs at the frozen
+    ``_NOW`` -- i.e. the spawn reads as freshly stamped, never as past its
+    deadline. If this file's clock handling ever changes, that is the
+    interaction to re-check; the deadline-crossing behavior itself is covered
+    in ``tests/test_reconcile_liveness.py``.
     """
     worktree = tmp_path / "wt"
     sess = _mk_headless_daemon_session("T-1", worktree, _STARTED_AT)
