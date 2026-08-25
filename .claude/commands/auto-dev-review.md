@@ -291,7 +291,11 @@ Prerequisite: the implementation branch must already be on origin (Step 2's agen
    git branch -D <branch-name>  # local only; origin still has it
    ```
 
-2. Spawn the fix agent with `isolation: "worktree"` and `model: "sonnet"` (the spawn is async either way — end the turn and resume on its completion notification; see the async dispatch note above). The agent's **first actions** must be:
+2. **Capture the dispatch timestamp immediately BEFORE the spawn** — it is the `--since` the verification in step 2b compares against, so it must be taken before the Agent tool call, not after:
+   ```bash
+   DISPATCH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   ```
+   Then spawn the fix agent with `isolation: "worktree"` and `model: "sonnet"` (the spawn is async either way — but do NOT end the turn yet; run step 2b first). The agent's **first actions** must be:
    ```bash
    git fetch origin
    git checkout -B <branch-name> origin/<branch-name>   # -B: idempotent (cw may pre-provision this branch, #712)
@@ -306,6 +310,25 @@ Prerequisite: the implementation branch must already be on origin (Step 2's agen
    git merge origin/main --no-edit
    ```
    If merge conflicts occur → BLOCK with file list. Do not force.
+
+2b. **Verify the dispatch actually launched — same turn, before ending it (#2012).** Immediately after the Agent tool call returns, run:
+   ```bash
+   cw agent-spawn-verify --since "$DISPATCH_TS" --exclude-session "$CLAUDE_CODE_SESSION_ID"
+   ```
+   Why this exists: the spawn is async, so the *only* thing that resumes this session is the subagent's completion notification. If the spawn silently never launched, no notification ever arrives and the session waits forever — the wedge #2012 reproduced four times, invisible to the liveness watchdog because "awaiting a subagent" was treated as unconditionally healthy. A real subagent writes its own transcript into this worktree's Claude project dir; this command polls for one that is neither yours nor pre-existing, then returns.
+
+   It is **one Bash call**, not a poll loop of your own — the waiting happens inside the command on purpose. Issuing repeated verification calls yourself is exactly the busy-wait pattern Step 3a warns against. Its poll window is operator-tunable (`agent_spawn_verify_poll_seconds` in `orchestrator.yaml`); pass `--poll-seconds` only if you have a specific reason to override it for this invocation.
+
+   - **Exit 0** → the dispatch is real. Proceed exactly as before: end the turn and resume on the completion notification.
+   - **Exit 1** → do **NOT** end the turn to await a notification that will not arrive. Take the Exit rule below.
+
+**Exit rule (fix-loop dispatch unverified).** On `cw agent-spawn-verify` exit 1, immediately emit the Stage 3 `blocked` sentinel with:
+   - `blocker.reason: "fix_loop_dispatch_unverified"`
+   - `blocker.details`: the command's diagnostic verbatim (it names the project dir checked, the `--since`, the exclusion, and the effective poll window)
+   - `blocker.retry_eligible: true` — a verification false-negative caused by slow infra (cold model start, contended host, network-mounted worktree) should be retryable rather than forcing a human into the loop.
+   - append `"fix_loop_dispatch_unverified"` to `friction_highlights`.
+
+   **Known gap (#2012):** `retry_eligible: true` is not yet consumed by `src/cw/dispatch/routing/__init__.py::_route_stage_failure` for reasons outside its three hardcoded special cases, so this blocker routes to BLOCKED_ON_USER today regardless of the flag. The flag is set now so the routing change (which needs its own attempt cap) is a follow-up rather than a schema migration.
 
 3. Agent fixes MUST_FIX issues, re-runs quality gates, creates a NEW commit on top (do NOT amend) **with the trailer `Auto-Dev-Fix-Cycle: <N>`** (`<N>` = current cycle, 1-5; pass via `git commit --trailer "Auto-Dev-Fix-Cycle: <N>"`), and pushes to origin using the explicit-refspec form (`git push origin HEAD:refs/heads/<branch-name>`) — robust against a local branch rename. After pushing, verify with `git rev-parse origin/<branch-name>` matching `git rev-parse HEAD`.
 
