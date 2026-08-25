@@ -40,6 +40,7 @@ from cw.dev_queue.crud import (
     register_watched_pr,
     remove_ticket,
     resolve_client,
+    select_clearable_tickets,
     select_prunable_tickets,
 )
 from cw.dev_queue.drain import (
@@ -146,6 +147,7 @@ __all__ = [
     "resolve_client",
     "save_dev_queue",
     "save_plan",
+    "select_clearable_tickets",
     "select_held_tickets",
     "select_prunable_tickets",
     "task_attention_state",
