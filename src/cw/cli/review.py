@@ -224,6 +224,25 @@ def _check_diff_matches_base(
         raise DiffBaseMismatchError(msg)
 
 
+def _require_base_xor_no_base_check(base: str | None, no_base_check: bool) -> None:
+    """Enforce --base/--no-base-check as a required alternatives pair (#1988).
+
+    Why not click's own `required=True` (the dev-queue-prune precedent,
+    src/cw/cli/dev_queue/crud.py): --base and --no-base-check are
+    alternatives, so requiring either outright would forbid the other.
+    This reproduces the same guarantee -- you cannot silently omit
+    diff-integrity verification -- as a UsageError raised before any
+    payload parsing runs. Shared by ``review_consolidate`` and
+    ``review_verify_fixes`` so the two commands cannot silently diverge.
+    """
+    if base is None and not no_base_check:
+        msg = "Must pass either --base <ref> or --no-base-check."
+        raise click.UsageError(msg)
+    if base is not None and no_base_check:
+        msg = "--base and --no-base-check are mutually exclusive."
+        raise click.UsageError(msg)
+
+
 def _resolve_documents_from_files(source: Path) -> list[Path]:
     """The files ``--documents-from`` *source* selects, in filename order.
 
@@ -575,18 +594,7 @@ def review_consolidate(
     for an integrity-guard rejection, a plain error message; exits 2 if
     neither or both of --base/--no-base-check are given.
     """
-    # Why not click's own `required=True` (the dev-queue-prune precedent,
-    # src/cw/cli/dev_queue/crud.py): --base and --no-base-check are
-    # alternatives, so requiring either outright would forbid the other.
-    # This reproduces the same guarantee -- you cannot silently omit
-    # diff-integrity verification -- as a UsageError raised before any
-    # payload parsing runs.
-    if base is None and not no_base_check:
-        msg = "Must pass either --base <ref> or --no-base-check."
-        raise click.UsageError(msg)
-    if base is not None and no_base_check:
-        msg = "--base and --no-base-check are mutually exclusive."
-        raise click.UsageError(msg)
+    _require_base_xor_no_base_check(base, no_base_check)
 
     parsed = _parse_payload_or_exit(path, _ConsolidateInput)
 
@@ -894,18 +902,7 @@ def review_verify_fixes(
     On failure: exits 1, prints 'field.path: message' lines to stderr; exits
     2 if neither or both of --base/--no-base-check are given.
     """
-    # Why not click's own `required=True` (the dev-queue-prune precedent,
-    # src/cw/cli/dev_queue/crud.py): --base and --no-base-check are
-    # alternatives, so requiring either outright would forbid the other.
-    # This reproduces the same guarantee -- you cannot silently omit
-    # diff-integrity verification -- as a UsageError raised before any
-    # payload parsing runs.
-    if base is None and not no_base_check:
-        msg = "Must pass either --base <ref> or --no-base-check."
-        raise click.UsageError(msg)
-    if base is not None and no_base_check:
-        msg = "--base and --no-base-check are mutually exclusive."
-        raise click.UsageError(msg)
+    _require_base_xor_no_base_check(base, no_base_check)
 
     parsed = _parse_payload_or_exit(path, _VerifyFixesInput)
     if base is not None:
