@@ -312,6 +312,30 @@ high prior, not absolutes. Name the exception out loud when you take it:
 If you're reaching for an exception more than occasionally, that's a smell —
 the work probably wants to be a ticket.
 
+### Shipping orchestrator-authored work — check your branch first
+
+When an exception above leaves you with a real diff to ship (a codified skill, a
+runbook edit), `/prep-pr` and `/ship-it` are still the right path — but they
+assume something that is false in an orchestrator session.
+
+Both push `git branch --show-current`. In a normal dev session that is the
+feature branch. **In an orchestrator session you are standing on the session
+branch of a cw-managed worktree**, so delegating from there pushes the session
+branch, not the work. `/ship-it` also resolves to whichever project's
+`ship-it.md` your cwd belongs to — in a cw-managed worktree that is cw's own,
+which knows nothing about a client repo's PR conventions — and it hardcodes
+`gh pr merge --auto --squash`, arming auto-merge even when you meant to leave
+the PR open for review.
+
+Three symptoms, one cause: an assumption about where you are standing.
+
+**Cut and check out a feature branch off the freshly-fetched default branch
+before delegating.** That single step makes all three correct — the push targets
+the right ref, the cwd's project is the one you are actually shipping to, and
+auto-merge is a deliberate choice rather than a surprise. If you cannot, create
+the PR directly with `gh pr create` from the correct branch and skip the
+delegation.
+
 ## Anti-patterns
 
 - **Re-sweeping a ticket that already has plan comments.** The sweep is in the
