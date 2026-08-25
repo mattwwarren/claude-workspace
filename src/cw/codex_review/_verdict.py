@@ -816,7 +816,7 @@ def _render_rejected_below_must_fix(verdict: ReviewVerdict) -> list[str]:
     ordered by their highest-severity member. Empty-returns-``[]``, mirroring
     every other per-concern helper in this file.
     """
-    below = [rf for rf in verdict.rejected if rf.raw.get("severity") != "MUST_FIX"]
+    below = [rf for rf in verdict.rejected if rf not in verdict.rejected_must_fix]
     if not below:
         return []
     groups: dict[tuple[str, str], list[RejectedFinding]] = {}
@@ -934,12 +934,12 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
         # keeps this informational rather than folding a matcher miss into
         # Health.recommendation's "coverage degraded" gate.
         lines.append(
-            f"**PROCEED (findings mechanically rejected)** — no MUST_FIX "
-            f"findings survived validation, but {verdict.rejected_count} "
-            "finding(s) below MUST_FIX were mechanically rejected before "
-            "adjudication and never evaluated on their merits — see the "
-            "rejected-findings section below before treating this pass as "
-            "clean."
+            f"**PROCEED ({verdict.rejected_count} finding(s) mechanically "
+            "rejected)** — no MUST_FIX findings survived validation, but "
+            f"{verdict.rejected_count} finding(s) below MUST_FIX were "
+            "mechanically rejected before adjudication and never evaluated "
+            "on their merits — see the rejected-findings section below "
+            "before treating this pass as clean."
         )
     else:
         lines.append(

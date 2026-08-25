@@ -43,6 +43,7 @@ from cw.review_findings import (
     ReviewVerdict,
     consolidate_verdict,
 )
+from cw.review_findings._consolidate import _count_rejected_by_severity
 from tests._codex_review_helpers import _task
 from tests._reconcile_helpers import (
     SCOPE_GUARD_BRANCH,
@@ -953,7 +954,7 @@ class TestSynthesizeCodexReviewResultSubMustFixRejection:
         assert result.review.rejected_count_by_severity == {"SHOULD_FIX": 1}
         # ...and the headline is qualified, never the bare clean one.
         body = render_verdict_comment(verdict, fix_loop_enabled=False)
-        assert "PROCEED (findings mechanically rejected)" in body
+        assert "PROCEED (1 finding(s) mechanically rejected)" in body
         assert "**Non-blocking** — no MUST_FIX findings" not in body
         # A1 (#2000, round-1 operator resolution): informational-only. The
         # counter deliberately does NOT flip Health.recommendation, so
@@ -1589,6 +1590,15 @@ class TestRenderVerdictComment:
             update={
                 "rejected": [strange, *base.rejected],
                 "rejected_count": len(base.rejected) + 1,
+                # Kept internally consistent with the injected `strange`
+                # rejection -- a real `consolidate_verdict` call would tally
+                # its severity-less `raw` under "unknown" (see
+                # `_count_rejected_by_severity`), and a verdict no real call
+                # could produce is exactly the drift #2000 exists to catch.
+                "rejected_count_by_severity": {
+                    **base.rejected_count_by_severity,
+                    "unknown": 1,
+                },
             }
         )
         body = render_verdict_comment(verdict, fix_loop_enabled=False)
@@ -1597,6 +1607,30 @@ class TestRenderVerdictComment:
         # SHOULD_FIX is a known severity, so its group precedes the unranked one
         # regardless of the reversed input order above.
         assert body.index("ordinary drop") < body.index("no severity at all")
+
+    def test_count_rejected_by_severity_tallies_unrecognized_as_unknown(
+        self,
+    ) -> None:
+        # #2000: `_count_rejected_by_severity`'s documented "anything unusable
+        # is tallied under 'unknown'" fallback (see its docstring) was never
+        # directly exercised anywhere in this diff -- the test above sets
+        # `rejected_count_by_severity` by hand rather than through the
+        # function that actually computes it.
+        strange = RejectedFinding.model_construct(
+            raw={"file": "src/cw/strange.py", "summary": "no severity at all"},
+            reviewer_role="Aaa Reviewer",
+            reason="unknown_file",
+            detail="",
+        )
+        known = RejectedFinding(
+            raw=_make_finding(severity="SHOULD_FIX").model_dump(),
+            reviewer_role="Reviewer",
+            reason="unknown_file",
+        )
+        assert _count_rejected_by_severity([strange, known]) == {
+            "unknown": 1,
+            "SHOULD_FIX": 1,
+        }
 
     def test_rejected_must_fix_section_unchanged_when_sub_must_fix_also_present(
         self,
