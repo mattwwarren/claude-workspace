@@ -2109,7 +2109,9 @@ class TestClearTickets:
         """No --status: every OCCUPIED_LANE_STATUSES row is excluded from the
         sweep, regardless of age -- only PENDING is removed (#2003)."""
         tasks = [
-            TicketTask(ticket_id=f"TKT-{status.value}", client="genhealth", status=status)
+            TicketTask(
+                ticket_id=f"TKT-{status.value}", client="genhealth", status=status
+            )
             for status in sorted(OCCUPIED_LANE_STATUSES)
         ]
         pending = TicketTask(
@@ -2193,7 +2195,9 @@ class TestClearTickets:
             return real(store, client, status)
 
         monkeypatch.setattr(crud, "_select_clear_candidates", _spy)
-        save_dev_queue(DevQueueStore(tasks=[TicketTask(ticket_id="TKT-ONCE", client="genhealth")]))
+        save_dev_queue(
+            DevQueueStore(tasks=[TicketTask(ticket_id="TKT-ONCE", client="genhealth")])
+        )
 
         clear_tickets("genhealth")
 
@@ -2740,7 +2744,9 @@ class TestCLIDevQueueClear:
         assert "Invalid value" in result.output or "invalid choice" in result.output
 
     def test_default_invocation_previews_only(self, tmp_dev_queue: Path) -> None:
-        save_dev_queue(DevQueueStore(tasks=[TicketTask(ticket_id="CLI-DEF", client="genhealth")]))
+        save_dev_queue(
+            DevQueueStore(tasks=[TicketTask(ticket_id="CLI-DEF", client="genhealth")])
+        )
         runner = CliRunner()
 
         result = runner.invoke(main, ["dev-queue", "clear", "--client", "genhealth"])
@@ -2752,7 +2758,9 @@ class TestCLIDevQueueClear:
         assert len(load_dev_queue().tasks) == 1
 
     def test_dry_run_flag_previews_only(self, tmp_dev_queue: Path) -> None:
-        save_dev_queue(DevQueueStore(tasks=[TicketTask(ticket_id="CLI-DR", client="genhealth")]))
+        save_dev_queue(
+            DevQueueStore(tasks=[TicketTask(ticket_id="CLI-DR", client="genhealth")])
+        )
         runner = CliRunner()
 
         result = runner.invoke(
@@ -2766,7 +2774,9 @@ class TestCLIDevQueueClear:
     def test_dry_run_and_confirm_together_previews_only(
         self, tmp_dev_queue: Path
     ) -> None:
-        save_dev_queue(DevQueueStore(tasks=[TicketTask(ticket_id="CLI-DRC", client="genhealth")]))
+        save_dev_queue(
+            DevQueueStore(tasks=[TicketTask(ticket_id="CLI-DRC", client="genhealth")])
+        )
         runner = CliRunner()
 
         result = runner.invoke(
@@ -2893,7 +2903,9 @@ class TestCLIDevQueueClear:
             raise AssertionError(msg)
 
         monkeypatch.setattr("cw.cli.dev_queue.crud.select_clearable_tickets", _boom)
-        save_dev_queue(DevQueueStore(tasks=[TicketTask(ticket_id="CLI-ONE", client="genhealth")]))
+        save_dev_queue(
+            DevQueueStore(tasks=[TicketTask(ticket_id="CLI-ONE", client="genhealth")])
+        )
         runner = CliRunner()
 
         result = runner.invoke(

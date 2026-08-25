@@ -24,6 +24,7 @@ from cw.dev_queue import (
     remove_ticket,
     requeue_ticket,
     resolve_client,
+    select_clearable_tickets,
     select_prunable_tickets,
     unblock_ticket,
 )
@@ -582,24 +583,89 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
     "status_filter",
     type=click.Choice([e.value for e in QueueItemStatus]),
     default=None,
-    help="Optional status filter",
+    help=(
+        "Optional status filter. Without it, RUNNING, BLOCKED_ON_USER, and"
+        " AWAITING_OPERATOR_SIGNOFF rows are excluded from the sweep -- name"
+        " one of them here explicitly to delete it."
+    ),
+)
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="Report what would be cleared without deleting anything. Never mutates state.",
+)
+@click.option(
+    "--confirm",
+    "confirm",
+    is_flag=True,
+    default=False,
+    help=(
+        "Actually delete the matched rows. Without --confirm (and without"
+        " --dry-run) the command only previews; --dry-run always wins if"
+        " both are given."
+    ),
 )
 @handle_errors
-def dev_queue_clear(client: str, status_filter: str | None) -> None:
-    """Clear dev-queue tasks for the given client, optionally filtered by status."""
+def dev_queue_clear(
+    client: str,
+    status_filter: str | None,
+    dry_run: bool,
+    confirm: bool,
+) -> None:
+    """Delete dev-queue tasks for a client -- destructive; previews by default.
+
+    Pass --confirm to actually remove the matched rows; --dry-run always
+    previews and wins if both are given. With no --status, RUNNING,
+    BLOCKED_ON_USER, and AWAITING_OPERATOR_SIGNOFF rows are excluded from
+    the sweep -- naming one of them explicitly via --status targets it for
+    deletion instead of skipping it. Takes the same dev-queue file lock the
+    dispatch loop takes and computes the deleted set exactly once per
+    invocation, so a --confirm run can never silently grow past what it
+    reports (#2003).
+    """
     status_enum = QueueItemStatus(status_filter) if status_filter else None
-    count = clear_tickets(client, status=status_enum)
-    click.echo(f"Cleared {count} dev-queue task(s) for {client}.")
+
+    if dry_run or not confirm:
+        candidates = select_clearable_tickets(client, status=status_enum)
+        _print_task_summary(candidates)
+        if not candidates:
+            click.echo("Nothing to clear.")
+        elif dry_run:
+            click.echo(
+                f"{len(candidates)} task(s) would be cleared"
+                " (dry-run; nothing was deleted)."
+            )
+        else:
+            click.echo(
+                f"{len(candidates)} task(s) would be cleared."
+                " Pass --confirm to actually delete them."
+            )
+        return
+
+    # Why clear_tickets alone, with no preceding select_clearable_tickets
+    # call: the library derives the candidate set exactly once under the
+    # dev-queue lock and deletes precisely that set, so rendering its return
+    # value reports exactly what was removed. Previewing first would
+    # re-derive under a second, later lock -- a TOCTOU window in which a
+    # concurrent dispatch tick could grow the deleted set past what was
+    # shown. Mirrors dev_queue_prune's identical precedent.
+    removed = clear_tickets(client, status=status_enum)
+    _print_task_summary(removed)
+    click.echo(f"Cleared {len(removed)} dev-queue task(s) for {client}.")
 
 
-def _print_prune_summary(tasks: list[TicketTask]) -> None:
-    """Render TICKET_ID/CLIENT/STATUS/AGE_DAYS columns for *tasks* (#382).
+def _print_task_summary(tasks: list[TicketTask]) -> None:
+    """Render TICKET_ID/CLIENT/STATUS/AGE_DAYS columns for *tasks*.
 
-    Mirrors ``tasks.py``'s ``_print_tasks_human`` column-table convention;
-    module-private to this file since that helper is itself module-private.
-    AGE_DAYS uses ``_prune_age_basis`` -- the same age basis
-    ``_select_prune_candidates`` filters on -- so a row's displayed age
-    cannot disagree with the reason it was selected.
+    Shared by `prune` (#382) and `clear` (#2003). Mirrors ``tasks.py``'s
+    ``_print_tasks_human`` column-table convention; module-private to this
+    file since that helper is itself module-private. AGE_DAYS uses
+    ``_prune_age_basis`` -- the same age basis ``_select_prune_candidates``
+    filters on -- so a row's displayed age cannot disagree with the reason
+    it was selected for `prune`; for `clear` the column is informational
+    only (clear does not filter on age).
     """
     if not tasks:
         return
@@ -744,7 +810,7 @@ def dev_queue_prune(
         candidates = select_prunable_tickets(
             statuses, older_than_days, client, all_clients=all_clients
         )
-        _print_prune_summary(candidates)
+        _print_task_summary(candidates)
         if not candidates:
             click.echo("Nothing to prune.")
         elif dry_run:
@@ -766,5 +832,5 @@ def dev_queue_prune(
     # a second, later lock -- a TOCTOU window in which a concurrent dispatch
     # tick could grow the deleted set past what was shown.
     removed = prune_tickets(statuses, older_than_days, client, all_clients=all_clients)
-    _print_prune_summary(removed)
+    _print_task_summary(removed)
     click.echo(f"Pruned {len(removed)} dev-queue task(s).")
