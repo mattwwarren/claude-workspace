@@ -1,8 +1,8 @@
-"""Shared transcript path resolution helper.
+"""Shared transcript path resolution helpers.
 
-Pure helper used by both ``cw.queue_peek`` and ``cw.reconcile._shared``.
-No heuristic, no degraded fallback — just the canonical resolution logic
-that both consumers share.
+Pure helpers used by ``cw.queue_peek``, ``cw.reconcile._shared``, and
+``cw.cli.agent_spawn_verify``. No heuristic, no degraded fallback — just the
+canonical resolution logic those consumers share.
 """
 
 from __future__ import annotations
@@ -50,3 +50,57 @@ def locate_transcript(
     except OSError:
         return None
     return None
+
+
+def find_new_subagent_transcript(
+    project_dir: Path,
+    *,
+    since: dt.datetime,
+    exclude_stem: str | None,
+) -> Path | None:
+    """Return the newest transcript under *project_dir* written after *since*.
+
+    The dispatch-verification leaf behind ``cw agent-spawn-verify`` (#2012):
+    a subagent spawned by the caller writes its own ``*.jsonl`` into the same
+    encoded project dir (today under a ``subagents/`` subdirectory), under a
+    filename matching neither the parent's csid nor its surface_ref prefix.
+    Its *appearance* is therefore the cheapest positive evidence that an async
+    spawn actually launched, as opposed to silently never starting.
+
+    Two filters make that evidence specific rather than incidental:
+
+    * ``exclude_stem`` drops the caller's own transcript — it is being
+      appended to continuously, so without this every call would trivially
+      "verify" itself. Pass the caller's ``$CLAUDE_CODE_SESSION_ID``.
+    * ``since`` drops pre-existing siblings from an earlier dispatch in the
+      same (sequentially reused) worktree — the same mtime guard
+      ``locate_transcript`` applies to its surface_ref candidate, here applied
+      per-file across the whole glob.
+
+    Single-pass and side-effect free: the polling loop lives in the CLI
+    command, not here. Returns the *newest* qualifying candidate rather than
+    the first one ``rglob`` happens to yield, so the answer does not depend on
+    filesystem iteration order. Fails open (``None``) on a missing dir or a
+    per-candidate stat failure, matching every sibling helper.
+    """
+    if not project_dir.is_dir():
+        return None
+    since_ts = since.timestamp()
+    newest: Path | None = None
+    newest_mtime = since_ts
+    try:
+        candidates = project_dir.rglob("*.jsonl")
+        for candidate in candidates:
+            if exclude_stem is not None and candidate.stem == exclude_stem:
+                continue
+            # Per-candidate: a stat failure on one sibling (rotated/deleted
+            # mid-glob) must not discard a hit already found on another.
+            try:
+                mtime = candidate.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > newest_mtime:
+                newest, newest_mtime = candidate, mtime
+    except OSError:
+        return None
+    return newest

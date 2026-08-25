@@ -246,9 +246,7 @@ class TestFindNewSubagentTranscript:
 
         assert result == newest
 
-    def test_none_exclude_stem_matches_any_new_transcript(
-        self, tmp_path: Path
-    ) -> None:
+    def test_none_exclude_stem_matches_any_new_transcript(self, tmp_path: Path) -> None:
         """exclude_stem=None (no ``$CLAUDE_CODE_SESSION_ID``) excludes nothing."""
         home = tmp_path / "home"
         worktree = tmp_path / "wt"
@@ -276,9 +274,7 @@ class TestFindNewSubagentTranscript:
         proj.mkdir()
         proj.chmod(0o000)
         try:
-            result = find_new_subagent_transcript(
-                proj, since=_NOW, exclude_stem=None
-            )
+            result = find_new_subagent_transcript(proj, since=_NOW, exclude_stem=None)
             assert result is None
         finally:
             proj.chmod(0o755)

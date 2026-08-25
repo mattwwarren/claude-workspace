@@ -539,7 +539,7 @@ def test_spawn_past_deadline_fires_named_attention_signal(
 
     assert len(candidates) == 1
     assert candidates[0].distress is True
-    assert candidates[0].spawn_deadline_exceeded is True
+    assert candidates[0].spawn_deadline_minutes == 30
     events = _attention_events()
     assert len(events) == 1
     assert events[0]["paused_status"] == _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON

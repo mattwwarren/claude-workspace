@@ -15,6 +15,17 @@ notification. Multi-dimensional evidence (roster presence, transcript
 staleness, sentinel absence, subagent-await), edge-triggered by the bucket
 crossing itself, and zero mutation beyond the bucket latch — the operator is
 educated; nothing is killed.
+
+The subagent-await limb of that evidence is **age-bounded** (#2012). It was
+originally unconditional — any outstanding ``agent_spawn_stamp`` entry
+suppressed the distress signal forever, with no expiry — so a session whose
+async subagent dispatch silently never launched looked definitionally healthy
+to this watchdog indefinitely. Past
+``OrchestratorConfig.fix_loop_await_deadline_minutes`` the suppression lifts
+and the signal fires under the discriminating
+``fix_loop_await_deadline_exceeded`` paused_status. Still signal-only: the
+deadline stops suppressing a signal, it never dispositions anything
+(ADR-0014).
 """
 
 from __future__ import annotations
@@ -34,11 +45,12 @@ from cw.models import (
 )
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
+    _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON,
     _LIVE_STATUSES,
     _SESSION_UNRESPONSIVE_REASON,
     _has_terminal_sentinel,
-    _read_unresolved_subagent_spawn,
     _transcript_age_seconds,
+    _unresolved_subagent_spawn_age_seconds,
     ticket_id_for_session,
 )
 
@@ -46,6 +58,10 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from cw.models import CwState, OrchestratorConfig, Stage, TicketTask
+
+# Unit conversion for fix_loop_await_deadline_minutes, which is compared
+# against a seconds-valued spawn age (#2012).
+_SECONDS_PER_MINUTE = 60
 
 # Fallback floor (minutes) used when both liveness_buckets_minutes is empty
 # and a stage has no per-stage override — mirrors the historical
@@ -80,9 +96,22 @@ class LivenessCandidate:
     stale_minutes: float
     # Signal-only operator distress flag: True when this crossing enters the
     # top bucket AND the session has emitted no sentinel AND is not awaiting a
-    # subagent (multi-dimensional evidence, not bare elapsed time). Drives a
-    # SESSION_NEEDS_ATTENTION + push in the act phase; never a disposition.
+    # subagent *within its deadline* (multi-dimensional evidence, not bare
+    # elapsed time). Drives a SESSION_NEEDS_ATTENTION + push in the act phase;
+    # never a disposition.
     distress: bool = False
+    # #2012 — how long this session's outstanding subagent spawn has been
+    # unresolved, or None when there is no outstanding spawn (or no readable
+    # stamp age for one). Read once in the detect phase so the act phase never
+    # re-reads the stamp mid-tick.
+    spawn_age_seconds: float | None = None
+    # #2012 — set (to the effective deadline, in minutes) ONLY when distress
+    # fired *because* an outstanding subagent spawn blew that deadline, rather
+    # than because no spawn explained the quietness. Both the discriminant for
+    # the fix_loop_await_deadline_exceeded paused_status and the value its
+    # breadcrumb names. Precomputed from config here for the same reason
+    # next_renotify_eligible_at is: the act phase takes no config.
+    spawn_deadline_minutes: int | None = None
     elapsed_seconds: float = 0.0
     # RFC 0008 W2 re-fire cadence (#1858). Set only when distress is True; the
     # future timestamp both stamped onto Session.liveness_attention_next_eligible_at
@@ -207,14 +236,28 @@ def _detect_liveness_candidates(
             continue
         # Distress evaluation (signal-only): only entering/staying at the top
         # bucket qualifies, and only when the quietness is not explained by an
-        # already-emitted sentinel or an outstanding agent_spawn_stamp entry
-        # (no sentinel, no outstanding subagent spawn). Re-evaluated fresh on
-        # every renotify check, not latched from the initial fire. All reads
-        # — detect-phase purity preserved (ADR-0006 inv. 1).
+        # already-emitted sentinel or by an outstanding agent_spawn_stamp entry
+        # that is still INSIDE its deadline. Re-evaluated fresh on every
+        # renotify check, not latched from the initial fire. All reads —
+        # detect-phase purity preserved (ADR-0006 inv. 1).
+        #
+        # #2012: the subagent-await conjunct used to be an unconditional
+        # `not _read_unresolved_subagent_spawn(...)` — any outstanding spawn
+        # suppressed the operator signal forever, with no age bound at all,
+        # which is precisely why a wedged fix-loop dispatch stayed invisible to
+        # this otherwise correctly-armed watchdog. The suppression is now
+        # bounded: past fix_loop_await_deadline_minutes it lifts. A spawn_age
+        # of None means "no outstanding spawn, or no readable bound for one",
+        # and both must NOT suppress — an unbounded wait is the failure mode.
+        # Still signal-only: no disposition follows from the deadline
+        # (ADR-0014).
+        spawn_age = _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
+        deadline_seconds = config.fix_loop_await_deadline_minutes * _SECONDS_PER_MINUTE
+        deadline_exceeded = spawn_age is not None and spawn_age >= deadline_seconds
         distress = (
             new_bucket is LivenessBucket.STALE_45M
             and not _has_terminal_sentinel(session)
-            and not _read_unresolved_subagent_spawn(session.worktree_path)
+            and (spawn_age is None or deadline_exceeded)
         )
         if is_renotify and not distress:
             # Debounce window elapsed but no longer distress-eligible this
@@ -238,11 +281,54 @@ def _detect_liveness_candidates(
                 new_bucket=new_bucket,
                 stale_minutes=stale_minutes,
                 distress=distress,
+                spawn_age_seconds=spawn_age,
+                spawn_deadline_minutes=(
+                    config.fix_loop_await_deadline_minutes
+                    if distress and deadline_exceeded
+                    else None
+                ),
                 elapsed_seconds=(now - session.started_at).total_seconds(),
                 next_renotify_eligible_at=next_renotify_eligible_at,
             )
         )
     return candidates
+
+
+def _distress_signal_text(candidate: LivenessCandidate) -> tuple[str, str]:
+    """Return the ``(paused_status, breadcrumbs)`` pair for a distress fire.
+
+    Two shapes, discriminated by ``spawn_deadline_minutes`` (#2012):
+
+    * **No outstanding subagent spawn** — the historical
+      ``session_unresponsive`` signal, byte-identical to its pre-#2012 text so
+      existing consumers and operator muscle memory are undisturbed.
+    * **An outstanding spawn past its deadline** —
+      ``fix_loop_await_deadline_exceeded``, naming both how long the spawn has
+      been unresolved and the deadline it blew. R3's bar for this deadline was
+      that it "knows what it is waiting for and can name what failed"; a
+      generic ``session_unresponsive`` would not, and the operator's next move
+      differs (chase a dispatch that produced no subagent, vs. a session that
+      simply went quiet).
+
+    Both are signal-only: the session is left running either way (ADR-0014).
+    """
+    common = (
+        f"transcript flat {candidate.stale_minutes:.0f}m at stage "
+        f"{candidate.stage.value}; elapsed {candidate.elapsed_seconds:.0f}s"
+    )
+    deadline_minutes = candidate.spawn_deadline_minutes
+    if deadline_minutes is None:
+        return (
+            _SESSION_UNRESPONSIVE_REASON,
+            f"{common}; no sentinel, no pending subagent; session left running",
+        )
+    spawn_minutes = (candidate.spawn_age_seconds or 0.0) / _SECONDS_PER_MINUTE
+    return (
+        _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON,
+        f"{common}; no sentinel; subagent spawn unresolved for "
+        f"{spawn_minutes:.0f}m, past the {deadline_minutes}m await deadline; "
+        "session left running",
+    )
 
 
 def _act_on_liveness_candidates(
@@ -298,6 +384,7 @@ def _act_on_liveness_candidates(
                 )
                 raise ValueError(msg)
             session.liveness_attention_next_eligible_at = next_eligible_at
+            paused_status, breadcrumbs = _distress_signal_text(candidate)
             record_event(
                 OrchestratorEventType.SESSION_NEEDS_ATTENTION,
                 {
@@ -306,13 +393,8 @@ def _act_on_liveness_candidates(
                     "client": session.client,
                     "ticket_id": candidate.ticket_id,
                     "claude_session_id": session.claude_session_id,
-                    "paused_status": _SESSION_UNRESPONSIVE_REASON,
-                    "breadcrumbs": (
-                        f"transcript flat {candidate.stale_minutes:.0f}m at stage "
-                        f"{candidate.stage.value}; elapsed "
-                        f"{candidate.elapsed_seconds:.0f}s; no sentinel, no "
-                        "pending subagent; session left running"
-                    ),
+                    "paused_status": paused_status,
+                    "breadcrumbs": breadcrumbs,
                     "crashed": False,
                     "stage": candidate.stage.value,
                     "stale_minutes": candidate.stale_minutes,

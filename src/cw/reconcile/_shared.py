@@ -50,6 +50,8 @@ from cw.dev_queue import (
 from cw.events import read_events, record_event
 from cw.exceptions import USAGE_LIMIT_RE, EmitValidationError
 from cw.models import (
+    AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+    AGENT_SPAWN_STAMP_KEY,
     DEFAULT_LANE,
     DEFAULT_STAGE,
     HOOK_CONTEXT_RELATIVE_PATH,
@@ -134,6 +136,16 @@ _SILENTLY_IDLE_REASON = "silently_idle"
 # is left running (no daemon stop, no revert, no park). Replaces the class of
 # signal the removed process-kill timeouts used to provide as a side effect.
 _SESSION_UNRESPONSIVE_REASON = "session_unresponsive"
+# Paused-status written to SESSION_NEEDS_ATTENTION events by the same liveness
+# distress path when the quietness IS explained by an outstanding subagent
+# spawn -- but that spawn has been outstanding longer than
+# OrchestratorConfig.fix_loop_await_deadline_minutes (#2012). Discriminated
+# from _SESSION_UNRESPONSIVE_REASON on purpose: the operator's next move is
+# different (a dispatch that never produced a subagent, vs. a session that
+# simply went quiet), and R3's bar for this deadline was that it "knows what it
+# is waiting for and can name what failed". Signal-only like its sibling: no
+# disposition, no queue mutation, no worktree touch (ADR-0014).
+_FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON = "fix_loop_await_deadline_exceeded"
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 # Paused-status written to SESSION_NEEDS_ATTENTION events when an
 # `external`-counterparty session (reviewing a teammate's PR) reaches the
@@ -1598,6 +1610,76 @@ def _worktree_dirty_by_path(client_name: str, worktree_path: Path | None) -> boo
         return False
 
 
+def _read_agent_spawn_stamp_context(
+    worktree_path: Path | None,
+) -> dict[str, Any] | None:
+    """Return the parsed ``.claude/cw-context.json`` for *worktree_path*, or None.
+
+    Shared read half of :func:`_read_unresolved_subagent_spawn` and
+    :func:`_unresolved_subagent_spawn_age_seconds` (#2012) so the two readers
+    of the same on-disk stamp cannot drift onto different fail-open rules.
+
+    Fail-open (``None``) on a None path, a missing worktree, a missing or
+    pre-v5 context, malformed JSON, a non-dict payload, or any other error.
+    Both callers translate that ``None`` into their own "no evidence" answer.
+
+    Reads the file directly rather than via ``cw.cli._hook_io``: reconcile must
+    not import from ``cw.cli`` (the dependency runs the other way).
+    """
+    if not worktree_path:
+        return None
+    try:
+        context_path = worktree_path / HOOK_CONTEXT_RELATIVE_PATH
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — fail-safe on any error; mirrors _worktree_dirty_by_path
+        return None
+    return context if isinstance(context, dict) else None
+
+
+def _unresolved_subagent_spawn_age_seconds(
+    worktree_path: Path | None, now: datetime
+) -> float | None:
+    """Return how long *worktree_path*'s unresolved subagent spawn has run.
+
+    Age sibling of :func:`_read_unresolved_subagent_spawn` (#2012), reading the
+    ``last_stamped_at`` half of the same ``agent_spawn_stamp`` payload that
+    ``cw agent-spawn-pre`` already writes — purely additive on the read side,
+    no new writer. ``last_stamped_at`` advances only when the count *increases*
+    (see :func:`cw.cli.agent_spawn_stamp._adjust_unresolved_count`), so it
+    answers "when did the oldest outstanding spawn begin", which is exactly the
+    quantity a deadline needs.
+
+    Returns ``None`` — meaning "no bound available" — when there is no
+    outstanding spawn, when the context is unreadable, or when
+    ``last_stamped_at`` is missing or unparseable. Every one of those is the
+    same fail-open direction as ``_read_unresolved_subagent_spawn``'s ``False``:
+    the caller must treat "no bound" as "do not suppress", never as "suppress
+    forever" — the unbounded-suppression bug this exists to close.
+
+    A naive ``last_stamped_at`` is read as UTC (matching the writer, which
+    stamps ``datetime.now(UTC).isoformat()``) so an old tz-less stamp cannot
+    raise on the subtraction. The result may be negative if the stamp is in the
+    future relative to *now*; callers compare against a positive deadline, for
+    which a negative age correctly reads as "not yet exceeded".
+    """
+    context = _read_agent_spawn_stamp_context(worktree_path)
+    if context is None or extract_unresolved_spawn_count(context) <= 0:
+        return None
+    stamp = context.get(AGENT_SPAWN_STAMP_KEY)
+    raw = (
+        stamp.get(AGENT_SPAWN_LAST_STAMPED_AT_KEY) if isinstance(stamp, dict) else None
+    )
+    if not isinstance(raw, str):
+        return None
+    try:
+        stamped_at = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if stamped_at.tzinfo is None:
+        stamped_at = stamped_at.replace(tzinfo=UTC)
+    return (now - stamped_at).total_seconds()
+
+
 def _read_unresolved_subagent_spawn(worktree_path: Path | None) -> bool:
     """Return True iff *worktree_path* carries an unresolved subagent spawn.
 
@@ -1614,25 +1696,24 @@ def _read_unresolved_subagent_spawn(worktree_path: Path | None) -> bool:
     would park healthy tickets under a reason that also overrides
     ``reap_policy: auto`` — strictly worse than missing one crash's precision.
 
-    Reads the file directly rather than via ``cw.cli._hook_io``: reconcile must
-    not import from ``cw.cli`` (the dependency runs the other way). The shared
-    path constant and the count-extraction logic both come from ``cw.models``
+    Reads the file via :func:`_read_agent_spawn_stamp_context` rather than
+    ``cw.cli._hook_io``: reconcile must not import from ``cw.cli`` (the
+    dependency runs the other way). The shared path constant and the
+    count-extraction logic both come from ``cw.models``
     (:func:`cw.models.extract_unresolved_spawn_count`) so this reader and
     ``cw.cli.agent_spawn_stamp``'s write-side reader cannot drift onto
     different literals or validation rules for the same on-disk shape (#1646
     review finding).
+
+    Deliberately **age-blind**, and unchanged by #2012: its callers (the
+    phantom sweep) ask "did this worker die mid-spawn", for which any
+    outstanding stamp is evidence no matter how old. The age-bounded question
+    belongs to :func:`_unresolved_subagent_spawn_age_seconds`.
     """
-    if not worktree_path:
+    context = _read_agent_spawn_stamp_context(worktree_path)
+    if context is None:
         return False
-    try:
-        context_path = worktree_path / HOOK_CONTEXT_RELATIVE_PATH
-        context = json.loads(context_path.read_text(encoding="utf-8"))
-        if not isinstance(context, dict):
-            return False
-        count = extract_unresolved_spawn_count(context)
-    except Exception:  # noqa: BLE001 — fail-safe on any error; mirrors _worktree_dirty_by_path
-        return False
-    return count > 0
+    return extract_unresolved_spawn_count(context) > 0
 
 
 def _apply_queue_mutations(

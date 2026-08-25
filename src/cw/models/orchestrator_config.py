@@ -708,6 +708,38 @@ class OrchestratorConfig(BaseModel):
     # (#1630) rather than an exponential backoff -- the operator wants "page me
     # again in N minutes while this is still stuck," not a growing delay.
     liveness_attention_renotify_interval_minutes: int = 60
+    # #2012 — age bound on the liveness sweep's subagent-await suppression.
+    # Before this field, an outstanding `agent_spawn_stamp` entry suppressed
+    # the SESSION_NEEDS_ATTENTION distress signal unconditionally and forever:
+    # "awaiting a subagent" was, by design, treated as definitionally healthy
+    # with no expiry, which is why a wedged fix-loop dispatch stayed invisible
+    # to an otherwise correctly-armed watchdog. Past this many minutes the
+    # suppression lifts and the distress signal fires with the discriminating
+    # `fix_loop_await_deadline_exceeded` paused_status.
+    #
+    # Signal-only, per ADR-0014: exceeding this deadline never dispositions a
+    # session, mutates the dev queue, or touches a worktree — it only stops
+    # suppressing an operator-facing signal.
+    #
+    # Practical effect is bounded by whichever liveness_first_bucket_by_stage /
+    # liveness_buckets_minutes threshold gates the STALE_45M crossing it is
+    # evaluated at: the deadline is only ever consulted for a session already
+    # in (or entering) the top staleness bucket. 30m sits comfortably under
+    # that 45m floor so the field has real effect out of the box.
+    fix_loop_await_deadline_minutes: int = 30
+    # #2012 — total window (seconds) `cw agent-spawn-verify` polls for a fresh
+    # subagent transcript before exiting 1. Operator-tunable rather than a code
+    # constant because this sits on the fix-loop dispatch path every client's
+    # auto-dev-review Step 3b runs through: host/load variance (cold model
+    # start, contended host, network-mounted worktree) can make a fixed window
+    # false-positive a healthy dispatch into `fix_loop_dispatch_unverified`.
+    # An affected client raises this without a code change — same rationale as
+    # busy_wait_guard_window_seconds above. `--poll-seconds` overrides it for a
+    # single invocation.
+    agent_spawn_verify_poll_seconds: int = 20
+    # Polling cadence (seconds) within the window above. `--poll-interval-
+    # seconds` overrides it for a single invocation.
+    agent_spawn_verify_poll_interval_seconds: int = 2
     # RFC 0008 W3 (#1002) — declarative operator-attention forward-set for the
     # cw-operator SSE channel bridge (cw.cw_operator_events). No coercion
     # validator (fail-loud, mirrors default_signoff's asymmetry with
