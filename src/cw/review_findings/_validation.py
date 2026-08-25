@@ -61,13 +61,19 @@ def _line_in_diff(diff: CapturedDiff, file: str, line: int) -> bool:
 
 
 def _substring_in_diff(diff: CapturedDiff, text: str) -> bool:
-    """Return True iff *text* appears verbatim anywhere in the diff text.
+    """Return True iff *text* appears anywhere in the diff text.
 
     Matches against the FULL diff text (context and removed lines included),
     not only ``+``-prefixed added lines — same rule for finding evidence and
-    escalation evidence quotes.
+    escalation evidence quotes. Both sides are normalized through
+    :func:`_normalize_diff_text`, identically to the primary finding-evidence
+    path, so an escalation quote is not stripped over a stray diff marker or a
+    Unicode dash standing in for its ASCII form (#1976). The ``-``/``+``
+    diff-pair rescue is deliberately NOT wired here: an
+    ``EscalationMetadata`` carries no line anchor for it to resolve a 1-line
+    declared range against.
     """
-    return text in diff.text
+    return _normalize_diff_text(text) in _normalize_diff_text(diff.text)
 
 
 def _file_in_repo_tree(worktree: Path, file: str) -> bool:
@@ -88,7 +94,7 @@ def _file_in_repo_tree(worktree: Path, file: str) -> bool:
     return candidate.is_relative_to(root) and candidate.is_file()
 
 
-def _normalize_diff_text(text: str) -> str:
+def _strip_diff_markers(text: str) -> str:
     """Strip one leading diff marker and surrounding whitespace per line.
 
     Lets an evidence-vs-diff substring comparison match regardless of which
@@ -105,6 +111,71 @@ def _normalize_diff_text(text: str) -> str:
         stripped_marker = raw_line[1:] if raw_line[:1] in ("+", "-") else raw_line
         normalized_lines.append(stripped_marker.strip())
     return "\n".join(normalized_lines)
+
+
+# Unicode punctuation an LLM reviewer routinely substitutes for its ASCII
+# equivalent when quoting a diff (#1976) — an em dash for ``--`` is the shape
+# that motivated the ticket. Keys are code points rather than literal
+# characters so this module stays pure-ASCII: ruff's RUF001 flags several of
+# these as ambiguous inside a string literal.
+# A `-`/`+` evidence pair is exactly two lines: the removed one and the added
+# one. Anything longer is a multi-line quote, not the single-rewritten-line
+# shape the rescue is scoped to (#1976).
+_EVIDENCE_PAIR_LINES: int = 2
+
+_UNICODE_PUNCTUATION: dict[int, str] = {
+    0x2014: "--",  # EM DASH
+    0x2013: "-",  # EN DASH
+    0x2018: "'",  # LEFT SINGLE QUOTATION MARK
+    0x2019: "'",  # RIGHT SINGLE QUOTATION MARK
+    0x201C: '"',  # LEFT DOUBLE QUOTATION MARK
+    0x201D: '"',  # RIGHT DOUBLE QUOTATION MARK
+    0x00A0: " ",  # NO-BREAK SPACE
+}
+
+
+def _normalize_unicode_punctuation(text: str) -> str:
+    """Fold the Unicode punctuation in *text* onto its ASCII equivalent.
+
+    Maps EM DASH to ``--``, EN DASH to ``-``, both curly single quotes to
+    ``'``, both curly double quotes to ``"``, and NO-BREAK SPACE to a plain
+    space. A reviewer quoting a diff through an LLM routinely emits the
+    typographic form where the source carries the ASCII one, which a raw
+    substring comparison reads as a content mismatch rather than the
+    formatting trivia it is (#1976). Nothing else is folded: this is a fixed,
+    enumerated table, not a general Unicode normalization pass.
+    """
+    return text.translate(_UNICODE_PUNCTUATION)
+
+
+def _normalize_diff_text(text: str) -> str:
+    """Normalize *text* for evidence-vs-diff substring comparison.
+
+    The single chokepoint every such comparison in this module routes both
+    sides through: :func:`_strip_diff_markers` first (#1715), then
+    :func:`_normalize_unicode_punctuation` (#1976). Strictly wider than the
+    marker strip alone — it never rejects a pair the marker strip would have
+    matched.
+    """
+    return _normalize_unicode_punctuation(_strip_diff_markers(text))
+
+
+def _evidence_diff_pair(text: str) -> tuple[str, str] | None:
+    """Return *text*'s ``(removed, added)`` halves iff it is a ``-``/``+`` pair.
+
+    A reviewer quoting a single rewritten line commonly quotes the diff's own
+    two-line before/after pair rather than the resulting source line (#1976).
+    Exactly two lines, the first ``-``-prefixed and the second ``+``-prefixed,
+    qualify; anything else (one line, three or more, both removed, reversed
+    order) returns ``None``.
+    """
+    lines = text.split("\n")
+    if len(lines) != _EVIDENCE_PAIR_LINES:
+        return None
+    removed, added = lines
+    if not removed.startswith("-") or not added.startswith("+"):
+        return None
+    return removed, added
 
 
 def _nearest_added_line(
@@ -393,6 +464,54 @@ def _reconcile_evidence_window(
     return best
 
 
+def _diff_pair_rescue(
+    diff: CapturedDiff,
+    file: str,
+    text: str,
+    line_start: int | None,
+    line_end: int | None,
+) -> bool:
+    """Rescue a ``-``/``+`` pair quoted against a 1-line declared range (#1976).
+
+    The windowed check in :func:`_evidence_in_claimed_lines` structurally
+    cannot match such a quote: a removed line has no new-file line number, so
+    its content is absent from both ``file_line_text`` and
+    ``file_window_text`` — ``file_diffs`` (raw per-file hunk text) is the only
+    substrate that retains it. Scoped deliberately narrowly: the declared
+    range must resolve to a single line (unset endpoint mirroring the other,
+    the same rule :func:`_resolve_line_window`/:func:`_resolve_hunk_window`
+    use) and the evidence must be pair-shaped, so a multi-line claim gets no
+    rescue.
+
+    #1714's false-accept floor is preserved: either half must appear verbatim
+    (after :func:`_normalize_diff_text`) in the file's own raw diff text, so
+    fabricated content stays rejected. No additional line-number bound is
+    applied to the match — that floor is about fabricated content, not
+    pinpoint locality.
+    """
+    raw_start = line_start if line_start is not None else line_end
+    raw_end = line_end if line_end is not None else line_start
+    if raw_start is None or raw_end is None or raw_start != raw_end:
+        return False
+    pair = _evidence_diff_pair(text)
+    if pair is None:
+        return False
+    removed, added = pair
+    haystack = _normalize_diff_text(diff.file_diffs.get(file, ""))
+    if (
+        _normalize_diff_text(removed) in haystack
+        or _normalize_diff_text(added) in haystack
+    ):
+        _log.info(
+            "auto-dev: rescued finding via diff-pair evidence match against "
+            "raw hunk text (file=%s, line=%d)",
+            file,
+            raw_start,
+        )
+        return True
+    return False
+
+
 def _evidence_in_claimed_lines(
     diff: CapturedDiff,
     file: str,
@@ -415,10 +534,12 @@ def _evidence_in_claimed_lines(
     itself is a few lines short/long of *text*'s own true span, against a
     widened window within ``_LINE_ANCHOR_TOLERANCE`` lines (#1792) — an
     endpoint that fails to resolve, or a widened search that finds no
-    matching window, makes the whole check fail. Both sides of every
-    substring comparison are routed through :func:`_normalize_diff_text` so a
-    stray ``+``/``-`` diff marker on either the evidence or the diff-derived
-    text cannot break an otherwise-genuine match (#1715).
+    matching window, falls through to :func:`_diff_pair_rescue` rather than
+    failing outright (#1976). Both sides of every substring comparison are
+    routed through :func:`_normalize_diff_text`, so neither a stray ``+``/``-``
+    diff marker (#1715) nor Unicode punctuation standing in for its ASCII
+    equivalent (#1976) on either the evidence or the diff-derived text can
+    break an otherwise-genuine match.
 
     A quote whose true origin is a REMOVED line — which has no new-file line
     number at all — is correctly rejected here (#1738: a context line, unlike
@@ -432,10 +553,12 @@ def _evidence_in_claimed_lines(
         )
     resolved = _resolve_hunk_window(diff, file, line_start, line_end)
     if resolved is None:
-        return False
+        return _diff_pair_rescue(diff, file, text, line_start, line_end)
     start, end = resolved
     window_text = diff.file_window_text.get(file, {})
-    return _reconcile_evidence_window(window_text, text, start, end) is not None
+    if _reconcile_evidence_window(window_text, text, start, end) is not None:
+        return True
+    return _diff_pair_rescue(diff, file, text, line_start, line_end)
 
 
 def _resolved_finding(diff: CapturedDiff, finding: Finding) -> Finding:
@@ -509,6 +632,43 @@ def _classify_unanchored_file(
     return "unknown_file"
 
 
+def _normalization_diagnosis(finding: Finding) -> str:
+    """Report which normalization/rescue stages ran before this rejection.
+
+    Appended to :func:`_evidence_window_discrepancy_detail`'s message so a
+    future false-reject is diagnosable straight from the sentinel, without
+    re-deriving the matcher's stages from the source (#1976). Pure function of
+    *finding*'s own declared range and evidence shape — the two booleans that
+    decide whether :func:`_diff_pair_rescue` could have run at all — so it
+    reports what was *attempted*, never why a given attempt failed.
+    """
+    if finding.line_start is None and finding.line_end is None:
+        return (
+            "; normalization applied: diff-marker stripping, unicode punctuation "
+            "normalization (em/en dash, curly quotes, NBSP); diff-pair rescue: not "
+            "applicable (file-level fallback has no line anchor for a diff-pair "
+            "rescue to resolve against)"
+        )
+    raw_start = (
+        finding.line_start if finding.line_start is not None else finding.line_end
+    )
+    raw_end = finding.line_end if finding.line_end is not None else finding.line_start
+    if raw_start == raw_end and _evidence_diff_pair(finding.evidence) is not None:
+        return (
+            "; normalization applied: diff-marker stripping, unicode punctuation "
+            "normalization (em/en dash, curly quotes, NBSP); diff-pair rescue: "
+            "attempted (evidence is a -/+ line pair against a 1-line declared range) "
+            "but no match in the file's raw diff text either"
+        )
+    return (
+        "; normalization applied: diff-marker stripping, unicode punctuation "
+        "normalization (em/en dash, curly quotes, NBSP); diff-pair rescue: not "
+        "attempted (evidence is not a -/+ line pair against a 1-line declared "
+        "range); only the marker-strip and unicode-punctuation normalization "
+        "above were applied"
+    )
+
+
 def _evidence_window_discrepancy_detail(finding: Finding) -> str:
     """Build a diagnosable ``RejectedFinding.detail`` for an
     ``evidence_not_in_diff`` rejection (#1792 AC4).
@@ -529,7 +689,7 @@ def _evidence_window_discrepancy_detail(finding: Finding) -> str:
         return (
             f"evidence is {evidence_lines} line(s); finding has no line "
             "anchor (file-level fallback) and the evidence text was not "
-            "found anywhere in the file's diff"
+            "found anywhere in the file's diff" + _normalization_diagnosis(finding)
         )
     declared_lines = (
         (finding.line_end or finding.line_start or 0)
@@ -541,6 +701,7 @@ def _evidence_window_discrepancy_detail(finding: Finding) -> str:
         f"line_start={finding.line_start}, line_end={finding.line_end} spans "
         f"{declared_lines} line(s); no window within ±{_LINE_ANCHOR_TOLERANCE} "
         "lines of the declared range contains the evidence text verbatim"
+        + _normalization_diagnosis(finding)
     )
 
 
