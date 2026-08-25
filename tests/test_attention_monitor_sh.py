@@ -55,7 +55,7 @@ def _extract_embedded_filter() -> str:
 def _run_filter(lines: list[dict[str, object]]) -> list[str]:
     code = _extract_embedded_filter()
     stdin = "\n".join(json.dumps(line) for line in lines) + "\n"
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(
         [sys.executable, "-c", code],
         input=stdin,
         capture_output=True,
@@ -90,7 +90,7 @@ def _liveness_event(
 
 
 def test_shell_syntax_valid() -> None:
-    result = subprocess.run(  # noqa: S603, S607
+    result = subprocess.run(
         ["bash", "-n", str(ATTENTION_MONITOR_SH)],
         capture_output=True,
         text=True,
@@ -217,7 +217,7 @@ def test_liveness_distinct_sessions_not_cross_suppressed() -> None:
 
 
 def test_needs_attention_rendering_unchanged() -> None:
-    event = {
+    event: dict[str, object] = {
         "type": "session.needs_attention",
         "payload": {
             "ticket_id": "T-999",
@@ -238,7 +238,7 @@ def test_needs_attention_rendering_unchanged() -> None:
 
 
 def test_unknown_type_passthrough_unaffected() -> None:
-    event = {
+    event: dict[str, object] = {
         "type": "operator.escalation",
         "payload": {
             "ticket_id": "T-77",
