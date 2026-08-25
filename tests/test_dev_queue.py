@@ -34,6 +34,7 @@ from cw.dev_queue import (
     resolve_client,
     save_dev_queue,
     save_plan,
+    select_clearable_tickets,
     select_prunable_tickets,
     transition_task_status,
     wait_for_terminal,
@@ -2005,6 +2006,8 @@ class TestRemoveTicket:
 
 class TestClearTickets:
     def test_clears_all_for_client_without_status(self, tmp_dev_queue: Path) -> None:
+        """With no status, occupied-lane rows are excluded by default (#2003)
+        -- only the PENDING row for the client is eligible here."""
         tasks = [
             TicketTask(ticket_id="TKT-A", client="genhealth"),
             TicketTask(ticket_id="TKT-B", client="genhealth"),
@@ -2040,15 +2043,17 @@ class TestClearTickets:
         assert "TKT-R" in ticket_ids
         assert "TKT-C" in ticket_ids
 
-    def test_returns_count_removed(self, tmp_dev_queue: Path) -> None:
+    def test_returns_removed_tasks_not_count(self, tmp_dev_queue: Path) -> None:
         tasks = [
             TicketTask(ticket_id="TKT-1", client="genhealth"),
             TicketTask(ticket_id="TKT-2", client="genhealth"),
             TicketTask(ticket_id="TKT-3", client="other"),
         ]
         save_dev_queue(DevQueueStore(tasks=tasks))
-        count = clear_tickets("genhealth")
-        assert count == 2
+        removed = clear_tickets("genhealth")
+        assert isinstance(removed, list)
+        assert all(isinstance(t, TicketTask) for t in removed)
+        assert len(removed) == 2
 
     def test_emits_task_deleted_operator_clear_per_task(
         self,
@@ -2097,6 +2102,161 @@ class TestClearTickets:
         assert payload["ticket_id"] == "TKT-SP"
         assert payload["status_at_deletion"] == QueueItemStatus.PENDING
         assert payload["reason"] == "operator_clear"
+
+    def test_default_clear_excludes_occupied_lane_statuses(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """No --status: every OCCUPIED_LANE_STATUSES row is excluded from the
+        sweep, regardless of age -- only PENDING is removed (#2003)."""
+        tasks = [
+            TicketTask(ticket_id=f"TKT-{status.value}", client="genhealth", status=status)
+            for status in sorted(OCCUPIED_LANE_STATUSES)
+        ]
+        pending = TicketTask(
+            ticket_id="TKT-pending", client="genhealth", status=QueueItemStatus.PENDING
+        )
+        save_dev_queue(DevQueueStore(tasks=[*tasks, pending]))
+
+        removed = clear_tickets("genhealth")
+
+        assert [t.ticket_id for t in removed] == ["TKT-pending"]
+        remaining_ids = {t.ticket_id for t in load_dev_queue().tasks}
+        assert remaining_ids == {t.ticket_id for t in tasks}
+
+    def test_explicit_status_running_clears_running_rows(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """Naming RUNNING explicitly via --status targets it for deletion
+        instead of skipping it (#2003)."""
+        running = TicketTask(
+            ticket_id="TKT-run", client="genhealth", status=QueueItemStatus.RUNNING
+        )
+        pending = TicketTask(
+            ticket_id="TKT-pend", client="genhealth", status=QueueItemStatus.PENDING
+        )
+        save_dev_queue(DevQueueStore(tasks=[running, pending]))
+
+        removed = clear_tickets("genhealth", status=QueueItemStatus.RUNNING)
+
+        assert [t.ticket_id for t in removed] == ["TKT-run"]
+        assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-pend"]
+
+    def test_explicit_status_blocked_on_user_clears_it(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        blocked = TicketTask(
+            ticket_id="TKT-blocked",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        save_dev_queue(DevQueueStore(tasks=[blocked]))
+
+        removed = clear_tickets("genhealth", status=QueueItemStatus.BLOCKED_ON_USER)
+
+        assert [t.ticket_id for t in removed] == ["TKT-blocked"]
+        assert load_dev_queue().tasks == []
+
+    def test_explicit_status_awaiting_operator_signoff_clears_it(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        signoff = TicketTask(
+            ticket_id="TKT-signoff",
+            client="genhealth",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[signoff]))
+
+        removed = clear_tickets(
+            "genhealth", status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        )
+
+        assert [t.ticket_id for t in removed] == ["TKT-signoff"]
+        assert load_dev_queue().tasks == []
+
+    def test_clear_tickets_derives_candidates_exactly_once(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """clear_tickets must not re-derive the candidate set after computing
+        it once under ``_lock()`` -- mirrors
+        test_prune_tickets_derives_candidates_exactly_once (#2003)."""
+        from cw.dev_queue import crud
+
+        real = crud._select_clear_candidates
+        calls: list[int] = []
+
+        def _spy(
+            store: DevQueueStore,
+            client: str,
+            status: QueueItemStatus | None,
+        ) -> list[TicketTask]:
+            calls.append(1)
+            return real(store, client, status)
+
+        monkeypatch.setattr(crud, "_select_clear_candidates", _spy)
+        save_dev_queue(DevQueueStore(tasks=[TicketTask(ticket_id="TKT-ONCE", client="genhealth")]))
+
+        clear_tickets("genhealth")
+
+        assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestSelectClearableTickets
+# ---------------------------------------------------------------------------
+
+
+class TestSelectClearableTickets:
+    """Tests for select_clearable_tickets() (GitHub #2003)."""
+
+    def test_preview_does_not_mutate(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            TicketTask(ticket_id="TKT-A", client="genhealth"),
+            TicketTask(ticket_id="TKT-B", client="genhealth"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+
+        selected = select_clearable_tickets("genhealth")
+
+        assert {t.ticket_id for t in selected} == {"TKT-A", "TKT-B"}
+        assert {t.ticket_id for t in load_dev_queue().tasks} == {"TKT-A", "TKT-B"}
+
+    def test_preview_same_filter_as_clear(self, tmp_dev_queue: Path) -> None:
+        """select_clearable_tickets and clear_tickets agree on the candidate
+        set, including the default occupied-lane exclusion and the
+        explicit-naming override."""
+        tasks = [
+            TicketTask(ticket_id="TKT-PEND", client="genhealth"),
+            TicketTask(
+                ticket_id="TKT-RUN", client="genhealth", status=QueueItemStatus.RUNNING
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+
+        previewed = select_clearable_tickets("genhealth")
+        removed = clear_tickets("genhealth")
+        assert {t.ticket_id for t in previewed} == {t.ticket_id for t in removed}
+        assert {t.ticket_id for t in previewed} == {"TKT-PEND"}
+
+        # Explicit-naming override agrees too.
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="TKT-RUN2",
+                        client="genhealth",
+                        status=QueueItemStatus.RUNNING,
+                    )
+                ]
+            )
+        )
+        previewed_running = select_clearable_tickets(
+            "genhealth", status=QueueItemStatus.RUNNING
+        )
+        removed_running = clear_tickets("genhealth", status=QueueItemStatus.RUNNING)
+        assert {t.ticket_id for t in previewed_running} == {
+            t.ticket_id for t in removed_running
+        }
+        assert {t.ticket_id for t in previewed_running} == {"TKT-RUN2"}
 
 
 # ---------------------------------------------------------------------------
@@ -2514,6 +2674,8 @@ class TestCLIDevQueueRemove:
 
 class TestCLIDevQueueClear:
     def test_clear_all_for_client(self, tmp_dev_queue: Path) -> None:
+        """No occupied-lane rows here, so --confirm with no --status clears
+        both PENDING rows for the client."""
         tasks = [
             TicketTask(ticket_id="CLI-A", client="genhealth"),
             TicketTask(ticket_id="CLI-B", client="genhealth"),
@@ -2521,7 +2683,9 @@ class TestCLIDevQueueClear:
         ]
         save_dev_queue(DevQueueStore(tasks=tasks))
         runner = CliRunner()
-        result = runner.invoke(main, ["dev-queue", "clear", "--client", "genhealth"])
+        result = runner.invoke(
+            main, ["dev-queue", "clear", "--client", "genhealth", "--confirm"]
+        )
         assert result.exit_code == 0, result.output
         assert "Cleared 2" in result.output
         store = load_dev_queue()
@@ -2548,6 +2712,7 @@ class TestCLIDevQueueClear:
                 "genhealth",
                 "--status",
                 "pending",
+                "--confirm",
             ],
         )
         assert result.exit_code == 0, result.output
@@ -2573,6 +2738,196 @@ class TestCLIDevQueueClear:
         )
         assert result.exit_code != 0
         assert "Invalid value" in result.output or "invalid choice" in result.output
+
+    def test_default_invocation_previews_only(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[TicketTask(ticket_id="CLI-DEF", client="genhealth")]))
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["dev-queue", "clear", "--client", "genhealth"])
+
+        assert result.exit_code == 0, result.output
+        assert "CLI-DEF" in result.output
+        assert "would be cleared" in result.output
+        assert "--confirm" in result.output
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_dry_run_flag_previews_only(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[TicketTask(ticket_id="CLI-DR", client="genhealth")]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main, ["dev-queue", "clear", "--client", "genhealth", "--dry-run"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "dry-run" in result.output
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_dry_run_and_confirm_together_previews_only(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        save_dev_queue(DevQueueStore(tasks=[TicketTask(ticket_id="CLI-DRC", client="genhealth")]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "clear",
+                "--client",
+                "genhealth",
+                "--dry-run",
+                "--confirm",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "dry-run" in result.output
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_confirm_actually_clears_default_excludes_occupied_lane(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        tasks = [
+            TicketTask(ticket_id="CLI-PEND", client="genhealth"),
+            TicketTask(
+                ticket_id="CLI-RUN", client="genhealth", status=QueueItemStatus.RUNNING
+            ),
+            TicketTask(
+                ticket_id="CLI-BLK",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main, ["dev-queue", "clear", "--client", "genhealth", "--confirm"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Cleared 1" in result.output
+        remaining_ids = {t.ticket_id for t in load_dev_queue().tasks}
+        assert remaining_ids == {"CLI-RUN", "CLI-BLK"}
+
+    def test_confirm_with_explicit_status_running_clears_it(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        tasks = [
+            TicketTask(
+                ticket_id="CLI-RUN2", client="genhealth", status=QueueItemStatus.RUNNING
+            ),
+            TicketTask(ticket_id="CLI-PEND2", client="genhealth"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "clear",
+                "--client",
+                "genhealth",
+                "--status",
+                "running",
+                "--confirm",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Cleared 1" in result.output
+        remaining_ids = {t.ticket_id for t in load_dev_queue().tasks}
+        assert remaining_ids == {"CLI-PEND2"}
+
+    def test_confirm_with_explicit_status_blocked_on_user_clears_it(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        tasks = [
+            TicketTask(
+                ticket_id="CLI-BLK2",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "clear",
+                "--client",
+                "genhealth",
+                "--status",
+                "blocked_on_user",
+                "--confirm",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Cleared 1" in result.output
+        assert load_dev_queue().tasks == []
+
+    def test_nothing_to_clear_message(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["dev-queue", "clear", "--client", "genhealth"])
+
+        assert result.exit_code == 0, result.output
+        assert "Nothing to clear." in result.output
+        assert load_dev_queue().tasks == []
+
+    def test_confirm_flag_never_calls_select_clearable_tickets(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The --confirm branch performs exactly one library call
+        (clear_tickets), never a preceding unlocked preview -- mirrors
+        test_confirm_flag_never_calls_select_prunable_tickets (#2003)."""
+
+        def _boom(*_args: object, **_kwargs: object) -> list[TicketTask]:
+            msg = "select_clearable_tickets must not run on the --confirm path"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.cli.dev_queue.crud.select_clearable_tickets", _boom)
+        save_dev_queue(DevQueueStore(tasks=[TicketTask(ticket_id="CLI-ONE", client="genhealth")]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main, ["dev-queue", "clear", "--client", "genhealth", "--confirm"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert load_dev_queue().tasks == []
+
+    def test_help_text_states_destructive_and_no_confirm_by_default(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["dev-queue", "clear", "--help"])
+
+        assert result.exit_code == 0, result.output
+        assert "destructive" in result.output
+        assert "previews by default" in result.output
+        assert "--confirm" in result.output
+        assert "RUNNING" in result.output
+        assert "BLOCKED_ON_USER" in result.output
+
+    def test_status_option_help_warns_on_running_and_blocked_on_user(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["dev-queue", "clear", "--help"])
+
+        assert result.exit_code == 0, result.output
+        assert "RUNNING" in result.output
+        assert "BLOCKED_ON_USER" in result.output
+        assert "AWAITING_OPERATOR_SIGNOFF" in result.output
 
 
 # ---------------------------------------------------------------------------
