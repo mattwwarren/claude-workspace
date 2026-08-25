@@ -1107,6 +1107,85 @@ class TestValidateReviewerDocument:
         assert not accepted
         assert rejected[0].reason == "invalid_line_reference"
 
+    def test_sub_must_fix_rejection_logs_info_with_reviewer_severity_reason_title(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # #2000: below MUST_FIX, a mechanical rejection used to leave no trace
+        # at all -- not in the log, not on the verdict, not in the comment. The
+        # counter is only half the fix; the operator reading the session log
+        # must be able to see WHICH finding was deleted and why.
+        f = _make_finding(
+            severity="SHOULD_FIX",
+            evidence="not present anywhere",
+            summary="silently dropped finding",
+        )
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            _accepted, rejected, _stripped = validate_reviewer_document(
+                _make_reviewer_doc(f, reviewer_role="Code Quality Reviewer"),
+                _make_diff(),
+            )
+        assert rejected[0].reason == "evidence_not_in_diff"
+        assert any(
+            "mechanically rejected finding" in rec.getMessage()
+            and "Code Quality Reviewer" in rec.getMessage()
+            and "SHOULD_FIX" in rec.getMessage()
+            and "evidence_not_in_diff" in rec.getMessage()
+            and "silently dropped finding" in rec.getMessage()
+            for rec in caplog.records
+        )
+
+    @pytest.mark.parametrize("severity", ["DEBT", "NIT", "PRINCIPLE"])
+    def test_every_sub_must_fix_severity_rejection_logs_info(
+        self, severity: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # #2000: the log line is keyed on the rejection itself, not on a
+        # severity floor -- every severity below MUST_FIX is announced too.
+        f = _make_finding(severity=severity, file="src/cw/other.py")
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            _accepted, rejected, _stripped = validate_reviewer_document(
+                _make_reviewer_doc(f), _make_diff()
+            )
+        assert rejected[0].reason == "unknown_file"
+        assert any(
+            "mechanically rejected finding" in rec.getMessage()
+            and severity in rec.getMessage()
+            and "unknown_file" in rec.getMessage()
+            for rec in caplog.records
+        )
+
+    def test_invalid_line_reference_rejection_logs_its_reason(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # #2000: the third mechanical-rejection reason reaches the same log.
+        f = _make_finding(severity="NIT", line_start=999, line_end=999)
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            _accepted, rejected, _stripped = validate_reviewer_document(
+                _make_reviewer_doc(f), _make_diff()
+            )
+        assert rejected[0].reason == "invalid_line_reference"
+        assert any(
+            "mechanically rejected finding" in rec.getMessage()
+            and "invalid_line_reference" in rec.getMessage()
+            for rec in caplog.records
+        )
+
+    def test_must_fix_rejection_still_logs(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # #2000 regression: the new log is on the shared append site, so the
+        # (already-visible via #1714) MUST_FIX case is announced as well.
+        f = _make_finding(severity="MUST_FIX", file="src/cw/other.py")
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            _accepted, rejected, _stripped = validate_reviewer_document(
+                _make_reviewer_doc(f), _make_diff()
+            )
+        assert rejected[0].reason == "unknown_file"
+        assert any(
+            "mechanically rejected finding" in rec.getMessage()
+            and "MUST_FIX" in rec.getMessage()
+            for rec in caplog.records
+        )
+
     def test_file_level_finding_skips_line_check(self) -> None:
         f = _make_finding(line_start=None, line_end=None)
         accepted, rejected, _ = validate_reviewer_document(
@@ -2608,6 +2687,32 @@ class TestDeriveReviewCounts:
         assert review.fix_cycles_used == 2
         assert review.agents_run == 3
 
+    def test_derive_review_counts_threads_rejected_count_and_by_severity(self) -> None:
+        # #2000 (A4): the two new parameters are pass-throughs on the same
+        # footing as agents_run -- pre-computed by consolidate_verdict, carried
+        # onto the Review that becomes AUTO_DEV_RESULT.review.
+        review = derive_review_counts(
+            [],
+            rejected_count=3,
+            rejected_count_by_severity={"SHOULD_FIX": 2, "NIT": 1},
+        )
+        assert review.rejected_count == 3
+        assert review.rejected_count_by_severity == {"SHOULD_FIX": 2, "NIT": 1}
+
+    def test_derive_review_counts_rejected_count_defaults_to_zero_when_omitted(
+        self,
+    ) -> None:
+        # #2000: every pre-existing no-kwarg call site keeps working unchanged.
+        review = derive_review_counts(
+            [
+                AcceptedFinding(
+                    finding=_make_finding(severity="MUST_FIX"), reviewers=["a"]
+                )
+            ]
+        )
+        assert review.rejected_count == 0
+        assert review.rejected_count_by_severity == {}
+
     def test_must_fix_deferred_counts_as_deferred(self) -> None:
         findings = [
             AcceptedFinding(
@@ -2742,6 +2847,64 @@ class TestConsolidateVerdict:
         verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
         assert verdict.rejected[0].reason == "unknown_file"
         assert verdict.rejected_must_fix == []
+
+    def test_rejected_count_totals_across_all_severities(self) -> None:
+        # #2000: the all-severity tally, across every reviewer document -- the
+        # number that makes "PROCEED manufactured by deletion" impossible.
+        doc_a = _make_reviewer_doc(
+            _make_finding(severity="SHOULD_FIX", file="src/cw/other.py"),
+            _make_finding(severity="NIT"),
+            reviewer_role="Reviewer A",
+        )
+        doc_b = _make_reviewer_doc(
+            _make_finding(severity="NIT", file="src/cw/other.py"),
+            reviewer_role="Reviewer B",
+        )
+        verdict = consolidate_verdict([doc_a, doc_b], _make_diff(), reviewed_sha="sha")
+        assert verdict.rejected_count == 2
+        assert verdict.rejected_count_by_severity == {"SHOULD_FIX": 1, "NIT": 1}
+        assert verdict.rejected_must_fix == []
+
+    def test_rejected_count_includes_must_fix_rejections_too(self) -> None:
+        # #2000: additive, not a replacement -- a MUST_FIX rejection feeds the
+        # new counters AND keeps populating the #1714 signal unchanged.
+        doc = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX", file="src/cw/other.py"),
+            _make_finding(severity="SHOULD_FIX", file="src/cw/other.py"),
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.rejected_count == 2
+        assert verdict.rejected_count_by_severity == {"MUST_FIX": 1, "SHOULD_FIX": 1}
+        assert len(verdict.rejected_must_fix) == 1
+        assert verdict.rejected_must_fix[0].raw["severity"] == "MUST_FIX"
+
+    def test_zero_rejections_defaults_rejected_count_to_zero(self) -> None:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        assert verdict.rejected_count == 0
+        assert verdict.rejected_count_by_severity == {}
+        assert verdict.review.rejected_count == 0
+        assert verdict.review.rejected_count_by_severity == {}
+
+    def test_consolidate_verdict_review_rejected_count_matches_top_level(self) -> None:
+        # #2000 (A4): computed once, threaded into both the ReviewVerdict and
+        # the nested Review that becomes AUTO_DEV_RESULT.review -- identical by
+        # construction, not by convention.
+        doc = _make_reviewer_doc(
+            _make_finding(severity="SHOULD_FIX", file="src/cw/other.py"),
+            _make_finding(severity="NIT"),
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.rejected_count == 1
+        assert verdict.review.rejected_count == verdict.rejected_count
+        assert verdict.rejected_count_by_severity == {"SHOULD_FIX": 1}
+        assert (
+            verdict.review.rejected_count_by_severity
+            == verdict.rejected_count_by_severity
+        )
 
     def test_rejected_must_fix_keyed_on_category_not_enumerated_reason(self) -> None:
         # #1714 AC#3: the selection is keyed on the finding's SEVERITY, never on
