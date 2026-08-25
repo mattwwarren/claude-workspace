@@ -437,7 +437,9 @@ def select_clearable_tickets(
     return _select_clear_candidates(store, client, status)
 
 
-def clear_tickets(client: str, status: QueueItemStatus | None = None) -> list[TicketTask]:
+def clear_tickets(
+    client: str, status: QueueItemStatus | None = None
+) -> list[TicketTask]:
     """Remove TicketTasks for *client*, optionally filtered by *status* (#2003).
 
     With no *status*, ``OCCUPIED_LANE_STATUSES`` (RUNNING, BLOCKED_ON_USER,
