@@ -339,6 +339,19 @@ then produces no further output. No attention event fires, because nothing
 failed in a way the pipeline can name. On a status table it is indistinguishable
 from a healthy worker doing slow work.
 
+One case deserves naming, because it is the one most likely to cost you hours:
+**a session waiting on a subagent will not page you at all, at any age.**
+`session_unresponsive` fires only when there is no terminal sentinel *and* no
+pending subagent spawn at the transcript tail (see
+[`events.md`](events.md)) — so an outstanding spawn suppresses the distress
+signal outright rather than for a bounded window. A fix-loop or review agent
+that is dispatched and never reports back therefore leaves its parent silent and
+unflagged indefinitely, with the queue row still reading `RUNNING`.
+
+That suppression is deliberate: a parent legitimately goes quiet while a
+subagent works, and paging on it would be noise. The gap is that it has no upper
+bound. Until it does, `peek` is the only thing that will show you.
+
 The **positive** check is `cw queue peek`:
 
 ```bash
@@ -358,10 +371,13 @@ Run it at checkpoints — after a gate, after a merge, before reporting that a
 wave is healthy — not on a timer. Event-driven monitoring covers the named
 failures; peek covers the unnamed one.
 
-This checkpoint discipline is a stopgap: `cw` already emits
-`session.liveness_changed` with staleness buckets, but no attention monitor
-subscribes to it yet (#2004). Once that lands, a stalled worker pages you and
-this becomes a confirmation step rather than the only line of defense.
+This has landed (#2004): the attention monitor (`scripts/attention_monitor.sh`,
+see the `orchestrate-sprint` skill's Phase 4) now subscribes to
+`session.liveness_changed`, filtered to `stale_30m`/`stale_45m`, so a stalled
+worker pages you once the reconcile liveness sweep crosses one of those
+bucket boundaries. `cw queue peek` remains valuable as a **confirmation**
+step — and it still covers the narrower residual window before the first
+`stale_30m` crossing — but it is no longer the only line of defense.
 
 > **Do not hand-roll a liveness check.** `peek` already computes `idle_m`
 > correctly from parsed transcript records. Substitutes based on file mtimes
@@ -590,6 +606,35 @@ This is unrelated to `cw event prune`, which trims the event log itself.
 Run `/harden-ticket` on a ticket before the first dispatch to surface
 ambiguities and unsound premises upfront. This eliminates the
 ambiguity/plan-review whack-a-mole loop that burns dispatch cycles.
+
+#### Resolutions are binding only with the marker
+
+The plan stage does not recognise resolutions by their heading. It greps the
+**live-fetched** ticket comments and body for the literal string
+`<!-- auto-dev-preflight-resolutions -->`, and only a source carrying that
+marker is injected into the plan agent's prompt as a `## Binding Pre-flight
+Resolutions` list of constraints. `/harden-ticket` appends the marker
+automatically.
+
+**A hand-written resolutions comment without the marker is advisory, not
+binding — and nothing reports that.** The comment still reads as authoritative
+to a human, and plan agents frequently comply anyway on their own judgment,
+which is what makes the omission so hard to notice. Ordinary tickets often
+converge fastest by dispatching first and answering the consolidated park, so
+the hand-written path is common — append the marker when you use it.
+
+Two consequences worth knowing:
+
+- **Exactly one marker-bearing source per ticket.** Two trip a multi-marker
+  gate. When re-resolving on a later round, post one consolidated comment
+  restating every prior resolution plus the new ones, and leave the earlier
+  unmarked comments as history. A marker-bearing body section is authoritative
+  when both channels carry it.
+- **"Missing `## Pre-flight Resolution Conformance` section" is a false
+  positive when no marker exists.** The plan is explicitly instructed to *omit*
+  that section when nothing was injected, so a reviewer flagging its absence is
+  applying a rule that does not apply. Check for a marker-bearing source before
+  acting on that finding — the reviewer cannot see whether injection happened.
 
 ### Settle a review finding for good (#1838)
 

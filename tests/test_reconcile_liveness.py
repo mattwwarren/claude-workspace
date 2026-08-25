@@ -7,6 +7,7 @@ and stage resolution via TicketTask (not Session.stage).
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
     CwState,
     LivenessBucket,
     OrchestratorConfig,
@@ -22,6 +24,10 @@ from cw.models import (
     SessionStatus,
     Stage,
     TicketTask,
+)
+from cw.reconcile._shared import (
+    _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON,
+    _SESSION_UNRESPONSIVE_REASON,
 )
 from cw.reconcile.liveness import (
     _classify_liveness_bucket,
@@ -427,3 +433,166 @@ def test_liveness_bucket_reflects_widened_transcript(
     assert len(candidates) == 1
     assert candidates[0].old_bucket == LivenessBucket.STALE_45M
     assert candidates[0].new_bucket == LivenessBucket.LIVE
+
+
+# ---------------------------------------------------------------------------
+# Deadline-bounded distress suppression (#2012)
+#
+# Before #2012 an outstanding agent_spawn_stamp suppressed the distress signal
+# unconditionally and forever: "awaiting a subagent" was, by design, treated as
+# definitionally healthy with no age bound at all. These tests pin the bound.
+# ---------------------------------------------------------------------------
+
+
+def _write_spawn_stamp(
+    worktree: Path, *, unresolved_count: int, stamped_at: datetime | None
+) -> None:
+    """Write an ``agent_spawn_stamp`` into *worktree*'s cw-context.json.
+
+    Mirrors ``TestReadUnresolvedSubagentSpawn._write_context``'s shape in
+    ``tests/test_reconcile_shared_sentinels.py`` — the same on-disk payload
+    ``cw agent-spawn-pre`` produces, written directly so the stamp age is
+    controllable relative to the frozen ``_NOW``.
+    """
+    (worktree / ".claude").mkdir(parents=True, exist_ok=True)
+    payload = {
+        "agent_spawn_stamp": {
+            "unresolved_count": unresolved_count,
+            "last_stamped_at": stamped_at.isoformat() if stamped_at else None,
+        }
+    }
+    (worktree / HOOK_CONTEXT_RELATIVE_PATH).write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def _attention_events() -> list[dict[str, object]]:
+    from cw.events import read_events
+
+    return [
+        dict(e.payload)
+        for e in read_events(
+            consumer="test-liveness-deadline",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+    ]
+
+
+def test_spawn_within_deadline_still_suppresses_distress(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """Regression guard: a fresh outstanding spawn keeps today's suppression.
+
+    The bound is a bound, not a removal — a session genuinely awaiting a
+    subagent it dispatched 5 minutes ago must not page the operator.
+    """
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=60)
+    _write_spawn_stamp(
+        worktree, unresolved_count=1, stamped_at=_NOW - timedelta(minutes=5)
+    )
+    state = CwState(sessions=[sess])
+    task = TicketTask(ticket_id="T-1", client="client-a", stage=Stage.PLAN)
+    config = OrchestratorConfig(fix_loop_await_deadline_minutes=30)
+
+    candidates = record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"T-1": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].new_bucket == LivenessBucket.STALE_45M
+    assert candidates[0].distress is False
+    assert _attention_events() == []
+
+
+def test_spawn_past_deadline_fires_named_attention_signal(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """The literal #2012 requirement: the deadline fires and names what failed.
+
+    An unresolved subagent spawn older than ``fix_loop_await_deadline_minutes``
+    no longer suppresses distress; the SESSION_NEEDS_ATTENTION it emits carries
+    the discriminating ``fix_loop_await_deadline_exceeded`` paused_status
+    (not generic ``session_unresponsive``) and a breadcrumb naming both the
+    elapsed minutes and the deadline.
+    """
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=60)
+    _write_spawn_stamp(
+        worktree, unresolved_count=1, stamped_at=_NOW - timedelta(minutes=55)
+    )
+    state = CwState(sessions=[sess])
+    task = TicketTask(ticket_id="T-1", client="client-a", stage=Stage.PLAN)
+    config = OrchestratorConfig(fix_loop_await_deadline_minutes=30)
+
+    candidates = record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"T-1": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].distress is True
+    assert candidates[0].spawn_deadline_minutes == 30
+    events = _attention_events()
+    assert len(events) == 1
+    assert events[0]["paused_status"] == _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON
+    breadcrumbs = str(events[0]["breadcrumbs"])
+    assert "55m" in breadcrumbs
+    assert "30m" in breadcrumbs
+    assert "subagent" in breadcrumbs
+
+
+def test_no_spawn_stamp_keeps_generic_unresponsive_reason(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A stale session with no outstanding spawn keeps the pre-#2012 reason."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=60)
+    state = CwState(sessions=[sess])
+    task = TicketTask(ticket_id="T-1", client="client-a", stage=Stage.PLAN)
+
+    record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": task},
+    )
+
+    events = _attention_events()
+    assert len(events) == 1
+    assert events[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
+
+
+def test_terminal_sentinel_still_suppresses_past_deadline(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """Sentinel precedence is preserved: a completed session never pages."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    sess.last_result = {"status": "shipped"}
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=60)
+    _write_spawn_stamp(
+        worktree, unresolved_count=1, stamped_at=_NOW - timedelta(minutes=55)
+    )
+    state = CwState(sessions=[sess])
+    task = TicketTask(ticket_id="T-1", client="client-a", stage=Stage.PLAN)
+    config = OrchestratorConfig(fix_loop_await_deadline_minutes=30)
+
+    candidates = record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"T-1": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].distress is False
+    assert _attention_events() == []

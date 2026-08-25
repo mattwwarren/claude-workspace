@@ -659,6 +659,17 @@ open enum; consumers MUST tolerate unknown values. Known values:
   tail. Edge-triggered per bucket crossing, fires a push notification, and
   mutates nothing — the session keeps running; the operator decides.
   `breadcrumbs` carries stale minutes, stage, and elapsed seconds.
+- `"fix_loop_await_deadline_exceeded"` — the same liveness-sweep distress
+  path, for the case its sibling above excludes: the session's quietness IS
+  explained by an outstanding subagent spawn, but that spawn has been
+  unresolved longer than `fix_loop_await_deadline_minutes` (default 30).
+  Before #2012 an outstanding spawn suppressed the signal unconditionally and
+  forever; the suppression is now age-bounded, and this value is what
+  distinguishes "a dispatch that produced no subagent" from a session that
+  simply went quiet. Signal-only exactly as `session_unresponsive` is — the
+  deadline stops suppressing a signal, it never dispositions anything
+  (ADR-0014). `breadcrumbs` carries stale minutes, stage, elapsed seconds, how
+  long the spawn has been unresolved, and the deadline it blew.
 - `"silently_idle"` — *historical (ADR-0014)*: the idle watchdog's park.
   No longer produced; may exist on old rows/logs.
 - `"needs_salvage"` — *historical (ADR-0014)*: the git-state salvage LOW

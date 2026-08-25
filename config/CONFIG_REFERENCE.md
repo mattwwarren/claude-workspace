@@ -579,6 +579,30 @@ liveness_first_bucket_by_stage:
 # only alert a saturated session ever gets, even if it stays flat for hours.
 liveness_attention_renotify_interval_minutes: 60
 
+# Age bound (minutes) on the liveness sweep's subagent-await suppression
+# (#2012). An outstanding `agent_spawn_stamp` in a worktree normally suppresses
+# the distress signal above — the session is legitimately awaiting a subagent
+# it dispatched. Before this knob that suppression had no expiry at all, so a
+# session whose async dispatch silently never launched looked healthy forever.
+# Past this many minutes the suppression lifts and session.needs_attention
+# fires with paused_status `fix_loop_await_deadline_exceeded`. Signal-only: the
+# deadline stops suppressing a signal, it never dispositions anything
+# (ADR-0014). Only consulted for sessions already at the top staleness bucket,
+# so values above liveness_buckets_minutes[2] have no additional effect.
+fix_loop_await_deadline_minutes: 30
+
+# `cw agent-spawn-verify` poll window and cadence, in seconds (#2012). The
+# auto-dev review stage runs that command in the same turn as its async
+# fix-agent spawn to prove a subagent transcript actually appeared; exit 1
+# blocks the stage with `fix_loop_dispatch_unverified` rather than letting it
+# await a notification that will never arrive. Raise the window if healthy
+# dispatches on this host trip that blocker — cold model starts, a contended
+# host, or a network-mounted worktree can all push first-transcript latency
+# past the default. `--poll-seconds` / `--poll-interval-seconds` override these
+# for a single invocation.
+agent_spawn_verify_poll_seconds: 20
+agent_spawn_verify_poll_interval_seconds: 2
+
 # session.needs_attention escalation latch: consecutive per-client
 # freshness-gate blocks (RFC 0007 W2) at which a needs_attention event fires
 # exactly once.
