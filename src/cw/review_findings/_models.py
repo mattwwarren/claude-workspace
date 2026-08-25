@@ -485,6 +485,30 @@ class ReviewVerdict(BaseModel):
     can tell whether its ``rejected_must_fix`` is the one backing the reported
     ``Blocker.details`` (#1729).
 
+    ``rejected_count``/``rejected_count_by_severity`` (#2000) are the
+    all-severity tally of ``rejected`` — a SUPERSET of ``rejected_must_fix``,
+    never a replacement for it. Below MUST_FIX, a mechanically-rejected
+    finding used to leave no trace anywhere: #1714 gave the MUST_FIX case a
+    signal and a force-block, but a SHOULD_FIX/DEBT/NIT/PRINCIPLE rejection
+    was deleted silently, so a review that had thrown findings away rendered
+    and reported byte-identically to one that genuinely found nothing. These
+    two counters are what make that difference visible. Purely recorded here,
+    same convention as ``unmatched_adjudication_count`` below: nothing in this
+    module reads them back, and (round-1 operator resolution) they
+    deliberately do NOT feed ``Health.recommendation`` — counting and
+    rendering satisfy "impossible to ship silently" without folding a matcher
+    miss into a gate that today means "coverage degraded".
+
+    ``downgraded_disposition_count`` (#2000) is the sibling counter for the
+    OTHER deletion path, written solely by
+    :func:`cw.review_adjudication.verify_fixed_dispositions`: the number of
+    ``"fixed"`` dispositions that call downgraded to ``"dropped"`` because the
+    fix-cycle diff never touched the cited location. Distinct from
+    ``rejected_count`` on purpose — a downgrade is a disposition change on an
+    already-ACCEPTED finding, not a validation-time rejection that never
+    entered ``accepted``. Computed fresh from each call's own downgrades, so
+    it describes that pass rather than accumulating across passes.
+
     ``unmatched_adjudication_count`` (#1805) is written solely by
     :func:`cw.review_adjudication.apply_adjudication`: the number of
     adjudication entries that matched no accepted finding (stale anchor,
@@ -509,6 +533,16 @@ class ReviewVerdict(BaseModel):
     # :func:`_select_rejected_must_fix` for why this is a second signal rather
     # than a widening of the first.
     rejected_must_fix: list[RejectedFinding] = Field(default_factory=list)
+    # #2000: the all-severity tally of ``rejected`` -- see the class docstring.
+    # Additive and default-0/empty (the `unmatched_adjudication_count`
+    # precedent), stamped once in `consolidate_verdict` alongside
+    # `rejected_must_fix` from the same `all_rejected` list.
+    rejected_count: int = 0
+    rejected_count_by_severity: dict[str, int] = Field(default_factory=dict)
+    # #2000: verify-fixes disposition downgrades, stamped exclusively by
+    # `cw.review_adjudication.verify_fixed_dispositions` -- a different
+    # deletion path from the two fields above, so a different counter.
+    downgraded_disposition_count: int = 0
     capability_mode: CapabilityMode | None = None
     capability_reason: str | None = None
     # #1773: one record per selected reviewer role describing where its agent

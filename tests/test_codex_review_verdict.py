@@ -37,11 +37,13 @@ from cw.review_findings import (
     AcceptedFinding,
     AgentSpecSource,
     AgentSpecStatus,
+    RejectedFinding,
     ReviewerRunFailure,
     ReviewerRunRecord,
     ReviewVerdict,
     consolidate_verdict,
 )
+from cw.review_findings._consolidate import _count_rejected_by_severity
 from tests._codex_review_helpers import _task
 from tests._reconcile_helpers import (
     SCOPE_GUARD_BRANCH,
@@ -901,6 +903,139 @@ class TestSynthesizeCodexReviewResultMechanicalRejection:
         assert len(verdict.rejected_must_fix) == 1
 
 
+def _sub_must_fix_rejected_doc(**overrides: object) -> ReviewerFindingsDocument:
+    """A doc whose single SHOULD_FIX finding cites a file absent from the diff.
+
+    The #2000 shape: mechanically rejected like
+    :func:`_mechanically_rejected_must_fix_doc`, but BELOW MUST_FIX, so #1714's
+    force-block deliberately does not fire and the finding used to vanish
+    without a counter, a log line, or a rendered section.
+    """
+    return _make_reviewer_doc(
+        _make_finding(
+            severity="SHOULD_FIX",
+            file="src/cw/never_in_the_diff.py",
+            line_start=None,
+            line_end=None,
+            summary="dropped below must_fix",
+        ),
+        **overrides,
+    )
+
+
+class TestSynthesizeCodexReviewResultSubMustFixRejection:
+    """#2000 — a rejection below MUST_FIX is counted and surfaced, not gating."""
+
+    def test_sub_must_fix_rejection_does_not_report_unqualified_proceed(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _make_stale_base_repo(make_git_repo, "wt-sub-mf-reject")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_sub_must_fix_rejected_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-sub-mf-reject",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        # Non-gating by operator resolution (A1): the run still completes.
+        assert result.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.rejected_must_fix == []
+        assert verdict.rejected_count == 1
+        assert verdict.rejected_count_by_severity == {"SHOULD_FIX": 1}
+        # The terminal sentinel an unattended orchestrator reads carries the
+        # same count -- not just the rendered comment a human reads.
+        assert result.review.rejected_count == 1
+        assert result.review.rejected_count_by_severity == {"SHOULD_FIX": 1}
+        # ...and the headline is qualified, never the bare clean one.
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "PROCEED (1 finding(s) mechanically rejected)" in body
+        assert "**Non-blocking** — no MUST_FIX findings" not in body
+        # A1 (#2000, round-1 operator resolution): informational-only. The
+        # counter deliberately does NOT flip Health.recommendation, so
+        # _should_gate_for_review_health keeps meaning "no reviewer ran /
+        # coverage degraded" rather than "one matcher miss occurred".
+        assert result.health.recommendation == "PROCEED"
+
+    def test_clean_review_with_zero_rejections_still_reports_proceed(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # Regression guard against over-triggering: nothing was rejected, so
+        # the ordinary clean headline must survive untouched.
+        worktree = _make_stale_base_repo(make_git_repo, "wt-sub-mf-clean")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-sub-mf-clean",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.status == "stage_complete"
+        assert result.health.recommendation == "PROCEED"
+        assert verdict is not None
+        assert verdict.rejected_count == 0
+        assert result.review.rejected_count == 0
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "**Non-blocking** — no MUST_FIX findings" in body
+        assert "mechanically rejected" not in body
+
+    def test_1714_force_block_still_fires_unchanged(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # R4: #2000 must not weaken #1714. A mixed pass (one MUST_FIX plus one
+        # SHOULD_FIX rejection) still takes the MUST_FIX force-block path with
+        # its original blocker reason.
+        worktree = _make_stale_base_repo(make_git_repo, "wt-1714-unchanged")
+        doc = _make_reviewer_doc(
+            _make_finding(
+                severity="MUST_FIX",
+                file="src/cw/never_in_the_diff.py",
+                line_start=None,
+                line_end=None,
+                summary="dropped before adjudication",
+            ),
+            _make_finding(
+                severity="SHOULD_FIX",
+                file="src/cw/also_never_in_the_diff.py",
+                line_start=None,
+                line_end=None,
+                summary="dropped below must_fix",
+            ),
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-1714-unchanged",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert verdict is not None
+        assert len(verdict.rejected_must_fix) == 1
+        assert verdict.rejected_count == 2
+        assert verdict.rejected_count_by_severity == {
+            "MUST_FIX": 1,
+            "SHOULD_FIX": 1,
+        }
+
+
 # ---------------------------------------------------------------------------
 # render_verdict_comment
 # ---------------------------------------------------------------------------
@@ -1352,6 +1487,185 @@ class TestRenderVerdictComment:
         assert verdict.rejected_must_fix[0].detail != ""
         body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert verdict.rejected_must_fix[0].detail in body
+
+    def test_render_verdict_comment_shows_sub_must_fix_rejected_section(self) -> None:
+        # #2000: below MUST_FIX there was no section at all -- the reader saw a
+        # clean comment over a review that had deleted a finding.
+        verdict = consolidate_verdict(
+            [_sub_must_fix_rejected_doc()], _make_diff(), reviewed_sha="sha"
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "### Below MUST_FIX — mechanically rejected (not adjudicated)" in body
+        # Distinct from the #1714 MUST_FIX heading, which must not appear here.
+        assert "### MUST_FIX — mechanically rejected (not adjudicated)" not in body
+        assert "<details>" in body
+        assert "src/cw/never_in_the_diff.py" in body
+        assert "dropped below must_fix" in body
+        assert "unknown_file" in body
+
+    def test_render_verdict_comment_groups_rejected_by_reviewer_and_reason(
+        self,
+    ) -> None:
+        # R5 (noise design): same reviewer, same reason collapses into ONE
+        # <details> group carrying a count, not N loose bullets.
+        doc = _make_reviewer_doc(
+            _make_finding(
+                severity="SHOULD_FIX",
+                file="src/cw/gone_a.py",
+                line_start=None,
+                line_end=None,
+                summary="first drop",
+            ),
+            _make_finding(
+                severity="NIT",
+                file="src/cw/gone_b.py",
+                line_start=None,
+                line_end=None,
+                summary="second drop",
+            ),
+            reviewer_role="Code Quality Reviewer",
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "<summary>Code Quality Reviewer — unknown_file (2)</summary>" in body
+        assert body.count("<details>") == 1
+        assert "first drop" in body
+        assert "second drop" in body
+
+    def test_sub_must_fix_rejected_line_renders_anchor_and_detail(self) -> None:
+        # A line-anchored SHOULD_FIX rejected `evidence_not_in_diff` is the one
+        # reason that populates RejectedFinding.detail (#1792) -- both the
+        # `file:line` anchor and the indented discrepancy line must reach the
+        # new section, not just the MUST_FIX one.
+        doc = _make_reviewer_doc(
+            _make_finding(
+                severity="SHOULD_FIX",
+                file="src/cw/foo.py",
+                line_start=10,
+                line_end=10,
+                evidence="not present anywhere",
+                summary="evidence mismatch",
+            )
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.rejected[0].detail != ""
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "- **src/cw/foo.py:10** — evidence mismatch" in body
+        assert f"  - {verdict.rejected[0].detail}" in body
+
+    def test_unrecognized_severity_rejection_sorts_last_and_still_renders(
+        self,
+    ) -> None:
+        # A rejected payload is by definition one that failed validation, so
+        # its claimed severity may be absent or not a Severity member at all.
+        # It must sort last rather than raise -- and it must still be RENDERED:
+        # an uncountable rejection is still a rejection, and dropping it here
+        # would reintroduce the exact silence #2000 closes.
+        strange = RejectedFinding.model_construct(
+            raw={"file": "src/cw/strange.py", "summary": "no severity at all"},
+            # A distinct role so it forms its own group -- and one that sorts
+            # FIRST alphabetically, so a pass that ignored severity rank and
+            # fell back to the raw key tuple would order it ahead of the
+            # SHOULD_FIX group and fail the ordering assertion below.
+            reviewer_role="Aaa Reviewer",
+            reason="unknown_file",
+            detail="",
+        )
+        base = consolidate_verdict(
+            [
+                _make_reviewer_doc(
+                    _make_finding(
+                        severity="SHOULD_FIX",
+                        file="src/cw/gone.py",
+                        line_start=None,
+                        line_end=None,
+                        summary="ordinary drop",
+                    )
+                )
+            ],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        verdict = base.model_copy(
+            update={
+                "rejected": [strange, *base.rejected],
+                "rejected_count": len(base.rejected) + 1,
+                # Kept internally consistent with the injected `strange`
+                # rejection -- a real `consolidate_verdict` call would tally
+                # its severity-less `raw` under "unknown" (see
+                # `_count_rejected_by_severity`), and a verdict no real call
+                # could produce is exactly the drift #2000 exists to catch.
+                "rejected_count_by_severity": {
+                    **base.rejected_count_by_severity,
+                    "unknown": 1,
+                },
+            }
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "no severity at all" in body
+        assert "ordinary drop" in body
+        # SHOULD_FIX is a known severity, so its group precedes the unranked one
+        # regardless of the reversed input order above.
+        assert body.index("ordinary drop") < body.index("no severity at all")
+
+    def test_count_rejected_by_severity_tallies_unrecognized_as_unknown(
+        self,
+    ) -> None:
+        # #2000: `_count_rejected_by_severity`'s documented "anything unusable
+        # is tallied under 'unknown'" fallback (see its docstring) was never
+        # directly exercised anywhere in this diff -- the test above sets
+        # `rejected_count_by_severity` by hand rather than through the
+        # function that actually computes it.
+        strange = RejectedFinding.model_construct(
+            raw={"file": "src/cw/strange.py", "summary": "no severity at all"},
+            reviewer_role="Aaa Reviewer",
+            reason="unknown_file",
+            detail="",
+        )
+        known = RejectedFinding(
+            raw=_make_finding(severity="SHOULD_FIX").model_dump(),
+            reviewer_role="Reviewer",
+            reason="unknown_file",
+        )
+        assert _count_rejected_by_severity([strange, known]) == {
+            "unknown": 1,
+            "SHOULD_FIX": 1,
+        }
+
+    def test_rejected_must_fix_section_unchanged_when_sub_must_fix_also_present(
+        self,
+    ) -> None:
+        # R3/R4: the #1714 section's heading and per-finding line shape are
+        # byte-identical whether or not the new sibling section renders.
+        doc = _make_reviewer_doc(
+            _make_finding(
+                severity="MUST_FIX",
+                file="src/cw/never_in_the_diff.py",
+                line_start=None,
+                line_end=None,
+                summary="dropped before adjudication",
+            ),
+            _make_finding(
+                severity="SHOULD_FIX",
+                file="src/cw/also_never_in_the_diff.py",
+                line_start=None,
+                line_end=None,
+                summary="dropped below must_fix",
+            ),
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert (
+            "### MUST_FIX — mechanically rejected (not adjudicated)\n"
+            "\n"
+            "- **src/cw/never_in_the_diff.py** — dropped before adjudication "
+            "(rejected: unknown_file)\n"
+        ) in body
+        assert "### Below MUST_FIX — mechanically rejected (not adjudicated)" in body
+        assert "dropped below must_fix" in body
+        # The headline stays #1714's -- the new branch sits strictly below it.
+        assert "MUST_FIX REJECTED" in body
+        assert "PROCEED (findings mechanically rejected)" not in body
 
     def test_clean_verdict_has_no_rejected_must_fix_section(self) -> None:
         verdict = consolidate_verdict(

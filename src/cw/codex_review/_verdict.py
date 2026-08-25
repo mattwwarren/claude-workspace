@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 from cw.auto_dev_result import (
     EMPTY_DIFF_BLOCKER_REASON,
@@ -32,7 +32,7 @@ from cw.executor_diagnostics import append_diagnostics_pointer
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
 from cw.review_adjudication import apply_voided_suppression
 from cw.review_finding_dispositions import suppress_adjudicated_findings
-from cw.review_findings import consolidate_verdict
+from cw.review_findings import Severity, consolidate_verdict
 from cw.worktree import compute_branch_diff_scope
 
 if TYPE_CHECKING:
@@ -47,15 +47,21 @@ if TYPE_CHECKING:
         AcceptedFinding,
         AgentSpecStatus,
         CapturedDiff,
+        RejectedFinding,
         ReviewerFindingsDocument,
         ReviewerRunFailure,
         ReviewerRunMetrics,
         ReviewerRunRecord,
         ReviewVerdict,
-        Severity,
     )
 
 _log = logging.getLogger(__name__)
+
+# #2000: severity ordering for the rejected-findings section, derived from the
+# `Severity` Literal itself rather than a hand-maintained rank table -- the
+# same USE_EXISTING pattern `_validation._VALID_SEVERITIES` already applies to
+# the same type, so a severity added later is ordered by construction.
+_SEVERITY_ORDER: tuple[str, ...] = get_args(Severity)
 
 
 # Confidence values other than HIGH render an inline annotation on their
@@ -773,6 +779,75 @@ def _render_rejected_must_fix(verdict: ReviewVerdict) -> list[str]:
     return lines
 
 
+def _rejected_severity_rank(rf: RejectedFinding) -> int:
+    """Rank *rf* by the severity it claimed, MUST_FIX-first (#2000).
+
+    ``raw`` is a payload that failed validation, so its ``severity`` may be
+    missing or not even a member of the Literal — anything unrecognized sorts
+    last rather than raising.
+    """
+    severity = rf.raw.get("severity")
+    if severity in _SEVERITY_ORDER:
+        return _SEVERITY_ORDER.index(severity)
+    return len(_SEVERITY_ORDER)
+
+
+def _render_rejected_below_must_fix(verdict: ReviewVerdict) -> list[str]:
+    """Render the sub-MUST_FIX findings validation dropped before adjudication.
+
+    The #2000 sibling of :func:`_render_rejected_must_fix`, and deliberately a
+    SECOND function rather than a widening of that one: #1714's section is
+    load-bearing for the force-block park and its heading, iteration source,
+    and per-finding line shape must stay exactly as they are (R3/R4). The
+    per-finding line here is written to match that function's output rather
+    than sharing a helper with it, so nothing in this file can change the
+    MUST_FIX section's bytes by accident.
+
+    Below MUST_FIX there is no force-block and none is wanted (round-1
+    operator resolution: informational, not gating) — but "not blocking" is
+    not "not worth saying". A finding deleted here was never evaluated on its
+    merits, and rendering nothing is what let a review that threw findings
+    away read as a clean pass.
+
+    R5 (designed for noise): rejections collapse by ``(reviewer_role,
+    reason)`` into one ``<details>`` block per group carrying its count, so a
+    matcher that misfires twelve times costs twelve lines behind one
+    disclosure triangle rather than twelve lines of comment. Groups are
+    ordered by their highest-severity member. Empty-returns-``[]``, mirroring
+    every other per-concern helper in this file.
+    """
+    below = [rf for rf in verdict.rejected if rf not in verdict.rejected_must_fix]
+    if not below:
+        return []
+    groups: dict[tuple[str, str], list[RejectedFinding]] = {}
+    for rf in below:
+        groups.setdefault((rf.reviewer_role, rf.reason), []).append(rf)
+
+    def _group_order(key: tuple[str, str]) -> tuple[int, tuple[str, str]]:
+        return (min(_rejected_severity_rank(rf) for rf in groups[key]), key)
+
+    lines = ["### Below MUST_FIX — mechanically rejected (not adjudicated)", ""]
+    for key in sorted(groups, key=_group_order):
+        role, reason = key
+        members = groups[key]
+        lines.append("<details>")
+        lines.append(f"<summary>{role} — {reason} ({len(members)})</summary>")
+        lines.append("")
+        for rf in members:
+            loc = str(rf.raw.get("file", "<unknown file>"))
+            line_start = rf.raw.get("line_start")
+            if line_start is not None:
+                loc = f"{loc}:{line_start}"
+            summary = str(rf.raw.get("summary", "<no summary>"))
+            lines.append(f"- **{loc}** — {summary} (rejected: {rf.reason})")
+            if rf.detail:
+                lines.append(f"  - {rf.detail}")
+        lines.append("")
+        lines.append("</details>")
+        lines.append("")
+    return lines
+
+
 def _render_delta_note(verdict: ReviewVerdict) -> list[str]:
     """Say which head this pass's diff was taken from, when it was a delta.
 
@@ -824,10 +899,11 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
     fix-loop-enabled-but-unneeded histories that would otherwise render
     identically from ``verdict.review`` alone.
 
-    The headline is three-way as of #1714: blocking, mechanically-rejected-
-    MUST_FIX, or clean. The rejected-MUST_FIX *section* is rendered
-    unconditionally regardless of which headline won, so the mixed case
-    (something blocking AND something dropped) reports both.
+    The headline is four-way as of #2000: blocking, mechanically-rejected-
+    MUST_FIX, proceeding-but-something-below-MUST_FIX-was-deleted, or clean.
+    Both rejected-findings *sections* render unconditionally regardless of
+    which headline won, so the mixed case (something blocking AND something
+    dropped) reports both.
     """
     lines = ["## Codex Review Verdict", ""]
     if verdict.blocking:
@@ -850,6 +926,21 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
             "on their merits) and require operator review before this branch "
             "can proceed."
         )
+    elif verdict.rejected_count:
+        # #2000: nothing MUST_FIX-shaped was dropped (the branch above already
+        # returned if so), so this pass does proceed -- but it proceeds having
+        # deleted findings nobody read, and the clean headline would say the
+        # opposite. Qualified, not blocking: the round-1 operator resolution
+        # keeps this informational rather than folding a matcher miss into
+        # Health.recommendation's "coverage degraded" gate.
+        lines.append(
+            f"**PROCEED ({verdict.rejected_count} finding(s) mechanically "
+            "rejected)** — no MUST_FIX findings survived validation, but "
+            f"{verdict.rejected_count} finding(s) below MUST_FIX were "
+            "mechanically rejected before adjudication and never evaluated "
+            "on their merits — see the rejected-findings section below "
+            "before treating this pass as clean."
+        )
     else:
         lines.append(
             _render_clean_headline(verdict.review, fix_loop_enabled=fix_loop_enabled)
@@ -861,6 +952,7 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
     lines.extend(_render_agent_spec_note(verdict))
     lines.extend(_render_delta_note(verdict))
     lines.extend(_render_rejected_must_fix(verdict))
+    lines.extend(_render_rejected_below_must_fix(verdict))
     lines.extend(_render_debt_note(verdict))
     lines.extend(_render_findings(verdict, "MUST_FIX", "MUST_FIX"))
     lines.extend(_render_findings(verdict, "SHOULD_FIX", "SHOULD_FIX"))

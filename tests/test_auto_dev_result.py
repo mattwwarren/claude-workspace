@@ -4492,6 +4492,56 @@ class TestReviewAgentsRun:
         assert review.agents_run == 4
 
 
+class TestReviewRejectedCount:
+    """#2000 — Review.rejected_count / rejected_count_by_severity.
+
+    The counts an orchestrator reading ONLY the terminal ``AUTO_DEV_RESULT``
+    sentinel needs in order to tell "nothing was found" apart from "findings
+    were mechanically deleted before anyone looked at them".
+    """
+
+    def test_rejected_count_defaults_to_zero_when_omitted(self) -> None:
+        review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
+        assert review.rejected_count == 0
+        assert review.rejected_count_by_severity == {}
+
+    def test_rejected_count_parses_explicit_value(self) -> None:
+        review = Review.model_validate(
+            {
+                "must_fix_initial": 1,
+                "should_fix": 0,
+                "fix_cycles_used": 0,
+                "rejected_count": 4,
+                "rejected_count_by_severity": {"SHOULD_FIX": 3, "NIT": 1},
+            }
+        )
+        assert review.rejected_count == 4
+        assert review.rejected_count_by_severity == {"SHOULD_FIX": 3, "NIT": 1}
+
+    def test_pre_2000_payload_without_rejected_count_parses_unchanged(self) -> None:
+        # Backward compatibility, proven rather than asserted in prose: the
+        # shipped-payload helper's "review" dict omits both new fields, exactly
+        # like every pre-#2000 producer's does.
+        result = parse_stdout(_wrap_sentinel(_shipped_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.review.rejected_count == 0
+        assert result.review.rejected_count_by_severity == {}
+
+    def test_rejected_count_survives_auto_dev_result_round_trip(self) -> None:
+        payload = _shipped_payload()
+        payload["review"] = {
+            "must_fix_initial": 0,
+            "should_fix": 1,
+            "fix_cycles_used": 0,
+            "rejected_count": 2,
+            "rejected_count_by_severity": {"SHOULD_FIX": 2},
+        }
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.review.rejected_count == 2
+        assert result.review.rejected_count_by_severity == {"SHOULD_FIX": 2}
+
+
 class TestSchemaVersionV5:
     """#1237 — schema_version 5 is a supported version."""
 

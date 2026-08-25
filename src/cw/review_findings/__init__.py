@@ -27,6 +27,16 @@ here via re-exports. Submodules:
 - ``_consolidate`` — ``consolidate_verdict`` orchestration and the atomic
   ``ReviewVerdict`` artifact writer.
 
+#2000 added three counters to ``ReviewVerdict`` — ``rejected_count``,
+``rejected_count_by_severity`` (both stamped by ``consolidate_verdict``, and
+mirrored onto the nested ``Review`` so they reach the terminal
+``AUTO_DEV_RESULT`` sentinel) and ``downgraded_disposition_count`` (stamped by
+``cw.review_adjudication``). They need no new export: the existing
+``ReviewVerdict`` re-export already carries them. Their counting helper,
+``_consolidate._count_rejected_by_severity``, stays package-private —
+``_select_rejected_must_fix`` is exported only because its #1714 selection rule
+is directly test-asserted, which is not true here.
+
 Import-cycle note (#1818): ``cw.review_finding_dispositions`` documents a
 load-bearing cycle broken only by that module refusing any module-scope ``cw``
 import, and the flat module's first two ``cw``-scoped imports — ``cw.atomic``

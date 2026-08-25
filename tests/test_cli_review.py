@@ -446,6 +446,13 @@ class TestReviewConsolidateCommand:
             # Always emitted, 0 here — only `cw review adjudicate` ever sets
             # it non-zero.
             "unmatched_adjudication_count",
+            # #2000: the all-severity tally of `rejected` (a superset of
+            # `rejected_must_fix` above), plus the verify-fixes downgrade
+            # counter. All three always emitted, 0/{} here — this command
+            # rejects nothing in the fixture and runs no verify-fixes pass.
+            "rejected_count",
+            "rejected_count_by_severity",
+            "downgraded_disposition_count",
             "previous_reviewed_sha",
             "debt",
         }
@@ -463,6 +470,12 @@ class TestReviewConsolidateCommand:
             # actually committed a change, vs. converging on an all-no-op
             # run.
             "had_real_commit",
+            # #2000: the same two rejection counts as the top-level verdict
+            # above, mirrored here so they survive into the terminal
+            # AUTO_DEV_RESULT sentinel rather than living only in this
+            # artifact. Identical values by construction, not by convention.
+            "rejected_count",
+            "rejected_count_by_severity",
         }
 
     def test_empty_documents_all_failed_yields_zero_agents_run(
