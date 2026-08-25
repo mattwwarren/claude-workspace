@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import os
 from pathlib import Path
+
+import pytest
 
 from cw._transcript import find_new_subagent_transcript, locate_transcript
 from tests.conftest import _write_idle_transcript
@@ -264,6 +267,46 @@ class TestFindNewSubagentTranscript:
         """A project dir that does not exist → None (matches sibling helpers)."""
         result = find_new_subagent_transcript(
             tmp_path / "nonexistent", since=_NOW, exclude_stem=None
+        )
+
+        assert result is None
+
+    def test_unstattable_candidate_is_skipped_not_fatal(self, tmp_path: Path) -> None:
+        """A dangling symlink among the candidates must not discard a real hit.
+
+        Real shape, not a mock: a transcript rotated or deleted mid-glob leaves
+        exactly this — a name the glob yields whose ``stat()`` then raises.
+        """
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        expected = _seed_transcript(
+            home, worktree, "sub-a.jsonl", mtime=_NOW + dt.timedelta(minutes=1)
+        )
+        (expected.parent / "dangling.jsonl").symlink_to(expected.parent / "gone.jsonl")
+
+        result = find_new_subagent_transcript(
+            expected.parent, since=_NOW, exclude_stem=None
+        )
+
+        assert result == expected
+
+    def test_glob_oserror_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OSError raised by the walk itself → None, never propagated."""
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        seeded = _seed_transcript(
+            home, worktree, "sub-a.jsonl", mtime=_NOW + dt.timedelta(minutes=1)
+        )
+
+        def _boom(*_args: object, **_kwargs: object) -> object:
+            raise OSError(errno.EIO, "simulated I/O error")
+
+        monkeypatch.setattr(Path, "rglob", _boom)
+
+        result = find_new_subagent_transcript(
+            seeded.parent, since=_NOW, exclude_stem=None
         )
 
         assert result is None
