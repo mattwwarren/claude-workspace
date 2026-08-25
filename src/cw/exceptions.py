@@ -205,12 +205,13 @@ class PlaceholderDiffError(CwError):
 
 
 class DiffBaseMismatchError(CwError):
-    """A consolidate payload's ``diff`` is not the real diff for its base.
+    """A payload's ``diff`` is not the real diff for its base.
 
     Raised by ``cw.cli.review._check_diff_matches_base`` (#1924) when
-    ``cw review consolidate --base <ref>`` finds that the payload's diff text
-    differs from ``git diff --no-color <base>...<reviewed_sha>``, or when that
-    git invocation itself fails (an unresolvable ref).
+    ``cw review consolidate --base <ref>`` or ``cw review verify-fixes --base
+    <ref>`` (#1988) finds that the payload's diff text differs from
+    ``git diff --no-color <base>...<reviewed_sha>``, or when that git
+    invocation itself fails (an unresolvable ref).
     """
 
     __slots__ = ()

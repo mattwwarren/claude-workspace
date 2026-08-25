@@ -1205,9 +1205,12 @@ class TestReviewVerifyFixesCommand:
         payload = {
             "verdict": _verdict_payload(accepted),
             "diff": _CONSOLIDATE_DIFF,
+            "reviewed_sha": "abc1234",
         }
         result = runner.invoke(
-            main, ["review", "verify-fixes", "-"], input=json.dumps(payload)
+            main,
+            ["review", "verify-fixes", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -1219,9 +1222,12 @@ class TestReviewVerifyFixesCommand:
         payload = {
             "verdict": _verdict_payload(accepted),
             "diff": _CONSOLIDATE_DIFF,
+            "reviewed_sha": "abc1234",
         }
         result = runner.invoke(
-            main, ["review", "verify-fixes", "-"], input=json.dumps(payload)
+            main,
+            ["review", "verify-fixes", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -1233,7 +1239,7 @@ class TestReviewVerifyFixesCommand:
     ) -> None:
         result = runner.invoke(
             main,
-            ["review", "verify-fixes", "-"],
+            ["review", "verify-fixes", "--no-base-check", "-"],
             input=json.dumps({"diff": _CONSOLIDATE_DIFF}),
         )
         assert result.exit_code == 1
@@ -1883,12 +1889,35 @@ def _branch_repo(
 class TestReviewConsolidateBaseFlag:
     """#1924: --base proves the payload diff is the real diff."""
 
-    def test_base_absent_is_inert(
+    def test_neither_base_nor_no_base_check_is_usage_error(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(_consolidate_payload()),
+        )
+        assert result.exit_code == 2, result.output
+        assert "--base" in result.output
+        assert "--no-base-check" in result.output
+
+    def test_base_and_no_base_check_together_is_usage_error(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--base", "main", "--no-base-check", "-"],
+            input=json.dumps(_consolidate_payload()),
+        )
+        assert result.exit_code == 2, result.output
+        assert "mutually exclusive" in result.output
+
+    def test_no_base_check_skips_verification(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         baseline = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(_consolidate_payload()),
         )
         assert baseline.exit_code == 0, baseline.output
@@ -1903,7 +1932,7 @@ class TestReviewConsolidateBaseFlag:
         monkeypatch.setattr("cw.cli.review.subprocess.run", _boom)
         result = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(_consolidate_payload()),
         )
 
@@ -2012,6 +2041,192 @@ class TestReviewConsolidateBaseFlag:
         assert mismatched.exit_code == 1
         assert '"blocking"' not in mismatched.output
         assert matching.exit_code == 0, matching.output
+
+
+class TestReviewVerifyFixesBaseFlag:
+    """#1988: --base proves verify-fixes' diff is the real fix-cycle diff."""
+
+    def test_neither_base_nor_no_base_check_is_usage_error(
+        self, runner: CliRunner
+    ) -> None:
+        accepted = _accepted_payload(line_start=2, line_end=2)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "diff": _CONSOLIDATE_DIFF,
+            "reviewed_sha": "abc1234",
+        }
+        result = runner.invoke(
+            main, ["review", "verify-fixes", "-"], input=json.dumps(payload)
+        )
+        assert result.exit_code == 2, result.output
+        assert "--base" in result.output
+        assert "--no-base-check" in result.output
+
+    def test_base_and_no_base_check_together_is_usage_error(
+        self, runner: CliRunner
+    ) -> None:
+        accepted = _accepted_payload(line_start=2, line_end=2)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "diff": _CONSOLIDATE_DIFF,
+            "reviewed_sha": "abc1234",
+        }
+        result = runner.invoke(
+            main,
+            ["review", "verify-fixes", "--base", "main", "--no-base-check", "-"],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 2, result.output
+        assert "mutually exclusive" in result.output
+
+    def test_no_base_check_skips_verification(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        accepted = _accepted_payload(line_start=2, line_end=2)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "diff": _CONSOLIDATE_DIFF,
+            "reviewed_sha": "abc1234",
+        }
+        baseline = runner.invoke(
+            main,
+            ["review", "verify-fixes", "--no-base-check", "-"],
+            input=json.dumps(payload),
+        )
+        assert baseline.exit_code == 0, baseline.output
+
+        calls: list[object] = []
+
+        def _boom(*args: object, **kwargs: object) -> object:
+            calls.append(args)
+            msg = "subprocess.run must not be called without --base"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.cli.review.subprocess.run", _boom)
+        result = runner.invoke(
+            main,
+            ["review", "verify-fixes", "--no-base-check", "-"],
+            input=json.dumps(payload),
+        )
+
+        assert calls == []
+        assert result.exit_code == 0, result.output
+        assert result.output == baseline.output
+
+    def test_base_matching_diff_passes(
+        self, runner: CliRunner, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, sha, real_diff = _branch_repo(make_git_repo, "verify-match")
+        accepted = _accepted_payload(file="src/thing.py", line_start=1, line_end=1)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "diff": real_diff,
+            "reviewed_sha": sha,
+        }
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "verify-fixes",
+                "--worktree",
+                str(repo),
+                "--base",
+                "main",
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["accepted"][0]["disposition"] == "fixed"
+        assert verdict["accepted"][0]["disposition_detail"] == ""
+
+    def test_base_mismatched_diff_errors(
+        self, runner: CliRunner, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, sha, real_diff = _branch_repo(make_git_repo, "verify-mismatch")
+        mutated = real_diff.replace("+y = 2", "+y = 3")
+        assert mutated != real_diff
+        accepted = _accepted_payload(file="src/thing.py", line_start=1, line_end=1)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "diff": mutated,
+            "reviewed_sha": sha,
+        }
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "verify-fixes",
+                "--worktree",
+                str(repo),
+                "--base",
+                "main",
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 1
+        assert '"blocking"' not in result.output
+
+    def test_base_unresolvable_ref_errors(
+        self, runner: CliRunner, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, sha, real_diff = _branch_repo(make_git_repo, "verify-badref")
+        accepted = _accepted_payload(file="src/thing.py", line_start=1, line_end=1)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "diff": real_diff,
+            "reviewed_sha": sha,
+        }
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "verify-fixes",
+                "--worktree",
+                str(repo),
+                "--base",
+                "no-such-ref",
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 1
+        assert "no-such-ref" in result.output
+
+    def test_base_with_reviewed_sha_matches_verdict_reviewed_sha(
+        self, runner: CliRunner, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """``verdict.reviewed_sha`` (the Checkpoint-3a-frozen sha) and the
+        payload's own ``reviewed_sha`` (the --base check's fix-cycle tip) are
+        independent fields the command never cross-checks — a payload
+        carrying two different shas for the two purposes still round-trips
+        cleanly.
+        """
+        repo, sha, real_diff = _branch_repo(make_git_repo, "verify-independent")
+        accepted = _accepted_payload(file="src/thing.py", line_start=1, line_end=1)
+        payload = {
+            "verdict": _verdict_payload(accepted, reviewed_sha="different-sha"),
+            "diff": real_diff,
+            "reviewed_sha": sha,
+        }
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "verify-fixes",
+                "--worktree",
+                str(repo),
+                "--base",
+                "main",
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["reviewed_sha"] == "different-sha"
 
 
 class TestReviewConsolidateRegressionFixtures:
