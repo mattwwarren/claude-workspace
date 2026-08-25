@@ -6,7 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.44.0] - 2026-08-25
+
 ### Added
+
+- **`cw guide` now documents three contracts that previously failed silently (#2015):** the operator guide ships inside the package, so it is the one documentation surface present wherever the binary is — a worker dispatched against a client repo loads that repo's `.claude/`, never claude-workspace's. Three rules that lived only in source or pipeline prose are now in it. (1) Pre-flight resolutions are binding only when the comment or body carries the literal `<!-- auto-dev-preflight-resolutions -->` marker; `/harden-ticket` appends it, a hand-written comment does not, and omitting it fails silently — including making a reviewer's "missing `## Pre-flight Resolution Conformance` section" finding a false positive. (2) A session waiting on a subagent never raises `session_unresponsive` at any age, because that signal requires no pending subagent spawn — so `cw queue peek`'s `idle_m` vs `age_m` is the only positive liveness check. (3) `/ship-it` and `/prep-pr` push `git branch --show-current`, which is the session branch inside an orchestrator worktree; check out the feature branch before delegating. The guide's `cw dev-queue clear` entry, which described an unguarded bulk delete as "queue hygiene", now states that it removes RUNNING and BLOCKED_ON_USER rows with no dry-run and no confirmation, and points at the new `prune` as the safe alternative.
 
 - **`cw session prune` archives old completed/failed sessions, and session lookup is now archive-aware (#1983):** a new `session_retention` module (`prune_sessions`, `find_session_by_id`) backs a new `cw session prune` command that moves terminal sessions older than a retention window out of the hot `sessions.json` into dated archive files, keeping the live state file small. `find_session_by_id` (replacing the old `_resolve_session`) now falls back to scanning those archives when a session isn't found in the live state, so `cw resume`/`cw status`/session-inspect lookups keep working for archived sessions, and warns when a truncated archive scan may have missed a match. The per-session migration walk in `migrate_cw_state` is now version-gated so it's skipped once state is already current.
 
