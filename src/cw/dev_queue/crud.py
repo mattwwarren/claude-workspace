@@ -483,7 +483,7 @@ def _prune_age_basis(task: TicketTask) -> datetime:
     CANCELLED row permanently unprunable -- ``created_at`` is the fallback.
 
     Both ``_select_prune_candidates`` (what gets deleted) and the CLI's
-    ``_print_prune_summary`` (the AGE_DAYS the operator reads before passing
+    ``_print_task_summary`` (the AGE_DAYS the operator reads before passing
     ``--confirm``) call this instead of re-deriving the rule, so the two can
     never diverge on what "age" means for a destructive command.
     """
