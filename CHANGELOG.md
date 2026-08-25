@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The auto-dev review fix-loop wedge — a parent that ends its turn awaiting a subagent completion notification that silently never arrives — is now closed on both sides (#2012):** a fix-loop dispatched asynchronously by `auto-dev-review.md` Step 3b, if the spawn itself failed, left the parent waiting forever with no sentinel, no error, and a queue row stuck `running`. `cw agent-spawn-verify` is a new command the orchestrator runs in the same turn as the spawn — a bounded, single-call check (not a poll loop) confirming a real subagent transcript appeared before the parent ends its turn to await one. On the watchdog side, the liveness sweep's subagent-await suppression (which previously silenced the `SESSION_NEEDS_ATTENTION` distress signal for the life of any outstanding spawn) is now bounded by a new `fix_loop_await_deadline_minutes` config field: past the deadline, suppression lifts and the signal fires under a discriminating `fix_loop_await_deadline_exceeded` reason. Still signal-only — the deadline stops suppressing a signal, it never dispositions or kills anything (ADR-0014).
+
 ## [1.44.0] - 2026-08-25
 
 ### Added
