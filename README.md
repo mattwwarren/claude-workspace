@@ -146,7 +146,7 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 | `cw dev-queue move <ticket> --to <lane>` | Re-lane a ticket |
 | `cw dev-queue cancel <ticket>` | Cancel a pending ticket and stop any running session |
 | `cw dev-queue remove <ticket> --all` | Remove a ticket from the queue |
-| `cw dev-queue clear -c <client> [-s <status>]` | Clear tasks for a client, optionally filtered to one status (e.g. `completed`) |
+| `cw dev-queue clear -c <client> [-s <status>] --confirm` | Delete tasks for a client (previews by default; add `--confirm` to delete). With no `-s`, RUNNING/BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF are excluded unless named explicitly |
 | `cw dev-queue plan` | Spawn `/orchestrate-plan` to produce a DispatchPlan |
 | `cw dev-queue refresh-all` | Fast-forward all client repos to origin/main |
 | `cw queue peek` | In-flight inspection of RUNNING dev-queue sessions (age, idle gap, sentinel, PR state) |

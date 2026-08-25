@@ -72,11 +72,12 @@ cw dev-queue move <ticket> -c <client> --to <lane>   # re-lane
 cw dev-queue cancel|remove -c <client>           # queue hygiene, one ticket at a time
 cw dev-queue prune --older-than <days> -c <c>    # bulk-retire stale terminal rows (dry-run
                                                  #   by default; needs --confirm to delete)
-cw dev-queue clear -c <client> [-s <status>]     # DESTRUCTIVE: deletes every matching row
-                                                 #   immediately — no dry-run, no --confirm.
-                                                 #   With no -s it removes RUNNING rows (live
-                                                 #   sessions) and BLOCKED_ON_USER rows
-                                                 #   (parked work) too. Prefer `prune`.
+cw dev-queue clear -c <client> [-s <status>]     # DESTRUCTIVE: previews by default; needs
+                                                 #   --confirm to delete. With no -s, excludes
+                                                 #   RUNNING/BLOCKED_ON_USER/
+                                                 #   AWAITING_OPERATOR_SIGNOFF; name one via -s
+                                                 #   to delete it explicitly. Bulk-only --
+                                                 #   prefer `prune` for age-based cleanup.
 cw dev-queue refresh-all                         # fast-forward main on every client repo
 ```
 

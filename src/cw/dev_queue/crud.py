@@ -395,25 +395,83 @@ def move_ticket(ticket_id: str, client_name: str, to_lane: str) -> str:
     return from_lane
 
 
-def clear_tickets(client: str, status: QueueItemStatus | None = None) -> int:
-    """Remove all TicketTasks for *client*, optionally filtered by *status*.
+def _select_clear_candidates(
+    store: DevQueueStore,
+    client: str,
+    status: QueueItemStatus | None,
+) -> list[TicketTask]:
+    """Shared filter for ``clear_tickets``/``select_clearable_tickets`` (#2003).
 
-    Returns the number of tasks removed.
+    Deliberately NOT ``_select_prune_candidates`` with a different call
+    shape -- the two commands have different eligibility rules and sharing
+    one function would force one to grow branches for the other's gates.
+    ``prune`` refuses ``OCCUPIED_LANE_STATUSES`` outright, at any age,
+    because it targets stale terminal rows; ``clear`` must remain able to
+    force-clear a stuck RUNNING or parked BLOCKED_ON_USER/
+    AWAITING_OPERATOR_SIGNOFF row when an operator names it explicitly via
+    ``--status`` -- there is no age cutoff or terminal-status restriction
+    here at all. When *status* is ``None``, ``OCCUPIED_LANE_STATUSES`` rows
+    are excluded from the default sweep; naming one of them via *status* is
+    itself the gate -- no further restriction applies.
+    """
+    if status is None:
+        return [
+            t
+            for t in store.tasks
+            if t.client == client and t.status not in OCCUPIED_LANE_STATUSES
+        ]
+    return [t for t in store.tasks if t.client == client and t.status == status]
+
+
+def select_clearable_tickets(
+    client: str, status: QueueItemStatus | None = None
+) -> list[TicketTask]:
+    """Read-only snapshot of the tasks ``clear_tickets`` would remove (#2003).
+
+    Unlocked (mirrors ``select_prunable_tickets``). Used only by the CLI's
+    ``--dry-run`` and default-preview paths, which never mutate. NOT used by
+    the ``--confirm`` path -- see ``clear_tickets`` for why the two must not
+    share a call in a single ``--confirm`` invocation.
+    """
+    store = load_dev_queue()
+    return _select_clear_candidates(store, client, status)
+
+
+def clear_tickets(
+    client: str, status: QueueItemStatus | None = None
+) -> list[TicketTask]:
+    """Remove TicketTasks for *client*, optionally filtered by *status* (#2003).
+
+    With no *status*, ``OCCUPIED_LANE_STATUSES`` (RUNNING, BLOCKED_ON_USER,
+    AWAITING_OPERATOR_SIGNOFF) rows are excluded from the sweep -- naming one
+    of them explicitly via *status* targets it for deletion instead of
+    skipping it.
+
+    Mirrors ``prune_tickets``'s locking/emission shape. Computes the
+    candidate set exactly ONCE, inside a single ``_lock()`` acquisition --
+    one ``load_dev_queue()`` call, one ``_select_clear_candidates()`` call,
+    one ``save_dev_queue()`` call -- and deletes exactly that computed set.
+    A design that instead called ``select_clearable_tickets()`` first
+    (unlocked, for a preview) and then ``clear_tickets()`` second (which
+    re-derives fresh under lock) would reopen a TOCTOU window between the
+    two calls, in which a concurrent dispatch tick or another prune/clear
+    invocation could grow the deleted set beyond whatever was rendered to
+    the operator. The CLI must call this function alone for the
+    ``--confirm`` path -- never ``select_clearable_tickets()`` first.
+
+    Returns the removed tasks (not a bare count, unlike the pre-#2003
+    signature -- the CLI's summary table needs per-row detail, mirroring
+    ``prune_tickets``).
     """
     with _lock():
         store = load_dev_queue()
-        if status is None:
-            removed_tasks = [t for t in store.tasks if t.client == client]
-        else:
-            removed_tasks = [
-                t for t in store.tasks if t.client == client and t.status == status
-            ]
+        removed_tasks = _select_clear_candidates(store, client, status)
         removed_ids = {id(t) for t in removed_tasks}
         store.tasks = [t for t in store.tasks if id(t) not in removed_ids]
         save_dev_queue(store)
         for task in removed_tasks:
             _emit_task_deleted(task, "operator_clear")
-    return len(removed_tasks)
+    return removed_tasks
 
 
 def _prune_age_basis(task: TicketTask) -> datetime:
@@ -425,7 +483,7 @@ def _prune_age_basis(task: TicketTask) -> datetime:
     CANCELLED row permanently unprunable -- ``created_at`` is the fallback.
 
     Both ``_select_prune_candidates`` (what gets deleted) and the CLI's
-    ``_print_prune_summary`` (the AGE_DAYS the operator reads before passing
+    ``_print_task_summary`` (the AGE_DAYS the operator reads before passing
     ``--confirm``) call this instead of re-deriving the rule, so the two can
     never diverge on what "age" means for a destructive command.
     """
