@@ -18,6 +18,7 @@ from cw.config import (
     _save_concurrency_overrides,
     clients_file,
     focus_file,
+    load_clients,
 )
 from cw.dev_queue import save_dev_queue
 from cw.focus import set_focus
@@ -38,7 +39,12 @@ if TYPE_CHECKING:
     from cw.models import TicketTask
 
 _SESSION = "sess-statusline-1"
-# Wall-clock ceiling at R1's real budget: the 300ms statusline debounce.
+# Loose wall-clock backstop for gross slowness (e.g. an accidental O(n^2)
+# walk in resolve_client_for_cwd's step-2 walk) — NOT the subprocess/network
+# guarantee. That guarantee now lives in each test's deterministic
+# _assert_no_subprocess_calls guard plus the load_clients call-count
+# assertion (#2006), which cannot flake and cannot be defeated by a fast
+# subprocess the way a wall-clock budget can.
 #
 # A CPU-time assertion (process_time) lived here briefly and was removed: it
 # was introduced to dodge scheduler contention, but coverage instrumentation
@@ -47,10 +53,12 @@ _SESSION = "sess-statusline-1"
 # both failed on CI under --cov (0.1938s, then 0.2367s / 0.1740s). A guard that
 # has to be widened every time it fires is measuring the runner, not the code.
 #
-# 300ms is the number the design actually specifies, and it catches the
-# regression class that matters: a subprocess / network / gh / git call, which
-# R1 forbids and which would blow far past the debounce budget.
-_WALL_CLOCK_BUDGET_SECONDS = 0.3
+# 300ms is the number the design actually specifies (the statusline debounce
+# budget) — but this ceiling no longer pins that spec exactly: it was
+# widened to 1.0s to absorb loaded-CI-runner variance (0.527s observed on
+# macOS, #2005) with margin, now that it is a backstop rather than the
+# primary guard.
+_WALL_CLOCK_BUDGET_SECONDS = 1.0
 
 
 def _write_clients(tmp_path: Path) -> Path:
@@ -583,14 +591,12 @@ class TestPerformance:
         ]
         _seed_queue(*tasks)
 
-        from cw.statusline import load_clients as original_load_clients
-
         load_clients_calls = 0
 
         def _counting_load_clients() -> dict[str, ClientConfig]:
             nonlocal load_clients_calls
             load_clients_calls += 1
-            return original_load_clients()
+            return load_clients()
 
         monkeypatch.setattr("cw.statusline.load_clients", _counting_load_clients)
 
