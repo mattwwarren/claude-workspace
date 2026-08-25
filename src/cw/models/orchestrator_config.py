@@ -726,7 +726,7 @@ class OrchestratorConfig(BaseModel):
     # evaluated at: the deadline is only ever consulted for a session already
     # in (or entering) the top staleness bucket. 30m sits comfortably under
     # that 45m floor so the field has real effect out of the box.
-    fix_loop_await_deadline_minutes: int = 30
+    fix_loop_await_deadline_minutes: int = Field(default=30, ge=1)
     # #2012 — total window (seconds) `cw agent-spawn-verify` polls for a fresh
     # subagent transcript before exiting 1. Operator-tunable rather than a code
     # constant because this sits on the fix-loop dispatch path every client's
@@ -736,10 +736,10 @@ class OrchestratorConfig(BaseModel):
     # An affected client raises this without a code change — same rationale as
     # busy_wait_guard_window_seconds above. `--poll-seconds` overrides it for a
     # single invocation.
-    agent_spawn_verify_poll_seconds: int = 20
+    agent_spawn_verify_poll_seconds: int = Field(default=20, ge=1)
     # Polling cadence (seconds) within the window above. `--poll-interval-
     # seconds` overrides it for a single invocation.
-    agent_spawn_verify_poll_interval_seconds: int = 2
+    agent_spawn_verify_poll_interval_seconds: int = Field(default=2, ge=1)
     # RFC 0008 W3 (#1002) — declarative operator-attention forward-set for the
     # cw-operator SSE channel bridge (cw.cw_operator_events). No coercion
     # validator (fail-loud, mirrors default_signoff's asymmetry with

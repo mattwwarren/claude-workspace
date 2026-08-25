@@ -16,6 +16,7 @@ unreadable or missing project dir must exit 1 with a diagnostic, not exit 0.
 from __future__ import annotations
 
 import datetime as dt
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -259,6 +260,34 @@ def test_exclude_session_defaults_to_session_env_var(
 
     assert result.exit_code == 1
     assert _MAIN_CSID in result.output
+
+
+def test_exit_zero_when_transcript_appears_mid_poll(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """The transcript arriving partway through the poll window is detected.
+
+    Proves the loop actually re-polls rather than only checking once at the
+    start — the literal scenario an async subagent dispatch produces.
+    """
+    worktree = tmp_path / "wt"
+    _write_idle_transcript(home, worktree, filename=f"{_MAIN_CSID}.jsonl")
+
+    def _write_late_transcript() -> None:
+        time.sleep(0.5)
+        _write_idle_transcript(home, worktree, filename="subagents/cccc3333-sub.jsonl")
+
+    writer = threading.Thread(target=_write_late_transcript)
+    writer.start()
+    try:
+        result = _invoke(
+            worktree, "--poll-seconds", "5", "--poll-interval-seconds", "1"
+        )
+    finally:
+        writer.join()
+
+    assert result.exit_code == 0, result.output
+    assert "cccc3333-sub" in result.output
 
 
 def test_since_without_timezone_is_treated_as_utc(

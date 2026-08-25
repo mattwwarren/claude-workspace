@@ -8,6 +8,7 @@ canonical resolution logic those consumers share.
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -89,7 +90,20 @@ def find_new_subagent_transcript(
     newest: Path | None = None
     newest_mtime = since_ts
     try:
-        candidates = project_dir.rglob("*.jsonl")
+        # #2012 fix-loop review: scoped to the documented `subagents/`
+        # location instead of an unbounded rglob over every *.jsonl ever
+        # written to the project dir. `rglob("subagents/*.jsonl")` matches
+        # `subagents/*.jsonl` at any depth (project_dir/subagents/*.jsonl
+        # directly, or project_dir/<session-uuid>/subagents/*.jsonl, or
+        # deeper) without pulling in unrelated top-level transcripts. The
+        # separate top-level `*.jsonl` glob stays included only because
+        # tests/test_transcript.py's pre-existing generic-behavior cases
+        # (outside this fix's file scope) seed fixtures directly at
+        # project_dir/*.jsonl and assert they're found there.
+        candidates = itertools.chain(
+            project_dir.glob("*.jsonl"),
+            project_dir.rglob("subagents/*.jsonl"),
+        )
         for candidate in candidates:
             if exclude_stem is not None and candidate.stem == exclude_stem:
                 continue

@@ -251,14 +251,16 @@ def _detect_liveness_candidates(
         # and both must NOT suppress — an unbounded wait is the failure mode.
         # Still signal-only: no disposition follows from the deadline
         # (ADR-0014).
-        spawn_age = _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
+        is_top_bucket = new_bucket is LivenessBucket.STALE_45M
+        distress_base = is_top_bucket and not _has_terminal_sentinel(session)
+        spawn_age = (
+            _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
+            if distress_base
+            else None
+        )
         deadline_seconds = config.fix_loop_await_deadline_minutes * _SECONDS_PER_MINUTE
         deadline_exceeded = spawn_age is not None and spawn_age >= deadline_seconds
-        distress = (
-            new_bucket is LivenessBucket.STALE_45M
-            and not _has_terminal_sentinel(session)
-            and (spawn_age is None or deadline_exceeded)
-        )
+        distress = distress_base and (spawn_age is None or deadline_exceeded)
         if is_renotify and not distress:
             # Debounce window elapsed but no longer distress-eligible this
             # tick (e.g. a terminal sentinel landed since the last check). No
