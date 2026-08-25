@@ -200,7 +200,9 @@ class TestReviewConsolidateCommand:
         doc = _make_reviewer_doc(status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -216,7 +218,9 @@ class TestReviewConsolidateCommand:
         doc = _make_reviewer_doc(finding, status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -236,7 +240,9 @@ class TestReviewConsolidateCommand:
         doc = _make_reviewer_doc(finding, status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -268,7 +274,9 @@ class TestReviewConsolidateCommand:
             documents=[doc_a.model_dump(mode="json"), doc_b.model_dump(mode="json")]
         )
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -290,7 +298,9 @@ class TestReviewConsolidateCommand:
             failed_reviewers=[failure.model_dump(mode="json")],
         )
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -308,7 +318,9 @@ class TestReviewConsolidateCommand:
         doc = _make_reviewer_doc(finding, status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -332,7 +344,9 @@ class TestReviewConsolidateCommand:
         doc = _make_reviewer_doc(finding, status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -344,7 +358,9 @@ class TestReviewConsolidateCommand:
         self, runner: CliRunner
     ) -> None:
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input="{not valid json"
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input="{not valid json",
         )
         assert result.exit_code == 1
         assert result.output.startswith("json:")
@@ -355,7 +371,9 @@ class TestReviewConsolidateCommand:
         payload = _consolidate_payload()
         del payload["reviewed_sha"]
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 1
         assert any(
@@ -366,7 +384,9 @@ class TestReviewConsolidateCommand:
         raw_finding = _finding_kwargs(severity="BOGUS")
         payload = _consolidate_payload(documents=[_doc_payload(dict(raw_finding))])
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 1
         assert any(
@@ -385,7 +405,9 @@ class TestReviewConsolidateCommand:
             documents=[_doc_payload(status="degraded", detail="")]
         )
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 1
         assert any(
@@ -399,7 +421,9 @@ class TestReviewConsolidateCommand:
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
         payload_file = tmp_path / "req.json"
         payload_file.write_text(json.dumps(payload))
-        result = runner.invoke(main, ["review", "consolidate", str(payload_file)])
+        result = runner.invoke(
+            main, ["review", "consolidate", "--no-base-check", str(payload_file)]
+        )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert verdict["review"]["agents_run"] == 1
@@ -408,7 +432,9 @@ class TestReviewConsolidateCommand:
         doc = _make_reviewer_doc(status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -477,7 +503,9 @@ class TestReviewConsolidateCommand:
             failed_reviewers=[f.model_dump(mode="json") for f in failures],
         )
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -509,7 +537,14 @@ class TestReviewConsolidateWorktreeOption:
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
         result = runner.invoke(
             main,
-            ["review", "consolidate", "-", "--worktree", str(tmp_path)],
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "-",
+                "--worktree",
+                str(tmp_path),
+            ],
             input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
@@ -528,7 +563,9 @@ class TestReviewConsolidateWorktreeOption:
         doc = _make_reviewer_doc(finding, status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -546,7 +583,9 @@ class TestReviewConsolidateWorktreeOption:
         doc = _make_reviewer_doc(finding, status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
@@ -566,6 +605,7 @@ class TestReviewConsolidateWorktreeOption:
             [
                 "review",
                 "consolidate",
+                "--no-base-check",
                 "-",
                 "--worktree",
                 str(tmp_path),
@@ -723,7 +763,7 @@ class TestReviewAdjudicateCommand:
         )
         consolidated = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(
                 _consolidate_payload(documents=[doc.model_dump(mode="json")])
             ),
@@ -1508,7 +1548,7 @@ class TestReviewConsolidateDuplicatedHunkDetection:
     ) -> None:
         result = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(_consolidate_payload(diff=_DUPLICATED_HUNK_DIFF)),
         )
 
@@ -1519,7 +1559,7 @@ class TestReviewConsolidateDuplicatedHunkDetection:
     def test_distinct_hunks_same_file_not_flagged(self, runner: CliRunner) -> None:
         result = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(_consolidate_payload(diff=_TWO_HUNK_DIFF)),
         )
 
@@ -1530,7 +1570,7 @@ class TestReviewConsolidateDuplicatedHunkDetection:
     ) -> None:
         result = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(_consolidate_payload(diff=_SAME_HUNK_TWO_FILES_DIFF)),
         )
 
@@ -1554,7 +1594,7 @@ class TestReviewConsolidatePlaceholderDiff:
     def test_placeholder_diff_rejected(self, runner: CliRunner, diff_text: str) -> None:
         result = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(_consolidate_payload(diff=diff_text)),
         )
 
@@ -1566,7 +1606,7 @@ class TestReviewConsolidatePlaceholderDiff:
     ) -> None:
         result = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(_consolidate_payload(diff=_DIFF_CONTAINING_ELLIPSIS)),
         )
 
@@ -1579,7 +1619,7 @@ class TestReviewConsolidatePlaceholderDiff:
         assert len(_SHORT_REAL_DIFF) < 40
         result = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(_consolidate_payload(diff=_SHORT_REAL_DIFF)),
         )
 
@@ -1609,7 +1649,14 @@ class TestReviewConsolidateDocumentsFrom:
         del payload["documents"]
         result = runner.invoke(
             main,
-            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--documents-from",
+                str(docs_dir),
+                "-",
+            ],
             input=json.dumps(payload),
         )
 
@@ -1640,7 +1687,7 @@ class TestReviewConsolidateDocumentsFrom:
 
         inline = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(
                 _consolidate_payload(
                     documents=[d.model_dump(mode="json") for d in docs]
@@ -1651,7 +1698,14 @@ class TestReviewConsolidateDocumentsFrom:
         del from_disk_payload["documents"]
         from_disk = runner.invoke(
             main,
-            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--documents-from",
+                str(docs_dir),
+                "-",
+            ],
             input=json.dumps(from_disk_payload),
         )
 
@@ -1675,6 +1729,7 @@ class TestReviewConsolidateDocumentsFrom:
             [
                 "review",
                 "consolidate",
+                "--no-base-check",
                 "--documents-from",
                 str(docs_dir / "pfx-*.json"),
                 "-",
@@ -1697,7 +1752,14 @@ class TestReviewConsolidateDocumentsFrom:
         del payload["documents"]
         result = runner.invoke(
             main,
-            ["review", "consolidate", "--documents-from", str(missing), "-"],
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--documents-from",
+                str(missing),
+                "-",
+            ],
             input=json.dumps(payload),
         )
 
@@ -1725,7 +1787,14 @@ class TestReviewConsolidateDocumentsFrom:
         )
         result = runner.invoke(
             main,
-            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--documents-from",
+                str(docs_dir),
+                "-",
+            ],
             input=json.dumps(payload),
         )
 
@@ -1747,7 +1816,14 @@ class TestReviewConsolidateDocumentsFrom:
         del payload["documents"]
         result = runner.invoke(
             main,
-            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--documents-from",
+                str(docs_dir),
+                "-",
+            ],
             input=json.dumps(payload),
         )
 
@@ -1767,7 +1843,14 @@ class TestReviewConsolidateDocumentsFrom:
         del payload["documents"]
         result = runner.invoke(
             main,
-            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--documents-from",
+                str(docs_dir),
+                "-",
+            ],
             input=json.dumps(payload),
         )
 
@@ -1787,7 +1870,14 @@ class TestReviewConsolidateDocumentsFrom:
         del payload["documents"]
         result = runner.invoke(
             main,
-            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--documents-from",
+                str(docs_dir),
+                "-",
+            ],
             input=json.dumps(payload),
         )
 
@@ -1804,7 +1894,14 @@ class TestReviewConsolidateDocumentsFrom:
 
         result = runner.invoke(
             main,
-            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--documents-from",
+                str(docs_dir),
+                "-",
+            ],
             input=json.dumps(
                 _consolidate_payload(documents=[ignored.model_dump(mode="json")])
             ),
@@ -1820,7 +1917,9 @@ class TestReviewConsolidateDocumentsFrom:
         payload = _consolidate_payload()
         del payload["documents"]
         result = runner.invoke(
-            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
         )
 
         assert result.exit_code == 0, result.output
@@ -1841,7 +1940,14 @@ class TestReviewConsolidateDocumentsFrom:
         # (a) A path that exists and is a directory -> <path>/*.json.
         bare = runner.invoke(
             main,
-            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--documents-from",
+                str(docs_dir),
+                "-",
+            ],
             input=json.dumps(payload),
         )
         # (b) A path whose parent exists but which does not itself exist ->
@@ -1851,6 +1957,7 @@ class TestReviewConsolidateDocumentsFrom:
             [
                 "review",
                 "consolidate",
+                "--no-base-check",
                 "--documents-from",
                 str(docs_dir / "pfx-*.json"),
                 "-",
@@ -2235,7 +2342,7 @@ class TestReviewConsolidateRegressionFixtures:
     def test_regression_duplicated_diff_reconstruction(self, runner: CliRunner) -> None:
         result = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(
                 _consolidate_payload(diff=_CONSOLIDATE_DIFF + _CONSOLIDATE_DIFF)
             ),
@@ -2255,7 +2362,7 @@ class TestReviewConsolidateRegressionFixtures:
         )
         result = runner.invoke(
             main,
-            ["review", "consolidate", "-"],
+            ["review", "consolidate", "--no-base-check", "-"],
             input=json.dumps(
                 _consolidate_payload(documents=[doc.model_dump(mode="json")])
             ),
@@ -2281,7 +2388,14 @@ class TestReviewConsolidateRegressionFixtures:
 
         result = runner.invoke(
             main,
-            ["review", "consolidate", "--documents-from", str(docs_dir), "-"],
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--documents-from",
+                str(docs_dir),
+                "-",
+            ],
             input=json.dumps(payload),
         )
 
