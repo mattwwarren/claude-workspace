@@ -31,10 +31,14 @@ from cw.review_findings import (
     _anchor_in_enclosing_def,
     _classify_finding,
     _enclosing_def_span,
+    _evidence_diff_pair,
     _evidence_in_claimed_lines,
     _line_reference_valid,
+    _normalize_diff_text,
+    _normalize_unicode_punctuation,
     _reconcile_evidence_window,
     _select_rejected_must_fix,
+    _strip_diff_markers,
     consolidate_verdict,
     dedupe_findings,
     derive_review_counts,
@@ -724,6 +728,86 @@ _PR1784_ABSENT_EVIDENCE = (
     "some fabricated line ten\n"
     "some fabricated line eleven"
 )
+
+
+# -- #1976 fixtures: #1879-shape formatting-trivia false-rejects ----------
+#
+# Hand-authored (not a redacted external capture): unified diff is this
+# repo's own format and the SHAPE is what is under test, not the literal
+# bytes of #1879 -- see the plan's Adopted Assumptions. Parsed through the
+# real _parse_unified_diff via _captured_diff_from_text, same as the #1729/
+# #1784 fixtures above, so the line-number arithmetic is the production
+# parser's, not the test's.
+#
+# New-file line map produced by that parse:
+#   10 context  def render(value: str) -> str:
+#   11 context      """Render *value* for the operator."""
+#      removed      prefix = "legacy"       <- only in file_diffs
+#   12 ADDED        prefix = "modern"  # rewritten -- see the ticket
+#   13 context      suffix = "done"
+#   14 context      return prefix + value + suffix
+_ISSUE1879_DIFF_LINES = [
+    "diff --git a/src/cw/example_renderer.py b/src/cw/example_renderer.py",
+    "--- a/src/cw/example_renderer.py",
+    "+++ b/src/cw/example_renderer.py",
+    "@@ -10,5 +10,5 @@ def render(value: str) -> str:",
+    " def render(value: str) -> str:",
+    '     """Render *value* for the operator."""',
+    '-    prefix = "legacy"',
+    '+    prefix = "modern"  # rewritten -- see the ticket',
+    '     suffix = "done"',
+    "     return prefix + value + suffix",
+]
+_ISSUE1879_DIFF = "\n".join(_ISSUE1879_DIFF_LINES) + "\n"
+_ISSUE1879_FILE = "src/cw/example_renderer.py"
+_ISSUE1879_ADDED_LINE_NO = 12
+_ISSUE1879_ADDED_LINE = '    prefix = "modern"  # rewritten -- see the ticket'
+_ISSUE1879_REMOVED_LINE = '    prefix = "legacy"'
+# The reviewer-quoted `-`/`+` pair for the single rewritten line: the removed
+# half exists ONLY in file_diffs (a removed line has no new-file line number,
+# so it is absent from both file_line_text and file_window_text).
+_ISSUE1879_DIFF_PAIR_EVIDENCE = f"-{_ISSUE1879_REMOVED_LINE}\n+{_ISSUE1879_ADDED_LINE}"
+
+
+# Unicode punctuation an LLM reviewer substitutes for its ASCII equivalent
+# when quoting a diff (#1976). Built via chr() rather than written literally:
+# ruff's RUF001 flags several of these as ambiguous inside a string literal,
+# and an escape-vs-character mixture in the fixtures would be its own trap.
+_EM_DASH = chr(0x2014)
+_EN_DASH = chr(0x2013)
+_LSQUO = chr(0x2018)
+_RSQUO = chr(0x2019)
+_LDQUO = chr(0x201C)
+_RDQUO = chr(0x201D)
+_NBSP = chr(0x00A0)
+
+# The three verbatim normalization/rescue-stage suffixes #1976 appends to a
+# rejected finding's `detail`, restated here as literals so the assertions
+# below lock the exact operator-facing wording rather than re-deriving it.
+_RESCUE_ATTEMPTED_DIAGNOSIS = (
+    "; normalization applied: diff-marker stripping, unicode punctuation "
+    "normalization (em/en dash, curly quotes, NBSP); diff-pair rescue: "
+    "attempted (evidence is a -/+ line pair against a 1-line declared range) "
+    "but no match in the file's raw diff text either"
+)
+_RESCUE_NOT_ATTEMPTED_DIAGNOSIS = (
+    "; normalization applied: diff-marker stripping, unicode punctuation "
+    "normalization (em/en dash, curly quotes, NBSP); diff-pair rescue: not "
+    "attempted (evidence is not a -/+ line pair against a 1-line declared "
+    "range); only the marker-strip and unicode-punctuation normalization "
+    "above were applied"
+)
+_RESCUE_NOT_APPLICABLE_DIAGNOSIS = (
+    "; normalization applied: diff-marker stripping, unicode punctuation "
+    "normalization (em/en dash, curly quotes, NBSP); diff-pair rescue: not "
+    "applicable (file-level fallback has no line anchor for a diff-pair "
+    "rescue to resolve against)"
+)
+
+
+def _issue1879_captured_diff() -> CapturedDiff:
+    """Build the #1976/#1879-shape ``CapturedDiff`` via the real diff parser."""
+    return _captured_diff_from_text(_ISSUE1879_DIFF)
 
 
 class TestSeverityAndDispositionLiterals:
@@ -1580,7 +1664,7 @@ class Test9491MustFixCaseReconstruction:
             "evidence is 1 line(s) long but the declared range "
             "line_start=9491, line_end=None spans 1 line(s); no window "
             "within ±3 lines of the declared range contains the "
-            "evidence text verbatim"
+            "evidence text verbatim" + _RESCUE_NOT_ATTEMPTED_DIAGNOSIS
         )
 
     def test_9491_parks_as_rejected_must_fix_via_consolidate_verdict(self) -> None:
@@ -1841,6 +1925,306 @@ class TestEvidenceWindowReconciliation:
         assert rejected[0].reason == "evidence_not_in_diff"
         assert "no line" in rejected[0].detail
         assert "file-level fallback" in rejected[0].detail
+
+
+class TestFormattingTolerantEvidenceMatching:
+    """#1976: mechanical evidence-verification must not reject a genuine
+    finding over formatting trivia — a Unicode em dash where the diff carries
+    ASCII ``--``, or a ``-``/``+`` diff-pair quote for a 1-line declared range
+    (whose removed half lives only in ``file_diffs``). Genuinely fabricated
+    evidence stays rejected under every normalization and the rescue: this is
+    a strictly additive relaxation, never a broadening of what counts as "in
+    the diff" (#1714's false-accept floor).
+    """
+
+    # -- Phase 1 items 1-4: direct unit tests of the new helpers ---------
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("+added line", "added line"),
+            ("-removed line", "removed line"),
+            ("  no marker  ", "no marker"),
+            ("+a\n-b\nc", "a\nb\nc"),
+            ("", ""),
+        ],
+    )
+    def test_strip_diff_markers(self, raw: str, expected: str) -> None:
+        assert _strip_diff_markers(raw) == expected
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (f"rewritten {_EM_DASH} see it", "rewritten -- see it"),
+            (f"range 1{_EN_DASH}2", "range 1-2"),
+            (f"it{_RSQUO}s {_LSQUO}q{_RSQUO}", "it's 'q'"),
+            (f"{_LDQUO}quoted{_RDQUO}", '"quoted"'),
+            (f"a{_NBSP}b", "a b"),
+            ("plain ascii -- 'x' \"y\"", "plain ascii -- 'x' \"y\""),
+            (
+                f"{_LDQUO}a{_RDQUO} {_EM_DASH} b {_EN_DASH} c{_RSQUO}d",
+                '"a" -- b - c\'d',
+            ),
+        ],
+    )
+    def test_normalize_unicode_punctuation(self, raw: str, expected: str) -> None:
+        assert _normalize_unicode_punctuation(raw) == expected
+
+    def test_normalize_diff_text_composes_both_stages(self) -> None:
+        # One input carrying BOTH a diff marker and unicode punctuation: the
+        # marker strip runs first, then the punctuation fold.
+        raw = f"+    prefix = {_LDQUO}x{_RDQUO} {_EM_DASH} note"
+        assert _normalize_diff_text(raw) == 'prefix = "x" -- note'
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("-x\n+y", ("-x", "+y")),
+            ("-x", None),
+            ("-x\n+y\n+z", None),
+            ("+x\n-y", None),
+            ("-x\n-y", None),
+        ],
+    )
+    def test_evidence_diff_pair(
+        self, raw: str, expected: tuple[str, str] | None
+    ) -> None:
+        assert _evidence_diff_pair(raw) == expected
+
+    # -- Phase 1 items 5-6: the `-`/`+` diff-pair rescue ------------------
+
+    def test_diff_pair_evidence_for_single_line_range_is_accepted(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Round-1 shape. MUST fail red pre-fix: the declared 1-line window's
+        # content is the ADDED line only, so the 2-line pair can be neither a
+        # substring of it (phase 1) nor exactly equal to any widened window
+        # (phase 2) -- the removed half exists only in file_diffs.
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO,
+            evidence=_ISSUE1879_DIFF_PAIR_EVIDENCE,
+        )
+        with caplog.at_level(logging.INFO):
+            accepted, rejected, _ = validate_reviewer_document(
+                _make_reviewer_doc(finding), diff
+            )
+        assert len(accepted) == 1
+        assert rejected == []
+        assert any("diff-pair evidence match" in r.getMessage() for r in caplog.records)
+
+    def test_diff_pair_rescue_matches_on_removed_half_alone(self) -> None:
+        # Symmetric case: only the REMOVED half is real -- the substrate the
+        # windowed check structurally cannot reach. Proves the rescue's
+        # removed-line branch carries the match on its own.
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO,
+            evidence=f'-{_ISSUE1879_REMOVED_LINE}\n+    prefix = "never written"',
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert len(accepted) == 1
+        assert rejected == []
+
+    # -- Phase 1 items 7-9: unicode-punctuation tolerance -----------------
+
+    def test_em_dash_evidence_against_ascii_double_hyphen_is_accepted(self) -> None:
+        # Round-2 shape, the ticket's headline case. MUST fail red pre-fix:
+        # `—` is not `--` under a raw substring comparison.
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO,
+            evidence=(f'    prefix = "modern"  # rewritten {_EM_DASH} see the ticket'),
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert len(accepted) == 1
+        assert rejected == []
+
+    def test_evidence_missing_leading_plus_marker_still_accepted(self) -> None:
+        # Regression lock on behavior that already passes pre-#1976 via
+        # #1715's per-line marker strip -- the split into
+        # _strip_diff_markers/_normalize_unicode_punctuation must not
+        # regress it.
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO,
+            evidence=_ISSUE1879_ADDED_LINE,
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert len(accepted) == 1
+        assert rejected == []
+
+    def test_curly_quote_evidence_against_straight_quotes_is_accepted(self) -> None:
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO,
+            evidence=(
+                f"    prefix = {_LDQUO}modern{_RDQUO}  # rewritten -- see the ticket"
+            ),
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert len(accepted) == 1
+        assert rejected == []
+
+    def test_nbsp_evidence_against_ascii_space_is_accepted(self) -> None:
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO,
+            evidence=(f'    prefix = "modern"  #{_NBSP}rewritten -- see the ticket'),
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert len(accepted) == 1
+        assert rejected == []
+
+    # -- Phase 1 items 10-12: the relaxation stays bounded ----------------
+
+    def test_pair_evidence_against_multi_line_range_stays_rejected(self) -> None:
+        # The rescue is scoped to a 1-line declared range: a pair-shaped
+        # quote declared against a 3-line range gets no rescue, so the
+        # ordinary windowed rejection stands.
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO + 2,
+            evidence=_ISSUE1879_DIFF_PAIR_EVIDENCE,
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert accepted == []
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_fabricated_pair_evidence_still_rejected(self) -> None:
+        # #1714 floor: pair-shaped and correctly-anchored, but neither half
+        # is anywhere in the file's raw diff text.
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO,
+            evidence="-    ghost_removed = 1\n+    ghost_added = 2",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert accepted == []
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_fabricated_non_pair_evidence_still_rejected(self) -> None:
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO,
+            evidence="    this line was never written by anyone",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert accepted == []
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    # -- Phase 1 item 13: per-stage rejection diagnostics -----------------
+
+    def test_detail_reports_rescue_not_attempted_for_non_pair_evidence(self) -> None:
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO,
+            evidence="    this line was never written by anyone",
+        )
+        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        assert rejected[0].detail.endswith(_RESCUE_NOT_ATTEMPTED_DIAGNOSIS)
+
+    def test_detail_reports_rescue_not_attempted_for_multi_line_range(self) -> None:
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO + 2,
+            evidence="-    ghost_removed = 1\n+    ghost_added = 2",
+        )
+        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        assert rejected[0].detail.endswith(_RESCUE_NOT_ATTEMPTED_DIAGNOSIS)
+
+    def test_detail_reports_rescue_attempted_for_single_line_pair(self) -> None:
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=_ISSUE1879_ADDED_LINE_NO,
+            line_end=_ISSUE1879_ADDED_LINE_NO,
+            evidence="-    ghost_removed = 1\n+    ghost_added = 2",
+        )
+        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        assert rejected[0].detail.endswith(_RESCUE_ATTEMPTED_DIAGNOSIS)
+
+    def test_detail_reports_rescue_not_applicable_for_file_level_finding(self) -> None:
+        # File-level fallback: no line anchor at all, so neither the declared
+        # range nor the pair shape has anything to resolve against.
+        diff = _issue1879_captured_diff()
+        finding = _make_finding(
+            file=_ISSUE1879_FILE,
+            line_start=None,
+            line_end=None,
+            evidence="    this line was never written by anyone",
+        )
+        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        assert rejected[0].detail.endswith(_RESCUE_NOT_APPLICABLE_DIAGNOSIS)
+
+    # -- Phase 1 items 15-16: the escalation-quote path -------------------
+
+    def test_escalation_quote_with_em_dash_survives_normalization(self) -> None:
+        # Mirrors the primary path's em-dash case on the separate
+        # _substring_in_diff predicate. Pre-fix the escalation was stripped:
+        # `—` is not `--` under the raw `text in diff.text` check.
+        diff = _make_diff("def broken():", "note -- rewritten")
+        esc = _make_escalation(evidence_quote=f"note {_EM_DASH} rewritten")
+        finding = _make_finding(escalation=esc)
+        accepted, _, stripped = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert not stripped
+        assert accepted[0].escalation is not None
+
+    def test_escalation_quote_fabricated_still_stripped(self) -> None:
+        # The wider normalization is strictly additive on this path too: a
+        # quote absent under BOTH the marker strip and the unicode fold is
+        # still stripped.
+        diff = _make_diff("def broken():", "note -- rewritten")
+        esc = _make_escalation(
+            evidence_quote=f"ghost quote {_EM_DASH} genuinely absent"
+        )
+        finding = _make_finding(escalation=esc)
+        accepted, _, stripped = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert accepted[0].escalation is None
+        assert len(stripped) == 1
+        assert stripped[0].reason == "escalation_evidence_not_in_diff"
 
 
 class TestUnanchoredFindings:

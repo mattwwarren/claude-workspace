@@ -57,11 +57,16 @@ EXPECTED_EXPORTS = {
     "_anchor_in_enclosing_def",
     "_classify_finding",
     "_dedup_key",
+    "_diff_pair_rescue",
     "_enclosing_def_span",
+    "_evidence_diff_pair",
     "_evidence_in_claimed_lines",
     "_line_reference_valid",
+    "_normalize_diff_text",
+    "_normalize_unicode_punctuation",
     "_reconcile_evidence_window",
     "_select_rejected_must_fix",
+    "_strip_diff_markers",
 }
 
 
