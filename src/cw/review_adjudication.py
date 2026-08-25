@@ -849,17 +849,34 @@ def verify_fixed_dispositions(
     accuracy of the record, not a new gate; the caller
     (``auto-dev-review.md`` Step 3b) surfaces it in ``friction_highlights`` so
     a human sees it.
+
+    ``downgraded_disposition_count`` (#2000) is stamped on the returned verdict
+    with this call's own downgrade tally — the second, structured half of the
+    same visibility fix the enriched WARNING below is the first half of. It is
+    computed FRESH rather than added to the input verdict's value: Stage 3
+    invokes this exactly once per pass (``auto-dev-review.md`` is the only call
+    site), so the honest reading of the field is "this pass walked back N fixed
+    claims", and accumulating would misreport a re-run as a worse pass.
     """
     accepted: list[AcceptedFinding] = []
+    downgraded = 0
     for af in verdict.accepted:
         if af.disposition != "fixed" or _fix_is_substantiated(af.finding, fix_diff):
             accepted.append(af)
             continue
+        downgraded += 1
+        # #2000: file/line alone did not identify WHICH finding's claim was
+        # walked back -- an operator reading the log could not tell a NIT from
+        # a MUST_FIX, or which reviewer had raised it.
         _log.warning(
             "auto-dev: downgraded 'fixed' disposition — fix-cycle diff does "
-            "not touch cited location (file=%s, line=%s)",
+            "not touch cited location (file=%s, line=%s, reviewers=%s, "
+            "severity=%s, title=%s)",
             af.finding.file,
             af.finding.line_start,
+            ", ".join(af.reviewers),
+            af.finding.severity,
+            af.finding.summary,
         )
         accepted.append(
             af.model_copy(
@@ -872,7 +889,9 @@ def verify_fixed_dispositions(
                 }
             )
         )
-    return verdict.model_copy(update={"accepted": accepted})
+    return verdict.model_copy(
+        update={"accepted": accepted, "downgraded_disposition_count": downgraded}
+    )
 
 
 def render_deferred_findings_md(adjudications: list[Adjudication]) -> str:

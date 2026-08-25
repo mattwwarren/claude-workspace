@@ -667,6 +667,24 @@ def validate_reviewer_document(
     for index, finding in enumerate(doc.findings):
         reason = _classify_finding(finding, diff, changed, worktree)
         if reason is not None and reason != "unanchored":
+            # #2000: announce EVERY mechanical rejection, at every severity.
+            # Before this line, a rejection below MUST_FIX left no trace on any
+            # surface -- #1714 gave the MUST_FIX case a verdict field and a
+            # force-block, but a SHOULD_FIX/DEBT/NIT/PRINCIPLE finding was
+            # deleted here in silence and the run reported as if nothing had
+            # been found. INFO (not WARNING) mirrors the "unanchored" /
+            # "no_diff_anchor" routing logs below: same category of event,
+            # same level.
+            _log.info(
+                "auto-dev: mechanically rejected finding — will not reach "
+                "adjudication (reviewer_role=%s, finding_index=%d, "
+                "severity=%s, reason=%s, title=%s)",
+                doc.reviewer_role,
+                index,
+                finding.severity,
+                reason,
+                finding.summary,
+            )
             rejected.append(
                 RejectedFinding(
                     raw=finding.model_dump(),

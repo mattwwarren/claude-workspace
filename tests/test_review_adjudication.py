@@ -445,6 +445,105 @@ class TestVerifyFixedDispositions:
         assert result.accepted[0].disposition_detail == "kept"
         assert caplog.records == []
 
+    def test_downgrade_increments_downgraded_disposition_count(self) -> None:
+        # #2000: before this counter, a verify-fixes downgrade left no
+        # structured trace at all -- the record silently said "dropped" and
+        # nothing said how many claims had been walked back.
+        verdict = _verdict(
+            _accepted(
+                _make_finding(file="src/cw/other.py", line_start=10, line_end=10),
+                disposition="fixed",
+            ),
+            _accepted(
+                _make_finding(file="src/cw/also_other.py", line_start=10, line_end=10),
+                disposition="fixed",
+            ),
+        )
+        result = verify_fixed_dispositions(
+            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+        )
+        assert result.downgraded_disposition_count == 2
+        assert verdict.downgraded_disposition_count == 0
+
+    def test_no_downgrade_leaves_downgraded_disposition_count_zero(self) -> None:
+        verdict = _verdict(
+            _accepted(
+                _make_finding(file="src/cw/foo.py", line_start=10, line_end=10),
+                disposition="fixed",
+            )
+        )
+        result = verify_fixed_dispositions(
+            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+        )
+        assert result.downgraded_disposition_count == 0
+
+    def test_downgraded_count_is_fresh_not_accumulated(self) -> None:
+        # #2000: computed from THIS call's own downgrades only. Stage 3 calls
+        # verify_fixed_dispositions exactly once, so accumulating a prior
+        # value would double-count a re-run rather than describe this pass.
+        verdict = _verdict(
+            _accepted(
+                _make_finding(file="src/cw/foo.py", line_start=10, line_end=10),
+                disposition="fixed",
+            ),
+            downgraded_disposition_count=7,
+        )
+        result = verify_fixed_dispositions(
+            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+        )
+        assert result.downgraded_disposition_count == 0
+
+    def test_downgrade_log_carries_reviewer_severity_and_title(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # #2000: the pre-existing WARNING named only file/line -- not enough to
+        # identify WHICH finding's "fixed" claim was walked back.
+        finding = _make_finding(
+            severity="SHOULD_FIX",
+            file="src/cw/other.py",
+            line_start=10,
+            line_end=10,
+            summary="claimed fixed but untouched",
+        )
+        verdict = _verdict(
+            _accepted(
+                finding,
+                reviewers=["Code Quality Reviewer"],
+                disposition="fixed",
+            )
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            verify_fixed_dispositions(
+                verdict, _make_diff(files={"src/cw/foo.py": [10]})
+            )
+
+        assert any(
+            "downgraded 'fixed' disposition" in rec.getMessage()
+            and "Code Quality Reviewer" in rec.getMessage()
+            and "SHOULD_FIX" in rec.getMessage()
+            and "claimed fixed but untouched" in rec.getMessage()
+            and "src/cw/other.py" in rec.getMessage()
+            for rec in caplog.records
+        )
+
+    @pytest.mark.parametrize("disposition", ["deferred", "rejected", "dropped"])
+    def test_non_fixed_disposition_never_increments_counter(
+        self, disposition: str
+    ) -> None:
+        # #2000: sibling of test_verify_fixed_dispositions_ignores_non_fixed_
+        # dispositions -- a pass-through must not be counted as a downgrade.
+        verdict = _verdict(
+            _accepted(
+                _make_finding(file="src/cw/other.py", line_start=10, line_end=10),
+                disposition=disposition,
+            )
+        )
+        result = verify_fixed_dispositions(
+            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+        )
+        assert result.downgraded_disposition_count == 0
+
     def test_downgrade_of_a_must_fix_leaves_blocking_and_must_fix_stale(self) -> None:
         """Record-only (#1805 R1): a downgrade never re-opens the gate.
 
