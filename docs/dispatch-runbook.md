@@ -358,10 +358,13 @@ Run it at checkpoints — after a gate, after a merge, before reporting that a
 wave is healthy — not on a timer. Event-driven monitoring covers the named
 failures; peek covers the unnamed one.
 
-This checkpoint discipline is a stopgap: `cw` already emits
-`session.liveness_changed` with staleness buckets, but no attention monitor
-subscribes to it yet (#2004). Once that lands, a stalled worker pages you and
-this becomes a confirmation step rather than the only line of defense.
+This has landed (#2004): the attention monitor (`scripts/attention_monitor.sh`,
+see the `orchestrate-sprint` skill's Phase 4) now subscribes to
+`session.liveness_changed`, filtered to `stale_30m`/`stale_45m`, so a stalled
+worker pages you once the reconcile liveness sweep crosses one of those
+bucket boundaries. `cw queue peek` remains valuable as a **confirmation**
+step — and it still covers the narrower residual window before the first
+`stale_30m` crossing — but it is no longer the only line of defense.
 
 > **Do not hand-roll a liveness check.** `peek` already computes `idle_m`
 > correctly from parsed transcript records. Substitutes based on file mtimes
