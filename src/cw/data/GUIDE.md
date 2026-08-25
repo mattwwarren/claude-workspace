@@ -29,6 +29,24 @@ it sweeps the ticket against real code, resolves the technical ambiguities, esca
 genuine forks, and posts a binding **Pre-flight Resolutions** comment the worker reads. This
 is the single biggest lever for first-try ships.
 
+> **What makes resolutions binding is a marker, not the heading.** The plan stage greps
+> the live-fetched ticket comments and body for the literal string
+> `<!-- auto-dev-preflight-resolutions -->`. Only a source carrying that marker is injected
+> into the plan agent's prompt as binding constraints; anything else is ordinary comment
+> text the agent may or may not follow. `harden-ticket` appends it for you.
+>
+> **If you write a resolutions comment by hand, you must append the marker yourself.**
+> Omitting it fails silently — the comment still reads as authoritative to a human, the plan
+> agent often complies anyway out of good judgment, and nothing anywhere reports that the
+> mechanism never engaged. Two related consequences: the plan is also told to *omit* its
+> `## Pre-flight Resolution Conformance` section when no marker-bearing source exists, so a
+> reviewer's "missing conformance section" finding is a false positive in that case — check
+> for the marker before acting on it.
+>
+> Use **exactly one** marker-bearing source per ticket. Two trip a multi-marker gate. When
+> re-resolving on a later round, post one consolidated comment restating every prior
+> resolution plus the new ones, and leave the earlier unmarked comments as history.
+
 **Skills** (ship with the repo; each wraps a whole operator motion):
 - `harden-ticket` — pre-flight a ticket before dispatch (above).
 - `sprint-buildout` — turn a hardened RFC into filed GitHub tickets (drives `cw sprint plan|apply`).
@@ -51,7 +69,14 @@ cw dev-queue requeue <ticket> -c <client>        # BLOCKED_ON_USER → PENDING (
                                                  #   --from-cancelled / --from-failed to recover)
 cw dev-queue unblock <ticket> -c <client>        # clear salvage-park markers and requeue
 cw dev-queue move <ticket> -c <client> --to <lane>   # re-lane
-cw dev-queue cancel|remove|clear -c <client>     # queue hygiene (clear takes -s <status>)
+cw dev-queue cancel|remove -c <client>           # queue hygiene, one ticket at a time
+cw dev-queue prune --older-than <days> -c <c>    # bulk-retire stale terminal rows (dry-run
+                                                 #   by default; needs --confirm to delete)
+cw dev-queue clear -c <client> [-s <status>]     # DESTRUCTIVE: deletes every matching row
+                                                 #   immediately — no dry-run, no --confirm.
+                                                 #   With no -s it removes RUNNING rows (live
+                                                 #   sessions) and BLOCKED_ON_USER rows
+                                                 #   (parked work) too. Prefer `prune`.
 cw dev-queue refresh-all                         # fast-forward main on every client repo
 ```
 
@@ -83,6 +108,21 @@ Prefer the **event bus and blocking waits** (`cw dev-queue wait`, `cw session wa
 `cw event tail -f`) over hand-rolled timed polling. `cw watchdog install` sets up a
 standalone systemd/launchd tick (escalation sweep + dispatch liveness) when no loop is
 running.
+
+> **Silence is not proof of life — run `cw queue peek` at checkpoints.** Every event on the
+> attention stream is a *failure* event: something the pipeline noticed and named. A session
+> that claims a ticket, registers in the roster, reports RUNNING and then simply stops
+> produces none of them, and is indistinguishable from a healthy session doing slow work.
+>
+> One case is worth knowing by name: **a session waiting on a subagent will not page you at
+> all.** `session_unresponsive` fires only when there is no sentinel *and* no pending
+> subagent spawn (`docs/events.md`), so a spawn that never completes suppresses the distress
+> signal indefinitely rather than for a bounded window.
+>
+> `cw queue peek` is the positive check. Read `idle_m` (minutes since the session's last
+> transcript **record**) against `age_m`: `idle_m` well below `age_m` means it is producing
+> output; `idle_m ≈ age_m` means it has done nothing since spawning. Run it after a gate,
+> after a merge, and before telling anyone a wave is healthy — not on a timer.
 
 **Push channels (MCP):** `cw queue-channel serve` (default `127.0.0.1:8789`; also hosts the
 `cw-operator` topic) and `cw pr-channel serve` (default `127.0.0.1:8788`) push events into
@@ -120,6 +160,20 @@ cw `session_id` → `sessions.json` `surface_ref` / `claude_session_id` →
    Pure local compute; no model quota. The `cw-followup` skill automates this per sentinel;
    `cw dev-queue unblock` (salvage-parked) and `requeue --from-cancelled/--from-failed`
    put recovered tickets back in the queue.
+
+   > **Salvaging by hand? Check what branch you are standing on first.** `/ship-it` and
+   > `/prep-pr` push `git branch --show-current` — correct in a normal dev session, wrong in
+   > an orchestrator session, where you are on the *session* branch and not the feature
+   > branch you mean to ship. Delegating from there pushes the session branch. `/ship-it`
+   > also resolves to whichever project's `ship-it.md` the cwd belongs to, which in a
+   > cw-managed worktree is cw's own — not the client repo's — and it hardcodes
+   > `gh pr merge --auto --squash`, which will arm auto-merge even when you meant to leave
+   > the PR open.
+   >
+   > The fix is one step, not an exception: **check out the feature branch before
+   > delegating** (or cut it yourself, as when shipping orchestrator-authored work). All
+   > three failure modes come from the same wrong assumption about where you are standing.
+   > Otherwise create the PR directly with `gh pr create` from the correct branch.
 8. **Clean up**: `cw done <dead-session> [--cleanup]`; `cw worktree gc` for squash-merged or
    closed branches; `cw dev-queue clear -c <client> -s completed` (one status per call);
    `cw doctor` to confirm green.
