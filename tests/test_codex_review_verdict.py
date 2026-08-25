@@ -37,6 +37,7 @@ from cw.review_findings import (
     AcceptedFinding,
     AgentSpecSource,
     AgentSpecStatus,
+    RejectedFinding,
     ReviewerRunFailure,
     ReviewerRunRecord,
     ReviewVerdict,
@@ -1529,6 +1530,73 @@ class TestRenderVerdictComment:
         assert body.count("<details>") == 1
         assert "first drop" in body
         assert "second drop" in body
+
+    def test_sub_must_fix_rejected_line_renders_anchor_and_detail(self) -> None:
+        # A line-anchored SHOULD_FIX rejected `evidence_not_in_diff` is the one
+        # reason that populates RejectedFinding.detail (#1792) -- both the
+        # `file:line` anchor and the indented discrepancy line must reach the
+        # new section, not just the MUST_FIX one.
+        doc = _make_reviewer_doc(
+            _make_finding(
+                severity="SHOULD_FIX",
+                file="src/cw/foo.py",
+                line_start=10,
+                line_end=10,
+                evidence="not present anywhere",
+                summary="evidence mismatch",
+            )
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.rejected[0].detail != ""
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "- **src/cw/foo.py:10** — evidence mismatch" in body
+        assert f"  - {verdict.rejected[0].detail}" in body
+
+    def test_unrecognized_severity_rejection_sorts_last_and_still_renders(
+        self,
+    ) -> None:
+        # A rejected payload is by definition one that failed validation, so
+        # its claimed severity may be absent or not a Severity member at all.
+        # It must sort last rather than raise -- and it must still be RENDERED:
+        # an uncountable rejection is still a rejection, and dropping it here
+        # would reintroduce the exact silence #2000 closes.
+        strange = RejectedFinding.model_construct(
+            raw={"file": "src/cw/strange.py", "summary": "no severity at all"},
+            # A distinct role so it forms its own group -- and one that sorts
+            # FIRST alphabetically, so a pass that ignored severity rank and
+            # fell back to the raw key tuple would order it ahead of the
+            # SHOULD_FIX group and fail the ordering assertion below.
+            reviewer_role="Aaa Reviewer",
+            reason="unknown_file",
+            detail="",
+        )
+        base = consolidate_verdict(
+            [
+                _make_reviewer_doc(
+                    _make_finding(
+                        severity="SHOULD_FIX",
+                        file="src/cw/gone.py",
+                        line_start=None,
+                        line_end=None,
+                        summary="ordinary drop",
+                    )
+                )
+            ],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        verdict = base.model_copy(
+            update={
+                "rejected": [strange, *base.rejected],
+                "rejected_count": len(base.rejected) + 1,
+            }
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "no severity at all" in body
+        assert "ordinary drop" in body
+        # SHOULD_FIX is a known severity, so its group precedes the unranked one
+        # regardless of the reversed input order above.
+        assert body.index("ordinary drop") < body.index("no severity at all")
 
     def test_rejected_must_fix_section_unchanged_when_sub_must_fix_also_present(
         self,
