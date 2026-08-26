@@ -2731,7 +2731,7 @@ def test_dispatch_fix_agent_resumes_pushed_branch(
     tmp_path: Path,
     stub_spawn: _SpawnRecorder,
 ) -> None:
-    """Re-dispatch reuses the existing worktree instead of raising StaleWorktreeError."""
+    """Re-dispatch reuses the existing worktree, never StaleWorktreeError."""
     from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
 
     client = _make_fix_client(make_git_repo, tmp_path)
@@ -2771,7 +2771,7 @@ def test_dispatch_fix_agent_verifies_head_before_merge(
     _seed_origin(client, branch)
 
     stale = tmp_path / "stale-wt"
-    _fix_git(client.workspace_path, "worktree", "add", str(stale), "main")
+    _fix_git(client.workspace_path, "worktree", "add", "--detach", str(stale), "main")
     monkeypatch.setattr(
         fix_agent_mod, "create_worktree", lambda *_args, **_kwargs: stale
     )
@@ -2803,7 +2803,7 @@ def test_dispatch_fix_agent_merge_conflict_blocks(
     _seed_origin(client, branch)
     _advance_origin_main(client, "shared.txt", "main side\n")
 
-    with pytest.raises(CwError, match="shared.txt"):
+    with pytest.raises(CwError, match=r"shared\.txt"):
         dispatch_fix_agent(
             client=client,
             branch=branch,
