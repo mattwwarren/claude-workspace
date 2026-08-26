@@ -51,6 +51,7 @@ from cw.review_findings import (
     validate_reviewer_document,
     write_review_verdict,
 )
+from cw.review_findings._validation import _best_effort_discarded_tally
 from tests.conftest import (
     FindingKwargs,
     _doc_payload,
@@ -3830,6 +3831,51 @@ class TestReviewerRunFailureDiscardedFindings:
             failed_reviewers=[failure],
         )
         assert verdict.run_failures_with_should_fix_discards == []
+
+
+class TestBestEffortDiscardedTally:
+    """#2029: the tally must survive whatever the broken payload turns out to be.
+
+    Its input is by definition a document that already failed to parse, so every
+    step of the walk is exercised directly here — several of these shapes never
+    reach it through the codex path (a payload that is not valid JSON classifies
+    as ``invalid_json`` upstream and is never tallied), and a defensive branch
+    that only production can reach is a branch nothing has ever run.
+    """
+
+    def test_counts_findings_by_claimed_severity(self) -> None:
+        raw = json.dumps(
+            {
+                "status": "ok",
+                "findings": [
+                    {"severity": "MUST_FIX"},
+                    {"severity": "NIT"},
+                    {"severity": "NIT"},
+                ],
+            }
+        )
+        assert _best_effort_discarded_tally(raw) == (3, {"MUST_FIX": 1, "NIT": 2})
+
+    def test_accepts_an_already_decoded_payload(self) -> None:
+        payload = {"findings": [{"severity": "SHOULD_FIX"}]}
+        assert _best_effort_discarded_tally(payload) == (1, {"SHOULD_FIX": 1})
+
+    def test_undecodable_json_tallies_nothing(self) -> None:
+        assert _best_effort_discarded_tally("not json{{") == (0, {})
+
+    def test_non_dict_payload_tallies_nothing(self) -> None:
+        assert _best_effort_discarded_tally(json.dumps([1, 2, 3])) == (0, {})
+        assert _best_effort_discarded_tally(None) == (0, {})
+
+    def test_non_list_findings_key_tallies_nothing(self) -> None:
+        assert _best_effort_discarded_tally({"findings": "nope"}) == (0, {})
+        assert _best_effort_discarded_tally({"status": "ok"}) == (0, {})
+
+    def test_unreadable_severities_bucket_as_unknown(self) -> None:
+        # A finding with no severity, and an item that is not a dict at all —
+        # both still happened, so both are counted rather than dropped.
+        payload = {"findings": [{"file": "a.py"}, "not a finding"]}
+        assert _best_effort_discarded_tally(payload) == (2, {"unknown": 2})
 
 
 class TestConsolidateVerdictFixCycles:
