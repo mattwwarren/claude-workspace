@@ -119,15 +119,22 @@ def test_review_large_scope_pins_sonnet() -> None:
     assert '(per `/review` command patterns) (all `model: "sonnet"`' in content
 
 
-def test_review_fix_agent_pins_sonnet() -> None:
-    """Fix agent in review stage must pin model: "sonnet".
+def test_review_fix_agent_dispatched_as_cw_session() -> None:
+    """Fix agent in review stage carries no model pin because it is not a subagent.
 
-    #1944 removed the dead Agent-tool `run_in_background: true` from the spawn
-    text (the tool is async unconditionally), so the pin no longer includes it.
+    #2017 retired its harness `Agent(isolation: "worktree")` spawn in favour of
+    a cw DAEMON session dispatched by `dispatch_fix_agent`, whose model comes
+    from the client's `worker_model` config rather than from skill text.
+    Asserting the retired pin's absence alongside the new call keeps this
+    file's guard character: a regression back to a harness subagent would
+    restore the unpinned-model hazard every other test here exists to catch.
+    (The unrelated `isolation: "worktree"` mention in the Step 3a sandbox
+    warning is about *reviewer* subagents, so the absence check is scoped to
+    the fix agent's own pin string.)
     """
     content = _cmd("auto-dev-review.md")
-    pin = '`isolation: "worktree"` and `model: "sonnet"`'
-    assert pin in content
+    assert "dispatch_fix_agent" in content
+    assert '`isolation: "worktree"` and `model: "sonnet"`' not in content
 
 
 def test_finalize_prior_pr_ci_fix_pins_sonnet() -> None:
