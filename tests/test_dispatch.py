@@ -13335,6 +13335,40 @@ class TestLaneCircuitBreaker:
         assert len(events) == 1
         assert events[0].payload["last_error"] == ""
 
+    def test_multiline_last_error_collapses_to_one_line(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """#2034: a WorktreeError's message (e.g. from a real git failure,
+        which embeds git's stderr verbatim) must be collapsed to one line
+        before it lands in the LANE_PAUSED payload — _format_event_line
+        renders one event per terminal line, and an embedded newline breaks
+        that contract. Nothing is lost, just joined onto one line."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(1)
+        add_ticket(TicketTask(ticket_id="GEN-2034A", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(
+            WorktreeError(
+                "Git command failed: git worktree add /p b\n"
+                "fatal: 'b' is already used by worktree at '/holder'"
+            )
+        )
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-2034-multiline",
+            event_types=[OrchestratorEventType.LANE_PAUSED],
+        )
+        assert len(events) == 1
+        last_error = events[0].payload["last_error"]
+        assert "\n" not in last_error
+        assert "Git command failed" in last_error
+        assert "fatal:" in last_error
+        assert "/holder" in last_error
+
     def test_success_resets_lane_counter(
         self,
         tmp_dispatch_dirs: Path,
