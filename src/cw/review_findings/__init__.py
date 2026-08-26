@@ -41,6 +41,15 @@ mirrored onto the nested ``Review`` so they reach the terminal
 ``_select_rejected_must_fix`` is exported only because its #1714 selection rule
 is directly test-asserted, which is not true here.
 
+#2029 follows the same economy: the new ``"schema_invalid"`` rejection reason,
+``ReviewerRunFailure``'s discard tally, and ``ReviewVerdict``'s
+``run_failures_with_should_fix_discards`` all ride the existing type re-exports
+and need no new names. Only ``parse_reviewer_document`` is added — the tolerant
+JSON→model boundary both executor paths call in place of
+``ReviewerFindingsDocument.model_validate``, so it has to be public. Its
+helpers (``_raw_finding_payload``, ``_best_effort_discarded_tally``,
+``_select_run_failures_with_discards``) stay package-private.
+
 Import-cycle note (#1818): ``cw.review_finding_dispositions`` documents a
 load-bearing cycle broken only by that module refusing any module-scope ``cw``
 import, and the flat module's first two ``cw``-scoped imports — ``cw.atomic``
@@ -110,6 +119,7 @@ from cw.review_findings._validation import (
     _enclosing_def_span,
     _evidence_in_claimed_lines,
     _line_reference_valid,
+    parse_reviewer_document,
     validate_reviewer_document,
 )
 
@@ -158,6 +168,7 @@ __all__ = [
     "consolidate_verdict",
     "dedupe_findings",
     "derive_review_counts",
+    "parse_reviewer_document",
     "validate_reviewer_document",
     "write_review_verdict",
 ]
