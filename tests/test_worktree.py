@@ -19,6 +19,7 @@ from cw.worktree import (
     _git_dir,
     _hashed_worktree_base,
     _register_cw_exclude,
+    _run_git,
     check_main_ff_safety,
     check_not_main_checkout,
     create_worktree,
@@ -296,9 +297,11 @@ class TestRegisterCwExclude:
         """OSError from file I/O is swallowed with a WARNING."""
         repo = make_git_repo("test-repo")
 
-        original_run = __import__("cw.worktree", fromlist=["_run_git"])._run_git
+        original_run = _run_git
 
-        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+        def mock_run(
+            *args: str, cwd: Path, check: bool = True
+        ) -> MagicMock | subprocess.CompletedProcess[str]:
             if "rev-parse" in args and "--git-common-dir" in args:
                 return original_run(*args, cwd=cwd, check=check)
             return MagicMock(returncode=0, stdout="", stderr="")
@@ -481,6 +484,8 @@ class TestCreateWorktree:
             result = MagicMock(stderr="", stdout="")
             if "rev-parse" in args and any("refs/heads/" in a for a in args):
                 result.returncode = 128  # branch doesn't exist locally
+            elif "rev-parse" in args and any("refs/remotes/origin/" in a for a in args):
+                result.returncode = 128  # branch doesn't exist on remote either
             elif "rev-parse" in args and any("origin/" in a for a in args):
                 result.returncode = 0  # origin/main resolves
                 result.stdout = "abc1234\n"
@@ -526,6 +531,63 @@ class TestCreateWorktree:
         assert "-b" not in wt_add_calls[0]
         # E: existing-branch path — no origin/ start-point added (#710 regression guard)
         assert not any("origin/" in a for a in wt_add_calls[0])
+        # AC1 (#2032): a present local ref must short-circuit before any
+        # remote check — no fetch, no refs/remotes/ lookup at all.
+        assert not any("fetch" in c for c in git_calls)
+        assert not any("refs/remotes" in a for c in git_calls for a in c)
+
+    def test_remote_only_branch_resumes_remote_tip(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AC2: local ref absent but origin/<branch> exists — worktree add
+        resumes the remote tip via `-b <branch> <path> origin/<branch>`,
+        not `_resolve_branch_start_point`'s origin/main ladder (#2032)."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        git_calls: list[tuple[str, ...]] = []
+        fetch_calls: list[tuple[ClientConfig, str]] = []
+
+        def mock_fetch(fetch_client: ClientConfig, branch_name: str) -> bool:
+            fetch_calls.append((fetch_client, branch_name))
+            return True
+
+        def mock_run(
+            *args: str,
+            cwd: object,
+            check: bool = True,
+        ) -> MagicMock:
+            git_calls.append(args)
+            result = MagicMock(stderr="", stdout="")
+            if "rev-parse" in args and any("refs/heads/" in a for a in args):
+                result.returncode = 128  # branch doesn't exist locally
+            elif "rev-parse" in args and any("refs/remotes/origin/" in a for a in args):
+                result.returncode = 0  # branch exists on the remote
+                result.stdout = "abc1234\n"
+            else:
+                result.returncode = 0
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        monkeypatch.setattr("cw.worktree.fetch_feature_branch", mock_fetch)
+        wt_path = tmp_path / "wt" / "feat-remote-only"
+        result = create_worktree(client, "feat/remote-only")
+        assert result == wt_path
+        assert fetch_calls == [(client, "feat/remote-only")]
+        wt_add_calls = [c for c in git_calls if "worktree" in c and "add" in c]
+        assert len(wt_add_calls) == 1
+        assert list(wt_add_calls[0]) == [
+            "worktree",
+            "add",
+            "-b",
+            "feat/remote-only",
+            str(wt_path),
+            "origin/feat/remote-only",
+        ]
 
     def test_new_branch_base_is_origin_main_not_operator_head(
         self,
@@ -580,6 +642,63 @@ class TestCreateWorktree:
             f"(operator HEAD was {c2})"
         )
 
+    def test_stale_local_ref_resumes_remote_history_after_delete(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """AC2+AC5 (integration): after `git branch -D <branch>` locally
+        (the exact auto-dev-review.md:291 fix-loop-reset sequence),
+        create_worktree must resume the branch's pushed history via
+        origin/<branch> — not silently start a fresh branch from
+        origin/main and discard real, already-pushed work (#2032)."""
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+        def _git(*args: str, cwd: Path) -> str:
+            return subprocess.run(
+                ["git", *args],
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=str(cwd),
+                env=clean_env,
+            ).stdout.strip()
+
+        workspace = make_git_repo("workspace")
+
+        # Bare origin with main pushed.
+        origin = tmp_path / "origin.git"
+        origin.mkdir()
+        _git("init", "--bare", "-b", "main", cwd=origin)
+        _git("remote", "add", "origin", str(origin), cwd=workspace)
+        _git("push", "origin", "main", cwd=workspace)
+        _git("fetch", "origin", cwd=workspace)
+
+        # Create the feature branch with a distinguishing commit, push it,
+        # then delete the local ref — reproducing the exact
+        # auto-dev-review.md:291 fix-loop reset (git branch -D after a
+        # review restart) while origin still has the branch's real history.
+        _git("checkout", "-b", "dev/2032-feature", cwd=workspace)
+        _git("commit", "--allow-empty", "-m", "real feature work", cwd=workspace)
+        feature_sha = _git("rev-parse", "HEAD", cwd=workspace)
+        _git("push", "origin", "dev/2032-feature", cwd=workspace)
+        _git("checkout", "main", cwd=workspace)
+        _git("branch", "-D", "dev/2032-feature", cwd=workspace)
+
+        client = ClientConfig(
+            name="test",
+            workspace_path=workspace,
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = create_worktree(client, "dev/2032-feature")
+
+        actual_head = _git("rev-parse", "HEAD", cwd=wt_path)
+        assert actual_head == feature_sha, (
+            f"Worktree HEAD should resume the pushed branch ({feature_sha}), "
+            f"got {actual_head} — branch was likely recreated from "
+            f"origin/main instead of resumed from its remote history"
+        )
+
     def test_new_branch_falls_back_to_local_default_when_origin_absent(
         self,
         tmp_path: Path,
@@ -603,6 +722,8 @@ class TestCreateWorktree:
             result = MagicMock(stderr="", stdout="")
             if "rev-parse" in args and any("refs/heads/" in a for a in args):
                 result.returncode = 128  # ticket branch doesn't exist
+            elif "rev-parse" in args and any("refs/remotes/origin/" in a for a in args):
+                result.returncode = 128  # branch doesn't exist on remote either
             elif "rev-parse" in args and any("origin/" in a for a in args):
                 result.returncode = 128  # origin/main absent (offline)
             elif "rev-parse" in args:
@@ -878,6 +999,8 @@ class TestCreateWorktree:
             result = MagicMock(stderr="", stdout="")
             if "rev-parse" in args and any("refs/heads/" in a for a in args):
                 result.returncode = 128  # ticket branch doesn't exist locally
+            elif "rev-parse" in args and any("refs/remotes/origin/" in a for a in args):
+                result.returncode = 128  # branch doesn't exist on remote either
             elif "rev-parse" in args and any("origin/" in a for a in args):
                 result.returncode = 0  # origin/main resolves (start-point ladder)
                 result.stdout = "abc1234\n"
@@ -997,6 +1120,8 @@ class TestSubmoduleInit:
             result = MagicMock(stderr="", stdout="")
             if "rev-parse" in args and any("refs/heads/" in a for a in args):
                 result.returncode = 128  # ticket branch doesn't exist locally
+            elif "rev-parse" in args and any("refs/remotes/origin/" in a for a in args):
+                result.returncode = 128  # branch doesn't exist on remote either
             elif "rev-parse" in args and any("origin/" in a for a in args):
                 result.returncode = 0  # origin/main resolves
                 result.stdout = "abc1234\n"
@@ -1039,6 +1164,8 @@ class TestSubmoduleInit:
             result = MagicMock(stderr="", stdout="")
             if "rev-parse" in args and any("refs/heads/" in a for a in args):
                 result.returncode = 128  # ticket branch doesn't exist locally
+            elif "rev-parse" in args and any("refs/remotes/origin/" in a for a in args):
+                result.returncode = 128  # branch doesn't exist on remote either
             elif "rev-parse" in args and any("origin/" in a for a in args):
                 result.returncode = 0  # origin/main resolves
                 result.stdout = "abc1234\n"
@@ -1077,6 +1204,8 @@ class TestSubmoduleInit:
             result = MagicMock(stderr="", stdout="")
             if "rev-parse" in args and any("refs/heads/" in a for a in args):
                 result.returncode = 128  # ticket branch doesn't exist locally
+            elif "rev-parse" in args and any("refs/remotes/origin/" in a for a in args):
+                result.returncode = 128  # branch doesn't exist on remote either
             elif "rev-parse" in args and any("origin/" in a for a in args):
                 result.returncode = 0  # origin/main resolves
                 result.stdout = "abc1234\n"

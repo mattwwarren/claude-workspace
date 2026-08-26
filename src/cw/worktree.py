@@ -170,6 +170,12 @@ def _run_git(
         raise WorktreeError(msg) from e
 
 
+def _ref_exists(ref: str, git_cwd: Path) -> bool:
+    """Return True if *ref* resolves to a valid object in *git_cwd*."""
+    result = _run_git("rev-parse", "--verify", ref, cwd=git_cwd, check=False)
+    return result.returncode == 0
+
+
 def check_not_main_checkout(worktree_path: Path, client: ClientConfig) -> None:
     """Raise WorktreeError if *worktree_path* resolves to the client's main checkout.
 
@@ -535,6 +541,14 @@ def create_worktree(
     *different* branch (or not a worktree at all) is treated as stale and
     raises :exc:`StaleWorktreeError` rather than being reused (see below).
 
+    When no existing worktree is reused, the branch itself is resolved via a
+    three-way check (#2032): a local ``refs/heads/<branch>`` is used as-is; if
+    absent, ``origin/<branch>`` is fetched and checked next so a branch whose
+    local ref was deleted (e.g. a fix-loop's ``git branch -D`` reset) resumes
+    its real pushed history instead of silently starting over; only when
+    neither exists is a brand-new branch created from the client's default
+    branch.
+
     *allow_dirty_reuse* relaxes the unsaved-work refusal **only** (the
     branch-identity check still fires). The staged pipeline reuses one
     per-ticket worktree across stages, where a prior stage legitimately leaves
@@ -576,21 +590,26 @@ def create_worktree(
 
     wt_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Check if branch exists locally (refs/heads/ avoids matching tags)
-    result = _run_git(
-        "rev-parse",
-        "--verify",
-        f"refs/heads/{branch}",
-        cwd=git_cwd,
-        check=False,
-    )
-    if result.returncode == 0:
-        # Branch exists — create worktree from it
+    # Three-way branch resolution: local ref / remote ref / neither (#2032).
+    # refs/heads/ and refs/remotes/origin/ are checked explicitly so a
+    # same-named tag never matches either.
+    if _ref_exists(f"refs/heads/{branch}", git_cwd):
+        # Local branch exists — create worktree from it.
         args = ["worktree", "add", str(wt_path), branch]
     else:
-        # Branch doesn't exist — create new branch from the client's default branch
-        start_point = _resolve_branch_start_point(client, git_cwd)
-        args = ["worktree", "add", "-b", branch, str(wt_path), start_point]
+        # Local ref absent — before assuming the branch doesn't exist at
+        # all, check the remote. A prior `git branch -D` (e.g.
+        # auto-dev-review.md's fix-loop reset) leaves exactly this state
+        # while origin still has the branch's real history.
+        fetch_feature_branch(client, branch)
+        if _ref_exists(f"refs/remotes/origin/{branch}", git_cwd):
+            # Branch exists on the remote — resume its pushed history.
+            args = ["worktree", "add", "-b", branch, str(wt_path), f"origin/{branch}"]
+        else:
+            # Branch doesn't exist locally or on the remote — create new
+            # branch from the client's default branch.
+            start_point = _resolve_branch_start_point(client, git_cwd)
+            args = ["worktree", "add", "-b", branch, str(wt_path), start_point]
 
     if force:
         args.insert(2, "--force")
