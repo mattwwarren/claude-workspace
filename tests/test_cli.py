@@ -10832,6 +10832,7 @@ def test_guide_documents_dropped_approval_hazard() -> None:
     result = runner.invoke(main, ["guide"])
     assert "operator answer" in result.output.lower()
     assert "cw dev-queue approve" in result.output
+    assert "approval evidence" in result.output.lower()
     assert "stage transitions" in result.output.lower()
 
 
