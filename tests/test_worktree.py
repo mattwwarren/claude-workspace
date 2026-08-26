@@ -19,6 +19,7 @@ from cw.worktree import (
     _git_dir,
     _hashed_worktree_base,
     _register_cw_exclude,
+    _run_git,
     check_main_ff_safety,
     check_not_main_checkout,
     create_worktree,
@@ -296,9 +297,11 @@ class TestRegisterCwExclude:
         """OSError from file I/O is swallowed with a WARNING."""
         repo = make_git_repo("test-repo")
 
-        original_run = __import__("cw.worktree", fromlist=["_run_git"])._run_git
+        original_run = _run_git
 
-        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+        def mock_run(
+            *args: str, cwd: Path, check: bool = True
+        ) -> MagicMock | subprocess.CompletedProcess[str]:
             if "rev-parse" in args and "--git-common-dir" in args:
                 return original_run(*args, cwd=cwd, check=check)
             return MagicMock(returncode=0, stdout="", stderr="")
@@ -562,9 +565,7 @@ class TestCreateWorktree:
             result = MagicMock(stderr="", stdout="")
             if "rev-parse" in args and any("refs/heads/" in a for a in args):
                 result.returncode = 128  # branch doesn't exist locally
-            elif "rev-parse" in args and any(
-                "refs/remotes/origin/" in a for a in args
-            ):
+            elif "rev-parse" in args and any("refs/remotes/origin/" in a for a in args):
                 result.returncode = 0  # branch exists on the remote
                 result.stdout = "abc1234\n"
             else:
