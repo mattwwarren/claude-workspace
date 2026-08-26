@@ -922,6 +922,52 @@ class TestRecommend:
         assert rec == "STOP"
         assert "systemic" in reason
 
+    def test_high_attempts_with_child_active_does_not_stop(self) -> None:
+        """#2028 comment 4, Instance 2 (session da8f1b20): age_m 5.1, idle_m
+        1.3, unproductive attempt 3 — STOP fired via the attempt-count arm
+        even though idle_m was barely elevated, because that arm never
+        consulted child activity. child_active=True must suppress it and
+        fall through to _stall_check instead."""
+        rec, reason = queue_peek.recommend(
+            age_min=5.1,
+            idle_min=1.3,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=3,
+            child_active=True,
+        )
+        assert rec != "STOP"
+        assert "systemic" not in reason
+
+    def test_high_attempts_with_child_active_instance_3_does_not_stop(self) -> None:
+        """#2028 comment 4, Instance 3 (session 7176f757): age_m 14.2,
+        idle_m 9.0, unproductive attempt 4 — same arm, same gap."""
+        rec, reason = queue_peek.recommend(
+            age_min=14.2,
+            idle_min=9.0,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=4,
+            child_active=True,
+        )
+        assert rec != "STOP"
+        assert "systemic" not in reason
+
+    def test_high_attempts_without_child_active_still_stops(self) -> None:
+        """Regression guard: omitting/False child_active preserves the
+        existing STOP-by-attempt-count behavior — a genuinely wedged session
+        with no active child must still be flagged."""
+        rec, reason = queue_peek.recommend(
+            age_min=10.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
+            child_active=False,
+        )
+        assert rec == "STOP"
+        assert "systemic" in reason
+
 
 class TestReachedDeepStage:
     """_reached_deep_stage — pipeline-order gate for stage_high_water (#1361)."""
@@ -1691,6 +1737,48 @@ class TestSubagentIdleBlend:
         assert row["idle_min"] is not None
         assert row["idle_min"] < 1
         assert "child subagent active" in row["reason"]
+
+    def test_active_child_suppresses_unproductive_attempts_stop(self) -> None:
+        """#2028 comment 4, Instance 2 (session da8f1b20): age_m 5.1,
+        idle_m 1.3, unproductive attempt 3 — STOP fired via the
+        attempt-count arm even though a subagent had written 33s earlier.
+        format_row must thread child_active into recommend() so this arm no
+        longer fires while a child is demonstrably active."""
+        task = _make_ticket_task(attempts=3, unproductive_attempts=3)
+        info: dict[str, Any] = {
+            "claim_started_at": "2026-06-20T11:54:54+00:00",  # ~5.1 min before _NOW
+            "first_user_ts": None,
+            "last_asst_ts": "2026-06-20T11:58:42+00:00",  # ~1.3 min before _NOW
+            "subagent_last_asst_ts": "2026-06-20T11:59:27+00:00",  # 33 sec before _NOW
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["recommend"] != "STOP"
+        assert "systemic" not in row["reason"]
+        assert "child subagent active" in row["reason"]
+
+    def test_idle_child_does_not_suppress_unproductive_attempts_stop(self) -> None:
+        """Regression guard: with no active child, the attempt-count STOP
+        arm fires exactly as before — the #2028 gate must not blanket-
+        suppress genuine systemic-failure STOPs."""
+        task = _make_ticket_task(
+            attempts=3, unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN
+        )
+        info: dict[str, Any] = {
+            "claim_started_at": "2026-06-20T11:50:00+00:00",  # 10 min before _NOW
+            "first_user_ts": None,
+            "last_asst_ts": "2026-06-20T11:50:36+00:00",  # ~9.4 min before _NOW
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["recommend"] == "STOP"
+        assert "systemic" in row["reason"]
 
 
 # ---------------------------------------------------------------------------

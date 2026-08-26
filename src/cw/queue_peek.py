@@ -570,6 +570,7 @@ def _score_session(
     unproductive_attempts: int,
     stage_high_water: Stage | None = None,
     usage_limit_detected: bool = False,
+    child_active: bool = False,
 ) -> tuple[str, str]:
     """Return recommendation when age_min is known."""
     if pr_state == "MERGED" and idle_min is not None and idle_min > IDLE_POST_PR_MIN:
@@ -591,8 +592,10 @@ def _score_session(
                 "timeout — stop or hand off"
             )
         return ("STOP", reason)
-    if unproductive_attempts >= STOP_UNPRODUCTIVE_ATTEMPTS_MIN and not (
-        _reached_deep_stage(stage_high_water)
+    if (
+        unproductive_attempts >= STOP_UNPRODUCTIVE_ATTEMPTS_MIN
+        and not _reached_deep_stage(stage_high_water)
+        and not child_active
     ):
         if usage_limit_detected:
             return (
@@ -615,12 +618,18 @@ def recommend(
     unproductive_attempts: int,
     stage_high_water: Stage | None = None,
     usage_limit_detected: bool = False,
+    child_active: bool = False,
 ) -> tuple[str, str]:
     """Return (recommendation, reasoning) from the peek-stop ladder.
 
     ``unproductive_attempts`` — not raw ``attempts`` — drives the
     STOP-by-attempt-count branch, mirroring the dispatch admission gate's
-    #1750 signal (GitHub #1768).
+    #1750 signal (GitHub #1768). ``child_active`` (#2028) suppresses that
+    same branch — an actively-writing subagent means the attempt counter is
+    describing the session's past, not its present, so it must not
+    independently drive a STOP while a child is demonstrably working; the
+    row falls through to ``_stall_check``, which already reads the
+    child-rescued ``idle_min``.
     """
     if age_min is None:
         return ("PEEK", "no transcript timestamps — verify session is alive")
@@ -632,6 +641,7 @@ def recommend(
         unproductive_attempts=unproductive_attempts,
         stage_high_water=stage_high_water,
         usage_limit_detected=usage_limit_detected,
+        child_active=child_active,
     )
 
 
@@ -692,6 +702,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         unproductive_attempts=t.unproductive_attempts,
         stage_high_water=t.stage_high_water,
         usage_limit_detected=info.get("usage_limit_detected", False),
+        child_active=child_active,
     )
     if child_active:
         reason = (
