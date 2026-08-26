@@ -221,7 +221,7 @@ class _HeadlessResolution(NamedTuple):
     """
 
     rescued: bool | None
-    landed_terminal: bool = False
+    landed_terminal: bool
 
 
 def _resolve_and_complete_headless_session(
@@ -280,17 +280,15 @@ def _resolve_and_complete_headless_session(
     # PENDING before consume_completed_sessions can process the event — causing
     # no_op and similar terminal outcomes to trigger infinite re-dispatch.
     rescued = False
-    routed = True
     if is_headless and parsed_sentinel is not None and isinstance(ticket_id_value, str):
         outcome = _apply_sentinel_to_task(
             ticket_id_value, session, parsed_sentinel, now=now
         )
         rescued = outcome.rescued
-        routed = outcome.routed
-    if not routed:
-        return _HeadlessResolution(
-            rescued=None, landed_terminal=outcome.landed_terminal
-        )
+        if not outcome.routed:
+            return _HeadlessResolution(
+                rescued=None, landed_terminal=outcome.landed_terminal
+            )
 
     session.status = SessionStatus.COMPLETED
     session.completed_at = now
