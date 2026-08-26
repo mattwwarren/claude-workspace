@@ -1199,7 +1199,13 @@ class TestValidateReviewerDocument:
         assert rejected[0].reason == "unknown_file"
 
     def test_invalid_line_reference_rejected(self) -> None:
-        f = _make_finding(line_start=999, line_end=999)
+        # #2007 narrowed what this reason covers: a bogus line alone is no
+        # longer sufficient, since the evidence may be genuinely present
+        # elsewhere in the diff and get content-rescued. The evidence here is
+        # fabricated, so the rejection stands.
+        f = _make_finding(
+            line_start=999, line_end=999, evidence="fabricated absent content"
+        )
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(f), _make_diff()
         )
@@ -1256,7 +1262,14 @@ class TestValidateReviewerDocument:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         # #2000: the third mechanical-rejection reason reaches the same log.
-        f = _make_finding(severity="NIT", line_start=999, line_end=999)
+        # Evidence fabricated so #2007's content rescue cannot claim it — the
+        # log assertion is about the rejection path, which needs a rejection.
+        f = _make_finding(
+            severity="NIT",
+            line_start=999,
+            line_end=999,
+            evidence="fabricated absent content",
+        )
         with caplog.at_level(logging.INFO, logger="cw.review_findings"):
             _accepted, rejected, _stripped = validate_reviewer_document(
                 _make_reviewer_doc(f), _make_diff()
@@ -1449,13 +1462,34 @@ class TestValidateReviewerDocument:
 
     # -- #1715: regression guards (mutation-proof) -----------------------
 
-    def test_anchor_outside_tolerance_still_rejected(self) -> None:
+    def test_anchor_outside_tolerance_fails_the_line_gate(self) -> None:
         # Distance 4 from the only added line (10) — outside the +/-3 bound.
+        # Asserted against `_line_reference_valid` directly rather than the
+        # document verdict: #2007 added a content rescue downstream of this
+        # gate, so a document-level assertion would now pass for the wrong
+        # reason (rescued, not near-line-resolved) and stop mutation-proofing
+        # the bound. The bound itself is unchanged.
         diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
         f = _make_finding(line_start=14, line_end=14, evidence="def broken():")
+        assert _line_reference_valid(diff, f) is False
+
+    def test_anchor_outside_tolerance_with_absent_evidence_still_rejected(self) -> None:
+        # The same out-of-tolerance anchor, with nothing for #2007's content
+        # rescue to find — the pre-#2007 verdict stands.
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(line_start=14, line_end=14, evidence="fabricated absent text")
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert not accepted
         assert rejected[0].reason == "invalid_line_reference"
+
+    def test_anchor_outside_tolerance_with_present_evidence_is_rescued(self) -> None:
+        # The #2007 flip side, pinned next to the bound it composes with: the
+        # anchor gate still says no, and the content rescue still says yes.
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(line_start=14, line_end=14, evidence="def broken():")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert rejected == []
+        assert accepted[0].line_start == 10
 
     def test_near_line_content_mismatch_still_rejected(self) -> None:
         # line_start=12 resolves to added line 10 (distance 2, within
