@@ -10827,6 +10827,14 @@ def test_guide_output_contains_markers() -> None:
     assert result.output.strip()
 
 
+def test_guide_documents_dropped_approval_hazard() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["guide"])
+    assert "operator answer" in result.output.lower()
+    assert "cw dev-queue approve" in result.output
+    assert "stage transitions" in result.output.lower()
+
+
 class TestBoardCommand:
     def test_board_help(self) -> None:
         runner = CliRunner()
