@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.sprint import AppliedBuildout
 
 # Usage-limit detection regex. Matches all documented Claude usage-limit phrasings:

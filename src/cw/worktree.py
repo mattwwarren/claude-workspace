@@ -543,6 +543,34 @@ def _parse_worktree_holder_path(message: str) -> Path | None:
     return Path(match.group(1)) if match else None
 
 
+def _branch_held_error(
+    client: ClientConfig, branch: str, holder: Path
+) -> BranchHeldByWorktreeError:
+    """Build the diagnostic for a foreign worktree already holding *branch* (#2034).
+
+    Names the holder, states whether it looks clean or dirty (per
+    :func:`worktree_has_unsaved_work`'s ``wt_path`` override), and gives the
+    exact removal command either way — never removes the holder itself.
+    """
+    if worktree_has_unsaved_work(client, branch, wt_path=holder):
+        state_msg = (
+            "has uncommitted or unpushed changes; verify before removing "
+            f"with `git worktree remove {holder}`"
+        )
+    else:
+        state_msg = (
+            f"appears clean; safe to remove with `git worktree remove {holder}` "
+            "if it is no longer needed"
+        )
+    msg = (
+        f"Branch {branch!r} is already checked out in another worktree at "
+        f"{holder}. This is likely an orphaned harness agent worktree "
+        f"(see #2017) that cw did not create and cannot verify is finished "
+        f"with. It was NOT removed automatically. That worktree {state_msg}."
+    )
+    return BranchHeldByWorktreeError(msg, holder_path=holder)
+
+
 def create_worktree(
     client: ClientConfig,
     branch: str,
@@ -636,23 +664,7 @@ def create_worktree(
         holder = _parse_worktree_holder_path(str(exc))
         if holder is None:
             raise
-        if worktree_has_unsaved_work(client, branch, wt_path=holder):
-            state_msg = (
-                f"has uncommitted or unpushed changes; verify before removing "
-                f"with `git worktree remove {holder}`"
-            )
-        else:
-            state_msg = (
-                f"appears clean; safe to remove with `git worktree remove {holder}` "
-                f"if it is no longer needed"
-            )
-        msg = (
-            f"Branch {branch!r} is already checked out in another worktree at "
-            f"{holder}. This is likely an orphaned harness agent worktree "
-            f"(see #2017) that cw did not create and cannot verify is finished "
-            f"with. It was NOT removed automatically. That worktree {state_msg}."
-        )
-        raise BranchHeldByWorktreeError(msg, holder_path=holder) from exc
+        raise _branch_held_error(client, branch, holder) from exc
     _register_cw_exclude(git_cwd)
 
     # Initialize submodules if the repo uses them

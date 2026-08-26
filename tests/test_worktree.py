@@ -1366,7 +1366,10 @@ class TestCreateWorktreeBranchHeldElsewhere:
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
             result = MagicMock(stderr="", stdout="")
             if "worktree" in args and "add" in args:
-                msg = "Git command failed: git worktree add x y\nfatal: some other failure"
+                msg = (
+                    "Git command failed: git worktree add x y\n"
+                    "fatal: some other failure"
+                )
                 raise WorktreeError(msg)
             if "rev-parse" in args and any(
                 a.startswith(("refs/heads/", "refs/remotes/")) for a in args
@@ -2918,9 +2921,7 @@ class TestWorktreeHasUnsavedWork:
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         assert (
-            worktree_has_unsaved_work(
-                client, "auto-dev/override", wt_path=foreign_path
-            )
+            worktree_has_unsaved_work(client, "auto-dev/override", wt_path=foreign_path)
             is True
         )
 
