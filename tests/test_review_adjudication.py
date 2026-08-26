@@ -19,6 +19,7 @@ from cw.review_adjudication import (
     REJECTED_ENTRY_SEVERITY,
     Adjudication,
     VoidedFinding,
+    _fix_is_substantiated,
     apply_adjudication,
     apply_voided_suppression,
     find_voided_matches,
@@ -29,12 +30,43 @@ from cw.review_adjudication import (
     render_voided_findings_block,
     verify_fixed_dispositions,
 )
-from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
+from cw.review_findings import AcceptedFinding, CapturedDiff, Finding, ReviewVerdict
 
 from .conftest import _make_diff, _make_finding
 
 _LOGGER = "cw.review_adjudication"
 _TICKET = "T-1814"
+_FIX_RESCUE_LOG = "rescued fixed disposition via fix-substantiation content rescue"
+
+
+def _diff_with_removed_line(
+    file: str,
+    removed_text: str,
+    context_text: str = "unrelated context line",
+    **overrides: object,
+) -> CapturedDiff:
+    """CapturedDiff with genuine ``-``/context-intact raw hunk text (#2007).
+
+    ``_make_diff`` cannot produce this — its ``file_diffs`` bodies are always
+    ``+``-only (see its own docstring), so it can never exercise the
+    removed-line predicate the fix-substantiation rescue is built on. Only
+    ``file_diffs`` carries realistic content here: ``file_line_text`` /
+    ``file_window_text`` stay empty because that rescue reads ``file_diffs``
+    exclusively, and leaving them empty proves it.
+    """
+    raw = (
+        f"+++ b/{file}\n@@ -1,3 +1,2 @@\n {context_text}\n"
+        f"-{removed_text}\n more context\n"
+    )
+    kwargs: dict[str, object] = {
+        "text": raw,
+        "files": {file: []},
+        "file_diffs": {file: raw},
+        "file_line_text": {file: {}},
+        "file_window_text": {file: {}},
+    }
+    kwargs.update(overrides)
+    return CapturedDiff(**kwargs)
 
 
 def _accepted(finding: Finding, **overrides: object) -> AcceptedFinding:
@@ -571,6 +603,68 @@ class TestVerifyFixedDispositions:
         assert result.accepted[0].disposition == "dropped"
         assert result.blocking is False
         assert result.must_fix == []
+
+
+class TestVerifyFixedDispositionsContentRescue:
+    """#2007: a fix that landed beyond the line-anchor tolerance is no longer
+    walked back to ``"dropped"`` when the fix-cycle diff genuinely REMOVED the
+    finding's cited evidence.
+
+    The rescue is additive and strictly narrower than "the evidence text is
+    somewhere in the hunk": it binds to ``file_diffs`` and matches only a
+    ``-``-prefixed line, because reporting a fix as substantiated when the
+    cited code was never removed is the exact false accept the substantiation
+    bar exists to prevent.
+    """
+
+    def test_rescues_hunk_shifted_fix_via_removed_line_evidence(self) -> None:
+        finding = _make_finding(file="src/cw/foo.py", line_start=10, line_end=10)
+        verdict = _verdict(_accepted(finding, disposition="fixed"))
+        fix_diff = _diff_with_removed_line("src/cw/foo.py", finding.evidence)
+
+        result = verify_fixed_dispositions(verdict, fix_diff)
+
+        assert result.accepted[0].disposition == "fixed"
+        assert result.downgraded_disposition_count == 0
+
+    def test_does_not_rescue_evidence_present_only_as_context(self) -> None:
+        finding = _make_finding(file="src/cw/foo.py", line_start=10, line_end=10)
+        verdict = _verdict(_accepted(finding, disposition="fixed"))
+        fix_diff = _diff_with_removed_line(
+            "src/cw/foo.py",
+            removed_text="unrelated removal",
+            context_text=finding.evidence,
+        )
+
+        result = verify_fixed_dispositions(verdict, fix_diff)
+
+        assert result.accepted[0].disposition == "dropped"
+        assert result.downgraded_disposition_count == 1
+
+    def test_leaves_genuinely_absent_evidence_dropped(self) -> None:
+        finding = _make_finding(file="src/cw/other.py", line_start=10, line_end=10)
+        verdict = _verdict(_accepted(finding, disposition="fixed"))
+
+        result = verify_fixed_dispositions(
+            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+        )
+
+        assert result.accepted[0].disposition == "dropped"
+
+    def test_fix_substantiation_rescue_logs_info_with_declared_line(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Distinct wording from the classify-path and persist-path rescue logs
+        # in cw.review_findings, so a log scan can tell the three apart.
+        finding = _make_finding(file="src/cw/foo.py", line_start=42, line_end=42)
+        fix_diff = _diff_with_removed_line("src/cw/foo.py", finding.evidence)
+
+        with caplog.at_level(logging.INFO, logger=_LOGGER):
+            assert _fix_is_substantiated(finding, fix_diff) is True
+
+        assert _FIX_RESCUE_LOG in caplog.text
+        assert "file=src/cw/foo.py" in caplog.text
+        assert "line=42" in caplog.text
 
 
 # Split across two source lines only to stay under the 88-column ruff limit;
