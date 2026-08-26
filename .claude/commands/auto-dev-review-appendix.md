@@ -133,20 +133,27 @@ remove the file by hand, then re-run.
 
 ## Why the fix loop uses push-then-recheckout
 
-You cannot attach a new subagent to the original implementation worktree.
-Subagents without `isolation: "worktree"` inherit the main session's sandbox
-(which typically excludes other worktrees), and `isolation: "worktree"` always
-creates a *new* worktree. Pushing the branch and re-checking it out inside the
-new sandbox is the only shape that reaches the same commits.
+cw's worktree provisioning is one worktree per `(client, branch)` — the fix
+agent's workspace is now reached through `dispatch_fix_agent`'s `create_worktree`
+call (#2017), not a harness `isolation` flag. `create_worktree` refuses to
+provision a branch that is still checked out somewhere else, so the branch must
+first be *freed*: the stale implementation worktree removed and the local ref
+deleted (Step 3b.1). Origin still carries the branch's real history, and
+`create_worktree`'s three-way resolution (#2032) resumes it from `origin/<branch>`
+when the local ref is absent. Pushing the branch before freeing it is therefore
+not a sandbox workaround — it is what makes the re-provisioned worktree land on
+the same commits.
 
 ---
 
 ## Fallback — direct execution from the main session's worktree
 
-Reached only if the isolation fix agent *also* hits sandbox failures (Read/Write/
-Bash denied inside its own new worktree), after two subagent attempts have
-failed. Slower than delegation but guaranteed to work; it is a last resort, not
-a shortcut past the fix loop.
+Reached only if the `dispatch_fix_agent` invocation fails after two attempts
+(its `uv run python -c` call exits non-zero — e.g. a
+`CwError`/`SpawnUnregisteredError` propagating out, per `auto-dev-review.md`'s
+deliberate no-swallow design), or if `cw session wait` repeatedly hits its hard
+timeout with no diagnosable git-side progress. Slower than delegation but
+guaranteed to work; it is a last resort, not a shortcut past the fix loop.
 
 ```bash
 # From the main session's worktree

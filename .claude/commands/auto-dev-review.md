@@ -281,7 +281,7 @@ Clean/SHOULD_FIX + large → EXIT `review_pending_approval`. MUST_FIX persists a
 
 ### Step 3b: Fix Loop (when MUST_FIX needs fixing)
 
-**Important**: the correct pattern is **push-then-recheckout** — never attach a new subagent to the original implementation worktree. **Questioning why** is rare; the sandbox reasoning lives in `.claude/commands/auto-dev-review-appendix.md`, section "Why the fix loop uses push-then-recheckout".
+**Important**: the correct pattern is **push-then-recheckout** — never attach a new fix session to the original implementation worktree. **Questioning why** is rare; the branch-freeing reasoning lives in `.claude/commands/auto-dev-review-appendix.md`, section "Why the fix loop uses push-then-recheckout".
 
 Prerequisite: the implementation branch must already be on origin (Step 2's agent pushes it) — if not, escalate BLOCK before starting the fix loop.
 
@@ -291,46 +291,42 @@ Prerequisite: the implementation branch must already be on origin (Step 2's agen
    git branch -D <branch-name>  # local only; origin still has it
    ```
 
-2. **Capture the dispatch timestamp immediately BEFORE the spawn** — it is the `--since` the verification in step 2b compares against, so it must be taken before the Agent tool call, not after:
+2. **Dispatch the fix agent as a cw session (#2017).** Write the fix-agent prompt — MUST_FIX findings + the Completion Artifacts block + Friction Protocol + Health Check, exactly the content described below — to `.cw/fix-agent-prompt.md` **via the Write tool**; never heredoc-inline it. Then:
    ```bash
-   DISPATCH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   FIX_PROMPT_PATH=".cw/fix-agent-prompt.md"
+
+   FIX_SESSION_ID="$(uv run python -c "
+   from pathlib import Path
+   from cw.config import get_client
+   from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+   client = get_client('$(jq -r '.client' .claude/cw-context.json)')
+   branch = f'{client.feature_branch_prefix}/$TICKET'
+   print(dispatch_fix_agent(
+       client=client,
+       branch=branch,
+       prompt_file=Path('$FIX_PROMPT_PATH'),
+       label='fix-$TICKET',
+       ticket_id='$TICKET',
+       lane='$(jq -r '.lane' .claude/cw-context.json)',
+       parent='$CW_SESSION',
+   ))
+   ")"
    ```
-   Then spawn the fix agent with `isolation: "worktree"` and `model: "sonnet"` (the spawn is async either way — but do NOT end the turn yet; run step 2b first). The agent's **first actions** must be:
+   `dispatch_fix_agent` does the whole dispatch **synchronously inside that one Bash call**: it provisions the branch-keyed worktree via `create_worktree` (the same helper every other pipeline stage reuses — step 1 above exists precisely to free that path), verifies HEAD landed on the expected `origin/<branch-name>` commit, fetches and merges `origin/<default-branch>` so the fix lands on top of any sibling PR that merged mid-pipeline, and spawns the fix agent as a first-class cw DAEMON session (`SessionPurpose.FIX`). On a merge conflict it aborts the merge, leaves the worktree clean, and raises naming the conflicting files — it never forces and never auto-resolves.
+
+   There is **no async gap left to verify** here, so `cw agent-spawn-verify` is no longer part of this path (it remains as a standalone operator diagnostic). `spawn_create_impl`'s own `_verify_roster_registration` already raises `SpawnUnregisteredError` synchronously if the daemon never adopts the worker, and `dispatch_fix_agent` deliberately does not swallow it.
+
+   **Non-zero exit** (stale worktree, merge conflict, `SpawnUnregisteredError`, or any other `CwError`) means no `FIX_SESSION_ID` was ever produced. Do **not** emit a dedicated blocker: fall through to the Step 3b.5 orchestrator fix gate below and treat it as a cycle failure (there will be no new commit since the prior cycle, which is exactly what that gate already checks). The cycle consumes budget against the 5-cycle cap.
+
+2b. **Wait for the fix session to finish.** On zero exit from step 2, immediately run:
    ```bash
-   git fetch origin
-   git checkout -B <branch-name> origin/<branch-name>   # -B: idempotent (cw may pre-provision this branch, #712)
-   git log --oneline -1  # verify at expected impl commit
-
-   # Refresh with latest main so the fix lands on top of upstream moves.
-   # Failure mode avoided: a sibling PR (e.g. another ticket in this same
-   # pipeline run) may have merged to main AFTER Step 2 pushed. Without
-   # this merge, subsequent pushes ship a branch that's silently missing
-   # commits from main — CI passes because it runs branch-HEAD, not the
-   # branch-merged-with-main state.
-   git merge origin/main --no-edit
+   cw session wait "$FIX_SESSION_ID" --timeout 900
    ```
-   If merge conflicts occur → BLOCK with file list. Do not force.
+   - **Exit 0** → proceed to Step 3 (the agent's commits are already on the pushed branch).
+   - **Non-zero (1 or 124)** → same disposition as a non-zero step 2: fall through to Step 3b.5's fix gate, which treats it as a cycle failure via its existing new-commit check.
 
-2b. **Verify the dispatch actually launched — same turn, before ending it (#2012).** Immediately after the Agent tool call returns, run:
-   ```bash
-   cw agent-spawn-verify --since "$DISPATCH_TS" --exclude-session "$CLAUDE_CODE_SESSION_ID"
-   ```
-   Why this exists: the spawn is async, so the *only* thing that resumes this session is the subagent's completion notification. If the spawn silently never launched, no notification ever arrives and the session waits forever — the wedge #2012 reproduced four times, invisible to the liveness watchdog because "awaiting a subagent" was treated as unconditionally healthy. A real subagent writes its own transcript into this worktree's Claude project dir; this command polls for one that is neither yours nor pre-existing, then returns.
-
-   It is **one Bash call**, not a poll loop of your own — the waiting happens inside the command on purpose. Issuing repeated verification calls yourself is exactly the busy-wait pattern Step 3a warns against. Its poll window is operator-tunable (`agent_spawn_verify_poll_seconds` in `orchestrator.yaml`); pass `--poll-seconds` only if you have a specific reason to override it for this invocation.
-
-   - **Exit 0** → the dispatch is real. Proceed exactly as before: end the turn and resume on the completion notification.
-   - **Exit 1** → do **NOT** end the turn to await a notification that will not arrive. Take the Exit rule below.
-
-**Exit rule (fix-loop dispatch unverified).** On `cw agent-spawn-verify` exit 1, immediately emit the Stage 3 `blocked` sentinel with:
-   - `blocker.reason: "fix_loop_dispatch_unverified"`
-   - `blocker.details`: the command's diagnostic verbatim (it names the project dir checked, the `--since`, the exclusion, and the effective poll window)
-   - `blocker.retry_eligible: true` — a verification false-negative caused by slow infra (cold model start, contended host, network-mounted worktree) should be retryable rather than forcing a human into the loop.
-   - append `"fix_loop_dispatch_unverified"` to `friction_highlights`.
-
-   **Known gap (#2012):** `retry_eligible: true` is not yet consumed by `src/cw/dispatch/routing/__init__.py::_route_stage_failure` for reasons outside its three hardcoded special cases, so this blocker routes to BLOCKED_ON_USER today regardless of the flag. The flag is set now so the routing change (which needs its own attempt cap) is a follow-up rather than a schema migration.
-
-3. Agent fixes MUST_FIX issues, re-runs quality gates, creates a NEW commit on top (do NOT amend) **with the trailer `Auto-Dev-Fix-Cycle: <N>`** (`<N>` = current cycle, 1-5; pass via `git commit --trailer "Auto-Dev-Fix-Cycle: <N>"`), and pushes to origin using the explicit-refspec form (`git push origin HEAD:refs/heads/<branch-name>`) — robust against a local branch rename. After pushing, verify with `git rev-parse origin/<branch-name>` matching `git rev-parse HEAD`.
+3. The fix agent fixes MUST_FIX issues, re-runs quality gates, creates a NEW commit on top (do NOT amend) **with the trailer `Auto-Dev-Fix-Cycle: <N>`** (`<N>` = current cycle, 1-5; pass via `git commit --trailer "Auto-Dev-Fix-Cycle: <N>"`), and pushes to origin using the explicit-refspec form (`git push origin HEAD:refs/heads/<branch-name>`) — robust against a local branch rename. After pushing, verify with `git rev-parse origin/<branch-name>` matching `git rev-parse HEAD`.
 
 The `Auto-Dev-Fix-Cycle` trailer is the durable cross-session signal for fix-loop progress: the resume detector reads the max `<N>` across fix-cycle trailers on commits newer than `Auto-Dev-Stage: impl-complete`, and on resume into `s3_fix_loop, substage="cycle_N"` the pipeline resumes at cycle `N+1`, preserving the cycle budget across session deaths.
 
@@ -386,9 +382,12 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
 5. **Cycle budget:** 2 cycles is the expected baseline. If MUST_FIX persists past cycle 2, the loop may continue with escalation visibility, hard-capped at 5 total cycles. **Entering cycle 3+, growing scope mid-fix, or exhausting the cap** is rare — the escalation triggers, the per-mode escalation behaviour, the cycle-5 hard exit, and the cap-value maintenance note live in `.claude/commands/auto-dev-review-appendix.md`, section
    "Fix loop cycle budget: escalation triggers and the cycle-5 hard exit". Read it now if this round entered cycle 3 or the fix-loop friction report flagged scope growth; do not improvise the escalation record or the hard-exit sentinel from this summary alone.
 
-**The isolation fix agent also hitting sandbox failures** (Read/Write/Bash denied
-inside its own new worktree, after two subagent attempts) is rare — the
-direct-execution fallback the main session then runs lives in
+**The `dispatch_fix_agent` invocation failing after two attempts** (its `uv run
+python -c` call exits non-zero — e.g. a `CwError`/`SpawnUnregisteredError`
+propagating out, per this file's deliberate no-swallow design), **or `cw session
+wait` repeatedly hitting its hard timeout with no diagnosable git-side
+progress,** is rare — the direct-execution fallback the main session then runs
+lives in
 `.claude/commands/auto-dev-review-appendix.md`, section "Fallback — direct
 execution from the main session's worktree". Read it now if that condition holds;
 do not improvise the git sequence from memory.
