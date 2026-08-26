@@ -44,6 +44,7 @@ from cw.models import (
     LaneConfig,
     OrchestratorConfig,
     OrchestratorEventType,
+    SessionPurpose,
     TicketTask,
 )
 from cw.pr_hydrate import PrAttentionState
@@ -78,14 +79,19 @@ from cw.reconcile.review_recipes import (
     _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
 )
 from cw.review_strategy import ReviewStrategy
+from cw.worktree import worktree_path_for
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
 # construction: _make_task accepts **kwargs (pr_url / pr_state / session_id /
 # client / lane), _pr_state builds a PrState with sensible OPEN defaults.
 # _client_with_lanes builds a ClientConfig with the given lanes (reused by the
 # resolve-precedence tests below).
+from tests.conftest import _clean_git_env
 from tests.test_pr_hydrate import _pr_state, _watched
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
+
+if typing.TYPE_CHECKING:
+    from collections.abc import Callable
 
 _SKILL_PATH = (
     Path(__file__).resolve().parent.parent
@@ -2570,4 +2576,318 @@ class TestAttentionConstantsTypedAsPrAttentionState:
         resolved = typing.get_type_hints(stub, globalns=vars(_shared))[name]
         assert resolved == PrAttentionState, (
             f"{name} must be annotated PrAttentionState, resolved {resolved!r}"
+        )
+
+
+# --- fix_agent recipe (#2017) ----------------------------------------------
+
+
+def _fix_git(repo: Path, *args: str) -> None:
+    """Run a git command in *repo*, failing loudly on a non-zero exit."""
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+
+
+def _make_fix_client(
+    make_git_repo: Callable[..., Path], tmp_path: Path, name: str = "acme"
+) -> ClientConfig:
+    """ClientConfig whose workspace_path is a real git repo.
+
+    ``create_worktree`` actually walks this repo with git, so ``_make_client``'s
+    bare-mkdir workspace (tests/test_spawn.py) cannot stand in here. Combines
+    that helper's shape with the ``ClientConfig(worktree_base=...)`` pattern
+    precedented in tests/test_worktree.py.
+    """
+    repo = make_git_repo(f"{name}-main")
+    return ClientConfig(
+        name=name,
+        workspace_path=repo,
+        default_branch="main",
+        worktree_base=tmp_path / "wt",
+    )
+
+
+def _seed_origin(client: ClientConfig, branch: str) -> None:
+    """Give *client*'s repo a real bare origin carrying main and *branch*.
+
+    Reproduces the ONLY git state ``dispatch_fix_agent`` can legitimately
+    observe: its caller contract (auto-dev-review.md Step 3b) guarantees the
+    implementation branch is already pushed, and Step 1's cleanup deletes only
+    the *local* ref. So local ``refs/heads/<branch>`` is absent while
+    ``origin/<branch>`` carries real history. ``shared.txt`` exists on main
+    before the branch diverges so a later main-side edit of it conflicts for
+    real.
+    """
+    repo = client.workspace_path
+    origin = repo.parent / f"{repo.name}-origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(origin)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    _fix_git(repo, "remote", "add", "origin", str(origin))
+    (repo / "shared.txt").write_text("base\n", encoding="utf-8")
+    _fix_git(repo, "add", "shared.txt")
+    _fix_git(repo, "commit", "-m", "base file")
+    _fix_git(repo, "push", "origin", "main")
+
+    _fix_git(repo, "checkout", "-b", branch)
+    (repo / "shared.txt").write_text("branch side\n", encoding="utf-8")
+    _fix_git(repo, "add", "shared.txt")
+    _fix_git(repo, "commit", "-m", "impl commit")
+    _fix_git(repo, "push", "origin", branch)
+
+    _fix_git(repo, "checkout", "main")
+    _fix_git(repo, "branch", "-D", branch)
+    _fix_git(repo, "fetch", "origin")
+
+
+def _advance_origin_main(client: ClientConfig, relpath: str, content: str) -> None:
+    """Land one more commit on origin/main after ``_seed_origin``."""
+    repo = client.workspace_path
+    (repo / relpath).write_text(content, encoding="utf-8")
+    _fix_git(repo, "add", relpath)
+    _fix_git(repo, "commit", "-m", f"main advances {relpath}")
+    _fix_git(repo, "push", "origin", "main")
+    _fix_git(repo, "fetch", "origin")
+
+
+def _fix_prompt(tmp_path: Path, content: str = "fix the MUST_FIX items\n") -> Path:
+    prompt = tmp_path / "fix-agent-prompt.md"
+    prompt.write_text(content, encoding="utf-8")
+    return prompt
+
+
+def test_dispatch_fix_agent_provisions_worktree_and_spawns(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """Happy path: local ref absent, origin/<branch> present -> provision + spawn."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+
+    session_id = dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt_file=_fix_prompt(tmp_path),
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert session_id == "spawned-session-id"
+    assert len(stub_spawn.calls) == 1
+    call = stub_spawn.calls[0]
+    assert call["headless"] is False
+    assert call["purpose"] is SessionPurpose.FIX
+    assert call["ticket_id"] == "2017"
+    assert call["lane"] == "default"
+    assert call["parent"] == "parent-session"
+    assert call["label"] == "fix-2017"
+    assert call["prompt"] == "fix the MUST_FIX items\n"
+    assert call["worktree"] == worktree_path_for(client, branch)
+    assert call["worktree"].exists()
+
+
+def test_dispatch_fix_agent_no_task_kwarg(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """No ``task=`` kwarg: task.attempts and lane occupancy stay untouched."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+
+    dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt_file=_fix_prompt(tmp_path),
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert "task" not in stub_spawn.calls[0]
+
+
+def test_dispatch_fix_agent_resumes_pushed_branch(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """Re-dispatch reuses the existing worktree instead of raising StaleWorktreeError."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    kwargs: dict[str, Any] = {
+        "client": client,
+        "branch": branch,
+        "prompt_file": _fix_prompt(tmp_path),
+        "label": "fix-2017",
+        "ticket_id": "2017",
+        "lane": "default",
+        "parent": "parent-session",
+    }
+
+    dispatch_fix_agent(**kwargs)
+    wt = worktree_path_for(client, branch)
+    assert wt.exists()
+
+    dispatch_fix_agent(**kwargs)
+
+    assert len(stub_spawn.calls) == 2
+    assert stub_spawn.calls[1]["worktree"] == wt
+
+
+def test_dispatch_fix_agent_verifies_head_before_merge(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worktree resolved to an unexpected SHA aborts before any spawn."""
+    from cw.reconcile.review_recipes import fix_agent as fix_agent_mod
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+
+    stale = tmp_path / "stale-wt"
+    _fix_git(client.workspace_path, "worktree", "add", str(stale), "main")
+    monkeypatch.setattr(
+        fix_agent_mod, "create_worktree", lambda *_args, **_kwargs: stale
+    )
+
+    with pytest.raises(CwError, match="does not match origin/dev/2017"):
+        fix_agent_mod.dispatch_fix_agent(
+            client=client,
+            branch=branch,
+            prompt_file=_fix_prompt(tmp_path),
+            label="fix-2017",
+            ticket_id="2017",
+            lane="default",
+            parent="parent-session",
+        )
+
+    assert stub_spawn.calls == []
+
+
+def test_dispatch_fix_agent_merge_conflict_blocks(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """A conflicting origin/main merge aborts, leaves the worktree clean, raises."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _advance_origin_main(client, "shared.txt", "main side\n")
+
+    with pytest.raises(CwError, match="shared.txt"):
+        dispatch_fix_agent(
+            client=client,
+            branch=branch,
+            prompt_file=_fix_prompt(tmp_path),
+            label="fix-2017",
+            ticket_id="2017",
+            lane="default",
+            parent="parent-session",
+        )
+
+    assert stub_spawn.calls == []
+    wt = worktree_path_for(client, branch)
+    status = subprocess.run(
+        ["git", "-C", str(wt), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    assert status.stdout.strip() == ""
+    merge_head = subprocess.run(
+        ["git", "-C", str(wt), "rev-parse", "--verify", "-q", "MERGE_HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_clean_git_env(),
+    )
+    assert merge_head.returncode != 0
+
+
+def test_dispatch_fix_agent_merge_clean_succeeds(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """A non-conflicting origin/main commit merges in and the spawn still runs."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _advance_origin_main(client, "sibling.txt", "merged sibling\n")
+
+    dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt_file=_fix_prompt(tmp_path),
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert len(stub_spawn.calls) == 1
+    wt = worktree_path_for(client, branch)
+    assert (wt / "sibling.txt").read_text(encoding="utf-8") == "merged sibling\n"
+    assert (wt / "shared.txt").read_text(encoding="utf-8") == "branch side\n"
+
+
+def test_dispatch_fix_agent_propagates_spawn_cwerror(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """A spawn CwError propagates (deliberate deviation from address_review)."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+
+    def _boom(**_kwargs: Any) -> None:
+        msg = "daemon never adopted the worker"
+        raise CwError(msg)
+
+    stub_spawn.side_effect = _boom
+
+    with pytest.raises(CwError, match="daemon never adopted the worker"):
+        dispatch_fix_agent(
+            client=client,
+            branch=branch,
+            prompt_file=_fix_prompt(tmp_path),
+            label="fix-2017",
+            ticket_id="2017",
+            lane="default",
+            parent="parent-session",
         )

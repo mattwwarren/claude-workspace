@@ -970,6 +970,22 @@ def test_worker_purposes_excludes_orchestrate() -> None:
     assert SessionPurpose.DEBT in WORKER_PURPOSES
 
 
+def test_session_purpose_fix_exists() -> None:
+    """SessionPurpose.FIX has value 'fix'."""
+    assert SessionPurpose.FIX == "fix"
+    assert SessionPurpose.FIX.value == "fix"
+
+
+def test_worker_purposes_excludes_fix() -> None:
+    """WORKER_PURPOSES tuple contains IMPL/IDEA/DEBT but not FIX (#2017)."""
+    from cw.models import WORKER_PURPOSES
+
+    assert SessionPurpose.FIX not in WORKER_PURPOSES
+    assert SessionPurpose.IMPL in WORKER_PURPOSES
+    assert SessionPurpose.IDEA in WORKER_PURPOSES
+    assert SessionPurpose.DEBT in WORKER_PURPOSES
+
+
 def test_session_lane_defaults_to_none() -> None:
     """Session.lane defaults to None when not provided."""
     sess = Session(
