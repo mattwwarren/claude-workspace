@@ -4328,7 +4328,7 @@ class TestParseSentinelFromTranscript:
         example_frame = (
             f"<<<AUTO_DEV_RESULT\n{json.dumps(example_payload)}\nAUTO_DEV_RESULT>>>"
         )
-        example_record = {
+        example_record: dict[str, object] = {
             "type": "assistant",
             "message": {
                 "role": "assistant",
