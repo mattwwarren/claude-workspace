@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict
 from cw.auto_dev_result import _PRE_IMPL_STAGES
 from cw.config import load_effective_clients
 from cw.exceptions import (
+    BranchHeldByWorktreeError,
     MissingWorkspaceError,
     StaleWorktreeError,
     WorktreeError,
@@ -59,6 +60,10 @@ _NUMSTAT_MIN_COLS = 3
 # fabricated-scope class and gets logged. 2.0 is deliberately loose: the
 # observed failure was ~6x on files and ~10x on lines.
 _SCOPE_MISMATCH_RATIO_THRESHOLD = 2.0
+# Matches git's "fatal: '<branch>' is already used by worktree at '<path>'"
+# line so create_worktree can name the colliding worktree in a targeted error
+# (#2034) instead of surfacing git's bare stderr.
+_WORKTREE_HELD_BY_RE = re.compile(r"already used by worktree at '([^']+)'")
 
 
 def slugify_branch(branch: str) -> str:
@@ -527,6 +532,45 @@ def _resolve_branch_start_point(client: ClientConfig, git_cwd: Path) -> str:
     raise WorktreeError(msg)
 
 
+def _parse_worktree_holder_path(message: str) -> Path | None:
+    """Extract the colliding worktree's path from a git worktree-add failure.
+
+    Returns ``None`` when *message* does not match the known
+    "already used by worktree at '<path>'" shape — callers must treat that as
+    "not this specific collision" and re-raise the original error unchanged.
+    """
+    match = _WORKTREE_HELD_BY_RE.search(message)
+    return Path(match.group(1)) if match else None
+
+
+def _branch_held_error(
+    client: ClientConfig, branch: str, holder: Path
+) -> BranchHeldByWorktreeError:
+    """Build the diagnostic for a foreign worktree already holding *branch* (#2034).
+
+    Names the holder, states whether it looks clean or dirty (per
+    :func:`worktree_has_unsaved_work`'s ``wt_path`` override), and gives the
+    exact removal command either way — never removes the holder itself.
+    """
+    if worktree_has_unsaved_work(client, branch, wt_path=holder):
+        state_msg = (
+            "has uncommitted or unpushed changes; verify before removing "
+            f"with `git worktree remove {holder}`"
+        )
+    else:
+        state_msg = (
+            f"appears clean; safe to remove with `git worktree remove {holder}` "
+            "if it is no longer needed"
+        )
+    msg = (
+        f"Branch {branch!r} is already checked out in another worktree at "
+        f"{holder}. This is likely an orphaned harness agent worktree "
+        f"(see #2017) that cw did not create and cannot verify is finished "
+        f"with. It was NOT removed automatically. That worktree {state_msg}."
+    )
+    return BranchHeldByWorktreeError(msg, holder_path=holder)
+
+
 def create_worktree(
     client: ClientConfig,
     branch: str,
@@ -614,7 +658,13 @@ def create_worktree(
     if force:
         args.insert(2, "--force")
 
-    _run_git(*args, cwd=git_cwd)
+    try:
+        _run_git(*args, cwd=git_cwd)
+    except WorktreeError as exc:
+        holder = _parse_worktree_holder_path(str(exc))
+        if holder is None:
+            raise
+        raise _branch_held_error(client, branch, holder) from exc
     _register_cw_exclude(git_cwd)
 
     # Initialize submodules if the repo uses them
@@ -714,7 +764,9 @@ def _has_unpushed_commits(client: ClientConfig, branch: str, wt_path: Path) -> b
     return True
 
 
-def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
+def worktree_has_unsaved_work(
+    client: ClientConfig, branch: str, *, wt_path: Path | None = None
+) -> bool:
     """Return True if the worktree for *branch* has unsaved work.
 
     "Unsaved" means either:
@@ -726,10 +778,17 @@ def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
     ``origin/<default_branch>`` then the local ``<default_branch>`` ref. If
     all refs are unresolvable (e.g. offline), returns True conservatively.
 
+    *wt_path* defaults to the branch's canonical ``worktree_path_for(client,
+    branch)`` location. Passing it explicitly lets a caller check a *foreign*
+    (non-canonical) worktree's dirty state instead — e.g. a worktree
+    collision's holder path, which cw did not create and does not track
+    (#2034).
+
     Never raises — every git error is swallowed and logged at WARNING level
     so that a git failure cannot block a cleanup sweep.
     """
-    wt_path = worktree_path_for(client, branch)
+    if wt_path is None:
+        wt_path = worktree_path_for(client, branch)
     if not wt_path.exists():
         return False
 

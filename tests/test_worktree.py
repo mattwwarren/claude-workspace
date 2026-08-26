@@ -36,6 +36,7 @@ from cw.worktree import (
     worktree_path_for,
 )
 from tests._reconcile_helpers import _no_op_salvage_payload
+from tests.conftest import _clean_git_env
 from tests.test_result import _valid_payload
 
 if TYPE_CHECKING:
@@ -1219,6 +1220,174 @@ class TestSubmoduleInit:
         # All git commands should use repo_path, not workspace_path
         for cwd in git_cwds:
             assert str(cwd) == str(repo)
+
+
+class TestCreateWorktreeBranchHeldElsewhere:
+    """#2034: a foreign (non-cw) worktree already checked out on the
+    requested branch — e.g. an orphaned harness Agent(isolation="worktree")
+    workspace (#2017). ``git worktree add`` fails with a real
+    "already used by worktree at '<path>'" fatal line; create_worktree must
+    surface a targeted, actionable error instead of a bare re-raise, without
+    ever touching the foreign worktree.
+
+    Uses the real-git ``make_git_repo`` fixture (not a mocked ``_run_git``)
+    because git's exact stderr shape is the thing under test — a hand-typed
+    fixture would just re-assert our own assumption about that shape.
+    """
+
+    def _git(self, *args: str, cwd: Path) -> str:
+        clean_env = _clean_git_env()
+        return subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(cwd),
+            env=clean_env,
+        ).stdout.strip()
+
+    def _make_foreign_holder(
+        self, tmp_path: Path, workspace: Path, branch: str
+    ) -> Path:
+        """Create a real worktree on *branch* OUTSIDE the client's worktree_base.
+
+        Simulates a harness agent worktree at ``.claude/worktrees/agent-<id>``
+        — a location cw's own worktree_base/GC scan never covers.
+        """
+        holder = tmp_path / "external-harness" / "agent-abc123"
+        holder.parent.mkdir(parents=True)
+        self._git("worktree", "add", str(holder), "-b", branch, cwd=workspace)
+        return holder
+
+    def test_holder_path_named_in_error(
+        self, tmp_path: Path, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        from cw.exceptions import BranchHeldByWorktreeError
+
+        workspace = make_git_repo("workspace")
+        holder = self._make_foreign_holder(tmp_path, workspace, "dev/2034")
+
+        client = ClientConfig(
+            name="test",
+            workspace_path=workspace,
+            worktree_base=tmp_path / "wt",
+        )
+
+        with pytest.raises(BranchHeldByWorktreeError) as exc_info:
+            create_worktree(client, "dev/2034")
+
+        exc = exc_info.value
+        assert exc.holder_path == holder
+        assert str(holder) in str(exc)
+
+    def test_holder_never_removed(
+        self, tmp_path: Path, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        from cw.exceptions import BranchHeldByWorktreeError
+
+        workspace = make_git_repo("workspace")
+        holder = self._make_foreign_holder(tmp_path, workspace, "dev/2034")
+
+        client = ClientConfig(
+            name="test",
+            workspace_path=workspace,
+            worktree_base=tmp_path / "wt",
+        )
+
+        with pytest.raises(BranchHeldByWorktreeError):
+            create_worktree(client, "dev/2034")
+
+        # AC #3 by construction: the foreign worktree must still be on disk
+        # AND still registered with git — never force-removed as a side effect.
+        assert holder.exists()
+        listing = self._git("worktree", "list", cwd=workspace)
+        assert str(holder) in listing
+
+    def test_clean_holder_message_says_clean(
+        self, tmp_path: Path, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        from cw.exceptions import BranchHeldByWorktreeError
+
+        workspace = make_git_repo("workspace")
+        holder = self._make_foreign_holder(tmp_path, workspace, "dev/2034")
+        # holder has no uncommitted changes and nothing unpushed beyond origin.
+
+        client = ClientConfig(
+            name="test",
+            workspace_path=workspace,
+            worktree_base=tmp_path / "wt",
+        )
+
+        with pytest.raises(BranchHeldByWorktreeError) as exc_info:
+            create_worktree(client, "dev/2034")
+
+        msg = str(exc_info.value)
+        assert "clean" in msg.lower()
+        assert f"git worktree remove {holder}" in msg
+
+    def test_dirty_holder_message_warns(
+        self, tmp_path: Path, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        from cw.exceptions import BranchHeldByWorktreeError
+
+        workspace = make_git_repo("workspace")
+        holder = self._make_foreign_holder(tmp_path, workspace, "dev/2034")
+        (holder / "uncommitted.txt").write_text("wip")
+
+        client = ClientConfig(
+            name="test",
+            workspace_path=workspace,
+            worktree_base=tmp_path / "wt",
+        )
+
+        with pytest.raises(BranchHeldByWorktreeError) as exc_info:
+            create_worktree(client, "dev/2034")
+
+        msg = str(exc_info.value)
+        assert "safe to remove" not in msg.lower()
+        assert "verify" in msg.lower()
+        assert f"git worktree remove {holder}" in msg
+
+    def test_unparseable_collision_message_falls_back(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A WorktreeError from ``_run_git`` whose text doesn't match the
+        known collision shape must re-raise unchanged — no mis-wrap, no
+        crash. Mirrors the mocking style of
+        test_existing_worktree_git_unavailable_raises_stale_not_oserror."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(stderr="", stdout="")
+            if "worktree" in args and "add" in args:
+                msg = (
+                    "Git command failed: git worktree add x y\n"
+                    "fatal: some other failure"
+                )
+                raise WorktreeError(msg)
+            if "rev-parse" in args and any(
+                a.startswith(("refs/heads/", "refs/remotes/")) for a in args
+            ):
+                result.returncode = 128  # branch doesn't exist locally or on remote
+            else:
+                result.returncode = 0  # origin/main start-point resolves
+                result.stdout = "abc1234\n"
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with pytest.raises(WorktreeError, match="some other failure") as exc_info:
+            create_worktree(client, "dev/2034")
+
+        from cw.exceptions import BranchHeldByWorktreeError
+
+        assert not isinstance(exc_info.value, BranchHeldByWorktreeError)
 
 
 class TestRemoveWorktree:
@@ -2727,6 +2896,34 @@ class TestWorktreeHasUnsavedWork:
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         assert worktree_has_unsaved_work(client, "auto-dev/level3-clean") is False
+
+    def test_wt_path_override_checks_given_path_not_canonical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2034: an explicit ``wt_path=`` checks *that* directory's dirty
+        state, not the branch's canonical ``worktree_path_for`` location —
+        needed to check a foreign (non-cw) worktree holding a branch."""
+        client = self._client(tmp_path)
+        # The client's own canonical path for this branch: clean.
+        canonical_path = tmp_path / "wt" / "auto-dev-override"
+        canonical_path.mkdir(parents=True)
+        # A different, dirty directory the caller wants checked instead.
+        foreign_path = tmp_path / "elsewhere" / "foreign"
+        foreign_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = " M dirty.py\n" if str(cwd) == str(foreign_path) else ""
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert (
+            worktree_has_unsaved_work(client, "auto-dev/override", wt_path=foreign_path)
+            is True
+        )
 
 
 class TestHasCommitsBeyondBase:
