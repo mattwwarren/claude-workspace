@@ -439,6 +439,10 @@ class TestReviewConsolidateCommand:
             # Claude-native coordinator through this passthrough with no
             # Python-side change beyond the field itself.
             "rejected_must_fix",
+            # #2029: the reviewer run failures whose unusable payload was
+            # claiming a MUST_FIX or SHOULD_FIX finding — the residual signal
+            # for the discards no per-finding rescue could recover.
+            "run_failures_with_should_fix_discards",
             # #1709: which filesystem-capability mode the reviewers ran under.
             # Always emitted (null for executors that never probe) so a
             # consumer can tell "not probed" from "probed and degraded".
@@ -2071,8 +2075,18 @@ class TestReviewConsolidateDocumentsFromSchemaInvalidFindings:
             reviewer_role="Alpha Reviewer",
             detail="reviewed the diff",
         )
+        # A distinct anchor+evidence, or dedupe_findings would merge the two
+        # into one AcceptedFinding and the assertion below would prove nothing.
         clean = _doc_payload(
-            _anchored_finding(severity="SHOULD_FIX", summary="beta kept"),
+            dict(
+                _finding_kwargs(
+                    severity="SHOULD_FIX",
+                    summary="beta kept",
+                    line_start=3,
+                    line_end=3,
+                    evidence="pass",
+                )
+            ),
             reviewer_role="Beta Reviewer",
             detail="reviewed the diff",
         )
