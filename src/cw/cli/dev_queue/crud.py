@@ -389,8 +389,8 @@ def dev_queue_approve(ticket_id: str, client: str | None, post_marker: bool) -> 
         " stage (e.g. a shipped PR that later went conflicting because a"
         " sibling PR in the same wave merged first). Accepts any COMPLETED"
         " row regardless of why the recovery is needed — check"
-        " `cw dev-queue show` / event history first. See"
-        " docs/dispatch-runbook.md."
+        " `cw dev-queue tasks -t <T> -c <CLIENT>` / event history first."
+        " See docs/dispatch-runbook.md."
     ),
 )
 @handle_errors
