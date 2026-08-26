@@ -53,6 +53,28 @@ def locate_transcript(
     return None
 
 
+def subagent_transcript_paths(project_dir: Path, claude_session_id: str) -> list[Path]:
+    """Return every subagent transcript for one parent session, sorted, or [].
+
+    Subagents write to ``<project_dir>/<claude_session_id>/subagents/*.jsonl``
+    (the layout backing ``find_new_subagent_transcript``, #2012). Scoped to
+    exactly this parent session's id: unlike ``find_new_subagent_transcript``,
+    which deliberately scans the whole project dir for *any* new subagent
+    transcript at spawn time, an idle-liveness check must not pick up a
+    sibling session's leftover subagents from a sequentially-reused worktree
+    — so this does not rglob the project dir. Fails open (``[]``) on a
+    missing directory or an OSError, matching every sibling helper in this
+    module.
+    """
+    subagents_dir = project_dir / claude_session_id / "subagents"
+    if not subagents_dir.is_dir():
+        return []
+    try:
+        return sorted(subagents_dir.glob("*.jsonl"))
+    except OSError:
+        return []
+
+
 def find_new_subagent_transcript(
     project_dir: Path,
     *,

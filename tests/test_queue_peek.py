@@ -922,6 +922,52 @@ class TestRecommend:
         assert rec == "STOP"
         assert "systemic" in reason
 
+    def test_high_attempts_with_child_active_does_not_stop(self) -> None:
+        """#2028 comment 4, Instance 2 (session da8f1b20): age_m 5.1, idle_m
+        1.3, unproductive attempt 3 — STOP fired via the attempt-count arm
+        even though idle_m was barely elevated, because that arm never
+        consulted child activity. child_active=True must suppress it and
+        fall through to _stall_check instead."""
+        rec, reason = queue_peek.recommend(
+            age_min=5.1,
+            idle_min=1.3,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=3,
+            child_active=True,
+        )
+        assert rec != "STOP"
+        assert "systemic" not in reason
+
+    def test_high_attempts_with_child_active_instance_3_does_not_stop(self) -> None:
+        """#2028 comment 4, Instance 3 (session 7176f757): age_m 14.2,
+        idle_m 9.0, unproductive attempt 4 — same arm, same gap."""
+        rec, reason = queue_peek.recommend(
+            age_min=14.2,
+            idle_min=9.0,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=4,
+            child_active=True,
+        )
+        assert rec != "STOP"
+        assert "systemic" not in reason
+
+    def test_high_attempts_without_child_active_still_stops(self) -> None:
+        """Regression guard: omitting/False child_active preserves the
+        existing STOP-by-attempt-count behavior — a genuinely wedged session
+        with no active child must still be flagged."""
+        rec, reason = queue_peek.recommend(
+            age_min=10.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
+            child_active=False,
+        )
+        assert rec == "STOP"
+        assert "systemic" in reason
+
 
 class TestReachedDeepStage:
     """_reached_deep_stage — pipeline-order gate for stage_high_water (#1361)."""
@@ -1363,6 +1409,32 @@ class TestParseTranscript:
         assert result["last_pr_number"] is None
         assert result["usage_limit_detected"] is False
 
+    def test_away_summary_does_not_masquerade_as_last_assistant_activity(
+        self, tmp_path: Path
+    ) -> None:
+        """A trailing ``away_summary`` system record (#2028) must not push
+        last_asst_ts forward — only real ``type == "assistant"`` entries
+        count, whether this transcript belongs to a parent or a subagent."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {"content": []},
+                },
+                {
+                    "type": "system",
+                    "subtype": "away_summary",
+                    "content": "session was idle",
+                    "timestamp": "2026-06-01T10:20:00Z",
+                },
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["last_asst_ts"] == "2026-06-01T10:00:00Z"
+
 
 # ---------------------------------------------------------------------------
 # format_row
@@ -1581,6 +1653,134 @@ class TestFormatRow:
         assert row["idle_min"] is not None
 
 
+class TestSubagentIdleBlend:
+    """format_row's parent/child idle blend (#2028)."""
+
+    def test_healthy_parent_idle_child_active_rescues_idle_and_reason(self) -> None:
+        """Shape A — #1976: parent idle_min ~15.8min (looks stuck), but a
+        subagent is active seconds ago. The blended idle_min reflects the
+        child's freshness and the ladder must not reach STOP/STOP-OR-PEEK;
+        reason must name the rescuing child."""
+        task = _make_ticket_task(attempts=1)
+        info: dict[str, Any] = {
+            "claim_started_at": "2026-06-20T11:30:00+00:00",  # 30 min before _NOW
+            "first_user_ts": None,
+            "last_asst_ts": "2026-06-20T11:44:12+00:00",  # ~15.8 min before _NOW
+            "subagent_last_asst_ts": "2026-06-20T11:59:55+00:00",  # 5 sec before _NOW
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["idle_min"] == pytest.approx(0.1, abs=0.05)
+        assert row["recommend"] not in {"STOP", "STOP-OR-PEEK"}
+        assert "child subagent active" in row["reason"]
+
+    def test_wedged_parent_idle_child_also_idle_unchanged(self) -> None:
+        """Shape B — #9: both parent and child are stale (~46.2min). The
+        blend must not rescue idle_min or reason — this is a genuine stall."""
+        task = _make_ticket_task(attempts=1)
+        info: dict[str, Any] = {
+            "claim_started_at": "2026-06-20T11:10:00+00:00",  # 50 min before _NOW
+            "first_user_ts": None,
+            "last_asst_ts": "2026-06-20T11:13:48+00:00",  # ~46.2 min before _NOW
+            "subagent_last_asst_ts": "2026-06-20T11:00:00+00:00",  # ~60 min before _NOW
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["idle_min"] == pytest.approx(46.2, abs=0.1)
+        assert row["recommend"] == "STOP-OR-PEEK"
+        assert "child subagent active" not in row["reason"]
+
+    def test_no_subagents_byte_identical_to_pre_fix_row(self) -> None:
+        """subagent_last_asst_ts absent → idle_min and reason unchanged."""
+        task = _make_ticket_task(attempts=1)
+        info: dict[str, Any] = {
+            "claim_started_at": "2026-06-20T11:50:00+00:00",  # 10 min before _NOW
+            "first_user_ts": None,
+            "last_asst_ts": "2026-06-20T11:58:00+00:00",  # 2 min before _NOW
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row_without_key = queue_peek.format_row(task, info, _NOW)
+        row_with_none = queue_peek.format_row(
+            task, {**info, "subagent_last_asst_ts": None}, _NOW
+        )
+        assert row_without_key["idle_min"] == pytest.approx(2.0)
+        assert "child subagent active" not in row_without_key["reason"]
+        assert row_without_key == row_with_none
+
+    def test_child_rescues_when_parent_idle_already_nulled_by_stale_guard(
+        self,
+    ) -> None:
+        """Parent idle is nulled by the existing reused-worktree stale-guard
+        (idle > age); a fresh subagent still rescues both idle_min and
+        reason — a nulled parent idle counts as 'no signal', not 'healthy'."""
+        task = _make_ticket_task(attempts=1)
+        info: dict[str, Any] = {
+            "claim_started_at": "2026-06-20T11:59:55+00:00",  # 5 sec before _NOW
+            "first_user_ts": None,
+            "last_asst_ts": "2026-06-20T10:21:00+00:00",  # ~99 min before _NOW
+            "subagent_last_asst_ts": "2026-06-20T11:59:58+00:00",  # 2 sec before _NOW
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["idle_min"] is not None
+        assert row["idle_min"] < 1
+        assert "child subagent active" in row["reason"]
+
+    def test_active_child_suppresses_unproductive_attempts_stop(self) -> None:
+        """#2028 comment 4, Instance 2 (session da8f1b20): age_m 5.1,
+        idle_m 1.3, unproductive attempt 3 — STOP fired via the
+        attempt-count arm even though a subagent had written 33s earlier.
+        format_row must thread child_active into recommend() so this arm no
+        longer fires while a child is demonstrably active."""
+        task = _make_ticket_task(attempts=3, unproductive_attempts=3)
+        info: dict[str, Any] = {
+            "claim_started_at": "2026-06-20T11:54:54+00:00",  # ~5.1 min before _NOW
+            "first_user_ts": None,
+            "last_asst_ts": "2026-06-20T11:58:42+00:00",  # ~1.3 min before _NOW
+            "subagent_last_asst_ts": "2026-06-20T11:59:27+00:00",  # 33 sec before _NOW
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["recommend"] != "STOP"
+        assert "systemic" not in row["reason"]
+        assert "child subagent active" in row["reason"]
+
+    def test_idle_child_does_not_suppress_unproductive_attempts_stop(self) -> None:
+        """Regression guard: with no active child, the attempt-count STOP
+        arm fires exactly as before — the #2028 gate must not blanket-
+        suppress genuine systemic-failure STOPs."""
+        task = _make_ticket_task(
+            attempts=3, unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN
+        )
+        info: dict[str, Any] = {
+            "claim_started_at": "2026-06-20T11:50:00+00:00",  # 10 min before _NOW
+            "first_user_ts": None,
+            "last_asst_ts": "2026-06-20T11:50:36+00:00",  # ~9.4 min before _NOW
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["recommend"] == "STOP"
+        assert "systemic" in row["reason"]
+
+
 # ---------------------------------------------------------------------------
 # build_peek_rows
 # ---------------------------------------------------------------------------
@@ -1773,6 +1973,118 @@ class TestBuildPeekRows:
         ):
             rows = queue_peek.build_peek_rows(None, _NOW)
         assert rows[0]["recommend"] != "STOP"
+
+
+class TestBuildPeekRowsSubagents:
+    """End-to-end regression for the #2028 subagent idle blend.
+
+    The parent transcript path returned by ``find_transcript_for_ticket`` is
+    deliberately named ``session.jsonl`` — NOT ``<csid>.jsonl`` — so this
+    test only passes if the subagent lookup is scoped by the CW_STATE
+    ``claude_session_id`` (via ``_load_session_refs``), not by
+    ``transcript.stem``. A stem-keyed lookup would resolve to the wrong
+    (nonexistent) subagents dir and silently find nothing.
+    """
+
+    _CSID = "aaaa1111-0000-0000-0000-000000000000"
+
+    def test_fresh_subagent_rescues_idle_min_via_csid_not_transcript_stem(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        task = _make_ticket_task("T-1", session_id="sess1234", attempts=1)
+        transcript_path = tmp_path / "session.jsonl"
+        _make_transcript(
+            transcript_path,
+            [
+                {
+                    "type": "user",
+                    "timestamp": "2026-06-20T11:30:00Z",
+                    "message": {"content": "start"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-20T11:44:12Z",  # ~15.8 min before _NOW
+                    "message": {"content": []},
+                },
+            ],
+        )
+        child_path = transcript_path.parent / self._CSID / "subagents" / "agent-x.jsonl"
+        child_path.parent.mkdir(parents=True)
+        _make_transcript(
+            child_path,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-20T11:59:55Z",  # 5 sec before _NOW
+                    "message": {"content": []},
+                },
+            ],
+        )
+        _write_sessions(
+            queue_peek.CW_STATE,
+            [
+                {
+                    "id": "sess1234",
+                    "claude_session_id": self._CSID,
+                    "started_at": "2026-06-20T11:30:00+00:00",  # 30 min before _NOW
+                }
+            ],
+        )
+        with (
+            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch(
+                "cw.queue_peek.find_transcript_for_ticket",
+                return_value=transcript_path,
+            ),
+            patch("cw.queue_peek.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, _NOW)
+        assert rows[0]["idle_min"] is not None
+        assert rows[0]["idle_min"] < 1
+        assert "child subagent active" in rows[0]["reason"]
+
+    def test_no_claude_session_id_leaves_idle_min_unchanged(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """A CW_STATE row with no claude_session_id has no <csid>/subagents/
+        path to derive — the blend is skipped, not an error."""
+        task = _make_ticket_task("T-1", session_id="sess1234", attempts=1)
+        transcript_path = tmp_path / "session.jsonl"
+        _make_transcript(
+            transcript_path,
+            [
+                {
+                    "type": "user",
+                    "timestamp": "2026-06-20T11:50:00Z",
+                    "message": {"content": "start"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-20T11:58:00Z",  # 2 min before _NOW
+                    "message": {"content": []},
+                },
+            ],
+        )
+        _write_sessions(
+            queue_peek.CW_STATE,
+            [
+                {
+                    "id": "sess1234",
+                    "claude_session_id": None,
+                    "started_at": "2026-06-20T11:50:00+00:00",
+                }
+            ],
+        )
+        with (
+            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch(
+                "cw.queue_peek.find_transcript_for_ticket",
+                return_value=transcript_path,
+            ),
+            patch("cw.queue_peek.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, _NOW)
+        assert rows[0]["idle_min"] == pytest.approx(2.0)
 
 
 # ---------------------------------------------------------------------------

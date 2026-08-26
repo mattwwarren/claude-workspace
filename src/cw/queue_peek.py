@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
-from cw._transcript import locate_transcript
+from cw._transcript import locate_transcript, subagent_transcript_paths
 from cw._util import claude_project_dir
 from cw.auto_dev_result import (
     AutoDevResult,
@@ -246,6 +246,13 @@ def _compute_jsonl_idle_min(t: TicketTask, now: dt.datetime) -> float | None:
     Best-effort liveness for blind rows (no resolvable transcript). Scans
     the project dir derived from worktree_path (from task or CW_STATE), or
     falls back to heuristic-matched dirs. Returns round(elapsed, 1) or None.
+
+    NOTE: mtime-based, not content-based — unlike parse_transcript()'s
+    last_asst_ts (entry_type == "assistant" only), this does not filter out
+    away_summary records, so a quiescent session's away_summary write can
+    make this look more recent than the last real assistant turn. Accepted
+    as best-effort because this branch only runs when no transcript could be
+    resolved at all (see A2, GH #2028).
     """
     refs = _load_session_refs(t.session_id)
     effective_wt = t.worktree_path
@@ -278,6 +285,26 @@ def _compute_jsonl_idle_min(t: TicketTask, now: dt.datetime) -> float | None:
         now - dt.datetime.fromtimestamp(newest_mtime, tz=dt.UTC)
     ).total_seconds()
     return round(elapsed_seconds / 60.0, 1)
+
+
+def _newest_subagent_ts(project_dir: Path, claude_session_id: str | None) -> str | None:
+    """Return the newest content-based last-activity ts across one parent
+    session's subagent transcripts, or None (#2028).
+
+    Reuses ``parse_transcript`` per child so the result inherits its
+    away_summary immunity (only ``entry_type == "assistant"`` counts) — no
+    separate parser needed. ISO-8601 timestamp strings sort correctly
+    lexicographically, matching the comparison idiom already used elsewhere
+    in this module.
+    """
+    if claude_session_id is None:
+        return None
+    newest: str | None = None
+    for child in subagent_transcript_paths(project_dir, claude_session_id):
+        child_ts = parse_transcript(child).get("last_asst_ts")
+        if child_ts is not None and (newest is None or child_ts > newest):
+            newest = child_ts
+    return newest
 
 
 def find_transcript_for_ticket(
@@ -543,6 +570,7 @@ def _score_session(
     unproductive_attempts: int,
     stage_high_water: Stage | None = None,
     usage_limit_detected: bool = False,
+    child_active: bool = False,
 ) -> tuple[str, str]:
     """Return recommendation when age_min is known."""
     if pr_state == "MERGED" and idle_min is not None and idle_min > IDLE_POST_PR_MIN:
@@ -564,8 +592,10 @@ def _score_session(
                 "timeout — stop or hand off"
             )
         return ("STOP", reason)
-    if unproductive_attempts >= STOP_UNPRODUCTIVE_ATTEMPTS_MIN and not (
-        _reached_deep_stage(stage_high_water)
+    if (
+        unproductive_attempts >= STOP_UNPRODUCTIVE_ATTEMPTS_MIN
+        and not _reached_deep_stage(stage_high_water)
+        and not child_active
     ):
         if usage_limit_detected:
             return (
@@ -588,12 +618,18 @@ def recommend(
     unproductive_attempts: int,
     stage_high_water: Stage | None = None,
     usage_limit_detected: bool = False,
+    child_active: bool = False,
 ) -> tuple[str, str]:
     """Return (recommendation, reasoning) from the peek-stop ladder.
 
     ``unproductive_attempts`` — not raw ``attempts`` — drives the
     STOP-by-attempt-count branch, mirroring the dispatch admission gate's
-    #1750 signal (GitHub #1768).
+    #1750 signal (GitHub #1768). ``child_active`` (#2028) suppresses that
+    same branch — an actively-writing subagent means the attempt counter is
+    describing the session's past, not its present, so it must not
+    independently drive a STOP while a child is demonstrably working; the
+    row falls through to ``_stall_check``, which already reads the
+    child-rescued ``idle_min``.
     """
     if age_min is None:
         return ("PEEK", "no transcript timestamps — verify session is alive")
@@ -605,6 +641,7 @@ def recommend(
         unproductive_attempts=unproductive_attempts,
         stage_high_water=stage_high_water,
         usage_limit_detected=usage_limit_detected,
+        child_active=child_active,
     )
 
 
@@ -650,6 +687,10 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         # claim time — a logical contradiction proving it belongs to a stale,
         # reused-worktree transcript rather than this session.
         idle = None
+    child_idle = minutes_since(info.get("subagent_last_asst_ts"), now)
+    child_active = child_idle is not None and (idle is None or child_idle < idle)
+    if child_active:
+        idle = child_idle
     pr_state = None
     if info.get("last_pr_number"):
         pr_state = gh_pr_state(info["last_pr_number"])
@@ -661,7 +702,13 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         unproductive_attempts=t.unproductive_attempts,
         stage_high_water=t.stage_high_water,
         usage_limit_detected=info.get("usage_limit_detected", False),
+        child_active=child_active,
     )
+    if child_active:
+        reason = (
+            f"{reason}; child subagent active {child_idle:.1f}m ago — "
+            "waiting on it, not idle"
+        )
     return {
         "ticket": t.ticket_id,
         "session": (t.session_id or "-")[:12],
@@ -691,15 +738,17 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
             str(t.ticket_id), t.session_id, t.worktree_path
         )
         if transcript is not None:
+            refs = _load_session_refs(t.session_id)
             if transcript.name == OPENCODE_LOG_RELATIVE_PATH.name:
                 info: dict[str, Any] = parse_opencode_transcript(transcript)
             else:
                 info = parse_transcript(transcript)
+                info["subagent_last_asst_ts"] = _newest_subagent_ts(
+                    transcript.parent, refs.get("claude_session_id")
+                )
             info["signal_source"] = _SIGNAL_SOURCE_TRANSCRIPT
             info["jsonl_idle_min"] = None
-            info["claim_started_at"] = _load_session_refs(t.session_id).get(
-                "started_at"
-            )
+            info["claim_started_at"] = refs.get("started_at")
         else:
             info = {
                 "signal_source": _SIGNAL_SOURCE_BLIND,

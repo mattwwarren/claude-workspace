@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from cw._transcript import find_new_subagent_transcript, locate_transcript
+from cw._transcript import (
+    find_new_subagent_transcript,
+    locate_transcript,
+    subagent_transcript_paths,
+)
 from tests.conftest import _write_idle_transcript
 
 _EPOCH = dt.datetime.fromtimestamp(0, tz=dt.UTC)
@@ -321,3 +325,103 @@ class TestFindNewSubagentTranscript:
             assert result is None
         finally:
             proj.chmod(0o755)
+
+
+class TestSubagentTranscriptPaths:
+    """Unit tests for ``subagent_transcript_paths`` (#2028).
+
+    Scoped to exactly one parent session's own ``<csid>/subagents/`` dir —
+    unlike ``find_new_subagent_transcript``, this must NOT pick up a sibling
+    session's leftover subagents from a sequentially-reused worktree.
+    """
+
+    _CSID = "aaaa1111-0000-0000-0000-000000000000"
+    _OTHER_CSID = "bbbb2222-0000-0000-0000-000000000000"
+
+    def _project_dir(self, home: Path, worktree: Path) -> Path:
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        return home / ".claude" / "projects" / encoded
+
+    def test_missing_subagents_dir_returns_empty_list(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        # Seed the project dir itself (so it exists) via an unrelated file,
+        # but never create a <csid>/subagents/ dir under it.
+        _seed_transcript(home, worktree, "some-other.jsonl", mtime=_NOW)
+        project_dir = self._project_dir(home, worktree)
+
+        result = subagent_transcript_paths(project_dir, self._CSID)
+
+        assert result == []
+
+    def test_returns_files_under_matching_csid_subagents_dir(
+        self, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        expected = _seed_transcript(
+            home,
+            worktree,
+            f"{self._CSID}/subagents/agent-x.jsonl",
+            mtime=_NOW,
+        )
+        project_dir = self._project_dir(home, worktree)
+
+        result = subagent_transcript_paths(project_dir, self._CSID)
+
+        assert result == [expected]
+
+    def test_ignores_other_sessions_subagents_dir(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        _seed_transcript(
+            home,
+            worktree,
+            f"{self._OTHER_CSID}/subagents/agent-y.jsonl",
+            mtime=_NOW,
+        )
+        project_dir = self._project_dir(home, worktree)
+
+        result = subagent_transcript_paths(project_dir, self._CSID)
+
+        assert result == []
+
+    def test_oserror_on_glob_returns_empty_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        _seed_transcript(
+            home,
+            worktree,
+            f"{self._CSID}/subagents/agent-x.jsonl",
+            mtime=_NOW,
+        )
+        project_dir = self._project_dir(home, worktree)
+
+        def _boom(*_args: object, **_kwargs: object) -> object:
+            raise OSError(errno.EIO, "simulated I/O error")
+
+        monkeypatch.setattr(Path, "glob", _boom)
+
+        result = subagent_transcript_paths(project_dir, self._CSID)
+
+        assert result == []
+
+    def test_unreadable_dir_returns_empty_list(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        worktree = tmp_path / "wt"
+        _seed_transcript(
+            home,
+            worktree,
+            f"{self._CSID}/subagents/agent-x.jsonl",
+            mtime=_NOW,
+        )
+        project_dir = self._project_dir(home, worktree)
+        subagents_dir = project_dir / self._CSID / "subagents"
+        subagents_dir.chmod(0o000)
+        try:
+            result = subagent_transcript_paths(project_dir, self._CSID)
+            assert result == []
+        finally:
+            subagents_dir.chmod(0o755)
