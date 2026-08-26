@@ -729,13 +729,13 @@ class OrchestratorConfig(BaseModel):
     fix_loop_await_deadline_minutes: int = Field(default=30, ge=1)
     # #2012 — total window (seconds) `cw agent-spawn-verify` polls for a fresh
     # subagent transcript before exiting 1. Operator-tunable rather than a code
-    # constant because this sits on the fix-loop dispatch path every client's
-    # auto-dev-review Step 3b runs through: host/load variance (cold model
-    # start, contended host, network-mounted worktree) can make a fixed window
-    # false-positive a healthy dispatch into `fix_loop_dispatch_unverified`.
-    # An affected client raises this without a code change — same rationale as
-    # busy_wait_guard_window_seconds above. `--poll-seconds` overrides it for a
-    # single invocation.
+    # constant because host/load variance (cold model start, contended host,
+    # network-mounted worktree) can make a fixed window report a verification
+    # failure for a dispatch that was in fact healthy, just slow to write its
+    # first transcript. An affected operator raises this without a code change —
+    # same rationale as busy_wait_guard_window_seconds above. `--poll-seconds`
+    # overrides it for a single invocation. (The auto-dev fix-loop call site is
+    # retired as of #2017; the command remains an operator diagnostic.)
     agent_spawn_verify_poll_seconds: int = Field(default=20, ge=1)
     # Polling cadence (seconds) within the window above. `--poll-interval-
     # seconds` overrides it for a single invocation.

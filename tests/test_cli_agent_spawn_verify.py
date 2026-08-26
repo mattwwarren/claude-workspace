@@ -1,12 +1,17 @@
 """CLI tests for ``cw agent-spawn-verify`` (#2012).
 
-The fix-loop dispatch verifier: after the review stage spawns its async fix
-agent it runs this command *in the same turn* to prove a subagent transcript
-actually appeared. Exit 0 means the dispatch is real and the orchestrator may
-end its turn to await the completion notification; exit 1 means the spawn
-produced nothing and the stage must fail loudly (``blocker.reason:
-fix_loop_dispatch_unverified``) rather than awaiting a notification that will
-never arrive.
+An async-spawn verifier: run *in the same turn* as a subagent spawn to prove a
+subagent transcript actually appeared. Exit 0 means the dispatch is real and the
+caller may end its turn to await the completion notification; exit 1 is a
+general verification failure meaning the spawn produced nothing, so the caller
+must act rather than await a notification that will never arrive.
+
+**Dual status (#2017):** the auto-dev review fix loop that motivated this
+command no longer calls it — Step 3b dispatches a cw session synchronously via
+``dispatch_fix_agent``, leaving no async gap. The command is kept as a
+standalone operator diagnostic and as the shared transcript-resolution leaf
+``cw queue peek`` builds on (#2028), so the behaviour asserted below is
+unchanged.
 
 Unlike the hook commands (``cw guard-cwd``, ``cw agent-spawn-pre``) this is an
 operator/orchestrator-facing command with **no** fail-open contract: an
