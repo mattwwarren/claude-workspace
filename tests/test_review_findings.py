@@ -11,6 +11,7 @@ import ast
 import json
 import logging
 from pathlib import Path
+from typing import Any, get_args
 
 import pytest
 from pydantic import ValidationError
@@ -23,6 +24,7 @@ from cw.review_findings import (
     CapturedDiff,
     Finding,
     RejectedFinding,
+    RejectedFindingReason,
     ReviewerFindingsDocument,
     ReviewerRunFailure,
     ReviewerRunRecord,
@@ -45,11 +47,13 @@ from cw.review_findings import (
     consolidate_verdict,
     dedupe_findings,
     derive_review_counts,
+    parse_reviewer_document,
     validate_reviewer_document,
     write_review_verdict,
 )
 from tests.conftest import (
     FindingKwargs,
+    _doc_payload,
     _finding_kwargs,
     _make_debt_record,
     _make_diff,
@@ -920,6 +924,125 @@ class TestRejectionReasonLiteral:
             raw={}, reviewer_role="R", reason="line_reference_out_of_range"
         )
         assert rf.reason == "line_reference_out_of_range"
+
+    def test_schema_invalid_is_valid_rejection_reason_literal(self) -> None:
+        # #2029: an 8th RejectedFindingReason value, and the only one produced
+        # BEFORE _classify_finding ever runs — at parse time, by
+        # parse_reviewer_document, for a findings[] item that could not become
+        # a Finding at all.
+        assert "schema_invalid" in get_args(RejectedFindingReason)
+        rf = RejectedFinding(raw={}, reviewer_role="R", reason="schema_invalid")
+        assert rf.reason == "schema_invalid"
+
+
+def _invalid_finding_payload(**overrides: object) -> dict[str, Any]:
+    """A raw finding dict with ``evidence`` removed — schema-invalid (#2029).
+
+    Omission rather than a blank value: the required-field failure is the shape
+    a real reviewer produces when it forgets the field entirely, and it is what
+    the ticket's own acceptance criteria name.
+    """
+    payload = dict(_finding_kwargs(**overrides))
+    del payload["evidence"]
+    return payload
+
+
+class TestParseReviewerDocument:
+    """#2029: one schema-invalid finding must not delete its siblings."""
+
+    def test_siblings_survive_one_invalid_finding(self) -> None:
+        payload = _doc_payload(
+            dict(_finding_kwargs(summary="first")),
+            _invalid_finding_payload(severity="NIT", summary="broken"),
+            dict(_finding_kwargs(severity="DEBT", summary="last")),
+        )
+        doc, rejected = parse_reviewer_document(payload)
+
+        assert [f.summary for f in doc.findings] == ["first", "last"]
+        assert len(rejected) == 1
+        rf = rejected[0]
+        assert rf.reason == "schema_invalid"
+        assert rf.reviewer_role == "Code Quality Reviewer"
+        assert rf.raw == _invalid_finding_payload(severity="NIT", summary="broken")
+        assert "evidence" in rf.detail
+
+    def test_ac4_one_invalid_finding_plus_one_of_every_severity(self) -> None:
+        severities = ["MUST_FIX", "SHOULD_FIX", "DEBT", "NIT", "PRINCIPLE"]
+        payload = _doc_payload(
+            _invalid_finding_payload(),
+            *(dict(_finding_kwargs(severity=s)) for s in severities),
+        )
+        doc, rejected = parse_reviewer_document(payload)
+
+        assert [f.severity for f in doc.findings] == severities
+        assert len(rejected) == 1
+        assert rejected[0].reason == "schema_invalid"
+
+    def test_schema_invalid_must_fix_feeds_the_existing_1714_gate(self) -> None:
+        # The design decision this ticket rests on: a schema-invalid finding is
+        # an ordinary RejectedFinding, so #1714's force-block selector fires for
+        # it with no new gating code at all.
+        payload = _doc_payload(
+            _invalid_finding_payload(severity="MUST_FIX"),
+            dict(_finding_kwargs(severity="NIT")),
+        )
+        _doc, rejected = parse_reviewer_document(payload)
+
+        assert rejected[0].raw["severity"] == "MUST_FIX"
+        assert _select_rejected_must_fix(rejected) == rejected
+
+    def test_non_list_findings_key_is_not_rescued(self) -> None:
+        # The boundary: per-ITEM rescue only. A malformed `findings` key itself
+        # is a structural failure and still propagates.
+        payload = _doc_payload(findings="not a list at all")
+        with pytest.raises(ValidationError):
+            parse_reviewer_document(payload)
+
+    def test_failed_reviewer_with_every_finding_invalid_parses_empty(self) -> None:
+        payload = _doc_payload(
+            _invalid_finding_payload(),
+            _invalid_finding_payload(severity="NIT"),
+            status="failed",
+            detail="reviewer produced nothing usable",
+        )
+        doc, rejected = parse_reviewer_document(payload)
+
+        assert doc.status == "failed"
+        assert doc.findings == []
+        assert len(rejected) == 2
+
+    def test_non_dict_finding_item_is_rescued_not_crashed_on(self) -> None:
+        payload = _doc_payload(
+            detail="checked the diff; one item was unusable",
+            findings=["not a finding at all"],
+        )
+        doc, rejected = parse_reviewer_document(payload)
+
+        assert doc.findings == []
+        assert len(rejected) == 1
+        assert rejected[0].reason == "schema_invalid"
+        assert rejected[0].raw == {"value": "not a finding at all"}
+
+    def test_valid_document_reports_no_rejects(self) -> None:
+        payload = _doc_payload(dict(_finding_kwargs()))
+        doc, rejected = parse_reviewer_document(payload)
+
+        assert len(doc.findings) == 1
+        assert rejected == []
+
+    def test_non_dict_payload_still_raises(self) -> None:
+        # A --documents-from file holding a bare JSON array must still fail as a
+        # structural error, not crash on a `.get()` against a list.
+        with pytest.raises(ValidationError):
+            parse_reviewer_document([1, 2, 3])
+
+    def test_each_rejection_is_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        payload = _doc_payload(_invalid_finding_payload(), dict(_finding_kwargs()))
+        with caplog.at_level(logging.INFO, logger="cw.review_findings._validation"):
+            parse_reviewer_document(payload)
+        assert "schema_invalid" in caplog.text
 
 
 class TestFindingValidation:
@@ -3579,6 +3702,136 @@ class TestConsolidateVerdictFailedReviewers:
         assert len(verdict.stripped_escalations) == 2
         assert verdict.stripped_escalations[0].reviewer_role == "R1"
         assert verdict.stripped_escalations[1].reviewer_role == "R2"
+
+
+class TestConsolidateVerdictPreValidationRejected:
+    """#2029: parse-time rejects join the existing #1714/#2000 machinery."""
+
+    def _schema_invalid_must_fix(self) -> RejectedFinding:
+        return RejectedFinding(
+            raw=dict(_finding_kwargs(severity="MUST_FIX")),
+            reviewer_role="Code Quality Reviewer",
+            reason="schema_invalid",
+            detail="evidence: Field required",
+        )
+
+    def test_pre_validation_reject_force_blocks_via_rejected_must_fix(self) -> None:
+        rf = self._schema_invalid_must_fix()
+        verdict = consolidate_verdict(
+            [], _make_diff(), reviewed_sha="sha", pre_validation_rejected=[rf]
+        )
+        assert verdict.rejected == [rf]
+        assert verdict.rejected_must_fix == [rf]
+        # R4 (#1714): the parked signal never flips `blocking` — an unparseable
+        # finding's anchor is exactly what must not reach the autofix loop.
+        assert verdict.blocking is False
+        assert verdict.rejected_count == 1
+        assert verdict.rejected_count_by_severity == {"MUST_FIX": 1}
+
+    def test_pre_validation_rejects_precede_per_document_rejects(self) -> None:
+        rf = self._schema_invalid_must_fix()
+        doc = _make_reviewer_doc(
+            _make_finding(
+                severity="SHOULD_FIX",
+                file="src/cw/never_in_the_diff.py",
+                line_start=None,
+                line_end=None,
+            )
+        )
+        verdict = consolidate_verdict(
+            [doc], _make_diff(), reviewed_sha="sha", pre_validation_rejected=[rf]
+        )
+        assert [r.reason for r in verdict.rejected] == [
+            "schema_invalid",
+            "unknown_file",
+        ]
+        assert verdict.rejected_count == 2
+        assert verdict.rejected_count_by_severity == {"MUST_FIX": 1, "SHOULD_FIX": 1}
+
+    def test_default_none_is_byte_identical_to_omitting_it(self) -> None:
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        diff = _make_diff()
+        omitted = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        explicit = consolidate_verdict(
+            [doc], diff, reviewed_sha="sha", pre_validation_rejected=None
+        )
+        assert omitted.model_dump() == explicit.model_dump()
+        assert omitted.run_failures_with_should_fix_discards == []
+
+
+class TestReviewerRunFailureDiscardedFindings:
+    """#2029: the residual whole-document discard tally and its gate."""
+
+    def test_discard_fields_default_to_zero_and_empty(self) -> None:
+        failure = ReviewerRunFailure(role="X", reason="schema_mismatch")
+        assert failure.discarded_finding_count == 0
+        assert failure.discarded_finding_severities == {}
+
+    def test_discard_fields_round_trip(self) -> None:
+        failure = ReviewerRunFailure(
+            role="X",
+            reason="schema_mismatch",
+            discarded_finding_count=2,
+            discarded_finding_severities={"MUST_FIX": 1, "NIT": 1},
+        )
+        assert ReviewerRunFailure.model_validate_json(failure.model_dump_json()) == (
+            failure
+        )
+
+    def test_should_fix_discard_is_selected_onto_the_verdict(self) -> None:
+        failure = ReviewerRunFailure(
+            role="Perf Reviewer",
+            reason="codex_review_unparseable",
+            discarded_finding_count=1,
+            discarded_finding_severities={"SHOULD_FIX": 1},
+        )
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+            failed_reviewers=[failure],
+        )
+        assert verdict.run_failures_with_should_fix_discards == [failure]
+
+    def test_nit_only_discard_stays_below_the_threshold(self) -> None:
+        failure = ReviewerRunFailure(
+            role="Perf Reviewer",
+            reason="codex_review_unparseable",
+            discarded_finding_count=3,
+            discarded_finding_severities={"NIT": 3},
+        )
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+            failed_reviewers=[failure],
+        )
+        assert verdict.run_failures_with_should_fix_discards == []
+
+    def test_zero_count_gating_severity_does_not_select(self) -> None:
+        # A tally that carries the key but counted nothing is not a discard.
+        failure = ReviewerRunFailure(
+            role="Perf Reviewer",
+            reason="codex_review_unparseable",
+            discarded_finding_severities={"MUST_FIX": 0},
+        )
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+            failed_reviewers=[failure],
+        )
+        assert verdict.run_failures_with_should_fix_discards == []
+
+    def test_failure_without_discards_is_not_selected(self) -> None:
+        failure = ReviewerRunFailure(role="Perf Reviewer", reason="codex_timeout")
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+            failed_reviewers=[failure],
+        )
+        assert verdict.run_failures_with_should_fix_discards == []
 
 
 class TestConsolidateVerdictFixCycles:

@@ -19,6 +19,7 @@ from cw.codex_review import (
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
+    CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
     CODEX_TIMEOUT,
     _format_failures_detail,
     make_codex_blocked,
@@ -2658,3 +2659,174 @@ class TestRenderDebtNote:
             self._verdict(previous_reviewed_sha="0ldsha1"), fix_loop_enabled=True
         )
         assert "0ldsha1" in set_body
+
+    def test_run_failure_discard_section_names_role_count_and_severities(
+        self,
+    ) -> None:
+        # #2029: a reviewer whose whole document was unusable still discarded
+        # findings nobody read — the comment has to say so.
+        verdict = self._verdict(
+            run_failures_with_should_fix_discards=[
+                ReviewerRunFailure(
+                    role="Performance Reviewer",
+                    reason="codex_review_unparseable",
+                    discarded_finding_count=2,
+                    discarded_finding_severities={"SHOULD_FIX": 1, "NIT": 1},
+                )
+            ]
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+
+        assert "### Reviewer failures that discarded findings" in body
+        assert "Performance Reviewer" in body
+        assert "codex_review_unparseable" in body
+        assert "SHOULD_FIX: 1" in body
+        assert "NIT: 1" in body
+
+    def test_empty_run_failure_discards_render_nothing(self) -> None:
+        body = render_verdict_comment(self._verdict(), fix_loop_enabled=False)
+        assert "### Reviewer failures that discarded findings" not in body
+
+
+class TestSynthesizeCodexReviewResultRunFailureDiscards:
+    """#2029 — a whole-document discard at SHOULD_FIX-or-above parks the run."""
+
+    def _failure(self, **overrides: object) -> ReviewerRunFailure:
+        payload: dict[str, object] = {
+            "role": "Performance Reviewer",
+            "reason": CODEX_REVIEW_UNPARSEABLE,
+        }
+        payload.update(overrides)
+        return ReviewerRunFailure.model_validate(payload)
+
+    def test_should_fix_discard_outranks_the_plain_partial_disposition(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _make_stale_base_repo(make_git_repo, "wt-2029-discard-order")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_sub_must_fix_rejected_doc()],
+            failures=[
+                self._failure(
+                    discarded_finding_count=1,
+                    discarded_finding_severities={"SHOULD_FIX": 1},
+                )
+            ],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-2029-discard-order",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS
+        assert result.blocker.reason != CODEX_REVIEW_PARTIAL
+        assert verdict is not None
+        assert len(verdict.run_failures_with_should_fix_discards) == 1
+
+    def test_must_fix_discard_also_gates(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _make_stale_base_repo(make_git_repo, "wt-2029-discard-mf")
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_sub_must_fix_rejected_doc()],
+            failures=[
+                self._failure(
+                    discarded_finding_count=1,
+                    discarded_finding_severities={"MUST_FIX": 1},
+                )
+            ],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-2029-discard-mf",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS
+
+    def test_nit_only_discard_falls_through_to_partial(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # The threshold lock: "any discard at all" is NOT the gate.
+        worktree = _make_stale_base_repo(make_git_repo, "wt-2029-discard-nit")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_sub_must_fix_rejected_doc()],
+            failures=[
+                self._failure(
+                    discarded_finding_count=3,
+                    discarded_finding_severities={"NIT": 2, "DEBT": 1},
+                )
+            ],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-2029-discard-nit",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_REVIEW_PARTIAL
+        assert verdict is not None
+        assert verdict.run_failures_with_should_fix_discards == []
+
+    def test_surviving_must_fix_still_outranks_a_discard(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # Ordering guard in the other direction: the new branch sits BELOW the
+        # blocking and rejected_must_fix branches, never above them.
+        worktree = _make_stale_base_repo(make_git_repo, "wt-2029-discard-under")
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_mechanically_rejected_must_fix_doc()],
+            failures=[
+                self._failure(
+                    discarded_finding_count=1,
+                    discarded_finding_severities={"SHOULD_FIX": 1},
+                )
+            ],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-2029-discard-under",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+
+    def test_pre_validation_rejected_threads_into_the_verdict(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _make_stale_base_repo(make_git_repo, "wt-2029-prevalidation")
+        rejected = RejectedFinding(
+            raw={"severity": "MUST_FIX", "file": "src/cw/foo.py", "summary": "unread"},
+            reviewer_role="Code Quality Reviewer",
+            reason="schema_invalid",
+            detail="evidence: Field required",
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc(_make_finding(severity="NIT"))],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-2029-prevalidation",
+            default_branch="main",
+            fix_loop_enabled=False,
+            pre_validation_rejected=[rejected],
+        )
+
+        assert verdict is not None
+        assert verdict.rejected_must_fix == [rejected]
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
