@@ -193,3 +193,20 @@ cw `session_id` → `sessions.json` `surface_ref` / `claude_session_id` →
   unpushed local commit or a worktree-vs-checkout mixup can look like divergence.
 - **Confusing `claimed=0`:** a lane cap filled by `BLOCKED_ON_USER` tasks can report a misleading
   skip reason — read it skeptically rather than assuming a stuck dispatcher.
+- **Operator answer, not observation:** a gate answer and monitor events arrive through the
+  same channel, both as tool results. When an answer lands in the same turn as a burst of
+  monitor events, it reads as one line among many instead of an instruction — execute the
+  authorized action (`cw dev-queue approve`/`requeue`, plus any tracker-side evidence) as the
+  *next* step, before summarizing queue state. Narrating the events first is the sign the
+  answer was never executed.
+- **`approve` moves the row; it is not approval evidence:** `cw dev-queue approve` clears the
+  queue-state gate. The Large-scope carve-out on a resumed draft separately greps the
+  live-fetched ticket comments for an operator reply posted after the park comment —
+  satisfying one does not satisfy the other. Skip the comment and the ticket silently
+  re-parks reporting "no operator reply received since the last park comment," which reads
+  like operator inaction, not a misfiled approval.
+- **Monitor noise drowns the signal:** a watcher that emits on every status change reports
+  `pending → running` inside a single stage — roughly half of all events, none actionable.
+  Key emission on stage transitions plus arrivals at `blocked_on_user`; let the periodic beat
+  carry `cw queue peek` for liveness, and use `cw event tail --type`/`--dedup-terminal` to
+  narrow the stream yourself.

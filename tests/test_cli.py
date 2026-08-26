@@ -4328,7 +4328,7 @@ class TestParseSentinelFromTranscript:
         example_frame = (
             f"<<<AUTO_DEV_RESULT\n{json.dumps(example_payload)}\nAUTO_DEV_RESULT>>>"
         )
-        example_record = {
+        example_record: dict[str, object] = {
             "type": "assistant",
             "message": {
                 "role": "assistant",
@@ -10825,6 +10825,15 @@ def test_guide_output_contains_markers() -> None:
     assert "orchestrating a sprint" in result.output
     assert "Sprint recipe" in result.output
     assert result.output.strip()
+
+
+def test_guide_documents_dropped_approval_hazard() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["guide"])
+    assert "operator answer" in result.output.lower()
+    assert "cw dev-queue approve" in result.output
+    assert "approval evidence" in result.output.lower()
+    assert "stage transitions" in result.output.lower()
 
 
 class TestBoardCommand:
