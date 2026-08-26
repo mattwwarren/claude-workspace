@@ -1119,9 +1119,15 @@ class TestRunCodexRoleFlagRejectionRetry:
 # ---------------------------------------------------------------------------
 
 
-def _invalid_finding_payload(**overrides: str) -> dict[str, object]:
-    """A raw codex finding payload with ``evidence`` removed (#2029)."""
-    payload = _finding_payload(**overrides)
+def _invalid_finding_payload(severity: str = "MUST_FIX") -> dict[str, object]:
+    """A raw codex finding payload with ``evidence`` removed (#2029).
+
+    Takes only ``severity`` rather than a generic ``**overrides`` splat:
+    ``_finding_payload``'s parameters are not uniformly typed (``line_start``
+    is ``int | None``), so a splat that mypy cannot narrow would type-error on
+    the call rather than on the offending argument.
+    """
+    payload = _finding_payload(severity=severity)
     del payload["evidence"]
     return payload
 
