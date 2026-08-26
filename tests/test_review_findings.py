@@ -30,9 +30,12 @@ from cw.review_findings import (
     StrippedEscalation,
     _anchor_in_enclosing_def,
     _classify_finding,
+    _content_rescue_anchor,
     _enclosing_def_span,
     _evidence_diff_pair,
     _evidence_in_claimed_lines,
+    _evidence_removed_in_fix_diff,
+    _line_exceeds_file_length,
     _line_reference_valid,
     _normalize_diff_text,
     _normalize_unicode_punctuation,
@@ -863,7 +866,7 @@ class TestRejectionReasonLiteral:
     def test_rejected_finding_never_uses_escalation_reason(self) -> None:
         # The escalation-only value is never produced on a RejectedFinding by
         # validate_reviewer_document — every rejected finding uses one of the
-        # five core reasons.
+        # six core reasons.
         bad = Finding.model_construct(**_finding_kwargs(severity="BOGUS"))
         diff = _make_diff()
         _accepted, rejected, _stripped = validate_reviewer_document(
@@ -905,6 +908,18 @@ class TestRejectionReasonLiteral:
         # the Literal itself accepts direct construction.
         rf = RejectedFinding(raw={}, reviewer_role="R", reason="unanchored")
         assert rf.reason == "unanchored"
+
+    def test_line_reference_out_of_range_is_valid_rejection_reason_literal(
+        self,
+    ) -> None:
+        # #2007: a 7th RejectedFindingReason value, split off the generic
+        # "invalid_line_reference" for the citation that names a line the file
+        # does not have at all — a distinct producer defect from a citation
+        # that merely drifted off its true position.
+        rf = RejectedFinding(
+            raw={}, reviewer_role="R", reason="line_reference_out_of_range"
+        )
+        assert rf.reason == "line_reference_out_of_range"
 
 
 class TestFindingValidation:
@@ -1184,7 +1199,13 @@ class TestValidateReviewerDocument:
         assert rejected[0].reason == "unknown_file"
 
     def test_invalid_line_reference_rejected(self) -> None:
-        f = _make_finding(line_start=999, line_end=999)
+        # #2007 narrowed what this reason covers: a bogus line alone is no
+        # longer sufficient, since the evidence may be genuinely present
+        # elsewhere in the diff and get content-rescued. The evidence here is
+        # fabricated, so the rejection stands.
+        f = _make_finding(
+            line_start=999, line_end=999, evidence="fabricated absent content"
+        )
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(f), _make_diff()
         )
@@ -1241,7 +1262,14 @@ class TestValidateReviewerDocument:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         # #2000: the third mechanical-rejection reason reaches the same log.
-        f = _make_finding(severity="NIT", line_start=999, line_end=999)
+        # Evidence fabricated so #2007's content rescue cannot claim it — the
+        # log assertion is about the rejection path, which needs a rejection.
+        f = _make_finding(
+            severity="NIT",
+            line_start=999,
+            line_end=999,
+            evidence="fabricated absent content",
+        )
         with caplog.at_level(logging.INFO, logger="cw.review_findings"):
             _accepted, rejected, _stripped = validate_reviewer_document(
                 _make_reviewer_doc(f), _make_diff()
@@ -1434,13 +1462,34 @@ class TestValidateReviewerDocument:
 
     # -- #1715: regression guards (mutation-proof) -----------------------
 
-    def test_anchor_outside_tolerance_still_rejected(self) -> None:
+    def test_anchor_outside_tolerance_fails_the_line_gate(self) -> None:
         # Distance 4 from the only added line (10) — outside the +/-3 bound.
+        # Asserted against `_line_reference_valid` directly rather than the
+        # document verdict: #2007 added a content rescue downstream of this
+        # gate, so a document-level assertion would now pass for the wrong
+        # reason (rescued, not near-line-resolved) and stop mutation-proofing
+        # the bound. The bound itself is unchanged.
         diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
         f = _make_finding(line_start=14, line_end=14, evidence="def broken():")
+        assert _line_reference_valid(diff, f) is False
+
+    def test_anchor_outside_tolerance_with_absent_evidence_still_rejected(self) -> None:
+        # The same out-of-tolerance anchor, with nothing for #2007's content
+        # rescue to find — the pre-#2007 verdict stands.
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(line_start=14, line_end=14, evidence="fabricated absent text")
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert not accepted
         assert rejected[0].reason == "invalid_line_reference"
+
+    def test_anchor_outside_tolerance_with_present_evidence_is_rescued(self) -> None:
+        # The #2007 flip side, pinned next to the bound it composes with: the
+        # anchor gate still says no, and the content rescue still says yes.
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(line_start=14, line_end=14, evidence="def broken():")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert rejected == []
+        assert accepted[0].line_start == 10
 
     def test_near_line_content_mismatch_still_rejected(self) -> None:
         # line_start=12 resolves to added line 10 (distance 2, within
@@ -3976,3 +4025,302 @@ class TestVerdictDebtFields:
         reloaded = ReviewVerdict.model_validate_json(stamped.model_dump_json())
         assert reloaded.previous_reviewed_sha == "old"
         assert reloaded.debt[0].fingerprint == ("src/cw/foo.py", "bug here")
+
+
+# -- #2007: content-based re-anchoring for drifted line citations ----------
+
+_RESCUE_LOG = "rescued finding via content-based re-anchoring"
+_PERSIST_RESCUE_LOG = "rescued finding's persisted anchor via content-based"
+
+# A real unified diff whose hunk starts at new-file line 100, so every line it
+# carries sits far outside `_LINE_ANCHOR_TOLERANCE` of a small declared anchor.
+# The marker text below appears ONLY as an unchanged context line: it lands in
+# `file_window_text` (which context lines populate) and never in
+# `file_line_text` (added lines only) — the exact divergence `_make_diff`
+# cannot produce, and the whole point of the persist-path substrate test.
+_CONTEXT_ONLY_DIFF = (
+    "diff --git a/src/pkg/mod.py b/src/pkg/mod.py\n"
+    "--- a/src/pkg/mod.py\n"
+    "+++ b/src/pkg/mod.py\n"
+    "@@ -100,5 +100,6 @@\n"
+    " context_only_marker_alpha\n"  # 100 (context)
+    " second_context_line\n"  # 101 (context)
+    "+freshly_added_line\n"  # 102 (added)
+    " third_context_line\n"  # 103 (context)
+    " fourth_context_line\n"  # 104 (context)
+)
+
+
+class TestContentRescueAnchor:
+    """Direct unit tests of ``_content_rescue_anchor`` (#2007).
+
+    Pure function of ``(candidates, evidence)`` — no ``CapturedDiff``, no
+    ``Finding``, no declared-line hint — so these follow
+    ``test_reconcile_evidence_window_direct_*``'s hand-written-dict style.
+    """
+
+    def test_evidence_far_beyond_tolerance_is_located(self) -> None:
+        assert _content_rescue_anchor(
+            {500: "the evidence text"}, "the evidence text"
+        ) == (
+            500,
+            500,
+        )
+
+    def test_multiline_evidence_located_across_drifted_window(self) -> None:
+        candidates = {900: "alpha line", 901: "beta line", 902: "gamma line"}
+        assert _content_rescue_anchor(candidates, "alpha line\nbeta line") == (900, 901)
+
+    def test_evidence_absent_from_file_returns_none(self) -> None:
+        candidates = {10: "something real", 11: "also real"}
+        assert _content_rescue_anchor(candidates, "fabricated content") is None
+
+    def test_empty_candidates_returns_none(self) -> None:
+        assert _content_rescue_anchor({}, "anything") is None
+
+    def test_content_rescue_normalizes_unicode_punctuation(self) -> None:
+        # #1976 regression guard: the rescue inherits the shared normalization
+        # via _reconcile_evidence_window rather than reimplementing matching.
+        candidates = {77: 'label = "quoted"'}
+        assert _content_rescue_anchor(candidates, "label = “quoted”") == (
+            77,
+            77,
+        )
+
+    def test_content_rescue_strips_diff_markers(self) -> None:
+        candidates = {88: "+def broken():"}
+        assert _content_rescue_anchor(candidates, "def broken():") == (88, 88)
+
+    def test_content_rescue_never_synthesizes_a_gap(self) -> None:
+        # #1714's false-accept floor: line 11 is genuinely absent from the
+        # diff, so a two-line evidence spanning 10-12 must NOT match by
+        # silently closing the hole.
+        candidates = {10: "first half", 12: "second half"}
+        assert _content_rescue_anchor(candidates, "first half\nsecond half") is None
+
+
+class TestLineExceedsFileLength:
+    """Direct unit tests of ``_line_exceeds_file_length`` (#2007)."""
+
+    def test_line_within_real_file_length_returns_false(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, "one\ntwo\nthree\n")
+        assert _line_exceeds_file_length(tmp_path, "src/pkg/mod.py", 3) is False
+
+    def test_line_beyond_real_file_length_returns_true(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, "one\ntwo\nthree\n")
+        assert _line_exceeds_file_length(tmp_path, "src/pkg/mod.py", 4) is True
+
+    def test_unreadable_file_returns_false(self, tmp_path: Path) -> None:
+        # Mirrors _anchor_in_enclosing_def's OSError/UnicodeDecodeError
+        # degrade: "can't tell" must never manufacture a rejection reason.
+        assert _line_exceeds_file_length(tmp_path, "src/pkg/absent.py", 999) is False
+
+
+class TestEvidenceRemovedInFixDiff:
+    """Direct unit tests of ``_evidence_removed_in_fix_diff`` (#2007).
+
+    The fix-substantiation rescue's predicate: it must recognize a genuinely
+    REMOVED line and nothing else, since a false accept here reports a fix as
+    substantiated when the cited code was never actually removed.
+    """
+
+    def test_removed_line_evidence_is_detected(self) -> None:
+        file_diffs = {
+            "f.py": "+++ b/f.py\n@@ -1,3 +1,2 @@\n untouched\n-old broken code\n more"
+        }
+        assert _evidence_removed_in_fix_diff(file_diffs, "f.py", "old broken code")
+
+    def test_multiline_removed_evidence_is_detected(self) -> None:
+        file_diffs = {
+            "f.py": "+++ b/f.py\n@@ @@\n ctx\n-first gone\n-second gone\n ctx2"
+        }
+        assert _evidence_removed_in_fix_diff(
+            file_diffs, "f.py", "first gone\nsecond gone"
+        )
+
+    def test_context_only_evidence_is_not_detected(self) -> None:
+        # The MUST-have regression: a plain substring match against the whole
+        # hunk text cannot tell "this code was deleted" from "this code is
+        # untouched context elsewhere in the same file" — and the second is a
+        # false accept in exactly the direction the substantiation bar exists
+        # to prevent.
+        file_diffs = {
+            "f.py": "+++ b/f.py\n@@ @@\n still here untouched\n-unrelated removal\n ctx"
+        }
+        assert not _evidence_removed_in_fix_diff(
+            file_diffs, "f.py", "still here untouched"
+        )
+
+    def test_added_line_evidence_is_not_detected(self) -> None:
+        file_diffs = {"f.py": "+++ b/f.py\n@@ @@\n ctx\n+brand new line\n ctx2"}
+        assert not _evidence_removed_in_fix_diff(file_diffs, "f.py", "brand new line")
+
+    def test_evidence_absent_returns_false(self) -> None:
+        file_diffs = {"f.py": "+++ b/f.py\n@@ @@\n ctx\n-something else\n ctx2"}
+        assert not _evidence_removed_in_fix_diff(file_diffs, "f.py", "never present")
+
+    def test_unknown_file_returns_false(self) -> None:
+        assert not _evidence_removed_in_fix_diff({}, "f.py", "anything")
+
+    def test_normalizes_unicode_punctuation_and_diff_markers(self) -> None:
+        file_diffs = {"f.py": '+++ b/f.py\n@@ @@\n ctx\n-label = "quoted"\n ctx2'}
+        assert _evidence_removed_in_fix_diff(file_diffs, "f.py", "label = “quoted”")
+
+
+class TestContentBasedReanchoring:
+    """``validate_reviewer_document`` end-to-end over the #2007 rescue."""
+
+    def test_line_anchor_miss_with_evidence_present_far_away_is_accepted(self) -> None:
+        diff = _make_diff("drifted target line", files={"src/cw/foo.py": [500]})
+        finding = _make_finding(
+            line_start=10, line_end=10, evidence="drifted target line"
+        )
+        accepted, rejected, _stripped = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert rejected == []
+        assert len(accepted) == 1
+
+    def test_line_anchor_miss_with_absent_evidence_stays_rejected(self) -> None:
+        # #1714's false-accept floor survives the rescue: content genuinely
+        # absent from the diff is still rejected at the anchor gate.
+        diff = _make_diff(files={"src/cw/foo.py": [10]})
+        finding = _make_finding(
+            line_start=999, line_end=999, evidence="fabricated nonexistent code"
+        )
+        _accepted, rejected, _stripped = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert [r.reason for r in rejected] == ["invalid_line_reference"]
+
+    def test_out_of_range_citation_with_worktree_gets_distinct_reason(
+        self, tmp_path: Path
+    ) -> None:
+        _write_enclosing_def_source(tmp_path, "one\ntwo\nthree\n")
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=999,
+            line_end=999,
+            evidence="fabricated nonexistent code",
+        )
+        _accepted, rejected, _stripped = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert [r.reason for r in rejected] == ["line_reference_out_of_range"]
+        assert "3" in rejected[0].detail
+        assert rejected[0].detail.strip()
+
+    def test_out_of_range_citation_without_worktree_falls_back_to_generic(self) -> None:
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=999,
+            line_end=999,
+            evidence="fabricated nonexistent code",
+        )
+        _accepted, rejected, _stripped = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert [r.reason for r in rejected] == ["invalid_line_reference"]
+        assert rejected[0].detail == ""
+
+    def test_content_rescue_logs_info_with_reanchored_location(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        diff = _make_diff("drifted target line", files={"src/cw/foo.py": [500]})
+        finding = _make_finding(
+            line_start=10, line_end=10, evidence="drifted target line"
+        )
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        assert _RESCUE_LOG in caplog.text
+        assert "file=src/cw/foo.py" in caplog.text
+        assert "line=500" in caplog.text
+
+    def test_near_miss_within_tolerance_unaffected_by_rescue_path(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Regression: an existing ±3 near-miss resolves at the anchor gate and
+        # must never even reach the rescue.
+        diff = _make_diff(files={"src/cw/foo.py": [10]})
+        finding = _make_finding(line_start=12, line_end=12)
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            accepted, rejected, _stripped = validate_reviewer_document(
+                _make_reviewer_doc(finding), diff
+            )
+        assert rejected == []
+        assert len(accepted) == 1
+        assert _RESCUE_LOG not in caplog.text
+        assert _PERSIST_RESCUE_LOG not in caplog.text
+
+    def test_evidence_present_in_different_file_not_matched(self) -> None:
+        # Per-file substrate lookup, not the rescue itself, is what scopes the
+        # search: evidence real in b.py must not rescue a claim against a.py.
+        diff = _make_diff(
+            "alpha content",
+            "beta content",
+            files={"src/cw/a.py": [10], "src/cw/b.py": [20]},
+        )
+        finding = _make_finding(
+            file="src/cw/a.py", line_start=100, line_end=100, evidence="beta content"
+        )
+        _accepted, rejected, _stripped = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert [r.reason for r in rejected] == ["invalid_line_reference"]
+
+    def test_earlier_hunk_shifting_a_later_finding_is_rescued(self) -> None:
+        # The shape the ticket's transcript scan actually found: an earlier
+        # hunk grew, pushing a later finding's true line 7 lines past its
+        # cited anchor — beyond ±3 — with the evidence genuinely present.
+        diff = _make_diff(
+            "first added line",
+            "shifted target line",
+            files={"src/cw/foo.py": [10, 47]},
+        )
+        finding = _make_finding(
+            line_start=40, line_end=40, evidence="shifted target line"
+        )
+        accepted, rejected, _stripped = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert rejected == []
+        assert len(accepted) == 1
+
+    def test_rescued_finding_persists_true_location_not_stale_declared_line(
+        self,
+    ) -> None:
+        diff = _make_diff("drifted target line", files={"src/cw/foo.py": [500]})
+        finding = _make_finding(
+            line_start=10, line_end=10, evidence="drifted target line"
+        )
+        accepted, _rejected, _stripped = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert accepted[0].line_start == 500
+        assert accepted[0].line_end == 500
+
+    def test_persist_path_content_rescue_never_snaps_onto_context_only_line(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The persist-path substrate invariant (#1738, carried into #2007):
+        # the classify-path rescue searches `file_window_text` (context lines
+        # included) and correctly accepts, but the persisted anchor is
+        # resolved against `file_line_text` (added lines only) and must NOT
+        # land on the context-only line the classify path matched.
+        diff = _captured_diff_from_text(_CONTEXT_ONLY_DIFF)
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=10,
+            line_end=10,
+            evidence="context_only_marker_alpha",
+        )
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            accepted, rejected, _stripped = validate_reviewer_document(
+                _make_reviewer_doc(finding), diff
+            )
+        assert rejected == []
+        assert len(accepted) == 1
+        assert accepted[0].line_start != 100
+        assert _PERSIST_RESCUE_LOG not in caplog.text

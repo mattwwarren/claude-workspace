@@ -14,7 +14,7 @@ from __future__ import annotations
 import cw.review_findings as rf
 
 # The complete re-export surface: 9 type aliases, FINGERPRINT_VERSION, the 13
-# model classes, the 5 public functions, and the 10 private names that existing
+# model classes, the 5 public functions, and the 18 private names that existing
 # cross-module call sites (``cw.codex_fix_loop_convergence``,
 # ``cw.review_adjudication``, ``tests/test_review_findings.py``) import
 # directly.
@@ -56,11 +56,14 @@ EXPECTED_EXPORTS = {
     "_VALID_SEVERITIES",
     "_anchor_in_enclosing_def",
     "_classify_finding",
+    "_content_rescue_anchor",
     "_dedup_key",
     "_diff_pair_rescue",
     "_enclosing_def_span",
     "_evidence_diff_pair",
     "_evidence_in_claimed_lines",
+    "_evidence_removed_in_fix_diff",
+    "_line_exceeds_file_length",
     "_line_reference_valid",
     "_normalize_diff_text",
     "_normalize_unicode_punctuation",

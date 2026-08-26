@@ -20,6 +20,10 @@ here via re-exports. Submodules:
 
 - ``_models`` — type aliases, model-only constants, and every Pydantic/
   TypedDict class the contract exposes. Imports from no sibling.
+- ``_text_match`` — pure text-normalization and window-reconciliation
+  primitives (#1715/#1976/#1792). Stdlib only; imports from no sibling.
+- ``_reanchor`` — #2007's content-based rescue for a line citation that
+  drifted past every tolerance-bounded gate. Imports ``_text_match`` only.
 - ``_validation`` — mechanical file/line-anchor resolution, evidence-quote
   matching, escalation stripping, and ``validate_reviewer_document``.
 - ``_dedup`` — cross-reviewer dedup into ``AcceptedFinding`` groups and the
@@ -85,20 +89,27 @@ from cw.review_findings._models import (
     StrippedEscalation,
     TrackingDisposition,
 )
-from cw.review_findings._validation import (
+from cw.review_findings._reanchor import (
+    _content_rescue_anchor,
+    _evidence_removed_in_fix_diff,
+    _line_exceeds_file_length,
+)
+from cw.review_findings._text_match import (
     _LINE_ANCHOR_TOLERANCE,
+    _evidence_diff_pair,
+    _normalize_diff_text,
+    _normalize_unicode_punctuation,
+    _reconcile_evidence_window,
+    _strip_diff_markers,
+)
+from cw.review_findings._validation import (
     _VALID_SEVERITIES,
     _anchor_in_enclosing_def,
     _classify_finding,
     _diff_pair_rescue,
     _enclosing_def_span,
-    _evidence_diff_pair,
     _evidence_in_claimed_lines,
     _line_reference_valid,
-    _normalize_diff_text,
-    _normalize_unicode_punctuation,
-    _reconcile_evidence_window,
-    _strip_diff_markers,
     validate_reviewer_document,
 )
 
@@ -130,11 +141,14 @@ __all__ = [
     "TrackingDisposition",
     "_anchor_in_enclosing_def",
     "_classify_finding",
+    "_content_rescue_anchor",
     "_dedup_key",
     "_diff_pair_rescue",
     "_enclosing_def_span",
     "_evidence_diff_pair",
     "_evidence_in_claimed_lines",
+    "_evidence_removed_in_fix_diff",
+    "_line_exceeds_file_length",
     "_line_reference_valid",
     "_normalize_diff_text",
     "_normalize_unicode_punctuation",
