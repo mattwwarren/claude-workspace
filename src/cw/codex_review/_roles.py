@@ -43,12 +43,14 @@ from cw.review_findings import (
     ReviewerRunFailure,
     ReviewerRunMetrics,
 )
+from cw.review_findings._validation import _best_effort_discarded_tally
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.codex_runner import CodexRunner, CodexRunResult
     from cw.executor_diagnostics import ExecutorFailureCategory
+    from cw.review_findings import RejectedFinding
 
 _log = logging.getLogger(__name__)
 
@@ -289,9 +291,19 @@ def _run_codex_role(
     scratch_dir: Path,
     session_id: str,
 ) -> tuple[
-    ReviewerFindingsDocument | None, ReviewerRunFailure | None, ReviewerRunMetrics
+    ReviewerFindingsDocument | None,
+    ReviewerRunFailure | None,
+    ReviewerRunMetrics,
+    list[RejectedFinding],
 ]:
-    """Run one reviewer role; return ``(document, failure, metrics)``.
+    """Run one role; return ``(document, failure, metrics, rejected)``.
+
+    ``rejected`` (#2029) holds the ``findings[]`` items that could not become a
+    :class:`Finding`, rescued out so their siblings survive; it is empty on
+    every failure branch, where there is no document to have rescued them from.
+    A schema-mismatch failure instead records a best-effort tally of what the
+    unusable payload was claiming on the ``ReviewerRunFailure`` itself — the
+    only trace that remains once no per-finding record is possible.
 
     Exactly one of ``document``/``failure`` is set. ``metrics`` is always set
     (#1710): the audit telemetry parsed from the ``codex exec --json`` stream,
@@ -344,8 +356,9 @@ def _run_codex_role(
     metrics = _parse_codex_audit_events(result.stdout, duration_seconds=duration)
 
     if not result.timed_out and result.returncode == 0:
-        doc = _parse_reviewer_document(result.output_file_content)
-        if doc is not None:
+        parsed = _parse_reviewer_document(result.output_file_content)
+        if parsed is not None:
+            doc, rejected = parsed
             if (
                 _AUDIT_ARGV_FLAGS[0] in argv
                 and metrics["terminal_event"] not in _TERMINAL_EVENTS
@@ -360,7 +373,7 @@ def _run_codex_role(
                     session_id,
                     metrics["terminal_event"],
                 )
-            return doc, None, metrics
+            return doc, None, metrics, rejected
 
     category = _classify_codex_failure(result)
     reason = _CATEGORY_TO_REASON[category]
@@ -369,6 +382,14 @@ def _run_codex_role(
         # "nonzero_exit" so the shared ExecutorFailureCategory taxonomy (and
         # the diagnostics bundle keyed by it) is untouched.
         reason = CODEX_MODEL_CAPACITY
+    # #2029: only a schema mismatch had a readable payload to lose findings
+    # from. A timeout or spawn error produced no output document at all, so
+    # "nothing to tally" and "tallied nothing" stay distinguishable.
+    discarded_count, discarded_severities = (
+        _best_effort_discarded_tally(result.output_file_content)
+        if category == "schema_mismatch"
+        else (0, {})
+    )
     _log.warning("codex review role %r failed: %s (%s)", role, reason, category)
     _persist_codex_role_diagnostics(
         session_id=session_id,
@@ -380,7 +401,17 @@ def _run_codex_role(
         schema_path=schema_path,
         output_path=output_path,
     )
-    return None, ReviewerRunFailure(role=role, reason=reason), metrics
+    return (
+        None,
+        ReviewerRunFailure(
+            role=role,
+            reason=reason,
+            discarded_finding_count=discarded_count,
+            discarded_finding_severities=discarded_severities,
+        ),
+        metrics,
+        [],
+    )
 
 
 def run_codex_roles(
@@ -396,6 +427,7 @@ def run_codex_roles(
     list[ReviewerFindingsDocument],
     list[ReviewerRunFailure],
     dict[str, ReviewerRunMetrics],
+    list[RejectedFinding],
 ]:
     """Run every role under one shared wall-clock deadline (Comment 3).
 
@@ -415,12 +447,18 @@ def run_codex_roles(
     audit telemetry (#1710). A ``budget_exhausted`` skip never calls
     :func:`_run_codex_role`, so it correctly contributes no entry — "no
     telemetry" and "telemetry showing nothing happened" are different facts.
+
+    The fourth (#2029) concatenates every role's parse-time schema rejects in
+    role order, for ``consolidate_verdict``'s ``pre_validation_rejected``. A
+    role that failed outright contributes nothing to it — its losses are
+    recorded on its own :class:`ReviewerRunFailure` tally instead.
     """
     scratch_dir = _codex_scratch_dir(uuid.uuid4().hex)
     try:
         documents: list[ReviewerFindingsDocument] = []
         failures: list[ReviewerRunFailure] = []
         metrics_by_role: dict[str, ReviewerRunMetrics] = {}
+        pre_validation_rejected: list[RejectedFinding] = []
         deadline: float | None = (
             None
             if wall_clock_budget_seconds is None
@@ -438,7 +476,7 @@ def run_codex_roles(
                 timeout: int | None = max(int(remaining), _MIN_ROLE_TIMEOUT_SECONDS)
             else:
                 timeout = None
-            doc, failure, metrics = _run_codex_role(
+            doc, failure, metrics, rejected = _run_codex_role(
                 runner=runner,
                 worktree=worktree,
                 role=role,
@@ -449,10 +487,11 @@ def run_codex_roles(
                 session_id=session_id,
             )
             metrics_by_role[role] = metrics
+            pre_validation_rejected.extend(rejected)
             if doc is not None:
                 documents.append(doc)
             if failure is not None:
                 failures.append(failure)
-        return documents, failures, metrics_by_role
+        return documents, failures, metrics_by_role, pre_validation_rejected
     finally:
         shutil.rmtree(scratch_dir, ignore_errors=True)
