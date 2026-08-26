@@ -6,6 +6,8 @@ import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.sprint import AppliedBuildout
 
 # Usage-limit detection regex. Matches all documented Claude usage-limit phrasings:
@@ -53,6 +55,25 @@ class StaleWorktreeError(WorktreeError):
     """
 
     __slots__ = ()
+
+
+class BranchHeldByWorktreeError(WorktreeError):
+    """``create_worktree`` found the requested branch already checked out in
+    another worktree (git's "already used by worktree at '<path>'" fatal).
+
+    Most often an orphaned harness ``Agent(isolation="worktree")`` workspace
+    left behind at a path (e.g. under ``.claude/worktrees/agent-<id>``) that
+    cw's own GC never scans, because it carries no ``Session``/``TicketTask``
+    row for cw to recognize as live (#2017). This is a refusal + diagnostic
+    report, not a removal (#2034) — the holder is never touched, since cw
+    cannot tell whether it is still in use.
+    """
+
+    __slots__ = ("holder_path",)
+
+    def __init__(self, message: str, *, holder_path: Path) -> None:
+        super().__init__(message)
+        self.holder_path = holder_path
 
 
 class HookContextConflictError(CwError):

@@ -785,6 +785,29 @@ flag. Check `cw dev-queue tasks -t <T> -c <CLIENT>` / the event history
 before requeuing it to confirm the failure isn't a genuine, still-unresolved
 defect.
 
+### COMPLETED row recovery (`--from-completed`)
+
+A shipped, `COMPLETED` ticket can later need another pass -- e.g. its merged
+PR went conflicting because a sibling ticket in the same wave merged first.
+`cw dev-queue requeue` normally only accepts
+`BLOCKED_ON_USER`/`AWAITING_OPERATOR_SIGNOFF`, so a COMPLETED row is
+otherwise a requeue dead-end short of deleting and re-adding it -- which
+would lose its `attempts`/cost history (#2023).
+
+Fix: requeue it explicitly with the escape hatch, which moves it back to
+PENDING at its current stage and clears `session_id`/`stage_base_ref` while
+preserving the row's attempt/cost history (mirrors `--from-cancelled` /
+`--from-failed` above):
+
+```bash
+cw dev-queue requeue <T> -c <CLIENT> --from-completed
+```
+
+**Caveat:** `--from-completed` accepts *any* COMPLETED row, regardless of why
+the recovery is needed -- the row carries no record of provenance by the time
+it reaches this flag. Check `cw dev-queue tasks -t <T> -c <CLIENT>` / the
+event history before requeuing it.
+
 ### Requeue at a different stage (`--stage` / `--regress`)
 
 `cw dev-queue requeue` defaults to re-running the ticket's **current** stage.

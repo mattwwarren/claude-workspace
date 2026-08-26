@@ -356,7 +356,13 @@ def _record_lane_spawn_error(
     count reaches ``lane_circuit_breaker_threshold`` the lane is paused and a
     circuit-breaker-sourced LANE_PAUSED event is emitted with the post-increment
     count and the (always-string) last error.  See GitHub #875.
+
+    ``last_error`` is collapsed to a single line before use: some raise sites
+    (e.g. a WorktreeError embedding git's multi-line stderr) legitimately
+    contain newlines, but ``cli.queues._format_event_line`` renders one event
+    per terminal line — an embedded newline would break that contract (#2034).
     """
+    last_error = " ".join(last_error.split())
     lane_key = f"{client_name}/{lane_cfg.name}"
     tripped = False
     with concurrency_override_lock():

@@ -91,6 +91,31 @@ class TestHookContextConflictError:
         assert err.conflicting_session_id is None
 
 
+class TestBranchHeldByWorktreeError:
+    """#2034: a foreign worktree squats the requested branch.
+
+    Modeled on TestHookContextConflictError above — a WorktreeError subclass
+    that carries the extra field the raise site needs (here, the path of the
+    worktree holding the branch) rather than forcing callers to re-parse the
+    message.
+    """
+
+    def test_is_worktree_error_subclass(self) -> None:
+        from cw.exceptions import BranchHeldByWorktreeError
+
+        assert issubclass(BranchHeldByWorktreeError, WorktreeError)
+
+    def test_carries_holder_path(self) -> None:
+        from pathlib import Path
+
+        from cw.exceptions import BranchHeldByWorktreeError
+
+        err = BranchHeldByWorktreeError("msg", holder_path=Path("/x"))
+
+        assert err.holder_path == Path("/x")
+        assert str(err) == "msg"
+
+
 class TestUsageLimitError:
     def test_usage_limit_error_is_cw_error(self) -> None:
         from cw.exceptions import UsageLimitError

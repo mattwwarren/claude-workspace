@@ -379,6 +379,20 @@ def dev_queue_approve(ticket_id: str, client: str | None, post_marker: bool) -> 
         " docs/dispatch-runbook.md."
     ),
 )
+@click.option(
+    "--from-completed",
+    "from_completed",
+    is_flag=True,
+    default=False,
+    help=(
+        "Allow requeuing a COMPLETED ticket back to PENDING at its current"
+        " stage (e.g. a shipped PR that later went conflicting because a"
+        " sibling PR in the same wave merged first). Accepts any COMPLETED"
+        " row regardless of why the recovery is needed — check"
+        " `cw dev-queue tasks -t <T> -c <CLIENT>` / event history first."
+        " See docs/dispatch-runbook.md."
+    ),
+)
 @handle_errors
 def dev_queue_requeue(
     ticket_id: str,
@@ -387,14 +401,16 @@ def dev_queue_requeue(
     regress: bool,
     from_cancelled: bool,
     from_failed: bool,
+    from_completed: bool,
 ) -> None:
     """Requeue a BLOCKED_ON_USER ticket back to PENDING.
 
     Defaults to re-running the current stage. Use --stage to advance forward.
     Use --regress with a backward --stage to move a blocked ticket backward
     (e.g. a plan-deviation review exit back to impl). Use --from-cancelled
-    to recover a CANCELLED ticket, or --from-failed to recover a FAILED
-    ticket (forward/same-stage only).
+    to recover a CANCELLED ticket, --from-failed to recover a FAILED
+    ticket, or --from-completed to recover a COMPLETED ticket
+    (forward/same-stage only).
     """
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
@@ -405,6 +421,7 @@ def dev_queue_requeue(
         allow_regress=regress,
         from_cancelled=from_cancelled,
         from_failed=from_failed,
+        from_completed=from_completed,
     )
     if result["regressed"]:
         reason = "cli_regress"
@@ -412,6 +429,8 @@ def dev_queue_requeue(
         reason = "cli_requeue_from_cancelled"
     elif result["from_failed_applied"]:
         reason = "cli_requeue_from_failed"
+    elif result["from_completed_applied"]:
+        reason = "cli_requeue_from_completed"
     else:
         reason = "cli_requeue"
     record_event(
