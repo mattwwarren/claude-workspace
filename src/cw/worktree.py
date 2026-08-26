@@ -170,6 +170,12 @@ def _run_git(
         raise WorktreeError(msg) from e
 
 
+def _ref_exists(ref: str, git_cwd: Path) -> bool:
+    """Return True if *ref* resolves to a valid object in *git_cwd*."""
+    result = _run_git("rev-parse", "--verify", ref, cwd=git_cwd, check=False)
+    return result.returncode == 0
+
+
 def check_not_main_checkout(worktree_path: Path, client: ClientConfig) -> None:
     """Raise WorktreeError if *worktree_path* resolves to the client's main checkout.
 
@@ -587,14 +593,7 @@ def create_worktree(
     # Three-way branch resolution: local ref / remote ref / neither (#2032).
     # refs/heads/ and refs/remotes/origin/ are checked explicitly so a
     # same-named tag never matches either.
-    local_check = _run_git(
-        "rev-parse",
-        "--verify",
-        f"refs/heads/{branch}",
-        cwd=git_cwd,
-        check=False,
-    )
-    if local_check.returncode == 0:
+    if _ref_exists(f"refs/heads/{branch}", git_cwd):
         # Local branch exists — create worktree from it.
         args = ["worktree", "add", str(wt_path), branch]
     else:
@@ -603,14 +602,7 @@ def create_worktree(
         # auto-dev-review.md's fix-loop reset) leaves exactly this state
         # while origin still has the branch's real history.
         fetch_feature_branch(client, branch)
-        remote_check = _run_git(
-            "rev-parse",
-            "--verify",
-            f"refs/remotes/origin/{branch}",
-            cwd=git_cwd,
-            check=False,
-        )
-        if remote_check.returncode == 0:
+        if _ref_exists(f"refs/remotes/origin/{branch}", git_cwd):
             # Branch exists on the remote — resume its pushed history.
             args = ["worktree", "add", "-b", branch, str(wt_path), f"origin/{branch}"]
         else:
