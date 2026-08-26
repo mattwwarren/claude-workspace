@@ -54,7 +54,7 @@ TrackingDisposition = Literal["FILED", "ALREADY_TRACKED", "NEEDS_FILING"]
 # cw.review_debt (which imports it) -- a single source of truth so a future
 # version bump can't update one site and silently miss the other.
 FINGERPRINT_VERSION: Literal["FINGERPRINT_V1"] = "FINGERPRINT_V1"
-# The six reasons a finding can be rejected outright (used by
+# The seven reasons a finding can be rejected outright (used by
 # :attr:`RejectedFinding.reason` and :func:`_classify_finding`'s return type).
 # Split from the escalation-strip reason (R6): a stripped escalation is a
 # survived finding whose escalation evidence failed the diff check, not a
@@ -66,12 +66,19 @@ FINGERPRINT_VERSION: Literal["FINGERPRINT_V1"] = "FINGERPRINT_V1"
 # normal operation no RejectedFinding.reason is ever "unanchored". It exists
 # in this Literal only so the discriminator type is honest about every value
 # _classify_finding can return.
+#
+# "line_reference_out_of_range" (#2007) splits the narrower half off
+# "invalid_line_reference": the cited line is past the end of the real file, so
+# no content-based re-anchoring could ever repair it. It is only ever produced
+# when a caller opted into the worktree fallback — without one there is nothing
+# to measure the file's length against, and the generic reason still applies.
 RejectedFindingReason = Literal[
     "invalid_severity",
     "missing_evidence",
     "evidence_not_in_diff",
     "unknown_file",
     "invalid_line_reference",
+    "line_reference_out_of_range",
     "unanchored",
 ]
 # The sole reason an escalation is stripped, kept as its own single-value

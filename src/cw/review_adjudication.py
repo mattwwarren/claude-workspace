@@ -68,6 +68,7 @@ from cw.review_findings import (
     AcceptedFinding,
     Disposition,
     Severity,
+    _evidence_removed_in_fix_diff,
     _line_reference_valid,
     derive_review_counts,
 )
@@ -826,10 +827,34 @@ def _fix_is_substantiated(finding: Finding, fix_diff: CapturedDiff) -> bool:
     non-fix. ``worktree=None`` deliberately disables the #1743 enclosing-def
     fallback: "some line inside the enclosing function changed" is evidence a
     finding is *anchorable*, not evidence it was *fixed*.
+
+    Past that tolerance, #2007 adds one further arm: a fix whose hunk shifted
+    the cited code further than ±3 lines is substantiated when the fix-cycle
+    diff genuinely REMOVED the finding's evidence. Bound to ``file_diffs``
+    only — a removed line has no new-file line number, so it exists in no
+    other substrate — and matched against ``-``-prefixed lines exclusively,
+    never a plain substring of the hunk, which could not tell deleted code
+    from untouched context elsewhere in the same file. Matching a removed line
+    is a categorically stronger claim than the proximity the paragraph above
+    refuses, which is why this arm is permitted and that one still is not.
+    The arm is purely additive: when it finds nothing, the pre-#2007
+    ``"dropped"`` downgrade stands untouched.
     """
     if finding.line_start is None and finding.line_end is None:
         return finding.file in fix_diff.files
-    return _line_reference_valid(fix_diff, finding, worktree=None)
+    if _line_reference_valid(fix_diff, finding, worktree=None):
+        return True
+    if _evidence_removed_in_fix_diff(
+        fix_diff.file_diffs, finding.file, finding.evidence
+    ):
+        _log.info(
+            "auto-dev: rescued fixed disposition via fix-substantiation "
+            "content rescue (file=%s, line=%d)",
+            finding.file,
+            finding.line_start if finding.line_start is not None else finding.line_end,
+        )
+        return True
+    return False
 
 
 def verify_fixed_dispositions(
