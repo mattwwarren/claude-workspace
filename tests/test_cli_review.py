@@ -2052,9 +2052,7 @@ class TestReviewConsolidateDocumentsFromSchemaInvalidFindings:
             _schema_invalid_finding(severity="MUST_FIX"),
             detail="reviewed the diff",
         )
-        (docs_dir / "a-bad-must-fix.json").write_text(
-            json.dumps(doc), encoding="utf-8"
-        )
+        (docs_dir / "a-bad-must-fix.json").write_text(json.dumps(doc), encoding="utf-8")
 
         result = _consolidate_from(runner, docs_dir)
 

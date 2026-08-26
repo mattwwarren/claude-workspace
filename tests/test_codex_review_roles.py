@@ -510,7 +510,9 @@ def test_run_codex_role_spawn_error_surfaces_codex_error_reason(
     runner = _SequencedRunner(
         [CodexRunResult(returncode=127, stdout="", stderr="codex: command not found")]
     )
-    _doc, failure, _metrics, _rejected = _run_one_role(runner, tmp_path, session_id="sess-spawn")
+    _doc, failure, _metrics, _rejected = _run_one_role(
+        runner, tmp_path, session_id="sess-spawn"
+    )
     assert failure is not None
     assert failure.reason == CODEX_ERROR
     path = _bundle_file("sess-spawn", "code-quality-reviewer", "spawn_error")
@@ -884,7 +886,9 @@ class TestRunCodexRoleAuditMetrics:
         runner = _SequencedRunner(
             [_ok_result(stdout=_audit_fixture("clean_with_command.jsonl"))]
         )
-        doc, failure, metrics, _rejected = _run_one_role(runner, tmp_path, session_id="sess-m1")
+        doc, failure, metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-m1"
+        )
         assert doc is not None
         assert failure is None
         assert metrics["thread_id"] == "<THREAD_ID>"
@@ -904,7 +908,9 @@ class TestRunCodexRoleAuditMetrics:
         runner = _SequencedRunner(
             [_ok_result(stdout=_audit_fixture("clean_no_tools.jsonl"))]
         )
-        _doc, _failure, metrics, _rejected = _run_one_role(runner, tmp_path, session_id="sess-m2")
+        _doc, _failure, metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-m2"
+        )
         assert metrics["duration_seconds"] == pytest.approx(7.25)
 
     def test_failure_branch_still_returns_metrics(self, tmp_path: Path) -> None:
@@ -917,7 +923,9 @@ class TestRunCodexRoleAuditMetrics:
                 )
             ]
         )
-        doc, failure, metrics, _rejected = _run_one_role(runner, tmp_path, session_id="sess-m3")
+        doc, failure, metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-m3"
+        )
         assert doc is None
         assert failure is not None
         assert metrics["terminal_event"] == "turn.failed"
@@ -975,7 +983,9 @@ class TestRunCodexRoleFlagRejectionRetry:
                 _ok_result(),
             ]
         )
-        doc, failure, metrics, _rejected = _run_one_role(runner, tmp_path, session_id="sess-retry")
+        doc, failure, metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-retry"
+        )
         # (a) the role ultimately succeeded — a real document, no failure
         assert doc is not None
         assert failure is None
@@ -1117,9 +1127,7 @@ def _invalid_finding_payload(**overrides: str) -> dict[str, object]:
 
 
 class TestRunCodexRoleSchemaInvalidFindings:
-    def test_sibling_findings_survive_one_invalid_finding(
-        self, tmp_path: Path
-    ) -> None:
+    def test_sibling_findings_survive_one_invalid_finding(self, tmp_path: Path) -> None:
         runner = _SequencedRunner(
             [
                 _ok_result(
@@ -1179,9 +1187,7 @@ class TestRunCodexRoleSchemaInvalidFindings:
         assert failure.discarded_finding_count == 3
         assert failure.discarded_finding_severities == {"MUST_FIX": 1, "NIT": 2}
 
-    def test_non_schema_failure_carries_no_discard_tally(
-        self, tmp_path: Path
-    ) -> None:
+    def test_non_schema_failure_carries_no_discard_tally(self, tmp_path: Path) -> None:
         # A timeout never produced an output document, so there is nothing to
         # tally — "no telemetry" and "telemetry showing nothing" differ.
         runner = _SequencedRunner(
@@ -1237,9 +1243,7 @@ class TestRunCodexRolesAggregatesPreValidationRejects:
         ]
         assert all(r.reason == "schema_invalid" for r in pre_rejected)
 
-    def test_clean_roster_aggregates_an_empty_reject_list(
-        self, tmp_path: Path
-    ) -> None:
+    def test_clean_roster_aggregates_an_empty_reject_list(self, tmp_path: Path) -> None:
         runner = _SequencedRunner([_ok_result(findings=[_finding_payload()])])
         _docs, _failures, _metrics, pre_rejected = run_codex_roles(
             runner=runner,

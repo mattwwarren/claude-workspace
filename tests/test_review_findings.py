@@ -1036,9 +1036,7 @@ class TestParseReviewerDocument:
         with pytest.raises(ValidationError):
             parse_reviewer_document([1, 2, 3])
 
-    def test_each_rejection_is_logged(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_each_rejection_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
         payload = _doc_payload(_invalid_finding_payload(), dict(_finding_kwargs()))
         with caplog.at_level(logging.INFO, logger="cw.review_findings._validation"):
             parse_reviewer_document(payload)
