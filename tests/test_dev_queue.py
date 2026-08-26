@@ -7519,6 +7519,132 @@ class TestRequeueTicket:
                 from_failed=True,
             )
 
+    # -- GitHub #2023: --from-completed requeue escape hatch ----------------
+
+    def test_requeue_from_completed_succeeds(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """COMPLETED row + from_completed=True -> PENDING at current stage,
+        with attempt history preserved (not reset)."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.FINALIZE,
+            session_id="sess-completed-1",
+            status=QueueItemStatus.COMPLETED,
+            disposition="shipped",
+        )
+        task.stage_base_ref = "deadbeef"
+        task.regress_attempts = 2
+        task.regressed_into_stage = Stage.FINALIZE
+        task.attempts = 3
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", from_completed=True)
+
+        assert result["from_stage"] == "finalize"
+        assert result["to_stage"] == "finalize"
+        assert result["from_completed_applied"] is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+        assert t.stage_base_ref is None
+        assert t.regress_attempts == 0
+        assert t.regressed_into_stage is None
+        # History preserved -- the crux of #2023: reusing the row rather than
+        # deleting and re-adding it keeps attempts/cost history intact.
+        assert t.attempts == 3
+
+    def test_requeue_from_completed_flag_on_approvable_row_not_applied(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """from_completed=True passed defensively on an already-approvable
+        (BLOCKED_ON_USER) row is a harmless no-op for the state gate, but
+        from_completed_applied must be False — the COMPLETED branch never
+        fired, so callers must not attribute the requeue to it."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess-completed-5",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", from_completed=True)
+
+        assert result["from_completed_applied"] is False
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_from_completed_without_flag_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """COMPLETED row without from_completed=True raises RequeueStateError
+        naming the --from-completed escape hatch."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.FINALIZE,
+            session_id="sess-completed-2",
+            status=QueueItemStatus.COMPLETED,
+            disposition="shipped",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStateError, match="--from-completed"):
+            requeue_ticket("GEN-500", "genhealth")
+
+    def test_requeue_from_completed_flag_does_not_broaden_running(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """from_completed=True does not admit a RUNNING row (flag is narrow)."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess-completed-3",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStateError, match="expected BLOCKED_ON_USER"):
+            requeue_ticket("GEN-500", "genhealth", from_completed=True)
+
+    def test_requeue_from_completed_regress_backward_rejected(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """from_completed=True + backward --stage on a COMPLETED row still
+        fails: the regress gate is untouched and does not accept COMPLETED."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.FINALIZE,
+            session_id="sess-completed-4",
+            status=QueueItemStatus.COMPLETED,
+            disposition="shipped",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError):
+            requeue_ticket(
+                "GEN-500",
+                "genhealth",
+                stage_override="impl",
+                allow_regress=True,
+                from_completed=True,
+            )
+
     # -- #1681: impl-bypass plan-availability guard -------------------------
 
     def test_requeue_stage_impl_bypass_worktree_missing_and_no_tracker_plan_raises(
@@ -9306,6 +9432,137 @@ class TestCLIRequeue:
                 "--client",
                 "genhealth",
                 "--from-failed",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
+        payload = captured[0]
+        assert payload["reason"] == "cli_requeue"
+
+    # -- GitHub #2023: --from-completed requeue escape hatch ----------------
+
+    def test_requeue_from_completed_cli_succeeds(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """`--from-completed` on a COMPLETED ticket exits 0 and moves PENDING."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.FINALIZE,
+            session_id="sess6401",
+            status=QueueItemStatus.COMPLETED,
+            disposition="shipped",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--from-completed",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "finalize -> finalize" in result.output
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_from_completed_cli_without_flag_exits_nonzero(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """COMPLETED ticket without --from-completed exits nonzero and names
+        the escape hatch in the printed error."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.FINALIZE,
+            session_id="sess6402",
+            status=QueueItemStatus.COMPLETED,
+            disposition="shipped",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "requeue", "GEN-500", "--client", "genhealth"],
+        )
+        assert result.exit_code != 0
+        assert "--from-completed" in result.output
+
+    def test_requeue_from_completed_emits_reason_event(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--from-completed` emits TICKET_REQUEUED with the
+        cli_requeue_from_completed provenance reason."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.FINALIZE,
+            session_id="sess6403",
+            status=QueueItemStatus.COMPLETED,
+            disposition="shipped",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.crud.record_event",
+            lambda _type, payload=None, **__: captured.append(payload or {}),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--from-completed",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
+        payload = captured[0]
+        assert payload["reason"] == "cli_requeue_from_completed"
+        assert payload["regressed"] is False
+
+    def test_requeue_from_completed_flag_on_approvable_row_emits_plain_reason(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--from-completed` passed defensively on an already-approvable
+        (BLOCKED_ON_USER) row must NOT emit the cli_requeue_from_completed
+        reason — that would falsely claim the row was recovered from
+        COMPLETED when the COMPLETED branch never fired."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess6404",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.crud.record_event",
+            lambda _type, payload=None, **__: captured.append(payload or {}),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--from-completed",
             ],
         )
         assert result.exit_code == 0, result.output
