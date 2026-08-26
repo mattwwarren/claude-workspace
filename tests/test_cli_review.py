@@ -27,6 +27,7 @@ from cw.review_adjudication import (
 from cw.review_findings import ReviewerRunFailure
 
 from .conftest import (
+    _doc_payload,
     _finding_kwargs,
     _make_escalation,
     _make_finding,
@@ -62,20 +63,6 @@ def _consolidate_payload(**overrides: object) -> dict[str, Any]:
         "diff": _CONSOLIDATE_DIFF,
         "reviewed_sha": "abc1234",
         "failed_reviewers": [],
-    }
-    payload.update(overrides)
-    return payload
-
-
-def _doc_payload(*findings: dict[str, Any], **overrides: object) -> dict[str, Any]:
-    """A raw ``ReviewerFindingsDocument`` dict (bypasses Pydantic construction
-    so invalid payloads — e.g. a bogus severity — can be sent through the CLI).
-    """
-    payload: dict[str, Any] = {
-        "reviewer_role": "Code Quality Reviewer",
-        "status": "ok",
-        "detail": "",
-        "findings": list(findings),
     }
     payload.update(overrides)
     return payload

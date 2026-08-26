@@ -586,6 +586,20 @@ def _make_reviewer_doc(
     return ReviewerFindingsDocument.model_validate(kwargs)
 
 
+def _doc_payload(*findings: dict[str, Any], **overrides: object) -> dict[str, Any]:
+    """A raw ``ReviewerFindingsDocument`` dict (bypasses Pydantic construction
+    so invalid payloads — e.g. a bogus severity — can be sent through the CLI).
+    """
+    payload: dict[str, Any] = {
+        "reviewer_role": "Code Quality Reviewer",
+        "status": "ok",
+        "detail": "",
+        "findings": list(findings),
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:
     """Minimal-but-valid CapturedDiff (#1237, restructured #1236).
 
