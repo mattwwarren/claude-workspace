@@ -878,19 +878,18 @@ def _raw_finding_payload(item: object) -> dict[str, Any]:
     return {"value": item}
 
 
-def parse_reviewer_document(
-    payload: object,
-) -> tuple[ReviewerFindingsDocument, list[RejectedFinding]]:
-    """Parse *payload* into a document, rescuing its usable findings (#2029).
+def _rescue_findings(payload: object) -> tuple[object, list[RejectedFinding]]:
+    """Reduce *payload*'s ``findings[]`` to its schema-valid survivors (#2029).
 
-    Returns ``(document, rejected)``. Pydantic's list validation is
+    Returns ``(reduced_payload, rejected)``. Pydantic's list validation is
     all-or-nothing, so ``ReviewerFindingsDocument.model_validate(payload)``
     threw away every sibling finding whenever ONE ``findings[]`` item failed
     its field or model validators — before :func:`validate_reviewer_document`,
     which owns per-finding mechanical rejection, could run at all. This
     function closes that gap by validating each item independently first: the
-    survivors build the document, and each casualty becomes an ordinary
-    :class:`RejectedFinding` with reason ``"schema_invalid"``.
+    survivors replace ``findings`` in the returned payload, and each casualty
+    becomes an ordinary :class:`RejectedFinding` with reason
+    ``"schema_invalid"``.
 
     Expressing the casualties as ordinary ``RejectedFinding`` records is what
     makes this fix small: #1714's ``_select_rejected_must_fix`` force-block and
@@ -900,23 +899,23 @@ def parse_reviewer_document(
 
     The rescue is per-ITEM only. A ``findings`` key that is not a list at all
     (and a *payload* that is not a dict) is a structural defect with no usable
-    items to salvage, so it falls through to the ordinary strict
-    ``model_validate`` and its :class:`ValidationError` propagates unchanged —
-    as does one raised by the final construction, when the surviving findings
-    still cannot satisfy the document's own invariants. Callers keep whatever
-    handling they already had for that error; it now means "this document is
-    structurally unusable", not "one of its findings was".
+    items to salvage, so *payload* is returned unchanged for the caller's own
+    strict ``model_validate`` to reject. This function never raises: a
+    residual structural failure (the surviving findings still cannot satisfy
+    the document's own invariants) is left entirely to the caller's
+    construction step.
 
     ``payload`` is typed ``object`` rather than ``dict[str, Any]`` because both
-    call sites hand it straight from ``json.loads`` — a file holding a bare
-    JSON array must still raise :class:`ValidationError`, not
-    ``AttributeError`` on a ``.get()`` against a list.
+    call sites (:func:`parse_reviewer_document` and, via #2042,
+    ``cw.cli.review.consolidate``) hand it straight from ``json.loads`` or an
+    already-decoded JSON value — a bare JSON array must fall through
+    unchanged, not raise ``AttributeError`` on a ``.get()`` against a list.
     """
     if not isinstance(payload, dict):
-        return ReviewerFindingsDocument.model_validate(payload), []
+        return payload, []
     raw_findings = payload.get("findings")
     if not isinstance(raw_findings, list):
-        return ReviewerFindingsDocument.model_validate(payload), []
+        return payload, []
 
     reviewer_role = str(payload.get("reviewer_role", ""))
     survivors: list[object] = []
@@ -946,9 +945,25 @@ def parse_reviewer_document(
             continue
         survivors.append(item)
 
-    document = ReviewerFindingsDocument.model_validate(
-        {**payload, "findings": survivors}
-    )
+    return {**payload, "findings": survivors}, rejected
+
+
+def parse_reviewer_document(
+    payload: object,
+) -> tuple[ReviewerFindingsDocument, list[RejectedFinding]]:
+    """Parse *payload* into a document, rescuing its usable findings (#2029).
+
+    Returns ``(document, rejected)``. Thin wrapper around
+    :func:`_rescue_findings`: the reduced payload it returns is handed to
+    ``ReviewerFindingsDocument.model_validate``, whose :class:`ValidationError`
+    propagates unchanged for a residual structural failure — a ``findings``
+    key that was never a list, a *payload* that was never a dict, or surviving
+    findings that still cannot satisfy the document's own invariants. Callers
+    keep whatever handling they already had for that error; it now means
+    "this document is structurally unusable", not "one of its findings was".
+    """
+    reduced, rejected = _rescue_findings(payload)
+    document = ReviewerFindingsDocument.model_validate(reduced)
     return document, rejected
 
 
