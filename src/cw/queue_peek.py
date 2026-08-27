@@ -68,6 +68,21 @@ STOP_UNPRODUCTIVE_ATTEMPTS_MIN: int = 3  # at or above this unproductive-attempt
 # count → systemic failure (mirrors the admission gate's signal, GitHub
 # #1750/#1768)
 
+# idle_min at or below this = "demonstrably writing" (#2044) — any
+# STOP-flavored verdict is downgraded to PEEK regardless of which arm
+# proposed it, once, at the aggregation point, instead of each arm
+# re-deriving its own liveness check.
+#
+# Grounded in the 2026-08-26/27 sprint's observed separation:
+# false-positive STOP verdicts on live sessions fired at
+# idle_min 0.0, 0.1, 0.3, 0.5 (#2017 sessions 8682e4d7, bf947d61,
+# 7c159163); the sprint's one true-positive STOP fired at idle_min 31.5
+# (#2029 session d505b5ef, all review subagents terminal). 2.0 sits
+# inside that 0.5-to-31.5 gap with no observed values in it, so the
+# exact value is not delicate — anything from ~1 to ~25 would have
+# classified all of these identically.
+IDLE_LIVE_MAX_MIN: float = 2.0
+
 _STAGE_ORDER: tuple[Stage, ...] = (
     Stage.HARDEN,
     Stage.PLAN,
@@ -610,6 +625,33 @@ def _score_session(
     return _stall_check(age_min, idle_min, pr_state)
 
 
+def _gate_stop_on_liveness(
+    rec: str, reason: str, idle_min: float | None
+) -> tuple[str, str]:
+    """Downgrade any STOP-flavored verdict to PEEK when idle_min shows the
+    session is demonstrably writing (#2044).
+
+    Applied once, after every _score_session arm has had its say, instead
+    of as a per-arm condition each arm must remember to add — #2028/PR
+    #2038 gated only the unproductive_attempts arm on child_active, and
+    the raw age arm reproduced the identical false-STOP 46 minutes later
+    because it never consulted idle_min at all (#2044 comment 1). One
+    gate at the verdict level closes every arm, present and future.
+
+    idle_min is None (no signal) does NOT suppress STOP — mirrors
+    _reached_deep_stage's "unknown = no signal" convention.
+    """
+    if not rec.startswith("STOP"):
+        return rec, reason
+    if idle_min is None or idle_min > IDLE_LIVE_MAX_MIN:
+        return rec, reason
+    return (
+        "PEEK",
+        f"{reason}; idle {idle_min:.1f}m indicates active writing — "
+        "verify before stopping",
+    )
+
+
 def recommend(
     age_min: float | None,
     idle_min: float | None,
@@ -630,10 +672,17 @@ def recommend(
     independently drive a STOP while a child is demonstrably working; the
     row falls through to ``_stall_check``, which already reads the
     child-rescued ``idle_min``.
+
+    Every arm's return value is finally routed through
+    ``_gate_stop_on_liveness`` (#2044) — a single verdict-level check that
+    downgrades any STOP to PEEK when ``idle_min`` shows the session is
+    demonstrably writing, regardless of which arm proposed the STOP. A
+    future arm that returns a new STOP needs no additional liveness
+    plumbing of its own — it is covered by this gate automatically.
     """
     if age_min is None:
         return ("PEEK", "no transcript timestamps — verify session is alive")
-    return _score_session(
+    rec, reason = _score_session(
         age_min=age_min,
         idle_min=idle_min,
         pr_state=pr_state,
@@ -643,6 +692,7 @@ def recommend(
         usage_limit_detected=usage_limit_detected,
         child_active=child_active,
     )
+    return _gate_stop_on_liveness(rec, reason, idle_min)
 
 
 def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
