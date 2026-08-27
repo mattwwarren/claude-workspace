@@ -46,6 +46,7 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEventType,
     SessionPurpose,
+    SessionStatus,
     TicketTask,
 )
 from cw.pr_hydrate import PrAttentionState
@@ -2989,6 +2990,76 @@ def test_dispatch_fix_agent_refuses_live_worktree_before_mutating(
     assert _git_stdout(worktree, "log", "--oneline") == log_before
     assert _git_stdout(worktree, "status", "--porcelain") == status_before
     assert not (worktree / "sibling.txt").exists()
+
+
+@pytest.mark.parametrize(
+    ("context_text", "session_status"),
+    [
+        pytest.param(
+            '{"session_id": "live1234"}',
+            SessionStatus.COMPLETED,
+            id="writer_went_terminal",
+        ),
+        pytest.param('{"session_id": "live1234"}', None, id="session_unknown_to_cw"),
+        pytest.param('{"client": "acme"}', None, id="context_names_no_session"),
+        pytest.param("{not json", None, id="context_unparseable"),
+    ],
+)
+def test_dispatch_fix_agent_pre_check_lets_a_free_worktree_through(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    stub_spawn: _SpawnRecorder,
+    context_text: str,
+    session_status: SessionStatus | None,
+) -> None:
+    """The pre-check refuses only a genuinely live holder.
+
+    The happy path of the R21 handoff IS this: the REVIEW session named in the
+    hook context has gone terminal by the time the reconcile tick dispatches. A
+    pre-check that refused any of these would deadlock the fix loop outright, so
+    each tolerance branch is pinned rather than left to the guard's own reading.
+    """
+    from cw.config import save_state
+    from cw.models import CwState, Session, SessionOrigin
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+    from cw.worktree import create_worktree
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    sessions = (
+        []
+        if session_status is None
+        else [
+            Session(
+                id="live1234",
+                name=f"{client.name}/auto-dev/2017",
+                client=client.name,
+                purpose=SessionPurpose.IMPL,
+                origin=SessionOrigin.DAEMON,
+                status=session_status,
+                workspace_path=client.workspace_path,
+            )
+        ]
+    )
+    save_state(CwState(sessions=sessions))
+    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    claude_dir = worktree / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "cw-context.json").write_text(context_text, encoding="utf-8")
+
+    dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="review-sess",
+    )
+
+    assert len(stub_spawn.calls) == 1
 
 
 def test_dispatch_fix_agent_merge_abort_failure_raises_distinct_message(
