@@ -2161,7 +2161,7 @@ class TestReviewConsolidateBaseFlag:
             msg = "subprocess.run must not be called without --base"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.cli.review.subprocess.run", _boom)
+        monkeypatch.setattr("cw.cli.review._diff_integrity.subprocess.run", _boom)
         result = runner.invoke(
             main,
             ["review", "consolidate", "--no-base-check", "-"],
@@ -2334,7 +2334,7 @@ class TestReviewVerifyFixesBaseFlag:
             msg = "subprocess.run must not be called without --base"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.cli.review.subprocess.run", _boom)
+        monkeypatch.setattr("cw.cli.review._diff_integrity.subprocess.run", _boom)
         result = runner.invoke(
             main,
             ["review", "verify-fixes", "--no-base-check", "-"],
