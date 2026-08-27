@@ -1713,7 +1713,7 @@ class TestValidateReviewerDocument:
         assert accepted[0].line_start == 9521
         assert accepted[0].line_end == 9526
 
-    def test_hunk_context_window_unrelated_line_still_rejected(self) -> None:
+    def test_hunk_context_window_unrelated_line_now_content_rescued(self) -> None:
         # Negative control: widening the window to include context-line
         # content must not turn it into "match anything nearby". Real diff,
         # real content -- but neither variant's evidence is the true content
@@ -3726,7 +3726,7 @@ class TestConsolidateVerdict:
         # gate later (_classify_mislocated_finding), which DOES search the
         # whole file and would now accept that exact fixture (see
         # TestValidateReviewerDocument.test_hunk_context_window_unrelated_
-        # line_still_rejected for the dedicated coverage of that flip), so
+        # line_now_content_rescued for the dedicated coverage of that flip), so
         # it no longer serves as a negative control here -- swapped for
         # fabricated evidence instead, to keep proving something stays
         # rejected in the aggregate.
