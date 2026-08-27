@@ -290,15 +290,47 @@ def check_pr_state(
     return state, pr_number, True
 
 
-def _has_unpushed_commits(wt_path: Path, branch: str) -> bool:
-    """Return True if *wt_path* has commits not yet pushed to origin/<branch>.
+def _has_unpushed_commits(wt_path: Path) -> bool:
+    """Return True if *wt_path* has commits not yet pushed to its upstream.
 
-    Conservative: returns True on any subprocess error or when the remote ref
-    does not exist (meaning we can't confirm the branch is fully pushed).
+    Resolves the upstream via ``@{u}`` on the worktree's actual checked-out
+    branch — mirroring the fix in ``cw.worktree._has_unpushed_commits``
+    (#2050) — rather than guessing ``origin/<branch>`` from a caller-supplied
+    name that may not match what is actually checked out (#2053).
+
+    Unlike ``cw.worktree``'s version, there is no ``ClientConfig`` available
+    in this call chain to resolve a default-branch fallback, so absence of an
+    upstream is a terminal conservative case rather than a fall-through:
+    returns True on any subprocess error, non-zero exit, blank ``@{u}``
+    resolution, or a failed log check against the resolved upstream.
     """
     try:
+        upstream = _sp.run(
+            [
+                "git",
+                "-C",
+                str(wt_path),
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{u}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_git_clean_env(),
+        )
+    except (OSError, FileNotFoundError):
+        return True  # conservative: treat as unpushed when git is unavailable
+    if upstream.returncode != 0:
+        return True
+    upstream_ref = upstream.stdout.strip()
+    if not upstream_ref:
+        return True
+
+    try:
         result = _sp.run(
-            ["git", "-C", str(wt_path), "log", f"origin/{branch}..HEAD", "--oneline"],
+            ["git", "-C", str(wt_path), "log", f"{upstream_ref}..HEAD", "--oneline"],
             capture_output=True,
             text=True,
             check=False,
@@ -307,18 +339,18 @@ def _has_unpushed_commits(wt_path: Path, branch: str) -> bool:
     except (OSError, FileNotFoundError):
         return True  # conservative: treat as unpushed when git is unavailable
     if result.returncode != 0:
-        # Remote ref may not exist or git failed — treat as unpushed conservatively.
         return True
     return bool(result.stdout.strip())
 
 
-def _is_dirty(wt_path: Path, branch: str) -> bool:
+def _is_dirty(wt_path: Path) -> bool:
     """Return True if *wt_path* has uncommitted changes or unpushed commits.
 
     Checks both:
     - Uncommitted changes (``git status --porcelain`` is non-empty after
       filtering out cw-managed scratch files that are not real user work)
-    - Unpushed commits (``git log origin/<branch>..HEAD`` is non-empty)
+    - Unpushed commits (upstream resolved via ``@{u}``; see
+      :func:`_has_unpushed_commits`)
 
     cw writes transient per-session files under ``.claude/`` (e.g.
     ``cw-context.json``, ``prep-pr-state.json``) that are gitignored in the
@@ -349,13 +381,12 @@ def _is_dirty(wt_path: Path, branch: str) -> bool:
     ]
     if lines:
         return True
-    return _has_unpushed_commits(wt_path, branch)
+    return _has_unpushed_commits(wt_path)
 
 
 def _verdict_for_state(
     state: str | None,
     wt_path: Path,
-    branch: str,
     *,
     include_closed: bool,
 ) -> GcVerdict:
@@ -368,7 +399,7 @@ def _verdict_for_state(
     if state == _GH_PR_STATE_CLOSED and not include_closed:
         return GcVerdict.KEEP_CLOSED_PR
     # MERGED, or CLOSED with include_closed=True — check for unsaved work first
-    if _is_dirty(wt_path, branch):
+    if _is_dirty(wt_path):
         return GcVerdict.SKIP_DIRTY
     if state == _GH_PR_STATE_MERGED:
         return GcVerdict.REMOVE_MERGED
@@ -516,9 +547,7 @@ def classify_worktrees(
             )
             continue
 
-        verdict = _verdict_for_state(
-            state, entry.path, entry.branch, include_closed=include_closed
-        )
+        verdict = _verdict_for_state(state, entry.path, include_closed=include_closed)
         if verdict == GcVerdict.SKIP_DIRTY:
             _log.info(
                 "gc: skip dirty worktree %s (branch=%s)", entry.path, entry.branch
