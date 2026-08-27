@@ -24,8 +24,16 @@ here via re-exports. Submodules:
   primitives (#1715/#1976/#1792). Stdlib only; imports from no sibling.
 - ``_reanchor`` — #2007's content-based rescue for a line citation that
   drifted past every tolerance-bounded gate. Imports ``_text_match`` only.
-- ``_validation`` — mechanical file/line-anchor resolution, evidence-quote
-  matching, escalation stripping, and ``validate_reviewer_document``.
+- ``_anchor`` — diff-anchoring geometry: which files/lines the diff touches,
+  near-miss anchor resolution (#1715), added-line vs hunk-window resolution
+  (#1738), the enclosing-def fallback (#1743), and the diff-pair rescue
+  (#1976). Answers where a citation lands, never what to do about it.
+- ``_classify`` — the verdict layer over ``_anchor``: the fixed
+  classification check order, the persisted-anchor repair, and the
+  diagnosable ``RejectedFinding.detail`` messages. Imports ``_anchor``.
+- ``_document`` — document-level entry points: ``validate_reviewer_document``
+  (accepted/rejected/stripped partition, escalation stripping) and #2029's
+  tolerant ``parse_reviewer_document``. Imports ``_classify``.
 - ``_dedup`` — cross-reviewer dedup into ``AcceptedFinding`` groups and the
   ``Review`` count aggregation.
 - ``_consolidate`` — ``consolidate_verdict`` orchestration and the atomic
@@ -52,19 +60,39 @@ needs it directly, mirroring ``_select_rejected_must_fix``'s precedent above.
 Its remaining helpers (``_raw_finding_payload``,
 ``_select_run_failures_with_discards``) stay package-private.
 
-Import-cycle note (#1818): ``cw.review_finding_dispositions`` documents a
-load-bearing cycle broken only by that module refusing any module-scope ``cw``
-import, and the flat module's first two ``cw``-scoped imports — ``cw.atomic``
-then ``cw.auto_dev_result`` — are what that discipline was verified against.
-The split preserves that order rather than the submodule order: isort sorts
-the re-export block alphabetically, so ``_consolidate`` is imported first, and
-its own first two imports are ``cw.atomic`` followed (via ``_dedup``) by
-``cw.auto_dev_result``. ``tests/test_review_finding_dispositions.py``'s
-cold-interpreter import-order matrix is the regression guard.
+Import-cycle note (#1818, revised #2054): ``cw.review_finding_dispositions``
+documents a load-bearing cycle broken only by that module refusing any
+module-scope ``cw`` import. isort sorts the re-export block alphabetically, so
+``_anchor`` is imported first — but it and its only dependency ``_text_match``
+are stdlib-only leaves, so the first ``cw``-scoped import from OUTSIDE this
+package now arrives one block later, via ``_classify`` → ``_models`` →
+``cw.auto_dev_result``; ``cw.atomic`` follows much later via ``_consolidate``.
+
+That is a genuine reversal of the ``cw.atomic``-then-``cw.auto_dev_result``
+order this package presented before the split, and it is deliberately NOT
+preserved: pinning an import order would be pinning a symptom. The invariant
+that actually matters is that ``cw.review_finding_dispositions`` holds no
+module-scope ``cw`` import, which makes the cycle unclosable in EVERY order
+rather than in the one order we happened to ship.
+``tests/test_review_finding_dispositions.py::test_module_imports_cleanly_whichever_module_loads_first``
+is the regression guard: it imports each participant first in a cold
+interpreter, so an order-dependent cycle fails there regardless of which
+submodule this block happens to load first.
 """
 
 from __future__ import annotations
 
+from cw.review_findings._anchor import (
+    _anchor_in_enclosing_def,
+    _diff_pair_rescue,
+    _enclosing_def_span,
+    _evidence_in_claimed_lines,
+    _line_reference_valid,
+)
+from cw.review_findings._classify import (
+    _VALID_SEVERITIES,
+    _classify_finding,
+)
 from cw.review_findings._consolidate import (
     _select_rejected_must_fix,
     consolidate_verdict,
@@ -74,6 +102,12 @@ from cw.review_findings._dedup import (
     _dedup_key,
     dedupe_findings,
     derive_review_counts,
+)
+from cw.review_findings._document import (
+    _best_effort_discarded_tally,
+    _rescue_findings,
+    parse_reviewer_document,
+    validate_reviewer_document,
 )
 from cw.review_findings._models import (
     FINGERPRINT_VERSION,
@@ -112,19 +146,6 @@ from cw.review_findings._text_match import (
     _normalize_unicode_punctuation,
     _reconcile_evidence_window,
     _strip_diff_markers,
-)
-from cw.review_findings._validation import (
-    _VALID_SEVERITIES,
-    _anchor_in_enclosing_def,
-    _best_effort_discarded_tally,
-    _classify_finding,
-    _diff_pair_rescue,
-    _enclosing_def_span,
-    _evidence_in_claimed_lines,
-    _line_reference_valid,
-    _rescue_findings,
-    parse_reviewer_document,
-    validate_reviewer_document,
 )
 
 __all__ = [

@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
 from cw.review_findings._dedup import dedupe_findings, derive_review_counts
+from cw.review_findings._document import validate_reviewer_document
 from cw.review_findings._models import ReviewerRunRecord, ReviewVerdict
-from cw.review_findings._validation import validate_reviewer_document
 
 if TYPE_CHECKING:
     from pathlib import Path
