@@ -27,10 +27,12 @@ from cw.review_adjudication import (
 from cw.review_findings import ReviewerRunFailure
 
 from .conftest import (
+    _doc_payload,
     _finding_kwargs,
     _make_escalation,
     _make_finding,
     _make_reviewer_doc,
+    _without_evidence,
     commit_tracked_file,
 )
 
@@ -62,20 +64,6 @@ def _consolidate_payload(**overrides: object) -> dict[str, Any]:
         "diff": _CONSOLIDATE_DIFF,
         "reviewed_sha": "abc1234",
         "failed_reviewers": [],
-    }
-    payload.update(overrides)
-    return payload
-
-
-def _doc_payload(*findings: dict[str, Any], **overrides: object) -> dict[str, Any]:
-    """A raw ``ReviewerFindingsDocument`` dict (bypasses Pydantic construction
-    so invalid payloads — e.g. a bogus severity — can be sent through the CLI).
-    """
-    payload: dict[str, Any] = {
-        "reviewer_role": "Code Quality Reviewer",
-        "status": "ok",
-        "detail": "",
-        "findings": list(findings),
     }
     payload.update(overrides)
     return payload
@@ -452,6 +440,10 @@ class TestReviewConsolidateCommand:
             # Claude-native coordinator through this passthrough with no
             # Python-side change beyond the field itself.
             "rejected_must_fix",
+            # #2029: the reviewer run failures whose unusable payload was
+            # claiming a MUST_FIX or SHOULD_FIX finding — the residual signal
+            # for the discards no per-finding rescue could recover.
+            "run_failures_with_should_fix_discards",
             # #1709: which filesystem-capability mode the reviewers ran under.
             # Always emitted (null for executors that never probe) so a
             # consumer can tell "not probed" from "probed and degraded".
@@ -1847,6 +1839,13 @@ class TestReviewConsolidateDocumentsFrom:
     def test_documents_from_schema_invalid_file_names_offending_file(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
+        # Still exits 1 after #2029, but for a DIFFERENT reason: the bogus
+        # severity is now dropped as `schema_invalid`, leaving findings=[] —
+        # and `_doc_payload` defaults `status="ok"` with a blank `detail`, so
+        # the document's own _check_ok_empty_findings_has_justification
+        # invariant is what raises. A red assertion here is not evidence the
+        # per-finding rescue regressed; the sibling-survival tests below are
+        # what prove it works.
         docs_dir = tmp_path / "review-findings"
         docs_dir.mkdir()
         bad = _doc_payload(dict(_finding_kwargs(severity="BOGUS")))
@@ -1988,6 +1987,119 @@ class TestReviewConsolidateDocumentsFrom:
         assert [
             r["reviewer_role"] for r in json.loads(globbed.output)["agents_run"]
         ] == ["Gamma Reviewer"]
+
+
+def _anchored_finding(**overrides: object) -> dict[str, Any]:
+    """A raw finding dict anchored to ``_CONSOLIDATE_DIFF``'s real added line."""
+    return dict(_finding_kwargs(line_start=2, line_end=2, **overrides))
+
+
+def _schema_invalid_finding(**overrides: object) -> dict[str, Any]:
+    """A raw finding dict with ``evidence`` removed — schema-invalid (#2029)."""
+    return _without_evidence(_anchored_finding(**overrides))
+
+
+def _consolidate_from(runner: CliRunner, docs_dir: Path) -> Any:
+    """Invoke ``cw review consolidate --documents-from <docs_dir>``."""
+    payload = _consolidate_payload()
+    del payload["documents"]
+    return runner.invoke(
+        main,
+        [
+            "review",
+            "consolidate",
+            "--no-base-check",
+            "--documents-from",
+            str(docs_dir),
+            "-",
+        ],
+        input=json.dumps(payload),
+    )
+
+
+class TestReviewConsolidateDocumentsFromSchemaInvalidFindings:
+    """#2029: one unparseable finding must not delete the whole document."""
+
+    def test_sibling_findings_survive_and_still_block(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        doc = _doc_payload(
+            _schema_invalid_finding(severity="NIT"),
+            _anchored_finding(severity="MUST_FIX", summary="real problem"),
+            detail="reviewed the diff",
+        )
+        (docs_dir / "a-mixed.json").write_text(json.dumps(doc), encoding="utf-8")
+
+        result = _consolidate_from(runner, docs_dir)
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert [r["reason"] for r in verdict["rejected"]] == ["schema_invalid"]
+        assert [a["finding"]["summary"] for a in verdict["accepted"]] == [
+            "real problem"
+        ]
+        assert verdict["blocking"] is True
+
+    def test_schema_invalid_must_fix_alone_parks_via_rejected_must_fix(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        doc = _doc_payload(
+            _schema_invalid_finding(severity="MUST_FIX"),
+            detail="reviewed the diff",
+        )
+        (docs_dir / "a-bad-must-fix.json").write_text(json.dumps(doc), encoding="utf-8")
+
+        result = _consolidate_from(runner, docs_dir)
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert len(verdict["rejected_must_fix"]) == 1
+        assert verdict["rejected_must_fix"][0]["reason"] == "schema_invalid"
+        assert verdict["blocking"] is False
+
+    def test_one_bad_file_does_not_delete_the_other_reviewers_findings(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        mixed = _doc_payload(
+            _schema_invalid_finding(severity="NIT"),
+            _anchored_finding(severity="SHOULD_FIX", summary="alpha kept"),
+            reviewer_role="Alpha Reviewer",
+            detail="reviewed the diff",
+        )
+        # A distinct anchor+evidence, or dedupe_findings would merge the two
+        # into one AcceptedFinding and the assertion below would prove nothing.
+        clean = _doc_payload(
+            dict(
+                _finding_kwargs(
+                    severity="SHOULD_FIX",
+                    summary="beta kept",
+                    line_start=3,
+                    line_end=3,
+                    evidence="pass",
+                )
+            ),
+            reviewer_role="Beta Reviewer",
+            detail="reviewed the diff",
+        )
+        (docs_dir / "a-mixed.json").write_text(json.dumps(mixed), encoding="utf-8")
+        (docs_dir / "b-clean.json").write_text(json.dumps(clean), encoding="utf-8")
+
+        result = _consolidate_from(runner, docs_dir)
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert sorted(a["finding"]["summary"] for a in verdict["accepted"]) == [
+            "alpha kept",
+            "beta kept",
+        ]
+        assert len(verdict["rejected"]) == 1
+        assert verdict["rejected"][0]["reviewer_role"] == "Alpha Reviewer"
 
 
 def _branch_repo(

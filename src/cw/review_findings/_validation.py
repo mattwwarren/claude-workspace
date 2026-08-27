@@ -7,6 +7,13 @@ rescue for a citation that drifted past all of them), evidence-quote matching,
 escalation stripping, and the :func:`validate_reviewer_document` entry point
 that composes them.
 
+:func:`parse_reviewer_document` (#2029) sits one step EARLIER than all of that:
+it is the tolerant JSON→model boundary both executor paths call instead of
+``ReviewerFindingsDocument.model_validate``, so one unparseable ``findings[]``
+item costs that item rather than every sibling in the document. Nothing here
+can rescue a finding the document never carried, which is why the split had to
+live at parse time rather than inside ``validate_reviewer_document``.
+
 The rescue inventory, in the order a finding meets them: ``_nearest_added_line``
 (#1715, ±3 lines) → ``_anchor_in_enclosing_def`` (#1743, worktree opt-in) →
 ``_content_rescue_anchor`` (#2007, unbounded content search) at the anchor gate;
@@ -25,12 +32,17 @@ names from :mod:`cw.review_findings`, not from this private submodule.
 from __future__ import annotations
 
 import ast
+import json
 import logging
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
+
+from pydantic import ValidationError
 
 from cw.review_findings._models import (
     _ESCALATION_STRIP_REASON,
+    Finding,
     RejectedFinding,
+    ReviewerFindingsDocument,
     Severity,
     StrippedEscalation,
     _is_blank,
@@ -52,9 +64,7 @@ if TYPE_CHECKING:
 
     from cw.review_findings._models import (
         CapturedDiff,
-        Finding,
         RejectedFindingReason,
-        ReviewerFindingsDocument,
     )
 
 _log = logging.getLogger(__name__)
@@ -851,3 +861,127 @@ def validate_reviewer_document(
             accepted.append(resolved_finding)
 
     return accepted, rejected, stripped
+
+
+def _raw_finding_payload(item: object) -> dict[str, Any]:
+    """Preserve one unusable ``findings[]`` item as a ``RejectedFinding.raw``.
+
+    A dict is kept as-is (keys coerced to ``str`` for the field's type), so
+    every downstream ``.get()`` reader — ``_select_rejected_must_fix``,
+    ``_count_rejected_by_severity``, the comment renderers — sees the payload
+    the reviewer actually sent. Anything else (a bare string, a number, a
+    nested list) is wrapped under ``"value"`` rather than dropped: the item is
+    unusable, but the fact that the reviewer emitted it is not.
+    """
+    if isinstance(item, dict):
+        return {str(key): value for key, value in item.items()}
+    return {"value": item}
+
+
+def parse_reviewer_document(
+    payload: object,
+) -> tuple[ReviewerFindingsDocument, list[RejectedFinding]]:
+    """Parse *payload* into a document, rescuing its usable findings (#2029).
+
+    Returns ``(document, rejected)``. Pydantic's list validation is
+    all-or-nothing, so ``ReviewerFindingsDocument.model_validate(payload)``
+    threw away every sibling finding whenever ONE ``findings[]`` item failed
+    its field or model validators — before :func:`validate_reviewer_document`,
+    which owns per-finding mechanical rejection, could run at all. This
+    function closes that gap by validating each item independently first: the
+    survivors build the document, and each casualty becomes an ordinary
+    :class:`RejectedFinding` with reason ``"schema_invalid"``.
+
+    Expressing the casualties as ordinary ``RejectedFinding`` records is what
+    makes this fix small: #1714's ``_select_rejected_must_fix`` force-block and
+    #2000's severity counters are already generic ``.get()``-based readers of
+    ``RejectedFinding.raw``, so a schema-invalid MUST_FIX gates the pipeline
+    with no new gating code.
+
+    The rescue is per-ITEM only. A ``findings`` key that is not a list at all
+    (and a *payload* that is not a dict) is a structural defect with no usable
+    items to salvage, so it falls through to the ordinary strict
+    ``model_validate`` and its :class:`ValidationError` propagates unchanged —
+    as does one raised by the final construction, when the surviving findings
+    still cannot satisfy the document's own invariants. Callers keep whatever
+    handling they already had for that error; it now means "this document is
+    structurally unusable", not "one of its findings was".
+
+    ``payload`` is typed ``object`` rather than ``dict[str, Any]`` because both
+    call sites hand it straight from ``json.loads`` — a file holding a bare
+    JSON array must still raise :class:`ValidationError`, not
+    ``AttributeError`` on a ``.get()`` against a list.
+    """
+    if not isinstance(payload, dict):
+        return ReviewerFindingsDocument.model_validate(payload), []
+    raw_findings = payload.get("findings")
+    if not isinstance(raw_findings, list):
+        return ReviewerFindingsDocument.model_validate(payload), []
+
+    reviewer_role = str(payload.get("reviewer_role", ""))
+    survivors: list[object] = []
+    rejected: list[RejectedFinding] = []
+    for index, item in enumerate(raw_findings):
+        try:
+            Finding.model_validate(item)
+        except ValidationError as exc:
+            # INFO, matching validate_reviewer_document's per-rejection line
+            # below: same category of event (a finding that will never reach
+            # adjudication), same level.
+            _log.info(
+                "auto-dev: schema-invalid finding dropped at parse time — "
+                "siblings retained (reviewer_role=%s, finding_index=%d, "
+                "reason=schema_invalid)",
+                reviewer_role,
+                index,
+            )
+            rejected.append(
+                RejectedFinding(
+                    raw=_raw_finding_payload(item),
+                    reviewer_role=reviewer_role,
+                    reason="schema_invalid",
+                    detail=str(exc),
+                )
+            )
+            continue
+        survivors.append(item)
+
+    document = ReviewerFindingsDocument.model_validate(
+        {**payload, "findings": survivors}
+    )
+    return document, rejected
+
+
+def _best_effort_discarded_tally(raw: object) -> tuple[int, dict[str, int]]:
+    """Count what an unusable reviewer payload was claiming to report (#2029).
+
+    For the residual case :func:`parse_reviewer_document` cannot rescue — a
+    document that failed structurally, so there are no ``RejectedFinding``
+    records to count. Accepts the raw ``-o`` file text or an already-decoded
+    payload, and returns ``(0, {})`` for anything it cannot read rather than
+    raising: this is diagnostics for a payload already known to be broken, so
+    every step of the walk has to survive the next surprise.
+
+    Mirrors :func:`~cw.review_findings._consolidate._count_rejected_by_severity`'s
+    ``.get()``-defensive, ``"unknown"``-bucket idiom, applied one layer earlier
+    (a whole discarded payload rather than a list of typed rejects).
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return 0, {}
+    if not isinstance(raw, dict):
+        return 0, {}
+    findings = raw.get("findings")
+    if not isinstance(findings, list):
+        return 0, {}
+    counts: dict[str, int] = {}
+    for item in findings:
+        severity = (
+            str(item.get("severity", "unknown"))
+            if isinstance(item, dict)
+            else "unknown"
+        )
+        counts[severity] = counts.get(severity, 0) + 1
+    return len(findings), counts

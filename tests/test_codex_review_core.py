@@ -31,9 +31,9 @@ def test_run_review_threads_session_id_to_run_codex_role(
     worktree = make_git_repo("wt-run-review-thread")
     captured: dict[str, object] = {}
 
-    def _spy_run_codex_role(**kwargs: object) -> tuple[object, object, object]:
+    def _spy_run_codex_role(**kwargs: object) -> tuple[object, object, object, object]:
         captured["session_id"] = kwargs["session_id"]
-        return _make_reviewer_doc(), None, {}
+        return _make_reviewer_doc(), None, {}, []
 
     monkeypatch.setattr("cw.codex_review._roles._run_codex_role", _spy_run_codex_role)
     run_review(

@@ -55,7 +55,11 @@ from cw.review_finding_dispositions import (
     parse_finding_disposition_block,
     split_disposition_key,
 )
-from cw.review_findings import AgentSpecStatus, ReviewerFindingsDocument
+from cw.review_findings import (
+    AgentSpecStatus,
+    ReviewerFindingsDocument,
+    parse_reviewer_document,
+)
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
@@ -66,7 +70,12 @@ if TYPE_CHECKING:
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
     from cw.review_finding_dispositions import FindingDisposition
-    from cw.review_findings import AgentSpecSource, CapturedDiff, Finding
+    from cw.review_findings import (
+        AgentSpecSource,
+        CapturedDiff,
+        Finding,
+        RejectedFinding,
+    )
 
 _log = logging.getLogger(__name__)
 
@@ -1089,8 +1098,16 @@ def _build_reviewer_prompt(
 
 def _parse_reviewer_document(
     output_file_content: str | None,
-) -> ReviewerFindingsDocument | None:
-    """Parse codex's ``-o`` output into a document, failing closed to ``None``."""
+) -> tuple[ReviewerFindingsDocument, list[RejectedFinding]] | None:
+    """Parse codex's ``-o`` output into a document, failing closed to ``None``.
+
+    Returns ``(document, rejected)`` since #2029, where ``rejected`` holds the
+    ``findings[]`` items that could not become a :class:`Finding`. ``None`` now
+    means only what it says on the tin — no output at all, undecodable JSON, or
+    a STRUCTURAL schema failure that survived the per-finding rescue. A single
+    bad finding no longer costs the role its entire document (and, downstream,
+    a ``CODEX_REVIEW_UNPARSEABLE`` park over findings that were perfectly fine).
+    """
     if output_file_content is None:
         return None
     try:
@@ -1098,7 +1115,7 @@ def _parse_reviewer_document(
     except json.JSONDecodeError:
         return None
     try:
-        return ReviewerFindingsDocument.model_validate(data)
+        return parse_reviewer_document(data)
     except ValueError:
         return None
 

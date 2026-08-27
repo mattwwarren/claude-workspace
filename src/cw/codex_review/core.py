@@ -50,11 +50,16 @@ def run_review(
     ``finding_dispositions`` (#1838) ride the same hop, for the same reason —
     the prepared pass already merged the durable queue-row ledger with the
     ticket thread's marker, so this only has to thread the result.
+
+    ``run_codex_roles``' fourth return value (#2029) — the findings rescued out
+    of their documents at parse time — rides the same hop as well, so a
+    schema-invalid MUST_FIX reaches #1714's force-block instead of vanishing
+    with its document.
     """
     prepared = _prepare_review_pass(
         task, worktree, default_branch, runner=runner, session_id=session_id
     )
-    documents, failures, metrics_by_role = run_codex_roles(
+    documents, failures, metrics_by_role, pre_validation_rejected = run_codex_roles(
         runner=runner,
         worktree=worktree,
         roles=prepared.roles,
@@ -78,4 +83,5 @@ def run_review(
         agent_spec_status=prepared.agent_spec_status,
         voided_findings=prepared.voided_findings,
         finding_dispositions=prepared.finding_dispositions,
+        pre_validation_rejected=pre_validation_rejected,
     )

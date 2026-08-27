@@ -28,6 +28,7 @@ from cw.codex_runner import CodexRunResult
 from cw.config import state_dir
 from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
 from cw.review_findings import (
+    RejectedFinding,
     ReviewerFindingsDocument,
     ReviewerRunFailure,
     ReviewerRunMetrics,
@@ -38,6 +39,7 @@ from tests._codex_review_helpers import (
     _ok_result,
     _SequencedRunner,
 )
+from tests.conftest import _without_evidence
 
 _AUDIT_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "codex_audit_events"
 
@@ -121,7 +123,7 @@ class TestRunCodexRoles:
         runner = _SequencedRunner(
             [_ok_result(findings=[_finding_payload()]), _ok_result()]
         )
-        docs, failures, metrics_by_role = run_codex_roles(
+        docs, failures, metrics_by_role, _pre_rejected = run_codex_roles(
             runner=runner,
             worktree=tmp_path,
             roles=["Code Quality Reviewer", "SysAdmin Reviewer"],
@@ -192,7 +194,7 @@ class TestRunCodexRoles:
         )
         runner = _SequencedRunner([_ok_result(), _ok_result()])
         with caplog.at_level(logging.WARNING):
-            docs, failures, metrics_by_role = run_codex_roles(
+            docs, failures, metrics_by_role, _pre_rejected = run_codex_roles(
                 runner=runner,
                 worktree=tmp_path,
                 roles=[
@@ -225,7 +227,7 @@ class TestRunCodexRoles:
             [CodexRunResult(returncode=1, stdout="", stderr="boom")]
         )
         with caplog.at_level(logging.WARNING):
-            docs, failures, metrics_by_role = run_codex_roles(
+            docs, failures, metrics_by_role, _pre_rejected = run_codex_roles(
                 runner=runner,
                 worktree=tmp_path,
                 roles=["Code Quality Reviewer"],
@@ -254,7 +256,7 @@ class TestRunCodexRoles:
                 ),
             ]
         )
-        _docs, failures, metrics_by_role = run_codex_roles(
+        _docs, failures, metrics_by_role, _pre_rejected = run_codex_roles(
             runner=runner,
             worktree=tmp_path,
             roles=["Code Quality Reviewer", "SysAdmin Reviewer"],
@@ -299,7 +301,7 @@ class TestRunCodexRoles:
                 _ok_result(role="SysAdmin Reviewer"),
             ]
         )
-        docs, failures, metrics_by_role = run_codex_roles(
+        docs, failures, metrics_by_role, _pre_rejected = run_codex_roles(
             runner=runner,
             worktree=tmp_path,
             roles=["Code Quality Reviewer", "SysAdmin Reviewer"],
@@ -481,7 +483,10 @@ def _run_one_role(
     session_id: str = "sess-diag",
     role: str = "Code Quality Reviewer",
 ) -> tuple[
-    ReviewerFindingsDocument | None, ReviewerRunFailure | None, ReviewerRunMetrics
+    ReviewerFindingsDocument | None,
+    ReviewerRunFailure | None,
+    ReviewerRunMetrics,
+    list[RejectedFinding],
 ]:
     scratch = tmp_path / "scratch"
     scratch.mkdir(exist_ok=True)
@@ -506,7 +511,9 @@ def test_run_codex_role_spawn_error_surfaces_codex_error_reason(
     runner = _SequencedRunner(
         [CodexRunResult(returncode=127, stdout="", stderr="codex: command not found")]
     )
-    _doc, failure, _metrics = _run_one_role(runner, tmp_path, session_id="sess-spawn")
+    _doc, failure, _metrics, _rejected = _run_one_role(
+        runner, tmp_path, session_id="sess-spawn"
+    )
     assert failure is not None
     assert failure.reason == CODEX_ERROR
     path = _bundle_file("sess-spawn", "code-quality-reviewer", "spawn_error")
@@ -528,7 +535,7 @@ def test_run_codex_role_model_capacity_surfaces_transient_reason(
             )
         ]
     )
-    _doc, failure, _metrics = _run_one_role(
+    _doc, failure, _metrics, _rejected = _run_one_role(
         runner, tmp_path, session_id="sess-capacity"
     )
     assert failure is not None
@@ -547,7 +554,7 @@ def test_run_codex_role_unrelated_nonzero_exit_still_codex_error(
     must keep parking as CODEX_ERROR — #1836's fix must not blanket-
     retry every turn.failed."""
     runner = _SequencedRunner([CodexRunResult(returncode=1, stdout="", stderr="boom")])
-    _doc, failure, _metrics = _run_one_role(
+    _doc, failure, _metrics, _rejected = _run_one_role(
         runner, tmp_path, session_id="sess-plain-error"
     )
     assert failure is not None
@@ -566,7 +573,7 @@ def test_run_codex_role_non_capacity_turn_failed_still_codex_error(
             )
         ]
     )
-    _doc, failure, _metrics = _run_one_role(
+    _doc, failure, _metrics, _rejected = _run_one_role(
         runner, tmp_path, session_id="sess-failed-turn"
     )
     assert failure is not None
@@ -588,7 +595,7 @@ def test_run_codex_role_capacity_phrasing_in_stderr_only_still_codex_error(
             )
         ]
     )
-    _doc, failure, _metrics = _run_one_role(
+    _doc, failure, _metrics, _rejected = _run_one_role(
         runner, tmp_path, session_id="sess-capacity-stderr"
     )
     assert failure is not None
@@ -657,7 +664,7 @@ class TestRunCodexRolePersistsDiagnostics:
 
     def test_success_does_not_persist_diagnostics(self, tmp_path: Path) -> None:
         runner = _SequencedRunner([_ok_result()])
-        doc, failure, _metrics = _run_one_role(runner, tmp_path)
+        doc, failure, _metrics, _rejected = _run_one_role(runner, tmp_path)
         assert doc is not None
         assert failure is None
         assert not diagnostics_bundle_dir("sess-diag").exists()
@@ -880,7 +887,9 @@ class TestRunCodexRoleAuditMetrics:
         runner = _SequencedRunner(
             [_ok_result(stdout=_audit_fixture("clean_with_command.jsonl"))]
         )
-        doc, failure, metrics = _run_one_role(runner, tmp_path, session_id="sess-m1")
+        doc, failure, metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-m1"
+        )
         assert doc is not None
         assert failure is None
         assert metrics["thread_id"] == "<THREAD_ID>"
@@ -900,7 +909,9 @@ class TestRunCodexRoleAuditMetrics:
         runner = _SequencedRunner(
             [_ok_result(stdout=_audit_fixture("clean_no_tools.jsonl"))]
         )
-        _doc, _failure, metrics = _run_one_role(runner, tmp_path, session_id="sess-m2")
+        _doc, _failure, metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-m2"
+        )
         assert metrics["duration_seconds"] == pytest.approx(7.25)
 
     def test_failure_branch_still_returns_metrics(self, tmp_path: Path) -> None:
@@ -913,7 +924,9 @@ class TestRunCodexRoleAuditMetrics:
                 )
             ]
         )
-        doc, failure, metrics = _run_one_role(runner, tmp_path, session_id="sess-m3")
+        doc, failure, metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-m3"
+        )
         assert doc is None
         assert failure is not None
         assert metrics["terminal_event"] == "turn.failed"
@@ -929,7 +942,7 @@ class TestRunCodexRoleAuditMetrics:
             [_ok_result(stdout=_audit_fixture("truncated_mid_command.jsonl"))]
         )
         with caplog.at_level(logging.WARNING):
-            doc, failure, metrics = _run_one_role(
+            doc, failure, metrics, _rejected = _run_one_role(
                 runner, tmp_path, session_id="sess-truncated"
             )
         assert doc is not None
@@ -971,7 +984,9 @@ class TestRunCodexRoleFlagRejectionRetry:
                 _ok_result(),
             ]
         )
-        doc, failure, metrics = _run_one_role(runner, tmp_path, session_id="sess-retry")
+        doc, failure, metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-retry"
+        )
         # (a) the role ultimately succeeded — a real document, no failure
         assert doc is not None
         assert failure is None
@@ -1015,7 +1030,7 @@ class TestRunCodexRoleFlagRejectionRetry:
             ]
         )
         with caplog.at_level(logging.WARNING):
-            doc, _failure, metrics = _run_one_role(
+            doc, _failure, metrics, _rejected = _run_one_role(
                 runner, tmp_path, session_id="sess-retry-quiet"
             )
         assert doc is not None
@@ -1027,7 +1042,7 @@ class TestRunCodexRoleFlagRejectionRetry:
         runner = _SequencedRunner(
             [CodexRunResult(returncode=1, stdout="", stderr="some other codex error")]
         )
-        doc, failure, _metrics = _run_one_role(
+        doc, failure, _metrics, _rejected = _run_one_role(
             runner, tmp_path, session_id="sess-noretry"
         )
         assert len(runner.calls) == 1
@@ -1042,7 +1057,7 @@ class TestRunCodexRoleFlagRejectionRetry:
         runner = _SequencedRunner(
             [CodexRunResult(returncode=-1, stdout="", stderr="", timed_out=True)]
         )
-        _doc, failure, _metrics = _run_one_role(
+        _doc, failure, _metrics, _rejected = _run_one_role(
             runner, tmp_path, session_id="sess-noretry-timeout"
         )
         assert len(runner.calls) == 1
@@ -1061,7 +1076,7 @@ class TestRunCodexRoleFlagRejectionRetry:
                 )
             ]
         )
-        _doc, failure, _metrics = _run_one_role(
+        _doc, failure, _metrics, _rejected = _run_one_role(
             runner, tmp_path, session_id="sess-noretry-spawn"
         )
         assert len(runner.calls) == 1
@@ -1085,7 +1100,7 @@ class TestRunCodexRoleFlagRejectionRetry:
                 CodexRunResult(returncode=1, stdout="", stderr="still broken"),
             ]
         )
-        doc, failure, _metrics = _run_one_role(
+        doc, failure, _metrics, _rejected = _run_one_role(
             runner, tmp_path, session_id="sess-retry-fail"
         )
         assert len(runner.calls) == 2
@@ -1098,3 +1113,151 @@ class TestRunCodexRoleFlagRejectionRetry:
         assert "--json" not in persisted.argv_sanitized
         assert "--ephemeral" not in persisted.argv_sanitized
         assert "still broken" in persisted.stderr_excerpt
+
+
+# ---------------------------------------------------------------------------
+# Per-finding schema tolerance and the residual discard tally (#2029)
+# ---------------------------------------------------------------------------
+
+
+def _invalid_finding_payload(severity: str = "MUST_FIX") -> dict[str, object]:
+    """A raw codex finding payload with ``evidence`` removed (#2029).
+
+    Takes only ``severity`` rather than a generic ``**overrides`` splat:
+    ``_finding_payload``'s parameters are not uniformly typed (``line_start``
+    is ``int | None``), so a splat that mypy cannot narrow would type-error on
+    the call rather than on the offending argument.
+    """
+    return _without_evidence(_finding_payload(severity=severity))
+
+
+class TestRunCodexRoleSchemaInvalidFindings:
+    def test_sibling_findings_survive_one_invalid_finding(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner(
+            [
+                _ok_result(
+                    findings=[
+                        _finding_payload(summary="kept one"),
+                        _invalid_finding_payload(severity="NIT"),
+                        _finding_payload(severity="DEBT", summary="kept two"),
+                    ]
+                )
+            ]
+        )
+        doc, failure, _metrics, rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-2029-partial"
+        )
+
+        assert failure is None
+        assert doc is not None
+        assert [f.summary for f in doc.findings] == ["kept one", "kept two"]
+        assert [r.reason for r in rejected] == ["schema_invalid"]
+        assert rejected[0].reviewer_role == "Code Quality Reviewer"
+        # A partially-rescued document is a SUCCESS, not a failure — no
+        # diagnostics bundle is persisted for it.
+        assert not diagnostics_bundle_dir("sess-2029-partial").exists()
+
+    def test_structural_failure_tallies_the_discarded_findings(
+        self, tmp_path: Path
+    ) -> None:
+        # No `reviewer_role` key at all: the document cannot be built even with
+        # per-finding tolerance applied, so this is the residual whole-document
+        # discard the ReviewerRunFailure tally exists to make visible.
+        payload = json.dumps(
+            {
+                "status": "ok",
+                "detail": "reviewed",
+                "findings": [
+                    _finding_payload(severity="MUST_FIX"),
+                    _finding_payload(severity="NIT"),
+                    _finding_payload(severity="NIT"),
+                ],
+            }
+        )
+        runner = _SequencedRunner(
+            [
+                CodexRunResult(
+                    returncode=0, stdout="", stderr="", output_file_content=payload
+                )
+            ]
+        )
+        doc, failure, _metrics, rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-2029-structural"
+        )
+
+        assert doc is None
+        assert rejected == []
+        assert failure is not None
+        assert failure.reason == CODEX_REVIEW_UNPARSEABLE
+        assert failure.discarded_finding_count == 3
+        assert failure.discarded_finding_severities == {"MUST_FIX": 1, "NIT": 2}
+
+    def test_non_schema_failure_carries_no_discard_tally(self, tmp_path: Path) -> None:
+        # A timeout never produced an output document, so there is nothing to
+        # tally — "no telemetry" and "telemetry showing nothing" differ.
+        runner = _SequencedRunner(
+            [CodexRunResult(returncode=-1, stdout="", stderr="", timed_out=True)]
+        )
+        _doc, failure, _metrics, _rejected = _run_one_role(
+            runner, tmp_path, session_id="sess-2029-timeout"
+        )
+
+        assert failure is not None
+        assert failure.reason == CODEX_TIMEOUT
+        assert failure.discarded_finding_count == 0
+        assert failure.discarded_finding_severities == {}
+
+
+class TestRunCodexRolesAggregatesPreValidationRejects:
+    def test_rejects_are_aggregated_across_roles_in_role_order(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _SequencedRunner(
+            [
+                _ok_result(
+                    role="Code Quality Reviewer",
+                    findings=[
+                        _invalid_finding_payload(severity="NIT"),
+                        _finding_payload(),
+                    ],
+                ),
+                _ok_result(
+                    role="SysAdmin Reviewer",
+                    findings=[_invalid_finding_payload(severity="DEBT")],
+                ),
+            ]
+        )
+        docs, failures, _metrics, pre_rejected = run_codex_roles(
+            runner=runner,
+            worktree=tmp_path,
+            roles=["Code Quality Reviewer", "SysAdmin Reviewer"],
+            prompts_by_role={
+                "Code Quality Reviewer": "p1",
+                "SysAdmin Reviewer": "p2",
+            },
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="s-2029-agg",
+        )
+
+        assert len(docs) == 2
+        assert failures == []
+        assert [r.reviewer_role for r in pre_rejected] == [
+            "Code Quality Reviewer",
+            "SysAdmin Reviewer",
+        ]
+        assert all(r.reason == "schema_invalid" for r in pre_rejected)
+
+    def test_clean_roster_aggregates_an_empty_reject_list(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner([_ok_result(findings=[_finding_payload()])])
+        _docs, _failures, _metrics, pre_rejected = run_codex_roles(
+            runner=runner,
+            worktree=tmp_path,
+            roles=["Code Quality Reviewer"],
+            prompts_by_role={"Code Quality Reviewer": "p1"},
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="s-2029-clean",
+        )
+
+        assert pre_rejected == []

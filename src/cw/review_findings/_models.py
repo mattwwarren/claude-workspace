@@ -72,6 +72,15 @@ FINGERPRINT_VERSION: Literal["FINGERPRINT_V1"] = "FINGERPRINT_V1"
 # no content-based re-anchoring could ever repair it. It is only ever produced
 # when a caller opted into the worktree fallback — without one there is nothing
 # to measure the file's length against, and the generic reason still applies.
+#
+# "schema_invalid" (#2029) is the only value produced BEFORE _classify_finding
+# ever runs. The other seven describe a well-formed Finding whose diff anchor
+# or evidence failed a mechanical check; this one describes a findings[] item
+# that could not become a Finding at all (a missing required field, a severity
+# outside the Literal, an item that is not even a dict). It is stamped at parse
+# time by parse_reviewer_document so one unparseable item costs one finding
+# rather than the whole reviewer's document — see that function for why the
+# rescue has to happen before top-level model construction.
 RejectedFindingReason = Literal[
     "invalid_severity",
     "missing_evidence",
@@ -80,6 +89,7 @@ RejectedFindingReason = Literal[
     "invalid_line_reference",
     "line_reference_out_of_range",
     "unanchored",
+    "schema_invalid",
 ]
 # The sole reason an escalation is stripped, kept as its own single-value
 # Literal so :attr:`StrippedEscalation.reason` cannot accidentally carry a
@@ -414,10 +424,23 @@ class ReviewerRunFailure(BaseModel):
     ``reason`` is an open string (not a closed Literal) — failure modes are
     executor-specific and evolve independently of this contract. It is
     deliberately not projected onto :class:`ReviewerRunRecord`.
+
+    ``discarded_finding_count``/``discarded_finding_severities`` (#2029) are a
+    best-effort tally of what the unusable payload was CLAIMING to report, for
+    the residual case ``parse_reviewer_document``'s per-finding rescue cannot
+    save: a document that failed structurally, so no ``RejectedFinding`` exists
+    for its items. Additive and default-0/empty, purely recorded here — the
+    same convention as ``ReviewVerdict.rejected_count`` — so every existing
+    ``role=..., reason=...`` construction site (timeout, budget_exhausted,
+    unparseable_response) is unaffected. Severities are read off the raw
+    payload, so an unusable one is bucketed as ``"unknown"`` rather than
+    dropped; see ``_validation._best_effort_discarded_tally``.
     """
 
     role: str
     reason: str
+    discarded_finding_count: int = 0
+    discarded_finding_severities: dict[str, int] = Field(default_factory=dict)
 
 
 class StrippedEscalation(BaseModel):
@@ -516,6 +539,21 @@ class ReviewVerdict(BaseModel):
     entered ``accepted``. Computed fresh from each call's own downgrades, so
     it describes that pass rather than accumulating across passes.
 
+    ``run_failures_with_should_fix_discards`` (#2029) is the residual half of
+    the same "a finding nobody read is not a clean review" rule
+    ``rejected_must_fix`` enforces per-finding. When a reviewer's document
+    fails STRUCTURALLY — no per-finding rescue is possible, so no
+    :class:`RejectedFinding` exists to select from — the run failure's own
+    :attr:`ReviewerRunFailure.discarded_finding_severities` tally is consulted
+    instead, and the failure lands here if it was claiming at least one
+    MUST_FIX **or SHOULD_FIX** finding. The threshold is deliberately one step
+    stricter than the per-finding gate's MUST_FIX-only rule: there, the
+    finding's own text survives in ``rejected`` for an operator to read, so a
+    SHOULD_FIX can safely be informational; here the text is gone entirely and
+    only a count remains, and a lost SHOULD_FIX with nothing left to inspect is
+    not something a pass should proceed past. NIT/DEBT/PRINCIPLE-only discards
+    stay non-gating, consistent with #2000's "below MUST_FIX is informational".
+
     ``unmatched_adjudication_count`` (#1805) is written solely by
     :func:`cw.review_adjudication.apply_adjudication`: the number of
     adjudication entries that matched no accepted finding (stale anchor,
@@ -540,6 +578,12 @@ class ReviewVerdict(BaseModel):
     # :func:`_select_rejected_must_fix` for why this is a second signal rather
     # than a widening of the first.
     rejected_must_fix: list[RejectedFinding] = Field(default_factory=list)
+    # #2029: the subset of this pass's ``ReviewerRunFailure`` list whose
+    # payload was claiming at least one MUST_FIX or SHOULD_FIX finding when it
+    # failed structurally -- see the class docstring for the threshold.
+    run_failures_with_should_fix_discards: list[ReviewerRunFailure] = Field(
+        default_factory=list
+    )
     # #2000: the all-severity tally of ``rejected`` -- see the class docstring.
     # Additive and default-0/empty (the `unmatched_adjudication_count`
     # precedent), stamped once in `consolidate_verdict` alongside

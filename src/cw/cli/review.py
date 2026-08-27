@@ -66,10 +66,12 @@ from cw.review_adjudication import (
 )
 from cw.review_findings import (
     CapturedDiff,
+    RejectedFinding,
     ReviewerFindingsDocument,
     ReviewerRunFailure,
     ReviewVerdict,
     consolidate_verdict,
+    parse_reviewer_document,
 )
 
 if TYPE_CHECKING:
@@ -294,8 +296,18 @@ def _resolve_documents_from_files(source: Path) -> list[Path]:
     return sorted(source.parent.glob(source.name))
 
 
-def _load_reviewer_document(path: Path) -> ReviewerFindingsDocument:
-    """Read one reviewer findings document, naming *path* on any failure."""
+def _load_reviewer_document(
+    path: Path,
+) -> tuple[ReviewerFindingsDocument, list[RejectedFinding]]:
+    """Read one reviewer findings document, naming *path* on any failure.
+
+    Returns ``(document, rejected)`` since #2029: a findings[] item that cannot
+    become a :class:`Finding` is now reported as a ``"schema_invalid"``
+    rejection alongside its surviving siblings, instead of destroying the whole
+    document. The ``ValidationError`` wrapping below still fires — but only for
+    a genuinely STRUCTURAL failure, one the per-finding rescue could not
+    resolve.
+    """
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -307,15 +319,28 @@ def _load_reviewer_document(path: Path) -> ReviewerFindingsDocument:
         msg = f"--documents-from could not parse {path} as JSON: {exc}"
         raise DocumentsFromReadError(msg) from exc
     try:
-        return ReviewerFindingsDocument.model_validate(payload)
+        return parse_reviewer_document(payload)
     except ValidationError as exc:
         msg = f"--documents-from rejected {path} as a reviewer document: {exc}"
         raise DocumentsFromReadError(msg) from exc
 
 
-def _load_documents_from(source: Path) -> list[ReviewerFindingsDocument]:
-    """Every reviewer findings document *source* selects, in filename order."""
-    return [_load_reviewer_document(p) for p in _resolve_documents_from_files(source)]
+def _load_documents_from(
+    source: Path,
+) -> tuple[list[ReviewerFindingsDocument], list[RejectedFinding]]:
+    """Every reviewer findings document *source* selects, in filename order.
+
+    The second element aggregates every file's parse-time rejects (#2029), in
+    the same filename order, for ``consolidate_verdict``'s
+    ``pre_validation_rejected``.
+    """
+    documents: list[ReviewerFindingsDocument] = []
+    rejected: list[RejectedFinding] = []
+    for path in _resolve_documents_from_files(source):
+        document, file_rejected = _load_reviewer_document(path)
+        documents.append(document)
+        rejected.extend(file_rejected)
+    return documents, rejected
 
 
 class _ConsolidateInput(BaseModel):
@@ -632,11 +657,14 @@ def review_consolidate(
     else:
         resolved_worktree = worktree if worktree is not None else Path.cwd()
 
-    documents = (
-        _load_documents_from(documents_from)
-        if documents_from is not None
-        else parsed.documents
-    )
+    # #2029: only the --documents-from path can report parse-time rejects. The
+    # payload's inline `documents` array is validated by _ConsolidateInput's own
+    # Pydantic field, which has the same all-or-nothing limitation and is out of
+    # scope here (tracked separately as #2042).
+    if documents_from is not None:
+        documents, pre_validation_rejected = _load_documents_from(documents_from)
+    else:
+        documents, pre_validation_rejected = parsed.documents, []
     diff = _build_captured_diff(parsed.diff)
     verdict = consolidate_verdict(
         documents,
@@ -644,6 +672,7 @@ def review_consolidate(
         parsed.reviewed_sha,
         worktree=resolved_worktree,
         failed_reviewers=parsed.failed_reviewers,
+        pre_validation_rejected=pre_validation_rejected,
     )
     click.echo(verdict.model_dump_json(indent=2))
 

@@ -793,7 +793,7 @@ def _rereview(
         delta_from_sha=previous_reviewed_sha,
         prior_open_findings=prior_open_findings,
     )
-    documents, failures, metrics_by_role = run_codex_roles(
+    documents, failures, metrics_by_role, pre_validation_rejected = run_codex_roles(
         runner=runner,
         worktree=worktree,
         roles=prepared.roles,
@@ -826,6 +826,9 @@ def _rereview(
         # mid-loop. Re-merged every cycle for the same reason the voids are
         # re-fetched: an operator can settle a finding while the loop runs.
         finding_dispositions=prepared.finding_dispositions,
+        # #2029: this cycle's own parse-time rescues. Per-cycle, not carried
+        # over — each re-review re-runs the roles and re-parses their output.
+        pre_validation_rejected=pre_validation_rejected,
     )
     if verdict is not None:
         verdict = verdict.model_copy(

@@ -26,6 +26,7 @@ from cw.codex_review._const import (
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
+    CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
     STAGE3_REVIEW,
 )
 from cw.executor_diagnostics import append_diagnostics_pointer
@@ -241,6 +242,28 @@ def make_codex_blocked(
     )
 
 
+def _verdict_block_reason(verdict: ReviewVerdict) -> str | None:
+    """The blocked reason *verdict*'s own contents demand, or ``None``.
+
+    The three dispositions that park on what the review FOUND — as opposed to
+    how the roster ran — in their load-bearing precedence order. All three
+    construct a byte-identical ``make_codex_blocked`` carrying the rendered
+    verdict comment, so only the reason varies and only that is returned here;
+    see :func:`synthesize_codex_review_result`'s docstring for why each one
+    sits where it does.
+
+    ``None`` means the verdict itself is clean and the caller falls through to
+    the roster-shaped and empty-diff branches below it.
+    """
+    if verdict.blocking:
+        return CODEX_MUST_FIX_FINDINGS
+    if verdict.rejected_must_fix:
+        return CODEX_MUST_FIX_MECHANICALLY_REJECTED
+    if verdict.run_failures_with_should_fix_discards:
+        return CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS
+    return None
+
+
 def synthesize_codex_review_result(
     *,
     task: TicketTask,
@@ -257,6 +280,7 @@ def synthesize_codex_review_result(
     agent_spec_status: list[AgentSpecStatus] | None = None,
     voided_findings: list[VoidedFinding] | None = None,
     finding_dispositions: dict[str, FindingDisposition] | None = None,
+    pre_validation_rejected: list[RejectedFinding] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
 
@@ -274,6 +298,14 @@ def synthesize_codex_review_result(
       roster was incomplete"). ``verdict.blocking`` stays False on this path by
       design — see ``_const.CODEX_MUST_FIX_MECHANICALLY_REJECTED`` for why the
       fix loop must not be entered.
+    - a reviewer run failed structurally while claiming a MUST_FIX or SHOULD_FIX
+      finding → blocked/CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS (#2029).
+      Ordered immediately after the mechanically-rejected branch and BEFORE the
+      partial one, on that branch's own logic: a role that reported findings we
+      then threw away unread is more specific than "the roster was incomplete",
+      and only the former says something was actually lost. It sits BELOW the
+      two MUST_FIX branches because both of those carry the finding's own text
+      for an operator to act on, where this one carries only a count.
     - documents present but at least one selected role skipped/errored without
       producing one (a partial review) → blocked/CODEX_REVIEW_PARTIAL — a
       review that silently proceeded on an incomplete roster would be exactly
@@ -334,6 +366,13 @@ def synthesize_codex_review_result(
     fingerprint-keyed and does not. Applied here for the identical reason —
     both call sites reach the blocking check through this function.
 
+    ``pre_validation_rejected`` (#2029) is the findings ``run_codex_roles``
+    rescued out of their documents at parse time, threaded straight into
+    :func:`consolidate_verdict`. Like ``voided_findings`` and unlike the purely
+    recorded arguments above, it is NOT merely recorded: a schema-invalid
+    MUST_FIX among them populates ``verdict.rejected_must_fix`` and takes the
+    mechanically-rejected branch below, through #1714's existing gate.
+
     ``fix_loop_enabled`` (#1705) is the caller's own already-known fix-loop
     state, threaded only as far as :func:`render_verdict_comment` on the
     blocking branch — it discriminates a fix-loop-disabled single pass from a
@@ -359,6 +398,7 @@ def synthesize_codex_review_result(
                 worktree=worktree,
                 failed_reviewers=failures,
                 metrics_by_role=metrics_by_role,
+                pre_validation_rejected=pre_validation_rejected,
             ),
             capability,
         ),
@@ -379,22 +419,15 @@ def synthesize_codex_review_result(
     verdict = suppress_adjudicated_findings(
         verdict, finding_dispositions or {}, ticket_id=task.ticket_id
     )
-    if verdict.blocking:
+    block_reason = _verdict_block_reason(verdict)
+    if block_reason is not None:
         blocked = make_codex_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
-            reason=CODEX_MUST_FIX_FINDINGS,
+            reason=block_reason,
             details=render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
         )
         return blocked.model_copy(update={"review": verdict.review}), verdict
-    if verdict.rejected_must_fix:
-        dropped = make_codex_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=CODEX_MUST_FIX_MECHANICALLY_REJECTED,
-            details=render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
-        )
-        return dropped.model_copy(update={"review": verdict.review}), verdict
     if failures:
         partial = make_codex_blocked(
             ticket_id=task.ticket_id,
@@ -848,6 +881,38 @@ def _render_rejected_below_must_fix(verdict: ReviewVerdict) -> list[str]:
     return lines
 
 
+def _render_run_failure_discarded_note(verdict: ReviewVerdict) -> list[str]:
+    """Render the findings a structurally-failed reviewer threw away (#2029).
+
+    The residual sibling of :func:`_render_rejected_must_fix` and
+    :func:`_render_rejected_below_must_fix`. Those two iterate
+    :class:`RejectedFinding` records and can name each finding's file and
+    summary; here the document never parsed, so nothing survives to name — only
+    the role, why it failed, and a best-effort count of what it was claiming.
+    Saying that much is the whole point: an operator reading a park needs to
+    know a reviewer reported findings nobody ever read.
+
+    Empty-returns-``[]``, mirroring every other per-concern helper here.
+    Severities are sorted for a stable rendering across runs.
+    """
+    failures = verdict.run_failures_with_should_fix_discards
+    if not failures:
+        return []
+    lines = ["### Reviewer failures that discarded findings", ""]
+    for failure in failures:
+        severities = ", ".join(
+            f"{severity}: {count}"
+            for severity, count in sorted(failure.discarded_finding_severities.items())
+        )
+        lines.append(
+            f"- **{failure.role}** ({failure.reason}) — "
+            f"{failure.discarded_finding_count} finding(s) reported but never "
+            f"read ({severities})"
+        )
+    lines.append("")
+    return lines
+
+
 def _render_delta_note(verdict: ReviewVerdict) -> list[str]:
     """Say which head this pass's diff was taken from, when it was a delta.
 
@@ -953,6 +1018,7 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
     lines.extend(_render_delta_note(verdict))
     lines.extend(_render_rejected_must_fix(verdict))
     lines.extend(_render_rejected_below_must_fix(verdict))
+    lines.extend(_render_run_failure_discarded_note(verdict))
     lines.extend(_render_debt_note(verdict))
     lines.extend(_render_findings(verdict, "MUST_FIX", "MUST_FIX"))
     lines.extend(_render_findings(verdict, "SHOULD_FIX", "SHOULD_FIX"))

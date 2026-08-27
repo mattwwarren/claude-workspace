@@ -108,6 +108,21 @@ CODEX_FIX_SCOPE_VIOLATION = "codex_fix_scope_violation"
 # identical review pass reproduces the identical rejection.
 CODEX_MUST_FIX_MECHANICALLY_REJECTED = "codex_must_fix_mechanically_rejected"
 
+# A reviewer whose whole document failed to parse while CLAIMING at least one
+# MUST_FIX or SHOULD_FIX finding (#2029). The residual half of the sibling
+# above: that one fires when a finding survived far enough to be recorded as a
+# RejectedFinding an operator can read, this one when the document failed
+# structurally and only a count of what was lost remains.
+#
+# Deliberately NOT CODEX_REVIEW_PARTIAL, which it is ordered ahead of: "the
+# roster was incomplete" and "a role reported findings we then threw away
+# unread" are different facts, and only the second says something was lost.
+# Also NOT in _TRANSIENT_FAILURE_REASONS, for the same reason as the sibling
+# above: re-running an identical review pass reproduces the identical
+# schema mismatch, so retrying would park the ticket a second time instead of
+# self-healing.
+CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS = "codex_reviewer_failure_discarded_findings"
+
 # next_actions label for codex_review's own blocked-result synthesis (#1835)
 # — must NOT borrow local_runner._FIXED_NEXT_ACTIONS
 # ("user_resolve_local_executor_failure"), which mislabels a Codex CLI
