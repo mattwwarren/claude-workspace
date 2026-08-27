@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import click
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from cw.cli._base import handle_errors
 from cw.cli.review._diff_integrity import (
@@ -35,6 +36,7 @@ from cw.review_findings import (
     RejectedFinding,
     ReviewerFindingsDocument,
     ReviewerRunFailure,
+    _rescue_findings,
     consolidate_verdict,
     parse_reviewer_document,
 )
@@ -54,12 +56,67 @@ class _ConsolidateInput(BaseModel):
     disk verbatim rather than having the coordinating session retype them into
     an inline array. When that option is set, any ``documents`` still present
     on this envelope is ignored.
+
+    ``documents_pre_validation_rejected`` (#2042) closes the gap #2029 left
+    open: rescuing a schema-invalid ``findings[]`` item without losing its
+    siblings previously worked only for ``--documents-from``, because that
+    path calls :func:`~cw.review_findings.parse_reviewer_document` per file
+    before Pydantic ever sees the payload. The inline ``documents`` array had
+    no such boundary — it was validated by this class's own
+    ``list[ReviewerFindingsDocument]`` field, which is all-or-nothing the same
+    way. ``_rescue_inline_documents`` (a ``model_validator(mode="before")``)
+    now runs :func:`~cw.review_findings._rescue_findings` per raw document
+    before that field validation happens, substituting each document's
+    reduced (survivors-only) payload back in and stashing casualties here.
+    Pydantic's own native ``list[ReviewerFindingsDocument]`` validation then
+    does final construction on the reduced payload, so a residual structural
+    failure (e.g. every finding rescued away, leaving the document unable to
+    satisfy its own invariants) keeps its correct ``documents.<i>:`` location
+    for free. The hook guards on ``data`` being a dict whose ``documents`` key
+    is a list, no-oping otherwise -- see its own docstring for why.
     """
 
     documents: list[ReviewerFindingsDocument] = Field(default_factory=list)
+    documents_pre_validation_rejected: list[RejectedFinding] = Field(
+        default_factory=list
+    )
     diff: str
     reviewed_sha: str
     failed_reviewers: list[ReviewerRunFailure] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _rescue_inline_documents(cls, data: Any) -> Any:
+        """Pre-filter each inline document's findings before Pydantic's own
+        `list[ReviewerFindingsDocument]` field validation runs (#2042).
+
+        No-ops (returns `data` unchanged) unless `data` is a dict and its
+        `documents` key is a list -- anything else falls through to Pydantic's
+        own native top-level/field validation, which already raises the
+        correct clean error for a malformed envelope. Mirrors
+        `_rescue_findings`'s own non-dict/non-list guard one level up: this
+        hook must never index/`.get()` into a shape it hasn't confirmed,
+        since an unguarded AttributeError/TypeError here would NOT be caught
+        by `_parse_payload_or_exit` (ValidationError only) or `handle_errors`
+        (CwError only), and would regress today's clean exit-1 contract into
+        an unhandled traceback.
+        """
+        if not isinstance(data, dict):
+            return data
+        raw_documents = data.get("documents")
+        if not isinstance(raw_documents, list):
+            return data
+        reduced_documents: list[object] = []
+        rejected: list[RejectedFinding] = []
+        for raw_document in raw_documents:
+            reduced, doc_rejected = _rescue_findings(raw_document)
+            reduced_documents.append(reduced)
+            rejected.extend(doc_rejected)
+        return {
+            **data,
+            "documents": reduced_documents,
+            "documents_pre_validation_rejected": rejected,
+        }
 
 
 def _resolve_documents_from_files(source: Path) -> list[Path]:
@@ -245,14 +302,15 @@ def review_consolidate(
     else:
         resolved_worktree = worktree if worktree is not None else Path.cwd()
 
-    # #2029: only the --documents-from path can report parse-time rejects. The
-    # payload's inline `documents` array is validated by _ConsolidateInput's own
-    # Pydantic field, which has the same all-or-nothing limitation and is out of
-    # scope here (tracked separately as #2042).
+    # #2042: both the --documents-from path and the inline `documents` array
+    # now report parse-time rejects -- the latter via
+    # `_ConsolidateInput._rescue_inline_documents`, which runs ahead of this
+    # class's own `list[ReviewerFindingsDocument]` field validation.
     if documents_from is not None:
         documents, pre_validation_rejected = _load_documents_from(documents_from)
     else:
-        documents, pre_validation_rejected = parsed.documents, []
+        documents = parsed.documents
+        pre_validation_rejected = parsed.documents_pre_validation_rejected
     diff = _build_captured_diff(parsed.diff)
     verdict = consolidate_verdict(
         documents,

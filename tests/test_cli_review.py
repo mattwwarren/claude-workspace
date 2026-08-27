@@ -368,7 +368,17 @@ class TestReviewConsolidateCommand:
             line.startswith("reviewed_sha:") for line in result.output.splitlines()
         )
 
-    def test_invalid_severity_prints_nested_field_path(self, runner: CliRunner) -> None:
+    def test_invalid_severity_finding_is_rescued_leaving_document_needing_justification(
+        self, runner: CliRunner
+    ) -> None:
+        # #2042: the inline `documents` path now rescues a schema-invalid
+        # finding (bogus severity) the same way --documents-from always has.
+        # The lone finding here is the only one in its document, so rescuing
+        # it away leaves `findings=[]` with a blank `detail` (`_doc_payload`'s
+        # default) -- the doc-level "ok status needs justification" invariant
+        # fires instead of the old per-finding severity field error, so the
+        # field-path prefix shifts from `documents.0.findings.0.severity:` to
+        # `documents.0:`.
         raw_finding = _finding_kwargs(severity="BOGUS")
         payload = _consolidate_payload(documents=[_doc_payload(dict(raw_finding))])
         result = runner.invoke(
@@ -378,8 +388,7 @@ class TestReviewConsolidateCommand:
         )
         assert result.exit_code == 1
         assert any(
-            line.startswith("documents.0.findings.0.severity:")
-            for line in result.output.splitlines()
+            line.startswith("documents.0:") for line in result.output.splitlines()
         )
 
     def test_degraded_status_with_blank_detail_prints_field_path_and_exits_1(
@@ -401,6 +410,36 @@ class TestReviewConsolidateCommand:
         assert any(
             line.startswith("documents.0:") for line in result.output.splitlines()
         )
+
+    def test_bare_list_payload_still_exits_1_cleanly(self, runner: CliRunner) -> None:
+        # #2042 guard: the new `_rescue_inline_documents` hook must no-op on
+        # anything that isn't a dict, falling through to Pydantic's own
+        # top-level validation -- not raise an unguarded AttributeError that
+        # would regress this into an unhandled traceback. CliRunner reports
+        # exit_code == 1 for both a clean exit and a crash, so this also
+        # checks `result.exception` is the clean `click.exceptions.Exit`
+        # (surfaced by CliRunner as `SystemExit`), not an arbitrary exception.
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input="[]",
+        )
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)
+
+    def test_non_list_documents_field_still_exits_1_cleanly(
+        self, runner: CliRunner
+    ) -> None:
+        # #2042 guard: `documents` present but not a list must also no-op the
+        # hook rather than index into a shape it hasn't confirmed.
+        payload = _consolidate_payload(documents="not-a-list")
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)
 
     def test_path_argument_reads_from_file(
         self, runner: CliRunner, tmp_path: Path
@@ -2091,6 +2130,96 @@ class TestReviewConsolidateDocumentsFromSchemaInvalidFindings:
         (docs_dir / "b-clean.json").write_text(json.dumps(clean), encoding="utf-8")
 
         result = _consolidate_from(runner, docs_dir)
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert sorted(a["finding"]["summary"] for a in verdict["accepted"]) == [
+            "alpha kept",
+            "beta kept",
+        ]
+        assert len(verdict["rejected"]) == 1
+        assert verdict["rejected"][0]["reviewer_role"] == "Alpha Reviewer"
+
+
+class TestReviewConsolidateInlineSchemaInvalidFindings:
+    """#2042: the inline `documents=[...]` payload gets the same per-finding
+    rescue `TestReviewConsolidateDocumentsFromSchemaInvalidFindings` already
+    covers for `--documents-from` (#2029) -- one schema-invalid finding must
+    not delete its document's surviving siblings, nor its document's fellow
+    documents in the same payload.
+    """
+
+    def test_sibling_findings_survive_and_still_block(self, runner: CliRunner) -> None:
+        doc = _doc_payload(
+            _schema_invalid_finding(severity="NIT"),
+            _anchored_finding(severity="MUST_FIX", summary="real problem"),
+            detail="reviewed the diff",
+        )
+        payload = _consolidate_payload(documents=[doc])
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert [r["reason"] for r in verdict["rejected"]] == ["schema_invalid"]
+        assert [a["finding"]["summary"] for a in verdict["accepted"]] == [
+            "real problem"
+        ]
+        assert verdict["blocking"] is True
+
+    def test_schema_invalid_must_fix_alone_parks_via_rejected_must_fix(
+        self, runner: CliRunner
+    ) -> None:
+        doc = _doc_payload(
+            _schema_invalid_finding(severity="MUST_FIX"),
+            detail="reviewed the diff",
+        )
+        payload = _consolidate_payload(documents=[doc])
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert len(verdict["rejected_must_fix"]) == 1
+        assert verdict["rejected_must_fix"][0]["reason"] == "schema_invalid"
+        assert verdict["blocking"] is False
+
+    def test_one_bad_document_does_not_delete_the_other_documents_findings(
+        self, runner: CliRunner
+    ) -> None:
+        mixed = _doc_payload(
+            _schema_invalid_finding(severity="NIT"),
+            _anchored_finding(severity="SHOULD_FIX", summary="alpha kept"),
+            reviewer_role="Alpha Reviewer",
+            detail="reviewed the diff",
+        )
+        # A distinct anchor+evidence, or dedupe_findings would merge the two
+        # into one AcceptedFinding and the assertion below would prove nothing.
+        clean = _doc_payload(
+            dict(
+                _finding_kwargs(
+                    severity="SHOULD_FIX",
+                    summary="beta kept",
+                    line_start=3,
+                    line_end=3,
+                    evidence="pass",
+                )
+            ),
+            reviewer_role="Beta Reviewer",
+            detail="reviewed the diff",
+        )
+        payload = _consolidate_payload(documents=[mixed, clean])
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
+        )
 
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
