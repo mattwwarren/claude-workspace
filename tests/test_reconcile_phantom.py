@@ -538,7 +538,7 @@ def test_phantom_reverted_event_emitted_with_dirty_worktree(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
     )
 
     reconcile()
@@ -602,7 +602,7 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
     )
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
@@ -691,7 +691,7 @@ def test_phantom_dirty_worktree_routes_to_blocked_on_user(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
     )
 
     report = reconcile()
@@ -755,7 +755,7 @@ def test_phantom_clean_worktree_routes_to_pending(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
     )
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
@@ -817,7 +817,7 @@ def test_dirty_phantom_task_not_re_claimable(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
     )
 
     reconcile()
@@ -873,7 +873,7 @@ def test_phantom_reverted_event_carries_queue_status_blocked(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
     )
     reconcile()
 
@@ -928,7 +928,7 @@ def test_phantom_reverted_event_carries_queue_status_pending(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
     )
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
     reconcile()
