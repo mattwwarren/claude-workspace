@@ -1,8 +1,10 @@
 """Tests for ``cw review consolidate`` (``cw.cli.review.consolidate``).
 
 Covers the command itself, its ``--documents-from`` loader, and the
-``cw.cli.review._diff_integrity`` guards that are only reachable through it
-(#1241, #1924, #2029). Split out of ``tests/test_cli_review.py`` for #2049 so
+``cw.cli.review._diff_integrity`` guards as exercised through this command
+(#1241, #1924, #2029) — ``_diff_integrity`` is also imported by
+``cw.cli.review.commands``, so these guards are not exclusive to
+``consolidate``. Split out of ``tests/test_cli_review.py`` for #2049 so
 the test modules mirror the ``src/cw/cli/review/`` package seams.
 """
 
