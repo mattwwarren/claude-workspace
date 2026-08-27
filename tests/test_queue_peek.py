@@ -1141,7 +1141,7 @@ class TestLivenessGate:
         """#2044 second example (bf947d61): age arm fires, idle_min=0.1 —
         must be downgraded even though the age arm never reads idle_min
         itself."""
-        rec, reason = queue_peek.recommend(
+        rec, _ = queue_peek.recommend(
             age_min=66.9,
             idle_min=0.1,
             pr_state=None,
@@ -1164,7 +1164,7 @@ class TestLivenessGate:
     def test_idle_none_does_not_suppress_stop(self) -> None:
         """idle_min is None (no signal) — mirrors _reached_deep_stage's
         'unknown = no signal; does NOT suppress STOP' convention."""
-        rec, reason = queue_peek.recommend(
+        rec, _ = queue_peek.recommend(
             age_min=queue_peek.STOP_AGE_MIN + 1.0,
             idle_min=None,
             pr_state=None,
