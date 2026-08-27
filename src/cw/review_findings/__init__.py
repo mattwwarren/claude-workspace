@@ -122,6 +122,7 @@ from cw.review_findings._validation import (
     _enclosing_def_span,
     _evidence_in_claimed_lines,
     _line_reference_valid,
+    _rescue_findings,
     parse_reviewer_document,
     validate_reviewer_document,
 )
@@ -167,6 +168,7 @@ __all__ = [
     "_normalize_diff_text",
     "_normalize_unicode_punctuation",
     "_reconcile_evidence_window",
+    "_rescue_findings",
     "_select_rejected_must_fix",
     "_strip_diff_markers",
     "consolidate_verdict",
