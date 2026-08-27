@@ -18,6 +18,7 @@ and stub the daemon spawn via the file-local ``stub_spawn`` fixture.
 from __future__ import annotations
 
 import fcntl
+import json
 import subprocess
 import typing
 from datetime import UTC, datetime, timedelta
@@ -37,7 +38,7 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events, record_event
-from cw.exceptions import CwError, SessionsLockReentryError
+from cw.exceptions import CwError, HookContextConflictError, SessionsLockReentryError
 from cw.models import (
     ClientConfig,
     DevQueueStore,
@@ -2582,6 +2583,17 @@ class TestAttentionConstantsTypedAsPrAttentionState:
 # --- fix_agent recipe (#2017) ----------------------------------------------
 
 
+def _git_stdout(repo: Path, *args: str) -> str:
+    """Stripped stdout of a read-only git command in *repo*."""
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    ).stdout.strip()
+
+
 def _fix_git(repo: Path, *args: str) -> None:
     """Run a git command in *repo*, failing loudly on a non-zero exit."""
     subprocess.run(
@@ -2659,10 +2671,7 @@ def _advance_origin_main(client: ClientConfig, relpath: str, content: str) -> No
     _fix_git(repo, "fetch", "origin")
 
 
-def _fix_prompt(tmp_path: Path, content: str = "fix the MUST_FIX items\n") -> Path:
-    prompt = tmp_path / "fix-agent-prompt.md"
-    prompt.write_text(content, encoding="utf-8")
-    return prompt
+_FIX_PROMPT_TEXT = "fix the MUST_FIX items\n"
 
 
 def test_dispatch_fix_agent_provisions_worktree_and_spawns(
@@ -2680,7 +2689,7 @@ def test_dispatch_fix_agent_provisions_worktree_and_spawns(
     session_id = dispatch_fix_agent(
         client=client,
         branch=branch,
-        prompt_file=_fix_prompt(tmp_path),
+        prompt=_FIX_PROMPT_TEXT,
         label="fix-2017",
         ticket_id="2017",
         lane="default",
@@ -2716,7 +2725,7 @@ def test_dispatch_fix_agent_no_task_kwarg(
     dispatch_fix_agent(
         client=client,
         branch=branch,
-        prompt_file=_fix_prompt(tmp_path),
+        prompt=_FIX_PROMPT_TEXT,
         label="fix-2017",
         ticket_id="2017",
         lane="default",
@@ -2740,7 +2749,7 @@ def test_dispatch_fix_agent_resumes_pushed_branch(
     kwargs: dict[str, Any] = {
         "client": client,
         "branch": branch,
-        "prompt_file": _fix_prompt(tmp_path),
+        "prompt": _FIX_PROMPT_TEXT,
         "label": "fix-2017",
         "ticket_id": "2017",
         "lane": "default",
@@ -2780,7 +2789,7 @@ def test_dispatch_fix_agent_verifies_head_before_merge(
         fix_agent_mod.dispatch_fix_agent(
             client=client,
             branch=branch,
-            prompt_file=_fix_prompt(tmp_path),
+            prompt=_FIX_PROMPT_TEXT,
             label="fix-2017",
             ticket_id="2017",
             lane="default",
@@ -2807,7 +2816,7 @@ def test_dispatch_fix_agent_merge_conflict_blocks(
         dispatch_fix_agent(
             client=client,
             branch=branch,
-            prompt_file=_fix_prompt(tmp_path),
+            prompt=_FIX_PROMPT_TEXT,
             label="fix-2017",
             ticket_id="2017",
             lane="default",
@@ -2850,7 +2859,7 @@ def test_dispatch_fix_agent_merge_clean_succeeds(
     dispatch_fix_agent(
         client=client,
         branch=branch,
-        prompt_file=_fix_prompt(tmp_path),
+        prompt=_FIX_PROMPT_TEXT,
         label="fix-2017",
         ticket_id="2017",
         lane="default",
@@ -2885,9 +2894,175 @@ def test_dispatch_fix_agent_propagates_spawn_cwerror(
         dispatch_fix_agent(
             client=client,
             branch=branch,
-            prompt_file=_fix_prompt(tmp_path),
+            prompt=_FIX_PROMPT_TEXT,
             label="fix-2017",
             ticket_id="2017",
             lane="default",
             parent="parent-session",
         )
+
+
+def _seed_live_session_context(client: ClientConfig, branch: str) -> Path:
+    """Provision the fix branch's worktree and point its hook context at a live
+    session, reproducing what a resident REVIEW session leaves behind.
+
+    Fixture shape mirrors tests/test_spawn.py's own
+    ``test_daemon_overwrite_raises_when_context_references_live_session``: a
+    real ACTIVE Session in cw state plus a hand-written ``cw-context.json``
+    naming it.
+    """
+    from cw.config import save_state
+    from cw.models import CwState, Session, SessionOrigin, SessionStatus
+    from cw.worktree import create_worktree
+
+    save_state(
+        CwState(
+            sessions=[
+                Session(
+                    id="live1234",
+                    name=f"{client.name}/auto-dev/2017",
+                    client=client.name,
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=client.workspace_path,
+                )
+            ]
+        )
+    )
+    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    claude_dir = worktree / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "cw-context.json").write_text(
+        json.dumps(
+            {
+                "session_id": "live1234",
+                "session_name": f"{client.name}/auto-dev/2017",
+                "client": client.name,
+                "purpose": "impl",
+                "ticket_id": "2017",
+                "headless": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return worktree
+
+
+def test_dispatch_fix_agent_refuses_live_worktree_before_mutating(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    tmp_config_dir: Path,
+) -> None:
+    """R22/R23: the live-session refusal happens before any worktree mutation.
+
+    Deliberately does NOT stub ``spawn_create_impl`` -- the whole point is to
+    exercise the real ``_write_hook_context`` guard that every other test in
+    this block stubs past, which is the coverage gap #2017's own fix loop fell
+    into. ``origin/main`` is advanced first so a merge that *did* run would be
+    visible in the worktree; asserting HEAD and the working tree are untouched
+    is what proves the refusal preceded the fetch/merge.
+    """
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _advance_origin_main(client, "sibling.txt", "merged sibling\n")
+    worktree = _seed_live_session_context(client, branch)
+    head_before = _git_stdout(worktree, "rev-parse", "HEAD")
+    log_before = _git_stdout(worktree, "log", "--oneline")
+    status_before = _git_stdout(worktree, "status", "--porcelain")
+
+    with pytest.raises(HookContextConflictError, match="live1234"):
+        dispatch_fix_agent(
+            client=client,
+            branch=branch,
+            prompt=_FIX_PROMPT_TEXT,
+            label="fix-2017",
+            ticket_id="2017",
+            lane="default",
+            parent="live1234",
+        )
+
+    assert _git_stdout(worktree, "rev-parse", "HEAD") == head_before
+    assert _git_stdout(worktree, "log", "--oneline") == log_before
+    assert _git_stdout(worktree, "status", "--porcelain") == status_before
+    assert not (worktree / "sibling.txt").exists()
+
+
+def test_dispatch_fix_agent_merge_abort_failure_raises_distinct_message(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R24 SHOULD_FIX: a failed ``merge --abort`` must not claim a clean tree."""
+    from cw.reconcile.review_recipes import fix_agent as fix_agent_mod
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _advance_origin_main(client, "shared.txt", "main side\n")
+
+    real_run_git = fix_agent_mod._run_git
+
+    def _abort_fails(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ("merge", "--abort"):
+            return subprocess.CompletedProcess(
+                args=list(args), returncode=128, stdout=""
+            )
+        return real_run_git(*args, **kwargs)
+
+    monkeypatch.setattr(fix_agent_mod, "_run_git", _abort_fails)
+
+    with pytest.raises(CwError, match="NOT verified clean") as excinfo:
+        fix_agent_mod.dispatch_fix_agent(
+            client=client,
+            branch=branch,
+            prompt=_FIX_PROMPT_TEXT,
+            label="fix-2017",
+            ticket_id="2017",
+            lane="default",
+            parent="parent-session",
+        )
+
+    assert "128" in str(excinfo.value)
+    assert "worktree left clean" not in str(excinfo.value)
+    assert stub_spawn.calls == []
+
+
+def test_dispatch_fix_agent_records_session_spawned_event(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """R24 MUST_FIX: a successful dispatch leaves a durable spawn audit trail."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+
+    session_id = dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    events = read_events(event_types=[OrchestratorEventType.SESSION_SPAWNED])
+    assert len(events) == 1
+    assert events[0].correlation_id == "2017"
+    assert events[0].payload == {
+        "ticket_id": "2017",
+        "client": client.name,
+        "session_id": session_id,
+        "lane": "default",
+    }
+    # Guards the exact regression R24 names: a ClientConfig object here would
+    # break event JSON serialization and this package's identity convention.
+    assert events[0].payload["client"] == "acme"
