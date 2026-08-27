@@ -704,31 +704,37 @@ def _has_unpushed_commits(client: ClientConfig, branch: str, wt_path: Path) -> b
     """Return True if *branch* has commits not on any known base ref.
 
     Three-level fallback:
-    1. ``origin/<branch>`` — canonical; used when the branch was pushed.
-    2. ``origin/<default_branch>`` — fallback when branch has no remote yet.
+    1. The worktree's own upstream, resolved via ``@{u}`` on the actual
+       checked-out branch — canonical; used when that branch was pushed,
+       regardless of whether its upstream name matches *branch*.
+    2. ``origin/<default_branch>`` — fallback when no upstream is configured.
     3. Local ``<default_branch>`` — offline / bare-clone fallback.
     Returns True conservatively on subprocess failure or all-refs-absent.
     """
     try:
-        ref_check = _run_git(
+        upstream = _run_git(
             "rev-parse",
-            "--verify",
-            f"origin/{branch}",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{u}",
             cwd=wt_path,
             check=False,
         )
-        if ref_check.returncode == 0:
-            # Level 1: origin/<branch> exists — canonical happy path.
-            log_result = _run_git(
-                "log",
-                f"origin/{branch}..HEAD",
-                "--oneline",
-                cwd=wt_path,
-                check=False,
-            )
-            return bool(log_result.stdout.strip())
+        if upstream.returncode == 0:
+            upstream_ref = upstream.stdout.strip()
+            if upstream_ref:
+                # Level 1: own upstream configured — canonical happy path.
+                log_result = _run_git(
+                    "log",
+                    f"{upstream_ref}..HEAD",
+                    "--oneline",
+                    cwd=wt_path,
+                    check=False,
+                )
+                if log_result.returncode == 0:
+                    return bool(log_result.stdout.strip())
 
-        # Level 2: origin/<branch> absent — compare against origin/<default_branch>.
+        # Level 2: no upstream configured — compare against origin/<default_branch>.
         default_base = f"origin/{client.default_branch}"
         log_result = _run_git(
             "log",
@@ -771,12 +777,14 @@ def worktree_has_unsaved_work(
 
     "Unsaved" means either:
     - uncommitted changes (``git status --porcelain`` is non-empty), OR
-    - unpushed commits (``git log origin/<branch>..HEAD`` is non-empty).
+    - unpushed commits (``git log <upstream>..HEAD`` is non-empty).
 
     Returns False when the worktree path does not exist (nothing to lose).
-    When ``origin/<branch>`` does not exist, falls back to comparing against
-    ``origin/<default_branch>`` then the local ``<default_branch>`` ref. If
-    all refs are unresolvable (e.g. offline), returns True conservatively.
+    Resolves the upstream from the worktree's actual checked-out branch
+    (``@{u}``); only when that branch has no upstream configured at all does
+    it fall back to comparing against ``origin/<default_branch>``, then the
+    local ``<default_branch>`` ref. If all refs are unresolvable (e.g.
+    offline), returns True conservatively.
 
     *wt_path* defaults to the branch's canonical ``worktree_path_for(client,
     branch)`` location. Passing it explicitly lets a caller check a *foreign*
