@@ -7945,6 +7945,43 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "blocked"
 
+    # -- #2017: fix-loop handoff -- routine flow, not an operator park -----
+
+    def test_blocked_fix_loop_pending_dispatch_leaves_task_running(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """The handoff sentinel must not touch status or page the operator.
+
+        The REVIEW session exits `blocked` here as a matter of routine per-cycle
+        flow, having just recorded the action list for cw.reconcile.fix_dispatch
+        to pick up. The generic fallthrough would park it BLOCKED_ON_USER and
+        emit session.needs_attention -- the park would strand the ticket the fix
+        loop is mid-way through, and the event would page an operator with
+        nothing to act on. Staying RUNNING is also what keeps claim.py's
+        PENDING-only reclaim from dispatching a second REVIEW session mid-fix.
+        """
+        from cw.dispatch import apply_staged_decision
+        from cw.events import read_events
+
+        task = self._make_running_task("FIXD-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {
+                "stage": "stage3_review",
+                "reason": "fix_loop_pending_dispatch",
+            },
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.disposition is None
+        assert task.blocked_reason is None
+        assert task.completed_at is None
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
+
     # -- #1717: FINALIZE self-heal regress round-trip repeat detection -----
 
     def test_finalize_regress_round_trip_no_commit_emits_repeat_not_silent_rearm(

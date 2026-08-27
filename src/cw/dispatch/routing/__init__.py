@@ -122,6 +122,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
+from cw.reconcile.fix_dispatch import FIX_LOOP_PENDING_DISPATCH
 from cw.unavailability import FAMILY_PROVIDER_OVERLOAD
 
 if TYPE_CHECKING:
@@ -765,6 +766,18 @@ def _route_stage_failure(
                 "regress_attempt": task.regress_attempts,
             },
         )
+        return
+    if status == "blocked" and blocker_reason == FIX_LOOP_PENDING_DISPATCH:
+        # #2017: the REVIEW session recorded its fix-loop action list on the
+        # queue row and exited so cw.reconcile.fix_dispatch can issue the spawn
+        # from outside the worktree. Routine per-cycle flow, not a terminal
+        # outcome -- so no SESSION_NEEDS_ATTENTION (nothing for an operator to
+        # act on) and no status transition at all. Leaving task.status at
+        # RUNNING is load-bearing, not merely tidy: the generic fallthrough
+        # would park it BLOCKED_ON_USER, stranding a ticket the fix loop is
+        # mid-way through, and RUNNING is precisely the state claim.py's
+        # PENDING-only reclaim ignores, which is what stops a second REVIEW
+        # session being dispatched before the fix agent has even spawned.
         return
     if status == "blocked" and blocker_reason == FAMILY_PROVIDER_OVERLOAD:
         # #1948: worker-declared provider overload (API 529) is transient and
