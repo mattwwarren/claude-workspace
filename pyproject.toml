@@ -309,19 +309,35 @@ ignore = [
 # ``from cw.watchdog import run_tick`` would bind a stale reference at import
 # time. Inline import at function level is the sanctioned mechanism.
 "src/cw/cli/watchdog.py" = ["PLC0415"]
-# cli/review defers imports for three sanctioned reasons: (1) reuse without
-# duplication — _build_captured_diff imports cw.codex_review._parse_unified_diff
+# cli/review defers imports for three sanctioned reasons, split across the two
+# submodules that hold the deferring functions since the #2048 review.py ->
+# review/ package split: (1) reuse without duplication — _group
+# ._build_captured_diff imports cw.codex_review._parse_unified_diff
 # function-locally rather than duplicate the ~60-line parser (documented in that
-# function's docstring); (2) monkeypatch timing — review_register defers
+# function's docstring); (2) monkeypatch timing — commands.review_register defers
 # cw.gh.fetch_pr_view / cw.operator_identity.cached_gh_login / cw.pr_hydrate so
 # test-time patches take effect (tests/test_cli_review.py:78,85 do
 # monkeypatch.setattr on cw.operator_identity.cached_gh_login and
-# cw.gh.fetch_pr_view); (3) startup cost — review_consolidate defers
+# cw.gh.fetch_pr_view); (3) startup cost — _group._parse_payload_or_exit defers
 # cw.result's _format_errors/_read_json_payload, since cw.result pulls in
-# cw.config's session-state chain and cli/review.py is eagerly imported by
+# cw.config's session-state chain and cli/review/ is eagerly imported by
 # cli/__init__.py on every ``cw`` invocation. Inline imports at function level
 # are the sanctioned mechanism, not a workaround.
-"src/cw/cli/review.py" = ["PLC0415"]
+"src/cw/cli/review/_group.py" = ["PLC0415"]
+"src/cw/cli/review/commands.py" = [
+    "PLC0415",
+    # `_AdjudicateInput.verdict`, `_VerifyFixesInput.verdict`,
+    # `_CheckVoidedInput.verdict` and `_CheckVoidedOutput.verdict` are pydantic
+    # field annotations, so `cw.review_findings.ReviewVerdict` must be
+    # importable at runtime for pydantic to resolve them at class-build time —
+    # a TYPE_CHECKING-only import would raise PydanticUndefinedAnnotation.
+    # Exactly the `src/cw/review_findings/_models.py` TC001 case above, and it
+    # only fires because the #2048 review.py -> package split moved every
+    # RUNTIME `cw.review_findings` use (`CapturedDiff`, `consolidate_verdict`,
+    # `parse_reviewer_document`) into the sibling `_group`/`consolidate`
+    # submodules, leaving this module's import annotation-only.
+    "TC001",
+]
 # review_finding_dispositions must import NOTHING from cw at module scope
 # (#1838): cw.models.tasks imports FindingDisposition from it, so a module-scope
 # cw.review_debt / cw.events / cw.models.enums import there closes the cycle

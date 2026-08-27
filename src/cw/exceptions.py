@@ -200,12 +200,12 @@ class ApproveGateError(CwError):
 class DuplicatedHunkError(CwError):
     """The same hunk appears twice for the same file in a consolidate payload.
 
-    Raised by ``cw.cli.review._check_no_duplicate_hunks`` (#1924). A
-    hand-assembled envelope whose ``diff`` was reconstructed from memory can
-    repeat a hunk verbatim; the matcher then validates evidence against a diff
-    that no commit ever produced. Distinct files carrying byte-identical hunk
-    text are legitimate and never raise — the file path is part of the
-    duplicate key.
+    Raised by ``cw.cli.review._diff_integrity._check_no_duplicate_hunks``
+    (#1924). A hand-assembled envelope whose ``diff`` was reconstructed from
+    memory can repeat a hunk verbatim; the matcher then validates evidence
+    against a diff that no commit ever produced. Distinct files carrying
+    byte-identical hunk text are legitimate and never raise — the file path is
+    part of the duplicate key.
     """
 
     __slots__ = ()
@@ -214,10 +214,10 @@ class DuplicatedHunkError(CwError):
 class PlaceholderDiffError(CwError):
     """A consolidate payload's ``diff`` never carried a real diff.
 
-    Raised by ``cw.cli.review._check_not_placeholder_diff`` (#1924) for an
-    unresolved template token (``<diff here>``, ``<insert diff>``, ``...``) or
-    for text too short to be a diff that also carries no ``diff --git``
-    header. Deliberately narrow, mirroring
+    Raised by ``cw.cli.review._diff_integrity._check_not_placeholder_diff``
+    (#1924) for an unresolved template token (``<diff here>``,
+    ``<insert diff>``, ``...``) or for text too short to be a diff that also
+    carries no ``diff --git`` header. Deliberately narrow, mirroring
     ``cw.auto_dev_result.parse._is_placeholder_sentinel_text``: silently
     accepting a real diff matters more than catching every possible stub.
     """
@@ -228,9 +228,10 @@ class PlaceholderDiffError(CwError):
 class DiffBaseMismatchError(CwError):
     """A payload's ``diff`` is not the real diff for its base.
 
-    Raised by ``cw.cli.review._check_diff_matches_base`` (#1924) when
-    ``cw review consolidate --base <ref>`` or ``cw review verify-fixes --base
-    <ref>`` (#1988) finds that the payload's diff text differs from
+    Raised by ``cw.cli.review._diff_integrity._check_diff_matches_base``
+    (#1924) when ``cw review consolidate --base <ref>`` or
+    ``cw review verify-fixes --base <ref>`` (#1988) finds that the payload's
+    diff text differs from
     ``git diff --no-color <base>...<reviewed_sha>``, or when that git
     invocation itself fails (an unresolvable ref).
     """
@@ -241,8 +242,8 @@ class DiffBaseMismatchError(CwError):
 class DocumentsFromReadError(CwError):
     """A ``--documents-from`` source could not be read into documents.
 
-    Raised by ``cw.cli.review._resolve_documents_from_files`` and
-    ``_load_reviewer_document`` (#1924) when the source path's parent does not
+    Raised by ``cw.cli.review.consolidate._resolve_documents_from_files`` and
+    ``._load_reviewer_document`` (#1924) when the source path's parent does not
     exist, or when a matched file is unreadable, is not JSON, or does not
     validate as a ``ReviewerFindingsDocument``. The message always names the
     offending path so the operator can fix that one file rather than guess.
