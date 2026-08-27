@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 # #2000: severity ordering for the rejected-findings section, derived from the
 # `Severity` Literal itself rather than a hand-maintained rank table -- the
-# same USE_EXISTING pattern `_validation._VALID_SEVERITIES` already applies to
+# same USE_EXISTING pattern `_classify._VALID_SEVERITIES` already applies to
 # the same type, so a severity added later is ordered by construction.
 _SEVERITY_ORDER: tuple[str, ...] = get_args(Severity)
 
