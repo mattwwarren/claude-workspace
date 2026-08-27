@@ -260,8 +260,7 @@ def _evidence_window_discrepancy_detail(finding: Finding) -> str:
         f"{declared_lines} line(s); no window within ±{_LINE_ANCHOR_TOLERANCE} "
         "lines of the declared range contains the evidence text verbatim; an "
         "unbounded content-based re-anchoring search of the file's diff also "
-        "found no match (#2019)"
-        + _normalization_diagnosis(finding)
+        "found no match (#2019)" + _normalization_diagnosis(finding)
     )
 
 

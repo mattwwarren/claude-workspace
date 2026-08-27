@@ -1875,7 +1875,8 @@ class Test9491MustFixCaseReconstruction:
             "evidence is 1 line(s) long but the declared range "
             "line_start=9491, line_end=None spans 1 line(s); no window "
             "within ±3 lines of the declared range contains the "
-            "evidence text verbatim" + _UNBOUNDED_RESCUE_MISS_DIAGNOSIS
+            "evidence text verbatim"
+            + _UNBOUNDED_RESCUE_MISS_DIAGNOSIS
             + _RESCUE_NOT_ATTEMPTED_DIAGNOSIS
         )
 
@@ -2203,7 +2204,10 @@ class TestEvidenceGateContentRescue:
             files={"src/cw/foo.py": [10, 13, 16, 20]},
         )
         f = _make_finding(
-            severity="SHOULD_FIX", line_start=8, line_end=15, evidence="fourth line content"
+            severity="SHOULD_FIX",
+            line_start=8,
+            line_end=15,
+            evidence="fourth line content",
         )
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert not rejected
@@ -2240,8 +2244,12 @@ class TestEvidenceGateContentRescue:
             "fourth line content",
             files={"src/cw/foo.py": [10, 13, 16, 20]},
         )
-        drifted = _make_finding(line_start=8, line_end=15, evidence="fourth line content")
-        clean = _make_finding(line_start=20, line_end=20, evidence="fourth line content")
+        drifted = _make_finding(
+            line_start=8, line_end=15, evidence="fourth line content"
+        )
+        clean = _make_finding(
+            line_start=20, line_end=20, evidence="fourth line content"
+        )
         doc_a = _make_reviewer_doc(drifted, reviewer_role="Reviewer A")
         doc_b = _make_reviewer_doc(clean, reviewer_role="Reviewer B")
         accepted_a, rejected_a, _ = validate_reviewer_document(doc_a, diff)
