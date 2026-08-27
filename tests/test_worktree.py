@@ -2637,9 +2637,7 @@ class TestWorktreeHasUnsavedWork:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert (
-            worktree_has_unsaved_work(client, "dev/2044", wt_path=wt_path) is False
-        )
+        assert worktree_has_unsaved_work(client, "dev/2044", wt_path=wt_path) is False
 
     def test_returns_true_for_unpushed_commits_on_own_upstream(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2663,9 +2661,7 @@ class TestWorktreeHasUnsavedWork:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert (
-            worktree_has_unsaved_work(client, "dev/2044", wt_path=wt_path) is True
-        )
+        assert worktree_has_unsaved_work(client, "dev/2044", wt_path=wt_path) is True
 
     def test_falls_through_to_level_2_when_upstream_log_returncode_nonzero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2695,9 +2691,7 @@ class TestWorktreeHasUnsavedWork:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert (
-            worktree_has_unsaved_work(client, "dev/2044", wt_path=wt_path) is True
-        )
+        assert worktree_has_unsaved_work(client, "dev/2044", wt_path=wt_path) is True
 
     def test_returns_false_when_no_upstream_and_at_base(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2916,7 +2910,7 @@ class TestWorktreeHasUnsavedWork:
     def test_returns_true_when_both_origins_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """No upstream configured and origin/<default_branch> absent (offline) → True."""
+        """No upstream and origin/<default_branch> absent (offline) → True."""
         client = self._client(tmp_path)
         wt_path = tmp_path / "wt" / "auto-dev-offline"
         wt_path.mkdir(parents=True)

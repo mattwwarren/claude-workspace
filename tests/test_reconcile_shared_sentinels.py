@@ -2228,9 +2228,7 @@ def test_worktree_dirty_by_path_passes_actual_wt_path_not_rederived_path(
 
     captured: dict[str, object] = {}
 
-    def _capture(
-        client: object, branch: str, *, wt_path: Path | None = None
-    ) -> bool:
+    def _capture(client: object, branch: str, *, wt_path: Path | None = None) -> bool:
         captured["wt_path"] = wt_path
         captured["branch"] = branch
         return True
@@ -2265,9 +2263,7 @@ def test_worktree_dirty_by_path_clean_state_for_non_canonical_branch_worktree(
 
     captured: dict[str, object] = {}
 
-    def _capture(
-        client: object, branch: str, *, wt_path: Path | None = None
-    ) -> bool:
+    def _capture(client: object, branch: str, *, wt_path: Path | None = None) -> bool:
         captured["wt_path"] = wt_path
         captured["branch"] = branch
         return False
