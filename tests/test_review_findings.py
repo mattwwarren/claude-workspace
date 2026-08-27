@@ -812,6 +812,16 @@ _RESCUE_NOT_APPLICABLE_DIAGNOSIS = (
     "applicable (file-level fallback has no line anchor for a diff-pair "
     "rescue to resolve against)"
 )
+# #2019: the evidence_not_in_diff detail message's exact wording for the
+# unbounded content-rescue miss, inserted before the pre-existing
+# normalization-diagnosis suffix above. Only the line-anchored branch of
+# _evidence_window_discrepancy_detail carries this clause -- the file-level
+# (no line anchor) branch is unaffected by #2019, which only touches the
+# line-anchored evidence-gate.
+_UNBOUNDED_RESCUE_MISS_DIAGNOSIS = (
+    "; an unbounded content-based re-anchoring search of the file's diff "
+    "also found no match (#2019)"
+)
 
 
 def _issue1879_captured_diff() -> CapturedDiff:
@@ -1446,12 +1456,24 @@ class TestValidateReviewerDocument:
         assert not accepted
         assert rejected[0].reason == "evidence_not_in_diff"
 
-    def test_evidence_from_other_line_same_file_rejected(self) -> None:
-        # R6 (#1236), one level more precise than the cross-file gap: a quote
-        # that IS the verbatim content of a *different added line in the same
-        # file* — outside the finding's claimed line window — is rejected
-        # (evidence_not_in_diff), even though it's real, in-file, in that file's
-        # hunk. The claimed window (line 10) must contain the evidence.
+    def test_evidence_from_other_line_same_file_is_now_content_rescued(self) -> None:
+        # R6 (#1236) originally pinned this as rejected: a quote that IS the
+        # verbatim content of a *different added line in the same file* —
+        # outside the finding's claimed line window — used to be rejected
+        # (evidence_not_in_diff) even though it's real, in-file content, on
+        # the theory that the claimed window (line 10) must itself contain
+        # the evidence.
+        #
+        # #2019 supersedes that: this is exactly the ticket's own motivating
+        # shape ("validate on the quote, not just the line number") — the
+        # claimed line is an exact anchor hit (10 is a genuine added line),
+        # but its content doesn't match; the evidence's true home (line 11)
+        # is genuinely, verbatim present elsewhere in the SAME file's diff.
+        # _classify_mislocated_finding's unbounded file_window_text search
+        # finds it there and accepts, and _resolved_finding's own narrower
+        # rescue (over the added-only file_line_text) also finds it, so the
+        # persisted anchor is fully corrected to (11, 11) rather than
+        # staying at the reviewer's stale (10, 10).
         diff = _make_diff(
             "def broken():",
             "sneaky = elsewhere()",
@@ -1459,8 +1481,9 @@ class TestValidateReviewerDocument:
         )
         f = _make_finding(evidence="sneaky = elsewhere()", line_start=10, line_end=10)
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
-        assert not accepted
-        assert rejected[0].reason == "evidence_not_in_diff"
+        assert rejected == []
+        assert accepted[0].line_start == 11
+        assert accepted[0].line_end == 11
 
     def test_evidence_cross_file_rejected(self) -> None:
         # R6 (#1236): a quote copied verbatim from a *different changed file's*
@@ -1637,13 +1660,18 @@ class TestValidateReviewerDocument:
         assert accepted[0].line_start == 10
         assert accepted[0].line_end == 16
 
-    def test_widened_range_window_rejects_evidence_outside_resolved_window(
+    def test_widened_range_window_beyond_resolved_bound_is_now_content_rescued(
         self,
     ) -> None:
-        # Same widened window (10-16) as above, but the evidence is the real
+        # Same widened window (10-16) as above; the evidence is the real
         # content of line 20 — a genuine added line, just outside the
-        # resolved window. Proves the widened window is still bounded, not an
-        # unbounded escape hatch.
+        # resolved window. Pre-#2019 this stayed rejected, proving the
+        # widened window was still bounded, not an unbounded escape hatch.
+        # #2019 gives the evidence-gate the same unbounded content rescue the
+        # anchor-gate already had (#2007) — see
+        # TestEvidenceGateContentRescue for the dedicated coverage of that
+        # rescue's acceptance/rejection/anchor-correction shape; this test
+        # keeps pinning THIS fixture's outcome now that it flips to accepted.
         diff = _make_diff(
             "first line content",
             "second line content",
@@ -1653,8 +1681,9 @@ class TestValidateReviewerDocument:
         )
         f = _make_finding(line_start=8, line_end=15, evidence="fourth line content")
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
-        assert not accepted
-        assert rejected[0].reason == "evidence_not_in_diff"
+        assert not rejected
+        assert accepted[0].line_start == 20
+        assert accepted[0].line_end == 20
 
     # -- #1738: hunk-context evidence window (mode 4) --------------------
 
@@ -1694,8 +1723,24 @@ class TestValidateReviewerDocument:
         # (a) genuine CONTEXT-line content from elsewhere in the same file
         # (line 9511, "from cw.auto_dev_result import ("), claimed at the
         # #1729 finding's line range. Only visible in file_window_text at
-        # all post-fix -- proves the widened map is still bounded to the
-        # claimed window, not a whole-file search.
+        # all post-#1738 fix -- proved the widened evidence-quote check
+        # (_evidence_in_claimed_lines) was still bounded to the claimed
+        # window, not a whole-file search. #2019 adds a SEPARATE unbounded
+        # rescue one gate later (_classify_mislocated_finding, reusing
+        # #2007's _content_rescue_anchor): once the evidence-gate misses,
+        # that rescue does search the whole file_window_text, finds this
+        # evidence's genuine home at line 9511, and accepts the finding.
+        #
+        # The PERSISTED anchor is NOT snapped to 9511, though: line 9511 is
+        # a context line, and _resolved_finding's own rescue only searches
+        # the narrower added-lines-only file_line_text (#1738's invariant --
+        # a persisted anchor never points at a context line), where 9511
+        # doesn't appear at all. So the anchor stays at whatever
+        # _resolve_line_window resolved the reviewer's original 9522-9527
+        # claim to over that added-only substrate -- 9521-9526, the exact
+        # same persisted span test_hunk_context_window_evidence_retained
+        # pins for the sibling #1729 finding above (evidence-independent:
+        # resolution runs before the evidence-quote check).
         unrelated_context = _make_finding(
             file="tests/test_dispatch.py",
             line_start=9522,
@@ -1705,8 +1750,9 @@ class TestValidateReviewerDocument:
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(unrelated_context), diff
         )
-        assert not accepted
-        assert rejected[0].reason == "evidence_not_in_diff"
+        assert not rejected
+        assert accepted[0].line_start == 9521
+        assert accepted[0].line_end == 9526
 
         # (b) evidence that only ever existed on a REMOVED line -- no
         # new-file line number at all, so it can never be in file_window_text
@@ -1829,7 +1875,8 @@ class Test9491MustFixCaseReconstruction:
             "evidence is 1 line(s) long but the declared range "
             "line_start=9491, line_end=None spans 1 line(s); no window "
             "within ±3 lines of the declared range contains the "
-            "evidence text verbatim" + _RESCUE_NOT_ATTEMPTED_DIAGNOSIS
+            "evidence text verbatim" + _UNBOUNDED_RESCUE_MISS_DIAGNOSIS
+            + _RESCUE_NOT_ATTEMPTED_DIAGNOSIS
         )
 
     def test_9491_parks_as_rejected_must_fix_via_consolidate_verdict(self) -> None:
@@ -1942,11 +1989,27 @@ class TestEvidenceWindowReconciliation:
         assert len(accepted) == 1
         assert rejected == []
 
-    def test_line_end_short_beyond_tolerance_still_rejected(self) -> None:
+    def test_line_end_short_beyond_tolerance_now_content_rescued(self) -> None:
         # Short by _LINE_ANCHOR_TOLERANCE + 1 (4 lines: declared line_end=
-        # 241, true end 245) -- outside the reconciliation's bound. Stays
-        # rejected -- proves the reconciliation is bounded, not an
-        # unbounded escape hatch.
+        # 241, true end 245) -- outside _reconcile_evidence_window's bound at
+        # the evidence-gate, which pre-#2019 was terminal (evidence_not_in_
+        # diff). #2019's _classify_mislocated_finding rescue then searches
+        # file_window_text unbounded, finds the evidence's true 235-245 span
+        # (added lines 235-243 plus context lines 244-245), and accepts.
+        #
+        # The PERSISTED anchor, however, stays at (235, 241) -- unchanged
+        # from the reviewer's declared range. _resolved_finding's own rescue
+        # (added the same #2019 shape as _classify_mislocated_finding's, but
+        # scoped to the narrower file_line_text substrate) tries to repair it
+        # but can't: file_line_text has no entries for 244/245 (unchanged
+        # hunk-context, never in the added-only map), so no window in that
+        # narrower substrate can ever join into the full 11-line evidence.
+        # This mirrors the existing #1738 invariant (see
+        # test_hunk_context_window_evidence_retained and
+        # test_1784_regression_persisted_anchor_is_repaired_to_true_end): a
+        # persisted anchor must always point at a real added line, never a
+        # context line, even when the (separately, more permissively
+        # matched) evidence-quote check spans further via file_window_text.
         diff = _pr1784_captured_diff()
         finding = _make_finding(
             file="scripts/install-skills.sh",
@@ -1957,8 +2020,10 @@ class TestEvidenceWindowReconciliation:
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff
         )
-        assert not accepted
-        assert rejected[0].reason == "evidence_not_in_diff"
+        assert rejected == []
+        assert len(accepted) == 1
+        assert accepted[0].line_start == 235
+        assert accepted[0].line_end == 241
 
     def test_evidence_genuinely_absent_still_rejected(self) -> None:
         # AC2 (negative control): same declared window as the regression
@@ -2090,6 +2155,104 @@ class TestEvidenceWindowReconciliation:
         assert rejected[0].reason == "evidence_not_in_diff"
         assert "no line" in rejected[0].detail
         assert "file-level fallback" in rejected[0].detail
+
+
+class TestEvidenceGateContentRescue:
+    """#2019: give the evidence-gate (``_evidence_in_claimed_lines``) the same
+    unbounded content rescue the anchor-gate already has via #2007's
+    ``_content_rescue_anchor``. A finding whose anchor resolves fine but whose
+    evidence doesn't fit the (already #1792-widened) window is no longer
+    mechanically discarded when the evidence text is genuinely present
+    elsewhere in the file's diff — a stale line number is weaker evidence than
+    the reviewer's own verbatim quote.
+    """
+
+    def test_evidence_beyond_widened_window_is_rescued_and_anchor_corrected(
+        self,
+    ) -> None:
+        # Same fixture as test_widened_range_window_rejects_evidence_outside_
+        # resolved_window (10-16 resolved window; evidence is line 20's real
+        # content) -- pre-#2019 that stayed rejected. Now the evidence-gate
+        # miss falls through to the unbounded content rescue, which finds it
+        # at line 20, and the persisted anchor is corrected to point there.
+        diff = _make_diff(
+            "first line content",
+            "second line content",
+            "third line content",
+            "fourth line content",
+            files={"src/cw/foo.py": [10, 13, 16, 20]},
+        )
+        f = _make_finding(line_start=8, line_end=15, evidence="fourth line content")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not rejected
+        assert accepted[0].line_start == 20
+        assert accepted[0].line_end == 20
+
+    def test_evidence_beyond_widened_window_rescued_at_should_fix_too(
+        self,
+    ) -> None:
+        # Comment 1's widening: the rescue applies uniformly regardless of
+        # severity -- _classify_anchored_finding/_evidence_in_claimed_lines
+        # carry no severity branch at all, so this is the same shape at
+        # SHOULD_FIX rather than MUST_FIX.
+        diff = _make_diff(
+            "first line content",
+            "second line content",
+            "third line content",
+            "fourth line content",
+            files={"src/cw/foo.py": [10, 13, 16, 20]},
+        )
+        f = _make_finding(
+            severity="SHOULD_FIX", line_start=8, line_end=15, evidence="fourth line content"
+        )
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not rejected
+        assert accepted[0].line_start == 20
+        assert accepted[0].line_end == 20
+
+    def test_fabricated_evidence_beyond_window_still_rejected(self) -> None:
+        # Negative control: #1714's false-accept floor is inherited unchanged
+        # -- fabricated evidence found nowhere in the file stays rejected,
+        # mirroring test_anchor_outside_tolerance_with_absent_evidence_still_
+        # rejected's role for the sibling anchor-gate rescue.
+        diff = _make_diff(
+            "first line content",
+            "second line content",
+            "third line content",
+            "fourth line content",
+            files={"src/cw/foo.py": [10, 13, 16, 20]},
+        )
+        f = _make_finding(line_start=8, line_end=15, evidence="never appears anywhere")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_sibling_reviewer_clean_anchor_absorbs_drifted_twin(self) -> None:
+        # #2019's suggested fix #5 (the #21 sibling-reviewer-dedup case),
+        # emergent from the anchor-correction above with no new dedup code:
+        # once the drifted twin's persisted anchor is corrected to match the
+        # clean copy's, dedupe_findings' existing
+        # (severity, file, line_start, line_end, evidence) key collapses them.
+        diff = _make_diff(
+            "first line content",
+            "second line content",
+            "third line content",
+            "fourth line content",
+            files={"src/cw/foo.py": [10, 13, 16, 20]},
+        )
+        drifted = _make_finding(line_start=8, line_end=15, evidence="fourth line content")
+        clean = _make_finding(line_start=20, line_end=20, evidence="fourth line content")
+        doc_a = _make_reviewer_doc(drifted, reviewer_role="Reviewer A")
+        doc_b = _make_reviewer_doc(clean, reviewer_role="Reviewer B")
+        accepted_a, rejected_a, _ = validate_reviewer_document(doc_a, diff)
+        accepted_b, rejected_b, _ = validate_reviewer_document(doc_b, diff)
+        assert not rejected_a
+        assert not rejected_b
+        merged = dedupe_findings(
+            [("Reviewer A", accepted_a[0]), ("Reviewer B", accepted_b[0])]
+        )
+        assert len(merged) == 1
+        assert merged[0].reviewers == ["Reviewer A", "Reviewer B"]
 
 
 class TestFormattingTolerantEvidenceMatching:
@@ -3539,13 +3702,26 @@ class TestConsolidateVerdict:
         # #1738 integration, mirroring
         # test_aggregate_near_line_and_multiline_via_consolidate_verdict's
         # shape: four findings through the full consolidate_verdict pipeline
-        # combining (1) the real #1729 hunk-context finding (mode 4, this
-        # ticket's fix), (2) its negative control (must stay rejected even
-        # with the widened window), and (3) the two existing #1715 fixtures
-        # (near-line anchor, multiline-prefix normalization) -- unaffected by
-        # this fix, re-run here to prove the two widenings compose cleanly.
-        # MUST fail red pre-fix: (1) is rejected (evidence_not_in_diff)
-        # before the fix. Retained/raw: 2/4 pre-fix -> 3/4 post-fix.
+        # combining (1) the real #1729 hunk-context finding (mode 4, #1738's
+        # fix), (2) a negative control (fabricated evidence genuinely absent
+        # from the file, at any offset -- must stay rejected), and (3) the
+        # two existing #1715 fixtures (near-line anchor, multiline-prefix
+        # normalization) -- unaffected by this fix, re-run here to prove the
+        # widenings compose cleanly.
+        #
+        # Finding (2) was originally #1738's own negative control: real
+        # CONTEXT-line content from elsewhere in the same file
+        # ("from cw.auto_dev_result import (", genuinely at line 9511),
+        # claimed at the #1729 finding's 9522-9527 range -- proving the
+        # #1738 widened window was still bounded to the claimed window, not
+        # a whole-file search. #2019 adds a SEPARATE unbounded rescue one
+        # gate later (_classify_mislocated_finding), which DOES search the
+        # whole file and would now accept that exact fixture (see
+        # TestValidateReviewerDocument.test_hunk_context_window_unrelated_
+        # line_still_rejected for the dedicated coverage of that flip), so
+        # it no longer serves as a negative control here -- swapped for
+        # fabricated evidence instead, to keep proving something stays
+        # rejected in the aggregate.
         pr1729_diff = _pr1729_captured_diff()
         legacy_diff = _make_diff(
             "def broken():",
@@ -3572,7 +3748,7 @@ class TestConsolidateVerdict:
                 file="tests/test_dispatch.py",
                 line_start=9522,
                 line_end=9527,
-                evidence="from cw.auto_dev_result import (",
+                evidence="fabricated absent text not in diff anywhere",
             ),
             _make_finding(
                 file="src/cw/foo.py",
