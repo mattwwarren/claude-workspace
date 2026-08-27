@@ -316,7 +316,7 @@ ignore = [
 # function-locally rather than duplicate the ~60-line parser (documented in that
 # function's docstring); (2) monkeypatch timing — commands.review_register defers
 # cw.gh.fetch_pr_view / cw.operator_identity.cached_gh_login / cw.pr_hydrate so
-# test-time patches take effect (tests/test_cli_review.py:78,85 do
+# test-time patches take effect (tests/test_cli_review_commands.py:52,59 do
 # monkeypatch.setattr on cw.operator_identity.cached_gh_login and
 # cw.gh.fetch_pr_view); (3) startup cost — _group._parse_payload_or_exit defers
 # cw.result's _format_errors/_read_json_payload, since cw.result pulls in
