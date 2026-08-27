@@ -29,7 +29,7 @@ Submodules:
 - ``_const`` — reason vocabulary, transient-failure set, and category mapping.
 - ``_diff`` — unified-diff capture and parsing.
 - ``_context`` — reviewer selection and prompt-context assembly (+ doc parsing),
-  including ``_prepare_review_pass`` (co-located with ``_load_optional_text``).
+  including ``_prepare_review_pass``. A package since #2043.
 - ``_roles`` — per-role codex execution and failure classification.
 - ``_verdict`` — verdict synthesis and review-comment rendering.
 - ``core`` — ``run_review`` orchestration.
