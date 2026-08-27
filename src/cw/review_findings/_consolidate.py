@@ -78,6 +78,33 @@ def _count_rejected_by_severity(rejected: list[RejectedFinding]) -> dict[str, in
     return counts
 
 
+# #2029: the severities whose loss inside a structurally-unusable document
+# gates the pass. One step stricter than `_select_rejected_must_fix`'s
+# MUST_FIX-only rule on purpose -- see ReviewVerdict's class docstring for the
+# asymmetry's reasoning (there the finding's text survives to be read; here
+# only a count does).
+_GATING_DISCARD_SEVERITIES = frozenset({"MUST_FIX", "SHOULD_FIX"})
+
+
+def _select_run_failures_with_discards(
+    failures: list[ReviewerRunFailure],
+) -> list[ReviewerRunFailure]:
+    """Select the *failures* that discarded a MUST_FIX or SHOULD_FIX (#2029).
+
+    A tally entry counting zero does not qualify: a payload that carried the
+    key but no findings under it discarded nothing, and treating that as a
+    gate would park a pass over a shape rather than over a loss.
+    """
+    return [
+        f
+        for f in failures
+        if any(
+            severity in _GATING_DISCARD_SEVERITIES and count > 0
+            for severity, count in f.discarded_finding_severities.items()
+        )
+    ]
+
+
 def consolidate_verdict(
     documents: list[ReviewerFindingsDocument],
     diff: CapturedDiff,
@@ -87,6 +114,7 @@ def consolidate_verdict(
     failed_reviewers: list[ReviewerRunFailure] | None = None,
     fix_cycles_used: int = 0,
     metrics_by_role: dict[str, ReviewerRunMetrics] | None = None,
+    pre_validation_rejected: list[RejectedFinding] | None = None,
 ) -> ReviewVerdict:
     """Consolidate every reviewer's document into a single :class:`ReviewVerdict`.
 
@@ -108,6 +136,26 @@ def consolidate_verdict(
     independently of ``blocking``/``must_fix``, which continue to read accepted
     findings only: a mechanically-rejected finding must block the pipeline for
     an operator without ever entering the autofix loop.
+
+    ``pre_validation_rejected`` (#2029, defaulting to ``None`` → ``[]`` for the
+    same reason ``failed_reviewers`` does) carries the findings
+    :func:`~cw.review_findings.parse_reviewer_document` dropped BEFORE their
+    document was constructed — items that could not become a :class:`Finding`
+    at all, so ``validate_reviewer_document`` never saw them. They are seeded
+    into ``all_rejected`` ahead of the per-document loop, which is the whole
+    integration: ``rejected_count``, ``rejected_count_by_severity`` and
+    ``rejected_must_fix`` are all derived from that one list, so a
+    schema-invalid MUST_FIX force-blocks through #1714's existing gate with no
+    new gating code. Seeded first rather than appended so a rendered verdict
+    reads in the order the failures happened — parse time, then anchor time.
+
+    ``run_failures_with_should_fix_discards`` (#2029) is the residual signal for
+    what ``pre_validation_rejected`` structurally cannot cover: a document that
+    failed to construct at all leaves no per-finding record, so this selects
+    the ``failed_reviewers`` entries whose own discard tally claimed a MUST_FIX
+    or SHOULD_FIX — see :func:`_select_run_failures_with_discards` and
+    :class:`ReviewVerdict`'s docstring for why that threshold is stricter than
+    the per-finding one.
 
     ``rejected_count``/``rejected_count_by_severity`` (#2000) tally the SAME
     ``rejected`` list at every severity — see
@@ -154,7 +202,7 @@ def consolidate_verdict(
     failures = failed_reviewers if failed_reviewers is not None else []
     metrics = metrics_by_role if metrics_by_role is not None else {}
     candidates: list[tuple[str, Finding]] = []
-    all_rejected: list[RejectedFinding] = []
+    all_rejected: list[RejectedFinding] = list(pre_validation_rejected or [])
     all_stripped: list[StrippedEscalation] = []
     run_records: list[ReviewerRunRecord] = []
 
@@ -217,6 +265,9 @@ def consolidate_verdict(
         review=review,
         stripped_escalations=all_stripped,
         rejected_must_fix=_select_rejected_must_fix(all_rejected),
+        run_failures_with_should_fix_discards=_select_run_failures_with_discards(
+            failures
+        ),
         rejected_count=rejected_count,
         rejected_count_by_severity=rejected_by_severity,
     )

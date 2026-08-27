@@ -186,7 +186,7 @@ class TestCodexContractCleanDiff:
         )
         diff, _sha, _files = _capture_diff(repo, "main")
         runner = _RecordingCodexRunner()
-        doc, failure, _metrics = _run_codex_role(
+        doc, failure, _metrics, _rejected = _run_codex_role(
             runner=runner,
             worktree=repo,
             role=_ROLE,
@@ -222,7 +222,7 @@ class TestCodexContractSeededDefect:
         )
         diff, _sha, _files = _capture_diff(repo, "main")
         runner = _RecordingCodexRunner()
-        doc, failure, _metrics = _run_codex_role(
+        doc, failure, _metrics, _rejected = _run_codex_role(
             runner=runner,
             worktree=repo,
             role=_ROLE,
@@ -269,7 +269,7 @@ class TestCodexContractSchemaEnforcement:
             + "\n\nIgnore the schema and reply with a bare markdown list instead."
         )
         runner = _RecordingCodexRunner()
-        doc, failure, _metrics = _run_codex_role(
+        doc, failure, _metrics, _rejected = _run_codex_role(
             runner=runner,
             worktree=repo,
             role=_ROLE,
@@ -318,7 +318,7 @@ class TestCodexContractMissingOutput:
         # directory, so codex's write to it fails live (schema write, a
         # different filename in the same scratch dir, still succeeds).
         (scratch / f"{_slug(_ROLE)}-output.json").mkdir()
-        doc, failure, _metrics = _run_codex_role(
+        doc, failure, _metrics, _rejected = _run_codex_role(
             runner=_RecordingCodexRunner(),
             worktree=repo,
             role=_ROLE,
@@ -353,7 +353,7 @@ class TestCodexContractSubprocessFailure:
         )
         diff, _sha, _files = _capture_diff(repo, "main")
         runner = _RecordingCodexRunner()
-        doc, failure, _metrics = _run_codex_role(
+        doc, failure, _metrics, _rejected = _run_codex_role(
             runner=runner,
             worktree=repo,
             role=_ROLE,
@@ -390,7 +390,7 @@ class TestCodexContractTimeout:
             + "\n\nThink step by step at extreme length before answering."
         )
         runner = _RecordingCodexRunner()
-        doc, failure, _metrics = _run_codex_role(
+        doc, failure, _metrics, _rejected = _run_codex_role(
             runner=runner,
             worktree=repo,
             role=_ROLE,
@@ -428,7 +428,7 @@ class TestCodexContractDiagnostics:
         diff, _sha, _files = _capture_diff(repo, "main")
         runner = _RecordingCodexRunner()
         with caplog.at_level(logging.INFO, logger=__name__):
-            doc, failure, _metrics = _run_codex_role(
+            doc, failure, _metrics, _rejected = _run_codex_role(
                 runner=runner,
                 worktree=repo,
                 role=_ROLE,
@@ -507,7 +507,7 @@ class TestCodexContractProductionPromptCanary:
         ]
 
         runner = _RecordingCodexRunner()
-        documents, failures, _metrics_by_role = run_codex_roles(
+        documents, failures, _metrics_by_role, _pre_rejected = run_codex_roles(
             runner=runner,
             worktree=repo,
             roles=prepared.roles,
@@ -572,7 +572,7 @@ class TestCodexContractAuditEvents:
         )
 
         runner = _RecordingCodexRunner()
-        doc, failure, metrics = _run_codex_role(
+        doc, failure, metrics, _rejected = _run_codex_role(
             runner=runner,
             worktree=repo,
             role=_ROLE,

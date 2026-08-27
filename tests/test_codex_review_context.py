@@ -568,7 +568,10 @@ class TestParseReviewerDocument:
         assert _parse_reviewer_document("not json{{") is None
 
     def test_schema_invalid_dict(self) -> None:
-        # Valid JSON but a failed status carrying findings is a schema violation.
+        # Still None after #2029, but structurally rather than per-finding: the
+        # lone `{"severity": "MUST_FIX"}` item is rescued out as
+        # `schema_invalid`, leaving findings=[] on a `status="failed"` document
+        # whose blank `detail` then trips _check_degraded_or_failed_has_reason.
         payload = json.dumps(
             {
                 "reviewer_role": "R",
@@ -581,11 +584,26 @@ class TestParseReviewerDocument:
 
     def test_valid_document(self) -> None:
         payload = _doc_json(findings=[_finding_payload()])
-        doc = _parse_reviewer_document(payload)
-        assert doc is not None
+        parsed = _parse_reviewer_document(payload)
+        assert parsed is not None
+        doc, rejected = parsed
         assert doc.status == "ok"
         assert len(doc.findings) == 1
         assert doc.findings[0].severity == "MUST_FIX"
+        assert rejected == []
+
+    def test_one_invalid_finding_no_longer_discards_the_document(self) -> None:
+        # #2029: the per-finding rescue reaches the codex path too.
+        bad = _finding_payload(severity="NIT")
+        del bad["evidence"]
+        payload = _doc_json(findings=[bad, _finding_payload(summary="kept")])
+        parsed = _parse_reviewer_document(payload)
+
+        assert parsed is not None
+        doc, rejected = parsed
+        assert [f.summary for f in doc.findings] == ["kept"]
+        assert [r.reason for r in rejected] == ["schema_invalid"]
+        assert rejected[0].reviewer_role == "Code Quality Reviewer"
 
 
 # ---------------------------------------------------------------------------
