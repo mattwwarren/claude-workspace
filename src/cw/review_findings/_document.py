@@ -19,7 +19,10 @@ The rescue inventory, in the order a finding meets them: ``_nearest_added_line``
 (#1715, ±3 lines) → ``_anchor_in_enclosing_def`` (#1743, worktree opt-in) →
 ``_content_rescue_anchor`` (#2007, unbounded content search) at the anchor gate;
 ``_nearest_hunk_line``/``_reconcile_evidence_window`` (#1738/#1792) →
-``_diff_pair_rescue`` (#1976) at the evidence-quote gate.
+``_diff_pair_rescue`` (#1976) → ``_content_rescue_anchor`` again, via
+``_classify_mislocated_finding`` (#2019, the same unbounded content search,
+now also reachable from an anchor-valid-but-evidence-misplaced miss) at the
+evidence-quote gate.
 
 Top of the validation half's dependency chain: imports ``_classify`` (which
 imports ``_anchor``), never the reverse.

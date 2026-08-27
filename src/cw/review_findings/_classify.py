@@ -98,6 +98,19 @@ def _resolved_finding(diff: CapturedDiff, finding: Finding) -> Finding:
     content, and #2007 does not relax it. A finding rescued on a context line
     at classification therefore keeps its declared anchor here rather than
     being snapped onto that context line.
+
+    Symmetrically, when :func:`_resolve_line_window` DOES succeed but
+    :func:`_reconcile_evidence_window` finds no better match at all (as
+    opposed to finding one that leaves ``(start, end)`` unchanged), #2019
+    tries the same narrower-substrate :func:`_content_rescue_anchor` here
+    too — this is the persist-time half of #2019's evidence-gate rescue: a
+    finding accepted via :func:`_classify_mislocated_finding`'s wider
+    ``file_window_text`` search also gets its *persisted* anchor corrected,
+    when that correction is possible without ever pointing at a context line.
+    A miss (including one caused only by the narrower substrate lacking a
+    context line the wider search relied on) leaves the anchor at its
+    #1715/#1743 near-line-tolerance resolution, unchanged — same
+    degrade-gracefully shape as the ``resolved is None`` branch above.
     """
     if finding.line_start is None and finding.line_end is None:
         return finding
@@ -130,6 +143,20 @@ def _resolved_finding(diff: CapturedDiff, finding: Finding) -> Finding:
             reconciled[1],
         )
         start, end = reconciled
+    elif reconciled is None:
+        rescued = _content_rescue_anchor(candidates, finding.evidence)
+        if rescued is not None:
+            _log.info(
+                "auto-dev: repaired finding's persisted anchor via content-"
+                "based re-anchoring beyond the reconciliation bound "
+                "(file=%s, declared=%d-%d, repaired=%d-%d)",
+                finding.file,
+                start,
+                end,
+                rescued[0],
+                rescued[1],
+            )
+            start, end = rescued
     return _finding_with_anchor(finding, start, end)
 
 
@@ -231,8 +258,9 @@ def _evidence_window_discrepancy_detail(finding: Finding) -> str:
         f"evidence is {evidence_lines} line(s) long but the declared range "
         f"line_start={finding.line_start}, line_end={finding.line_end} spans "
         f"{declared_lines} line(s); no window within ±{_LINE_ANCHOR_TOLERANCE} "
-        "lines of the declared range contains the evidence text verbatim"
-        + _normalization_diagnosis(finding)
+        "lines of the declared range contains the evidence text verbatim; an "
+        "unbounded content-based re-anchoring search of the file's diff also "
+        "found no match (#2019)" + _normalization_diagnosis(finding)
     )
 
 
@@ -297,6 +325,39 @@ def _classify_drifted_finding(
     return "invalid_line_reference"
 
 
+def _classify_mislocated_finding(
+    finding: Finding, diff: CapturedDiff
+) -> RejectedFindingReason | None:
+    """Rescue a finding whose valid anchor's window doesn't contain its own
+    evidence (#2019).
+
+    Sibling of :func:`_classify_drifted_finding`'s content rescue, scoped to
+    the opposite gate: here the line anchor itself resolved fine (it passed
+    :func:`~cw.review_findings._anchor._line_reference_valid`), but
+    :func:`~cw.review_findings._anchor._evidence_in_claimed_lines` — already
+    widened up to :data:`~cw.review_findings._text_match._LINE_ANCHOR_TOLERANCE`
+    lines past the resolved window by #1792 — still can't find the evidence.
+    Same unbounded ``file_window_text`` search as #2007's sibling, no
+    additional line bound: a reviewer's declared line number is the least
+    stable part of a citation (rebases and multi-hunk shifts move it), so if
+    the evidence text is genuinely present anywhere else in the file's diff,
+    that is a stronger signal than the stale line number and the finding is
+    accepted rather than mechanically discarded on citation mechanics.
+    """
+    rescued = _content_rescue_anchor(
+        diff.file_window_text.get(finding.file, {}), finding.evidence
+    )
+    if rescued is not None:
+        _log.info(
+            "auto-dev: rescued finding via content-based re-anchoring "
+            "(evidence-gate) (file=%s, line=%d)",
+            finding.file,
+            rescued[0],
+        )
+        return None
+    return "evidence_not_in_diff"
+
+
 def _classify_anchored_finding(
     finding: Finding,
     diff: CapturedDiff,
@@ -313,9 +374,11 @@ def _classify_anchored_finding(
 
     Order: file-known → line-anchor gate → (on a gate miss)
     :func:`_classify_drifted_finding`'s content rescue → evidence-in-claimed-
-    lines. A line-anchor miss is no longer terminal (#2007): the evidence may
-    still be genuinely present in the diff, just further from the cited line
-    than ``_LINE_ANCHOR_TOLERANCE`` reaches.
+    lines → (on a gate miss) :func:`_classify_mislocated_finding`'s content
+    rescue. Neither gate miss is terminal any more (#2007, #2019): the
+    evidence may still be genuinely present in the diff, just further from
+    the cited line than ``_LINE_ANCHOR_TOLERANCE`` (and #1792's widening)
+    reaches.
     """
     if finding.file not in changed:
         return _classify_unanchored_file(finding.file, worktree)
@@ -324,7 +387,7 @@ def _classify_anchored_finding(
     if not _evidence_in_claimed_lines(
         diff, finding.file, finding.evidence, finding.line_start, finding.line_end
     ):
-        return "evidence_not_in_diff"
+        return _classify_mislocated_finding(finding, diff)
     return None
 
 
