@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.45.0] - 2026-08-27
+
 ### Added
 
 - **`cw queue peek`'s idle detection now blends in a spawned subagent's own liveness (#2028):** `idle_m` previously resolved exactly one transcript per RUNNING task and never looked at a subagent's own transcript, so a session actively waiting on a working subagent could read as stuck (`idle_m > 15min`, no PR) and get a false STOP-OR-PEEK recommendation. A new `cw._transcript.subagent_transcript_paths(project_dir, csid)` locates a parent session's own `<csid>/subagents/*.jsonl` (scoped narrower than the existing project-dir-wide rglob so a sibling session's leftover subagents in a reused worktree are never picked up), and `queue_peek._newest_subagent_ts` finds the freshest child activity, inheriting `parse_transcript`'s `away_summary` immunity. `format_row` blends the child timestamp into `idle_min` — most-recent-activity-wins, so a working child rescues a parent that looks idle, and a dead/absent child never makes `idle_min` look worse than the parent-only value did — and appends a reason suffix naming the rescuing child. The `unproductive_attempts` STOP arm in `recommend()`/`_score_session()` is likewise suppressed when a child is demonstrably active, falling through to `_stall_check` so it consults the same blended `idle_min` instead of firing on attempt count alone.
