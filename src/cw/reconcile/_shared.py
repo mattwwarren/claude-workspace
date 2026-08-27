@@ -1605,7 +1605,7 @@ def _worktree_dirty_by_path(client_name: str, worktree_path: Path | None) -> boo
         if not branch:
             return False
         client = get_client(client_name)
-        return worktree_has_unsaved_work(client, branch)
+        return worktree_has_unsaved_work(client, branch, wt_path=worktree_path)
     except Exception:  # noqa: BLE001 — fail-safe on any error; mirrors _compute_worktree_dirty
         return False
 

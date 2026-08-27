@@ -2042,7 +2042,7 @@ def test_dirty_worktree_push_fires_once_not_per_tick_timed_out(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
     )
 
     revert_timed_out_tasks()  # tick 1 — routes to BLOCKED_ON_USER, fires push
@@ -2092,7 +2092,7 @@ def test_dirty_worktree_push_silent_for_already_blocked_task(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
     )
 
     for _ in range(3):
@@ -2131,7 +2131,7 @@ def test_dirty_worktree_push_silent_for_no_task_terminal_session(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
     )
 
     for _ in range(3):
@@ -2185,7 +2185,7 @@ def test_dirty_worktree_push_fires_once_not_per_tick_completed_silent(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
     )
 
     revert_completed_silent_tasks()  # tick 1 — routes to BLOCKED_ON_USER, fires push
@@ -2210,6 +2210,80 @@ def test_compute_worktree_dirty_returns_false_when_get_client_raises(
         lambda _name: (_ for _ in ()).throw(ValueError("no such client")),
     )
     assert _compute_worktree_dirty("missing-client", "some-branch") is False
+
+
+def test_worktree_dirty_by_path_passes_actual_wt_path_not_rederived_path(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2050: _worktree_dirty_by_path passes its own worktree_path through
+    to worktree_has_unsaved_work via wt_path=, not the branch-rederived
+    canonical path — the caller already holds the correct on-disk path even
+    when the checked-out branch name doesn't match the canonical slug."""
+    from cw.reconcile import _worktree_dirty_by_path
+
+    wt_path = tmp_path / "some-foreign-dir"
+    wt_path.mkdir(parents=True)
+
+    captured: dict[str, object] = {}
+
+    def _capture(
+        client: object, branch: str, *, wt_path: Path | None = None
+    ) -> bool:
+        captured["wt_path"] = wt_path
+        captured["branch"] = branch
+        return True
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch",
+        lambda _p: "dev/2044-liveness-gate",
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile._shared.worktree_has_unsaved_work", _capture)
+
+    assert _worktree_dirty_by_path("client-a", wt_path) is True
+    assert captured["wt_path"] == wt_path
+    assert captured["branch"] == "dev/2044-liveness-gate"
+
+
+def test_worktree_dirty_by_path_clean_state_for_non_canonical_branch_worktree(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same setup as above, but worktree_has_unsaved_work reports clean —
+    _worktree_dirty_by_path must still forward the real wt_path and return
+    False, not silently re-derive the canonical path."""
+    from cw.reconcile import _worktree_dirty_by_path
+
+    wt_path = tmp_path / "some-foreign-dir"
+    wt_path.mkdir(parents=True)
+
+    captured: dict[str, object] = {}
+
+    def _capture(
+        client: object, branch: str, *, wt_path: Path | None = None
+    ) -> bool:
+        captured["wt_path"] = wt_path
+        captured["branch"] = branch
+        return False
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch",
+        lambda _p: "dev/2044-liveness-gate",
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile._shared.worktree_has_unsaved_work", _capture)
+
+    assert _worktree_dirty_by_path("client-a", wt_path) is False
+    assert captured["wt_path"] == wt_path
 
 
 class TestDetectPostReviewClean:
