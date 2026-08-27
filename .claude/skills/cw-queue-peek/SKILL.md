@@ -114,6 +114,15 @@ The command's recommendation is computed from this ladder. Higher rules win:
 7. **Mature session**: `age_min > 45` → **PEEK** (verify still progressing).
 8. **Normal range**: `age_min > 30` → **WAIT** (in expected range).
 9. **Early**: anything else → **WAIT** (early/healthy).
+10. **Liveness gate (applied last, to every STOP above)**: if `idle_min ≤ 2`,
+    any STOP verdict from rules 1-9 above is downgraded to **PEEK** with a
+    caveat appended — a session demonstrably writing to its transcript is
+    never told to stop, regardless of which rule fired. `idle_min` unknown
+    (`None`) does not trigger this — same "no signal ≠ healthy" rule as the
+    stage-high-water gate. Fixed in #2044 after rules 3 and 4 were each
+    found capable of STOPping a live session (rule 3 read no idle signal at
+    all; rule 4's pre-#2044 form only checked subagent activity, not the
+    main session's own `idle_min`).
 
 Rule 3's STOP reason text says "approaches" when `age_min` is still below
 the referenced 60-min ceiling and "exceeded" once it's at or past it — same
@@ -124,7 +133,9 @@ rule, wording reflects how far past the trigger the session actually is.
 - Peek is free (~30s operator time, no API calls beyond `gh pr view`).
 - Per-session worker burn: roughly $0.05-0.15/min when actively producing.
 - 30-min wasted ≈ $2-5; 60-min wasted ≈ $4-10.
-- False-positive STOP cost: lose WIP, re-dispatch ≈ $2-5 + 30 min.
+- False-positive STOP cost: lose WIP, re-dispatch ≈ $2-5 + 30 min. The
+  liveness gate (rule 10, #2044) exists specifically to head off this cost
+  on live sessions.
 
 Bias: peek aggressively (free), stop conservatively (real cost on false
 positives). Only stop when the peek confirms the session can't produce
