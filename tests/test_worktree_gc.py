@@ -560,7 +560,7 @@ class TestIsDirty:
             patch("cw.worktree_gc._has_unpushed_commits", return_value=False),
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            assert _is_dirty(tmp_path, "dev/630") is False
+            assert _is_dirty(tmp_path) is False
 
     def test_dirty_worktree_returns_true(self, tmp_path: Path) -> None:
         from cw.worktree_gc import _is_dirty
@@ -569,13 +569,13 @@ class TestIsDirty:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=" M some/file.py\n", stderr=""
             )
-            assert _is_dirty(tmp_path, "dev/630") is True
+            assert _is_dirty(tmp_path) is True
 
     def test_oserror_returns_true_conservative(self, tmp_path: Path) -> None:
         from cw.worktree_gc import _is_dirty
 
         with patch("cw.worktree_gc._sp.run", side_effect=OSError("no git")):
-            assert _is_dirty(tmp_path, "dev/630") is True
+            assert _is_dirty(tmp_path) is True
 
     def test_unpushed_commits_returns_true(self, tmp_path: Path) -> None:
         """Clean working tree with unpushed commits → dirty."""
@@ -586,7 +586,7 @@ class TestIsDirty:
             patch("cw.worktree_gc._has_unpushed_commits", return_value=True),
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            assert _is_dirty(tmp_path, "dev/630") is True
+            assert _is_dirty(tmp_path) is True
 
     def test_strips_git_dir_from_env(self, tmp_path: Path) -> None:
         """GIT_DIR must be stripped so git uses the worktree, not the parent repo."""
@@ -607,41 +607,95 @@ class TestIsDirty:
             patch("cw.worktree_gc._sp.run", side_effect=_capture),
             patch("cw.worktree_gc._has_unpushed_commits", return_value=False),
         ):
-            _is_dirty(tmp_path, "dev/630")
+            _is_dirty(tmp_path)
 
         assert "GIT_DIR" not in captured_env
 
 
 class TestHasUnpushedCommits:
-    def test_no_unpushed_returns_false(self, tmp_path: Path) -> None:
-        with patch("cw.worktree_gc._sp.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            assert _has_unpushed_commits(tmp_path, "dev/630") is False
+    def test_pushed_non_canonical_branch_returns_false(self, tmp_path: Path) -> None:
+        """AC1: upstream resolves via @{u} to a ref unrelated to any passed-in
+        branch name; log against that ref is empty -> False."""
 
-    def test_unpushed_commits_returns_true(self, tmp_path: Path) -> None:
-        with patch("cw.worktree_gc._sp.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="abc123 fix something\n", stderr=""
-            )
-            assert _has_unpushed_commits(tmp_path, "dev/630") is True
+        def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "@{u}" in cmd:
+                return MagicMock(returncode=0, stdout="origin/renamed-branch\n", stderr="")
+            if "log" in cmd:
+                assert "origin/renamed-branch..HEAD" in cmd
+                return MagicMock(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected git call: {cmd}")
 
-    def test_oserror_returns_true_conservative(self, tmp_path: Path) -> None:
+        with patch("cw.worktree_gc._sp.run", side_effect=_side_effect):
+            assert _has_unpushed_commits(tmp_path) is False
+
+    def test_unpushed_commits_on_own_upstream_returns_true(self, tmp_path: Path) -> None:
+        """AC2: same @{u} resolution, log against it is non-empty -> True."""
+
+        def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "@{u}" in cmd:
+                return MagicMock(returncode=0, stdout="origin/dev/630\n", stderr="")
+            if "log" in cmd:
+                return MagicMock(returncode=0, stdout="abc123 fix\n", stderr="")
+            raise AssertionError(f"unexpected git call: {cmd}")
+
+        with patch("cw.worktree_gc._sp.run", side_effect=_side_effect):
+            assert _has_unpushed_commits(tmp_path) is True
+
+    def test_no_upstream_configured_returns_true_conservative(
+        self, tmp_path: Path
+    ) -> None:
+        """AC3 / Scope: no upstream at all -> stays not-reapable (True), no fallback."""
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=128, stdout="", stderr="no upstream")
+            assert _has_unpushed_commits(tmp_path) is True
+
+    def test_upstream_resolves_but_empty_stdout_returns_true(
+        self, tmp_path: Path
+    ) -> None:
+        """@{u} exits 0 but with blank stdout (defensive edge case) -> True."""
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="  \n", stderr="")
+            assert _has_unpushed_commits(tmp_path) is True
+
+    def test_upstream_log_nonzero_returns_true_conservative(self, tmp_path: Path) -> None:
+        """@{u} resolves, but the log check against it fails -> True."""
+
+        def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "@{u}" in cmd:
+                return MagicMock(returncode=0, stdout="origin/dev/630\n", stderr="")
+            return MagicMock(returncode=1, stdout="", stderr="error")
+
+        with patch("cw.worktree_gc._sp.run", side_effect=_side_effect):
+            assert _has_unpushed_commits(tmp_path) is True
+
+    def test_oserror_on_upstream_rev_parse_returns_true(self, tmp_path: Path) -> None:
         with patch("cw.worktree_gc._sp.run", side_effect=OSError("no git")):
-            assert _has_unpushed_commits(tmp_path, "dev/630") is True
+            assert _has_unpushed_commits(tmp_path) is True
 
-    def test_nonzero_exit_returns_true_conservative(self, tmp_path: Path) -> None:
-        """Non-zero exit (e.g. remote ref absent) → conservative True."""
-        with patch("cw.worktree_gc._sp.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=128, stdout="", stderr="error")
-            assert _has_unpushed_commits(tmp_path, "dev/630") is True
+    def test_oserror_on_log_returns_true(self, tmp_path: Path) -> None:
+        def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "@{u}" in cmd:
+                return MagicMock(returncode=0, stdout="origin/dev/630\n", stderr="")
+            raise OSError("git log exploded")
 
-    def test_passes_branch_to_log_command(self, tmp_path: Path) -> None:
-        with patch("cw.worktree_gc._sp.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            _has_unpushed_commits(tmp_path, "feature/xyz")
+        with patch("cw.worktree_gc._sp.run", side_effect=_side_effect):
+            assert _has_unpushed_commits(tmp_path) is True
 
-        cmd = mock_run.call_args[0][0]
-        assert "origin/feature/xyz..HEAD" in cmd
+    def test_passes_resolved_upstream_ref_to_log_command(self, tmp_path: Path) -> None:
+        """The log command is built from the resolved @{u} ref, not a caller-
+        supplied branch string (there is no branch parameter any more)."""
+        captured: dict[str, list[str]] = {}
+
+        def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "@{u}" in cmd:
+                return MagicMock(returncode=0, stdout="origin/feature/xyz\n", stderr="")
+            captured["log_cmd"] = cmd
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("cw.worktree_gc._sp.run", side_effect=_side_effect):
+            _has_unpushed_commits(tmp_path)
+
+        assert "origin/feature/xyz..HEAD" in captured["log_cmd"]
 
 
 # ---------------------------------------------------------------------------
@@ -1049,7 +1103,7 @@ class TestIsDirtyCwScratchFiltering:
             patch("cw.worktree_gc._has_unpushed_commits", return_value=False),
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout=cw_status, stderr="")
-            result = _is_dirty(tmp_path, "dev/630")
+            result = _is_dirty(tmp_path)
 
         assert result is False
 
@@ -1062,7 +1116,7 @@ class TestIsDirtyCwScratchFiltering:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=mixed_status, stderr=""
             )
-            result = _is_dirty(tmp_path, "dev/630")
+            result = _is_dirty(tmp_path)
 
         assert result is True
 
