@@ -619,16 +619,21 @@ class TestHasUnpushedCommits:
 
         def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
             if "@{u}" in cmd:
-                return MagicMock(returncode=0, stdout="origin/renamed-branch\n", stderr="")
+                return MagicMock(
+                    returncode=0, stdout="origin/renamed-branch\n", stderr=""
+                )
             if "log" in cmd:
                 assert "origin/renamed-branch..HEAD" in cmd
                 return MagicMock(returncode=0, stdout="", stderr="")
-            raise AssertionError(f"unexpected git call: {cmd}")
+            msg = f"unexpected git call: {cmd}"
+            raise AssertionError(msg)
 
         with patch("cw.worktree_gc._sp.run", side_effect=_side_effect):
             assert _has_unpushed_commits(tmp_path) is False
 
-    def test_unpushed_commits_on_own_upstream_returns_true(self, tmp_path: Path) -> None:
+    def test_unpushed_commits_on_own_upstream_returns_true(
+        self, tmp_path: Path
+    ) -> None:
         """AC2: same @{u} resolution, log against it is non-empty -> True."""
 
         def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
@@ -636,7 +641,8 @@ class TestHasUnpushedCommits:
                 return MagicMock(returncode=0, stdout="origin/dev/630\n", stderr="")
             if "log" in cmd:
                 return MagicMock(returncode=0, stdout="abc123 fix\n", stderr="")
-            raise AssertionError(f"unexpected git call: {cmd}")
+            msg = f"unexpected git call: {cmd}"
+            raise AssertionError(msg)
 
         with patch("cw.worktree_gc._sp.run", side_effect=_side_effect):
             assert _has_unpushed_commits(tmp_path) is True
@@ -646,7 +652,9 @@ class TestHasUnpushedCommits:
     ) -> None:
         """AC3 / Scope: no upstream at all -> stays not-reapable (True), no fallback."""
         with patch("cw.worktree_gc._sp.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=128, stdout="", stderr="no upstream")
+            mock_run.return_value = MagicMock(
+                returncode=128, stdout="", stderr="no upstream"
+            )
             assert _has_unpushed_commits(tmp_path) is True
 
     def test_upstream_resolves_but_empty_stdout_returns_true(
@@ -657,7 +665,9 @@ class TestHasUnpushedCommits:
             mock_run.return_value = MagicMock(returncode=0, stdout="  \n", stderr="")
             assert _has_unpushed_commits(tmp_path) is True
 
-    def test_upstream_log_nonzero_returns_true_conservative(self, tmp_path: Path) -> None:
+    def test_upstream_log_nonzero_returns_true_conservative(
+        self, tmp_path: Path
+    ) -> None:
         """@{u} resolves, but the log check against it fails -> True."""
 
         def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
@@ -676,7 +686,8 @@ class TestHasUnpushedCommits:
         def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
             if "@{u}" in cmd:
                 return MagicMock(returncode=0, stdout="origin/dev/630\n", stderr="")
-            raise OSError("git log exploded")
+            msg = "git log exploded"
+            raise OSError(msg)
 
         with patch("cw.worktree_gc._sp.run", side_effect=_side_effect):
             assert _has_unpushed_commits(tmp_path) is True
