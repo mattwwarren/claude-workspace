@@ -434,7 +434,7 @@ class ReviewerRunFailure(BaseModel):
     ``role=..., reason=...`` construction site (timeout, budget_exhausted,
     unparseable_response) is unaffected. Severities are read off the raw
     payload, so an unusable one is bucketed as ``"unknown"`` rather than
-    dropped; see ``_validation._best_effort_discarded_tally``.
+    dropped; see ``_document._best_effort_discarded_tally``.
     """
 
     role: str

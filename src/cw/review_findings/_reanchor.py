@@ -17,10 +17,10 @@ inherited unchanged, because the actual matching is delegated to
 
 Three call sites, each with its own deliberately-chosen substrate:
 
-- classification (:func:`~cw.review_findings._validation._classify_anchored_finding`)
+- classification (:func:`~cw.review_findings._classify._classify_anchored_finding`)
   searches ``file_window_text`` — context and added lines, matching what the
   evidence-quote check already accepts;
-- anchor persistence (:func:`~cw.review_findings._validation._resolved_finding`)
+- anchor persistence (:func:`~cw.review_findings._classify._resolved_finding`)
   searches ``file_line_text`` — added lines only, preserving #1738's invariant
   that a persisted anchor never points at a context line;
 - fix substantiation (:func:`~cw.review_adjudication._fix_is_substantiated`)

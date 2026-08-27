@@ -1,12 +1,14 @@
 """Pure text-normalization and window-reconciliation primitives (#1715/#1976/#1792).
 
-Extracted verbatim from :mod:`cw.review_findings._validation` by #2007. These
-functions were always leaf-level — stdlib only, no model or diff dependency —
-but they lived in the module that also owns classification. #2007 added a
-second consumer (:mod:`cw.review_findings._reanchor`, the content-based rescue)
-which ``_validation`` in turn calls, so leaving them where they were would have
-forced a ``_validation`` <-> ``_reanchor`` import cycle. Hoisting them into a
-shared leaf both import from breaks it by construction.
+Extracted verbatim by #2007 from the then-single ``_validation`` module, since
+split three ways into :mod:`cw.review_findings._anchor`,
+:mod:`cw.review_findings._classify`, and :mod:`cw.review_findings._document`
+(#2054). These functions were always leaf-level — stdlib only, no model or diff
+dependency — but they lived in the module that also owns classification. #2007
+added a second consumer (:mod:`cw.review_findings._reanchor`, the content-based
+rescue) which the validation modules in turn call, so leaving them where they
+were would have forced a validation <-> ``_reanchor`` import cycle. Hoisting
+them into a shared leaf both import from breaks it by construction.
 
 Split out of the single ``review_findings.py`` module (#1818); import these
 names from :mod:`cw.review_findings`, not from this private submodule.
