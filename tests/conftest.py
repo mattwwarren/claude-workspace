@@ -555,7 +555,7 @@ def _without_evidence(payload: dict[str, Any]) -> dict[str, Any]:
     shape a real reviewer produces when it forgets the field entirely, and it
     is what the ticket's own acceptance criteria name. Shared by
     ``test_review_findings.py``, ``test_codex_review_roles.py``, and
-    ``test_cli_review.py``, which each built a near-identical local helper
+    ``test_cli_review_consolidate.py``, which each built a near-identical helper
     doing this same delete against their own base-payload builder — one
     source of truth so the mechanism can't silently drift between them.
     """
