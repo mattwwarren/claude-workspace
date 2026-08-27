@@ -42,8 +42,8 @@ from cw.review_findings import (
     ReviewerFindingsDocument,
     ReviewerRunFailure,
     ReviewerRunMetrics,
+    _best_effort_discarded_tally,
 )
-from cw.review_findings._validation import _best_effort_discarded_tally
 
 if TYPE_CHECKING:
     from pathlib import Path

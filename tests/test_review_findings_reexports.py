@@ -14,10 +14,10 @@ from __future__ import annotations
 import cw.review_findings as rf
 
 # The complete re-export surface: 9 type aliases, FINGERPRINT_VERSION, the 13
-# model classes, the 6 public functions, and the 18 private names that existing
+# model classes, the 6 public functions, and the 19 private names that existing
 # cross-module call sites (``cw.codex_fix_loop_convergence``,
-# ``cw.review_adjudication``, ``tests/test_review_findings.py``) import
-# directly.
+# ``cw.review_adjudication``, ``cw.codex_review._roles``,
+# ``tests/test_review_findings.py``) import directly.
 EXPECTED_EXPORTS = {
     # Type aliases
     "AgentSpecSource",
@@ -56,6 +56,7 @@ EXPECTED_EXPORTS = {
     "_LINE_ANCHOR_TOLERANCE",
     "_VALID_SEVERITIES",
     "_anchor_in_enclosing_def",
+    "_best_effort_discarded_tally",
     "_classify_finding",
     "_content_rescue_anchor",
     "_dedup_key",
