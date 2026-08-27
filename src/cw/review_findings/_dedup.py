@@ -1,7 +1,7 @@
 """Cross-reviewer dedup and count aggregation (#1237).
 
 Merges the ``(reviewer_role, Finding)`` candidates that survived
-:mod:`cw.review_findings._validation` into :class:`AcceptedFinding` groups, and
+:mod:`cw.review_findings._document` into :class:`AcceptedFinding` groups, and
 aggregates those into the :class:`cw.auto_dev_result.Review` count block the
 approval gate reads.
 
