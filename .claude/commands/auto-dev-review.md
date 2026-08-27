@@ -281,54 +281,50 @@ Clean/SHOULD_FIX + large → EXIT `review_pending_approval`. MUST_FIX persists a
 
 ### Step 3b: Fix Loop (when MUST_FIX needs fixing)
 
-**Important**: the correct pattern is **push-then-recheckout** — never attach a new fix session to the original implementation worktree. **Questioning why** is rare; the branch-freeing reasoning lives in `.claude/commands/auto-dev-review-appendix.md`, section "Why the fix loop uses push-then-recheckout".
+**Important**: this session does **not** dispatch the fix agent. It records the action list on the dev-queue row and exits; the orchestrator's next reconcile tick issues the spawn. **Questioning why** is rare; the structural constraint lives in `.claude/commands/auto-dev-review-appendix.md`, section "Why the fix loop hands off asynchronously".
 
 Prerequisite: the implementation branch must already be on origin (Step 2's agent pushes it) — if not, escalate BLOCK before starting the fix loop.
 
-1. Remove the stale implementation worktree and the local branch ref from the main session (the branch still exists on origin):
-   ```bash
-   git worktree remove --force <impl-worktree-path>
-   git branch -D <branch-name>  # local only; origin still has it
-   ```
+1. **Leave the worktree alone.** Do NOT remove it, and do NOT delete the local branch ref. `cw.reconcile.fix_dispatch` reuses this exact `(client, branch)` worktree, so it must still be there — `create_worktree` then takes its idempotent-reuse path and mutates nothing.
 
-2. **Dispatch the fix agent as a cw session (#2017).** Write the fix-agent prompt — MUST_FIX findings + the Completion Artifacts block + Friction Protocol + Health Check, exactly the content described below — to `.cw/fix-agent-prompt.md` **via the Write tool**; never heredoc-inline it. Then:
+2. **Record the fix-agent handoff, then end the turn (#2017).** Write the fix-agent prompt — MUST_FIX findings + the Completion Artifacts block + Friction Protocol + Health Check, exactly the content described below — to `.cw/fix-agent-prompt.md` **via the Write tool**; never heredoc-inline it. That file is a transport only, read once by the snippet below; the durable copy is the dev-queue field it writes. Then:
    ```bash
-   FIX_PROMPT_PATH=".cw/fix-agent-prompt.md"
+   CLIENT="$(jq -r '.client' .claude/cw-context.json)"
+   FIX_CYCLE=<N>   # current cycle, 1-5
 
-   FIX_SESSION_ID="$(uv run python -c "
+   uv run python -c "
+   from datetime import UTC, datetime
    from pathlib import Path
-   from cw.config import get_client
-   from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+   from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+   from cw.models import PendingFixDispatch
 
-   client = get_client('$(jq -r '.client' .claude/cw-context.json)')
-   branch = f'{client.feature_branch_prefix}/$TICKET'
-   print(dispatch_fix_agent(
-       client=client,
-       branch=branch,
-       prompt_file=Path('$FIX_PROMPT_PATH'),
-       label='fix-$TICKET',
-       ticket_id='$TICKET',
-       lane='$(jq -r '.lane' .claude/cw-context.json)',
-       parent='$CW_SESSION',
-   ))
-   ")"
+   with dev_queue_lock():
+       store = load_dev_queue()
+       task = next(t for t in store.tasks
+                   if t.ticket_id == '$TICKET' and t.client == '$CLIENT')
+       task.pending_fix_dispatch = PendingFixDispatch(
+           prompt=Path('.cw/fix-agent-prompt.md').read_text(encoding='utf-8'),
+           label='fix-$TICKET',
+           cycle=$FIX_CYCLE,
+           requested_by_session_id='$CW_SESSION',
+           requested_at=datetime.now(UTC),
+       )
+       save_dev_queue(store)
+   "
    ```
-   `dispatch_fix_agent` does the whole dispatch **synchronously inside that one Bash call**: it provisions the branch-keyed worktree via `create_worktree` (the same helper every other pipeline stage reuses — step 1 above exists precisely to free that path), verifies HEAD landed on the expected `origin/<branch-name>` commit, fetches and merges `origin/<default-branch>` so the fix lands on top of any sibling PR that merged mid-pipeline, and spawns the fix agent as a first-class cw DAEMON session (`SessionPurpose.FIX`). On a merge conflict it aborts the merge, leaves the worktree clean, and raises naming the conflicting files — it never forces and never auto-resolves.
+   Then **end the turn with no further Bash calls this cycle**, emitting a `blocked` AUTO_DEV_RESULT sentinel with `blocker.reason: "fix_loop_pending_dispatch"` and `blocker.stage: "stage3_review"`.
 
-   There is **no async gap left to verify** here, so `cw agent-spawn-verify` is no longer part of this path (it remains as a standalone operator diagnostic). `spawn_create_impl`'s own `_verify_roster_registration` already raises `SpawnUnregisteredError` synchronously if the daemon never adopts the worker, and `dispatch_fix_agent` deliberately does not swallow it.
+   This is not a park. `cw.reconcile.fix_dispatch` picks the record up on the next reconcile tick and dispatches the fix agent as a first-class cw DAEMON session (`SessionPurpose.FIX`) — provisioning the branch-keyed worktree, verifying HEAD landed on the expected `origin/<branch-name>` commit, and merging `origin/<default-branch>` so the fix lands on top of any sibling PR that merged mid-pipeline. On a merge conflict it aborts and reports the conflicting files; it never forces and never auto-resolves. The row stays RUNNING throughout, so nothing re-dispatches it mid-fix, and it is unparked to PENDING automatically once the fix session goes terminal.
 
-   **Non-zero exit** (stale worktree, merge conflict, `SpawnUnregisteredError`, or any other `CwError`) means no `FIX_SESSION_ID` was ever produced. Do **not** emit a dedicated blocker: fall through to the Step 3b.5 orchestrator fix gate below and treat it as a cycle failure (there will be no new commit since the prior cycle, which is exactly what that gate already checks). The cycle consumes budget against the 5-cycle cap.
+   **Why the handoff is asynchronous rather than a call from here:** `cw` provisions one worktree per `(client, branch)`, so the fix session's worktree IS this session's worktree, and `spawn_create_impl` refuses to overwrite a hook context that names a still-live session. Dispatching from inside this session can therefore never succeed. Do not "fix" this by dispatching directly.
 
-2b. **Wait for the fix session to finish.** On zero exit from step 2, immediately run:
-   ```bash
-   cw session wait "$FIX_SESSION_ID" --timeout 900
-   ```
-   - **Exit 0** → proceed to Step 3 (the agent's commits are already on the pushed branch).
-   - **Non-zero (1 or 124)** → same disposition as a non-zero step 2: fall through to Step 3b.5's fix gate, which treats it as a cycle failure via its existing new-commit check.
+   **Dispatch failures surface as events, not as a sentinel** (`stage.errored` with `error_kind: "fix_dispatch_failed"`, plus `session.needs_attention`) — no session is running when an asynchronous dispatch fails, so there is nothing to carry a `blocker.reason`. See `docs/events.md`.
 
 3. The fix agent fixes MUST_FIX issues, re-runs quality gates, creates a NEW commit on top (do NOT amend) **with the trailer `Auto-Dev-Fix-Cycle: <N>`** (`<N>` = current cycle, 1-5; pass via `git commit --trailer "Auto-Dev-Fix-Cycle: <N>"`), and pushes to origin using the explicit-refspec form (`git push origin HEAD:refs/heads/<branch-name>`) — robust against a local branch rename. After pushing, verify with `git rev-parse origin/<branch-name>` matching `git rev-parse HEAD`.
 
 The `Auto-Dev-Fix-Cycle` trailer is the durable cross-session signal for fix-loop progress: the resume detector reads the max `<N>` across fix-cycle trailers on commits newer than `Auto-Dev-Stage: impl-complete`, and on resume into `s3_fix_loop, substage="cycle_N"` the pipeline resumes at cycle `N+1`, preserving the cycle budget across session deaths.
+
+**Steps 3b.5 and 4 below run in a DIFFERENT session from the one that recorded the handoff.** Once the fix session goes terminal, `cw.reconcile.fix_dispatch` unparks the row to PENDING and the pipeline dispatches a fresh REVIEW session, which resumes at `s3_fix_loop, cycle_{N+1}` via that same trailer mechanism. If you are reading this after such a resume, the fix agent has already run and pushed — verify its work, do not re-record a handoff for the cycle that just completed.
 
 The fix-loop agent's prompt must end with both the Friction Protocol block and the following Health Check block verbatim:
    ```
@@ -344,13 +340,13 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
 
    The fix-loop agent's prompt must ALSO instruct: "If your fix touches any file outside the original Stage 1 approved plan's file list, OR if your changes push the diff into Large tier (>10 files OR >500 lines OR a forbidden area), report this in the friction report under a new bullet `**Scope growth**: [list affected files / explain tier change]`. The main session uses this to decide escalation."
 
-3b. **Orchestrator fix gate** (Subagent Reliability Mitigation 1, fix-loop variant). After the fix-loop agent returns (or times out), before re-running review (or before the sparse-feedback gate in step 4):
+3b. **Orchestrator fix gate** (Subagent Reliability Mitigation 1, fix-loop variant). At the top of the resumed REVIEW session, before re-running review (or before the sparse-feedback gate in step 4):
    - Re-run the test command in the impl worktree. Non-zero exit → fix is false; treat as cycle failure (counts against the 5-cycle hard cap).
    - Re-run mypy/ruff. Non-zero on touched files → fix is false.
    - Compare pasted `git diff --stat` against live `git diff --stat $FORK_POINT`. Substantial mismatch → fix is false.
    - Verify the fix produced at least one new commit since the prior cycle (`git log $PRIOR_HEAD..HEAD --oneline` must be non-empty). Zero new commits → fix-loop agent did not actually fix anything; treat as cycle failure.
 
-   On gate failure: log the failed check, increment the cycle counter, and re-spawn the fix agent (within the 5-cycle hard cap). Headless: append `"fix_loop_gate_failed_cycle_<N>"` to `friction_highlights`, and emit `stage.errored`:
+   On gate failure: log the failed check, increment the cycle counter, and record a fresh handoff per step 2 above (within the 5-cycle hard cap). Headless: append `"fix_loop_gate_failed_cycle_<N>"` to `friction_highlights`, and emit `stage.errored`:
    ```bash
    cw event record stage.errored \
      --correlation-id "$TICKET" \
@@ -382,12 +378,11 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
 5. **Cycle budget:** 2 cycles is the expected baseline. If MUST_FIX persists past cycle 2, the loop may continue with escalation visibility, hard-capped at 5 total cycles. **Entering cycle 3+, growing scope mid-fix, or exhausting the cap** is rare — the escalation triggers, the per-mode escalation behaviour, the cycle-5 hard exit, and the cap-value maintenance note live in `.claude/commands/auto-dev-review-appendix.md`, section
    "Fix loop cycle budget: escalation triggers and the cycle-5 hard exit". Read it now if this round entered cycle 3 or the fix-loop friction report flagged scope growth; do not improvise the escalation record or the hard-exit sentinel from this summary alone.
 
-**The `dispatch_fix_agent` invocation failing after two attempts** (its `uv run
-python -c` call exits non-zero — e.g. a `CwError`/`SpawnUnregisteredError`
-propagating out, per this file's deliberate no-swallow design), **or `cw session
-wait` repeatedly hitting its hard timeout with no diagnosable git-side
-progress,** is rare — the direct-execution fallback the main session then runs
-lives in
+**A recorded `pending_fix_dispatch` failing to dispatch across two observed
+cycles** — visible as `stage.errored` (`error_kind: "fix_dispatch_failed"`) plus
+`session.needs_attention` events for this ticket, NOT as a session sentinel,
+since no session is running when an asynchronous dispatch fails — is rare; the
+direct-execution fallback the main session then runs lives in
 `.claude/commands/auto-dev-review-appendix.md`, section "Fallback — direct
 execution from the main session's worktree". Read it now if that condition holds;
 do not improvise the git sequence from memory.

@@ -123,17 +123,19 @@ def test_review_fix_agent_dispatched_as_cw_session() -> None:
     """Fix agent in review stage carries no model pin because it is not a subagent.
 
     #2017 retired its harness `Agent(isolation: "worktree")` spawn in favour of
-    a cw DAEMON session dispatched by `dispatch_fix_agent`, whose model comes
-    from the client's `worker_model` config rather than from skill text.
-    Asserting the retired pin's absence alongside the new call keeps this
-    file's guard character: a regression back to a harness subagent would
-    restore the unpinned-model hazard every other test here exists to catch.
-    (The unrelated `isolation: "worktree"` mention in the Step 3a sandbox
-    warning is about *reviewer* subagents, so the absence check is scoped to
-    the fix agent's own pin string.)
+    a cw DAEMON session, whose model comes from the client's `worker_model`
+    config rather than from skill text. The session is dispatched from the
+    reconcile tick, so what this file guards on the skill side is the handoff
+    record the review session writes (`pending_fix_dispatch`). Asserting the
+    retired pin's absence alongside it keeps this file's guard character: a
+    regression back to a harness subagent would restore the unpinned-model
+    hazard every other test here exists to catch. (The unrelated `isolation:
+    "worktree"` mention in the Step 3a sandbox warning is about *reviewer*
+    subagents, so the absence check is scoped to the fix agent's own pin
+    string.)
     """
     content = _cmd("auto-dev-review.md")
-    assert "dispatch_fix_agent" in content
+    assert "pending_fix_dispatch" in content
     assert '`isolation: "worktree"` and `model: "sonnet"`' not in content
 
 

@@ -131,29 +131,48 @@ remove the file by hand, then re-run.
 
 ---
 
-## Why the fix loop uses push-then-recheckout
+## Why the fix loop hands off asynchronously
 
-cw's worktree provisioning is one worktree per `(client, branch)` — the fix
-agent's workspace is now reached through `dispatch_fix_agent`'s `create_worktree`
-call (#2017), not a harness `isolation` flag. `create_worktree` refuses to
-provision a branch that is still checked out somewhere else, so the branch must
-first be *freed*: the stale implementation worktree removed and the local ref
-deleted (Step 3b.1). Origin still carries the branch's real history, and
-`create_worktree`'s three-way resolution (#2032) resumes it from `origin/<branch>`
-when the local ref is absent. Pushing the branch before freeing it is therefore
-not a sandbox workaround — it is what makes the re-provisioned worktree land on
-the same commits.
+cw's worktree provisioning is one worktree per `(client, branch)`, keyed on
+those two values alone — there is no per-purpose dimension. The fix session's
+worktree is therefore *the same path* the review session is sitting in.
+`spawn_create_impl` writes a `cw-context.json` into that worktree and refuses to
+overwrite one that names a session still live in cw state, with no exemption for
+"the live session is my own parent". So a review session calling the dispatch
+directly is refused every time, on every cycle, forever — the failure is
+structural, not flaky, and no retry or worktree cleanup gets around it.
+
+The fix (#2017 R21) is to move the spawn out of the review session's turn
+entirely. The review session's responsibility ends at writing a
+`PendingFixDispatch` onto its dev-queue row — durable, outside any worktree —
+and exiting. `cw.reconcile.fix_dispatch` reads it on a later tick, from the
+orchestrator process, which is resident in no worktree at all; by then the
+session named in the hook context has gone terminal and the guard is satisfied
+without needing an exemption.
+
+Two consequences worth knowing:
+
+- **The worktree is never removed between review and fix.** Step 3b.1's old
+  `git worktree remove --force` + `git branch -D` is gone. `create_worktree`
+  now hits its idempotent-reuse branch, which checks and mutates nothing.
+- **The row stays RUNNING for the whole handoff.** `dispatch/claim.py` only
+  claims PENDING rows, so nothing re-dispatches the ticket while the fix agent
+  works. `fix_dispatch`'s completion phase reverts it to PENDING once the fix
+  session goes terminal, and the fresh REVIEW session resumes at
+  `s3_fix_loop, cycle_{N+1}` off the `Auto-Dev-Fix-Cycle` trailers.
 
 ---
 
 ## Fallback — direct execution from the main session's worktree
 
-Reached only if the `dispatch_fix_agent` invocation fails after two attempts
-(its `uv run python -c` call exits non-zero — e.g. a
-`CwError`/`SpawnUnregisteredError` propagating out, per `auto-dev-review.md`'s
-deliberate no-swallow design), or if `cw session wait` repeatedly hits its hard
-timeout with no diagnosable git-side progress. Slower than delegation but
-guaranteed to work; it is a last resort, not a shortcut past the fix loop.
+Reached only if a recorded `pending_fix_dispatch` fails to dispatch across two
+observed cycles. The signal is a pair of events per failed attempt —
+`stage.errored` with `error_kind: "fix_dispatch_failed"` and
+`session.needs_attention` with `paused_status: "fix_dispatch_failed"`, the
+latter carrying the underlying error text in `breadcrumbs` — not a session
+sentinel: no session is running when an asynchronous dispatch fails, so there is
+nothing to carry a `blocker.reason`. Slower than delegation but guaranteed to
+work; it is a last resort, not a shortcut past the fix loop.
 
 ```bash
 # From the main session's worktree
