@@ -2612,10 +2612,98 @@ class TestWorktreeHasUnsavedWork:
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         assert worktree_has_unsaved_work(client, "auto-dev/unpushed") is True
 
-    def test_returns_false_when_origin_branch_absent_and_at_base(
+    def test_returns_false_for_pushed_non_canonical_branch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """No origin/<branch>, branch sitting at base HEAD with 0 commits → False."""
+        """AC1 (#2050): upstream resolves via ``@{u}`` on the worktree's
+        actual checked-out branch, not by guessing ``origin/<branch>`` from
+        the caller-supplied branch name — clean tree, upstream log empty →
+        False even when the passed-in ``branch`` doesn't match the resolved
+        upstream ref."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-noncanonical"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = ""  # clean working tree
+            elif "@{u}" in args:
+                result.stdout = "origin/dev/2044-liveness-gate\n"
+            elif "log" in args and "origin/dev/2044-liveness-gate..HEAD" in args:
+                result.stdout = ""  # upstream log empty — nothing unpushed
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert (
+            worktree_has_unsaved_work(client, "dev/2044", wt_path=wt_path) is False
+        )
+
+    def test_returns_true_for_unpushed_commits_on_own_upstream(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2a (#2050): same ``@{u}`` resolution as above, but the resolved
+        upstream's log is non-empty → True."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-noncanonical-unpushed"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = ""  # clean working tree
+            elif "@{u}" in args:
+                result.stdout = "origin/dev/2044-liveness-gate\n"
+            elif "log" in args and "origin/dev/2044-liveness-gate..HEAD" in args:
+                result.stdout = "abc1234 add feature\n"  # unpushed on upstream
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert (
+            worktree_has_unsaved_work(client, "dev/2044", wt_path=wt_path) is True
+        )
+
+    def test_falls_through_to_level_2_when_upstream_log_returncode_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """B2 (#2050): the upstream resolves via ``@{u}``, but the log check
+        against it fails (non-zero returncode, no exception) — must fall
+        through to Level 2 (``origin/<default_branch>``) rather than trusting
+        the failed call's empty stdout as "nothing unpushed"."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-upstream-log-fails"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = ""  # clean working tree
+            elif "@{u}" in args:
+                result.stdout = "origin/dev/2044-liveness-gate\n"
+            elif "log" in args and "origin/dev/2044-liveness-gate..HEAD" in args:
+                result.returncode = 1  # upstream log check itself failed
+                result.stdout = ""
+            elif "log" in args and "origin/main..HEAD" in args:
+                result.returncode = 0
+                result.stdout = "abc1234 add feature\n"  # Level 2: unpushed
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert (
+            worktree_has_unsaved_work(client, "dev/2044", wt_path=wt_path) is True
+        )
+
+    def test_returns_false_when_no_upstream_and_at_base(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No upstream configured, branch sitting at base HEAD with 0 commits
+        → False."""
         client = self._client(tmp_path)
         wt_path = tmp_path / "wt" / "auto-dev-noorigin"
         wt_path.mkdir(parents=True)
@@ -2624,8 +2712,8 @@ class TestWorktreeHasUnsavedWork:
             result = MagicMock(returncode=0, stderr="")
             if "status" in args:
                 result.stdout = ""  # clean working tree
-            elif "rev-parse" in args and "origin/auto-dev/noorigin" in args:
-                result.returncode = 128  # origin/<branch> does NOT exist
+            elif "@{u}" in args:
+                result.returncode = 128  # no upstream configured
                 result.stdout = ""
             elif "log" in args and "origin/main" in " ".join(args):
                 result.returncode = 0
@@ -2637,10 +2725,10 @@ class TestWorktreeHasUnsavedWork:
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         assert worktree_has_unsaved_work(client, "auto-dev/noorigin") is False
 
-    def test_returns_true_when_origin_branch_absent_and_commits_beyond_base(
+    def test_returns_true_when_no_upstream_and_commits_beyond_base(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """No origin/<branch>, branch has commits beyond base → True."""
+        """No upstream configured, branch has commits beyond base → True."""
         client = self._client(tmp_path)
         wt_path = tmp_path / "wt" / "auto-dev-noorigin-commits"
         wt_path.mkdir(parents=True)
@@ -2649,8 +2737,8 @@ class TestWorktreeHasUnsavedWork:
             result = MagicMock(returncode=0, stderr="")
             if "status" in args:
                 result.stdout = ""  # clean working tree
-            elif "rev-parse" in args and "origin/auto-dev" in " ".join(args):
-                result.returncode = 128  # origin/<branch> does NOT exist
+            elif "@{u}" in args:
+                result.returncode = 128  # no upstream configured
                 result.stdout = ""
             elif "log" in args and "origin/main" in " ".join(args):
                 result.returncode = 0
@@ -2753,6 +2841,28 @@ class TestWorktreeHasUnsavedWork:
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         assert worktree_has_unsaved_work(client, "auto-dev/logerr") is True
 
+    def test_returns_true_when_upstream_rev_parse_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``@{u}`` rev-parse raises (not status) → fail-safe: treat as unsaved."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-upstream-rev-parse-err"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            if "status" in args:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "@{u}" in args:
+                msg = "git rev-parse @{u} exploded"
+                raise WorktreeError(msg)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert (
+            worktree_has_unsaved_work(client, "auto-dev/upstream-err", wt_path=wt_path)
+            is True
+        )
+
     # --- #472: .claude/ artifact filter ---
 
     def test_returns_false_when_only_claude_artifacts_untracked(
@@ -2806,7 +2916,7 @@ class TestWorktreeHasUnsavedWork:
     def test_returns_true_when_both_origins_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Both origin/<branch> and origin/<default_branch> absent (offline) → True."""
+        """No upstream configured and origin/<default_branch> absent (offline) → True."""
         client = self._client(tmp_path)
         wt_path = tmp_path / "wt" / "auto-dev-offline"
         wt_path.mkdir(parents=True)
@@ -2816,7 +2926,7 @@ class TestWorktreeHasUnsavedWork:
             if "status" in args:
                 result.stdout = ""  # clean working tree
             elif "rev-parse" in args:
-                result.returncode = 128  # origin/<branch> does NOT exist
+                result.returncode = 128  # @{u} — no upstream configured
                 result.stdout = ""
             elif "log" in args:
                 # Both origin refs absent — non-zero for any log call
@@ -2832,7 +2942,7 @@ class TestWorktreeHasUnsavedWork:
     def test_returns_true_when_origin_absent_and_local_default_has_commits(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Level 3: origin absent, local default present, has commits → True."""
+        """Level 3: no upstream, local default present, has commits → True."""
         client = self._client(tmp_path)
         wt_path = tmp_path / "wt" / "auto-dev-level3"
         wt_path.mkdir(parents=True)
@@ -2844,7 +2954,7 @@ class TestWorktreeHasUnsavedWork:
             if "status" in args:
                 result.stdout = ""  # clean working tree
             elif "rev-parse" in args:
-                result.returncode = 128  # origin/<branch> does NOT exist
+                result.returncode = 128  # @{u} — no upstream configured
                 result.stdout = ""
             elif "log" in args:
                 call_count[0] += 1
@@ -2866,7 +2976,7 @@ class TestWorktreeHasUnsavedWork:
     def test_returns_false_when_origin_absent_and_local_default_clean(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Level 3: origin absent, local default present, no commits → False."""
+        """Level 3: no upstream, local default present, no commits → False."""
         client = self._client(tmp_path)
         wt_path = tmp_path / "wt" / "auto-dev-level3-clean"
         wt_path.mkdir(parents=True)
@@ -2878,7 +2988,7 @@ class TestWorktreeHasUnsavedWork:
             if "status" in args:
                 result.stdout = ""  # clean working tree
             elif "rev-parse" in args:
-                result.returncode = 128  # origin/<branch> does NOT exist
+                result.returncode = 128  # @{u} — no upstream configured
                 result.stdout = ""
             elif "log" in args:
                 call_count[0] += 1
