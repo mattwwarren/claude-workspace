@@ -39,6 +39,7 @@ from cw.reconcile._shared import (
 )
 from cw.reconcile.concierge import run_concierge_recoveries
 from cw.reconcile.escalation import run_escalation_sweep
+from cw.reconcile.fix_dispatch import run_fix_dispatch
 from cw.reconcile.gate_recipes import run_gate_recipes
 from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
 from cw.reconcile.liveness import record_session_liveness_changes
@@ -102,6 +103,10 @@ def _run_terminal_backstops_and_sweeps(
     run_concierge_recoveries(now=now, native_live=native_live, config=config)
     run_gate_recipes(now=now, config=config)
     run_review_recipes(config=config)
+    # Sited AFTER run_review_recipes but deliberately OUTSIDE it: the fix loop
+    # is not an optional PR-attention automation and must not inherit that
+    # family's default-off review_recipes_enabled gate (#2017).
+    run_fix_dispatch(config=config)
     run_escalation_sweep(now=now)
     return timed_out_ticket_ids, completed_silent_ticket_ids
 

@@ -15,11 +15,17 @@ class SessionPurpose(StrEnum):
     IDEA = "idea"
     DEBT = "debt"
     ORCHESTRATE = "orchestrate"
+    # #2017 -- spawned via the fix_agent recipe (src/cw/reconcile/review_recipes/
+    # fix_agent.py), direct from the REVIEW stage's fix loop. Never a `cw
+    # start`/`--purpose` choice (see WORKER_PURPOSES exclusion below), same
+    # carve-out shape as ORCHESTRATE.
+    FIX = "fix"
 
 
 # Purposes a worker session can be dispatched/created with. ORCHESTRATE is
 # excluded: an ORCHESTRATE session is created only via `cw orchestrate start`
-# (#595 / Phase 4b), never selected as a worker --purpose.
+# (#595 / Phase 4b), never selected as a worker --purpose. FIX is excluded for
+# the same reason (#2017): it is dispatched only by the fix_agent recipe.
 WORKER_PURPOSES: tuple[SessionPurpose, ...] = (
     SessionPurpose.IMPL,
     SessionPurpose.IDEA,

@@ -139,7 +139,10 @@ from cw.review_finding_dispositions import FindingDisposition
 #      permanent historical fact, not a per-arrival marker. Model default and
 #      migration fill are both True (fail-open): state we cannot reconstruct
 #      must not retroactively refuse a legitimate completion.
-DEV_QUEUE_SCHEMA_VERSION = 33
+# v34: added TicketTask.pending_fix_dispatch/fix_dispatch_session_id
+#      (GitHub #2017) — the durable, non-worktree handoff surface the review
+#      fix loop's asynchronous dispatch runs on. See PendingFixDispatch below.
+DEV_QUEUE_SCHEMA_VERSION = 34
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -213,6 +216,31 @@ def _validate_review_recipe_keys(value: dict[str, bool]) -> dict[str, bool]:
 # percent-encoding at the sink (cw.gh._fetch_branch_exists_on_origin) rather
 # than by outlawing an id the tracker already assigned.
 _SAFE_TICKET_ID = re.compile(r"^(?!.*\.\.)[a-zA-Z0-9][a-zA-Z0-9._#-]*$")
+
+
+class PendingFixDispatch(BaseModel):
+    """Durable action-list handoff for the review fix loop (GitHub #2017 R21).
+
+    Written by the REVIEW session under ``dev_queue_lock()`` before it exits;
+    consumed by ``cw.reconcile.fix_dispatch`` on a later reconcile tick, from a
+    process that is never resident in the ticket's worktree. That separation is
+    the whole point: ``cw.spawn._write_hook_context``'s DAEMON guard refuses any
+    spawn into a worktree whose ``cw-context.json`` references a still-live
+    session, so a review session can never dispatch a fix session into its own
+    worktree. By the time this record is consumed the writing session is
+    terminal by construction, and the guard is satisfied without an exemption.
+
+    Carries the prompt TEXT, not a path: the prompt *is* the action list, and a
+    worktree-local file is not a durable surface (R21.4) — it dies with the
+    worktree. Lives in ``dev_queue.json``, which outlives both.
+    """
+
+    # NOT extra=forbid — persisted/runtime state, see #1200
+    prompt: str
+    label: str
+    cycle: int
+    requested_by_session_id: str
+    requested_at: datetime
 
 
 class TicketTask(BaseModel):
@@ -615,6 +643,22 @@ class TicketTask(BaseModel):
     # WatchedPr that cw.reconcile.stale_dispatch_watch registers for it
     # (GitHub #1927).
     blocked_on_pr: int | None = None
+    # GitHub #2017 — the review fix loop's asynchronous handoff pair. The
+    # REVIEW session records `pending_fix_dispatch` and exits; a later
+    # reconcile tick (cw.reconcile.fix_dispatch) dispatches the fix session
+    # from outside any worktree, clears the record, and stamps
+    # `fix_dispatch_session_id` so the completion watcher can revert the row to
+    # PENDING once that session goes terminal.
+    #
+    # Deliberately NOT accompanied by a status transition at record time: the
+    # row stays RUNNING for the whole handoff, which is what keeps it invisible
+    # to dispatch/claim.py's PENDING-only reclaim check and so prevents a second
+    # REVIEW session being dispatched before the fix agent has even spawned.
+    #
+    # Per-arrival markers in the v27/v29 convention, not durable history: each
+    # is consumed and cleared by exactly one seam in fix_dispatch.py.
+    pending_fix_dispatch: PendingFixDispatch | None = None
+    fix_dispatch_session_id: str | None = None
 
     @field_validator("gate_recipes")
     @classmethod

@@ -281,6 +281,10 @@ ignore = [
 # dependency (spawn.py imports cw.reconcile at module top). Inline import at
 # function level is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/review_recipes/address_review.py" = ["PLC0415"]
+# review_recipes.fix_agent defers the cw.spawn import inside dispatch_fix_agent
+# for the identical reason as address_review.py above (#2017). Inline import at
+# function level is the sanctioned mechanism, not a workaround.
+"src/cw/reconcile/review_recipes/fix_agent.py" = ["PLC0415"]
 # review_recipes.auto_fix_ci defers cw.dev_queue.add_ticket / cw.dispatch
 # .run_dispatch_loop / cw.models.TicketTask inside _dispatch_auto_fix_ci: the
 # add_ticket lock IS dev_queue_lock (nesting would self-deadlock), and dispatch

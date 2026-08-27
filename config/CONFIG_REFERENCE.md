@@ -591,15 +591,18 @@ liveness_attention_renotify_interval_minutes: 60
 # so values above liveness_buckets_minutes[2] have no additional effect.
 fix_loop_await_deadline_minutes: 30
 
-# `cw agent-spawn-verify` poll window and cadence, in seconds (#2012). The
-# auto-dev review stage runs that command in the same turn as its async
-# fix-agent spawn to prove a subagent transcript actually appeared; exit 1
-# blocks the stage with `fix_loop_dispatch_unverified` rather than letting it
-# await a notification that will never arrive. Raise the window if healthy
-# dispatches on this host trip that blocker — cold model starts, a contended
-# host, or a network-mounted worktree can all push first-transcript latency
-# past the default. `--poll-seconds` / `--poll-interval-seconds` override these
-# for a single invocation.
+# `cw agent-spawn-verify` poll window and cadence, in seconds (#2012). Run that
+# command in the same turn as an async subagent spawn to prove a subagent
+# transcript actually appeared; exit 1 is a verification failure the caller must
+# act on rather than awaiting a notification that will never arrive. Raise the
+# window if healthy dispatches on this host report that failure — cold model
+# starts, a contended host, or a network-mounted worktree can all push
+# first-transcript latency past the default. `--poll-seconds` /
+# `--poll-interval-seconds` override these for a single invocation. The auto-dev
+# review fix loop no longer calls this synchronously (#2017 records a
+# PendingFixDispatch handoff instead; cw.reconcile.fix_dispatch dispatches the
+# fix agent asynchronously on a later reconcile tick); it remains an operator
+# diagnostic.
 agent_spawn_verify_poll_seconds: 20
 agent_spawn_verify_poll_interval_seconds: 2
 

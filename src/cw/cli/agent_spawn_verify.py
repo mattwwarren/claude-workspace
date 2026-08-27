@@ -1,23 +1,25 @@
 """The ``cw agent-spawn-verify`` command (#2012).
 
-Closes the fix-loop async-dispatch wedge from the *dispatching* side. When
-``auto-dev-review.md`` Step 3b spawns its fix agent, the spawn is async: the
-orchestrating session ends its turn and resumes on the subagent's completion
-notification. If that spawn silently never launches, no notification ever
-arrives and the session waits forever — the failure mode that produced four
-reproductions before anything noticed.
+Bounds the wait on an *async* subagent spawn. A real subagent writes its own
+transcript into a worktree's Claude project dir, so the appearance of a
+``*.jsonl`` that is neither the caller's own nor a pre-existing sibling is cheap
+positive evidence the dispatch is real. Exit 0 means "verified, safe to end the
+turn and await"; exit 1 means "this dispatch produced nothing" and the caller
+must act rather than wait on a completion notification that will never arrive.
 
-This command turns that unbounded wait into a bounded check the orchestrator
-runs **in the same turn as the spawn**: a real subagent writes its own
-transcript into this worktree's Claude project dir, so the appearance of a
-``*.jsonl`` that is neither the caller's own nor a pre-existing sibling is
-cheap positive evidence the dispatch is real. Exit 0 means "verified, safe to
-end the turn and await"; exit 1 means "this dispatch produced nothing" and the
-stage must fail loudly (``blocker.reason: fix_loop_dispatch_unverified``).
+**Dual status (#2017).** The pipeline call site this was written for is retired:
+``auto-dev-review.md`` Step 3b no longer spawns its fix agent as a harness
+subagent, and no longer calls ``dispatch_fix_agent`` itself either — it records
+a ``PendingFixDispatch`` on the dev-queue row and exits; ``cw.reconcile.fix_dispatch``
+dispatches the fix agent asynchronously on a later reconcile tick, from a
+process resident in no worktree, which leaves no in-session async gap for this
+command to verify. The command is kept for two live consumers: as a standalone
+**operator diagnostic** for any hand-run async spawn, and as the shared
+transcript-resolution leaf ``cw queue peek`` builds on (#2028).
 
 **One Bash call, not a poll loop.** The waiting happens inside this process,
-deliberately: the orchestrator issuing repeated verification calls is exactly
-the busy-wait pattern ``cw guard-busy-wait`` exists to refuse.
+deliberately: a caller issuing repeated verification calls is exactly the
+busy-wait pattern ``cw guard-busy-wait`` exists to refuse.
 
 **No fail-open contract.** Unlike the hook handlers (``cw guard-cwd``, ``cw
 agent-spawn-pre``), which must never block a tool call and so exit 0 on every
@@ -134,6 +136,9 @@ def agent_spawn_verify(
     Prints the verifying transcript path and exits 0 on success; exits 1 with
     a diagnostic naming the checked project dir, ``--since``, the exclusion,
     and the effective poll window when the window elapses with no candidate.
+    Exit 1 is a general verification failure reported to whichever caller
+    invoked it — the auto-dev pipeline call site is retired (#2017); this
+    remains an operator diagnostic and a shared transcript-resolution leaf.
     """
     since_ts = _parse_since(since)
     worktree_path = Path(worktree).expanduser() if worktree else Path.cwd()
