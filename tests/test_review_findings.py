@@ -61,6 +61,7 @@ from tests.conftest import (
     _make_escalation,
     _make_finding,
     _make_reviewer_doc,
+    _without_evidence,
 )
 
 # -- #1738 fixtures: real #1729 diagnostics artifact -----------------------
@@ -937,15 +938,8 @@ class TestRejectionReasonLiteral:
 
 
 def _invalid_finding_payload(**overrides: object) -> dict[str, Any]:
-    """A raw finding dict with ``evidence`` removed — schema-invalid (#2029).
-
-    Omission rather than a blank value: the required-field failure is the shape
-    a real reviewer produces when it forgets the field entirely, and it is what
-    the ticket's own acceptance criteria name.
-    """
-    payload = dict(_finding_kwargs(**overrides))
-    del payload["evidence"]
-    return payload
+    """A raw finding dict with ``evidence`` removed — schema-invalid (#2029)."""
+    return _without_evidence(dict(_finding_kwargs(**overrides)))
 
 
 class TestParseReviewerDocument:

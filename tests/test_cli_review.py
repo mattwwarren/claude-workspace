@@ -32,6 +32,7 @@ from .conftest import (
     _make_escalation,
     _make_finding,
     _make_reviewer_doc,
+    _without_evidence,
     commit_tracked_file,
 )
 
@@ -1995,9 +1996,7 @@ def _anchored_finding(**overrides: object) -> dict[str, Any]:
 
 def _schema_invalid_finding(**overrides: object) -> dict[str, Any]:
     """A raw finding dict with ``evidence`` removed — schema-invalid (#2029)."""
-    payload = _anchored_finding(**overrides)
-    del payload["evidence"]
-    return payload
+    return _without_evidence(_anchored_finding(**overrides))
 
 
 def _consolidate_from(runner: CliRunner, docs_dir: Path) -> Any:

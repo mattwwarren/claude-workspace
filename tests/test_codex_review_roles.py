@@ -39,6 +39,7 @@ from tests._codex_review_helpers import (
     _ok_result,
     _SequencedRunner,
 )
+from tests.conftest import _without_evidence
 
 _AUDIT_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "codex_audit_events"
 
@@ -1127,9 +1128,7 @@ def _invalid_finding_payload(severity: str = "MUST_FIX") -> dict[str, object]:
     is ``int | None``), so a splat that mypy cannot narrow would type-error on
     the call rather than on the offending argument.
     """
-    payload = _finding_payload(severity=severity)
-    del payload["evidence"]
-    return payload
+    return _without_evidence(_finding_payload(severity=severity))
 
 
 class TestRunCodexRoleSchemaInvalidFindings:

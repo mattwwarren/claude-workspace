@@ -547,6 +547,23 @@ def _finding_kwargs(**overrides: object) -> _RawFindingKwargs:
     return cast("_RawFindingKwargs", kwargs)
 
 
+def _without_evidence(payload: dict[str, Any]) -> dict[str, Any]:
+    """Strip the required ``evidence`` field to build a schema-invalid payload
+    (#2029).
+
+    Omission rather than a blank value: the required-field failure is the
+    shape a real reviewer produces when it forgets the field entirely, and it
+    is what the ticket's own acceptance criteria name. Shared by
+    ``test_review_findings.py``, ``test_codex_review_roles.py``, and
+    ``test_cli_review.py``, which each built a near-identical local helper
+    doing this same delete against their own base-payload builder — one
+    source of truth so the mechanism can't silently drift between them.
+    """
+    payload = dict(payload)
+    del payload["evidence"]
+    return payload
+
+
 def _make_finding(**overrides: object) -> Finding:
     """Minimal-but-valid Finding with keyword overrides (#1237)."""
     return Finding.model_validate(_finding_kwargs(**overrides))
