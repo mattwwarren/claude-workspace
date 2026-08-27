@@ -763,9 +763,11 @@ class TestRecommend:
         assert "CI" in reason
 
     def test_age_above_stop_threshold_returns_stop(self) -> None:
+        # idle_min load-bearing for the liveness gate (#2044) — must be
+        # stale, not "demonstrably writing".
         rec, reason = queue_peek.recommend(
             age_min=queue_peek.STOP_AGE_MIN + 1.0,
-            idle_min=0.0,
+            idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
             unproductive_attempts=1,
@@ -777,7 +779,7 @@ class TestRecommend:
     def test_age_exceeds_ceiling_returns_stop_with_exceeded_wording(self) -> None:
         rec, reason = queue_peek.recommend(
             age_min=128.7,
-            idle_min=0.0,
+            idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
             unproductive_attempts=1,
@@ -789,7 +791,7 @@ class TestRecommend:
     def test_age_exactly_at_ceiling_returns_exceeded_wording(self) -> None:
         rec, reason = queue_peek.recommend(
             age_min=60.0,
-            idle_min=0.0,
+            idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
             unproductive_attempts=1,
@@ -800,7 +802,7 @@ class TestRecommend:
     def test_age_just_below_ceiling_returns_approaching_wording(self) -> None:
         rec, reason = queue_peek.recommend(
             age_min=59.9,
-            idle_min=0.0,
+            idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
             unproductive_attempts=1,
@@ -834,9 +836,11 @@ class TestRecommend:
         assert "systemic" not in reason
 
     def test_high_unproductive_attempts_returns_stop(self) -> None:
+        # idle_min load-bearing for the liveness gate (#2044) — must be
+        # stale, not "demonstrably writing".
         rec, reason = queue_peek.recommend(
             age_min=10.0,
-            idle_min=0.0,
+            idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
             unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
@@ -910,10 +914,10 @@ class TestRecommend:
     def test_high_attempts_without_usage_limit_signal_still_stops(self) -> None:
         """Regression guard for test_high_unproductive_attempts_returns_stop:
         omitting/False usage_limit_detected preserves the existing STOP
-        behavior."""
+        behavior. idle_min load-bearing for the liveness gate (#2044)."""
         rec, reason = queue_peek.recommend(
             age_min=10.0,
-            idle_min=0.0,
+            idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
             unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
@@ -956,10 +960,11 @@ class TestRecommend:
     def test_high_attempts_without_child_active_still_stops(self) -> None:
         """Regression guard: omitting/False child_active preserves the
         existing STOP-by-attempt-count behavior — a genuinely wedged session
-        with no active child must still be flagged."""
+        with no active child must still be flagged. idle_min load-bearing
+        for the liveness gate (#2044)."""
         rec, reason = queue_peek.recommend(
             age_min=10.0,
-            idle_min=0.0,
+            idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
             unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
@@ -1025,9 +1030,10 @@ class TestScoreSessionStageHighWater:
         assert "systemic" not in reason
 
     def test_high_attempts_with_shallow_high_water_still_stops(self) -> None:
+        # idle_min load-bearing for the liveness gate (#2044).
         rec, reason = queue_peek.recommend(
             age_min=10.0,
-            idle_min=0.0,
+            idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
             unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
@@ -1037,9 +1043,10 @@ class TestScoreSessionStageHighWater:
         assert "systemic" in reason
 
     def test_high_attempts_with_none_high_water_still_stops(self) -> None:
+        # idle_min load-bearing for the liveness gate (#2044).
         rec, reason = queue_peek.recommend(
             age_min=10.0,
-            idle_min=0.0,
+            idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
             unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
@@ -1061,9 +1068,10 @@ class TestScoreSessionStageHighWater:
         assert "merged" in reason.lower()
 
     def test_age_timeout_stops_even_with_finalize_high_water(self) -> None:
+        # idle_min load-bearing for the liveness gate (#2044).
         rec, reason = queue_peek.recommend(
             age_min=queue_peek.STOP_AGE_MIN + 1.0,
-            idle_min=0.0,
+            idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
             unproductive_attempts=1,
@@ -1097,6 +1105,122 @@ class TestScoreSessionStageHighWater:
         )
         assert rec != "STOP"
         assert "systemic" not in reason
+
+
+class TestLivenessGate:
+    """_gate_stop_on_liveness — a single verdict-level check applied to every
+    STOP-flavored recommendation, regardless of which _score_session arm
+    proposed it (#2044)."""
+
+    def test_high_attempts_live_idle_does_not_stop(self) -> None:
+        """#2044 primary example (7c159163): idle_min=0.0, no child_active,
+        unproductive-attempts arm fires — must be downgraded."""
+        rec, reason = queue_peek.recommend(
+            age_min=24.9,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=5,
+        )
+        assert rec != "STOP"
+        assert "unproductive attempt" in reason
+        assert "indicates active writing" in reason
+
+    def test_high_attempts_stale_idle_still_stops(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=24.9,
+            idle_min=20.0,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=5,
+        )
+        assert rec == "STOP"
+        assert "systemic" in reason
+
+    def test_age_arm_live_idle_does_not_stop(self) -> None:
+        """#2044 second example (bf947d61): age arm fires, idle_min=0.1 —
+        must be downgraded even though the age arm never reads idle_min
+        itself."""
+        rec, reason = queue_peek.recommend(
+            age_min=66.9,
+            idle_min=0.1,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=5,
+        )
+        assert rec != "STOP"
+
+    def test_age_arm_stale_idle_still_stops(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=66.9,
+            idle_min=20.0,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=5,
+        )
+        assert rec == "STOP"
+        assert "timeout" in reason
+
+    def test_idle_none_does_not_suppress_stop(self) -> None:
+        """idle_min is None (no signal) — mirrors _reached_deep_stage's
+        'unknown = no signal; does NOT suppress STOP' convention."""
+        rec, reason = queue_peek.recommend(
+            age_min=queue_peek.STOP_AGE_MIN + 1.0,
+            idle_min=None,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=1,
+        )
+        assert rec == "STOP"
+
+    def test_idle_exactly_at_threshold_is_live(self) -> None:
+        rec, _ = queue_peek.recommend(
+            age_min=queue_peek.STOP_AGE_MIN + 1.0,
+            idle_min=queue_peek.IDLE_LIVE_MAX_MIN,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=1,
+        )
+        assert rec != "STOP"
+
+    def test_idle_just_above_threshold_is_stale(self) -> None:
+        rec, _ = queue_peek.recommend(
+            age_min=queue_peek.STOP_AGE_MIN + 1.0,
+            idle_min=queue_peek.IDLE_LIVE_MAX_MIN + 0.1,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=1,
+        )
+        assert rec == "STOP"
+
+    def test_gate_does_not_touch_non_stop_verdicts(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=5.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=1,
+        )
+        assert rec in {"WAIT", "PEEK"}
+        assert "indicates active writing" not in reason
+
+    def test_gate_leaves_stall_check_stop_or_peek_unaffected(self) -> None:
+        """_stall_check's STOP-OR-PEEK path already requires
+        idle_min > IDLE_STALL_MIN (15) to fire — well above
+        IDLE_LIVE_MAX_MIN (2.0), so the new gate is a no-op here."""
+        age_min = 10.0
+        idle_min = queue_peek.IDLE_STALL_MIN + 1.0
+        pr_state = None
+        direct_rec, direct_reason = queue_peek._stall_check(age_min, idle_min, pr_state)
+        rec, reason = queue_peek.recommend(
+            age_min=age_min,
+            idle_min=idle_min,
+            pr_state=pr_state,
+            sentinel_status=None,
+            unproductive_attempts=1,
+        )
+        assert rec == direct_rec == "STOP-OR-PEEK"
+        assert reason == direct_reason
 
 
 # ---------------------------------------------------------------------------
