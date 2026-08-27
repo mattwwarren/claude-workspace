@@ -348,7 +348,7 @@ def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
     )
 
     reverted = revert_timed_out_tasks()
@@ -400,7 +400,7 @@ def test_revert_timed_out_clean_worktree_routes_to_pending(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
     )
 
     reverted = revert_timed_out_tasks()
@@ -445,7 +445,7 @@ def test_revert_timed_out_does_not_touch_regressed_into_stage(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
     )
 
     reverted = revert_timed_out_tasks()
@@ -486,7 +486,7 @@ def test_revert_completed_silent_dirty_worktree_routes_to_blocked_on_user(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
     )
 
     reverted = revert_completed_silent_tasks()
@@ -526,7 +526,7 @@ def test_revert_completed_silent_clean_worktree_routes_to_pending(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
     )
 
     reverted = revert_completed_silent_tasks()

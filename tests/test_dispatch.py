@@ -2078,7 +2078,8 @@ class TestDispatchTickSpawnErrors:
             "cw.reconcile._shared.get_client", lambda _name: sample_client_config
         )
         monkeypatch.setattr(
-            "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+            "cw.reconcile._shared.worktree_has_unsaved_work",
+            lambda _c, _b, **_kw: False,
         )
 
         reverted = revert_timed_out_tasks()
