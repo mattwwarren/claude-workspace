@@ -261,6 +261,22 @@ def _fill_ever_spawned_default(task_raw: dict[str, Any]) -> None:
         task_raw["ever_spawned"] = True
 
 
+def _fill_pending_fix_dispatch_default(task_raw: dict[str, Any]) -> None:
+    """Fill pending_fix_dispatch introduced in dev-queue schema v34
+    (GitHub #2017). Idempotent, and additive by construction: an already-
+    recorded handoff is never reset, since the record carries the fix loop's
+    entire action list and nothing else holds a copy of it."""
+    if "pending_fix_dispatch" not in task_raw:
+        task_raw["pending_fix_dispatch"] = None
+
+
+def _fill_fix_dispatch_session_id_default(task_raw: dict[str, Any]) -> None:
+    """Fill fix_dispatch_session_id introduced in dev-queue schema v34
+    (GitHub #2017). Idempotent."""
+    if "fix_dispatch_session_id" not in task_raw:
+        task_raw["fix_dispatch_session_id"] = None
+
+
 def _fill_watched_prs_default(raw: dict[str, Any]) -> None:
     """Fill the top-level watched_prs list introduced in schema v15 (#1154).
 
@@ -307,6 +323,8 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_pending_operator_comment_default(task_raw)
                 _fill_stale_gate_default(task_raw)
                 _fill_finding_dispositions_default(task_raw)
+                _fill_pending_fix_dispatch_default(task_raw)
+                _fill_fix_dispatch_session_id_default(task_raw)
                 _fill_unproductive_attempts_default(task_raw)
                 _fill_ever_spawned_default(task_raw)
     _fill_watched_prs_default(raw)

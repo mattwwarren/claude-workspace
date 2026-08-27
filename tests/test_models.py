@@ -23,6 +23,7 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEvent,
     OrchestratorEventType,
+    PendingFixDispatch,
     PrState,
     QueueItemStatus,
     ReapPolicy,
@@ -1039,7 +1040,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 33
+        assert DEV_QUEUE_SCHEMA_VERSION == 34
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -1916,6 +1917,7 @@ class TestPackageExportCompleteness:
             "OrchestratorConfig",
             "OrchestratorEvent",
             "OrchestratorEventType",
+            "PendingFixDispatch",
             "PrState",
             "QueueItemStatus",
             "ReapPolicy",
@@ -1970,3 +1972,42 @@ class TestExtractUnresolvedSpawnCount:
         from cw.models import extract_unresolved_spawn_count
 
         assert extract_unresolved_spawn_count(context) == expected
+
+
+class TestPendingFixDispatch:
+    """The v34 durable fix-loop handoff surface (#2017 R21.4)."""
+
+    def test_both_fields_default_to_none(self) -> None:
+        task = TicketTask(ticket_id="2017", client="acme")
+
+        assert task.pending_fix_dispatch is None
+        assert task.fix_dispatch_session_id is None
+
+    def test_round_trips_through_serialization(self) -> None:
+        """The prompt text itself must survive the dev-queue round trip: it IS
+        the action list, not a pointer to one a worktree teardown could orphan.
+        """
+        task = TicketTask(
+            ticket_id="2017",
+            client="acme",
+            pending_fix_dispatch=PendingFixDispatch(
+                prompt="fix the MUST_FIX items\n",
+                label="fix-2017",
+                cycle=1,
+                requested_by_session_id="review-sess",
+                requested_at=datetime(2026, 8, 26, tzinfo=UTC),
+            ),
+            fix_dispatch_session_id="fix-sess",
+        )
+
+        restored = TicketTask.model_validate(task.model_dump(mode="json"))
+
+        assert restored.pending_fix_dispatch is not None
+        assert restored.pending_fix_dispatch.prompt == "fix the MUST_FIX items\n"
+        assert restored.pending_fix_dispatch.label == "fix-2017"
+        assert restored.pending_fix_dispatch.cycle == 1
+        assert restored.pending_fix_dispatch.requested_by_session_id == "review-sess"
+        assert restored.pending_fix_dispatch.requested_at == datetime(
+            2026, 8, 26, tzinfo=UTC
+        )
+        assert restored.fix_dispatch_session_id == "fix-sess"
