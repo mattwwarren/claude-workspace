@@ -349,7 +349,7 @@ class TestLoadOperatorComments:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", _fail_if_called
+            "cw.codex_review._context.core.fetch_issue_comments", _fail_if_called
         )
         assert _load_operator_comments(tmp_path, "T-1") is None
 
@@ -358,7 +358,8 @@ class TestLoadOperatorComments:
     ) -> None:
         """gh failure surfaces as None from fetch_issue_comments -- degrade."""
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: None
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: None,
         )
         assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
 
@@ -366,7 +367,7 @@ class TestLoadOperatorComments:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: []
+            "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
         )
         assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
 
@@ -376,7 +377,7 @@ class TestLoadOperatorComments:
         """A whitespace-only or body-less entry contributes nothing; a comment
         with no author/createdAt still renders under an 'unknown' header."""
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [
                 {"body": "   "},
                 {"author": {"login": "op"}, "createdAt": "2026-08-10T00:00:00Z"},
@@ -391,7 +392,7 @@ class TestLoadOperatorComments:
     ) -> None:
         """A thread of empty bodies is indistinguishable from no thread."""
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [{"body": ""}],
         )
         assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
@@ -402,7 +403,7 @@ class TestLoadOperatorComments:
         """#1730: this ticket delivers the full operator thread, not just a
         single comment -- the multi-comment join path must be covered."""
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [
                 {
                     "author": {"login": "a"},
@@ -445,7 +446,7 @@ class TestLoadVoidedFindings:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", _fail_if_called
+            "cw.codex_review._context.core.fetch_issue_comments", _fail_if_called
         )
         assert _load_voided_findings(tmp_path, "T-1") == []
 
@@ -453,7 +454,8 @@ class TestLoadVoidedFindings:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: None
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: None,
         )
         assert _load_voided_findings(self._github_repo(tmp_path), "T-1") == []
 
@@ -461,7 +463,7 @@ class TestLoadVoidedFindings:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: []
+            "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
         )
         assert _load_voided_findings(self._github_repo(tmp_path), "T-1") == []
 
@@ -469,7 +471,7 @@ class TestLoadVoidedFindings:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [{"author": {"login": "a"}, "body": "just prose"}],
         )
         assert _load_voided_findings(self._github_repo(tmp_path), "T-1") == []
@@ -479,7 +481,7 @@ class TestLoadVoidedFindings:
     ) -> None:
         entry = _make_voided_finding()
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [
                 {"author": {"login": "a"}, "body": "unrelated send-back"},
                 {"author": None, "body": None},
@@ -498,7 +500,7 @@ class TestLoadVoidedFindings:
         repo = make_git_repo("wt-prepare-voided")
         entry = _make_voided_finding()
         monkeypatch.setattr(
-            "cw.codex_review._context._load_voided_findings",
+            "cw.codex_review._context.core._load_voided_findings",
             lambda *_a, **_kw: [entry],
         )
         prepared = _prepare_review_pass(
@@ -617,7 +619,7 @@ class TestLoadReviewPolicy:
     ) -> None:
         _write(tmp_path / ".claude" / "review-policy.md", "## Code Quality Reviewer\nx")
         calls: list[str] = []
-        import cw.codex_review._context as cr
+        import cw.codex_review._context._repo_config as cr
 
         real = cr._load_optional_text
 
@@ -1268,7 +1270,7 @@ def _write_repo_spec(worktree: Path, content: str) -> None:
 
 def _patch_global_agents(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr("cw.codex_review._context._GLOBAL_AGENTS_DIR", path)
+    monkeypatch.setattr("cw.codex_review._context._agent_spec._GLOBAL_AGENTS_DIR", path)
 
 
 class TestResolveAgentSpec:
@@ -1555,7 +1557,7 @@ class TestPrepareReviewPass:
             make_git_repo, "wt-1730-comments", "github-issues"
         )
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [
                 {
                     "author": {"login": "mattwwarren"},
@@ -1600,7 +1602,7 @@ class TestPrepareReviewPass:
             return [{"author": {"login": "a"}, "body": "some comment"}]
 
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", _counting_fetch
+            "cw.codex_review._context.core.fetch_issue_comments", _counting_fetch
         )
 
         _prepare_review_pass(
@@ -1621,7 +1623,7 @@ class TestPrepareReviewPass:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", _fail_if_called
+            "cw.codex_review._context.core.fetch_issue_comments", _fail_if_called
         )
 
         prepared = _prepare_review_pass(
@@ -1643,7 +1645,7 @@ class TestPrepareReviewPass:
         repo = self._repo_with_change(make_git_repo, "wt-1730-banner", "github-issues")
         _write_real_hook_context(repo, pending=True)
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [{"body": "SENDBACK-MARKER-1730"}],
         )
 
@@ -1668,7 +1670,7 @@ class TestPrepareReviewPass:
         )
         _write_real_hook_context(repo, pending=False)
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [{"body": "SENDBACK-MARKER-1730"}],
         )
 
@@ -2053,7 +2055,7 @@ class TestLoadFindingDispositions:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", _fail_if_called
+            "cw.codex_review._context.core.fetch_issue_comments", _fail_if_called
         )
         assert _load_finding_dispositions(tmp_path, "T-1") == {}
 
@@ -2061,7 +2063,8 @@ class TestLoadFindingDispositions:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: None
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: None,
         )
         assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == {}
 
@@ -2069,7 +2072,7 @@ class TestLoadFindingDispositions:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [{"author": {"login": "a"}, "body": "just prose"}],
         )
         assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == {}
@@ -2079,7 +2082,7 @@ class TestLoadFindingDispositions:
     ) -> None:
         ledger = _disposition_ledger()
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [
                 {"author": {"login": "a"}, "body": "unrelated send-back"},
                 {"author": None, "body": None},
@@ -2164,7 +2167,7 @@ class TestPrepareReviewPassFindingDispositions:
     ) -> None:
         repo = self._repo(make_git_repo, "wt-1838-stored")
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: []
+            "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
         )
         ledger = _disposition_ledger()
         prepared = _prepare_review_pass(
@@ -2191,7 +2194,7 @@ class TestPrepareReviewPassFindingDispositions:
         stored = _disposition_ledger(file="src/cw/stored.py", summary="Stored bug")
         fresh = _disposition_ledger(file="src/cw/fresh.py", summary="Fresh bug")
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [
                 {
                     "author": {"login": "op"},
@@ -2216,7 +2219,7 @@ class TestPrepareReviewPassFindingDispositions:
     ) -> None:
         repo = self._repo(make_git_repo, "wt-1838-absent")
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: []
+            "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
         )
         prepared = _prepare_review_pass(
             _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-1838-absent"
@@ -2236,7 +2239,7 @@ class TestPrepareReviewPassFindingDispositions:
         repo = self._repo(make_git_repo, "wt-1838-persist")
         fresh = _disposition_ledger()
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments",
+            "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [
                 {
                     "author": {"login": "op"},

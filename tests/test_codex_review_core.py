@@ -117,7 +117,7 @@ class TestPrepareReviewPass:
         _git(repo, "commit", "-m", "add mod.py")
 
         monkeypatch.setattr(
-            "cw.codex_review._context._load_voided_findings",
+            "cw.codex_review._context.core._load_voided_findings",
             lambda *_a, **_kw: [
                 _make_voided_finding(
                     severity="MUST_FIX",
@@ -170,7 +170,7 @@ class TestPrepareReviewPass:
         key = _disposition_key("mod.py", "Bug here")
         assert key is not None
         monkeypatch.setattr(
-            "cw.codex_review._context._load_finding_dispositions",
+            "cw.codex_review._context.core._load_finding_dispositions",
             lambda *_a, **_kw: {
                 key: FindingDisposition(
                     outcome="REJECTED",

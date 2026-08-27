@@ -734,7 +734,7 @@ class TestVoidedFindingNeverEngagesFixLoop:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-voided-no-loop")
         monkeypatch.setattr(
-            "cw.codex_review._context._load_voided_findings",
+            "cw.codex_review._context.core._load_voided_findings",
             lambda *_a, **_kw: [
                 _make_voided_finding(
                     severity="MUST_FIX",
@@ -2036,7 +2036,7 @@ class TestRereviewForwardsFindingDispositions:
             codex_fix_loop, "synthesize_codex_review_result", _spy_synth
         )
         monkeypatch.setattr(
-            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: []
+            "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
         )
 
         # The delta is `main..HEAD`, i.e. exactly the feature commit — so the
