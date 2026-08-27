@@ -31,6 +31,7 @@ from cw.review_findings import (
     ReviewVerdict,
     StrippedEscalation,
     _anchor_in_enclosing_def,
+    _best_effort_discarded_tally,
     _classify_finding,
     _content_rescue_anchor,
     _enclosing_def_span,
@@ -51,7 +52,6 @@ from cw.review_findings import (
     validate_reviewer_document,
     write_review_verdict,
 )
-from cw.review_findings._validation import _best_effort_discarded_tally
 from tests.conftest import (
     FindingKwargs,
     _doc_payload,
