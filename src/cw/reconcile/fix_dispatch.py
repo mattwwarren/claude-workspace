@@ -151,6 +151,8 @@ def _build_dispatch_jobs(
     survive until the dispatch actually succeeds so a transient conflict retries
     on the next tick instead of dropping the action list on the floor.
     """
+    if not candidates:
+        return []
     jobs: list[_DispatchJob] = []
     with dev_queue_lock():
         store = load_dev_queue()
@@ -158,6 +160,19 @@ def _build_dispatch_jobs(
             task = _find_task(store, candidate.ticket_id, candidate.client)
             if task is None or task.pending_fix_dispatch is None:
                 continue  # concurrently dispatched or removed — silent skip
+            if task.fix_dispatch_session_id is not None:
+                # A prior fix session for this ticket hasn't been unparked yet
+                # (completion watcher hasn't cleared fix_dispatch_session_id).
+                # Dispatching a second one here would orphan the first — the
+                # two fields are meant to be mutually exclusive by convention,
+                # not enforced by the model, so guard it here defensively.
+                _log.warning(
+                    "fix_dispatch: skipping ticket %s — fix_dispatch_session_id "
+                    "%r still set, prior fix session not yet unparked",
+                    task.ticket_id,
+                    task.fix_dispatch_session_id,
+                )
+                continue
             client_cfg = clients.get(task.client)
             if client_cfg is None:
                 _log.warning(

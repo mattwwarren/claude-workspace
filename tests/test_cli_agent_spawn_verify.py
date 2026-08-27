@@ -7,11 +7,12 @@ general verification failure meaning the spawn produced nothing, so the caller
 must act rather than await a notification that will never arrive.
 
 **Dual status (#2017):** the auto-dev review fix loop that motivated this
-command no longer calls it — Step 3b dispatches a cw session synchronously via
-``dispatch_fix_agent``, leaving no async gap. The command is kept as a
-standalone operator diagnostic and as the shared transcript-resolution leaf
-``cw queue peek`` builds on (#2028), so the behaviour asserted below is
-unchanged.
+command no longer calls it — Step 3b records a ``PendingFixDispatch`` handoff
+and exits; ``cw.reconcile.fix_dispatch`` dispatches the fix agent
+asynchronously on a later reconcile tick, leaving no in-session async gap.
+The command is kept as a standalone operator diagnostic and as the shared
+transcript-resolution leaf ``cw queue peek`` builds on (#2028), so the
+behaviour asserted below is unchanged.
 
 Unlike the hook commands (``cw guard-cwd``, ``cw agent-spawn-pre``) this is an
 operator/orchestrator-facing command with **no** fail-open contract: an

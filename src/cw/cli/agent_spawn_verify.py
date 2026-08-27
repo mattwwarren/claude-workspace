@@ -9,9 +9,11 @@ must act rather than wait on a completion notification that will never arrive.
 
 **Dual status (#2017).** The pipeline call site this was written for is retired:
 ``auto-dev-review.md`` Step 3b no longer spawns its fix agent as a harness
-subagent — it dispatches a cw session synchronously via
-``cw.reconcile.review_recipes.fix_agent.dispatch_fix_agent``, which leaves no
-async gap to verify. The command is kept for two live consumers: as a standalone
+subagent, and no longer calls ``dispatch_fix_agent`` itself either — it records
+a ``PendingFixDispatch`` on the dev-queue row and exits; ``cw.reconcile.fix_dispatch``
+dispatches the fix agent asynchronously on a later reconcile tick, from a
+process resident in no worktree, which leaves no in-session async gap for this
+command to verify. The command is kept for two live consumers: as a standalone
 **operator diagnostic** for any hand-run async spawn, and as the shared
 transcript-resolution leaf ``cw queue peek`` builds on (#2028).
 

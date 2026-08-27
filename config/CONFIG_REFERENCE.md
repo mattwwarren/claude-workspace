@@ -599,8 +599,10 @@ fix_loop_await_deadline_minutes: 30
 # starts, a contended host, or a network-mounted worktree can all push
 # first-transcript latency past the default. `--poll-seconds` /
 # `--poll-interval-seconds` override these for a single invocation. The auto-dev
-# review fix loop no longer calls this (#2017 dispatches its fix agent as a cw
-# session synchronously); it remains an operator diagnostic.
+# review fix loop no longer calls this synchronously (#2017 records a
+# PendingFixDispatch handoff instead; cw.reconcile.fix_dispatch dispatches the
+# fix agent asynchronously on a later reconcile tick); it remains an operator
+# diagnostic.
 agent_spawn_verify_poll_seconds: 20
 agent_spawn_verify_poll_interval_seconds: 2
 
