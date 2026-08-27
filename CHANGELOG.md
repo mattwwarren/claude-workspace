@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`worktree_gc._has_unpushed_commits` now resolves the checked-out branch's real upstream via `@{u}` instead of assuming `origin/<branch>` (#2053):** it previously compared unpushed-commit counts against `origin/<branch>` by name, so a branch pushed under a different name or without that exact remote ref was misjudged. It now resolves the actual configured upstream and falls back only when none is set, matching the same fix already applied to `_has_unpushed_commits`'s sibling helper `worktree_has_unsaved_work` under #2050.
+
 ## [1.45.0] - 2026-08-27
 
 ### Added
