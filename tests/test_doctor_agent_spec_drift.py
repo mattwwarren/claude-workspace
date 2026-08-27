@@ -65,7 +65,9 @@ def test_role_falls_back_to_global_when_repo_missing(
 ) -> None:
     _write_repo_specs(sample_client.workspace_path, skip={"Deployment Reviewer"})
     global_dir = tmp_path / "global-agents"
-    monkeypatch.setattr("cw.codex_review._context._GLOBAL_AGENTS_DIR", global_dir)
+    monkeypatch.setattr(
+        "cw.codex_review._context._agent_spec._GLOBAL_AGENTS_DIR", global_dir
+    )
     _populate_global_agents_dir(global_dir, deployment_reviewer="GLOBAL SPEC\n")
 
     results = _check_agent_spec_drift({"test-client": sample_client})
@@ -85,7 +87,9 @@ def test_fallback_disabled_reports_global_only_role_as_absent(
         "[tool.cw.codex_review]\nagent_spec_global_fallback = false\n",
     )
     global_dir = tmp_path / "global-agents"
-    monkeypatch.setattr("cw.codex_review._context._GLOBAL_AGENTS_DIR", global_dir)
+    monkeypatch.setattr(
+        "cw.codex_review._context._agent_spec._GLOBAL_AGENTS_DIR", global_dir
+    )
     _populate_global_agents_dir(global_dir, deployment_reviewer="GLOBAL SPEC\n")
 
     results = _check_agent_spec_drift({"test-client": sample_client})
@@ -133,7 +137,9 @@ def test_blank_repo_file_recovered_by_global_fallback_reports_resolved(
         "   \n",
     )
     global_dir = tmp_path / "global-agents"
-    monkeypatch.setattr("cw.codex_review._context._GLOBAL_AGENTS_DIR", global_dir)
+    monkeypatch.setattr(
+        "cw.codex_review._context._agent_spec._GLOBAL_AGENTS_DIR", global_dir
+    )
     _populate_global_agents_dir(global_dir, deployment_reviewer="GLOBAL SPEC\n")
 
     results = _check_agent_spec_drift({"test-client": sample_client})

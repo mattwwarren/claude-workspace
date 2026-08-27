@@ -263,8 +263,8 @@ _MUST_FIX_MECHANICALLY_REJECTED_REASON = "codex_must_fix_mechanically_rejected"
 # #1775 reaffirms this for _park_review_health_gate specifically: a degraded
 # reviewer's stated reason (ReviewerRunRecord.detail, threaded through
 # cw.review_findings.consolidate_verdict and rendered by
-# cw.codex_review._verdict._render_degraded_roles_note) lives entirely inside
-# the review-executor process and is never written onto the
+# cw.codex_review._verdict._render._render_degraded_roles_note) lives entirely
+# inside the review-executor process and is never written onto the
 # session.last_result sentinel this dispatch-loop process reads -- there is no
 # existing data path from that detail into _park_review_health_gate's
 # breadcrumbs/needs_attention payload. Threading one in was considered and

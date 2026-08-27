@@ -887,7 +887,9 @@ def _isolate_global_agents_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     """
     global_agents = tmp_path / "isolated-global-agents"
     global_agents.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr("cw.codex_review._context._GLOBAL_AGENTS_DIR", global_agents)
+    monkeypatch.setattr(
+        "cw.codex_review._context._agent_spec._GLOBAL_AGENTS_DIR", global_agents
+    )
 
 
 @pytest.fixture(autouse=True)

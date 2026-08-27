@@ -353,7 +353,7 @@ ignore = [
 # (#1838): codex_background imports cw.codex_fix_loop, which imports
 # cw.codex_review, so a module-level import here would close that cycle. Same
 # shape and rationale as the codex_background.py entry above.
-"src/cw/codex_review/_context.py" = ["PLC0415"]
+"src/cw/codex_review/_context/core.py" = ["PLC0415"]
 # Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
 # so module-level imports legitimately follow executable code (E402).
 "tests/test_cw_pr_events_channel.py" = ["E402"]
