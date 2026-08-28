@@ -14,6 +14,7 @@ import pytest
 from cw.config import (
     load_state,
     save_state,
+    sessions_lock,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
@@ -22,6 +23,7 @@ from cw.models import (
     CompletionReason,
     CwState,
     DevQueueStore,
+    OrchestratorConfig,
     OrchestratorEventType,
     PrState,
     QueueItemStatus,
@@ -971,3 +973,68 @@ class TestConciergeAndEscalationWiring:
         assert report.phantom_session_ids == ["phantom-1"]
         concierge_mock.assert_called_once()
         escalation_mock.assert_called_once()
+
+
+class TestFixDispatchRunsPostLock:
+    """#2064: run_fix_dispatch's spawn reaches spawn_create_impl's own
+    sessions_lock() acquisition, so it must run strictly AFTER reconcile()'s
+    own sessions_lock hold releases -- not from inside
+    _run_terminal_backstops_and_sweeps, which runs while the lock is held."""
+
+    def test_fix_dispatch_wiring_no_phantoms_branch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[]))
+
+        def _spy(*, config: OrchestratorConfig) -> list[str]:
+            with sessions_lock():
+                pass
+            return []
+
+        fix_dispatch_mock = MagicMock(side_effect=_spy)
+        monkeypatch.setattr("cw.reconcile.core.run_fix_dispatch", fix_dispatch_mock)
+
+        reconcile()
+
+        fix_dispatch_mock.assert_called_once()
+
+    def test_fix_dispatch_wiring_phantom_branch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A phantom (missing-surface) DAEMON session routes through the
+        phantom-handling tail of _reconcile_locked -- the hoisted call must
+        still run post-lock there too."""
+        state = CwState(sessions=[_mk_session("phantom-1", "missing-ref")])
+        save_state(state)
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "unrelated1"}],
+        )
+
+        def _spy(*, config: OrchestratorConfig) -> list[str]:
+            with sessions_lock():
+                pass
+            return []
+
+        fix_dispatch_mock = MagicMock(side_effect=_spy)
+        monkeypatch.setattr("cw.reconcile.core.run_fix_dispatch", fix_dispatch_mock)
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == ["phantom-1"]
+        fix_dispatch_mock.assert_called_once()
+
+    def test_fix_dispatch_runs_before_completed_ticket_ids_early_return(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guards against placing the hoisted call after the
+        ``completed_ticket_ids`` early return -- it must run unconditionally
+        every tick, including ticks with no completions."""
+        save_state(CwState(sessions=[]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+        fix_dispatch_mock = MagicMock(return_value=[])
+        monkeypatch.setattr("cw.reconcile.core.run_fix_dispatch", fix_dispatch_mock)
+
+        reconcile()
+
+        fix_dispatch_mock.assert_called_once()
