@@ -170,6 +170,17 @@ ignore = [
     # `Review`) into the sibling `_dedup` submodule.
     "TC001",
 ]
+"src/cw/review_adjudication/_models.py" = [
+    # `Adjudication.severity` / `VoidedFinding.severity` are pydantic field
+    # annotations, so `cw.review_findings.Severity` must be importable at
+    # runtime for pydantic to resolve it at class-build time — a
+    # TYPE_CHECKING-only import raises NameError there. The same case as the
+    # two blocks above, and it only fires because the #2011
+    # review_adjudication.py -> package split left this submodule with no
+    # RUNTIME use of either alias (`REJECTED_ENTRY_SEVERITY`, the module's one
+    # other `Severity` site, moved to the sibling `_deferred_md`).
+    "TC001",
+]
 "src/cw/tui.py" = [
     "TCH003",  # WatchRow Pydantic model needs runtime access to Path
 ]
