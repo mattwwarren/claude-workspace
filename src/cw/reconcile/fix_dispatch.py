@@ -36,6 +36,16 @@ unlike its siblings called from inside ``core._run_terminal_backstops_and_sweeps
 The detect/act/deferred-post-lock-dispatch *shape* is still borrowed from
 ``review_recipes.address_review``; only the gating and lock placement differ.
 
+The #2064 hoist also runs this module one step later, per tick, relative to
+``cw.reconcile.escalation.run_escalation_sweep`` (previously before it inside
+``core._run_terminal_backstops_and_sweeps``, now after ``_reconcile_locked``
+returns). Inert: ``run_fix_dispatch`` only ever touches RUNNING rows and
+transitions them RUNNING->PENDING (status stays RUNNING for the whole handoff,
+per the paragraph above), while escalation eligibility requires
+BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF/FAILED. Neither RUNNING nor PENDING
+is ever escalation-eligible, so this module cannot move a row into or out of
+the set the sweep scans, in either order.
+
 Throughout, the row's ``status`` is left at RUNNING for the whole handoff. That
 is load-bearing, not incidental: ``dispatch/claim.py`` only ever claims PENDING
 rows, so a RUNNING row cannot be re-dispatched as a second REVIEW session while

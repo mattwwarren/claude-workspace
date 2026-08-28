@@ -255,6 +255,18 @@ def reconcile() -> ReconcileReport:
     # without a SessionsLockReentryError (#1228). Runs unconditionally (no
     # gate, by design, #2017) -- must sit BEFORE the completed_ticket_ids
     # early return below, not after.
+    #
+    # This hoist also moves run_fix_dispatch to AFTER run_escalation_sweep
+    # (called inside _reconcile_locked above, line ~106) instead of before it
+    # as in the old _run_terminal_backstops_and_sweeps ordering. Safe: the two
+    # touch disjoint TicketTask status sets. run_fix_dispatch only ever acts on
+    # RUNNING rows and transitions them RUNNING->PENDING (fix_dispatch.py's
+    # module docstring: status stays RUNNING for the whole handoff); escalation
+    # eligibility requires BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF/FAILED
+    # (escalation.py's _is_escalation_eligible). Neither RUNNING nor PENDING is
+    # ever escalation-eligible, so run_fix_dispatch cannot flip a row into or
+    # out of the set run_escalation_sweep scans -- the reorder changes nothing
+    # escalation observes on this tick or any other.
     run_fix_dispatch(config=_orchestrator_config)
 
     if not completed_ticket_ids:
