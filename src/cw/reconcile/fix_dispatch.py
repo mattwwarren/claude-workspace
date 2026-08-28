@@ -28,11 +28,13 @@ Deliberately NOT an RFC-0010 review recipe, and deliberately not registered in
 ``run_review_recipes``: that family gates on ``review_recipes_enabled``, which
 defaults off. These recipes are optional PR-attention automations; the fix loop
 is not optional — gating it would silently disable the fix loop for every client
-that has not opted in. Sited and called like ``run_escalation_sweep`` instead:
-a sibling of ``gate_recipes``/``concierge``/``escalation``, invoked
-unconditionally from ``core._run_terminal_backstops_and_sweeps``. The
-detect/act/deferred-post-lock-dispatch *shape* is still borrowed from
-``review_recipes.address_review``; only the gating differs.
+that has not opted in. Invoked unconditionally as a post-pass from
+``core.reconcile()``, strictly AFTER ``sessions_lock()`` releases (#2064) —
+unlike its siblings called from inside ``core._run_terminal_backstops_and_sweeps``
+(which run under that lock), this module's ``dispatch_fix_agent`` call reaches
+``spawn_create_impl``'s own ``sessions_lock()`` acquisition, which cannot nest.
+The detect/act/deferred-post-lock-dispatch *shape* is still borrowed from
+``review_recipes.address_review``; only the gating and lock placement differ.
 
 Throughout, the row's ``status`` is left at RUNNING for the whole handoff. That
 is load-bearing, not incidental: ``dispatch/claim.py`` only ever claims PENDING
@@ -81,6 +83,19 @@ FIX_LOOP_PENDING_DISPATCH = "fix_loop_pending_dispatch"
 
 _STAGE_FIX_LOOP = "s3_fix_loop"
 _ERROR_KIND_DISPATCH_FAILED = "fix_dispatch_failed"
+
+# Cap on fix-agent spawns per _act_on_pending_fix_dispatches call (#2064).
+# This loop bypasses dispatch/host_capacity.py and dispatch/claim.py's lane
+# occupancy entirely, by design (dispatch_fix_agent's own docstring:
+# "Passes NO task= kwarg ... lane occupancy are untouched") -- this cap is
+# what bounds it instead, now that the #2064 hoist makes the loop execute
+# for the first time (previously every call died on sessions_lock reentry).
+# Candidates beyond the cap are left untouched (pending_fix_dispatch is
+# never cleared) and are reconsidered on a later tick. Shape mirrors
+# dispatch/pr_gate.py's _MAX_PROBES_PER_TICK. Picked conservatively small
+# (vs. pr_gate's 20): each unit here is a full git fetch/merge +
+# spawn_create_impl DAEMON process launch, not a cheap `gh pr list` probe.
+_MAX_FIX_DISPATCHES_PER_TICK = 3
 
 
 class _FixDispatchCandidate(NamedTuple):
@@ -262,13 +277,39 @@ def _act_on_pending_fix_dispatches(
 ) -> list[str]:
     """Dispatch each pending fix agent; return the ticket_ids actually spawned.
 
-    Every ``dispatch_fix_agent`` call runs strictly AFTER ``dev_queue_lock()``
-    releases (mirrors ``address_review._dispatch_address_review``), so the spawn
-    never nests the flock. ``dispatch_fix_agent`` itself defers the ``cw.spawn``
-    import, so this module needs no function-local import of its own.
+    Two locks are in play, and only one is guaranteed here:
+
+    - ``dev_queue_lock()`` is genuinely never nested: every ``dispatch_fix_agent``
+      call below runs strictly AFTER ``_build_dispatch_jobs``'s own
+      ``dev_queue_lock()`` releases.
+    - ``sessions_lock()`` is NOT nested only because the call site
+      (``core.reconcile()``) invokes ``run_fix_dispatch`` after its own
+      ``sessions_lock()`` releases (#2064) — that guarantee lives at the call
+      site, not in this function. ``address_review._dispatch_address_review``'s
+      otherwise-similar claim does NOT hold for ``sessions_lock``; see that
+      module's docstring.
+
+    ``dispatch_fix_agent`` itself defers the ``cw.spawn`` import, so this module
+    needs no function-local import of its own.
+
+    Capped at ``_MAX_FIX_DISPATCHES_PER_TICK`` spawns per call (#2064): this
+    loop bypasses host_capacity/lane admission by design (``dispatch_fix_agent``'s
+    own docstring), so the cap is what bounds fan-out now that the sessions_lock
+    fix makes the loop actually execute for the first time; overflow candidates
+    are sliced off before ``_build_dispatch_jobs`` runs and are reconsidered next
+    tick, latch untouched.
     """
+    capped = candidates[:_MAX_FIX_DISPATCHES_PER_TICK]
+    elided = len(candidates) - len(capped)
+    if elided > 0:
+        _log.info(
+            "fix_dispatch: %d candidate(s) deferred to a later tick — "
+            "per-tick spawn cap (%d) reached",
+            elided,
+            _MAX_FIX_DISPATCHES_PER_TICK,
+        )
     acted: list[str] = []
-    for job in _build_dispatch_jobs(candidates, clients):
+    for job in _build_dispatch_jobs(capped, clients):
         try:
             session_id = dispatch_fix_agent(
                 client=job.client_cfg,
@@ -335,7 +376,8 @@ def run_fix_dispatch(*, config: OrchestratorConfig) -> list[str]:
 
     Runs UNCONDITIONALLY — there is no enablement gate, by design (see the
     module docstring). *config* is accepted for signature parity with its
-    sibling sweeps in ``core._run_terminal_backstops_and_sweeps``.
+    sibling sweeps in ``core._run_terminal_backstops_and_sweeps``, even though
+    this call itself is sited in ``core.reconcile()`` post-lock (#2064).
 
     Completions run first, and the queue is re-loaded between the phases: a row
     unparked by the completions phase must not then be seen as a pending

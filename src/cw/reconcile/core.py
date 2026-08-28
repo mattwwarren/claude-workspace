@@ -103,10 +103,6 @@ def _run_terminal_backstops_and_sweeps(
     run_concierge_recoveries(now=now, native_live=native_live, config=config)
     run_gate_recipes(now=now, config=config)
     run_review_recipes(config=config)
-    # Sited AFTER run_review_recipes but deliberately OUTSIDE it: the fix loop
-    # is not an optional PR-attention automation and must not inherit that
-    # family's default-off review_recipes_enabled gate (#2017).
-    run_fix_dispatch(config=config)
     run_escalation_sweep(now=now)
     return timed_out_ticket_ids, completed_silent_ticket_ids
 
@@ -252,6 +248,13 @@ def reconcile() -> ReconcileReport:
     # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
     # executes under the session lock (liveness — #485 SHOULD_FIX 4).
     completed_ticket_ids = complete_timed_out_merged_tasks()
+
+    # Sited here (#2064), not in _run_terminal_backstops_and_sweeps: dispatch_fix_agent's
+    # spawn_create_impl() call re-acquires sessions_lock(), so it cannot run from inside
+    # _reconcile_locked's sessions_lock() hold without a SessionsLockReentryError (#1228).
+    # Runs unconditionally (no gate, by design, #2017) -- must sit BEFORE the
+    # completed_ticket_ids early return below, not after.
+    run_fix_dispatch(config=_orchestrator_config)
 
     if not completed_ticket_ids:
         return locked_report
