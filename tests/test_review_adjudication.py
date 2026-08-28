@@ -1,8 +1,11 @@
 """Tests for the Claude-native adjudication seam (GitHub #1805).
 
-1:1 with ``src/cw/review_adjudication.py`` per the CLAUDE.md Testing
-convention. Reuses ``tests/conftest.py``'s ``_make_finding``/``_make_diff``
-fixtures rather than re-declaring equivalents.
+1:1 with the ``src/cw/review_adjudication/`` package per the CLAUDE.md Testing
+convention (the module became a package in #2011; this file covers its whole
+public surface, and ``tests/test_review_adjudication_reexports.py`` guards the
+re-export list that keeps it importable from one place). Reuses
+``tests/conftest.py``'s ``_make_finding``/``_make_diff`` fixtures rather than
+re-declaring equivalents.
 """
 
 from __future__ import annotations
