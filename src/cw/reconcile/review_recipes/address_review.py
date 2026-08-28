@@ -201,11 +201,26 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
 
     Runs strictly AFTER ``dev_queue_lock()`` releases (mirrors
     ``gate_recipes._post_auto_approve_comment`` running post-lock), so the spawn
-    never nests the flock. The function-local ``spawn_create_impl`` import breaks
-    the ``cw.spawn`` ↔ ``cw.reconcile`` cycle. Passes NO ``task=`` kwarg
+    never nests THAT flock. The function-local ``spawn_create_impl`` import
+    breaks the ``cw.spawn`` ↔ ``cw.reconcile`` cycle. Passes NO ``task=`` kwarg
     (Resolution 6: no dev-queue correlation). On ``CwError`` emits a durable
     ``PR_ACTION_FAILED`` correction and returns ``None`` — one candidate's
     failure never aborts the loop.
+
+    That "never nests the flock" guarantee covers ``dev_queue_lock`` only.
+    ``sessions_lock`` is a separate, NOT-covered lock: this spawn runs from
+    inside ``run_review_recipes``, which still executes under
+    ``_run_terminal_backstops_and_sweeps``'s ``sessions_lock()`` hold
+    (unhoisted, unlike ``fix_dispatch.run_fix_dispatch`` post-#2064). Every
+    call here therefore reenters ``sessions_lock()`` inside
+    ``spawn_create_impl`` and is silently absorbed by the broad ``except
+    CwError`` below — see ``sessions_lock()``'s own docstring
+    (``config.py:284-304``) for "the guard documents tolerance of this
+    caller," and ``SessionsLockReentryError``'s class docstring
+    (``exceptions.py:375-390``) for "this is a ``CwError`` subclass, which is
+    why ``except CwError`` swallows it." #2064 is where the sibling bug in
+    ``fix_dispatch`` was first diagnosed and fixed; this module's own
+    reentry is unchanged — no behavior change here, docstring only.
     """
     from cw.spawn import spawn_create_impl
 

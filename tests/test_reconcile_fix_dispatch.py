@@ -12,11 +12,13 @@ construction.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from cw.config import load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import CwError, HookContextConflictError
@@ -28,12 +30,16 @@ from cw.models import (
     OrchestratorEventType,
     PendingFixDispatch,
     QueueItemStatus,
+    SessionPurpose,
     SessionStatus,
 )
-from cw.reconcile import fix_dispatch
+from cw.native_daemon import FakeNativeDaemonClient
+from cw.reconcile import fix_dispatch, reconcile
 from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests.test_reconcile_review_recipes import _make_fix_client, _seed_origin
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 _TICKET = "2017"
@@ -411,3 +417,108 @@ def test_run_fix_dispatch_no_candidates_is_a_noop(
 
     assert fix_dispatch.run_fix_dispatch(config=OrchestratorConfig()) == []
     assert stub_dispatch.calls == []
+
+
+# --- sessions_lock integration (#2064) ---------------------------------------
+
+
+def test_run_fix_dispatch_spawns_real_fix_session_through_sessions_lock(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reconcile() must dispatch fix agents post-lock (#2064).
+
+    Exercises the REAL ``dispatch_fix_agent`` -> ``spawn_create_impl`` path
+    (only the native daemon is faked), so the spawn's own ``sessions_lock()``
+    acquisition genuinely runs. On the pre-fix tree this dies with
+    ``SessionsLockReentryError`` inside ``spawn_create_impl``, is caught by
+    ``_act_on_pending_fix_dispatches``'s broad ``except CwError``, and no fix
+    session is ever spawned.
+    """
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2019"
+    _seed_origin(client, branch)
+    monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: mock_native_daemon)
+    monkeypatch.setattr(
+        fix_dispatch, "load_effective_clients", lambda: {_CLIENT: client}
+    )
+
+    # Parent session dispatch_fix_agent -> spawn_create_impl resolves via
+    # PendingFixDispatch.requested_by_session_id ("review-sess" default).
+    # Terminal so it never enters phantom detection (_LIVE_STATUSES-only).
+    save_state(
+        CwState(
+            sessions=[
+                _make_daemon_session(
+                    id="review-sess",
+                    name=f"{_CLIENT}/review/2019",
+                    client=_CLIENT,
+                    status=SessionStatus.COMPLETED,
+                )
+            ]
+        )
+    )
+    task = _make_ticket_task(
+        ticket_id="2019",
+        client=_CLIENT,
+        status=QueueItemStatus.RUNNING,
+    )
+    task.pending_fix_dispatch = _pending(label="fix-2019")
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    reconcile()
+
+    fix_sessions = [s for s in load_state().sessions if s.purpose == SessionPurpose.FIX]
+    assert len(fix_sessions) == 1
+    updated = _only_task()
+    assert updated.pending_fix_dispatch is None
+    assert updated.fix_dispatch_session_id == fix_sessions[0].id
+    assert read_events(event_types=[OrchestratorEventType.STAGE_ERRORED]) == []
+
+
+# --- per-tick spawn cap (#2064) -----------------------------------------------
+
+
+def test_act_on_pending_fix_dispatches_caps_spawns_per_tick(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fan-out is bounded: only the first ``_MAX_FIX_DISPATCHES_PER_TICK``
+    candidates spawn; the rest are left pending and reconsidered next tick."""
+    monkeypatch.setattr(fix_dispatch, "_MAX_FIX_DISPATCHES_PER_TICK", 2)
+    ticket_ids = ["2020", "2021", "2022"]
+    tasks = [
+        _make_ticket_task(
+            ticket_id=ticket_id,
+            client=_CLIENT,
+            status=QueueItemStatus.RUNNING,
+            pending_fix_dispatch=_pending(label=f"fix-{ticket_id}"),
+        )
+        for ticket_id in ticket_ids
+    ]
+    save_dev_queue(DevQueueStore(tasks=tasks))
+
+    candidates = fix_dispatch._detect_pending_fix_dispatches(load_dev_queue().tasks)
+    with caplog.at_level(logging.INFO, logger="cw.reconcile.fix_dispatch"):
+        acted = fix_dispatch._act_on_pending_fix_dispatches(
+            candidates, clients={_CLIENT: acme_client}
+        )
+
+    assert len(acted) == 2
+    assert len(stub_dispatch.calls) == 2
+
+    elided_ids = set(ticket_ids) - set(acted)
+    assert len(elided_ids) == 1
+    reloaded = {t.ticket_id: t for t in load_dev_queue().tasks}
+    elided = reloaded[next(iter(elided_ids))]
+    assert elided.pending_fix_dispatch is not None
+    assert elided.fix_dispatch_session_id is None
+    assert elided.status == QueueItemStatus.RUNNING
+
+    assert any("cap" in rec.message for rec in caplog.records)
