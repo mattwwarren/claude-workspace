@@ -441,9 +441,7 @@ def test_run_fix_dispatch_spawns_real_fix_session_through_sessions_lock(
     client = _make_fix_client(make_git_repo, tmp_path)
     branch = "dev/2019"
     _seed_origin(client, branch)
-    monkeypatch.setattr(
-        "cw.spawn.get_native_daemon_client", lambda: mock_native_daemon
-    )
+    monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: mock_native_daemon)
     monkeypatch.setattr(
         fix_dispatch, "load_effective_clients", lambda: {_CLIENT: client}
     )

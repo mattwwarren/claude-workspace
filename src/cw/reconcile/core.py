@@ -249,11 +249,12 @@ def reconcile() -> ReconcileReport:
     # executes under the session lock (liveness — #485 SHOULD_FIX 4).
     completed_ticket_ids = complete_timed_out_merged_tasks()
 
-    # Sited here (#2064), not in _run_terminal_backstops_and_sweeps: dispatch_fix_agent's
-    # spawn_create_impl() call re-acquires sessions_lock(), so it cannot run from inside
-    # _reconcile_locked's sessions_lock() hold without a SessionsLockReentryError (#1228).
-    # Runs unconditionally (no gate, by design, #2017) -- must sit BEFORE the
-    # completed_ticket_ids early return below, not after.
+    # Sited here (#2064), not in _run_terminal_backstops_and_sweeps:
+    # dispatch_fix_agent's spawn_create_impl() call re-acquires sessions_lock(),
+    # so it cannot run from inside _reconcile_locked's sessions_lock() hold
+    # without a SessionsLockReentryError (#1228). Runs unconditionally (no
+    # gate, by design, #2017) -- must sit BEFORE the completed_ticket_ids
+    # early return below, not after.
     run_fix_dispatch(config=_orchestrator_config)
 
     if not completed_ticket_ids:
