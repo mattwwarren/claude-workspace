@@ -174,6 +174,66 @@ class TestRoundTripValidation:
         assert doc.findings[0].line_end is None
         assert doc.findings[0].escalation is None
 
+    def test_round_trip_model_validate_null_admission_rationale_fields(self) -> None:
+        # #1837 added `transitive_impact_evidence: str = ""` and
+        # `release_critical_exception: str = ""` to Finding without a matching
+        # None-normalizer — the same gap #1817 opened with `no_diff_anchor`.
+        # The strict-schema transform makes both nullable+required, so codex
+        # faithfully sends `null` on every finding that doesn't invoke the
+        # out-of-delta exceptions — and model_validate rejected `null` for a
+        # `str` field, mechanically rejecting real findings as schema_invalid
+        # before adjudication (#2070).
+        payload = {
+            "reviewer_role": "R",
+            "status": "ok",
+            "detail": "",
+            "findings": [
+                {
+                    **_VALID_FINDING,
+                    "transitive_impact_evidence": None,
+                    "release_critical_exception": None,
+                }
+            ],
+        }
+        doc = ReviewerFindingsDocument.model_validate(payload)
+        assert doc.findings[0].transitive_impact_evidence == ""
+        assert doc.findings[0].release_critical_exception == ""
+
+    def test_every_nullable_wrapped_finding_field_tolerates_null(self) -> None:
+        # Producer/consumer contract pin (#2070, same failure family as
+        # #190/#191): the strict-mode transform tells codex that `null` is a
+        # legal value for every Finding field that was optional or defaulted,
+        # so the consumer model must accept `null` for each of them. A future
+        # defaulted field added to Finding without a matching None-normalizer
+        # (the #1817 no_diff_anchor gap, repeated verbatim at #1837) fails
+        # here instead of silently rejecting real findings at review time.
+        result = to_openai_strict_schema(_schema())
+        finding_props: dict[str, Any] = result["$defs"]["Finding"]["properties"]
+        nullable_fields = [
+            name
+            for name, sub in finding_props.items()
+            if any(
+                isinstance(branch, dict) and branch.get("type") == "null"
+                for branch in sub.get("anyOf", [])
+            )
+        ]
+        # The strict transform must have wrapped at least the known defaulted
+        # fields — an empty list would make the loop below vacuously green.
+        assert {
+            "no_diff_anchor",
+            "transitive_impact_evidence",
+            "release_critical_exception",
+        } <= set(nullable_fields)
+        for name in nullable_fields:
+            payload = {
+                "reviewer_role": "R",
+                "status": "ok",
+                "detail": "",
+                "findings": [{**_VALID_FINDING, name: None}],
+            }
+            doc = ReviewerFindingsDocument.model_validate(payload)
+            assert len(doc.findings) == 1, f"null {name!r} rejected the finding"
+
     def test_round_trip_model_validate_null_no_diff_anchor(self) -> None:
         # #1817 added `no_diff_anchor: bool = False` to Finding without a
         # matching None-normalizer (unlike detail/findings on the document).
