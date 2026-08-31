@@ -175,6 +175,21 @@ class Finding(BaseModel):
     transitive_impact_evidence: str = ""
     release_critical_exception: str = ""
 
+    @field_validator(
+        "transitive_impact_evidence", "release_critical_exception", mode="before"
+    )
+    @classmethod
+    def _null_admission_rationale_to_default(cls, v: str | None) -> str:
+        # Why: an OpenAI strict-mode schema (#1364) wraps every previously-
+        # optional field as nullable rather than omittable, so codex may send
+        # an explicit `null` for a field it left at its default. #1837 added
+        # both fields without the matching normalizer — the same gap #1817
+        # opened with `no_diff_anchor` — so every codex finding carrying
+        # `null` here was rejected as schema_invalid before adjudication
+        # (#2070). Blank and null mean the same thing: the exception was not
+        # invoked.
+        return "" if v is None else v
+
     @field_validator("no_diff_anchor", mode="before")
     @classmethod
     def _null_no_diff_anchor_to_default(cls, v: bool | None) -> bool:

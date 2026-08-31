@@ -1074,6 +1074,26 @@ class TestFindingValidation:
         f = _make_finding(line_start=None, line_end=None)
         assert f.line_start is None
 
+    def test_null_admission_rationale_fields_normalize_to_blank(self) -> None:
+        # #2070: codex sends explicit `null` for the two #1837 fields on every
+        # finding that doesn't invoke the out-of-delta exceptions (the strict
+        # schema wraps defaulted fields nullable, #1364) — null and blank both
+        # mean "not invoked", so the normalizer maps one onto the other
+        # instead of rejecting the finding as schema_invalid.
+        f = _make_finding(
+            transitive_impact_evidence=None, release_critical_exception=None
+        )
+        assert f.transitive_impact_evidence == ""
+        assert f.release_critical_exception == ""
+
+    def test_non_null_admission_rationale_fields_preserved(self) -> None:
+        f = _make_finding(
+            transitive_impact_evidence="+ def changed_sig(",
+            release_critical_exception="data loss on upgrade",
+        )
+        assert f.transitive_impact_evidence == "+ def changed_sig("
+        assert f.release_critical_exception == "data loss on upgrade"
+
 
 class TestEscalationMetadata:
     def test_required_fields_round_trip(self) -> None:
