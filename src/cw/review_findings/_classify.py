@@ -31,6 +31,7 @@ from cw.review_findings._anchor import (
 )
 from cw.review_findings._models import Severity, _is_blank
 from cw.review_findings._reanchor import (
+    _cited_lines_on_disk,
     _content_rescue_anchor,
     _line_exceeds_file_length,
     _line_reference_out_of_range_detail,
@@ -174,6 +175,22 @@ def _finding_with_anchor(finding: Finding, start: int, end: int) -> Finding:
     return finding.model_copy(update=updates)
 
 
+def _degraded_finding(finding: Finding) -> Finding:
+    """Copy *finding* with its line anchor dropped and ``anchor_degraded`` set.
+
+    The persisted shape of a ``line_anchor_degraded`` classification (#2081):
+    a file-level finding — both endpoints ``None``, exactly what a reviewer
+    would have filed had it cited no line at all — carrying the flag that
+    tells every downstream reader (the verdict comment, the adjudicator) that
+    the file-level anchor is validation's doing, not the reviewer's. The
+    reviewer's text (summary, consequence, evidence, suggested fix) is
+    untouched: adjudicating on that text is the whole point of the routing.
+    """
+    return finding.model_copy(
+        update={"line_start": None, "line_end": None, "anchor_degraded": True}
+    )
+
+
 def _classify_unanchored_file(
     file: str, worktree: Path | None
 ) -> Literal["unanchored", "unknown_file"]:
@@ -298,12 +315,33 @@ def _classify_drifted_finding(
     separately repairs the persisted anchor, against the narrower
     added-lines-only substrate.
 
-    On a miss, the rejection is split by *why* the citation was unusable:
-    ``"line_reference_out_of_range"`` when ``worktree`` is given and the cited
-    line is past the end of the real file (an invented position), and today's
-    ``"invalid_line_reference"`` otherwise. ``worktree=None`` (no caller opted
-    in) keeps the pre-#2007 reason byte-for-byte, the same degrade-gracefully
-    shape as #1632's ``_classify_unanchored_file``.
+    On a miss, the outcome is split by *what the citation actually was*, and
+    only under the ``worktree`` opt-in — ``worktree=None`` (no caller opted
+    in) keeps the pre-#2007 ``"invalid_line_reference"`` byte-for-byte, the
+    same degrade-gracefully shape as #1632's ``_classify_unanchored_file``:
+
+    - ``"line_reference_out_of_range"`` (#2007) when the cited line is past
+      the end of the real file — an invented position, still rejected.
+    - ``"line_anchor_degraded"`` (#2081) when every cited line exists in the
+      file on disk. The line number is the least stable part of a finding —
+      it drifts whenever the branch sits while the default branch moves, or
+      an earlier hunk grows — so a citation that names a real line of a real
+      changed file but resolves against nothing in the diff is *unverified*,
+      not *contradicted*. Rejecting it was the one disposition that destroyed
+      information, and it filtered hardest in exactly the stale-base situation
+      where a finding matters most (the reported incident: a correct MUST_FIX
+      about a branch ~1000 commits behind its base, dropped on a drifted line
+      number and caught only by an out-of-band manual check).
+      :func:`~cw.review_findings._document.validate_reviewer_document` routes
+      this value to adjudication as a flagged file-level finding rather than
+      to ``rejected`` — the #1632 ``"unanchored"`` precedent, which already
+      adjudicates a finding whose file is not in the diff at all on nothing
+      more than the path existing on disk. No evidence check gates the
+      routing: the diff-substrate search above has already missed, and the
+      incident's own evidence (the base-branch lines the stale edit would
+      revert) exists in neither the diff nor the branch's on-disk file.
+    - ``"invalid_line_reference"`` otherwise — the file could not be read, so
+      neither of the positive proofs above was available.
     """
     rescued = _content_rescue_anchor(
         diff.file_window_text.get(finding.file, {}), finding.evidence
@@ -316,12 +354,15 @@ def _classify_drifted_finding(
             rescued[0],
         )
         return None
-    if worktree is not None and any(
-        _line_exceeds_file_length(worktree, finding.file, line)
-        for line in (finding.line_start, finding.line_end)
-        if line is not None
-    ):
+    if worktree is None:
+        return "invalid_line_reference"
+    cited = [
+        line for line in (finding.line_start, finding.line_end) if line is not None
+    ]
+    if any(_line_exceeds_file_length(worktree, finding.file, line) for line in cited):
         return "line_reference_out_of_range"
+    if _cited_lines_on_disk(worktree, finding.file, cited):
+        return "line_anchor_degraded"
     return "invalid_line_reference"
 
 
@@ -443,6 +484,11 @@ def _classify_finding(
     change resulted; this is the reviewer/codex output contract's problem
     (see ``.claude/commands/auto-dev-review.md``'s verbatim-evidence
     requirement), not a matcher defect.
+
+    ``"line_anchor_degraded"`` (#2081) is the second value, after
+    ``"unanchored"``, that :func:`validate_reviewer_document` routes to
+    ``accepted`` rather than ``rejected`` — see
+    :func:`_classify_drifted_finding` for when it is produced and why.
 
     ``no_diff_anchor`` (#1817) short-circuits to acceptance before any
     anchoring check runs: the finding declares it has no diff artifact at all,

@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from cw.auto_dev_result import Review
 
@@ -73,6 +74,16 @@ FINGERPRINT_VERSION: Literal["FINGERPRINT_V1"] = "FINGERPRINT_V1"
 # when a caller opted into the worktree fallback — without one there is nothing
 # to measure the file's length against, and the generic reason still applies.
 #
+# "line_anchor_degraded" (#2081) is the second "unanchored"-shaped value: like
+# it, _classify_finding returns it as a plain discriminator and
+# validate_reviewer_document routes the finding to `accepted` (with its line
+# anchor dropped and `Finding.anchor_degraded` stamped) rather than
+# constructing a RejectedFinding — no RejectedFinding.reason is ever this value
+# in normal operation. It is produced only under the worktree opt-in, for a
+# citation whose line resolves against neither the diff nor any content
+# rescue but DOES exist in the file on disk: the stale-base shape, where the
+# reviewer's line number drifted while its text did not.
+#
 # "schema_invalid" (#2029) is the only value produced BEFORE _classify_finding
 # ever runs. The other seven describe a well-formed Finding whose diff anchor
 # or evidence failed a mechanical check; this one describes a findings[] item
@@ -89,6 +100,7 @@ RejectedFindingReason = Literal[
     "invalid_line_reference",
     "line_reference_out_of_range",
     "unanchored",
+    "line_anchor_degraded",
     "schema_invalid",
 ]
 # The sole reason an escalation is stripped, kept as its own single-value
@@ -150,6 +162,19 @@ class Finding(BaseModel):
     exists to close. When it is set, ``file`` MUST be the fixed literal
     ``"N/A"``: :attr:`file` stays required and non-blank so the field remains
     queryable, and a per-reviewer freeform value would defeat that.
+
+    ``anchor_degraded`` (#2081) is stamped by ``validate_reviewer_document``,
+    never by a reviewer: it marks a finding whose cited line resolved against
+    neither the diff nor any content-based rescue, but which names a real line
+    of a real changed file — the stale-base shape, where a line number drifts
+    while the finding's text stays right. Such a finding used to be rejected
+    outright as ``invalid_line_reference``; it is now degraded to file-level
+    (both endpoints ``None``) and routed to adjudication with this flag set,
+    so the adjudicator weighs it on its text and never mistakes it for a
+    finding the reviewer *filed* at file level. ``SkipJsonSchema`` keeps it out
+    of the reviewer-facing schema (the codex strict schema included): it is
+    validation output, not reviewer input, and any value a reviewer does send
+    is reset before classification.
     """
 
     severity: Severity
@@ -163,6 +188,7 @@ class Finding(BaseModel):
     confidence: Confidence
     escalation: EscalationMetadata | None = None
     no_diff_anchor: bool = False
+    anchor_degraded: SkipJsonSchema[bool] = False
     # #1837: the two fields a reviewer uses to argue a finding on code the
     # latest fix cycle did NOT touch still belongs in this fix loop.
     # ``transitive_impact_evidence`` is a verbatim quote from the delta

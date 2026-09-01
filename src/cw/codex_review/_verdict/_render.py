@@ -46,6 +46,17 @@ _CONFIDENCE_ANNOTATION = " _({confidence} confidence)_"
 # a second heading.
 _DISPOSITION_ANNOTATION = " _(suppressed — {disposition}{detail})_"
 
+# #2081: a finding whose line anchor validation dropped because the cited line
+# resolved against nothing in the diff (but exists in the file on disk). It
+# renders at file level, so without this note it would be indistinguishable
+# from a finding the reviewer *filed* at file level — and the adjudicator
+# needs to know the location is unverified and the text is what to weigh.
+# Display-only, exactly like the two annotations above.
+_ANCHOR_DEGRADED_ANNOTATION = (
+    " _(line anchor degraded — the cited line did not resolve against the "
+    "diff; adjudicate on the finding's text)_"
+)
+
 
 def _disposition_annotation(accepted: AcceptedFinding) -> str:
     """Annotate a finding whose disposition says it is no longer blocking.
@@ -85,7 +96,10 @@ def _render_findings(
             else _CONFIDENCE_ANNOTATION.format(confidence=finding.confidence)
         )
         suppression = _disposition_annotation(af)
-        lines.append(f"- **{loc}**{annotation}{suppression} — {finding.summary}")
+        degraded = _ANCHOR_DEGRADED_ANNOTATION if finding.anchor_degraded else ""
+        lines.append(
+            f"- **{loc}**{annotation}{suppression}{degraded} — {finding.summary}"
+        )
     lines.append("")
     return lines
 
@@ -289,6 +303,37 @@ def _render_agent_spec_note(verdict: ReviewVerdict) -> list[str]:
     return [line, ""]
 
 
+def _render_rejected_finding_text(rf: RejectedFinding) -> list[str]:
+    """Render a rejected MUST_FIX's full original text under its line (#2081).
+
+    The one-line ``summary`` plus a rejection code reads as "the reviewer made
+    a citation error"; the operator deciding whether to act on a mechanically
+    rejected MUST_FIX needs what the reviewer actually said — its
+    ``consequence``, ``suggested_fix`` and verbatim ``evidence`` — without
+    opening the persisted verdict artifact. Each renders as an indented
+    follow-up line in the same shape ``rf.detail`` already uses; ``evidence``
+    goes in a fenced block because it is quoted source text and may span
+    lines. Read via ``.get()`` like every other ``raw`` consumer, and a field
+    that is missing or blank simply renders nothing.
+    """
+    lines: list[str] = []
+    labelled_fields = (
+        ("consequence", "consequence"),
+        ("suggested fix", "suggested_fix"),
+    )
+    for label, key in labelled_fields:
+        value = rf.raw.get(key)
+        if isinstance(value, str) and value.strip():
+            lines.append(f"  - {label}: {value.strip()}")
+    evidence = rf.raw.get("evidence")
+    if isinstance(evidence, str) and evidence.strip():
+        lines.append("  - evidence:")
+        lines.append("    ```")
+        lines.extend(f"    {line}" for line in evidence.strip().splitlines())
+        lines.append("    ```")
+    return lines
+
+
 def _render_rejected_must_fix(verdict: ReviewVerdict) -> list[str]:
     """Render the MUST_FIX findings validation dropped before adjudication.
 
@@ -308,7 +353,9 @@ def _render_rejected_must_fix(verdict: ReviewVerdict) -> list[str]:
     ``_evidence_window_discrepancy_detail``), renders as an indented
     follow-up line so the diagnosable discrepancy (declared vs. evidence
     line counts) reaches the operator reading the posted comment, not just
-    the persisted verdict artifact.
+    the persisted verdict artifact. :func:`_render_rejected_finding_text`
+    (#2081) follows it with the finding's full original text, same indented
+    shape: the per-finding line itself is unchanged.
     """
     if not verdict.rejected_must_fix:
         return []
@@ -322,6 +369,7 @@ def _render_rejected_must_fix(verdict: ReviewVerdict) -> list[str]:
         lines.append(f"- **{loc}** — {summary} (rejected: {rf.reason})")
         if rf.detail:
             lines.append(f"  - {rf.detail}")
+        lines.extend(_render_rejected_finding_text(rf))
     lines.append("")
     return lines
 

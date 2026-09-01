@@ -57,6 +57,7 @@ EXPECTED_EXPORTS = {
     "_VALID_SEVERITIES",
     "_anchor_in_enclosing_def",
     "_best_effort_discarded_tally",
+    "_cited_lines_on_disk",
     "_classify_finding",
     "_content_rescue_anchor",
     "_dedup_key",

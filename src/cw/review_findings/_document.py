@@ -43,6 +43,7 @@ from pydantic import ValidationError
 from cw.review_findings._anchor import _changed_files, _substring_in_diff
 from cw.review_findings._classify import (
     _classify_finding,
+    _degraded_finding,
     _rejection_detail,
     _resolved_finding,
 )
@@ -60,6 +61,15 @@ if TYPE_CHECKING:
     from cw.review_findings._models import CapturedDiff
 
 _log = logging.getLogger(__name__)
+
+# The `_classify_finding` verdicts that route a finding INTO adjudication
+# instead of into `rejected`: #1632's "unanchored" and #2081's
+# "line_anchor_degraded". Both are honest members of RejectedFindingReason
+# (the discriminator type covers every value `_classify_finding` can return)
+# that never become a RejectedFinding.reason in normal operation.
+_ADJUDICATION_ROUTED_REASONS: frozenset[str] = frozenset(
+    {"unanchored", "line_anchor_degraded"}
+)
 
 
 def validate_reviewer_document(
@@ -83,15 +93,32 @@ def validate_reviewer_document(
     not that the finding's evidence quote is — an unanchored finding's
     escalation (if any) still goes through the ordinary diff-based
     evidence_quote check below, same as any other accepted finding.
+
+    ``worktree`` also opts into the #2081 ``"line_anchor_degraded"`` routing:
+    a finding whose cited line resolves against neither the diff nor any
+    content rescue, but names a real line of a real changed file, is accepted
+    as a *flagged file-level* finding (:func:`_degraded_finding`: both line
+    endpoints dropped, ``Finding.anchor_degraded`` set) instead of being
+    rejected as ``invalid_line_reference`` — the stale-base shape, where the
+    line number drifted and the text did not. Same rationale as the
+    unanchored relaxation: adjudication, not a mechanical filter, decides a
+    finding that is unverified rather than contradicted. ``anchor_degraded``
+    is validation output only — a value a reviewer sends is reset before
+    classification, so the flag can never mean "the reviewer said so".
     """
     accepted: list[Finding] = []
     rejected: list[RejectedFinding] = []
     stripped: list[StrippedEscalation] = []
     changed = _changed_files(diff)
 
-    for index, finding in enumerate(doc.findings):
+    for index, source in enumerate(doc.findings):
+        finding = (
+            source.model_copy(update={"anchor_degraded": False})
+            if source.anchor_degraded
+            else source
+        )
         reason = _classify_finding(finding, diff, changed, worktree)
-        if reason is not None and reason != "unanchored":
+        if reason is not None and reason not in _ADJUDICATION_ROUTED_REASONS:
             # #2000: announce EVERY mechanical rejection, at every severity.
             # Before this line, a rejection below MUST_FIX left no trace on any
             # surface -- #1714 gave the MUST_FIX case a verdict field and a
@@ -128,6 +155,21 @@ def validate_reviewer_document(
                 index,
                 finding.file,
             )
+        if reason == "line_anchor_degraded":
+            _log.info(
+                "auto-dev: routed finding with unresolvable line anchor to "
+                "adjudication as file-level (cited line exists on disk but "
+                "resolves against nothing in the diff; evidence quote not "
+                "verified) (reviewer_role=%s, finding_index=%d, severity=%s, "
+                "file=%s, line_start=%s, line_end=%s)",
+                doc.reviewer_role,
+                index,
+                finding.severity,
+                finding.file,
+                finding.line_start,
+                finding.line_end,
+            )
+            finding = _degraded_finding(finding)
         if finding.no_diff_anchor:
             # Mirrors the "unanchored" INFO above: a finding that skipped the
             # mechanical checks is always announced, so an operator can tell a

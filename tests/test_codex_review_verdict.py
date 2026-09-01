@@ -30,6 +30,7 @@ from cw.codex_review._capability import (
     _CodexFilesystemCapability,
     _CodexFingerprint,
 )
+from cw.codex_review._verdict._render import _render_rejected_finding_text
 from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.models.enums import OrchestratorEventType
@@ -2830,3 +2831,97 @@ class TestSynthesizeCodexReviewResultRunFailureDiscards:
         assert verdict.rejected_must_fix == [rejected]
         assert result.blocker is not None
         assert result.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+
+
+class TestRenderAnchorDegraded:
+    """#2081: the posted comment tells the adjudicator when a finding's
+    file-level anchor is validation's doing, and a MUST_FIX that is still
+    mechanically rejected carries its full original text into the park.
+    """
+
+    @staticmethod
+    def _degraded_verdict(tmp_path: Path) -> ReviewVerdict:
+        (tmp_path / "src" / "pkg").mkdir(parents=True)
+        (tmp_path / "src" / "pkg" / "mod.py").write_text(
+            "".join(f"setting_{n} = {n}\n" for n in range(1, 401))
+        )
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=341,
+            line_end=341,
+            summary="Required base update was skipped",
+            evidence="base-branch lines the stale edit would revert",
+        )
+        return consolidate_verdict(
+            [_make_reviewer_doc(finding)], diff, reviewed_sha="sha", worktree=tmp_path
+        )
+
+    def test_degraded_finding_is_annotated_inline(self, tmp_path: Path) -> None:
+        verdict = self._degraded_verdict(tmp_path)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "### MUST_FIX\n" in body
+        assert (
+            "- **src/pkg/mod.py** _(line anchor degraded — the cited line did not "
+            "resolve against the diff; adjudicate on the finding's text)_ — "
+            "Required base update was skipped"
+        ) in body
+        # It is adjudicated, not parked: no mechanical-rejection section.
+        assert "mechanically rejected" not in body
+
+    def test_undegraded_finding_carries_no_annotation(self) -> None:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(summary="ordinary"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "- **src/cw/foo.py:10** — ordinary" in body
+        assert "line anchor degraded" not in body
+
+    def test_rejected_must_fix_park_renders_full_original_text(self) -> None:
+        verdict = consolidate_verdict(
+            [_mechanically_rejected_must_fix_doc()], _make_diff(), reviewed_sha="sha"
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        # The #1714 per-finding line is byte-for-byte unchanged; the text
+        # follows it in the same indented shape `detail` already uses.
+        assert (
+            "### MUST_FIX — mechanically rejected (not adjudicated)\n"
+            "\n"
+            "- **src/cw/never_in_the_diff.py** — dropped before adjudication "
+            "(rejected: unknown_file)\n"
+            "  - consequence: It breaks\n"
+            "  - suggested fix: Fix it\n"
+            "  - evidence:\n"
+            "    ```\n"
+            "    def broken():\n"
+            "    ```\n"
+        ) in body
+
+    def test_rejected_text_renders_multiline_evidence_and_skips_blanks(self) -> None:
+        rf = RejectedFinding(
+            raw={
+                "severity": "MUST_FIX",
+                "file": "f.py",
+                "summary": "s",
+                "consequence": "   ",
+                "evidence": "first line\nsecond line\n",
+            },
+            reviewer_role="R",
+            reason="unknown_file",
+        )
+        assert _render_rejected_finding_text(rf) == [
+            "  - evidence:",
+            "    ```",
+            "    first line",
+            "    second line",
+            "    ```",
+        ]
+
+    def test_rejected_text_is_empty_for_a_bare_payload(self) -> None:
+        # A schema_invalid reject may carry no Finding fields at all.
+        rf = RejectedFinding(
+            raw={"value": 42}, reviewer_role="R", reason="schema_invalid"
+        )
+        assert _render_rejected_finding_text(rf) == []

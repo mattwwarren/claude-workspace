@@ -32,6 +32,7 @@ from cw.review_findings import (
     StrippedEscalation,
     _anchor_in_enclosing_def,
     _best_effort_discarded_tally,
+    _cited_lines_on_disk,
     _classify_finding,
     _content_rescue_anchor,
     _enclosing_def_span,
@@ -3011,10 +3012,14 @@ class TestEnclosingDefAnchor:
             line_end=6,
             evidence="target_function does too many things",
         )
-        _, rejected, _ = validate_reviewer_document(
+        accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff, worktree=tmp_path
         )
-        assert rejected[0].reason == "invalid_line_reference"
+        # #2081: the fallback declined, so the anchor stayed unresolved — but
+        # line 6 exists on disk, so the finding is degraded to file-level and
+        # adjudicated rather than rejected as invalid_line_reference.
+        assert rejected == []
+        assert accepted[0].anchor_degraded is True
 
     def test_anchor_with_no_enclosing_def_still_rejected(self, tmp_path: Path) -> None:
         _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
@@ -3028,10 +3033,13 @@ class TestEnclosingDefAnchor:
             line_end=4,
             evidence="module scope finding",
         )
-        _, rejected, _ = validate_reviewer_document(
+        accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff, worktree=tmp_path
         )
-        assert rejected[0].reason == "invalid_line_reference"
+        # #2081: no enclosing def means no rescue here, but line 4 is a real
+        # line of the file — degraded and adjudicated, not rejected.
+        assert rejected == []
+        assert accepted[0].anchor_degraded is True
 
     def test_class_def_anchor_accepted(self, tmp_path: Path) -> None:
         _write_enclosing_def_source(tmp_path, self._CLASS_SOURCE)
@@ -3047,7 +3055,7 @@ class TestEnclosingDefAnchor:
         )
         assert rejected[0].reason == "evidence_not_in_diff"
 
-    def test_syntax_error_source_falls_back_to_invalid_line_reference(
+    def test_syntax_error_source_falls_back_to_degraded_anchor(
         self, tmp_path: Path
     ) -> None:
         _write_enclosing_def_source(tmp_path, "def foo(:\n    pass\n")
@@ -3060,10 +3068,14 @@ class TestEnclosingDefAnchor:
             line_end=1,
             evidence="foo does too many things",
         )
-        _, rejected, _ = validate_reviewer_document(
+        accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff, worktree=tmp_path
         )
-        assert rejected[0].reason == "invalid_line_reference"
+        # #2081: the parse failure only disables the enclosing-def rescue; the
+        # file is still readable and line 1 exists, so the finding is
+        # degraded and adjudicated rather than rejected.
+        assert rejected == []
+        assert accepted[0].anchor_degraded is True
 
 
 def _find_function_node(
@@ -4819,3 +4831,224 @@ class TestContentBasedReanchoring:
         assert len(accepted) == 1
         assert accepted[0].line_start != 100
         assert _PERSIST_RESCUE_LOG not in caplog.text
+
+
+# -- #2081: a drifted-but-real line citation is adjudicated, not dropped ------
+
+_DEGRADED_ROUTING_LOG = "routed finding with unresolvable line anchor to adjudication"
+
+
+def _write_stale_base_source(tmp_path: Path, line_count: int = 400) -> None:
+    """A 400-line on-disk file standing in for the incident's shared config.
+
+    The reviewer cited ``:341`` of a file the branch edits; the diff (a small
+    hunk near the top) has nothing at or near that line, and the evidence text
+    is nowhere in the diff either — but line 341 exists in the real file.
+    """
+    _write_enclosing_def_source(
+        tmp_path, "".join(f"setting_{n} = {n}\n" for n in range(1, line_count + 1))
+    )
+
+
+def _stale_base_finding(**overrides: object) -> Finding:
+    kwargs: dict[str, object] = {
+        "severity": "MUST_FIX",
+        "file": "src/pkg/mod.py",
+        "line_start": 341,
+        "line_end": 341,
+        "summary": "Required base update was skipped before editing shared config",
+        "consequence": "merging silently reverts two previously-merged PRs",
+        "evidence": "base-branch lines the stale edit would revert",
+    }
+    kwargs.update(overrides)
+    return _make_finding(**kwargs)
+
+
+class TestCitedLinesOnDisk:
+    """Pure unit tests of ``_cited_lines_on_disk`` (#2081)."""
+
+    def test_all_lines_within_file_is_true(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, "one\ntwo\nthree\n")
+        assert _cited_lines_on_disk(tmp_path, "src/pkg/mod.py", [1, 3])
+
+    def test_any_line_past_end_is_false(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, "one\ntwo\nthree\n")
+        assert not _cited_lines_on_disk(tmp_path, "src/pkg/mod.py", [1, 4])
+
+    def test_unreadable_file_is_false_not_a_guess(self, tmp_path: Path) -> None:
+        # The positive counterpart of _line_exceeds_file_length's "can't tell"
+        # case: neither helper manufactures an outcome for a missing file.
+        assert not _cited_lines_on_disk(tmp_path, "src/pkg/missing.py", [1])
+        assert not _line_exceeds_file_length(tmp_path, "src/pkg/missing.py", 1)
+
+
+class TestLineAnchorDegraded:
+    """#2081: a finding whose cited line resolves against neither the diff nor
+    any content rescue, but names a real line of a real changed file, is
+    degraded to file-level and routed to adjudication (flagged) instead of
+    being rejected as ``invalid_line_reference``. Reconstructs the incident:
+    a correct MUST_FIX about a stale-base edit, dropped on a drifted line
+    number.
+    """
+
+    def test_reason_literal_and_finding_flag(self) -> None:
+        assert "line_anchor_degraded" in get_args(RejectedFindingReason)
+        rf = RejectedFinding(raw={}, reviewer_role="R", reason="line_anchor_degraded")
+        assert rf.reason == "line_anchor_degraded"
+        assert _make_finding().anchor_degraded is False
+
+    def test_flag_is_hidden_from_reviewer_schema(self) -> None:
+        # Validation output, not reviewer input: neither the Finding schema
+        # nor the document schema codex is prompted with exposes it.
+        assert "anchor_degraded" not in Finding.model_json_schema()["properties"]
+        doc_schema = ReviewerFindingsDocument.model_json_schema()
+        assert "anchor_degraded" not in doc_schema["$defs"]["Finding"]["properties"]
+
+    def test_classify_returns_degraded_under_worktree(self, tmp_path: Path) -> None:
+        _write_stale_base_source(tmp_path)
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        finding = _stale_base_finding()
+        changed = frozenset(diff.files)
+        assert _classify_finding(finding, diff, changed, tmp_path) == (
+            "line_anchor_degraded"
+        )
+        assert _classify_finding(finding, diff, changed) == "invalid_line_reference"
+
+    def test_drifted_citation_on_disk_is_adjudicated_file_level(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _write_stale_base_source(tmp_path)
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        finding = _stale_base_finding()
+        with caplog.at_level(logging.INFO, logger="cw.review_findings._document"):
+            accepted, rejected, stripped = validate_reviewer_document(
+                _make_reviewer_doc(finding), diff, worktree=tmp_path
+            )
+        assert rejected == []
+        assert stripped == []
+        assert len(accepted) == 1
+        degraded = accepted[0]
+        assert degraded.anchor_degraded is True
+        assert degraded.line_start is None
+        assert degraded.line_end is None
+        # The reviewer's text is exactly what adjudication weighs — untouched.
+        assert degraded.summary == finding.summary
+        assert degraded.consequence == finding.consequence
+        assert degraded.suggested_fix == finding.suggested_fix
+        assert degraded.evidence == finding.evidence
+        assert degraded.severity == "MUST_FIX"
+        assert _DEGRADED_ROUTING_LOG in caplog.text
+        assert "line_start=341" in caplog.text
+
+    def test_without_worktree_stays_invalid_line_reference(self) -> None:
+        # Strictly opt-in, like #1632/#2007: no worktree, no positive proof the
+        # line exists, so the pre-#2081 rejection is byte-for-byte unchanged.
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(_stale_base_finding()), diff
+        )
+        assert accepted == []
+        assert [r.reason for r in rejected] == ["invalid_line_reference"]
+
+    def test_unreadable_file_under_worktree_stays_invalid_line_reference(
+        self, tmp_path: Path
+    ) -> None:
+        # Worktree opted in, but the cited file is not on disk: neither the
+        # out-of-range proof nor the on-disk proof is available, and "can't
+        # tell" must never manufacture a rescue.
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(_stale_base_finding()), diff, worktree=tmp_path
+        )
+        assert accepted == []
+        assert [r.reason for r in rejected] == ["invalid_line_reference"]
+
+    def test_out_of_range_citation_is_still_rejected(self, tmp_path: Path) -> None:
+        # An invented position (#2007) is contradicted, not merely unverified.
+        _write_stale_base_source(tmp_path, line_count=300)
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(_stale_base_finding()), diff, worktree=tmp_path
+        )
+        assert accepted == []
+        assert [r.reason for r in rejected] == ["line_reference_out_of_range"]
+
+    def test_evidence_present_in_diff_is_rescued_not_degraded(
+        self, tmp_path: Path
+    ) -> None:
+        # #2007's content rescue runs first: a drifted citation whose evidence
+        # IS in the diff keeps its (repaired) line anchor, no degrade.
+        _write_stale_base_source(tmp_path)
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        finding = _stale_base_finding(evidence="real added line")
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected == []
+        assert accepted[0].anchor_degraded is False
+        assert accepted[0].line_start == 2
+
+    def test_reviewer_supplied_flag_is_reset(self) -> None:
+        # anchor_degraded can only ever mean "validation dropped the anchor":
+        # a value a reviewer sends on an otherwise-valid finding is discarded
+        # and the finding keeps its verified line anchor.
+        finding = _make_finding(anchor_degraded=True)
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+        assert rejected == []
+        assert accepted[0].anchor_degraded is False
+        assert accepted[0].line_start == 10
+
+    def test_degraded_finding_escalation_still_validated_against_diff(
+        self, tmp_path: Path
+    ) -> None:
+        # Same rule as #1632's unanchored findings: the routing proves the
+        # line is real, never that an escalation's quote is.
+        _write_stale_base_source(tmp_path)
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        finding = _stale_base_finding(
+            escalation=_make_escalation(evidence_quote="ghost quote")
+        )
+        accepted, rejected, stripped = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected == []
+        assert accepted[0].anchor_degraded is True
+        assert accepted[0].escalation is None
+        assert len(stripped) == 1
+
+    def test_degraded_must_fix_blocks_and_is_not_a_mechanical_rejection(
+        self, tmp_path: Path
+    ) -> None:
+        # The incident's outcome, inverted: the MUST_FIX reaches the verdict's
+        # accepted set (blocking, adjudicated) rather than the #1714 park.
+        _write_stale_base_source(tmp_path)
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_stale_base_finding())],
+            diff,
+            reviewed_sha="sha",
+            worktree=tmp_path,
+        )
+        assert verdict.blocking is True
+        assert len(verdict.must_fix) == 1
+        assert verdict.rejected == []
+        assert verdict.rejected_must_fix == []
+        assert verdict.review.must_fix_initial == 1
+        assert verdict.accepted[0].finding.anchor_degraded is True
+
+    def test_flag_survives_verdict_round_trip(self, tmp_path: Path) -> None:
+        # `cw review adjudicate` reads the verdict back from JSON; the flag
+        # must reach it, SkipJsonSchema notwithstanding (schema-only).
+        _write_stale_base_source(tmp_path)
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_stale_base_finding())],
+            diff,
+            reviewed_sha="sha",
+            worktree=tmp_path,
+        )
+        reloaded = ReviewVerdict.model_validate_json(verdict.model_dump_json())
+        assert reloaded.accepted[0].finding.anchor_degraded is True
+        assert reloaded.accepted[0].finding.line_start is None
