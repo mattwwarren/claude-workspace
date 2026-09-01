@@ -14322,6 +14322,37 @@ class TestStalePendingClientsPredicate:
             == {}
         )
 
+    def test_claim_tick_that_drained_the_queue_is_excluded(self) -> None:
+        """#2076: ``pending`` is the tick-START snapshot, so the tick that
+        claimed the queue's last row records ``claimed=1 pending=1``. Reading
+        raw ``pending`` false-paged the operator for a healthy idle loop
+        (breadcrumbs ``pending=1 age_s=91``, twice in one day)."""
+        tick = _make_tick_summary(
+            claimed=1, pending=1, tick_at=_STALE_NOW - timedelta(seconds=91)
+        )
+        assert (
+            _stale_pending_clients(
+                {"test-client": tick},
+                stale_after_seconds=90,
+                blocked_clients=set(),
+                now=_STALE_NOW,
+            )
+            == {}
+        )
+
+    def test_claim_tick_with_rows_left_behind_is_still_returned(self) -> None:
+        """A stale claim tick that did NOT drain the queue still pages: the
+        rows it left behind are genuinely abandoned if the loop stopped."""
+        tick = _make_tick_summary(
+            claimed=1, pending=3, tick_at=_STALE_NOW - timedelta(seconds=200)
+        )
+        assert _stale_pending_clients(
+            {"test-client": tick},
+            stale_after_seconds=90,
+            blocked_clients=set(),
+            now=_STALE_NOW,
+        ) == {"test-client": tick}
+
     def test_client_absent_from_tick_data_never_appears(self) -> None:
         """A client that has never emitted DISPATCH_TICK is simply absent."""
         assert (
@@ -14601,6 +14632,31 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
                 OrchestratorConfig().dispatch_stale_notify_interval_minutes
             ),
         }
+
+    def test_watchdog_scans_after_dispatch_tick_records_its_events(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2076: the scan reads the latest recorded dispatch.tick, so it must
+        run AFTER the iteration's dispatch_tick — scanning first meant a
+        healthy loop's newest tick was always a full iteration old (sleep +
+        guarded pre-tick passes + spawn work), routinely aging past
+        TICK_STALE_SECONDS and false-paging the operator."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        order: list[str] = []
+        monkeypatch.setattr(
+            "cw.dispatch.loop.dispatch_tick",
+            lambda *_a, **_k: (order.append("tick"), DispatchTickResult(spawned=0))[1],
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.loop._notify_stale_clients_with_pending",
+            lambda **_kwargs: order.append("watchdog"),
+        )
+        run_dispatch_loop(once=True, emit=None)
+        assert order == ["tick", "watchdog"]
 
     def test_second_tick_within_gate_interval_skips_the_scan(
         self,
