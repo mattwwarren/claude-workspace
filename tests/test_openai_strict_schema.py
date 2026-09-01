@@ -263,3 +263,15 @@ class TestRoundTripValidation:
         assert doc.detail == "some text"
         assert len(doc.findings) == 1
         assert doc.findings[0].summary == "Bug here"
+
+
+class TestValidationStampedFields:
+    def test_anchor_degraded_is_absent_from_strict_schema(self) -> None:
+        # #2081: `Finding.anchor_degraded` is stamped by validation, never
+        # sent by a reviewer, so the strict schema codex is prompted with must
+        # not ask for it — and a strict-mode producer could not omit it if it
+        # were there (every property is required under strict mode).
+        result = to_openai_strict_schema(_schema())
+        finding_props: dict[str, Any] = result["$defs"]["Finding"]["properties"]
+        assert "anchor_degraded" not in finding_props
+        assert "anchor_degraded" not in result["$defs"]["Finding"]["required"]

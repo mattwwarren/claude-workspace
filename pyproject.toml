@@ -1,6 +1,6 @@
 [project]
 name = "claude-workspace"
-version = "1.45.2"
+version = "1.45.3"
 description = "Multi-session workspace orchestrator for Claude Code"
 readme = "README.md"
 authors = [
@@ -172,6 +172,12 @@ ignore = [
     # split moved `derive_review_counts` (the module's one RUNTIME use of
     # `Review`) into the sibling `_dedup` submodule.
     "TC001",
+    # `Finding.anchor_degraded: SkipJsonSchema[bool]` (#2081) is likewise a
+    # pydantic field annotation: `pydantic.json_schema.SkipJsonSchema` must be
+    # importable at runtime for pydantic to resolve it at class-build time,
+    # and the module has no other runtime use of it. Same case as TC001 above,
+    # one import boundary further out (third-party rather than first-party).
+    "TC002",
 ]
 "src/cw/review_adjudication/_models.py" = [
     # `Adjudication.severity` / `VoidedFinding.severity` are pydantic field

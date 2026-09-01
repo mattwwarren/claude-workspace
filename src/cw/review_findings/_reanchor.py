@@ -105,6 +105,24 @@ def _line_exceeds_file_length(worktree: Path, file: str, line: int) -> bool:
     return line > count
 
 
+def _cited_lines_on_disk(worktree: Path, file: str, lines: list[int]) -> bool:
+    """True iff *file* is readable under *worktree* and every line in *lines*
+    is within its length (#2081).
+
+    The positive counterpart of :func:`_line_exceeds_file_length`, and
+    deliberately NOT its negation: that function's "can't tell" case (an
+    unreadable file) returns ``False`` so it never manufactures an
+    out-of-range rejection, and this one returns ``False`` for the same case
+    so it never manufactures a rescue either. A citation earns the
+    ``line_anchor_degraded`` routing only on positive proof that the cited
+    line exists in the real file.
+    """
+    count = _file_line_count(worktree, file)
+    if count is None:
+        return False
+    return all(line <= count for line in lines)
+
+
 def _line_reference_out_of_range_detail(finding: Finding, worktree: Path) -> str:
     """Build a diagnosable ``RejectedFinding.detail`` for the out-of-range case.
 
