@@ -188,7 +188,10 @@ def test_act_on_pending_fix_dispatches_retries_on_transient_conflict(
         raise HookContextConflictError(msg, conflicting_session_id="review-sess")
 
     stub_dispatch.side_effect = _conflict
-    _seed_task(pending_fix_dispatch=_pending())
+    # A fresh requested_at: the transient-retry posture only holds inside the
+    # escalation window (#2075) — the shared builder's fixed 2026-08-26 stamp
+    # is aged past it by construction.
+    _seed_task(pending_fix_dispatch=_pending(requested_at=datetime.now(UTC)))
 
     acted = fix_dispatch._act_on_pending_fix_dispatches(
         [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
@@ -203,6 +206,46 @@ def test_act_on_pending_fix_dispatches_retries_on_transient_conflict(
     assert (
         read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]) == []
     )
+
+
+def test_act_on_pending_fix_dispatches_escalates_conflict_past_age_bound(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+) -> None:
+    """A conflict on an aged handoff is no longer transient (#2075).
+
+    The silent variant: some other session holds the worktree (a stray revert
+    let a fresh REVIEW session claim the row), so the per-tick retry would
+    recur forever with NO operator signal. Past _CONFLICT_ESCALATION_SECONDS
+    the conflict routes through the loud failure path instead.
+    """
+
+    def _conflict(**_kwargs: Any) -> None:
+        msg = "worktree still held"
+        raise HookContextConflictError(msg, conflicting_session_id="other-review")
+
+    stub_dispatch.side_effect = _conflict
+    _seed_task(pending_fix_dispatch=_pending())  # builder stamp: aged by days
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is None
+    assert task.status == QueueItemStatus.PENDING
+
+    errored = read_events(event_types=[OrchestratorEventType.STAGE_ERRORED])
+    assert len(errored) == 1
+    assert errored[0].payload["error_kind"] == "fix_dispatch_failed"
+
+    attention = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    assert len(attention) == 1
+    assert attention[0].payload["paused_status"] == "fix_dispatch_failed"
+    assert "worktree still held" in attention[0].payload["breadcrumbs"]
 
 
 def test_act_on_pending_fix_dispatches_clears_and_escalates_on_hard_failure(
@@ -233,6 +276,10 @@ def test_act_on_pending_fix_dispatches_clears_and_escalates_on_hard_failure(
     assert task.pending_fix_dispatch is None
     assert task.fix_dispatch_session_id is None
     assert task.status == QueueItemStatus.PENDING
+    # #2075: the failure unpark must not charge the attempt ceiling — the
+    # REVIEW round behind the handoff produced a real action list, and the
+    # respawned round's own claim already increments raw attempts.
+    assert task.unproductive_attempts == 0
 
     errored = read_events(event_types=[OrchestratorEventType.STAGE_ERRORED])
     assert len(errored) == 1
@@ -348,6 +395,10 @@ def test_act_on_fix_dispatch_completions_unparks_task(tmp_config_dir: Path) -> N
     task = _only_task()
     assert task.fix_dispatch_session_id is None
     assert task.status == QueueItemStatus.PENDING
+    # #2075: the routine per-cycle unpark is progress (a review round ran AND
+    # its fix session completed) — charging it walked healthy fix loops to
+    # attempt_cap_blocked at an already-approved finalize.
+    assert task.unproductive_attempts == 0
 
 
 def test_act_on_fix_dispatch_completions_skips_still_live_session(

@@ -89,6 +89,7 @@ from cw.models import (
     LaneConfig,
     OrchestratorConfig,
     OrchestratorEventType,
+    PendingFixDispatch,
     QueueItemStatus,
     Session,
     SessionOrigin,
@@ -5194,6 +5195,109 @@ class TestClaimNextPendingUsageLimitedGate:
         queue = load_dev_queue()
         stored = next(t for t in queue.tasks if t.ticket_id == "GEN-1346-CLAIM2")
         assert stored.status == QueueItemStatus.RUNNING
+
+
+class TestClaimNextPendingFixDispatchHold:
+    """#2075: a PENDING row mid-fix-loop handoff belongs to
+    cw.reconcile.fix_dispatch, never to claim. The handoff row is meant to
+    stay RUNNING, but any non-sentinel RUNNING->PENDING revert can re-park it
+    with the record untouched; claiming it then spawns a fresh REVIEW session
+    whose live worktree makes every subsequent dispatch_fix_agent attempt
+    raise HookContextConflictError — the silent never-spawns loop."""
+
+    @staticmethod
+    def _pending_fix() -> PendingFixDispatch:
+        return PendingFixDispatch(
+            prompt="fix the MUST_FIX items\n",
+            label="fix-2075",
+            cycle=2,
+            requested_by_session_id="review-sess",
+            requested_at=datetime.now(UTC),
+        )
+
+    def _claim(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> tuple[TicketTask | None, bool]:
+        from cw.dispatch import _claim_next_pending
+
+        return _claim_next_pending(
+            "test-client",
+            lane=DEFAULT_LANE,
+            client=sample_client_config,
+            config=simple_config,
+        )
+
+    def test_row_with_unconsumed_handoff_is_not_claimed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        task = TicketTask(ticket_id="GEN-2075-HOLD1", client="test-client")
+        task.pending_fix_dispatch = self._pending_fix()
+        add_ticket(task)
+
+        assert self._claim(sample_client_config, simple_config) == (None, False)
+        stored = next(iter(load_dev_queue().tasks))
+        assert stored.status == QueueItemStatus.PENDING
+        assert stored.attempts == 0
+
+    def test_row_awaiting_fix_completion_is_not_claimed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        task = TicketTask(ticket_id="GEN-2075-HOLD2", client="test-client")
+        task.fix_dispatch_session_id = "fix-sess"
+        add_ticket(task)
+
+        assert self._claim(sample_client_config, simple_config) == (None, False)
+        stored = next(iter(load_dev_queue().tasks))
+        assert stored.status == QueueItemStatus.PENDING
+
+    def test_priority_claim_skips_held_row(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """The priority path holds the row too — same guard, break not claim."""
+        from cw.dispatch import _claim_next_pending
+
+        held = TicketTask(ticket_id="GEN-2075-PHELD", client="test-client")
+        held.pending_fix_dispatch = self._pending_fix()
+        add_ticket(held)
+        add_ticket(TicketTask(ticket_id="GEN-2075-PFREE", client="test-client"))
+
+        claimed, _ = _claim_next_pending(
+            "test-client",
+            lane=DEFAULT_LANE,
+            client=sample_client_config,
+            config=simple_config,
+            priority_ticket_ids=["GEN-2075-PHELD", "GEN-2075-PFREE"],
+        )
+        assert claimed is not None
+        assert claimed.ticket_id == "GEN-2075-PFREE"
+
+    def test_claim_falls_through_to_the_next_unheld_row(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """The hold is per-row, not per-lane: an unheld sibling still claims."""
+        held = TicketTask(ticket_id="GEN-2075-HELD", client="test-client")
+        held.pending_fix_dispatch = self._pending_fix()
+        add_ticket(held)
+        add_ticket(TicketTask(ticket_id="GEN-2075-FREE", client="test-client"))
+
+        claimed, backoff_skipped = self._claim(sample_client_config, simple_config)
+        assert claimed is not None
+        assert claimed.ticket_id == "GEN-2075-FREE"
+        assert backoff_skipped is False
 
 
 # ---------------------------------------------------------------------------
