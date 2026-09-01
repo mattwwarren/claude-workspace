@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import pathspec
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
@@ -384,6 +385,78 @@ def test_build_aiderignore_never_blocks_a_manifest_path_even_if_repo_aiderignore
         check=False,
     )
     assert check.returncode == 1, "manifest path must NOT be effectively ignored"
+
+
+def _commit_all(worktree: Path) -> None:
+    """git add -A + commit — bracketed paths can't go through
+    ``commit_tracked_file``'s per-path ``git add``, which parses its pathspec
+    argument as a glob (the same gitwildmatch gotcha #2072 fixes)."""
+    subprocess.run(
+        ["git", "-C", str(worktree), "add", "-A"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "commit", "-m", "add tracked files"],
+        capture_output=True,
+        check=True,
+    )
+
+
+def test_build_aiderignore_escaped_output_compiles_and_fences_the_literal_path(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Both #2072 failure modes, asserted against pathspec itself (the matcher
+    aider feeds the generated file to):
+
+    1. Crash mode — an unescaped reversed-range segment like ``[sort-panel]``
+       makes ``PathSpec.from_lines`` raise ``re.error`` inside aider's
+       ``sanity_check_repo``; the escaped output must compile.
+    2. Wrong-file fencing — unescaped ``a/[b]/c.py`` matches ``a/b/c.py`` and
+       not itself; the escaped output must block the literal bracketed path
+       and must NOT block the unbracketed lookalike (which isn't tracked).
+    """
+    worktree = make_git_repo("wt-aiderignore-escape")
+    (worktree / "src/app/[sort-panel]").mkdir(parents=True)
+    (worktree / "src/app/[sort-panel]/page.tsx").write_text("x\n", encoding="utf-8")
+    (worktree / "a/[b]").mkdir(parents=True)
+    (worktree / "a/[b]/c.py").write_text("x = 1\n", encoding="utf-8")
+    (worktree / "src").mkdir(exist_ok=True)
+    (worktree / "src/in_scope.py").write_text("x = 1\n", encoding="utf-8")
+    _commit_all(worktree)
+
+    result = build_aiderignore(worktree, ["src/in_scope.py"])
+
+    assert result is not None
+    lines = result.read_text(encoding="utf-8").splitlines()
+    spec = pathspec.PathSpec.from_lines("gitwildmatch", lines)  # crash mode
+    assert spec.match_file("src/app/[sort-panel]/page.tsx")
+    assert spec.match_file("a/[b]/c.py")
+    assert not spec.match_file("a/b/c.py")
+    assert not spec.match_file("src/in_scope.py")
+
+
+def test_build_aiderignore_escapes_manifest_negation_lines_too(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A bracketed *manifest* path must stay addable: its ``!/`` negation line
+    needs the same escaping, or the negation re-includes the wrong file and the
+    literal manifest path stays fenced (#2072)."""
+    worktree = make_git_repo("wt-aiderignore-escape-manifest")
+    (worktree / "docs/[user-guide]").mkdir(parents=True)
+    (worktree / "docs/[user-guide]/index.md").write_text("x\n", encoding="utf-8")
+    (worktree / "core").mkdir()
+    (worktree / "core/database.py").write_text("x = 1\n", encoding="utf-8")
+    _commit_all(worktree)
+
+    result = build_aiderignore(worktree, ["docs/[user-guide]/index.md"])
+
+    assert result is not None
+    lines = result.read_text(encoding="utf-8").splitlines()
+    assert "!/docs/\\[user-guide\\]/index.md" in lines
+    spec = pathspec.PathSpec.from_lines("gitwildmatch", lines)
+    assert not spec.match_file("docs/[user-guide]/index.md")
+    assert spec.match_file("core/database.py")
 
 
 def test_build_aiderignore_fails_open_when_git_ls_files_errors(

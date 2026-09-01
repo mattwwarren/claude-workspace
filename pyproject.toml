@@ -47,6 +47,9 @@ dev = [
     "types-psutil>=6.0",
     "pytest-cov>=6.0",
     "diff-cover>=9.0",
+    # Direct test dependency (#2072): asserts the generated aiderignore against
+    # the same gitwildmatch matcher aider itself uses.
+    "pathspec>=1.0",
 ]
 
 [tool.uv.sources]
