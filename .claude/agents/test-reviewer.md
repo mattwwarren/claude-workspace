@@ -111,6 +111,8 @@ Review test quality, coverage, proper use of AAA (Arrange-Act-Assert) pattern, t
 
 ## Review Methodology
 
+**Never mutate the checkout under review.** When you run under `/auto-dev-review`, the worktree is the orchestrating session's own, shared live with parallel sibling reviewers — a revert-and-rerun ("revert the fix, confirm the test goes red, restore") races them, and they will file the transient state as a real defect (#2087). Read, grep, and run the existing suite read-only. To verify a test is not vacuous, *request* the kill-check in the finding's `suggested_fix` (the exact line to revert and the test that must go red); the orchestrating session runs it. Outside `/auto-dev-review`, on a checkout you own exclusively, the technique is fine.
+
 ### 1. Check Test Structure
 
 ```bash

@@ -65,6 +65,8 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
 
 **Sandbox warning**: reviewer subagents spawned without `isolation: "worktree"` have inconsistent file access depending on sandbox state. **Inline the full diff directly in each reviewer's prompt** (captured from the main session) so reviewers evaluate purely from prompt content. Do not assume read access "just works."
 
+**Before spawning reviewers, capture clean-tree evidence (#2087).** Run `git status --porcelain` and `git diff HEAD --stat` in the session worktree and record both outputs as `PRE_DISPATCH_TREE`. Both MUST be empty — a dirty tree here is a pipeline defect to resolve before any reviewer sees it, not something to review around. Re-capture the same two commands as `POST_CONSOLIDATE_TREE` immediately after Checkpoint 3a step 3's `cw review consolidate` call. Together they are the contemporaneous evidence the #1714 carve-out at Checkpoint 3a step 4 requires; without both, that carve-out is unavailable.
+
 **Before spawning reviewers, load project-specific extensions** (both optional, both forwarded into every reviewer prompt):
 - `.claude/review-extras.md` — free-form prose rubrics every reviewer applies on top of the global agent specs. Read verbatim; if absent, set `PROJECT_RUBRICS = null`.
 - `.claude/sensitive-files.yml` — manifest of high-blast-radius paths. If present, diff the changed-files list against its globs and capture `(file_path, reason, category)` per match into `SENSITIVE_HITS`; if absent or no matches, set `SENSITIVE_HITS = []`.
@@ -98,6 +100,16 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
   3. Do tests validate meaningful behavior?
   4. Could this break anything downstream?
   5. Debug artifacts left in? (`print()`, `breakpoint()`, `pdb`, `ic()`)
+- **The shared-worktree rule, verbatim (#2087):**
+  ```
+  ## Shared Worktree — read-only
+
+  The checkout you can see is the orchestrating session's own worktree, shared live with every sibling reviewer in this round. Treat it as READ-ONLY: no `git checkout`/`stash`/`revert`/`reset`/`apply`, no edits, no generated or scratch files, no dependency installs. Running the existing test suite read-only is fine.
+
+  Empirical revert-and-rerun verification ("revert the fix, confirm the regression test goes red, restore") is a legitimate technique but NOT yours to run here: even self-restored, the transient mutation races your siblings, who will observe it as a real defect. Request it instead — in the finding's `suggested_fix`, name the exact line to revert (or argument to empty, or logger to no-op) and the test that must go red. The orchestrating session decides whether to run that kill-check itself before bucketing.
+
+  Uncommitted working-tree state you observe mid-review — a non-empty `git status`, a file whose content differs from the diff, a stray untracked file — is review-process transient state, NOT a property of the diff. Never file it as a finding at any severity, and never set `no_diff_anchor` to smuggle it through. If it prevented a check you are required to perform, report that in `detail` with `status: "degraded"`.
+  ```
 - **Product Manager Reviewer only:** prepend `Mode: spec compliance` to the prompt (Mode 2 per the agent spec). Other reviewers do not need a mode declaration.
 - **Output contract** (see below) — no praise, `NO_ISSUES` if clean.
 - The friction protocol block
@@ -163,6 +175,7 @@ REVIEW_FINDINGS>>>
    - Render `.accepted` entries whose `disposition` is not `"fixed"` — a step-3.5 voided suppression, or a disposition an earlier step stamped — informationally only, on the same footing as NIT/PRINCIPLE (#1814). Their outcome is already in `ADJUDICATIONS`; bucketing one would append a second, conflicting entry for the same identity.
    - Discard `.rejected` findings (evidence didn't match the diff) whose `severity` is **not** `MUST_FIX` entirely — log them, do not present them to the bucket sort.
    - **A `.rejected` finding with `severity: MUST_FIX` may NOT be silently discarded** (#1714). Log it, and if any is present this run EXITS `blocked` with `blocker.reason: "review_blocked"` (same exit shape as the 5-cycle MUST_FIX case below). A finding rejected for a *mechanical* reason — bad line anchor, evidence quote absent from the diff — was never evaluated on its merits, so "no MUST_FIX survived validation" is not "the code is clean". Do not fix it either: its anchor is unreliable by definition, making it an operator-review signal, not a fix-loop input. `.rejected[].raw` carries the original `file`/`line_start`/`summary` — surface them in the exit's `blocker.details` so the operator can adjudicate manually. Also post them as a tracker comment per the blocking-findings comment rule below.
+   - **The one carve-out — session-transient tree state (#2087).** A rejected MUST_FIX whose *subject* is the review process's own transient working-tree state — uncommitted changes, a non-empty `git status`, a file differing from the diff mid-review, typically because a sibling reviewer mutated the shared worktree against the rule above — is not a finding about the diff, and blocking the round on it buys an operator round-trip that can only end in "dismiss". It does NOT trigger the `review_blocked` exit **if and only if** both `PRE_DISPATCH_TREE` and `POST_CONSOLIDATE_TREE` (Step 3a) were captured and both were empty. Then: (a) do not exit; (b) append `transient_state_finding_dismissed: <reviewer_role>: <summary>` to `friction_highlights`; (c) in the round's tracker comment, list it under a `Dismissed — session-transient state (#2087)` sub-heading quoting both clean-tree captures, not as a blocking finding; (d) if the mutation's author is identifiable from a reviewer's own response, also append `reviewer_mutated_shared_worktree: <reviewer_role>` to `friction_highlights`. Judge the *subject* strictly: a MUST_FIX that names diff content, even with a bad anchor, stays on the exit above. Missing either capture, or either capture non-empty, means the evidence is not contemporaneous and the finding stays on the exit above too — the carve-out never widens #1714, it only declines to page an operator about state the session has already proven clean.
    - Log `.stripped_escalations` (escalations whose evidence quote wasn't in the diff — the finding itself survives and is adjudicated normally).
    - **Freeze** `.review.must_fix_initial`, `.review.should_fix`, and `.review.agents_run` from this *first* `cw review consolidate` call for the final sentinel. A Step 3b re-review re-invokes `cw review consolidate` on the updated diff purely to re-check `blocking`, never to overwrite these frozen numbers.
 
