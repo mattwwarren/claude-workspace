@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.45.4] - 2026-09-01
+
+### Fixed
+
+- **Reviewers are told the session worktree is shared and read-only, and a MUST_FIX about session-transient tree state no longer hard-blocks a round the session has already proven clean (#2087):** in a live large-scope round, the Test Reviewer ran a revert-and-rerun verification directly against the orchestrating session's shared worktree; two sibling reviewers observed the transient uncommitted mutation and each filed a MUST_FIX about working-tree divergence, `cw review consolidate` rejected both (they set `no_diff_anchor: true` against a real file/line), and #1714 then exited the round `review_blocked` — even though the session had verified the tree clean before dispatch and after consolidation and the reviewed diff was never affected. Net cost: a wasted review round, a real MUST_FIX and two SHOULD_FIX left un-bucketed, and an operator round-trip that could only end in "dismiss". Every reviewer prompt now carries a verbatim shared-worktree rule (read-only; request a kill-check in `suggested_fix` instead of running it; never file transient tree state as a finding or smuggle it through `no_diff_anchor`), the Test Reviewer spec says the same, and Step 3a captures `git status --porcelain` / `git diff HEAD --stat` before dispatch and again after consolidation. Checkpoint 3a gains a single, narrow carve-out on the #1714 exit: a rejected MUST_FIX whose subject is transient tree state — not diff content — is dismissed with both clean-tree captures quoted in the tracker comment and a `transient_state_finding_dismissed` friction highlight, if and only if both captures exist and were empty. Anything else stays on the exit.
+
 ## [1.45.3] - 2026-09-01
 
 ### Fixed
