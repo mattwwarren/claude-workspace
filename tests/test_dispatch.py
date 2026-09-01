@@ -89,6 +89,7 @@ from cw.models import (
     LaneConfig,
     OrchestratorConfig,
     OrchestratorEventType,
+    PendingFixDispatch,
     QueueItemStatus,
     Session,
     SessionOrigin,
@@ -5194,6 +5195,109 @@ class TestClaimNextPendingUsageLimitedGate:
         queue = load_dev_queue()
         stored = next(t for t in queue.tasks if t.ticket_id == "GEN-1346-CLAIM2")
         assert stored.status == QueueItemStatus.RUNNING
+
+
+class TestClaimNextPendingFixDispatchHold:
+    """#2075: a PENDING row mid-fix-loop handoff belongs to
+    cw.reconcile.fix_dispatch, never to claim. The handoff row is meant to
+    stay RUNNING, but any non-sentinel RUNNING->PENDING revert can re-park it
+    with the record untouched; claiming it then spawns a fresh REVIEW session
+    whose live worktree makes every subsequent dispatch_fix_agent attempt
+    raise HookContextConflictError — the silent never-spawns loop."""
+
+    @staticmethod
+    def _pending_fix() -> PendingFixDispatch:
+        return PendingFixDispatch(
+            prompt="fix the MUST_FIX items\n",
+            label="fix-2075",
+            cycle=2,
+            requested_by_session_id="review-sess",
+            requested_at=datetime.now(UTC),
+        )
+
+    def _claim(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> tuple[TicketTask | None, bool]:
+        from cw.dispatch import _claim_next_pending
+
+        return _claim_next_pending(
+            "test-client",
+            lane=DEFAULT_LANE,
+            client=sample_client_config,
+            config=simple_config,
+        )
+
+    def test_row_with_unconsumed_handoff_is_not_claimed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        task = TicketTask(ticket_id="GEN-2075-HOLD1", client="test-client")
+        task.pending_fix_dispatch = self._pending_fix()
+        add_ticket(task)
+
+        assert self._claim(sample_client_config, simple_config) == (None, False)
+        stored = next(iter(load_dev_queue().tasks))
+        assert stored.status == QueueItemStatus.PENDING
+        assert stored.attempts == 0
+
+    def test_row_awaiting_fix_completion_is_not_claimed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        task = TicketTask(ticket_id="GEN-2075-HOLD2", client="test-client")
+        task.fix_dispatch_session_id = "fix-sess"
+        add_ticket(task)
+
+        assert self._claim(sample_client_config, simple_config) == (None, False)
+        stored = next(iter(load_dev_queue().tasks))
+        assert stored.status == QueueItemStatus.PENDING
+
+    def test_priority_claim_skips_held_row(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """The priority path holds the row too — same guard, break not claim."""
+        from cw.dispatch import _claim_next_pending
+
+        held = TicketTask(ticket_id="GEN-2075-PHELD", client="test-client")
+        held.pending_fix_dispatch = self._pending_fix()
+        add_ticket(held)
+        add_ticket(TicketTask(ticket_id="GEN-2075-PFREE", client="test-client"))
+
+        claimed, _ = _claim_next_pending(
+            "test-client",
+            lane=DEFAULT_LANE,
+            client=sample_client_config,
+            config=simple_config,
+            priority_ticket_ids=["GEN-2075-PHELD", "GEN-2075-PFREE"],
+        )
+        assert claimed is not None
+        assert claimed.ticket_id == "GEN-2075-PFREE"
+
+    def test_claim_falls_through_to_the_next_unheld_row(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """The hold is per-row, not per-lane: an unheld sibling still claims."""
+        held = TicketTask(ticket_id="GEN-2075-HELD", client="test-client")
+        held.pending_fix_dispatch = self._pending_fix()
+        add_ticket(held)
+        add_ticket(TicketTask(ticket_id="GEN-2075-FREE", client="test-client"))
+
+        claimed, backoff_skipped = self._claim(sample_client_config, simple_config)
+        assert claimed is not None
+        assert claimed.ticket_id == "GEN-2075-FREE"
+        assert backoff_skipped is False
 
 
 # ---------------------------------------------------------------------------
@@ -14322,6 +14426,37 @@ class TestStalePendingClientsPredicate:
             == {}
         )
 
+    def test_claim_tick_that_drained_the_queue_is_excluded(self) -> None:
+        """#2076: ``pending`` is the tick-START snapshot, so the tick that
+        claimed the queue's last row records ``claimed=1 pending=1``. Reading
+        raw ``pending`` false-paged the operator for a healthy idle loop
+        (breadcrumbs ``pending=1 age_s=91``, twice in one day)."""
+        tick = _make_tick_summary(
+            claimed=1, pending=1, tick_at=_STALE_NOW - timedelta(seconds=91)
+        )
+        assert (
+            _stale_pending_clients(
+                {"test-client": tick},
+                stale_after_seconds=90,
+                blocked_clients=set(),
+                now=_STALE_NOW,
+            )
+            == {}
+        )
+
+    def test_claim_tick_with_rows_left_behind_is_still_returned(self) -> None:
+        """A stale claim tick that did NOT drain the queue still pages: the
+        rows it left behind are genuinely abandoned if the loop stopped."""
+        tick = _make_tick_summary(
+            claimed=1, pending=3, tick_at=_STALE_NOW - timedelta(seconds=200)
+        )
+        assert _stale_pending_clients(
+            {"test-client": tick},
+            stale_after_seconds=90,
+            blocked_clients=set(),
+            now=_STALE_NOW,
+        ) == {"test-client": tick}
+
     def test_client_absent_from_tick_data_never_appears(self) -> None:
         """A client that has never emitted DISPATCH_TICK is simply absent."""
         assert (
@@ -14601,6 +14736,31 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
                 OrchestratorConfig().dispatch_stale_notify_interval_minutes
             ),
         }
+
+    def test_watchdog_scans_after_dispatch_tick_records_its_events(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2076: the scan reads the latest recorded dispatch.tick, so it must
+        run AFTER the iteration's dispatch_tick — scanning first meant a
+        healthy loop's newest tick was always a full iteration old (sleep +
+        guarded pre-tick passes + spawn work), routinely aging past
+        TICK_STALE_SECONDS and false-paging the operator."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        order: list[str] = []
+        monkeypatch.setattr(
+            "cw.dispatch.loop.dispatch_tick",
+            lambda *_a, **_k: (order.append("tick"), DispatchTickResult(spawned=0))[1],
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.loop._notify_stale_clients_with_pending",
+            lambda **_kwargs: order.append("watchdog"),
+        )
+        run_dispatch_loop(once=True, emit=None)
+        assert order == ["tick", "watchdog"]
 
     def test_second_tick_within_gate_interval_skips_the_scan(
         self,

@@ -716,9 +716,6 @@ def _run_dispatch_loop_body(
             _run_stale_dispatch_watch_registration_guarded()
             _run_pr_state_hydration_guarded(config)
             _run_stale_gate_release_guarded()
-            stale_watchdog_next_scan_at = _run_stale_client_watchdog_guarded(
-                config, stale_watchdog_next_scan_at
-            )
             _check_version_drift()
             result = dispatch_tick(
                 config,
@@ -734,6 +731,17 @@ def _run_dispatch_loop_body(
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client,
+            )
+
+            # AFTER dispatch_tick, not before it (#2076): the scan reads the
+            # latest recorded dispatch.tick per client, so scanning first
+            # meant a healthy loop's newest tick was always one full
+            # iteration old at scan time — sleep + the guarded pre-tick
+            # passes (PR hydration's gh calls included) + the tick's own
+            # spawn work routinely exceeds TICK_STALE_SECONDS. Post-tick,
+            # a healthy loop's newest tick is seconds old when scanned.
+            stale_watchdog_next_scan_at = _run_stale_client_watchdog_guarded(
+                config, stale_watchdog_next_scan_at
             )
 
             if result.usage_limit_detected and not once:

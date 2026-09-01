@@ -414,6 +414,25 @@ def _tracked_files(worktree: Path) -> list[str] | None:
 
 _AIDERIGNORE_SEPARATOR = "# --- cw #1915: plan-manifest enforcement ---"
 
+# Order matters: backslash first, or the escapes themselves get re-escaped.
+_GITWILDMATCH_METACHARACTERS = ("\\", "[", "]", "*", "?")
+
+
+def _escape_gitwildmatch(path: str) -> str:
+    """Escape *path* so a gitwildmatch matcher treats it as a literal path.
+
+    The generated aiderignore is parsed as gitwildmatch glob patterns, not
+    literal paths, so an unescaped bracket segment either crashes pathspec
+    outright (a reversed character range like ``[sort-panel]`` raises
+    ``re.error`` inside aider's ``sanity_check_repo``, before the model is
+    contacted → ``aider_no_output``) or silently fences the wrong file
+    (``a/[b]/c.py`` matches ``a/b/c.py`` and not itself). Backslash escapes
+    are honoured by the dialect, so escaping is sufficient (#2072).
+    """
+    for ch in _GITWILDMATCH_METACHARACTERS:
+        path = path.replace(ch, "\\" + ch)
+    return path
+
 
 def build_aiderignore(worktree: Path, manifest_files: list[str]) -> Path | None:
     """Materialise a ``--aiderignore`` file blocking every tracked file the
@@ -445,6 +464,11 @@ def build_aiderignore(worktree: Path, manifest_files: list[str]) -> Path | None:
     Every blocked line is written ``/``-prefixed (root-anchored gitignore
     syntax) to avoid the "no internal slash matches the basename anywhere in
     the tree" gotcha for single-segment filenames.
+
+    Both cw-written line sets (block and negation) pass through
+    ``_escape_gitwildmatch`` because these lines carry literal tracked paths,
+    not patterns (#2072). The merged-in pre-existing ``.aiderignore`` content
+    is left verbatim — those lines genuinely are glob patterns.
     """
     if not manifest_files:
         return None
@@ -461,8 +485,8 @@ def build_aiderignore(worktree: Path, manifest_files: list[str]) -> Path | None:
 
     lines = [existing.rstrip("\n")] if existing else []
     lines.append(_AIDERIGNORE_SEPARATOR)
-    lines.extend(f"/{path}" for path in blocked)
-    lines.extend(f"!/{path}" for path in sorted(manifest_set))
+    lines.extend(f"/{_escape_gitwildmatch(path)}" for path in blocked)
+    lines.extend(f"!/{_escape_gitwildmatch(path)}" for path in sorted(manifest_set))
     content = "\n".join(lines) + "\n"
 
     out_path = worktree / AIDERIGNORE_RELATIVE_PATH

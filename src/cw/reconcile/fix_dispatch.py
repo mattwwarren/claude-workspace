@@ -94,6 +94,16 @@ FIX_LOOP_PENDING_DISPATCH = "fix_loop_pending_dispatch"
 _STAGE_FIX_LOOP = "s3_fix_loop"
 _ERROR_KIND_DISPATCH_FAILED = "fix_dispatch_failed"
 
+# How long a HookContextConflictError stays "transient by construction" (#2075).
+# The expected conflict window is one tick or two: the REVIEW session that
+# recorded the handoff is going terminal. A handoff still conflicting this long
+# after ``requested_at`` means something ELSE holds the worktree (the observed
+# case: a stray revert re-parked the row to PENDING and a fresh REVIEW session
+# was claimed on top of the unconsumed record) — retrying silently forever is
+# the failure mode #2075's silent variant reported, so past this age the
+# conflict escalates through ``_stamp_dispatch_failure`` and pages instead.
+_CONFLICT_ESCALATION_SECONDS = 15 * 60
+
 # Cap on fix-agent spawns per _act_on_pending_fix_dispatches call (#2064).
 # This loop bypasses dispatch/host_capacity.py and dispatch/claim.py's lane
 # occupancy entirely, by design (dispatch_fix_agent's own docstring:
@@ -247,7 +257,14 @@ def _stamp_dispatch_failure(job: _DispatchJob, exc: CwError) -> None:
             return
         task.pending_fix_dispatch = None
         if task.status == QueueItemStatus.RUNNING:
-            transition_task_status(task, QueueItemStatus.PENDING)
+            # unproductive=False (#2075): the REVIEW round behind this handoff
+            # completed and consolidated a real action list — the dispatch
+            # failure is infra-side, not evidence the ticket is churning.
+            # Charging it walked healthy tickets to attempt_cap_blocked at an
+            # already-approved finalize. The loud STAGE_ERRORED +
+            # SESSION_NEEDS_ATTENTION pair below remains the bound that pages
+            # the operator on every recurrence.
+            transition_task_status(task, QueueItemStatus.PENDING, unproductive=False)
         save_dev_queue(store)
         # session_id degrades to the REVIEW session that recorded the handoff:
         # this tick owns no session of its own, and that is the closest thing to
@@ -330,7 +347,25 @@ def _act_on_pending_fix_dispatches(
                 lane=job.lane,
                 parent=job.pending.requested_by_session_id,
             )
-        except HookContextConflictError:
+        except HookContextConflictError as exc:
+            age_seconds = (datetime.now(UTC) - job.pending.requested_at).total_seconds()
+            if age_seconds > _CONFLICT_ESCALATION_SECONDS:
+                # No longer transient (#2075): the writing REVIEW session went
+                # terminal long ago, so a persisting conflict means another
+                # session holds the worktree and this handoff will never
+                # dispatch. Silent per-tick retries emitted NO operator signal
+                # while the ticket sat unconsumed — escalate through the loud
+                # failure path instead (fix_dispatch_failed event pair +
+                # unpark), which is the "or a fix_dispatch_failed event fires"
+                # half of the contract.
+                _log.warning(
+                    "fix_dispatch: worktree held %ds for ticket %s — escalating",
+                    int(age_seconds),
+                    job.ticket_id,
+                    exc_info=True,
+                )
+                _stamp_dispatch_failure(job, exc)
+                continue
             # Transient by construction: the REVIEW session that wrote this
             # record is still going terminal. Leave the latch alone and retry
             # next tick -- this is the ONE failure this design expects to see.
@@ -374,7 +409,15 @@ def _act_on_fix_dispatch_completions(
                 continue
             task.fix_dispatch_session_id = None
             if task.status == QueueItemStatus.RUNNING:
-                transition_task_status(task, QueueItemStatus.PENDING)
+                # unproductive=False (#2075): this unpark is the routine
+                # per-cycle handoff — a full review round ran AND its fix
+                # session went terminal. Charging it (plus the respawned
+                # REVIEW round's own claim) made every healthy fix cycle
+                # count double against the attempt ceiling, blocking
+                # fully-approved finalizes behind attempt_cap_blocked.
+                transition_task_status(
+                    task, QueueItemStatus.PENDING, unproductive=False
+                )
             unparked.append(task.ticket_id)
         if unparked:
             save_dev_queue(store)

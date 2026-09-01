@@ -203,8 +203,17 @@ def _stale_pending_clients(
     """Return the subset of *tick_data* that is stale AND has pending work.
 
     A client qualifies when its last ``dispatch.tick`` is older than
-    *stale_after_seconds*, it still has ``pending > 0``, and it is NOT in
-    *blocked_clients* (the set derived from live executor-blocked markers).
+    *stale_after_seconds*, it still has pending work left behind by that tick,
+    and it is NOT in *blocked_clients* (the set derived from live
+    executor-blocked markers).
+
+    "Pending work left behind" is ``pending - claimed``, not raw ``pending``:
+    a tick's ``pending`` payload field is the tick-*start* snapshot
+    (``_client_tick_snapshot`` runs before any claim), so a tick that claimed
+    the queue's last row records ``claimed=1 pending=1``. Reading raw
+    ``pending`` made that final claim tick look like abandoned work once it
+    aged past the threshold, paging the operator for a healthy, idle loop
+    (#2076: ``pending=1 age_s=91`` fired ~90s after a successful claim).
 
     Extracted from ``cw.doctor.loop_health._check_loop_liveness`` (#1875) so
     the on-demand doctor check and the dispatch loop's proactive watchdog
@@ -219,7 +228,7 @@ def _stale_pending_clients(
         client: tick
         for client, tick in tick_data.items()
         if (now - tick.tick_at).total_seconds() > stale_after_seconds
-        and tick.pending > 0
+        and tick.pending - tick.claimed > 0
         and client not in blocked_clients
     }
 

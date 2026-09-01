@@ -271,6 +271,78 @@ def _is_stale_pr_gated(task: TicketTask, stale_pr_ticket_ids: frozenset[str]) ->
     )
 
 
+def _is_fix_dispatch_held(task: TicketTask) -> bool:
+    """True iff *task* is mid-fix-loop handoff and owned by fix_dispatch (#2075).
+
+    A row carrying an unconsumed ``pending_fix_dispatch`` (or a live
+    ``fix_dispatch_session_id``) belongs to ``cw.reconcile.fix_dispatch``. By
+    design such a row stays RUNNING for the whole handoff, but any of the
+    codebase's many non-sentinel RUNNING→PENDING reverts (crash/phantom/stall
+    sweeps) can re-park it with the record untouched. Claiming it then spawns
+    a fresh REVIEW session whose live worktree makes every subsequent
+    ``dispatch_fix_agent`` attempt raise ``HookContextConflictError`` — the
+    silent never-spawns loop #2075 reported. Skipping here leaves the row for
+    the fix-dispatch pass, which dispatches regardless of row status and
+    unparks it cleanly when the fix session completes.
+    """
+    return (
+        task.pending_fix_dispatch is not None
+        or task.fix_dispatch_session_id is not None
+    )
+
+
+# _screen_and_claim outcomes. "skipped" covers every held/parked case the two
+# claim loops treat identically (move to the next candidate, no flag raised).
+_CLAIM_CLAIMED = "claimed"
+_CLAIM_BACKOFF = "backoff"
+_CLAIM_SKIPPED = "skipped"
+
+
+def _screen_and_claim(
+    task: TicketTask,
+    *,
+    client_name: str,
+    lane: str,
+    client: ClientConfig,
+    config: OrchestratorConfig,
+    stale_pr_ticket_ids: frozenset[str],
+    store: DevQueueStore,
+    now: datetime,
+) -> str:
+    """Run one PENDING candidate through the claim gauntlet; report the outcome.
+
+    The identical screen-then-claim sequence both claim loops (priority and
+    plain) run per candidate, extracted (#2075) so the fix-dispatch hold could
+    be added without pushing ``_claim_next_pending`` past its PLR0912 branch
+    budget. Screens in precedence order — spawn-error backoff, fix-dispatch
+    hold, stale-PR gate, attempt ceiling — then claims. Parking paths save the
+    store themselves (``_park_stale_pr_task`` and the ceiling park below), as
+    does the successful claim; a screened-out candidate writes nothing.
+    """
+    if task.next_eligible_at is not None and now < task.next_eligible_at:
+        return _CLAIM_BACKOFF
+    if _is_fix_dispatch_held(task):
+        return _CLAIM_SKIPPED
+    if _is_stale_pr_gated(task, stale_pr_ticket_ids):
+        _park_stale_pr_task(task, client_name, lane, store)
+        return _CLAIM_SKIPPED
+    ceiling = resolve_attempt_ceiling(client, task, config)
+    if ceiling is not None and task.unproductive_attempts >= ceiling:
+        transition_task_status(
+            task,
+            QueueItemStatus.BLOCKED_ON_USER,
+            disposition="attempt_cap_blocked",
+        )
+        save_dev_queue(store)
+        _emit_attempt_cap_blocked_event(client_name, task.ticket_id, ceiling)
+        _emit_attempt_cap_attention_event(task, client_name, lane, ceiling)
+        return _CLAIM_SKIPPED
+    transition_task_status(task, QueueItemStatus.RUNNING)
+    task.attempts += 1
+    save_dev_queue(store)
+    return _CLAIM_CLAIMED
+
+
 def _claim_next_pending(
     client_name: str,
     *,
@@ -362,38 +434,21 @@ def _claim_next_pending(
                         and task.lane == lane
                         and task.status == QueueItemStatus.PENDING
                     ):
-                        in_backoff = (
-                            task.next_eligible_at is not None
-                            and now < task.next_eligible_at
+                        outcome = _screen_and_claim(
+                            task,
+                            client_name=client_name,
+                            lane=lane,
+                            client=client,
+                            config=config,
+                            stale_pr_ticket_ids=stale_pr_ticket_ids,
+                            store=store,
+                            now=now,
                         )
-                        if in_backoff:
+                        if outcome == _CLAIM_CLAIMED:
+                            return task, spawn_backoff_skipped
+                        if outcome == _CLAIM_BACKOFF:
                             spawn_backoff_skipped = True
-                            break
-                        if _is_stale_pr_gated(task, stale_pr_ticket_ids):
-                            _park_stale_pr_task(task, client_name, lane, store)
-                            break
-                        ceiling = resolve_attempt_ceiling(client, task, config)
-                        if (
-                            ceiling is not None
-                            and task.unproductive_attempts >= ceiling
-                        ):
-                            transition_task_status(
-                                task,
-                                QueueItemStatus.BLOCKED_ON_USER,
-                                disposition="attempt_cap_blocked",
-                            )
-                            save_dev_queue(store)
-                            _emit_attempt_cap_blocked_event(
-                                client_name, task.ticket_id, ceiling
-                            )
-                            _emit_attempt_cap_attention_event(
-                                task, client_name, lane, ceiling
-                            )
-                            break
-                        transition_task_status(task, QueueItemStatus.RUNNING)
-                        task.attempts += 1
-                        save_dev_queue(store)
-                        return task, spawn_backoff_skipped
+                        break
         pending = sorted(
             [
                 t
@@ -405,27 +460,20 @@ def _claim_next_pending(
             key=lambda t: (-t.priority, t.created_at),
         )
         for task in pending:
-            if task.next_eligible_at is not None and now < task.next_eligible_at:
+            outcome = _screen_and_claim(
+                task,
+                client_name=client_name,
+                lane=lane,
+                client=client,
+                config=config,
+                stale_pr_ticket_ids=stale_pr_ticket_ids,
+                store=store,
+                now=now,
+            )
+            if outcome == _CLAIM_CLAIMED:
+                return task, spawn_backoff_skipped
+            if outcome == _CLAIM_BACKOFF:
                 spawn_backoff_skipped = True
-                continue
-            if _is_stale_pr_gated(task, stale_pr_ticket_ids):
-                _park_stale_pr_task(task, client_name, lane, store)
-                continue
-            ceiling = resolve_attempt_ceiling(client, task, config)
-            if ceiling is not None and task.unproductive_attempts >= ceiling:
-                transition_task_status(
-                    task,
-                    QueueItemStatus.BLOCKED_ON_USER,
-                    disposition="attempt_cap_blocked",
-                )
-                save_dev_queue(store)
-                _emit_attempt_cap_blocked_event(client_name, task.ticket_id, ceiling)
-                _emit_attempt_cap_attention_event(task, client_name, lane, ceiling)
-                continue
-            transition_task_status(task, QueueItemStatus.RUNNING)
-            task.attempts += 1
-            save_dev_queue(store)
-            return task, spawn_backoff_skipped
     return None, spawn_backoff_skipped
 
 
