@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/prep-pr` Step 8 now finds a project ship-it that ships as a skill, not only one that ships as a command:** the step probed a single path (`test -f .claude/commands/ship-it.md`), so a repo whose ship-it lives at `.claude/skills/ship-it/SKILL.md` — commonly a symlink into `.agents/skills/ship-it/` — read as having no ship-it at all. Interactively that meant a STOP telling the user to create the ship-it they already had; headless it meant a `no project /ship-it` BLOCK, which `/auto-dev` finalize routes to a human, for a branch that could have shipped unattended. Step 8 now probes all three supported layouts, prints each hit's resolved path so a `.claude/skills` → `.agents/skills` symlink reads as one ship-it rather than two, invokes a skill-layout ship-it through the `Skill` tool (falling back to reading its `SKILL.md` where no `Skill` tool exists), prefers the command form if a repo genuinely has both, and names every probed path in the STOP/BLOCK message. `/auto-dev-finalize-appendix`'s operator prompt for that BLOCK says the same. A guard test executes the extracted probe against real command-, skill-, and symlinked-skill-layout trees, so a narrowing regression fails loudly instead of resurfacing as a spurious BLOCK.
+
 ## [1.45.4] - 2026-09-01
 
 ### Fixed
