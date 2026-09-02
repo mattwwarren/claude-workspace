@@ -67,7 +67,7 @@ Create PR via /prep-pr + /ship-it?
 
 ## Why Stage 4 delegates to /prep-pr
 
-`/prep-pr` delegates to the per-project `.claude/commands/ship-it.md`, which
+`/prep-pr` delegates to the per-project ship-it (a command or a skill — see Step 8's probe), which
 knows repo-specific PR conventions (template, labels, reviewers, base branch, CI
 bootstrap) the pipeline shouldn't hardcode. It keeps sync-with-main and
 quality-gate-rerun logic in one place instead of duplicating them across
@@ -374,4 +374,4 @@ when `prep_pr_finalize.py verify --require-automerge` reported the
 
 **Permission mode (known limitation, #636 — deferred):** headless workers run under `claude --bg --permission-mode auto` (`native_daemon.py` `_DEFAULT_PERMISSION_MODE`), so the `auto` classifier fires on `gh pr create` inside a worktree-isolated subagent and, with no TTY to approve, blocks `/prep-pr`. The allowlist `Bash(gh pr:*)` does NOT suppress it, and setting `bypassPermissions` on *this subagent spawn alone* is ineffective — the worker's own `auto` mode is the source. The effective fix (spawning the worker with a non-`auto` `permission_mode`) is **deferred** to RFC 0005's FINALIZE/REVIEW stages (#622/#621); until then a classifier block surfaces as a BLOCK for manual ship.
 
-**If the agent returns BLOCK due to "no project `/ship-it`":** The project hasn't been set up for automated PR creation. AskUserQuestion: "Project has no `.claude/commands/ship-it.md`. Create one manually and resume, skip this ticket (leave branch pushed), or abort pipeline?"
+**If the agent returns BLOCK due to "no project `/ship-it`":** The project hasn't been set up for automated PR creation. AskUserQuestion: "Project has no ship-it in any layout `/prep-pr` probes (`.claude/commands/ship-it.md`, `.claude/skills/ship-it/SKILL.md`, `.agents/skills/ship-it/SKILL.md`). Create one manually and resume, skip this ticket (leave branch pushed), or abort pipeline?"

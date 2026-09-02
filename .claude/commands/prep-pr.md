@@ -287,31 +287,60 @@ After all gates pass:
 ## Step 8: Ship
 
 1. Commit any remaining uncommitted changes (staged autofix results, etc.)
-2. Check for a project-level ship-it command:
+2. Check for a project-level ship-it. **A project ship-it is a command in some
+   repos and a skill in others — probe every supported layout, never just the
+   command path.** A repo whose ship-it is a skill has a working ship-it; a
+   single-path `test -f .claude/commands/ship-it.md` reports it missing and
+   sends this step down the STOP/BLOCK branch for a repo that can ship fine.
+
    ```bash
-   test -f .claude/commands/ship-it.md && echo "project"
+   for candidate in .claude/commands/ship-it.md \
+                    .claude/skills/ship-it/SKILL.md \
+                    .agents/skills/ship-it/SKILL.md; do
+     [ -f "$candidate" ] && echo "found $candidate -> $(cd "$(dirname "$candidate")" && pwd -P)/$(basename "$candidate")"
+   done
    ```
-   - **If project-level exists**: Read `.claude/commands/ship-it.md` and follow those instructions step-by-step. Execute every step that produces side effects (push, gh pr create, slack post, monitor register). Reading the file is not the same as running it.
-   - **If no project-level exists**: **STOP.** Tell the user:
-     > "This project has no `/ship-it` command (`.claude/commands/ship-it.md`). Create a project-level ship-it that knows your repo's PR conventions, branch naming, and CI setup. The generic global one was removed because it caused more problems than it solved."
+
+   The resolved path is printed because `.claude/skills/ship-it` is commonly a
+   symlink to `.agents/skills/ship-it` — two hits with one resolved path are
+   one ship-it, not two.
+
+   - **If a command file was found** (`.claude/commands/ship-it.md`): Read it and follow those instructions step-by-step. Execute every step that produces side effects (push, gh pr create, slack post, monitor register). Reading the file is not the same as running it.
+   - **If a skill was found** (`…/skills/ship-it/SKILL.md`): invoke it with the
+     `Skill` tool (`ship-it`) so its bundled `references/` load the way the
+     skill expects. If this runtime has no `Skill` tool, Read the `SKILL.md`
+     and follow it step-by-step, resolving its relative paths against the
+     skill's own directory. Same rule as the command form: every side-effecting
+     step must actually run.
+   - **If both a command and a distinct skill were found**: prefer the command
+     (`.claude/commands/ship-it.md`), and say in the Ship Summary which one ran
+     and which was skipped.
+   - **If both skill paths were found and they resolve to *different* files**
+     (no symlink between them): prefer `.claude/skills/ship-it/SKILL.md` — the
+     path the runtime itself loads — and name the shadowed `.agents/` copy in
+     the Ship Summary. Never merge or run both.
+   - **If none of the layouts matched**: **STOP.** Tell the user:
+     > "This project has no ship-it — probed `.claude/commands/ship-it.md`, `.claude/skills/ship-it/SKILL.md`, and `.agents/skills/ship-it/SKILL.md`. Create a project-level ship-it that knows your repo's PR conventions, branch naming, and CI setup. The generic global one was removed because it caused more problems than it solved."
      >
      > Do NOT fall back to any global ship-it. Do NOT try to create a PR yourself. The user must set up a project-specific ship-it first.
 
-**Headless:** propagate headless-ness into the delegated `ship-it.md` execution
+**Headless:** propagate headless-ness into the delegated ship-it execution
 — this is the delegation hop where the original defect surfaced.
-- **If no project-level ship-it exists** → emit a `HEADLESS BLOCK`
-  (`gate: "Step 8 ship"`, `details: "no project /ship-it"`) instead of the
-  interactive STOP message. (`auto-dev-finalize.md` Step 4c's subagent
-  instruction already expects and handles this specific BLOCK cause.)
-- **If it exists** → while following `ship-it.md` step-by-step, treat the whole
+- **If no project-level ship-it exists in any probed layout** → emit a
+  `HEADLESS BLOCK` (`gate: "Step 8 ship"`, `details: "no project /ship-it"`)
+  instead of the interactive STOP message. (`auto-dev-finalize.md` Step 4c's
+  subagent instruction already expects and handles this specific BLOCK cause.)
+  Do not emit this BLOCK on the strength of the command path alone — run the
+  full probe first.
+- **If it exists** → while following it step-by-step, treat the whole
   delegated run as headless: any interactive step in that file (its own
   `AskUserQuestion`, a confirmation prompt, a "proceed?" gate) converts to the
   same rule as this command — auto-resolve if the deterministic action is
   unambiguous, otherwise emit a `HEADLESS BLOCK` (`gate: "Step 8 ship-it: <that
   step>"`). A side-effecting step (push, `gh pr create`, feed/slack post,
   monitor register) must run or BLOCK — it must **never** be silently skipped.
-  If `ship-it.md` itself accepts a `--headless`/non-interactive flag, pass it
-  through.
+  If the project ship-it itself accepts a `--headless`/non-interactive flag,
+  pass it through.
 
 Pass through relevant arguments when invoking the project-level ship-it:
 - `--draft` if the user's original arguments included it
@@ -388,5 +417,5 @@ Print the Ship Summary from Step 9 as the final message. Add cycle-level context
 - This skill is ecosystem-agnostic: gate detection adapts to Python, Node, Rust, and Go projects
 - Each review-fix cycle captures a scope snapshot for creep monitoring
 - Never amend commits. Each fix gets its own commit.
-- A project-level `/ship-it` (`.claude/commands/ship-it.md`) is required — there is no global fallback
+- A project-level ship-it is required — there is no global fallback. It may be a command (`.claude/commands/ship-it.md`) or a skill (`.claude/skills/ship-it/SKILL.md`, `.agents/skills/ship-it/SKILL.md`)
 - `--headless` (see **Headless Mode**) is set by `auto-dev-finalize.md` Step 4c for the headless `/auto-dev` pipeline. It replaces every `AskUserQuestion` gate with a deterministic action or a `HEADLESS BLOCK`; nothing side-effecting is ever silently skipped.

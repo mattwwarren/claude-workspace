@@ -268,7 +268,7 @@ Once tickets are enqueued, this is the toolkit for watching a wave and closing i
 | `/review-monitor` | Watch a PR and respond to review events. |
 | `/address-review` | Address review comments on a GitHub PR and post replies. |
 | `/prep-pr` | Prepare a PR: format title/body, wire auto-merge, post to tracker. |
-| `/ship-it` | Final gate check + merge. **Project-scoped** — each repo supplies its own `.claude/commands/ship-it.md`; `/prep-pr` resolves it from the current project and blocks if absent. Never installed globally. |
+| `/ship-it` | Final gate check + merge. **Project-scoped** — each repo supplies its own, as a command (`.claude/commands/ship-it.md`) or a skill (`.claude/skills/ship-it/SKILL.md`, `.agents/skills/ship-it/SKILL.md`); `/prep-pr` Step 8 probes all three and blocks if none is present. Never installed globally. |
 | `/post-review` | Post-merge cleanup and debt filing. |
 
 ### Session management
