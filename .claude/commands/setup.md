@@ -166,15 +166,23 @@ plan_exit:
 
 ### Step 6: Bootstrap Per-Project `/ship-it`
 
-`/prep-pr` and `/auto-dev` both require a per-project `.claude/commands/ship-it.md` — there is no global fallback (by design: accidental loading was bad). `/setup` offers to copy the template into the current repo so these pipelines work out of the box.
+`/prep-pr` and `/auto-dev` both require a per-project ship-it — there is no global fallback (by design: accidental loading was bad). It may be a command (`.claude/commands/ship-it.md`) or a skill (`.claude/skills/ship-it/SKILL.md`, `.agents/skills/ship-it/SKILL.md`); `/prep-pr` Step 8 probes all three. `/setup` offers to copy the command template into the current repo so these pipelines work out of the box.
 
-1. **Check existence:**
+1. **Check existence — probe every layout `/prep-pr` probes, not just the
+   command path.** A repo whose ship-it is a skill already has a working
+   ship-it; bootstrapping a command stub next to it would shadow the real one
+   (Step 8 prefers the command when both exist), which is worse than the
+   missing-ship-it case this step exists to fix.
    ```bash
-   test -f .claude/commands/ship-it.md && echo "exists"
+   for candidate in .claude/commands/ship-it.md \
+                    .claude/skills/ship-it/SKILL.md \
+                    .agents/skills/ship-it/SKILL.md; do
+     [ -f "$candidate" ] && echo "exists $candidate"
+   done
    ```
 
-2. **If missing**, ask the user:
-   > "This repo has no `.claude/commands/ship-it.md`. `/prep-pr` and `/auto-dev` need one to create PRs. Copy the template from the installed Claude home or from the checked-out `global-claude/templates/ship-it-template.md`? (yes / no / show-me)"
+2. **If no layout matched**, ask the user:
+   > "This repo has no ship-it — probed `.claude/commands/ship-it.md`, `.claude/skills/ship-it/SKILL.md`, and `.agents/skills/ship-it/SKILL.md`. `/prep-pr` and `/auto-dev` need one to create PRs. Copy the command template from the installed Claude home or from the checked-out `global-claude/templates/ship-it-template.md`? (yes / no / show-me)"
 
    - **yes** → copy (not symlink — symlinks = de facto global fallback, which we explicitly reject):
      ```bash
@@ -187,7 +195,7 @@ plan_exit:
    - **no** → Skip. Warn: "`/prep-pr` and `/auto-dev` will fail with BLOCK until a `ship-it.md` exists in this repo."
    - **show-me** → `cat "$TEMPLATE_SRC"` and re-ask yes/no.
 
-3. **If present**, skip silently (don't overwrite user customizations on a re-run). If `--reset` was passed, ask whether to overwrite.
+3. **If any layout matched**, skip silently (don't overwrite user customizations on a re-run, and never add a command stub beside an existing skill). If `--reset` was passed, ask whether to overwrite — name the layout that already exists so the user is not offered a second, competing ship-it by accident.
 
 ### Step 7: Confirm
 

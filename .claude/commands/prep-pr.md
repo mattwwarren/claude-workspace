@@ -315,6 +315,10 @@ After all gates pass:
    - **If both a command and a distinct skill were found**: prefer the command
      (`.claude/commands/ship-it.md`), and say in the Ship Summary which one ran
      and which was skipped.
+   - **If both skill paths were found and they resolve to *different* files**
+     (no symlink between them): prefer `.claude/skills/ship-it/SKILL.md` — the
+     path the runtime itself loads — and name the shadowed `.agents/` copy in
+     the Ship Summary. Never merge or run both.
    - **If none of the layouts matched**: **STOP.** Tell the user:
      > "This project has no ship-it — probed `.claude/commands/ship-it.md`, `.claude/skills/ship-it/SKILL.md`, and `.agents/skills/ship-it/SKILL.md`. Create a project-level ship-it that knows your repo's PR conventions, branch naming, and CI setup. The generic global one was removed because it caused more problems than it solved."
      >
