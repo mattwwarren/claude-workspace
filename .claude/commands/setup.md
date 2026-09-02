@@ -195,7 +195,23 @@ plan_exit:
    - **no** → Skip. Warn: "`/prep-pr` and `/auto-dev` will fail with BLOCK until a `ship-it.md` exists in this repo."
    - **show-me** → `cat "$TEMPLATE_SRC"` and re-ask yes/no.
 
-3. **If any layout matched**, skip silently (don't overwrite user customizations on a re-run, and never add a command stub beside an existing skill). If `--reset` was passed, ask whether to overwrite — name the layout that already exists so the user is not offered a second, competing ship-it by accident.
+3. **If any layout matched**, skip silently — don't overwrite user
+   customizations on a re-run, and never add a command stub beside an existing
+   skill.
+
+   **If `--reset` was passed**, name the layout that already exists and ask
+   whether to overwrite *that file*. The overwrite target is the layout that
+   was found, never a new one:
+   - **existing command** (`.claude/commands/ship-it.md`) → on yes, run the
+     Step 2 copy above, which overwrites that same path.
+   - **existing skill** (`…/skills/ship-it/SKILL.md`) → do NOT run the Step 2
+     copy. It writes `.claude/commands/ship-it.md`, which would leave a command
+     stub shadowing the skill (Step 8 of `/prep-pr` prefers the command), which
+     is the failure this step exists to prevent. Say so, and offer to overwrite
+     the skill's `SKILL.md` in place from the template instead, or to leave it
+     alone. Converting a repo from the skill layout to the command layout is a
+     deliberate migration, not a `--reset` side effect — require the user to
+     say that is what they want, and delete the skill in the same breath.
 
 ### Step 7: Confirm
 

@@ -67,7 +67,7 @@ Create PR via /prep-pr + /ship-it?
 
 ## Why Stage 4 delegates to /prep-pr
 
-`/prep-pr` delegates to the per-project `.claude/commands/ship-it.md`, which
+`/prep-pr` delegates to the per-project ship-it (a command or a skill — see Step 8's probe), which
 knows repo-specific PR conventions (template, labels, reviewers, base branch, CI
 bootstrap) the pipeline shouldn't hardcode. It keeps sync-with-main and
 quality-gate-rerun logic in one place instead of duplicating them across

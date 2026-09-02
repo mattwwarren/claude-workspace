@@ -84,6 +84,7 @@ LAYOUT_LIST_COPIES = {
     "setup bootstrap prompt": lambda: _paragraph_at(
         SETUP_PATH, "This repo has no ship-it"
     ),
+    "setup Step 6 intro": lambda: _paragraph_at(SETUP_PATH, "It may be a command"),
 }
 
 
@@ -175,3 +176,24 @@ def test_setup_probe_finds_skill_layout(tmp_path: Path) -> None:
 
 def test_setup_probe_is_silent_when_no_ship_it_exists(tmp_path: Path) -> None:
     assert _run(_setup_probe(), tmp_path).strip() == ""
+
+
+def test_prep_pr_probe_separates_two_distinct_skill_files(tmp_path: Path) -> None:
+    """The precondition Step 8's skill-vs-skill tie-break rests on.
+
+    The symlink case collapses to one resolved path; two real files must NOT,
+    or the tie-break bullet describes a state the probe can never report.
+    """
+    _write(tmp_path / ".claude" / "skills" / "ship-it" / "SKILL.md", "# claude\n")
+    _write(tmp_path / ".agents" / "skills" / "ship-it" / "SKILL.md", "# agents\n")
+
+    stdout = _run(_prep_pr_probe(), tmp_path)
+    resolved = {line.split(" -> ")[1] for line in stdout.strip().splitlines()}
+    assert len(resolved) == 2, stdout
+
+
+def test_tie_break_prefers_the_runtime_loaded_skill_path() -> None:
+    """The tie-break must keep naming a winner, and it must be the loaded path."""
+    rule = _paragraph_at(PREP_PR_PATH, "**If both skill paths were found")
+    assert ".claude/skills/ship-it/SKILL.md" in rule
+    assert "prefer" in rule
