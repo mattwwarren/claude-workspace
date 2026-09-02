@@ -30,6 +30,7 @@ ROOT = Path(__file__).parent.parent
 PREP_PR_PATH = ROOT / ".claude" / "commands" / "prep-pr.md"
 SETUP_PATH = ROOT / ".claude" / "commands" / "setup.md"
 FINALIZE_APPENDIX_PATH = ROOT / ".claude" / "commands" / "auto-dev-finalize-appendix.md"
+README_PATH = ROOT / "README.md"
 FENCE = "```bash"
 
 CANDIDATE_PATHS = (
@@ -85,6 +86,9 @@ LAYOUT_LIST_COPIES = {
         SETUP_PATH, "This repo has no ship-it"
     ),
     "setup Step 6 intro": lambda: _paragraph_at(SETUP_PATH, "It may be a command"),
+    "README command table row": lambda: _paragraph_at(
+        README_PATH, "| `/ship-it` | Final gate check"
+    ),
 }
 
 

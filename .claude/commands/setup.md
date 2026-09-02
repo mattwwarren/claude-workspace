@@ -203,15 +203,28 @@ plan_exit:
    whether to overwrite *that file*. The overwrite target is the layout that
    was found, never a new one:
    - **existing command** (`.claude/commands/ship-it.md`) → on yes, run the
-     Step 2 copy above, which overwrites that same path.
-   - **existing skill** (`…/skills/ship-it/SKILL.md`) → do NOT run the Step 2
-     copy. It writes `.claude/commands/ship-it.md`, which would leave a command
-     stub shadowing the skill (Step 8 of `/prep-pr` prefers the command), which
-     is the failure this step exists to prevent. Say so, and offer to overwrite
-     the skill's `SKILL.md` in place from the template instead, or to leave it
-     alone. Converting a repo from the skill layout to the command layout is a
-     deliberate migration, not a `--reset` side effect — require the user to
-     say that is what they want, and delete the skill in the same breath.
+     `/bin/cp "$TEMPLATE_SRC" .claude/commands/ship-it.md` command from item 2's
+     **yes** branch above. It overwrites that same path, which is the right
+     target here.
+   - **existing skill** (`…/skills/ship-it/SKILL.md`) → do NOT run that `cp`.
+     It writes `.claude/commands/ship-it.md`, which would leave a command stub
+     shadowing the skill (`/prep-pr` Step 8 prefers the command), which is the
+     failure this step exists to prevent. There is also **no skill-flavored
+     reset template** — `ship-it-template.md` carries command frontmatter
+     (`description` / `argument-hint` / `allowed-tools`) and a body that tells
+     the reader to copy it to `.claude/commands/ship-it.md`, so writing it into
+     a `SKILL.md` produces a broken skill (no `name:`), not a reset one. Say
+     that plainly and offer only: leave the skill alone (default), or hand-edit
+     it. Do not synthesize a skill from the command template.
+   - **skill → command migration** is a deliberate change, not a `--reset` side
+     effect. Do it only when the user says that is what they want, and never as
+     an inference from "yes, overwrite". When they do: copy the template to
+     `.claude/commands/ship-it.md`, then remove exactly the ship-it skill —
+     `rm -rf .claude/skills/ship-it` when that path is a real directory. If it
+     is a symlink (`test -L .claude/skills/ship-it`), `rm` **the symlink only**
+     and ask separately before touching its resolve target
+     (`.agents/skills/ship-it`, typically shared with other tooling). Never
+     `rm -rf` a path you have not resolved first.
 
 ### Step 7: Confirm
 
