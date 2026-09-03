@@ -39,7 +39,7 @@ from cw.models import (
 from cw.reconcile import (
     reconcile,
 )
-from cw.ssh import check_ssh_key_available
+from cw.ssh import check_ssh_key_available, push_remote_scheme, remote_needs_ssh_probe
 from cw.worktree import (
     check_main_ff_safety,
     fast_forward_main,
@@ -60,6 +60,7 @@ if TYPE_CHECKING:
         OrchestratorConfig,
         TicketTask,
     )
+    from cw.ssh import RemoteScheme
 from cw.dispatch.claim import _lane_occupants_for_client, _lane_stats_for_client
 
 _log = logging.getLogger("cw.dispatch")
@@ -235,6 +236,7 @@ def _emit_ssh_key_skip(
     cap: int,
     emit: Callable[[str], None] | None,
     warned_ssh_key: set[str] | None,
+    remote_scheme: RemoteScheme,
 ) -> None:
     """Emit the operator error line (once per run) + dispatch.tick skip event.
 
@@ -243,6 +245,10 @@ def _emit_ssh_key_skip(
     literal operator message exactly once per dispatch-loop run via ``emit``,
     deduplicated through ``warned_ssh_key`` (fleet-wide, not per-client --
     keyed on a single sentinel since this check has no per-client dimension).
+
+    ``remote_scheme`` (#1495) records which push-remote transport engaged
+    the probe (``ssh`` or ``unknown`` -- ``http``/``local`` clients never
+    reach this helper), so a false gate is diagnosable from events alone.
     """
     if emit is not None and (
         warned_ssh_key is None or _SSH_KEY_WARN_SENTINEL not in warned_ssh_key
@@ -263,6 +269,7 @@ def _emit_ssh_key_skip(
             "running": running_count,
             "cap": cap,
             "skip_reason": DispatchSkipReason.SSH_KEY_GATE,
+            "remote_scheme": remote_scheme,
             "lanes": _lane_stats_for_client(
                 client, queue_snapshot, occupants=lane_occupants
             ),
@@ -277,6 +284,7 @@ def _emit_ssh_key_bypass(
     *,
     probe_result: bool,
     gate_enabled: bool,
+    remote_scheme: RemoteScheme,
 ) -> None:
     """Record the operator-forwarded bypass event (GitHub #1437).
 
@@ -296,8 +304,73 @@ def _emit_ssh_key_bypass(
             "client": client.name,
             "probe_result": probe_result,
             "gate_enabled": gate_enabled,
+            "remote_scheme": remote_scheme,
         },
     )
+
+
+def _apply_ssh_key_gate(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    ssh_key_available: bool | None,
+    pending_count: int,
+    running_count: int,
+    cap: int,
+    emit: Callable[[str], None] | None,
+    warned_ssh_key: set[str] | None,
+    gate_enabled: bool,
+) -> tuple[bool | None, bool]:
+    """Run the SSH-agent-key gate; returns ``(resolved_probe, gated)``.
+
+    Keys the gate on the transport the client's push actually uses (#1495):
+    :func:`~cw.ssh.push_remote_scheme` resolves ``origin``'s effective push
+    URL, and an ``http``/``local`` remote skips the probe entirely -- the
+    memoized probe verdict is returned unresolved (still ``None``) and the
+    client is never gated, since no SSH key is involved in its pushes. An
+    ``ssh`` remote engages the pre-#1495 gate unchanged, and ``unknown``
+    (resolution failed) deliberately does too, so a scheme lookup failure
+    keeps the gate fail-closed instead of silently disabling it.
+
+    The second element is True when *client* must be held PENDING (the
+    dispatch.tick skip event has already been emitted). When the probe
+    reports unavailable and *gate_enabled* is False (#1437), the would-be
+    skip is suppressed: a bypass event is recorded and the client proceeds.
+
+    Extracted from ``cw.dispatch.tick._run_preflight_gates`` for the same
+    reason as :func:`_apply_disk_pressure_gate`: the remote-scheme branch
+    would otherwise push that caller past the PLR0911/PLR0912 ceilings.
+    """
+    scheme = push_remote_scheme(client.repo_path or client.workspace_path)
+    if not remote_needs_ssh_probe(scheme):
+        _log.debug(
+            "ssh_key_gate: skipping probe for %s (push remote scheme=%s)",
+            client.name,
+            scheme,
+        )
+        return ssh_key_available, False
+    resolved = _resolve_ssh_key_once(ssh_key_available)
+    if resolved:
+        return resolved, False
+    if not gate_enabled:
+        _emit_ssh_key_bypass(
+            client,
+            probe_result=resolved,
+            gate_enabled=gate_enabled,
+            remote_scheme=scheme,
+        )
+        return resolved, False
+    _emit_ssh_key_skip(
+        client,
+        queue_snapshot,
+        pending_count=pending_count,
+        running_count=running_count,
+        cap=cap,
+        emit=emit,
+        warned_ssh_key=warned_ssh_key,
+        remote_scheme=scheme,
+    )
+    return resolved, True
 
 
 def _resolve_disk_pressure(

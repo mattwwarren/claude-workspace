@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
-from cw.ssh import check_ssh_key_available
+import pytest
+
+from cw.ssh import (
+    _classify_remote_url,
+    check_ssh_key_available,
+    push_remote_scheme,
+    remote_needs_ssh_probe,
+)
 
 if TYPE_CHECKING:
-    import pytest
+    from pathlib import Path
 
 
 def _make_run_result(returncode: int = 0, stdout: str = "") -> Any:
@@ -202,3 +210,139 @@ class TestResolveIdentityAgentSock:
         monkeypatch.setattr("cw.ssh._sp.run", _router)
         assert check_ssh_key_available() is True
         assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# push_remote_scheme / remote_needs_ssh_probe (#1495)
+# ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+@pytest.fixture
+def _isolated_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide the host's global/system git config from the probe under test.
+
+    A host-level ``url.<base>.insteadOf`` rewrite (e.g. a git proxy that maps
+    ``git@github.com:`` to an HTTP URL) is exactly what ``push_remote_scheme``
+    is designed to honour, so left visible it would silently flip these
+    fixtures' expected schemes on such a machine.
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    # Same rewrite can arrive as environment config (GIT_CONFIG_COUNT +
+    # GIT_CONFIG_KEY_n/VALUE_n), which GIT_CONFIG_GLOBAL does not hide.
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+
+
+class TestClassifyRemoteUrl:
+    """URL-shape classification behind ``push_remote_scheme`` (#1495)."""
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("https://github.com/o/r.git", "http"),
+            ("http://local_proxy@127.0.0.1:8080/git/o/r", "http"),
+            ("HTTPS://GITHUB.COM/o/r", "http"),
+            ("git@github.com:o/r.git", "ssh"),
+            ("github.com:o/r.git", "ssh"),
+            ("ssh://git@github.com/o/r.git", "ssh"),
+            ("git+ssh://github.com/o/r.git", "ssh"),
+            ("file:///srv/git/r.git", "local"),
+            ("/srv/git/r.git", "local"),
+            ("../sibling.git", "local"),
+            ("git://github.com/o/r.git", "unknown"),
+            ("", "unknown"),
+        ],
+    )
+    def test_classifies_url_shapes(self, url: str, expected: str) -> None:
+        assert _classify_remote_url(url) == expected
+
+
+class TestRemoteNeedsSshProbe:
+    """Only http/local remotes are exempt; unknown stays fail-closed."""
+
+    def test_http_and_local_skip_probe(self) -> None:
+        assert remote_needs_ssh_probe("http") is False
+        assert remote_needs_ssh_probe("local") is False
+
+    def test_ssh_and_unknown_engage_probe(self) -> None:
+        assert remote_needs_ssh_probe("ssh") is True
+        assert remote_needs_ssh_probe("unknown") is True
+
+
+@pytest.mark.usefixtures("_isolated_git_config")
+class TestPushRemoteScheme:
+    """``push_remote_scheme`` against real git repos and failing subprocesses."""
+
+    def test_https_origin_resolves_http(self, tmp_path: Path) -> None:
+        _git(tmp_path, "init", "-q")
+        _git(tmp_path, "remote", "add", "origin", "https://github.com/o/r.git")
+
+        assert push_remote_scheme(tmp_path) == "http"
+
+    def test_ssh_origin_resolves_ssh(self, tmp_path: Path) -> None:
+        _git(tmp_path, "init", "-q")
+        _git(tmp_path, "remote", "add", "origin", "git@github.com:o/r.git")
+
+        assert push_remote_scheme(tmp_path) == "ssh"
+
+    def test_push_url_wins_over_fetch_url(self, tmp_path: Path) -> None:
+        """The effective *push* transport is what matters, not the fetch URL."""
+        _git(tmp_path, "init", "-q")
+        _git(tmp_path, "remote", "add", "origin", "https://github.com/o/r.git")
+        _git(
+            tmp_path, "remote", "set-url", "--push", "origin", "git@github.com:o/r.git"
+        )
+
+        assert push_remote_scheme(tmp_path) == "ssh"
+
+    def test_push_insteadof_rewrite_is_applied(self, tmp_path: Path) -> None:
+        """``pushInsteadOf`` rewrites are honoured, so config-level SSH shows up."""
+        _git(tmp_path, "init", "-q")
+        _git(tmp_path, "remote", "add", "origin", "https://github.com/o/r.git")
+        _git(
+            tmp_path,
+            "config",
+            "url.git@github.com:.pushInsteadOf",
+            "https://github.com/",
+        )
+
+        assert push_remote_scheme(tmp_path) == "ssh"
+
+    def test_no_origin_resolves_unknown(self, tmp_path: Path) -> None:
+        _git(tmp_path, "init", "-q")
+
+        assert push_remote_scheme(tmp_path) == "unknown"
+
+    def test_not_a_repo_resolves_unknown(self, tmp_path: Path) -> None:
+        assert push_remote_scheme(tmp_path / "nowhere") == "unknown"
+
+    def test_git_missing_resolves_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            msg = "git"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.ssh._sp.run", _raise)
+        assert push_remote_scheme(tmp_path) == "unknown"
+
+    def test_timeout_resolves_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise subprocess.TimeoutExpired(cmd="git", timeout=5)
+
+        monkeypatch.setattr("cw.ssh._sp.run", _raise)
+        assert push_remote_scheme(tmp_path) == "unknown"
+
+    def test_empty_stdout_resolves_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.ssh._sp.run", lambda *_a, **_kw: _make_run_result(0, "\n")
+        )
+        assert push_remote_scheme(tmp_path) == "unknown"

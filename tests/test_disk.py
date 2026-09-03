@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -26,14 +27,30 @@ class TestCheckDiskUsage:
         assert usage.total_gb >= usage.free_gb
 
     def test_walks_up_to_nearest_existing_ancestor_for_missing_path(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A not-yet-created worktree base still resolves via its ancestor."""
+        """A not-yet-created worktree base still resolves via its ancestor.
+
+        Asserts the *resolution* (which path the probe was asked about), not
+        the measurement: comparing two live ``shutil.disk_usage`` readings for
+        exact equality flaked whenever anything wrote to the filesystem
+        between the two calls (#2091).
+        """
         missing = tmp_path / "does" / "not" / "exist"
+        probed: list[Path] = []
+        real_disk_usage = shutil.disk_usage
+
+        def _spy(path: Path) -> object:
+            probed.append(path)
+            return real_disk_usage(path)
+
+        monkeypatch.setattr("cw.disk.shutil.disk_usage", _spy)
 
         usage = check_disk_usage(missing)
 
-        assert usage == check_disk_usage(tmp_path)
+        assert probed == [tmp_path]
+        assert usage.free_gb > 0
+        assert usage.total_gb >= usage.free_gb
 
     def test_returns_plain_namedtuple_shape(self, tmp_path: Path) -> None:
         """Field names are part of the contract the gating call site reads."""

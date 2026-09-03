@@ -281,7 +281,11 @@ gh-availability preflight probe, RFC 0011 A5, checked before any per-client
 gate so a real GitHub outage short-circuits every client before any pays the
 freshness git-fetch cost) → `ssh_key_gate` (#927; per-client `ssh-add -l`
 preflight — a session spawned without an unlocked SSH key cannot push and
-would burn a slot on a guaranteed-failing session) → `disk_pressure_gate`
+would burn a slot on a guaranteed-failing session; only engaged when the
+client's effective `origin` push URL is an `ssh` transport or unresolvable
+(#1495) — an `http`/`local` push remote skips the probe entirely — and the
+skip payload then carries `remote_scheme: "ssh" | "unknown"` naming which
+one engaged it) → `disk_pressure_gate`
 (client's worktree-base mount below `disk_pressure_min_free_gb` free,
 checked before the freshness gate's `git pull`) → `freshness_gate` (local
 branch behind origin) → `usage_limited` (API rate limit; backoff armed) →
@@ -334,7 +338,8 @@ Consumers MUST tolerate unknown `skip_reason` values.
 {
   "client": "<str>",
   "probe_result": false,
-  "gate_enabled": false
+  "gate_enabled": false,
+  "remote_scheme": "ssh | unknown"
 }
 ```
 **Semantics:** GitHub #1437. Emitted when `ssh_key_gate_enabled` is `false`
@@ -343,7 +348,12 @@ agent key unavailable — the operator has explicitly disabled the gate, so
 the client dispatches anyway instead of being held PENDING, and this event
 records that the skip was suppressed. `probe_result` is the raw probe
 outcome (`false` means unavailable) and `gate_enabled` echoes the config
-flag that suppressed the skip. Earlier sibling of
+flag that suppressed the skip. `remote_scheme` (#1495) is the transport of
+the client's effective `origin` push URL that engaged the probe — `ssh`, or
+`unknown` when the URL could not be resolved (treated as `ssh`, fail-closed);
+a client whose push remote is `http` or `local` never reaches the probe, so
+neither this event nor the `ssh_key_gate` skip is ever emitted for it.
+Earlier sibling of
 `gate.disk_pressure_bypassed` (#1887), which mirrors this bypass shape;
 forwarded to the operator-attention channel by default (same as
 `gate.auto_approved`), since an SSH-key-gate bypass is attention-worthy.
