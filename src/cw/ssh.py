@@ -1,13 +1,42 @@
-"""SSH agent key preflight check (#927), with IdentityAgent resolution (#1436)."""
+"""SSH agent key preflight check (#927), with IdentityAgent resolution (#1436).
+
+Also owns the push-remote scheme classification (#1495) that decides whether
+the probe applies to a client at all: an HTTP(S) or local-path remote never
+needs an SSH key, so the gate must not hold such a client PENDING on the
+state of an ssh-agent it will never use.
+"""
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess as _sp
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _SSH_KEY_MARKERS = ("ED25519", "RSA")
 _DEFAULT_SSH_HOST = "github.com"
 _IDENTITYAGENT_LINE_PARTS = 2
+
+# Push-remote transport classification (#1495). ``unknown`` covers every
+# unresolvable case (not a git dir, no such remote, git missing, timeout,
+# an unrecognised URL shape) and is treated like ``ssh`` by the gate -- the
+# probe is engaged -- so a resolution failure degrades to pre-#1495
+# behaviour rather than silently disabling the gate.
+RemoteScheme = Literal["ssh", "http", "local", "unknown"]
+
+# Schemes whose pushes never touch an ssh-agent, so the SSH-key probe is
+# skipped for clients using them.
+_SCHEMES_WITHOUT_SSH: frozenset[str] = frozenset({"http", "local"})
+
+_HTTP_URL_PREFIXES = ("http://", "https://")
+_SSH_URL_PREFIXES = ("ssh://", "git+ssh://", "ssh+git://")
+_LOCAL_URL_PREFIXES = ("file://", "/", "./", "../")
+# scp-like syntax (``[user@]host:path``): no ``://``, and a colon before the
+# first slash. Matches ``git@github.com:owner/repo.git`` and ``host:path``.
+_SCP_LIKE_URL_RE = re.compile(r"^(?:[^@/:]+@)?[^/:]+:")
 
 
 def _resolve_identity_agent_sock(host: str, *, timeout: int) -> str | None:
@@ -87,3 +116,60 @@ def check_ssh_key_available(*, timeout: int = 5, host: str = _DEFAULT_SSH_HOST) 
     except (OSError, _sp.TimeoutExpired):
         return False
     return any(marker in result.stdout for marker in _SSH_KEY_MARKERS)
+
+
+def _classify_remote_url(url: str) -> RemoteScheme:
+    """Classify a git remote URL into a :data:`RemoteScheme`."""
+    lowered = url.strip().lower()
+    if lowered.startswith(_HTTP_URL_PREFIXES):
+        return "http"
+    if lowered.startswith(_SSH_URL_PREFIXES):
+        return "ssh"
+    if lowered.startswith(_LOCAL_URL_PREFIXES):
+        return "local"
+    # scp-like syntax has no scheme separator at all; anything with ``://``
+    # that reached here is some other transport (``git://``), not ssh.
+    if "://" not in lowered and _SCP_LIKE_URL_RE.match(lowered):
+        return "ssh"
+    return "unknown"
+
+
+def push_remote_scheme(
+    repo_path: Path, *, timeout: int = 5, remote: str = "origin"
+) -> RemoteScheme:
+    """Return the transport scheme of *repo_path*'s effective push URL for *remote*.
+
+    Runs ``git remote get-url --push <remote>`` so ``insteadOf`` /
+    ``pushInsteadOf`` rewrites are already applied -- the answer is the
+    transport a push actually uses, not the one written in ``.git/config``.
+    Fails open to ``unknown`` (never raises) on a missing git binary,
+    OSError, timeout, non-zero exit, or an empty/unrecognised URL; the gate
+    treats ``unknown`` exactly like ``ssh`` (probe engaged), so this helper
+    can only ever *narrow* the set of clients the probe applies to, never
+    widen a bypass. Local, no network (R1), same subprocess shape as
+    ``cw.pr_hydrate._resolve_repo_slug``.
+    """
+    try:
+        result = _sp.run(
+            ["git", "-C", str(repo_path), "remote", "get-url", "--push", remote],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    url = result.stdout.strip()
+    return _classify_remote_url(url) if url else "unknown"
+
+
+def remote_needs_ssh_probe(scheme: RemoteScheme) -> bool:
+    """Return True iff the SSH-key preflight probe applies to *scheme* (#1495).
+
+    Only ``http`` and ``local`` remotes are exempt; ``ssh`` and ``unknown``
+    both engage the probe, so a scheme-resolution failure keeps the gate
+    fail-closed rather than turning it off.
+    """
+    return scheme not in _SCHEMES_WITHOUT_SSH

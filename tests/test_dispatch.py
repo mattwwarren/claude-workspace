@@ -15929,6 +15929,151 @@ class TestSshKeyPreflightGate:
         ]
         assert skip_ticks == []
 
+    def test_http_remote_skips_probe_and_dispatches(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1495: an HTTP(S) push remote never engages the SSH probe.
+
+        Even with the probe forced unavailable, the client dispatches, no
+        SSH_KEY_GATE skip is recorded, and the probe is never even called.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1I", client="test-client"))
+        probe_calls: list[bool] = []
+
+        def _probe(**_kw: object) -> bool:
+            probe_calls.append(True)
+            return False
+
+        monkeypatch.setattr("cw.dispatch.gating.check_ssh_key_available", _probe)
+        monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", lambda _p: "http")
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+        assert probe_calls == []
+        tick_events = read_events(
+            consumer="test-s1-http-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert [
+            e
+            for e in tick_events
+            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
+        ] == []
+
+    def test_local_remote_skips_probe_and_dispatches(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1495: a local-path push remote is exempt the same way."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1J", client="test-client"))
+        _force_ssh_key_unavailable(monkeypatch)
+        monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", lambda _p: "local")
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+
+    def test_unknown_remote_scheme_still_gates(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1495: a scheme-resolution failure keeps the gate fail-closed."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1K", client="test-client"))
+        _force_ssh_key_unavailable(monkeypatch)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.push_remote_scheme", lambda _p: "unknown"
+        )
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-s1-unknown-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        skips = [
+            e
+            for e in tick_events
+            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
+        ]
+        assert len(skips) == 1
+        assert skips[0].payload["remote_scheme"] == "unknown"
+
+    def test_skip_and_bypass_events_record_remote_scheme(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1495: both ssh-gate events name the transport that engaged
+        the probe, so a false gate is diagnosable from events alone."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1L", client="test-client"))
+        _force_ssh_key_unavailable(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+        bypass_config = simple_config.model_copy(update={"ssh_key_gate_enabled": False})
+        dispatch_tick(bypass_config, native_daemon=daemon, auto_ff=False)
+
+        skips = [
+            e
+            for e in read_events(
+                consumer="test-s1-scheme-tick",
+                event_types=[OrchestratorEventType.DISPATCH_TICK],
+            )
+            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
+        ]
+        assert [e.payload["remote_scheme"] for e in skips] == ["ssh"]
+        bypasses = read_events(
+            consumer="test-s1-scheme-bypass",
+            event_types=[OrchestratorEventType.SSH_KEY_GATE_BYPASSED],
+        )
+        assert [e.payload["remote_scheme"] for e in bypasses] == ["ssh"]
+
+    def test_probe_scope_uses_repo_path_when_set(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1495: the scheme is resolved against the client's repo."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1M", client="test-client"))
+        _force_ssh_key_unavailable(monkeypatch)
+        probed: list[Path] = []
+
+        def _scheme(path: Path) -> str:
+            probed.append(path)
+            return "http"
+
+        monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", _scheme)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        expected = sample_client_config.repo_path or sample_client_config.workspace_path
+        assert probed == [expected]
+
     def test_gate_enforced_by_default_still_skips_and_no_bypass_event(
         self,
         tmp_dispatch_dirs: Path,

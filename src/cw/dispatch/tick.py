@@ -46,15 +46,13 @@ if TYPE_CHECKING:
     from cw.native_daemon import NativeDaemonClient
 from cw.dispatch.gating import (
     _apply_disk_pressure_gate,
+    _apply_ssh_key_gate,
     _emit_availability_skip,
-    _emit_ssh_key_bypass,
-    _emit_ssh_key_skip,
     _emit_stale_skip,
     _emit_usage_limit_skip_events,
     _reconcile_usage_limited,
     _resolve_availability_once,
     _resolve_freshness,
-    _resolve_ssh_key_once,
 )
 from cw.dispatch.host_capacity import HostCapacityContext, resolve_host_capacity
 from cw.dispatch.lanes import (
@@ -317,13 +315,17 @@ def _run_preflight_gates(
     since the SSH-key probe short-circuits and is never reached in that
     case.
 
-    ``ssh_key_gate_enabled`` (GitHub #1437) is the operator escape hatch: the
-    probe always runs unconditionally (needed either way to compute the
-    resolved verdict threaded back to the caller, and to populate the bypass
-    event's ``probe_result``), but when the probe reports unavailable and
-    this is False, the would-be skip is suppressed -- a bypass event is
-    recorded instead of the skip, and the client proceeds (``gated=False``).
-    Default True reproduces pre-#1437 behavior exactly.
+    ``ssh_key_gate_enabled`` (GitHub #1437) is the operator escape hatch: for
+    a client whose push remote engages the probe (see
+    :func:`~cw.dispatch.gating._apply_ssh_key_gate`, GitHub #1495 -- an
+    HTTP(S)/local remote skips the probe entirely and leaves
+    ``ssh_key_available`` unresolved), the probe runs unconditionally (needed
+    either way to compute the resolved verdict threaded back to the caller,
+    and to populate the bypass event's ``probe_result``), but when the probe
+    reports unavailable and this is False, the would-be skip is suppressed
+    -- a bypass event is recorded instead of the skip, and the client
+    proceeds (``gated=False``). Default True reproduces pre-#1437 behavior
+    exactly.
 
     ``disk_pressure_gate_enabled`` / ``disk_pressure_min_free_gb`` (GitHub
     #1887) drive the third gate, applied via
@@ -342,26 +344,18 @@ def _run_preflight_gates(
         )
         return _PreflightGateResult(resolved_available, ssh_key_available, True)
 
-    resolved_ssh_key_available = _resolve_ssh_key_once(ssh_key_available)
-    if not resolved_ssh_key_available:
-        if not ssh_key_gate_enabled:
-            _emit_ssh_key_bypass(
-                client,
-                probe_result=resolved_ssh_key_available,
-                gate_enabled=ssh_key_gate_enabled,
-            )
-            return _PreflightGateResult(
-                resolved_available, resolved_ssh_key_available, False
-            )
-        _emit_ssh_key_skip(
-            client,
-            queue_snapshot,
-            pending_count=pending_count,
-            running_count=running_count,
-            cap=cap,
-            emit=emit,
-            warned_ssh_key=warned_ssh_key,
-        )
+    resolved_ssh_key_available, ssh_gated = _apply_ssh_key_gate(
+        client,
+        queue_snapshot,
+        ssh_key_available=ssh_key_available,
+        pending_count=pending_count,
+        running_count=running_count,
+        cap=cap,
+        emit=emit,
+        warned_ssh_key=warned_ssh_key,
+        gate_enabled=ssh_key_gate_enabled,
+    )
+    if ssh_gated:
         return _PreflightGateResult(
             resolved_available, resolved_ssh_key_available, True
         )

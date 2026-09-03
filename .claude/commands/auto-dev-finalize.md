@@ -335,8 +335,24 @@ gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
 
 5. **Run the project's quality gates once — this is a hard escalation valve, not a fix loop.**
 
+   Resolve `prep_pr_state.py` exactly as `/prep-pr` Step 2 does (repo copy first, installed path last, STOP on a stale copy — #2090):
+
    ```bash
-   ~/.claude/scripts/prep_pr_state.py detect-gates
+   PREP_PR_STATE=""
+   for candidate in .claude/scripts/prep_pr_state.py scripts/prep_pr_state.py "$HOME/.claude/scripts/prep_pr_state.py"; do
+     if [ -f "$candidate" ]; then PREP_PR_STATE="$candidate"; break; fi
+   done
+   if [ -z "$PREP_PR_STATE" ]; then
+     echo "prep_pr_state.py not found (probed .claude/scripts/, scripts/, ~/.claude/scripts/)"; exit 1
+   fi
+   if ! grep -q 'gate-timeout' "$PREP_PR_STATE"; then
+     echo "STALE: $PREP_PR_STATE predates #1432 (no gate-timeout subcommand) — reinstall it or use the repo copy"; exit 1
+   fi
+   echo "PREP_PR_STATE=$PREP_PR_STATE"
+   ```
+
+   ```bash
+   "$PREP_PR_STATE" detect-gates
    ```
 
    Run each detected gate's `command` directly via Bash: foreground, **no autofix, no fix loop, no backgrounding**, fail fast on the first failure. Do NOT reuse `/prep-pr` Step 7's fix-loop machinery.

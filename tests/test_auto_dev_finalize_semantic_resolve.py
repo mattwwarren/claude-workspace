@@ -100,7 +100,7 @@ def test_gate_failure_reverts_and_parks() -> None:
     assert "PRE_MERGE_SHA" in section
     assert "git reset --hard $PRE_MERGE_SHA" in section
     assert "reverted" in section
-    assert "prep_pr_state.py detect-gates" in section
+    assert '"$PREP_PR_STATE" detect-gates' in section
 
 
 def test_gate_run_is_foreground_no_fix_loop() -> None:
@@ -154,5 +154,5 @@ def test_gate_failure_park_is_terminal_no_retry() -> None:
     itself — not just the resolver — never being retried."""
     section = _semantic_resolve_section()
     assert _finalize().count("classify_merge_conflict.py resolve") == 1
-    assert section.count("prep_pr_state.py detect-gates") == 1
+    assert section.count('"$PREP_PR_STATE" detect-gates') == 1
     assert "do NOT re-run the gate" in section

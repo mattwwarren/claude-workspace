@@ -816,6 +816,23 @@ def _mock_ssh_key_available(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _mock_push_remote_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default every client's push remote to ``ssh`` so the probe is engaged (#1495).
+
+    Sibling of ``_mock_ssh_key_available``: ``_apply_ssh_key_gate`` now
+    resolves the client's push-remote scheme via ``push_remote_scheme``
+    (a real ``git remote get-url --push origin`` subprocess) before deciding
+    whether the SSH-key probe applies. The dispatch fixtures' fake client
+    repos have no ``origin`` at all, which would resolve to ``unknown`` --
+    also probe-engaging, so behaviour would match, but every tick would pay
+    a subprocess for it. Pinning ``ssh`` keeps the pre-#1495 gate contract
+    (``TestSshKeyPreflightGate``) exercised verbatim; ``test_ssh.py``
+    exercises the real helper via ``cw.ssh`` directly and is unaffected.
+    """
+    monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", lambda _path: "ssh")
+
+
+@pytest.fixture(autouse=True)
 def _mock_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default the claim-time disk-pressure probe to 'abundant space' (#1887).
 

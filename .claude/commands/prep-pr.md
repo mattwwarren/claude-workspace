@@ -120,10 +120,28 @@ git merge origin/<base>
 
 ## Step 2: Detect Quality Gates
 
-Run the backing script to auto-detect quality gates. If you're operating from the checked-out `global-claude` repo or a Codex wrapper, prefer the repo's `scripts/prep_pr_state.py`; otherwise the installed `~/.claude/scripts/...` path is fine:
+Resolve the backing script before anything else. The checked-out repo's copy is the source of truth: the installed `~/.claude/scripts/...` path is a separate checkout that nothing syncs, and a stale copy there silently lacks Step 7's `gate-timeout` / `gate-elapsed` subcommands (#2090). Probe the repo layouts first and the installed path last, and STOP on a stale hit rather than improvising:
 
 ```bash
-~/.claude/scripts/prep_pr_state.py detect-gates
+PREP_PR_STATE=""
+for candidate in .claude/scripts/prep_pr_state.py scripts/prep_pr_state.py "$HOME/.claude/scripts/prep_pr_state.py"; do
+  if [ -f "$candidate" ]; then PREP_PR_STATE="$candidate"; break; fi
+done
+if [ -z "$PREP_PR_STATE" ]; then
+  echo "prep_pr_state.py not found (probed .claude/scripts/, scripts/, ~/.claude/scripts/)"; exit 1
+fi
+if ! grep -q 'gate-timeout' "$PREP_PR_STATE"; then
+  echo "STALE: $PREP_PR_STATE predates #1432 (no gate-timeout subcommand) — reinstall it or use the repo copy"; exit 1
+fi
+echo "PREP_PR_STATE=$PREP_PR_STATE"
+```
+
+Shell state does not persist between `Bash` tool calls: every later `"$PREP_PR_STATE"` invocation in this file means the path printed here — substitute it literally, or re-run the resolver at the top of the same call. Never fall back to a bare `~/.claude/scripts/prep_pr_state.py`; if the resolver reports STALE, surface that verbatim (headless: `HEADLESS BLOCK`, `gate: "Step 2 script resolution"`) instead of picking timeouts yourself.
+
+Run the resolved script to auto-detect quality gates:
+
+```bash
+"$PREP_PR_STATE" detect-gates
 ```
 
 This scans for `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod` and checks the project's `CLAUDE.md` for `## Quality Gates` overrides. `CLAUDE.md` remains the canonical contract filename even when this workflow is reused from Codex.
@@ -133,7 +151,7 @@ Store the result — you'll run these gates in Step 7.
 ## Step 3: Capture Initial Scope Snapshot
 
 ```bash
-~/.claude/scripts/prep_pr_state.py snapshot --base <base> --max-cycles <N>
+"$PREP_PR_STATE" snapshot --base <base> --max-cycles <N>
 ```
 
 This records the initial diff metrics (files, additions, deletions, directories) for scope creep detection later.
@@ -195,12 +213,12 @@ Spawn parallel subagents via the Task tool, grouped by file for exclusive owners
 
 1. **Capture new scope snapshot:**
    ```bash
-   ~/.claude/scripts/prep_pr_state.py snapshot --base <base>
+   "$PREP_PR_STATE" snapshot --base <base>
    ```
 
 2. **Check for scope creep:**
    ```bash
-   ~/.claude/scripts/prep_pr_state.py check-scope
+   "$PREP_PR_STATE" check-scope
    ```
 
 3. **If scope creep is detected** (file count +30%, line count +50%, new non-test files, new directories):
@@ -227,7 +245,7 @@ Run each gate detected in Step 2, in order.
 
 Before running each gate, fetch its timeout ceiling:
 ```bash
-~/.claude/scripts/prep_pr_state.py gate-timeout <gate-name>
+"$PREP_PR_STATE" gate-timeout <gate-name>
 ```
 This returns `foreground_ceiling_s` (when to switch this gate to background) and `poll_ceiling_s` (total wall-clock budget once backgrounded before declaring the result lost).
 
@@ -239,7 +257,7 @@ For each gate:
 3. Once backgrounded, the harness passively notifies this session when the command exits (success, failure, or crash) — this is the primary detection path. Do not idle-wait; continue other Step-7 work if any, and let the notification arrive.
 4. **Liveness / early-block check** (bounded re-checks, not a dedicated poll tool): at intervals (e.g. every few minutes of elapsed session time), `Read` `<output_file>` to confirm the gate is still producing output (progress = alive), and call:
    ```bash
-   ~/.claude/scripts/prep_pr_state.py gate-elapsed --started <started> --ceiling-seconds <poll_ceiling_s>
+   "$PREP_PR_STATE" gate-elapsed --started <started> --ceiling-seconds <poll_ceiling_s>
    ```
    - **If a completion notification arrives before the ceiling is exceeded** → treat as authoritative: read the final output/exit code and apply the existing pass/fail handling (autofix retry, or ask/HEADLESS-BLOCK below).
    - **If `exceeded: true` and no completion notification has arrived** → the backgrounded command's result is lost or stalled (dead backgrounding path, not merely slow). Emit the `gate_timeout` block below **immediately** — do not wait for the remaining stage budget. Note: unlike every other block in this file, `reason:` here is `gate_timeout`, not the fixed `agent_block` literal — this is a deliberate, nested-only forward-compat marker (the sentinel's top-level `blocker.reason` still collapses to `agent_block` per the existing gate-collapse rule; `gate_timeout` and the gate name survive verbatim inside `blocker.details`):
@@ -348,7 +366,7 @@ Pass through relevant arguments when invoking the project-level ship-it:
 
 ## Step 9: Finalize — Verify Ship & Emit Summary
 
-**This step is the contract that proves /ship-it actually ran.** Do not skip it. Do not paraphrase it. Run the script. Prefer the checked-out repo script when available; otherwise `~/.claude/scripts/...` is acceptable.
+**This step is the contract that proves /ship-it actually ran.** Do not skip it. Do not paraphrase it. Run the script. Prefer the checked-out repo copy when available (`.claude/scripts/prep_pr_finalize.py`, then `scripts/prep_pr_finalize.py` — the same layout order Step 2 uses for `prep_pr_state.py`); otherwise `~/.claude/scripts/...` is acceptable.
 
 ```bash
 ~/.claude/scripts/prep_pr_finalize.py verify --require-automerge
@@ -392,7 +410,7 @@ Then re-run finalize with `--require-monitor` to confirm.
 
 Remove the state file:
 ```bash
-~/.claude/scripts/prep_pr_state.py clean
+"$PREP_PR_STATE" clean
 ```
 
 Print the Ship Summary from Step 9 as the final message. Add cycle-level context above it:
