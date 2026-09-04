@@ -180,7 +180,7 @@ def test_plan_step1a_decision_excludes_every_agent_authored_comment() -> None:
 def test_checkpoint1_resumed_draft_approval_requires_operator_authority() -> None:
     """The Large-scope resumed-draft carve-out cannot be cleared by an agent."""
     content = _cmd("auto-dev-plan.md")
-    window = _after(content, "(the `### Approval requested` ask).", span=400)
+    window = _after(content, "(the `### Approval requested` ask;", span=400)
     assert RULE_REFERENCE in window
     assert "never approval evidence" in window
 
