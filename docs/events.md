@@ -684,11 +684,20 @@ open enum; consumers MUST tolerate unknown values. Known values:
   No longer produced; may exist on old rows/logs.
 - `"needs_salvage"` — *historical (ADR-0014)*: the git-state salvage LOW
   path's park. No longer produced; may exist on old rows/logs.
-- `"dirty_worktree"` — A phantom-reaped, TIMED_OUT, or COMPLETED session's
-  worktree has uncommitted changes. The owning task has been routed to
-  BLOCKED_ON_USER instead of being re-dispatched to avoid clobbering in-flight
-  work. `breadcrumbs` is the absolute path to the worktree. Operator should
-  review, commit or discard the changes, then manually unblock the task.
+- `"dirty_worktree"` — the worktree has unsaved work: uncommitted changes,
+  or commits not on the branch's own remote ref (`worktree_has_unsaved_work`
+  / `unsaved_work_reason` in `cw.worktree`). Produced by two paths: dispatch's
+  pre-spawn stale-worktree guard (`dispatch/claim.py`, a `StaleWorktreeError`
+  on a tree it will not remove) and reconcile's phantom-reaped / TIMED_OUT /
+  COMPLETED-silent reverts. The owning task is routed to BLOCKED_ON_USER
+  instead of being re-dispatched to avoid clobbering in-flight work. From the
+  dispatch path `breadcrumbs` is `<worktree path>: <reason>` — e.g.
+  `…/dev-2114: 2 uncommitted path(s)` or `…: 3 commit(s) not on
+  origin/dev/2114` (#2114); the reconcile paths still emit the bare path.
+  Operator should read the reason, commit/push or discard the changes, then
+  `cw dev-queue requeue` the task. `cw doctor --reap` deliberately leaves
+  this park alone (reverting it re-derives the identical park). The
+  pre-spawn park does not charge `unproductive_attempts` (no session ran).
 - `"attempt_cap_blocked"` — the dispatch claim path refused to claim a
   PENDING row whose `unproductive_attempts` reached its attempt ceiling, and
   parked it BLOCKED_ON_USER before any spawn (#786/#1257). Session-less by
