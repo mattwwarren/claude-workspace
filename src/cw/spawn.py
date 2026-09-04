@@ -70,7 +70,14 @@ _log = logging.getLogger(__name__)
 #     queue row in hand, only this file; without the key every worker would
 #     resolve the global default and the per-lane knob would be unreachable.
 #     Null for USER-origin sessions, which have no lane.)
-CW_CONTEXT_SCHEMA_VERSION = 6
+# v7: added `queue_metadata.plan_approved_at` (dev-queue schema v35 — the
+#     tracker-neutral record that `cw dev-queue approve` released this row's
+#     PLAN-stage approval gate, as an ISO-8601 timestamp or null. Read by
+#     auto-dev-plan.md's Checkpoint 1 as operator approval evidence, so a
+#     Linear-tracked ticket — whose tracker the GitHub-only `--post-marker`
+#     comment never reaches — stops re-parking at plan_pending_approval on
+#     every re-dispatch.)
+CW_CONTEXT_SCHEMA_VERSION = 7
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -515,6 +522,13 @@ def _write_hook_context(
                     # re-entry may carry an operator send-back the review stage
                     # must treat as a binding adjudication input.
                     "pending_operator_comment": task.pending_operator_comment,
+                    # v7: tracker-neutral plan-approval evidence for the
+                    # plan stage's Checkpoint 1 (Large-scope carve-out).
+                    "plan_approved_at": (
+                        task.plan_approved_at.isoformat()
+                        if task.plan_approved_at is not None
+                        else None
+                    ),
                 },
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,

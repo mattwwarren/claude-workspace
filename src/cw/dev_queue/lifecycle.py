@@ -34,9 +34,13 @@ from cw.dev_queue.storage import load_dev_queue
 from cw.events import record_event
 from cw.gh import fetch_approved_plan_comment
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
+from cw.worktree import _checked_out_branch, worktree_path_for
 
 if TYPE_CHECKING:
-    from cw.models import TicketTask
+    from pathlib import Path
+
+    from cw.models import ClientConfig, TicketTask
 
 _WAIT_POLL_INTERVAL: int = 5
 
@@ -763,32 +767,87 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     _emit_stage_change(task, old_stage, target_stage, "regress")
 
 
-def _plan_is_reviewed(task: TicketTask) -> bool:
+def _tracker_allows_github_fetch(client_cfg: ClientConfig | None) -> bool:
+    """True unless *client_cfg*'s tracker is positively known to be non-GitHub.
+
+    :func:`fetch_approved_plan_comment` is GitHub-only (``gh issue view``):
+    called against a Linear-tracked ticket id it fails and returns ``None``
+    after paying the ``gh`` subprocess cost, which masqueraded as "the tracker
+    was checked and had no reviewed plan" (#1906). Same fail-open polarity
+    as ``requeue._impl_bypass_plan_available``: an unresolvable tracker
+    (``None`` client, or no ``.claude/project-config.yaml``) still attempts
+    the GitHub fetch exactly as before; only a *known* non-GitHub tracker
+    skips it.
+    """
+    if client_cfg is None:
+        return True
+    tracker = resolve_tracker(client_cfg.workspace_path)
+    return tracker is None or tracker == TRACKER_GITHUB_ISSUES
+
+
+def _local_plan_path(task: TicketTask, client_cfg: ClientConfig | None) -> Path | None:
+    """Resolve the on-disk ``.cw/plan.md`` for *task*, or None.
+
+    ``task.worktree_path`` wins when stamped (USER-origin rows, tests). It is
+    ``None`` for every dispatch-driven row -- dispatch stamps
+    ``worktree_path`` on the Session, never the TicketTask (see
+    ``queue_peek.py``) -- so the pre-#1906-follow-up fallback that read only
+    that field never saw a real worktree. Fall back to the branch-derived
+    worktree :func:`worktree_path_for` computes for the feature branch, the
+    same read-only primitives ``create_worktree`` uses to decide reuse, and
+    trust it only when the checked-out branch matches: a stale or foreign
+    checkout must not lend its plan to this ticket.
+    """
+    if task.worktree_path is not None:
+        return task.worktree_path / ".cw" / "plan.md"
+    if client_cfg is None:
+        return None
+    branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
+    wt_path = worktree_path_for(client_cfg, branch)
+    if not wt_path.exists() or _checked_out_branch(wt_path) != branch:
+        return None
+    return wt_path / ".cw" / "plan.md"
+
+
+def _local_plan_body(task: TicketTask, client_cfg: ClientConfig | None) -> str | None:
+    """Return the worktree's ``.cw/plan.md`` text for *task*, or None.
+
+    A missing worktree, a missing file, or a read/decode failure between
+    ``.exists()`` and ``.read_text()`` all degrade to ``None`` (fail-closed)
+    rather than raising -- an unhandled exception here would abort the
+    caller's whole reconcile tick or approve call. ``UnicodeDecodeError`` is
+    not an ``OSError`` subclass, so it is caught explicitly alongside it.
+    """
+    plan_path = _local_plan_path(task, client_cfg)
+    if plan_path is None or not plan_path.exists():
+        return None
+    try:
+        return plan_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _plan_is_reviewed(task: TicketTask, client_cfg: ClientConfig | None) -> bool:
     """True iff the plan-of-record for *task* carries both signoff markers.
 
     Mirrors ``gate_recipes._plan_of_record_body``'s tracker-first,
     ``.cw/plan.md``-fallback fetch shape: the tracker (GitHub issue comments)
-    is checked first via :func:`fetch_approved_plan_comment`, then the
-    worktree's ``.cw/plan.md`` if the tracker read returns ``None``. A row
-    with no materialized worktree, or a read failure between ``.exists()``
-    and ``.read_text()``, degrades to "not reviewed" (fail-closed) rather
-    than raising. See GitHub #968. The reviewed-check itself delegates to
-    :func:`_plan_body_signoff_ok` (#1567), which fails closed on a marker that
-    is present but never closed with ``-->`` — a bare substring check would
-    incorrectly accept that malformed body as reviewed.
+    is checked first via :func:`fetch_approved_plan_comment` -- skipped when
+    :func:`_tracker_allows_github_fetch` says the client's tracker is
+    positively non-GitHub -- then the worktree's ``.cw/plan.md`` resolved by
+    :func:`_local_plan_body`. Any miss degrades to "not reviewed"
+    (fail-closed) rather than raising. See GitHub #968. The reviewed-check
+    itself delegates to :func:`_plan_body_signoff_ok` (#1567), which fails
+    closed on a marker that is present but never closed with ``-->`` -- a
+    bare substring check would incorrectly accept that malformed body as
+    reviewed.
     """
-    body = fetch_approved_plan_comment(task.ticket_id)
+    body = None
+    if _tracker_allows_github_fetch(client_cfg):
+        body = fetch_approved_plan_comment(task.ticket_id)
     if body is None:
-        if task.worktree_path is None:
-            return False
-        plan_path = task.worktree_path / ".cw" / "plan.md"
-        if not plan_path.exists():
-            return False
-        try:
-            body = plan_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            return False
-    return _plan_body_signoff_ok(body)
+        body = _local_plan_body(task, client_cfg)
+    return body is not None and _plan_body_signoff_ok(body)
 
 
 def _reset_for_same_stage_requeue(task: TicketTask) -> None:

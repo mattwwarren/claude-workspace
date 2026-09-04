@@ -8630,6 +8630,80 @@ class TestDevQueueApproveCli:
         assert fetch_cwd is not None
         assert fetch_cwd == post_cwd
 
+    def test_approve_post_marker_skips_gh_on_linear_tracker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A Linear-tracked client never reaches gh for the marker (the call
+        could only fail against a Linear id) and is told the approval lives
+        on the dev-queue row instead -- the previous behavior surfaced as a
+        misleading 'dedup check failed' on every Linear approve."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        _write_project_config_yaml(
+            tmp_path / "ws", "tracking:\n  primary:\n    system: linear\n"
+        )
+        with (
+            patch("cw.cli.dev_queue.crud.fetch_issue_comments") as fetch_mock,
+            patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock,
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                [
+                    "dev-queue",
+                    "approve",
+                    "ACME-1",
+                    "--client",
+                    "acme",
+                    "--post-marker",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        fetch_mock.assert_not_called()
+        post_mock.assert_not_called()
+        assert "tracker is 'linear', not GitHub" in result.output
+        assert "plan_approved_at" in result.output
+        # The GitHub-only hint is meaningless advice on this tracker.
+        assert "Pass --post-marker" not in result.output
+
+    def test_approve_plan_requeue_hint_suppressed_on_linear_tracker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without --post-marker, a Linear approve reports the row-side
+        record and does not suggest the GitHub-only flag."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        _write_project_config_yaml(
+            tmp_path / "ws", "tracking:\n  primary:\n    system: linear\n"
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "re-queued at plan stage" in result.output
+        assert "recorded on the dev-queue row (plan_approved_at)" in result.output
+        assert "Pass --post-marker" not in result.output
+
+    def test_approve_plan_requeue_hint_shown_on_github_tracker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: an unconfigured/GitHub tracker keeps the hint."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Pass --post-marker" in result.output
+
     def test_approve_post_marker_reports_gh_post_failure(
         self,
         tmp_config_dir: Path,

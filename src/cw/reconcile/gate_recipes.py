@@ -66,9 +66,11 @@ from cw.dev_queue import (
     _PLAN_SPEC_MARKER,
     BRANCH_STALENESS_GATE_DISPOSITION,
     _approve_ticket_locked,
+    _local_plan_body,
     _marker_version,
     _newest_by_created_at,
     _plan_body_signoff_ok,
+    _tracker_allows_github_fetch,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -336,40 +338,35 @@ def _predicate_holds(snapshot: dict[str, object]) -> bool:
     )
 
 
-def _plan_of_record_body(task: TicketTask) -> str | None:
+def _plan_of_record_body(
+    task: TicketTask, client_cfg: ClientConfig | None
+) -> str | None:
     """Return the plan-of-record body, tracker-first with a `.cw/plan.md` fallback.
 
     Why tracker-first (opposite of local_runner.build_task_message's
     .cw-first order): that function fills a local cache for Stage-2 task
     prompts; this gate checks *current* approval freshness, for which the
-    tracker is the authoritative, freshest source. Falls back to the
-    worktree's ``.cw/plan.md`` only when the tracker read returns None. A row
-    with no materialized worktree has no fallback (returns None rather than
-    raising on ``Path(None)``).
+    tracker is the authoritative, freshest source. The GitHub-only tracker
+    read is skipped when ``_tracker_allows_github_fetch`` says the client's
+    tracker is positively non-GitHub (a ``gh`` call against a Linear id can
+    only fail, and every reconcile tick would pay for it, #1906). Falls back
+    to the worktree's ``.cw/plan.md`` via ``_local_plan_body`` -- which
+    resolves the real branch-derived worktree for dispatch-driven rows whose
+    ``worktree_path`` is never stamped -- only when the tracker read returns
+    None. Every miss or read failure degrades to None rather than
+    propagating: an unhandled exception here would abort the entire
+    reconcile tick, including the unrelated auto_approve_clean_review recipe
+    processed in the same run_gate_recipes() call.
     """
-    body = fetch_approved_plan_comment(task.ticket_id)
-    if body is not None:
-        return body
-    if task.worktree_path is None:
-        return None
-    plan_path = task.worktree_path / ".cw" / "plan.md"
-    if not plan_path.exists():
-        return None
-    try:
-        return plan_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        # Read/decode failure between .exists() and read_text() (deleted,
-        # permission error, non-UTF-8 content, etc.) degrades to "no plan
-        # body" rather than propagating — an unhandled exception here would
-        # abort the entire reconcile tick, including the unrelated
-        # auto_approve_clean_review recipe processed in the same
-        # run_gate_recipes() call. UnicodeDecodeError is not an OSError
-        # subclass, so it must be caught explicitly alongside it.
-        return None
+    if _tracker_allows_github_fetch(client_cfg):
+        body = fetch_approved_plan_comment(task.ticket_id)
+        if body is not None:
+            return body
+    return _local_plan_body(task, client_cfg)
 
 
 def _clean_plan_snapshot(
-    last_result: object, task: TicketTask
+    last_result: object, task: TicketTask, client_cfg: ClientConfig | None
 ) -> dict[str, object] | None:
     """Extract the clean-plan predicate snapshot, or None if not fireable.
 
@@ -386,7 +383,7 @@ def _clean_plan_snapshot(
         return None
     if last_result.get("status") != _PLAN_PENDING_APPROVAL:
         return None
-    body = _plan_of_record_body(task)
+    body = _plan_of_record_body(task, client_cfg)
     if body is None:
         return None
     if not _plan_body_signoff_ok(body):
@@ -498,7 +495,9 @@ def _detect_auto_adopt_plan(
         session = state.find_by_name_or_id(task.session_id)
         if session is None:
             continue
-        snapshot = _clean_plan_snapshot(session.last_result, task)
+        snapshot = _clean_plan_snapshot(
+            session.last_result, task, clients.get(task.client)
+        )
         if snapshot is None:
             continue
         if not _recipe_gate_open(config, task, clients, RECIPE_AUTO_ADOPT_PLAN):
