@@ -225,6 +225,12 @@ def _fill_pending_operator_comment_default(task_raw: dict[str, Any]) -> None:
         task_raw["pending_operator_comment"] = False
 
 
+def _fill_plan_approved_at_default(task_raw: dict[str, Any]) -> None:
+    """Fill plan_approved_at introduced in dev-queue schema v35. Idempotent."""
+    if "plan_approved_at" not in task_raw:
+        task_raw["plan_approved_at"] = None
+
+
 def _fill_stale_gate_default(task_raw: dict[str, Any]) -> None:
     """Fill stale_gate_detected_at/blocked_on_pr introduced in dev-queue
     schema v30 (GitHub #1713). Idempotent."""
@@ -327,6 +333,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_fix_dispatch_session_id_default(task_raw)
                 _fill_unproductive_attempts_default(task_raw)
                 _fill_ever_spawned_default(task_raw)
+                _fill_plan_approved_at_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw

@@ -124,16 +124,15 @@ def _impl_bypass_plan_available(
 
     Local-first, tracker-fallback -- the inverse order of
     :func:`cw.dev_queue.lifecycle._plan_is_reviewed` (tracker-first,
-    ``.cw/plan.md``-fallback). That predicate targets ``task.worktree_path``,
-    which is always ``None`` for dispatch-driven ``TicketTask`` rows (dispatch
-    stamps ``session_id`` but not ``worktree_path`` -- see
-    ``queue_peek.py:298-299``), so it would never see the real on-disk
-    worktree and would always pay for a network call on the common path. This
-    predicate instead computes the real worktree path via
-    :func:`worktree_path_for` + :func:`_checked_out_branch` -- the same
-    read-only primitives :func:`cw.worktree.create_worktree` uses to decide
-    reuse-vs-rebuild -- so the common "reused worktree, no rebuild" case is
-    resolved with zero network cost. Only falls through to
+    ``.cw/plan.md``-fallback). That predicate is an approval-freshness gate,
+    so it asks the tracker first and would always pay for a network call on
+    the common path here. This predicate instead computes the real worktree
+    path via :func:`worktree_path_for` + :func:`_checked_out_branch` -- the
+    same read-only primitives :func:`cw.worktree.create_worktree` uses to
+    decide reuse-vs-rebuild (and that ``lifecycle._local_plan_path`` now
+    shares for its own fallback, since dispatch stamps ``worktree_path`` on
+    the Session but never on the ``TicketTask``) -- so the common "reused
+    worktree, no rebuild" case is resolved with zero network cost. Only falls through to
     :func:`fetch_approved_plan_comment` when the local read fails to prove
     the plan is there (worktree missing, foreign branch, or no/unmarked
     ``.cw/plan.md``). See GitHub #1681.

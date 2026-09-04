@@ -105,7 +105,7 @@ You (coordinator)
 | `merge_pending` | PR created but CI/merge gate hasn't cleared yet. Not a failure — don't re-dispatch, just monitor the PR. |
 | `ambiguities_pending_resolution` | Answer questions on the issue, re-dispatch. |
 | `premises_pending_verification` | Verify flagged premises on the issue, re-dispatch. |
-| `plan_pending_approval` | Read the plan comment, post `<!-- auto-dev-plan-approved -->`, re-dispatch. |
+| `plan_pending_approval` | Read the plan comment, then `cw dev-queue approve` (records the approval on the row for any tracker; `--post-marker` also posts `<!-- auto-dev-plan-approved -->` on GitHub). |
 | `review_pending_approval` | Review the diff yourself, ship (`gh pr create` + `gh pr merge --squash --auto`). |
 | `merge_gate_blocked` | A prior pipeline PR is still open. Merge or close it, re-dispatch. |
 | `scope_exceeded` | Diff grew past the declared scope tier. Re-scope the ticket or approve manually. |
