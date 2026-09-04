@@ -340,6 +340,13 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
     post_mock.assert_called_once()
     assert post_mock.call_args.args[0] == "T-v"
     assert post_mock.call_args.args[1] == "rendered"
+    # #2095: the tracker is resolved from the client's workspace (None here --
+    # no project-config.yaml -- so the GitHub post still fires, fail-open) and
+    # the durable copy is written before the post is attempted.
+    assert post_mock.call_args.kwargs["tracker"] is None
+    artifact = post_mock.call_args.kwargs["artifact_path"]
+    assert artifact == worktree / ".claude" / "review-verdict.md"
+    assert artifact.read_text(encoding="utf-8") == "rendered"
 
 
 def test_run_codex_review_and_complete_exception_path(
@@ -624,6 +631,68 @@ def test_post_review_comment_logs_on_none_result(
     assert any(
         "T-1" in r.message and "gh call failed" in r.message for r in caplog.records
     )
+
+
+def test_post_review_comment_skips_gh_on_non_github_tracker(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """#2095: a Linear-tracked ticket never reaches gh (the call could only
+    fail with 'invalid issue format'); the skip is a WARNING that names the
+    tracker and the durable artifact, not a swallowed subprocess failure."""
+    artifact = tmp_path / ".claude" / "review-verdict.md"
+    with (
+        patch("cw.codex_background.post_issue_comment") as post_mock,
+        caplog.at_level("WARNING"),
+    ):
+        _post_review_comment(
+            "GEN-1", "findings", cwd=None, tracker="linear", artifact_path=artifact
+        )
+    post_mock.assert_not_called()
+    assert any(
+        "review_comment_skipped" in r.message
+        and "GEN-1" in r.message
+        and "linear" in r.message
+        and str(artifact) in r.message
+        for r in caplog.records
+    )
+
+
+@pytest.mark.parametrize("tracker", [None, "github-issues"])
+def test_post_review_comment_posts_on_github_or_unknown_tracker(
+    tracker: str | None,
+) -> None:
+    """Fail-open: an unresolvable tracker, or a positively-GitHub one, posts."""
+    with patch("cw.codex_background.post_issue_comment") as post_mock:
+        post_mock.return_value = subprocess.CompletedProcess(
+            args=["gh"], returncode=0, stdout=b"", stderr=b""
+        )
+        _post_review_comment("T-1", "findings", cwd=None, tracker=tracker)
+    post_mock.assert_called_once_with("T-1", "findings", cwd=None)
+
+
+def test_persist_review_verdict_writes_durable_copy(tmp_path: Path) -> None:
+    """#2095: the rendered verdict lands in .claude/review-verdict.md."""
+    from cw.codex_background import (
+        REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
+        _persist_review_verdict,
+    )
+
+    path = _persist_review_verdict(tmp_path, "## Verdict\n")
+    assert path == tmp_path / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
+    assert path.read_text(encoding="utf-8") == "## Verdict\n"
+
+
+def test_persist_review_verdict_degrades_on_oserror(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A write failure is logged and returns None; it never raises into the
+    daemon thread's success path."""
+    from cw.codex_background import _persist_review_verdict
+
+    (tmp_path / ".claude").write_text("not a directory", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert _persist_review_verdict(tmp_path, "x") is None
+    assert any("review_verdict_persist_failed" in r.message for r in caplog.records)
 
 
 def test_post_review_comment_logs_on_nonzero_returncode(
