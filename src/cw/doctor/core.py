@@ -57,6 +57,7 @@ from cw.doctor.wedge import (
     _check_wedge_repo_ahead,
     _check_wedge_task_running_completed_session,
     _check_wedge_task_running_no_session,
+    _check_wedge_terminal_sibling_park,
     _reap_wedge_findings,
 )
 from cw.exceptions import CwError
@@ -116,7 +117,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
 
     if link_state is not None:
         report.checks.extend(_check_timed_out_merged(link_state, _clients))
-        # Wedge checks: load queue once, run all three checks.
+        # Wedge checks: load queue once, run every check off it.
         queue = _deps.load_dev_queue()
         report.wedge_findings.extend(
             _check_wedge_task_running_no_session(link_state, queue)
@@ -128,6 +129,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
         report.wedge_findings.extend(
             _check_wedge_dead_session_blocked_on_user(link_state, queue)
         )
+        report.wedge_findings.extend(_check_wedge_terminal_sibling_park(queue))
         report.wedge_findings.extend(_check_wedge_active_no_daemon_entry(link_state))
         if reap and report.wedge_findings:
             _reap_wedge_findings(report.wedge_findings)

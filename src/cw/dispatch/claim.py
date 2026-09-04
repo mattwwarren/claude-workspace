@@ -35,12 +35,12 @@ from cw.executor import (
 )
 from cw.models import (
     CODEX_BACKEND,
-    OCCUPIED_LANE_STATUSES,
     ClientConfig,
     DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
+    occupies_lane_slot,
 )
 from cw.reconcile import resolve_attempt_ceiling
 from cw.worktree import (
@@ -482,7 +482,7 @@ def _lane_occupants_for_client(
 ) -> dict[str, list[dict[str, str]]]:
     """Per-lane occupant ``{ticket_id, status}`` list for dispatch.tick payloads.
 
-    Sibling of :func:`_lane_stats_for_client` -- same OCCUPIED_LANE_STATUSES
+    Sibling of :func:`_lane_stats_for_client` -- same :func:`occupies_lane_slot`
     join over ``client``/``lane``, but returns identifying detail instead
     of counts, so a ``lane_cap_blocked`` reader can name the occupant
     instead of inferring a (possibly phantom) cross-client cap. See #1243.
@@ -499,7 +499,7 @@ def _lane_occupants_for_client(
             for t in queue_snapshot.tasks
             if t.client == client.name
             and t.lane == lane_cfg.name
-            and t.status in OCCUPIED_LANE_STATUSES
+            and occupies_lane_slot(t)
         ]
     return occupants
 

@@ -262,28 +262,79 @@ def _emit_task_deleted(
     )
 
 
-def remove_ticket(ticket_id: str, client: str, *, remove_all: bool = False) -> None:
+def _remove_ticket_selector_clause(
+    status: QueueItemStatus | None, disposition: str | None
+) -> str:
+    """Render remove_ticket's optional status/disposition filter for messages.
+
+    e.g. ``" (status=blocked_on_user, disposition=terminal_sibling)"``. Empty
+    string when neither selector is given, so the unfiltered message is
+    byte-identical to the pre-#2100 text.
+    """
+    parts = []
+    if status is not None:
+        parts.append(f"status={status.value}")
+    if disposition is not None:
+        parts.append(f"disposition={disposition!r}")
+    if not parts:
+        return ""
+    return f" ({', '.join(parts)})"
+
+
+def remove_ticket(
+    ticket_id: str,
+    client: str,
+    *,
+    remove_all: bool = False,
+    status: QueueItemStatus | None = None,
+    disposition: str | None = None,
+) -> None:
     """Remove one (or all) matching TicketTask(s) from the dev queue.
 
-    Raises CwError when no task matches.  Raises CwError when multiple tasks
-    match and *remove_all* is False.
+    *status*/*disposition* (GitHub #2100), when given, narrow the
+    (ticket_id, client) match set before the multi-match gate below is
+    evaluated -- both are optional and AND'ed together when both are given.
+    This lets an operator remove a single stuck duplicate row (e.g. a
+    ``BLOCKED_ON_USER`` row parked ``disposition=terminal_sibling`` --
+    see ``cw.reconcile.tasks.park_terminal_sibling_tasks`` -- that
+    ``cw doctor --reap`` will not touch, since there is nothing to revert it
+    *to*) without either guessing which of several same-ticket rows
+    ``--all`` would keep, or deleting the ticket's live/legitimate row along
+    with it.
+
+    Raises CwError when no task matches (after the status/disposition
+    filter, if given).  Raises CwError when multiple tasks match and
+    *remove_all* is False -- the message then suggests --status/--disposition
+    when neither was already given as a narrowing selector.
     """
     with _lock():
         store = load_dev_queue()
         matches = [
-            t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
+            t
+            for t in store.tasks
+            if t.ticket_id == ticket_id
+            and t.client == client
+            and (status is None or t.status == status)
+            and (disposition is None or t.disposition == disposition)
         ]
         n = len(matches)
+        selector = _remove_ticket_selector_clause(status, disposition)
         if n == 0:
             msg = (
                 f"No dev-queue task found for ticket '{ticket_id}'"
-                f" in client '{client}'."
+                f" in client '{client}'{selector}."
             )
             raise CwError(msg)
         if n > 1 and not remove_all:
+            suggestion = (
+                " pass --status/--disposition to narrow the match, or --all"
+                " to remove all."
+                if not selector
+                else " pass --all to remove all matching rows."
+            )
             msg = (
                 f"Multiple dev-queue tasks ({n}) match ticket '{ticket_id}' in"
-                f" client '{client}'; pass --all to remove all."
+                f" client '{client}'{selector};{suggestion}"
             )
             raise CwError(msg)
         match_set = {id(m) for m in matches}

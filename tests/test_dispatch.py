@@ -6742,6 +6742,55 @@ class TestLaneCapCountingWithAwaitingSignoff:
         assert len(events) == 1
         assert events[0].payload["skip_reason"] == DispatchSkipReason.CAP_FULL
 
+    def test_running_by_lane_excludes_terminal_sibling_park(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """A terminal_sibling park never occupies its lane slot (#2100).
+
+        Inverse of test_running_by_lane_counts_signoff_as_occupied: a genuine
+        BLOCKED_ON_USER park occupies the slot and blocks dispatch, but this
+        terminal_sibling park must not — the PENDING sibling in the same lane
+        (max_parallel=1) spawns normally instead of being lane-cap-blocked.
+        """
+        lanes = [LaneConfig(name="impl", max_parallel=1)]
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=sample_client_config.workspace_path,
+            default_branch="main",
+            lanes=lanes,
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+
+        sibling_park = TicketTask(
+            ticket_id="SIBLING-2",
+            client="test-client",
+            lane="impl",
+        )
+        sibling_park.status = QueueItemStatus.BLOCKED_ON_USER
+        sibling_park.disposition = "terminal_sibling"
+        with dev_queue_lock():
+            store = load_dev_queue()
+            store.tasks.append(sibling_park)
+            save_dev_queue(store)
+
+        add_ticket(
+            TicketTask(ticket_id="IMPL-NEW-3", client="test-client", lane="impl")
+        )
+
+        config = OrchestratorConfig(default_ceiling=1)
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        events = read_events(
+            consumer="test-terminal-sibling-not-occupied",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.NONE
+
     def test_lane_stats_for_client_signoff_bucket(self, tmp_path: Path) -> None:
         """_lane_stats_for_client reports a distinct signoff count (#990)."""
         from cw.dispatch import _lane_stats_for_client
@@ -7144,6 +7193,40 @@ class TestLaneOccupantsForClient:
         )
         occupants = _lane_occupants_for_client(client, DevQueueStore(tasks=[]))
         assert occupants["impl"] == []
+
+    def test_lane_occupants_for_client_excludes_terminal_sibling_park(
+        self, tmp_path: Path
+    ) -> None:
+        """A terminal_sibling BLOCKED_ON_USER row is not an occupant (#2100).
+
+        Otherwise-identical BLOCKED_ON_USER rows still count -- only the
+        terminal_sibling disposition is carved out, via occupies_lane_slot.
+        """
+        from cw.dispatch import _lane_occupants_for_client
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[LaneConfig(name="impl", max_parallel=4)],
+        )
+        tasks = [
+            TicketTask(
+                ticket_id="SIB",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="terminal_sibling",
+            ),
+            TicketTask(
+                ticket_id="REAL",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="awaiting_operator",
+            ),
+        ]
+        occupants = _lane_occupants_for_client(client, DevQueueStore(tasks=tasks))
+        assert occupants["impl"] == [{"ticket_id": "REAL", "status": "blocked_on_user"}]
 
 
 # ---------------------------------------------------------------------------

@@ -1226,6 +1226,78 @@ class TestOperatorSignoffGates:
             OrchestratorConfig(default_signoff="bogus")  # type: ignore[arg-type]
 
 
+class TestOccupiesLaneSlot:
+    """occupies_lane_slot: OCCUPIED_LANE_STATUSES membership with the
+    terminal_sibling carve-out (GitHub #2100)."""
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            QueueItemStatus.RUNNING,
+            QueueItemStatus.BLOCKED_ON_USER,
+            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        ],
+    )
+    def test_true_for_ordinary_occupied_status(self, status: QueueItemStatus) -> None:
+        from cw.models import occupies_lane_slot
+
+        task = TicketTask(ticket_id="GEN-1", client="acme", status=status)
+        assert occupies_lane_slot(task) is True
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            QueueItemStatus.PENDING,
+            QueueItemStatus.COMPLETED,
+            QueueItemStatus.FAILED,
+            QueueItemStatus.CANCELLED,
+        ],
+    )
+    def test_false_for_non_occupied_status(self, status: QueueItemStatus) -> None:
+        from cw.models import occupies_lane_slot
+
+        task = TicketTask(ticket_id="GEN-1", client="acme", status=status)
+        assert occupies_lane_slot(task) is False
+
+    def test_false_for_terminal_sibling_park(self) -> None:
+        from cw.models import ReapReason, occupies_lane_slot
+
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition=ReapReason.TERMINAL_SIBLING.value,
+        )
+        assert occupies_lane_slot(task) is False
+
+    def test_true_for_blocked_on_user_with_other_disposition(self) -> None:
+        """The carve-out is disposition-specific, not "any BLOCKED_ON_USER"."""
+        from cw.models import occupies_lane_slot
+
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition="awaiting_operator",
+        )
+        assert occupies_lane_slot(task) is True
+
+    def test_false_for_terminal_sibling_disposition_on_non_blocked_status(
+        self,
+    ) -> None:
+        """The carve-out is scoped to BLOCKED_ON_USER; a non-occupied status
+        with a stray terminal_sibling disposition is already False regardless."""
+        from cw.models import ReapReason, occupies_lane_slot
+
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            status=QueueItemStatus.PENDING,
+            disposition=ReapReason.TERMINAL_SIBLING.value,
+        )
+        assert occupies_lane_slot(task) is False
+
+
 class TestCodexFixLoopEnabledGate:
     """Lane-scoped codex_fix_loop_enabled with client/global fallback (#1553)."""
 
@@ -1870,7 +1942,8 @@ class TestPackageExportCompleteness:
     equals the exhaustive top-level surface (the historical 49 names, plus
     #1730's ``HOOK_CONTEXT_RELATIVE_PATH`` = 50, plus #1646's three
     ``AGENT_SPAWN_*`` stamp keys = 53, plus #1646's own review-fix-loop
-    addition of ``extract_unresolved_spawn_count`` = 54) — hardcoded here, NOT
+    addition of ``extract_unresolved_spawn_count`` = 54, plus #2100's
+    ``occupies_lane_slot`` = 55) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -1940,6 +2013,7 @@ class TestPackageExportCompleteness:
             "_validate_gate_recipe_keys",
             "_validate_review_recipe_keys",
             "extract_unresolved_spawn_count",
+            "occupies_lane_slot",
         }
         assert set(models.__all__) == expected
 

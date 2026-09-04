@@ -266,6 +266,39 @@ class TestRenderBoardLaneHeader:
         output = _render(state)
         assert "[1/3]" in output
 
+    def test_lane_panel_occupancy_excludes_terminal_sibling_park(self) -> None:
+        """A terminal_sibling BLOCKED_ON_USER row is not counted (#2100).
+
+        Inverse of test_lane_panel_occupancy_counts_awaiting_signoff: an
+        ordinary BLOCKED_ON_USER row occupies its slot, but a terminal_sibling
+        one does not -- the panel title tally must read [0/3], not [1/3].
+        """
+        from cw.models import ClientConfig
+
+        lane = LaneConfig(name="default", max_parallel=3)
+        client_cfg = ClientConfig(
+            name="acme",
+            workspace_path=Path("/tmp/acme"),
+            lanes=[lane],
+        )
+        task = TicketTask(
+            ticket_id="MW-2100",
+            client="acme",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition="terminal_sibling",
+            stage=Stage.REVIEW,
+            lane="default",
+        )
+        state = BoardState(
+            cw_state=CwState(),
+            dev_queue=DevQueueStore(tasks=[task]),
+            clients={"acme": client_cfg},
+            config=OrchestratorConfig(),
+            now=NOW,
+        )
+        output = _render(state)
+        assert "[0/3]" in output
+
 
 class TestRenderBoardFooter:
     def test_footer_present(self) -> None:

@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from cw.models.enums import QueueItemStatus, Stage
+from cw.models.enums import OCCUPIED_LANE_STATUSES, QueueItemStatus, ReapReason, Stage
 from cw.models.events import PrState, WatchedPr
 
 # Runtime (not TYPE_CHECKING) because ``finding_dispositions``' annotation
@@ -691,6 +691,33 @@ class TicketTask(BaseModel):
             )
             raise ValueError(msg)
         return value
+
+
+def occupies_lane_slot(task: TicketTask) -> bool:
+    """True iff *task* counts toward its lane's ``OCCUPIED_LANE_STATUSES`` cap.
+
+    GitHub #2100. Mirrors ``OCCUPIED_LANE_STATUSES`` membership with exactly
+    one carve-out: a BLOCKED_ON_USER row parked with
+    ``disposition == ReapReason.TERMINAL_SIBLING`` (stamped by
+    ``cw.reconcile.tasks.park_terminal_sibling_tasks``) is a duplicate row a
+    lock-contention race minted for a ticket whose real row already reached a
+    terminal status — not live or operator-parked work. Counting it toward
+    lane occupancy holds that lane slot forever behind a ticket that already
+    shipped, and ``cw doctor --reap`` cannot free it (there is nothing to
+    revert it *to* — see the dedicated wedge class in ``cw.doctor.wedge``).
+
+    Every dispatch consumer that gates on ``OCCUPIED_LANE_STATUSES`` for lane
+    capacity (``dispatch.tick``/``dispatch.claim``/``board``) must call this
+    instead of testing membership directly, so a terminal_sibling row is
+    excluded everywhere occupancy is computed, not just where it happens to
+    be visible first.
+    """
+    if task.status not in OCCUPIED_LANE_STATUSES:
+        return False
+    return not (
+        task.status == QueueItemStatus.BLOCKED_ON_USER
+        and task.disposition == ReapReason.TERMINAL_SIBLING.value
+    )
 
 
 class DispatchPlan(BaseModel):

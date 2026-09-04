@@ -24,7 +24,6 @@ from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.models import (
     DEFAULT_LANE,
-    OCCUPIED_LANE_STATUSES,
     ClientConfig,
     CwState,
     DevQueueStore,
@@ -38,6 +37,7 @@ from cw.models import (
     Stage,
     StageExecutorConfig,
     TicketTask,
+    occupies_lane_slot,
 )
 from cw.orchestrate import (
     SessionSummary,
@@ -387,7 +387,7 @@ def _build_lane_panel(
     # per-client collapsing becomes a UX requirement.
     # Why: mirrors dispatch._lane_stats_for_client without importing the
     # private function.
-    running = sum(1 for t in tasks_in_lane if t.status in OCCUPIED_LANE_STATUSES)
+    running = sum(1 for t in tasks_in_lane if occupies_lane_slot(t))
 
     pause_tag = " [PAUSED]" if paused else ""
     title = f"{client_name} / {lane_name}{pause_tag}  [{running}/{max_parallel}]"
