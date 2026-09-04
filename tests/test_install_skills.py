@@ -936,6 +936,34 @@ class TestScriptsInstalled:
         entries = (fake_home / ".claude" / ".cw-skills-manifest").read_text()
         assert "pre-symlink.bak" not in entries
 
+    def test_second_divergent_replacement_keeps_earlier_backup(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        """Until the global-claude hand-over is done, a checkout there can
+        restore the tracked file over cw's link; a later run must not clobber
+        the first generation's backup with the second's.
+        """
+        dst = fake_home / ".claude" / "scripts"
+        dst.mkdir()
+        target = dst / "prep_pr_state.py"
+        target.write_text("# generation one\n")
+        first = _run(script, fake_home)
+        assert first.returncode == 0, first.stderr
+
+        # Simulate `git checkout` in global-claude restoring the tracked copy.
+        target.unlink()
+        target.write_text("# generation two\n")
+        second = _run(script, fake_home)
+        assert second.returncode == 0, second.stderr
+
+        assert target.is_symlink()
+        gen1 = dst / "prep_pr_state.py.pre-symlink.bak"
+        gen2 = dst / "prep_pr_state.py.pre-symlink.1.bak"
+        assert gen1.read_text() == "# generation one\n"
+        assert gen2.read_text() == "# generation two\n"
+        assert f"    - {gen2}" in second.stdout
+        assert f"    - {gen1}" not in second.stdout
+
     def test_identical_regular_file_replaced_without_backup(
         self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
     ) -> None:

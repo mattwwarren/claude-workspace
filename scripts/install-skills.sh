@@ -371,8 +371,18 @@ if [ -d "$SCRIPTS_SRC" ]; then
             # bytes cw is installing, keep them beside the link (see the NOTE
             # ON SCRIPTS header); a byte-identical copy has nothing to keep.
             if ! cmp -s "$src_file" "$dst_file"; then
-                cp -p "$dst_file" "$dst_file.pre-symlink.bak"
-                backed_up_scripts+=("$rel")
+                # Never overwrite an earlier generation: until the hand-over
+                # is done, a checkout in global-claude can restore the tracked
+                # file over the link, so this branch can fire again for the
+                # same name with different bytes.
+                backup="$dst_file.pre-symlink.bak"
+                n=1
+                while [ -e "$backup" ]; do
+                    backup="$dst_file.pre-symlink.$n.bak"
+                    n=$((n + 1))
+                done
+                cp -p "$dst_file" "$backup"
+                backed_up_scripts+=("$backup")
             fi
         fi
         ln -sf "$src_file" "$dst_file"
@@ -522,7 +532,7 @@ if [ "${#replaced_scripts[@]}" -gt 0 ]; then
     if [ "${#backed_up_scripts[@]}" -gt 0 ]; then
         echo "  replaced copies that differed from cw's source were kept beside the link:"
         for p in "${backed_up_scripts[@]}"; do
-            echo "    - $SCRIPTS_DST/$p.pre-symlink.bak"
+            echo "    - $p"
         done
     fi
 fi
