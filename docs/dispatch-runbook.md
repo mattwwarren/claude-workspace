@@ -554,8 +554,37 @@ common wedge conditions:
 
 - `wedge/task-running-no-session` — reverts task to PENDING.
 - `wedge/task-running-completed-session` — reverts task to PENDING.
+- `wedge/terminal-sibling-park` — a `BLOCKED_ON_USER` row with
+  `disposition=terminal_sibling` (see below) that was never claimed
+  (`attempts == 0`, no `session_id`) — cancels the row. Never a PENDING
+  revert: the ticket's real row already finished, so there is nothing to
+  revert it *to* (reverting it just gets it re-parked `terminal_sibling` on
+  the very next reconcile pass).
 
 Run `cw doctor --reap --json` for machine-readable output.
+
+#### `terminal_sibling` duplicate rows (GitHub #2100)
+
+A `disposition=terminal_sibling` `BLOCKED_ON_USER` row is a duplicate:
+`park_terminal_sibling_tasks` parks any `PENDING` row whose `(client,
+ticket_id)` already has a terminal (`COMPLETED`/`CANCELLED`) sibling. The
+usual source is a PR-watcher recipe (e.g. `auto_fix_ci`) re-dispatching a
+ticket whose queue row is already terminal; as of #2100 that recipe
+requeues the ticket's own row in place instead of minting a fresh one, so a
+genuinely new `terminal_sibling` duplicate should be rare going forward —
+this section covers cleaning up an existing one.
+
+`cw doctor --reap` auto-cancels the narrow, safe shape above
+(never-claimed, no session). A row with claim history (`attempts > 0`) is
+left alone — inspect it before deciding, then remove it directly with the
+`--status`/`--disposition` selectors on `cw dev-queue remove` (combine them
+to target the exact row without `--all`, which would also delete the
+ticket's legitimate row):
+
+```bash
+cw dev-queue remove <TICKET-ID> --client <client> \
+  --status blocked_on_user --disposition terminal_sibling
+```
 
 ### Bulk cleanup of stale terminal rows (`cw dev-queue prune`)
 

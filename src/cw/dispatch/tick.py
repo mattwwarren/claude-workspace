@@ -24,11 +24,11 @@ from cw.dev_queue import (
 from cw.executor_diagnostics import cleanup_expired_diagnostics
 from cw.models import (
     DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
-    OCCUPIED_LANE_STATUSES,
     ClientConfig,
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
+    occupies_lane_slot,
 )
 from cw.native_daemon import get_native_daemon_client
 
@@ -238,12 +238,15 @@ def _resolve_client_lane_context(
     """Build a client's per-lane running count and effective lane list for this tick.
 
     Returns ``(running_by_lane, effective_lanes)``. Tasks in RUNNING,
-    BLOCKED_ON_USER, or AWAITING_OPERATOR_SIGNOFF with an active session_id
-    count toward their lane's cap (ADR-0006: BLOCKED_ON_USER occupies the
-    slot; #990 extends this to a signoff-parked ticket, which is likewise not
-    eligible for re-dispatch). Reuses the *queue_snapshot* the caller already
-    holds — nothing between the two points mutates the queue (auto-ff is
-    git-only). For clients with no declared lanes, the synthesized default
+    BLOCKED_ON_USER, or AWAITING_OPERATOR_SIGNOFF count toward their lane's
+    cap (ADR-0006: BLOCKED_ON_USER occupies the slot; #990 extends this to a
+    signoff-parked ticket, which is likewise not eligible for re-dispatch) —
+    via :func:`occupies_lane_slot`, which carves out a BLOCKED_ON_USER row
+    parked ``disposition=terminal_sibling`` (#2100): that park holds no real
+    work, and counting it would never let its slot free up. Reuses the
+    *queue_snapshot* the caller already holds — nothing between the two
+    points mutates the queue (auto-ff is git-only). For clients with no
+    declared lanes, the synthesized default
     lane's ``max_parallel`` is overridden with *client_ceiling* so
     backward-compat behaviour is preserved. Extracted from
     :func:`dispatch_tick` to keep it within the PLR0912/PLR0915 ceilings
@@ -253,7 +256,7 @@ def _resolve_client_lane_context(
     for qt in queue_snapshot.tasks:
         if qt.client != client.name:
             continue
-        if qt.status not in OCCUPIED_LANE_STATUSES:
+        if not occupies_lane_slot(qt):
             continue
         lane_key = qt.lane
         running_by_lane[lane_key] = running_by_lane.get(lane_key, 0) + 1

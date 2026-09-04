@@ -1998,6 +1998,129 @@ class TestRemoveTicket:
             for _, p, _ in events
         )
 
+    def test_status_filter_removes_only_matching_row(self, tmp_dev_queue: Path) -> None:
+        """GitHub #2100: --status narrows a multi-match remove to one row."""
+        tasks = [
+            TicketTask(
+                ticket_id="TKT-SIB",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="terminal_sibling",
+            ),
+            TicketTask(
+                ticket_id="TKT-SIB",
+                client="genhealth",
+                status=QueueItemStatus.COMPLETED,
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        remove_ticket("TKT-SIB", "genhealth", status=QueueItemStatus.BLOCKED_ON_USER)
+        store = load_dev_queue()
+        assert len(store.tasks) == 1
+        assert store.tasks[0].status == QueueItemStatus.COMPLETED
+
+    def test_disposition_filter_removes_only_matching_row(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """GitHub #2100: --disposition narrows a multi-match remove to one row.
+
+        The exact stuck-duplicate shape the issue reports: two BLOCKED_ON_USER
+        rows for the same ticket, one a terminal_sibling park and one a
+        genuine human-gated park -- --all would delete both.
+        """
+        tasks = [
+            TicketTask(
+                ticket_id="TKT-SIB",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="terminal_sibling",
+            ),
+            TicketTask(
+                ticket_id="TKT-SIB",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="awaiting_operator",
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        remove_ticket("TKT-SIB", "genhealth", disposition="terminal_sibling")
+        store = load_dev_queue()
+        assert len(store.tasks) == 1
+        assert store.tasks[0].disposition == "awaiting_operator"
+
+    def test_combined_status_and_disposition_filter(self, tmp_dev_queue: Path) -> None:
+        """status and disposition selectors AND together (#2100)."""
+        tasks = [
+            TicketTask(
+                ticket_id="TKT-SIB",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="terminal_sibling",
+            ),
+            TicketTask(
+                ticket_id="TKT-SIB",
+                client="genhealth",
+                status=QueueItemStatus.COMPLETED,
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        remove_ticket(
+            "TKT-SIB",
+            "genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition="terminal_sibling",
+        )
+        store = load_dev_queue()
+        assert len(store.tasks) == 1
+        assert store.tasks[0].status == QueueItemStatus.COMPLETED
+
+    def test_status_filter_matching_nothing_raises_with_selector_in_message(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        task = TicketTask(
+            ticket_id="TKT-SIB", client="genhealth", status=QueueItemStatus.COMPLETED
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        with pytest.raises(CwError, match=r"status=blocked_on_user"):
+            remove_ticket(
+                "TKT-SIB", "genhealth", status=QueueItemStatus.BLOCKED_ON_USER
+            )
+
+    def test_multi_match_error_suggests_selectors_when_none_given(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        tasks = [
+            TicketTask(ticket_id="TKT-5", client="genhealth"),
+            TicketTask(ticket_id="TKT-5", client="genhealth"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        with pytest.raises(CwError, match=r"--status/--disposition"):
+            remove_ticket("TKT-5", "genhealth")
+
+    def test_multi_match_error_omits_selector_suggestion_when_already_narrowed(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """A selector that still leaves >1 match suggests only --all, not
+        itself again."""
+        tasks = [
+            TicketTask(
+                ticket_id="TKT-5",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+            ),
+            TicketTask(
+                ticket_id="TKT-5",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        with pytest.raises(
+            CwError, match=r"pass --all to remove all matching rows"
+        ) as exc_info:
+            remove_ticket("TKT-5", "genhealth", status=QueueItemStatus.BLOCKED_ON_USER)
+        assert "--status/--disposition" not in str(exc_info.value)
+
 
 # ---------------------------------------------------------------------------
 # TestClearTickets
@@ -2669,6 +2792,94 @@ class TestCLIDevQueueRemove:
         store = load_dev_queue()
         assert len(store.tasks) == 1
         assert store.tasks[0].ticket_id == "CLI-KEEP"
+
+    def test_remove_with_status_flag_narrows_multi_match(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """GitHub #2100: --status removes a filtered single match, no --all."""
+        tasks = [
+            TicketTask(
+                ticket_id="CLI-SIB",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="terminal_sibling",
+            ),
+            TicketTask(
+                ticket_id="CLI-SIB",
+                client="genhealth",
+                status=QueueItemStatus.COMPLETED,
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "remove",
+                "CLI-SIB",
+                "--client",
+                "genhealth",
+                "--status",
+                "blocked_on_user",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        store = load_dev_queue()
+        assert len(store.tasks) == 1
+        assert store.tasks[0].status == QueueItemStatus.COMPLETED
+
+    def test_remove_with_disposition_flag_narrows_multi_match(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """GitHub #2100: --disposition removes a filtered single match."""
+        tasks = [
+            TicketTask(
+                ticket_id="CLI-SIB",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="terminal_sibling",
+            ),
+            TicketTask(
+                ticket_id="CLI-SIB",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="awaiting_operator",
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "remove",
+                "CLI-SIB",
+                "--client",
+                "genhealth",
+                "--disposition",
+                "terminal_sibling",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        store = load_dev_queue()
+        assert len(store.tasks) == 1
+        assert store.tasks[0].disposition == "awaiting_operator"
+
+    def test_remove_multi_match_error_mentions_selectors(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        tasks = [
+            TicketTask(ticket_id="CLI-DUP", client="genhealth"),
+            TicketTask(ticket_id="CLI-DUP", client="genhealth"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "remove", "CLI-DUP", "--client", "genhealth"]
+        )
+        assert result.exit_code != 0
+        assert "--status/--disposition" in result.output
 
 
 # ---------------------------------------------------------------------------

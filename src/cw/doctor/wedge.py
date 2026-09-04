@@ -34,7 +34,7 @@ from cw.doctor import _deps
 from cw.doctor._shared import WedgeFinding
 from cw.doctor.loop_health import _gh_pr_states, _reap_session_by_selector
 from cw.exceptions import CwError
-from cw.models import QueueItemStatus, SessionStatus
+from cw.models import QueueItemStatus, ReapReason, SessionStatus
 from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
 from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
@@ -49,6 +49,20 @@ if TYPE_CHECKING:
 
 # Wedge class for BLOCKED_ON_USER tasks whose sessions are dead (OOM/crash path).
 _WEDGE_BLOCKED_DEAD_SESSION = "wedge/blocked-on-user-dead-session"
+
+# Wedge class for BLOCKED_ON_USER tasks parked terminal_sibling (#2100): a
+# duplicate row minted by a lock-contention race for a ticket whose real row
+# already reached a terminal status (see
+# ``cw.reconcile.tasks.park_terminal_sibling_tasks``). Deliberately distinct
+# from ``_WEDGE_BLOCKED_DEAD_SESSION`` above: that class's remedy (revert the
+# oldest blocked row to PENDING) has nothing to revert THIS row to — the
+# ticket's real row already finished — so reverting it just gets it re-parked
+# terminal_sibling on the very next reconcile pass, a silent ping-pong. Both
+# the class-5 detector and ``_collapse_blocked_on_user_tasks`` exclude this
+# disposition outright (see ``_is_terminal_sibling_park``) so a row can only
+# ever surface here, with CANCEL — never a PENDING revert — as its --reap
+# remedy (``_cancel_terminal_sibling_parks``).
+_WEDGE_TERMINAL_SIBLING = "wedge/terminal-sibling-park"
 
 # Dispositions marking a park that waits on a HUMAN, not on a wedge (#1653):
 # the four sentinel statuses stamped verbatim onto the task at park time.
@@ -273,6 +287,24 @@ def _is_dead_session_task(
     return session.surface_ref not in live_short_ids
 
 
+def _is_terminal_sibling_disposition(task: TicketTask) -> bool:
+    """True iff *task* carries the terminal_sibling park disposition (#2100).
+
+    The BROAD exclusion — disposition alone, regardless of ``attempts`` or
+    ``session_id`` — used by both
+    :func:`_check_wedge_dead_session_blocked_on_user` and
+    :func:`_collapse_blocked_on_user_tasks` to keep either from ever
+    reverting a terminal_sibling row to PENDING: ``park_terminal_sibling_tasks``
+    re-parks purely on disposition (a terminal sibling existing for the same
+    (client, ticket_id)), not on ``attempts``, so ANY terminal_sibling row
+    reverted to PENDING gets re-parked on the very next reconcile pass
+    regardless of its claim history. Contrast :func:`_is_terminal_sibling_park`
+    below — the NARROWER shape (``session_id is None`` + ``attempts == 0``)
+    that is additionally safe to auto-CANCEL under ``--reap``.
+    """
+    return task.disposition == ReapReason.TERMINAL_SIBLING.value
+
+
 def _check_wedge_dead_session_blocked_on_user(
     state: CwState,
     queue: DevQueueStore,
@@ -286,12 +318,21 @@ def _check_wedge_dead_session_blocked_on_user(
     excluded outright (#1653): their worker exited by design, so they always
     look "dead" to this heuristic, but they are waiting on an operator, not
     wedged — reverting them re-runs the identical park.
+
+    A terminal_sibling park (#2100) is likewise excluded outright: it too
+    always has session_id is None (park_terminal_sibling_tasks clears it) and
+    so always looks "dead" to this heuristic, but reverting ANY terminal_sibling
+    row to PENDING just gets it re-parked terminal_sibling on the next
+    reconcile pass (see _is_terminal_sibling_disposition) — its remedy is
+    CANCEL, and only for the narrower reap-eligible shape (see
+    _WEDGE_TERMINAL_SIBLING/_check_wedge_terminal_sibling_park).
     """
     candidates = [
         t
         for t in queue.tasks
         if t.status == QueueItemStatus.BLOCKED_ON_USER
         and t.disposition not in _HUMAN_GATED_PARK_DISPOSITIONS
+        and not _is_terminal_sibling_disposition(t)
     ]
     if not candidates:
         return []
@@ -316,6 +357,59 @@ def _check_wedge_dead_session_blocked_on_user(
             )
         )
     return findings
+
+
+def _is_terminal_sibling_park(task: TicketTask) -> bool:
+    """True iff *task* is a #2100 terminal_sibling duplicate park.
+
+    BLOCKED_ON_USER + disposition == ReapReason.TERMINAL_SIBLING +
+    session_id is None + attempts == 0 — exactly the shape
+    ``park_terminal_sibling_tasks`` (``cw.reconcile.tasks``) stamps: a row
+    ``add_ticket`` minted during a lock-contention race, never claimed
+    (attempts == 0, ``ever_spawned=False`` at construction — see
+    ``cw.reconcile.review_recipes.auto_fix_ci``), for a ticket whose real row
+    already reached COMPLETED or CANCELLED. The ``attempts == 0`` guard
+    matters: a row with claim history is not this narrow duplicate shape and
+    is left to the existing dead-session wedge class
+    (``_check_wedge_dead_session_blocked_on_user``) instead. Shared by the
+    class-7 detector and its ``--reap`` remedy so the two can never select a
+    different row set.
+    """
+    return (
+        task.status == QueueItemStatus.BLOCKED_ON_USER
+        and task.disposition == ReapReason.TERMINAL_SIBLING.value
+        and task.session_id is None
+        and task.attempts == 0
+    )
+
+
+def _check_wedge_terminal_sibling_park(queue: DevQueueStore) -> list[WedgeFinding]:
+    """Detect #2100 terminal_sibling duplicate parks holding a lane slot.
+
+    Distinct from class-5 (``_check_wedge_dead_session_blocked_on_user``,
+    which excludes this disposition outright): that class's remedy is to
+    revert the row to PENDING, but a terminal_sibling park has nothing to
+    revert TO — the ticket's real row already finished — so reverting it
+    just gets it re-parked terminal_sibling on the very next reconcile pass
+    (a silent ping-pong; see ``_cancel_terminal_sibling_parks`` for the
+    correct CANCEL remedy). Needs no daemon/session lookup, unlike class-5:
+    ``_is_terminal_sibling_park`` is a pure predicate over the row itself.
+    """
+    return [
+        WedgeFinding(
+            wedge_class=_WEDGE_TERMINAL_SIBLING,
+            session_id=None,
+            ticket_id=task.ticket_id,
+            recipe=(
+                "BLOCKED_ON_USER task parked terminal_sibling holds a lane"
+                " slot for a ticket whose real row already finished. Run:"
+                " cw doctor --reap to cancel this duplicate row."
+            ),
+            state_file=str(state_file()),
+        )
+        for task in queue.tasks
+        if _is_terminal_sibling_park(task)
+    ]
 
 
 def _daemon_supervisor_alive() -> bool:
@@ -391,6 +485,14 @@ def _collapse_blocked_on_user_tasks(
     helper is also reached from loop_health._reap_session_by_selector, whose
     callers select tickets by other criteria.
 
+    A terminal_sibling park (#2100) is excluded the same way, for the same
+    defense-in-depth reason — reverting one to PENDING here would just get it
+    re-parked terminal_sibling on the next reconcile pass, the exact
+    ping-pong #2100 reports; its correct --reap remedy is
+    ``_cancel_terminal_sibling_parks`` instead. This is what stops the
+    ping-pong even for a caller (loop_health._reap_session_by_selector) that
+    never routes through the class-7 detector at all.
+
     Returns True when any mutation was applied.
     """
     changed = False
@@ -404,12 +506,14 @@ def _collapse_blocked_on_user_tasks(
             t
             for t in all_blocked
             if t.disposition not in _HUMAN_GATED_PARK_DISPOSITIONS
+            and not _is_terminal_sibling_disposition(t)
         ]
         if len(tasks_for_ticket) < len(all_blocked):
             _log.warning(
                 "Ticket %s: %d BLOCKED_ON_USER row(s) parked on a human gate "
-                "left untouched by collapse (#1653); release via requeue/"
-                "approve or a gate recipe.",
+                "or terminal_sibling (#2100) left untouched by collapse; "
+                "release via requeue/approve/a gate recipe, or "
+                "cw doctor --reap for a terminal_sibling row.",
                 ticket_id,
                 len(all_blocked) - len(tasks_for_ticket),
             )
@@ -439,6 +543,28 @@ def _collapse_blocked_on_user_tasks(
     return changed
 
 
+def _cancel_terminal_sibling_parks(queue: DevQueueStore, ticket_ids: set[str]) -> bool:
+    """CANCEL every BLOCKED_ON_USER terminal_sibling park for *ticket_ids* (#2100).
+
+    Deliberately NOT a reuse of ``_collapse_blocked_on_user_tasks``: that
+    helper reverts the OLDEST blocked row of a ticket to PENDING because
+    there IS a legitimate park to recover — a terminal_sibling park has
+    nothing to recover, since the ticket's real row already reached
+    COMPLETED/CANCELLED, so reverting it to PENDING would just get it
+    re-parked terminal_sibling on the very next reconcile pass (the exact
+    ping-pong #2100 reports). Every matching row is CANCELLED outright
+    instead. Matches via ``_is_terminal_sibling_park`` — the same predicate
+    the class-7 detector uses — so this can never touch a ticket's real,
+    non-duplicate row, even when *ticket_ids* also names one.
+    """
+    changed = False
+    for task in queue.tasks:
+        if task.ticket_id in ticket_ids and _is_terminal_sibling_park(task):
+            transition_task_status(task, QueueItemStatus.CANCELLED)
+            changed = True
+    return changed
+
+
 def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     """Apply mutations for actionable wedge classes.
 
@@ -451,6 +577,9 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     Class-6 (active-no-daemon-entry): call _reap_session_by_selector per
         phantom session; that helper marks COMPLETED, reverts queue task to
         PENDING, stops the daemon surface, and emits an audit event.
+    Class-7 (terminal-sibling-park, #2100): CANCEL every matching row via
+        _cancel_terminal_sibling_parks — never a PENDING revert (see that
+        function's docstring for why).
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
@@ -465,6 +594,7 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
             "wedge/repo-ahead-of-queue",
             _WEDGE_BLOCKED_DEAD_SESSION,
             _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+            _WEDGE_TERMINAL_SIBLING,
         }
     }
     blocked_ticket_ids: set[str] = {
@@ -472,13 +602,23 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         for f in findings
         if f.ticket_id and f.wedge_class == _WEDGE_BLOCKED_DEAD_SESSION
     }
+    terminal_sibling_ticket_ids: set[str] = {
+        f.ticket_id
+        for f in findings
+        if f.ticket_id and f.wedge_class == _WEDGE_TERMINAL_SIBLING
+    }
     phantom_session_ids: list[str] = [
         f.session_id
         for f in findings
         if f.session_id and f.wedge_class == _WEDGE_ACTIVE_NO_DAEMON_ENTRY
     ]
 
-    if not running_ticket_ids and not blocked_ticket_ids and not phantom_session_ids:
+    if not (
+        running_ticket_ids
+        or blocked_ticket_ids
+        or terminal_sibling_ticket_ids
+        or phantom_session_ids
+    ):
         return
 
     with dev_queue_lock():
@@ -495,6 +635,11 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         if blocked_ticket_ids:
             blocked_changed = _collapse_blocked_on_user_tasks(queue, blocked_ticket_ids)
             changed = changed or blocked_changed
+        if terminal_sibling_ticket_ids:
+            sibling_changed = _cancel_terminal_sibling_parks(
+                queue, terminal_sibling_ticket_ids
+            )
+            changed = changed or sibling_changed
         if changed:
             save_dev_queue(queue)
 

@@ -602,11 +602,45 @@ def dev_queue_unblock(ticket_id: str, client: str | None) -> None:
     default=False,
     help="Remove all matching entries when multiple match",
 )
+@click.option(
+    "--status",
+    "-s",
+    "status_filter",
+    type=click.Choice([e.value for e in QueueItemStatus]),
+    default=None,
+    help=(
+        "Narrow to rows at this status before matching -- lets a filtered"
+        " single match remove without --all (GitHub #2100)."
+    ),
+)
+@click.option(
+    "--disposition",
+    "disposition_filter",
+    default=None,
+    help=(
+        "Narrow to rows with this disposition before matching (e.g."
+        " terminal_sibling) -- combines with --status; lets a filtered"
+        " single match remove without --all (GitHub #2100)."
+    ),
+)
 @handle_errors
-def dev_queue_remove(tickets: tuple[str, ...], client: str, remove_all: bool) -> None:
+def dev_queue_remove(
+    tickets: tuple[str, ...],
+    client: str,
+    remove_all: bool,
+    status_filter: str | None,
+    disposition_filter: str | None,
+) -> None:
     """Remove dev-queue task(s) for the given ticket(s) and client."""
+    status_enum = QueueItemStatus(status_filter) if status_filter else None
     for ticket in tickets:
-        remove_ticket(ticket, client, remove_all=remove_all)
+        remove_ticket(
+            ticket,
+            client,
+            remove_all=remove_all,
+            status=status_enum,
+            disposition=disposition_filter,
+        )
         click.echo(f"Removed {ticket} from {client} dev-queue.")
 
 
