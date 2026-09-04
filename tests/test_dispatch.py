@@ -1764,6 +1764,10 @@ class TestDispatchTickSpawnErrors:
         task = queue.tasks[0]
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.session_id is None
+        # #2114: no session ever spawned for this claim, so the park must not
+        # charge the global attempt ceiling -- a re-derived park would
+        # otherwise ratchet to attempt_cap_blocked in ten cycles.
+        assert task.unproductive_attempts == 0
 
     def test_stale_worktree_dirty_park_emits_session_needs_attention(
         self,
@@ -7663,6 +7667,56 @@ class TestParkRunningTaskExpectedSessionId:
         task = load_dev_queue().tasks[0]
         assert task.status is QueueItemStatus.BLOCKED_ON_USER
         assert task.session_id is None
+
+    def test_park_charges_unproductive_attempt_by_default(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """The post-spawn caller (codex_boot orphan) keeps the default charge:
+        a session really ran and exited RUNNING with nothing to show."""
+        add_ticket(
+            TicketTask(
+                ticket_id="PARK-3",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-ran",
+            )
+        )
+
+        _park_running_task_blocked_on_user(
+            ticket_id="PARK-3",
+            client_name="test-client",
+            disposition="codex_review_orphaned_at_boot",
+            breadcrumbs="orphan",
+        )
+
+        assert load_dev_queue().tasks[0].unproductive_attempts == 1
+
+    def test_park_with_unproductive_false_does_not_charge(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """#2114: the pre-spawn callers (dirty-worktree guard, codex capability
+        gate) pass unproductive=False -- no session ever ran, and charging a
+        park that re-derives on every claim ratchets it to attempt_cap_blocked."""
+        add_ticket(
+            TicketTask(
+                ticket_id="PARK-4",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-never-spawned",
+            )
+        )
+
+        _park_running_task_blocked_on_user(
+            ticket_id="PARK-4",
+            client_name="test-client",
+            disposition="dirty_worktree",
+            breadcrumbs="/wt: 2 uncommitted path(s)",
+            unproductive=False,
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
 
     def test_mismatched_expected_session_id_skips_the_park(
         self, tmp_dispatch_dirs: Path
