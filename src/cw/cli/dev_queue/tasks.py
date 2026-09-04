@@ -11,6 +11,7 @@ import json
 
 import click
 
+from cw.auto_dev_result import is_known_blocker_reason
 from cw.cli._base import handle_errors
 from cw.config import load_clients
 from cw.dev_queue import load_dev_queue, task_attention_state
@@ -38,6 +39,22 @@ def _needs_attn_by_client(tasks: list[TicketTask]) -> dict[str, int]:
         if task_attention_state(t) is not None:
             counts[t.client] = counts.get(t.client, 0) + 1
     return counts
+
+
+def _reason_cell(blocked_reason: str | None) -> str:
+    """Render the REASON column, flagging an unregistered reason (#2097).
+
+    A ``?`` **prefix** rather than a suffix so the flag survives the column's
+    20-char truncation -- a reason long enough to be cut is exactly the one an
+    operator is most likely to mistake for a documented routing code. Advisory
+    only: ``blocker.reason`` stays an open enum and the value is still shown
+    verbatim (see ``cw.auto_dev_result.is_known_blocker_reason``).
+    """
+    if not blocked_reason:
+        return "—"
+    if is_known_blocker_reason(blocked_reason):
+        return blocked_reason[:20]
+    return f"?{blocked_reason}"[:20]
 
 
 def _print_tasks_human(tasks: list[TicketTask]) -> None:
@@ -77,7 +94,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
             (t.computed_scope_tier or "—")[:20],
             t.stage.value[:10],
             (t.disposition or "—")[:20],
-            (t.blocked_reason or "—")[:20],
+            _reason_cell(t.blocked_reason),
             (t.pr_url or "—")[:10],
             attention[:18],
             ("yes" if t.stale_gate_detected_at else "—")[:10],
@@ -106,6 +123,11 @@ def dev_queue_tasks(
     """List dev-queue tasks with typed field output.
 
     Programmatic inspection view. For the human aggregate summary use dev-queue status.
+
+    REASON is the row's blocker reason. A leading ``?`` marks a reason that is
+    not in cw's known-reason registry and does not declare itself freeform with
+    an ``x_`` prefix (#2097) — the value is still shown verbatim, the flag just
+    says cw does not recognise it as a documented routing code.
     """
     queue = load_dev_queue()
     tasks: list[TicketTask] = queue.tasks

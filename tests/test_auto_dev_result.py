@@ -12,10 +12,17 @@ from pydantic import ValidationError
 from cw.auto_dev_result import (
     _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION,
     _PREMISE_GLITCH_PLACEHOLDER_CLAIM,
+    BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS,
+    BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
+    BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
+    BLOCKER_REASON_STATUS_UNKNOWN,
     BLOCKER_REASON_VALIDATION_FAILED,
+    DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON,
     EMPTY_DIFF_BLOCKER_REASON,
     FINALIZE_REGRESS_BLOCKER_REASONS,
+    FREEFORM_BLOCKER_REASON_PREFIX,
+    KNOWN_BLOCKER_REASONS,
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
     SALVAGE_HOLD_STATUSES,
@@ -35,9 +42,11 @@ from cw.auto_dev_result import (
     _is_placeholder_sentinel_text,
     extract_block,
     is_documented_example,
+    is_known_blocker_reason,
     parse_stdout,
     queue_status_for_terminal_sentinel,
 )
+from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
 from cw.models import QueueItemStatus
 
 # ---------------------------------------------------------------------------
@@ -887,6 +896,90 @@ class TestInvariants:
         result = AutoDevResult.model_validate(p)
         assert result.blocker is not None
         assert result.blocker.reason == "future_unknown_reason"
+
+
+# ---------------------------------------------------------------------------
+# Known-reason registry — warn-only, never a gate (#2097)
+# ---------------------------------------------------------------------------
+
+
+class TestKnownBlockerReasons:
+    """KNOWN_BLOCKER_REASONS + the Blocker warn-only validator (#2097).
+
+    The incident this guards: a session emitted an invented
+    ``blocker.reason`` that read exactly like a documented routing code, and
+    nothing anywhere said otherwise. The registry makes that visible; it must
+    never make it *fail*, because ``blocker.reason`` stays an open enum (§4.2).
+    """
+
+    _UNKNOWN = "stale_branch_restart_directed"
+
+    def test_unknown_reason_still_parses(self) -> None:
+        """Open-enum contract survives the registry: warn, never reject."""
+        p = _blocked_payload()
+        p["blocker"]["reason"] = self._UNKNOWN
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.reason == self._UNKNOWN
+
+    def test_unknown_reason_logs_a_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        p = _blocked_payload()
+        p["blocker"]["reason"] = self._UNKNOWN
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            AutoDevResult.model_validate(p)
+        assert f"blocker_reason_unknown reason={self._UNKNOWN}" in caplog.text
+
+    def test_registered_reason_logs_nothing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        p = _blocked_payload()
+        p["blocker"]["reason"] = "review_blocked"
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            AutoDevResult.model_validate(p)
+        assert "blocker_reason_unknown" not in caplog.text
+
+    def test_freeform_prefix_suppresses_the_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """`x_` is the declared freeform namespace, not an accident."""
+        p = _blocked_payload()
+        p["blocker"]["reason"] = "x_producer_local_experiment"
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result = AutoDevResult.model_validate(p)
+        assert "blocker_reason_unknown" not in caplog.text
+        assert result.blocker is not None
+        assert result.blocker.reason == "x_producer_local_experiment"
+
+    def test_is_known_blocker_reason_predicate(self) -> None:
+        assert is_known_blocker_reason("agent_block")
+        assert is_known_blocker_reason(DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON)
+        assert is_known_blocker_reason(f"{FREEFORM_BLOCKER_REASON_PREFIX}anything")
+        assert not is_known_blocker_reason(self._UNKNOWN)
+
+    def test_registry_absorbs_the_module_level_constants(self) -> None:
+        """The four pre-existing schema.py reason constants are all members."""
+        assert EMPTY_DIFF_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
+        assert STALE_DISPATCH_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
+        assert FINALIZE_REGRESS_BLOCKER_REASONS <= KNOWN_BLOCKER_REASONS
+        assert OPERATOR_UNAVAILABLE_BLOCKER_REASONS <= KNOWN_BLOCKER_REASONS
+
+    def test_registry_covers_the_parse_side_synthetic_reasons(self) -> None:
+        """Lockstep guard: parse.py owns these literals, the registry restates
+        them (schema.py cannot import parse.py — parse.py imports schema.py)."""
+        assert {
+            BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS,
+            BLOCKER_REASON_NO_RESULT_EMITTED,
+            BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
+            BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
+            BLOCKER_REASON_STATUS_UNKNOWN,
+            BLOCKER_REASON_VALIDATION_FAILED,
+        } <= KNOWN_BLOCKER_REASONS
+
+    def test_registry_covers_the_codex_review_reasons(self) -> None:
+        """Same lockstep for cw.codex_review._const's blocker reasons."""
+        assert CODEX_MUST_FIX_MECHANICALLY_REJECTED in KNOWN_BLOCKER_REASONS
 
 
 # ---------------------------------------------------------------------------
@@ -4498,12 +4591,17 @@ class TestReviewRejectedCount:
     The counts an orchestrator reading ONLY the terminal ``AUTO_DEV_RESULT``
     sentinel needs in order to tell "nothing was found" apart from "findings
     were mechanically deleted before anyone looked at them".
+
+    #2098: both fields default to ``None`` ("producer did not report"), not
+    ``0``/``{}`` — a defaulted ``0`` is indistinguishable from a
+    producer-confirmed "nothing rejected" and silently reintroduces the exact
+    omitted-vs-zero ambiguity this field exists to resolve, one level up.
     """
 
-    def test_rejected_count_defaults_to_zero_when_omitted(self) -> None:
+    def test_rejected_count_defaults_to_none_when_omitted(self) -> None:
         review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
-        assert review.rejected_count == 0
-        assert review.rejected_count_by_severity == {}
+        assert review.rejected_count is None
+        assert review.rejected_count_by_severity is None
 
     def test_rejected_count_parses_explicit_value(self) -> None:
         review = Review.model_validate(
@@ -4518,14 +4616,29 @@ class TestReviewRejectedCount:
         assert review.rejected_count == 4
         assert review.rejected_count_by_severity == {"SHOULD_FIX": 3, "NIT": 1}
 
+    def test_rejected_count_parses_explicit_zero(self) -> None:
+        # A producer-confirmed zero is distinct from an omitted field — both
+        # must round-trip as their own value, not collapse to the same thing.
+        review = Review.model_validate(
+            {
+                "must_fix_initial": 0,
+                "should_fix": 0,
+                "fix_cycles_used": 0,
+                "rejected_count": 0,
+                "rejected_count_by_severity": {},
+            }
+        )
+        assert review.rejected_count == 0
+        assert review.rejected_count_by_severity == {}
+
     def test_pre_2000_payload_without_rejected_count_parses_unchanged(self) -> None:
         # Backward compatibility, proven rather than asserted in prose: the
         # shipped-payload helper's "review" dict omits both new fields, exactly
         # like every pre-#2000 producer's does.
         result = parse_stdout(_wrap_sentinel(_shipped_payload()))
         assert isinstance(result, AutoDevResult)
-        assert result.review.rejected_count == 0
-        assert result.review.rejected_count_by_severity == {}
+        assert result.review.rejected_count is None
+        assert result.review.rejected_count_by_severity is None
 
     def test_rejected_count_survives_auto_dev_result_round_trip(self) -> None:
         payload = _shipped_payload()

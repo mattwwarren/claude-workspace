@@ -252,6 +252,18 @@ class DocumentsFromReadError(CwError):
     __slots__ = ()
 
 
+class PlanReadError(CwError):
+    """A ``cw review consolidate --plan`` source could not be read (#2101).
+
+    Raised by ``cw.cli.review.consolidate._load_planned_files`` when the named
+    plan file cannot be read from disk. Mirrors ``DocumentsFromReadError``'s
+    shape for a different CLI option — the message always names the offending
+    path.
+    """
+
+    __slots__ = ()
+
+
 class EmitValidationError(CwError):
     """Raised by emit_result_locked() when the payload fails AutoDevResult
     validation. Carries the formatted field-error lines (see _format_errors

@@ -57,6 +57,7 @@ from cw.auto_dev_result import (
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
     STALE_DISPATCH_BLOCKER_REASON,
+    is_known_blocker_reason,
 )
 from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
 from cw.dev_queue import (
@@ -277,6 +278,30 @@ _MUST_FIX_MECHANICALLY_REJECTED_REASON = "codex_must_fix_mechanically_rejected"
 BREADCRUMB_ELIGIBLE_PAUSED_STATUSES: frozenset[str] = (
     STAGE_FAILURE_STATUSES - {"scope_exceeded", "forbidden_area"}
 ) | {_AWAITING_OPERATOR_REASON, _MUST_FIX_MECHANICALLY_REJECTED_REASON}
+
+
+# Appended to Rule 5's breadcrumb when the sentinel's blocker.reason is
+# neither registered in KNOWN_BLOCKER_REASONS nor declared freeform via the
+# `x_` prefix (#2097). The reason itself still travels verbatim -- open enum,
+# §4.2 -- but an operator reading `session.needs_attention` can now tell an
+# invented reason from a documented routing code without cross-checking the
+# contract by hand, which is the failure the #2097 incident turned on.
+_UNRECOGNIZED_REASON_SUFFIX = " (unrecognized)"
+
+
+def _breadcrumb_for_reason(blocker_reason: str | None) -> str:
+    """Render Rule 5's SESSION_NEEDS_ATTENTION breadcrumb (#1511, #2097).
+
+    Verbatim reason for a registered or `x_`-declared one; the same string
+    plus :data:`_UNRECOGNIZED_REASON_SUFFIX` otherwise. Empty when the
+    sentinel carried no blocker at all, exactly as before #2097.
+    """
+    if blocker_reason is None:
+        return ""
+    reason = str(blocker_reason)
+    if is_known_blocker_reason(reason):
+        return reason
+    return f"{reason}{_UNRECOGNIZED_REASON_SUFFIX}"
 
 
 def _park_must_fix_mechanically_rejected(task: TicketTask) -> None:
@@ -817,7 +842,7 @@ def _route_stage_failure(
             },
         )
         return
-    breadcrumbs = str(blocker_reason) if blocker_reason is not None else ""
+    breadcrumbs = _breadcrumb_for_reason(blocker_reason)
     record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
         {

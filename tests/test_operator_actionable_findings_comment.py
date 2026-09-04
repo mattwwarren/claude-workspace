@@ -264,12 +264,23 @@ def test_blocking_findings_header_still_declared_exactly_once() -> None:
 
 
 def test_step1a_excludes_operator_actionable_header_from_plan_detection() -> None:
+    """Same #2097 relocation as the blocking-findings guard: Step 1a now
+    references auto-dev.md's "Comment provenance rule" instead of restating
+    the fixed-header set, so membership is asserted at the rule."""
     section = _step1a_section()
     window = _after(section, "Pipeline-authored comment exclusion (#1650):", span=350)
-    assert HEADER in window
-    assert BLOCKING_HEADER in window
-    assert "## Pending Verification Scan" in window
-    assert "## Multi-Marker Gate Blocked" in window
+    assert "**pipeline fixed header**" in window
+    assert "*Comment provenance rule* in `.claude/commands/auto-dev.md`" in window
+    rule = _cmd("auto-dev.md")
+    rule_section = rule[
+        rule.index("## Comment provenance rule (#2097)") : rule.index(
+            "## Tool-Use Denial Exit"
+        )
+    ]
+    assert HEADER in rule_section
+    assert BLOCKING_HEADER in rule_section
+    assert "## Pending Verification Scan" in rule_section
+    assert "## Multi-Marker Gate Blocked" in rule_section
 
 
 # ---------------------------------------------------------------------------

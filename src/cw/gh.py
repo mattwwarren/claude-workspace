@@ -21,6 +21,17 @@ if TYPE_CHECKING:
 _GH_PR_STATE_MERGED = "MERGED"
 _PR_EXISTS_TIMEOUT = 10
 _PLAN_MARKER = "<!-- plan-spec-reviewed"
+# Provenance marker appended to every tracker comment this module posts
+# (GitHub #2097). An automated session posts under the operator's own gh
+# identity, so a comment it writes is byte-indistinguishable from one the
+# operator typed -- a later stage read exactly such a comment as a binding
+# operator directive and exited on an invented blocker reason. Every comment
+# written through post_issue_comment therefore carries this marker unless the
+# caller is relaying a decision the operator made themselves (today only
+# `cw dev-queue approve --post-marker`, which passes operator_authored=True).
+# The consumer-side trust rule lives in .claude/commands/auto-dev.md
+# ("Comment provenance rule"); this constant is the machine-readable half.
+AGENT_COMMENT_MARKER = "<!-- cw-agent-authored -->"
 FETCH_COMMENTS_TIMEOUT = 30
 _POST_COMMENT_TIMEOUT_SECONDS = 30
 _PR_VIEW_TIMEOUT = 15
@@ -498,6 +509,17 @@ def _comment_has_marker(comment: dict[str, Any]) -> bool:
     return isinstance(body, str) and _PLAN_MARKER in body
 
 
+def is_agent_authored(body: str) -> bool:
+    """Return True if *body* carries the agent-authored provenance marker (#2097).
+
+    Policy-free predicate over the marker :func:`post_issue_comment` appends:
+    it answers "was this written by the pipeline under the operator's
+    identity?", not "may this comment direct anything". Callers own the
+    trust decision.
+    """
+    return AGENT_COMMENT_MARKER in body
+
+
 def fetch_approved_plan_comment(
     ticket_id: str, *, timeout: int = FETCH_COMMENTS_TIMEOUT
 ) -> str | None:
@@ -544,6 +566,7 @@ def post_issue_comment(
     *,
     timeout: int = _POST_COMMENT_TIMEOUT_SECONDS,
     cwd: Path | None = None,
+    operator_authored: bool = False,
 ) -> _sp.CompletedProcess[bytes] | None:
     """Post *body* as a GitHub issue comment via ``gh issue comment``.
 
@@ -553,10 +576,16 @@ def post_issue_comment(
 
     *cwd* scopes the ``gh`` call to a client's repo (defaults to None, i.e.
     ambient CWD); multi-client callers MUST pass it (GitHub #1269/#1279).
+
+    *operator_authored* suppresses the :data:`AGENT_COMMENT_MARKER` provenance
+    line this function otherwise appends (GitHub #2097). Pass it only when the
+    comment records a decision the operator themselves made through a cw
+    command — not merely "an operator started the run this comment came from".
     """
+    posted_body = body if operator_authored else f"{body}\n\n{AGENT_COMMENT_MARKER}"
     try:
         return _sp.run(
-            ["gh", "issue", "comment", ticket_id, "--body", body],
+            ["gh", "issue", "comment", ticket_id, "--body", posted_body],
             capture_output=True,
             timeout=timeout,
             check=False,

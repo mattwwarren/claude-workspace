@@ -136,6 +136,85 @@ FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset({"agent_block"})
 OPERATOR_UNAVAILABLE_BLOCKER_REASONS: frozenset[str] = frozenset(
     {"push_auth_failed", "operator_unavailable"}
 )
+# blocker.reason emitted when a stage finds a destructive directive (delete a
+# remote branch, force-push/rewrite shared history, discard work, close or
+# reopen a ticket) sourced from a tracker comment rather than from the
+# operator directly. Named here because both the producer skills and this
+# registry reference it; see .claude/commands/auto-dev.md's "Comment
+# provenance rule" for the gate itself (#2097).
+DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON: Literal[
+    "destructive_directive_requires_operator"
+] = "destructive_directive_requires_operator"
+# Prefix reserving the explicit freeform half of the open enum (#2097). A
+# reason starting with it is *declared* experimental/producer-local, so it is
+# never warned about even though it is absent from KNOWN_BLOCKER_REASONS.
+FREEFORM_BLOCKER_REASON_PREFIX: Literal["x_"] = "x_"
+# Every blocker.reason cw or a producer skill is known to emit today (#2097).
+# ADVISORY, NOT A GATE: blocker.reason stays an open enum per
+# docs/headless-contract.md §4.2 -- an unrecognized reason parses and is
+# surfaced verbatim, it just logs a warning and is flagged in the operator's
+# view, so an *invented* reason that looks like a documented routing code
+# (the #2097 incident) is visible instead of silently authoritative.
+# Grouped by source; each group's owning module/doc is the place to add to.
+KNOWN_BLOCKER_REASONS: frozenset[str] = (
+    # .claude/commands/auto-dev.md's `blocker.reason` Values table. The
+    # doc-conformance test in tests/test_agent_comment_provenance.py parses
+    # that table and asserts every row appears here, so the two cannot drift.
+    frozenset(
+        {
+            "impl_not_pushed",
+            "impl_failed",
+            "review_blocked",
+            "plan_deviation",
+            "review_operator_actionable",
+            "plan_scope_drift",
+            "plan_unreviewable",
+            "plan_unsound",
+            "ambiguity_scan_unconverged",
+            "deferred_stub_unresolved",
+            "scope_tier_stale",
+            "fix_loop_pending_dispatch",
+            "agent_block",
+            "tool_denied",
+            DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON,
+        }
+    )
+    # Documented outside that table: docs/headless-contract.md §4.2, the
+    # stage skills' own exit clauses, and the local/opencode runner prompts.
+    | frozenset(
+        {
+            "automerge_not_armed",
+            "local_main_diverged_from_origin",
+            "plan_ambiguous",
+            "plan_missing",
+            "plan_missing_context",
+            "prior_pipeline_pr_open",
+        }
+    )
+    # cw-side synthetic reasons. The literals are owned by
+    # cw.auto_dev_result.parse (BLOCKER_REASON_*), cw.codex_review._const, and
+    # cw.dev_queue.lifecycle -- restated rather than imported because parse and
+    # lifecycle both import THIS module, so importing back would cycle.
+    # tests/test_auto_dev_result.py pins the parse-side copies in lockstep.
+    | frozenset(
+        {
+            "codex_must_fix_findings",
+            "codex_must_fix_mechanically_rejected",
+            "codex_review_partial",
+            "codex_review_unparseable",
+            "multiple_result_blocks",
+            "no_result_emitted",
+            "pr_already_open_pre_dispatch",
+            "schema_version_unsupported",
+            "status_unknown",
+            "validation_failed",
+        }
+    )
+    # Constants defined above in this module.
+    | frozenset({EMPTY_DIFF_BLOCKER_REASON, STALE_DISPATCH_BLOCKER_REASON})
+    | FINALIZE_REGRESS_BLOCKER_REASONS
+    | OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+)
 # Max automatic FINALIZE→IMPL regressions per ticket; prevents ping-pong.
 FINALIZE_REGRESS_CAP: int = 2
 SCOPE_TIER_SMALL: Literal["small"] = "small"
@@ -200,6 +279,23 @@ SALVAGE_HOLD_STATUSES: frozenset[str] = (
     | PAUSED_FOR_USER_INPUT_STATUSES
     | frozenset({"merge_pending"})
 )
+
+
+def is_known_blocker_reason(reason: str) -> bool:
+    """Return True if *reason* is registered or declared freeform (#2097).
+
+    Single source of truth for the "should this reason be flagged to the
+    operator" question: the :class:`Blocker` warn-only validator, dispatch
+    routing's ``SESSION_NEEDS_ATTENTION`` breadcrumb, and
+    ``cw dev-queue tasks``' REASON column all read it, so the ``x_`` freeform
+    carve-out cannot be honored at one site and missed at another.
+
+    Never a gate — ``blocker.reason`` remains an open enum (§4.2). A False
+    answer means "surface it as unrecognized," never "reject it."
+    """
+    return reason in KNOWN_BLOCKER_REASONS or reason.startswith(
+        FREEFORM_BLOCKER_REASON_PREFIX
+    )
 
 
 def queue_status_for_terminal_sentinel(status: Status) -> QueueItemStatus:
@@ -372,12 +468,22 @@ class Review(BaseModel):
     # `.claude/review-verdict.json` artifact) sees it too. Without it, a pass
     # that mechanically deleted findings reports `must_fix_initial: 0` and is
     # indistinguishable from one that genuinely found nothing. Additive and
-    # purely advisory, defaulting to `0`/`{}` so every pre-#2000 payload
-    # parses unchanged — same shape of change as `agents_run` (v5) and
-    # `had_real_commit`, and no `schema_version` bump (docs/headless-
-    # contract.md §8, Note A13).
-    rejected_count: int = 0
-    rejected_count_by_severity: dict[str, int] = Field(default_factory=dict)
+    # purely advisory, no `schema_version` bump (docs/headless-contract.md §8,
+    # Note A13).
+    #
+    # #2098: defaults to `None`, not `0`/`{}`. The #2000 producer half
+    # (`.claude/commands/auto-dev-review.md`) never actually landed a Freeze
+    # rule entry or a sentinel-template key for these two fields, so every
+    # real producer omitted them and this default fired on every payload —
+    # including the ones with real rejections. A defaulted `0` is
+    # indistinguishable from a producer-confirmed "nothing was rejected", so
+    # the omitted-vs-zero ambiguity this field exists to resolve for
+    # `must_fix_initial` was silently reintroduced one level up. `None` means
+    # "the producer did not report this field"; a producer that ran
+    # `cw review consolidate` and got a real count must emit it, never
+    # round it down to omission.
+    rejected_count: int | None = None
+    rejected_count_by_severity: dict[str, int] | None = None
 
 
 class AgentHealthEntry(BaseModel):
@@ -436,7 +542,14 @@ class Blocker(BaseModel):
 
     ``reason`` is intentionally typed as ``str`` (open enum per §4.2). The
     producer may add new reasons without a schema bump; consumers surface
-    unknown reasons verbatim.
+    unknown reasons verbatim. Since #2097 that openness is *advisory-checked*
+    rather than unchecked: a reason outside :data:`KNOWN_BLOCKER_REASONS`
+    still parses and is still surfaced verbatim, but logs
+    ``blocker_reason_unknown`` at WARNING and is flagged ``(unrecognized)`` in
+    the operator's views — so an invented reason that reads like a documented
+    routing code cannot pass as one. A producer that genuinely wants a
+    freeform reason declares it with the :data:`FREEFORM_BLOCKER_REASON_PREFIX`
+    (``x_``) namespace, which suppresses the warning.
 
     Phase B and Phase E of the queue-orchestrator observability expansion
     (issue #174) added five optional fields. All default to None so v1/v2
@@ -457,6 +570,17 @@ class Blocker(BaseModel):
     # means human intervention is required.
     retry_eligible: bool | None = None
     retry_delay_seconds: int | None = None
+
+    # Why: #2097 -- warn-only, never reject. The open-enum contract (§4.2)
+    # forbids failing a parse on an unrecognized reason, so this returns the
+    # value untouched; the WARNING (and the routing/CLI `(unrecognized)`
+    # flags fed by is_known_blocker_reason) is the entire remedy.
+    @field_validator("reason")
+    @classmethod
+    def _warn_unknown_reason(cls, v: str) -> str:
+        if not is_known_blocker_reason(v):
+            _log.warning("blocker_reason_unknown reason=%s", v)
+        return v
 
     @model_validator(mode="after")
     def _check_retry_invariants(self) -> Blocker:
@@ -627,6 +751,19 @@ class AutoDevResult(BaseModel):
     # rejects a coercible non-bool ("true"/1) rather than silently lax-mode
     # coercing it to True and defeating the consumer's identity check in
     # `productivity.py`. See GitHub issue #1896 R3.
+    #
+    # #2098: this is scoped to Step 1c.0 settlement ONLY — a resumed round
+    # that transcribes an operator's reply to a parked ambiguity/premise via
+    # its own step 5 candidate. A Step 1b `## Binding Pre-flight Resolutions`
+    # merge (an operator comment folded into the plan-agent prompt before the
+    # plan is even generated) is a *different* mechanism and never mints a
+    # `resolution_evidence` candidate, even though it is also an "operator
+    # resolution" in the colloquial sense — its trace lives in the plan's own
+    # `## Pre-flight Resolution Conformance` section and `friction_highlights`,
+    # not here. Widening this field to cover every merged pre-flight
+    # resolution would make any re-dispatch of a ticket carrying one emit
+    # `resolution_consumed: true` forever, defeating the anti-gaming ceiling
+    # `cw.dispatch.productivity` relies on this field for.
     resolution_consumed: StrictBool = False
     # Provenance for resolution_consumed above: the settlement round's source
     # comment id/URL and the settled item ids. None when resolution_consumed

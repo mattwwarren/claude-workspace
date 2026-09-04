@@ -221,3 +221,33 @@ def test_auto_dev_decision_rows_reference_consolidated_park() -> None:
     ):
         window = _after(content, row_anchor, span=400)
         assert "consolidated park (#1650)" in window, row_anchor
+
+
+# ---------------------------------------------------------------------------
+# 8. Approval evidence is tracker-neutral: `cw dev-queue approve` stamps
+#    queue_metadata.plan_approved_at, which Checkpoint 1 must honor alongside
+#    an approving tracker reply (the GitHub-only `--post-marker` comment can
+#    never reach a Linear-tracked ticket).
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint1_accepts_row_side_plan_approval_evidence() -> None:
+    """The Large-scope carve-out names the queue_metadata record as evidence."""
+    section = _checkpoint1_section()
+    window = _after(
+        section, "requires approval evidence in the live-fetched comments", span=1300
+    )
+    assert "`queue_metadata.plan_approved_at`" in window
+    assert "`.claude/cw-context.json`" in window
+    assert "`cw dev-queue approve`" in window
+    assert "Either source alone is sufficient" in window
+    assert "Absent both, EXIT `plan_pending_approval` again" in window
+
+
+def test_consolidated_park_names_cw_approve_as_comment_equivalent() -> None:
+    """The park comment's `### Approval requested` ask tells the operator
+    `cw dev-queue approve` clears the gate without a tracker comment."""
+    appendix = _appendix("plan")
+    window = _after(appendix, "`### Approval requested`", span=500)
+    assert "cw dev-queue approve <ticket> -c <client>" in window
+    assert "`plan_approved_at`" in window

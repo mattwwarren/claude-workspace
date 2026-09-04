@@ -7870,6 +7870,78 @@ class TestDevQueueTasksPrState:
         assert human_result.exit_code == 0, human_result.output
         assert "REASON" in human_result.output
         assert "plan_unreviewable" in human_result.output
+        # A registered reason is never flagged (#2097).
+        assert "?plan_unreviewable" not in human_result.output
+
+    def test_tasks_human_flags_an_unregistered_blocked_reason(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """REASON prefixes an unregistered reason with `?` (GitHub #2097).
+
+        A prefix, not a suffix, so the flag survives the column's 20-char
+        truncation -- the long invented reason is exactly the case that
+        motivated the flag.
+        """
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-2097",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="blocked",
+                        blocked_reason="stale_branch_restart_directed",
+                    )
+                ]
+            )
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        # 20-char column: the reason is cut, the leading `?` survives.
+        assert "?stale_branch_restar" in result.output
+        assert "stale_branch_restart_directed" not in result.output
+
+    def test_tasks_human_does_not_flag_a_freeform_blocked_reason(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """An `x_`-prefixed reason declares itself freeform — no flag (#2097)."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-2097X",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="blocked",
+                        blocked_reason="x_producer_local",
+                    )
+                ]
+            )
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert "x_producer_local" in result.output
+        assert "?x_producer_local" not in result.output
+
+    def test_tasks_human_renders_em_dash_for_absent_blocked_reason(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """No blocker reason keeps the pre-#2097 em-dash placeholder."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(tasks=[TicketTask(ticket_id="GEN-0", client="attn-client")])
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert "—" in result.output
 
     def test_tasks_json_includes_scope_hint_large(self, tmp_config_dir: Path) -> None:
         """_task_to_dict carries scope_hint through the JSON contract (#1618)."""
@@ -8450,7 +8522,12 @@ class TestDevQueueApproveCli:
                 ],
             )
         assert result.exit_code == 0, result.output
-        post_mock.assert_called_once_with("ACME-1", _PLAN_APPROVED_MARKER, cwd=ANY)
+        # operator_authored=True (#2097): the plan-approved marker records the
+        # operator's own --post-marker invocation, so it is the one comment
+        # through this choke point that must NOT carry AGENT_COMMENT_MARKER.
+        post_mock.assert_called_once_with(
+            "ACME-1", _PLAN_APPROVED_MARKER, cwd=ANY, operator_authored=True
+        )
         assert "posted the plan-approved marker comment" in result.output
 
     def test_approve_post_marker_dedups_when_already_present(
@@ -8629,6 +8706,80 @@ class TestDevQueueApproveCli:
         post_cwd = post_mock.call_args.kwargs["cwd"]
         assert fetch_cwd is not None
         assert fetch_cwd == post_cwd
+
+    def test_approve_post_marker_skips_gh_on_linear_tracker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A Linear-tracked client never reaches gh for the marker (the call
+        could only fail against a Linear id) and is told the approval lives
+        on the dev-queue row instead -- the previous behavior surfaced as a
+        misleading 'dedup check failed' on every Linear approve."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        _write_project_config_yaml(
+            tmp_path / "ws", "tracking:\n  primary:\n    system: linear\n"
+        )
+        with (
+            patch("cw.cli.dev_queue.crud.fetch_issue_comments") as fetch_mock,
+            patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock,
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                [
+                    "dev-queue",
+                    "approve",
+                    "ACME-1",
+                    "--client",
+                    "acme",
+                    "--post-marker",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        fetch_mock.assert_not_called()
+        post_mock.assert_not_called()
+        assert "tracker is 'linear', not GitHub" in result.output
+        assert "plan_approved_at" in result.output
+        # The GitHub-only hint is meaningless advice on this tracker.
+        assert "Pass --post-marker" not in result.output
+
+    def test_approve_plan_requeue_hint_suppressed_on_linear_tracker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without --post-marker, a Linear approve reports the row-side
+        record and does not suggest the GitHub-only flag."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        _write_project_config_yaml(
+            tmp_path / "ws", "tracking:\n  primary:\n    system: linear\n"
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "re-queued at plan stage" in result.output
+        assert "recorded on the dev-queue row (plan_approved_at)" in result.output
+        assert "Pass --post-marker" not in result.output
+
+    def test_approve_plan_requeue_hint_shown_on_github_tracker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: an unconfigured/GitHub tracker keeps the hint."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Pass --post-marker" in result.output
 
     def test_approve_post_marker_reports_gh_post_failure(
         self,
