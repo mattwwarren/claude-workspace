@@ -47,7 +47,7 @@ from cw.worktree import (
     check_not_main_checkout,
     create_worktree,
     remove_worktree,
-    worktree_has_unsaved_work,
+    unsaved_work_reason,
     worktree_path_for,
 )
 
@@ -985,19 +985,24 @@ def _spawn_claimed_task(
             # inspect. The outer except handler will not overwrite
             # BLOCKED_ON_USER (it checks status == RUNNING before
             # reverting).
-            if worktree_has_unsaved_work(client, branch):
+            unsaved = unsaved_work_reason(client, branch)
+            if unsaved is not None:
                 _log.warning(
-                    "dispatch: stale worktree %s/%s has unsaved work"
+                    "dispatch: stale worktree %s/%s has unsaved work (%s)"
                     " — leaving for operator inspection; parking as"
                     " BLOCKED_ON_USER",
                     client.name,
                     branch,
+                    unsaved,
                 )
+                # #2114: the breadcrumb names WHICH predicate fired and the
+                # base ref it measured against -- `dirty_worktree` on a
+                # visibly clean tree is otherwise undiagnosable.
                 _park_running_task_blocked_on_user(
                     ticket_id=task.ticket_id,
                     client_name=client.name,
                     disposition="dirty_worktree",
-                    breadcrumbs=str(worktree_path_for(client, branch)),
+                    breadcrumbs=f"{worktree_path_for(client, branch)}: {unsaved}",
                 )
             else:
                 with contextlib.suppress(WorktreeError, OSError):

@@ -1749,7 +1749,8 @@ class TestDispatchTickSpawnErrors:
         monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
         monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _record_remove)
         monkeypatch.setattr(
-            "cw.dispatch.claim.worktree_has_unsaved_work", lambda _c, _b: True
+            "cw.dispatch.claim.unsaved_work_reason",
+            lambda _c, _b: "1 uncommitted path(s)",
         )
 
         daemon = FakeNativeDaemonClient()
@@ -1772,7 +1773,8 @@ class TestDispatchTickSpawnErrors:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """StaleWorktreeError + dirty worktree park emits SESSION_NEEDS_ATTENTION
-        with breadcrumbs == the stringified worktree path (#1257)."""
+        with breadcrumbs == the worktree path plus the reason the predicate
+        fired (#1257, #2114)."""
         from cw.worktree import worktree_path_for
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
@@ -1784,7 +1786,8 @@ class TestDispatchTickSpawnErrors:
 
         monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
         monkeypatch.setattr(
-            "cw.dispatch.claim.worktree_has_unsaved_work", lambda _c, _b: True
+            "cw.dispatch.claim.unsaved_work_reason",
+            lambda _c, _b: "1 uncommitted path(s)",
         )
 
         daemon = FakeNativeDaemonClient()
@@ -1799,7 +1802,10 @@ class TestDispatchTickSpawnErrors:
         )
         assert len(events) == 1
         assert events[0].payload["paused_status"] == "dirty_worktree"
-        assert events[0].payload["breadcrumbs"] == expected_path
+        assert (
+            events[0].payload["breadcrumbs"]
+            == f"{expected_path}: 1 uncommitted path(s)"
+        )
         assert events[0].payload["ticket_id"] == "GEN-425D-ATT"
 
     def test_stale_worktree_clean_removes_and_reverts(
@@ -1828,7 +1834,7 @@ class TestDispatchTickSpawnErrors:
         monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
         monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _record_remove)
         monkeypatch.setattr(
-            "cw.dispatch.claim.worktree_has_unsaved_work", lambda _c, _b: False
+            "cw.dispatch.claim.unsaved_work_reason", lambda _c, _b: None
         )
 
         daemon = FakeNativeDaemonClient()

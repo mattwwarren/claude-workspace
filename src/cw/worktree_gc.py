@@ -290,11 +290,50 @@ def check_pr_state(
     return state, pr_number, True
 
 
+def _git_stdout(wt_path: Path, *args: str) -> str | None:
+    """Run ``git -C <wt_path> <args>`` and return stripped stdout, or None on
+    a non-zero exit or when git cannot be invoked."""
+    try:
+        result = _sp.run(
+            ["git", "-C", str(wt_path), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_git_clean_env(),
+        )
+    except (OSError, FileNotFoundError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _own_remote_log(wt_path: Path) -> bool | None:
+    """Level 0 (#2114): compare against ``origin/<checked-out branch>``.
+
+    Returns the unpushed verdict when that ref exists, or None to fall
+    through to the ``@{u}`` level. Mirrors ``cw.worktree._own_remote_ref``:
+    ``@{u}`` is whatever tracking ref is configured, and when it is the
+    default branch every commit on the feature branch reads as unpushed.
+    """
+    current = _git_stdout(wt_path, "branch", "--show-current")
+    if not current:
+        return None
+    ref = f"origin/{current}"
+    if _git_stdout(wt_path, "rev-parse", "--verify", "--quiet", ref) is None:
+        return None
+    log = _git_stdout(wt_path, "log", f"{ref}..HEAD", "--oneline")
+    if log is None:
+        return None
+    return bool(log)
+
+
 def _has_unpushed_commits(wt_path: Path) -> bool:
     """Return True if *wt_path* has commits not yet pushed to its upstream.
 
-    Resolves the upstream via ``@{u}`` on the worktree's actual checked-out
-    branch — mirroring the fix in ``cw.worktree._has_unpushed_commits``
+    Prefers ``origin/<checked-out branch>`` when that ref exists (#2114) and
+    only then resolves the upstream via ``@{u}`` on the worktree's actual
+    checked-out branch — mirroring ``cw.worktree._unpushed_commits_detail``
     (#2050) — rather than guessing ``origin/<branch>`` from a caller-supplied
     name that may not match what is actually checked out (#2053).
 
@@ -304,43 +343,16 @@ def _has_unpushed_commits(wt_path: Path) -> bool:
     returns True on any subprocess error, non-zero exit, blank ``@{u}``
     resolution, or a failed log check against the resolved upstream.
     """
-    try:
-        upstream = _sp.run(
-            [
-                "git",
-                "-C",
-                str(wt_path),
-                "rev-parse",
-                "--abbrev-ref",
-                "--symbolic-full-name",
-                "@{u}",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=_git_clean_env(),
-        )
-    except (OSError, FileNotFoundError):
-        return True  # conservative: treat as unpushed when git is unavailable
-    if upstream.returncode != 0:
-        return True
-    upstream_ref = upstream.stdout.strip()
+    own_verdict = _own_remote_log(wt_path)
+    if own_verdict is not None:
+        return own_verdict
+    upstream_ref = _git_stdout(
+        wt_path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"
+    )
     if not upstream_ref:
-        return True
-
-    try:
-        result = _sp.run(
-            ["git", "-C", str(wt_path), "log", f"{upstream_ref}..HEAD", "--oneline"],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=_git_clean_env(),
-        )
-    except (OSError, FileNotFoundError):
-        return True  # conservative: treat as unpushed when git is unavailable
-    if result.returncode != 0:
-        return True
-    return bool(result.stdout.strip())
+        return True  # conservative: no upstream, or git unavailable
+    log = _git_stdout(wt_path, "log", f"{upstream_ref}..HEAD", "--oneline")
+    return True if log is None else bool(log)
 
 
 def _is_dirty(wt_path: Path) -> bool:
