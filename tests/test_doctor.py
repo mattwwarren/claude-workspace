@@ -4976,6 +4976,259 @@ class TestWedgeDeadSessionBlockedOnUser:
         t = next(t for t in store.tasks if t.ticket_id == "TST-590-H")
         assert t.status == QueueItemStatus.PENDING
 
+    def test_terminal_sibling_park_not_detected_by_class_5(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A terminal_sibling park is not a class-5 finding (#2100).
+
+        Mirrors test_human_gated_park_not_detected_or_reverted: the row always
+        looks "dead" to the class-5 heuristic (session_id is None), but its
+        remedy is CANCEL via the dedicated class-7 detector, never a PENDING
+        revert -- reverting it would just get it re-parked terminal_sibling on
+        the next reconcile pass.
+        """
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+
+        save_state(CwState(sessions=[]))
+        task = self._make_blocked_task(
+            "TST-2100-A", session_id=None, disposition="terminal_sibling"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=True)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-2100-A")
+        # Untouched by class-5 (would revert to PENDING); class-7 cancels it
+        # instead (see TestWedgeTerminalSiblingPark).
+        assert t.status == QueueItemStatus.CANCELLED
+        class5_findings = [
+            f
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/blocked-on-user-dead-session"
+            and f.ticket_id == "TST-2100-A"
+        ]
+        assert class5_findings == []
+
+    def test_collapse_leaves_terminal_sibling_sibling_untouched(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """_collapse_blocked_on_user_tasks skips a terminal_sibling row and
+        collapses only the genuine sibling (#2100).
+
+        The terminal_sibling row is oldest -- without the #2100 guard the
+        collapse would pick it as the revert-to-PENDING target verbatim.
+        Exercises ``_collapse_blocked_on_user_tasks`` directly (mirroring
+        ``TestWedgeReapRecipes``'s isolation style) rather than through
+        ``run_doctor``: a full doctor run's post-reap ``reconcile()`` pass
+        would immediately re-park the reverted PENDING row terminal_sibling
+        again via ``park_terminal_sibling_tasks`` -- correct, pre-existing
+        dev-queue behavior (any PENDING row of a ticket with a terminal
+        sibling is re-parked, #876), but orthogonal to what this test checks.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor.wedge import _collapse_blocked_on_user_tasks
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        sibling_oldest = self._make_blocked_task(
+            "TST-2100-B",
+            session_id=None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            disposition="terminal_sibling",
+        )
+        dead_younger = self._make_blocked_task(
+            "TST-2100-B",
+            session_id=None,
+            created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        save_dev_queue(DevQueueStore(tasks=[sibling_oldest, dead_younger]))
+
+        store = load_dev_queue()
+        changed = _collapse_blocked_on_user_tasks(store, {"TST-2100-B"})
+        assert changed is True
+        save_dev_queue(store)
+
+        after = load_dev_queue()
+        tasks = sorted(
+            (t for t in after.tasks if t.ticket_id == "TST-2100-B"),
+            key=lambda t: t.created_at,
+        )
+        # The terminal_sibling row is untouched -- still BLOCKED_ON_USER.
+        assert tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert tasks[0].disposition == "terminal_sibling"
+        # The genuine dead-session row IS collapsed to PENDING.
+        assert tasks[1].status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# TestWedgeTerminalSiblingPark (GitHub #2100)
+# ---------------------------------------------------------------------------
+
+
+class TestWedgeTerminalSiblingPark:
+    """The dedicated class-7 wedge: BLOCKED_ON_USER terminal_sibling parks."""
+
+    def _make_sibling_task(
+        self,
+        ticket_id: str,
+        *,
+        attempts: int = 0,
+        session_id: str | None = None,
+        disposition: str | None = "terminal_sibling",
+    ) -> TicketTask:
+        from cw.models import QueueItemStatus
+
+        return _make_ticket_task(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id=session_id,
+            disposition=disposition,
+            attempts=attempts,
+        )
+
+    def test_detects_and_reports_recipe(self, tmp_config_dir: Path) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        task = self._make_sibling_task("TST-2100-C")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=False)
+
+        findings = [
+            f
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/terminal-sibling-park"
+            and f.ticket_id == "TST-2100-C"
+        ]
+        assert len(findings) == 1
+        assert "cancel" in findings[0].recipe.lower()
+
+    def test_detection_only_does_not_mutate_without_reap(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """ADR-0006 signal-only: detection alone never mutates the row."""
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        task = self._make_sibling_task("TST-2100-D")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        run_doctor(reap=False)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-2100-D")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.disposition == "terminal_sibling"
+
+    def test_reap_cancels_the_row(self, tmp_config_dir: Path) -> None:
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        task = self._make_sibling_task("TST-2100-E")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        run_doctor(reap=True)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-2100-E")
+        assert t.status == QueueItemStatus.CANCELLED
+
+    def test_reap_never_touches_the_real_completed_row(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """The ticket's real (non-duplicate) row is left completely alone."""
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        sibling = self._make_sibling_task("TST-2100-F")
+        real = _make_ticket_task(
+            ticket_id="TST-2100-F",
+            client="client-a",
+            status=QueueItemStatus.COMPLETED,
+            pr_url="https://github.com/o/r/pull/1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[sibling, real]))
+
+        run_doctor(reap=True)
+
+        store = load_dev_queue()
+        tasks = {t.status: t for t in store.tasks if t.ticket_id == "TST-2100-F"}
+        assert tasks[QueueItemStatus.CANCELLED].disposition is None
+        assert (
+            tasks[QueueItemStatus.COMPLETED].pr_url == "https://github.com/o/r/pull/1"
+        )
+
+    def test_attempts_nonzero_not_detected(self, tmp_config_dir: Path) -> None:
+        """Claim history (attempts > 0) is not the narrow duplicate shape.
+
+        Deliberately conservative (#2100): only a row that was NEVER claimed
+        is safe to auto-cancel under --reap. A row with claim history is left
+        for an operator to inspect via `cw dev-queue remove --status
+        blocked_on_user --disposition terminal_sibling`.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        task = self._make_sibling_task("TST-2100-G", attempts=1)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=True)
+
+        findings = [
+            f
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/terminal-sibling-park"
+        ]
+        assert findings == []
+        # Also excluded from class-5 (disposition-based, regardless of
+        # attempts) -- untouched, not reverted to PENDING.
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-2100-G")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_session_id_set_not_detected(self, tmp_config_dir: Path) -> None:
+        """A non-None session_id is not the narrow duplicate shape either."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        task = self._make_sibling_task("TST-2100-H", session_id="sess-1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=False)
+
+        findings = [
+            f
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/terminal-sibling-park"
+        ]
+        assert findings == []
+
+    def test_other_disposition_not_detected(self, tmp_config_dir: Path) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        task = self._make_sibling_task("TST-2100-I", disposition="awaiting_operator")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=False)
+
+        findings = [
+            f
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/terminal-sibling-park"
+        ]
+        assert findings == []
+
 
 # TestCheckLoopLiveness
 # ---------------------------------------------------------------------------

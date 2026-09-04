@@ -45,6 +45,7 @@ from cw.models import (
     LaneConfig,
     OrchestratorConfig,
     OrchestratorEventType,
+    QueueItemStatus,
     SessionPurpose,
     SessionStatus,
     TicketTask,
@@ -679,8 +680,6 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
-
     probed = {"lock_held": False}
     captured: list[BaseException] = []
 
@@ -1098,32 +1097,35 @@ def test_detect_auto_fix_ci_master_switch_off_returns_empty() -> None:
     )
 
 
-def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
+def test_act_auto_fix_ci_requeues_completed_row_and_dispatches_once(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """GitHub #2100: a COMPLETED row is requeued in place, never a sibling add.
+
+    This is the terminal_sibling park's exact root-cause scenario: a ticket
+    whose real dev-queue row already reached COMPLETED goes ci_failing again
+    (a post-merge PR, or hydration lag). The fix must mutate that same row
+    (status -> PENDING, stage unchanged) rather than mint a second, PLAN-stage
+    row alongside it.
+    """
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(
+        status=QueueItemStatus.COMPLETED,
         pr_url=_PR_URL,
         pr_state=_pr_state(
             attention_state="ci_failing", failing_checks=["lint", "mypy"]
         ),
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
-    store_before = load_dev_queue()
-    added: list[TicketTask] = []
     dispatched: list[dict[str, Any]] = []
 
-    def _fake_add_ticket(t: TicketTask) -> bool:
-        # emit-before-dispatch: PR_ACTION_TAKEN is durable before re-enqueue.
+    def _fake_dispatch(**kwargs: Any) -> None:
+        # emit-before-dispatch: PR_ACTION_TAKEN is durable before the requeue
+        # + tick run.
         taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
         assert any(e.correlation_id == task.ticket_id for e in taken)
-        added.append(t)
-        return True
-
-    def _fake_dispatch(**kwargs: Any) -> None:
         dispatched.append(kwargs)
 
-    monkeypatch.setattr("cw.dev_queue.add_ticket", _fake_add_ticket)
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch)
 
     acted = _act_auto_fix_ci(
@@ -1132,26 +1134,63 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
     )
 
     assert acted == [task.ticket_id]
-    assert len(added) == 1
-    assert added[0].ticket_id == task.ticket_id
-    assert added[0].client == task.client
-    assert added[0].lane == task.lane
-    # #1631: this is a brand-new row for a ticket with no session spawned
-    # under it yet -- the model default (True, fail-open) is for rows of
-    # unknown history, not this one, whose history is positively known.
-    # Dropping this kwarg would silently reopen #1631's false-completion gap
-    # for every ticket redispatched through auto-fix-CI.
-    assert added[0].ever_spawned is False
     assert dispatched == [{"once": True, "client": task.client, "emit": None}]
+    # Never mints a sibling row (#2100) -- exactly one row survives, requeued
+    # in place at its original stage.
+    store_after = load_dev_queue()
+    assert len(store_after.tasks) == 1
+    after_task = store_after.tasks[0]
+    assert after_task.ticket_id == task.ticket_id
+    assert after_task.status == QueueItemStatus.PENDING
+    assert after_task.stage == task.stage
     taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
     # auto_fix_ci's evidence is the failing checks, not the (meaningless-here)
     # review_decision field the address_review recipe uses.
     assert taken[-1].payload["evidence_snapshot"] == {
         "failing_checks": ["lint", "mypy"]
     }
+    # #2100 provenance: the row's status at fire time lands in the durably
+    # recorded PR_ACTION_TAKEN payload.
+    assert taken[-1].payload["queue_row_status"] == "completed"
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
-    # The latch is the ONLY mutation this act phase makes to the row.
-    after_task = load_dev_queue().tasks[0]
+
+
+def test_act_auto_fix_ci_existing_blocked_row_noop_dispatches_once(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GitHub #2100: a row that already owns the ticket is left alone.
+
+    BLOCKED_ON_USER (like PENDING/RUNNING/AWAITING_OPERATOR_SIGNOFF) already
+    occupies the ticket -- auto_fix_ci must not add a sibling OR requeue it;
+    only the follow-up dispatch tick runs.
+    """
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="ci_failing", failing_checks=["lint"]),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    store_before = load_dev_queue()
+    dispatched: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
+    )
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == [task.ticket_id]
+    assert dispatched == [{"once": True, "client": task.client, "emit": None}]
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    assert taken[-1].payload["queue_row_status"] == "blocked_on_user"
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    # The latch is the ONLY mutation this act phase makes -- no sibling row,
+    # no status change on the already-parked row.
+    store_after = load_dev_queue()
+    assert len(store_after.tasks) == 1
+    after_task = store_after.tasks[0]
     assert (
         after_task.model_copy(update={"auto_fix_ci_fired_at": None})
         == store_before.tasks[0]
@@ -1167,20 +1206,21 @@ def test_act_auto_fix_ci_dispatch_loop_locked_elsewhere_fails_open(
     second ``cw`` process would (fcntl.flock is per-open-file-description, so
     this denies acquisition even from this same test process). Proves
     ``_dispatch_auto_fix_ci`` does NOT bypass a genuinely-held external lock
-    (there is no ``force=True`` at this call site) -- it fails open via the
-    same ``except CwError`` / ``PR_ACTION_FAILED`` posture already used for
-    the analogous ``SessionsLockReentryError`` case (GitHub #1228). The ticket
-    is still re-enqueued (``add_ticket`` ran); only the "trigger a tick right
-    now" nicety is lost, deferred to whichever process holds the lock on its
-    own next regular tick.
+    (there is no ``force=True`` at this call site) -- it fails open via a
+    ``DispatchLoopLockedError``-specific ``PR_ACTION_FAILED`` (GitHub #2100),
+    a sibling posture to the ``except CwError`` path already used for the
+    analogous ``SessionsLockReentryError`` case (GitHub #1228). The row was
+    already requeued in place (``requeue_ticket`` ran, for real, before the
+    tick); only the "trigger a tick right now" nicety is lost, deferred to
+    whichever process holds the lock on its own next regular tick.
     """
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(
+        status=QueueItemStatus.COMPLETED,
         pr_url=_PR_URL,
         pr_state=_pr_state(attention_state="ci_failing", failing_checks=["lint"]),
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
-    store_before = load_dev_queue()
 
     lock_path = dispatch_loop_lock_file()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1203,16 +1243,20 @@ def test_act_auto_fix_ci_dispatch_loop_locked_elsewhere_fails_open(
     # Pin the failure to the lock-contention path specifically -- not just
     # "some CwError" -- mirroring test_reconcile_reentry_guard_fires_and_is_swallowed's
     # exact-exception check for the analogous #1228 SessionsLockReentryError case.
-    assert "dispatch loop already running" in matching[0].payload["error"]
-    # Latch stays stamped even on dispatch failure (no retry storm); it is the
-    # ONLY mutation this act phase makes to the row -- same invariant as the
-    # successful-dispatch case above.
-    after_task = load_dev_queue().tasks[0]
+    # The message explicitly says the row is already requeued/current (#2100)
+    # rather than the stale "already re-enqueued" claim.
+    error_text = matching[0].payload["error"]
+    assert "dispatch loop already running" in error_text
+    assert "already requeued/current" in error_text
+    # The row itself WAS requeued to PENDING despite the tick failing -- the
+    # mutation and the tick are independent failure domains (#2100). Never
+    # mints a sibling: exactly one row survives.
+    store_after = load_dev_queue()
+    assert len(store_after.tasks) == 1
+    after_task = store_after.tasks[0]
+    assert after_task.status == QueueItemStatus.PENDING
+    # Latch stays stamped even on dispatch failure (no retry storm).
     assert after_task.auto_fix_ci_fired_at is not None
-    assert (
-        after_task.model_copy(update={"auto_fix_ci_fired_at": None})
-        == store_before.tasks[0]
-    )
 
 
 def test_act_auto_fix_ci_stale_row_silent_skip(
@@ -1239,26 +1283,35 @@ def test_act_auto_fix_ci_stale_row_silent_skip(
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
 
 
-def test_act_auto_fix_ci_add_ticket_raises_emits_pr_action_failed(
+def test_act_auto_fix_ci_requeue_raises_emits_pr_action_failed(
     tmp_config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from cw.dev_queue import LaneNotFoundError
+    """GitHub #2100: a requeue_ticket failure corrects via PR_ACTION_FAILED.
+
+    Mirrors the old add_ticket-raises coverage, updated for the row-mutation
+    call this recipe now makes for a terminal row.
+    """
+    from cw.exceptions import RequeueStateError
 
     _write_acme_clients_yaml(tmp_config_dir)
-    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    task = _make_task(
+        status=QueueItemStatus.COMPLETED,
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="ci_failing"),
+    )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    lane_gone_msg = "lane gone"
+    row_gone_msg = "row moved on"
 
-    def _boom(_t: TicketTask) -> bool:
-        raise LaneNotFoundError(lane_gone_msg)
+    def _boom(*_args: object, **_kwargs: object) -> dict[str, str | bool | int]:
+        raise RequeueStateError(row_gone_msg)
 
-    monkeypatch.setattr("cw.dev_queue.add_ticket", _boom)
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _boom)
     monkeypatch.setattr(
         "cw.dispatch.run_dispatch_loop",
-        lambda **_kw: pytest.fail("dispatch must not run when add_ticket raises"),
+        lambda **_kw: pytest.fail("dispatch must not run when requeue_ticket raises"),
     )
 
     with caplog.at_level("WARNING"):
@@ -1273,7 +1326,12 @@ def test_act_auto_fix_ci_add_ticket_raises_emits_pr_action_failed(
     failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
     assert len(failed) == 1
     assert failed[0].correlation_id == task.ticket_id
-    assert "lane gone" in failed[0].payload["error"]
+    assert "row moved on" in failed[0].payload["error"]
+    # No sibling minted despite the failure -- the row is untouched, still
+    # COMPLETED (the mocked requeue_ticket never actually mutated it).
+    store_after = load_dev_queue()
+    assert len(store_after.tasks) == 1
+    assert store_after.tasks[0].status == QueueItemStatus.COMPLETED
 
 
 def test_auto_fix_ci_fires_once_per_episode(
@@ -1282,7 +1340,6 @@ def test_auto_fix_ci_fires_once_per_episode(
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
-    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
@@ -1310,7 +1367,6 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
-    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
@@ -1400,9 +1456,7 @@ def test_auto_fix_ci_repo_match_dispatches_normally(
         pr_state=_pr_state(attention_state="ci_failing", failing_checks=["lint"]),
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
-    added: list[TicketTask] = []
     dispatched: list[dict[str, Any]] = []
-    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
     monkeypatch.setattr(
         "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
     )
@@ -1413,9 +1467,11 @@ def test_auto_fix_ci_repo_match_dispatches_normally(
     )
 
     assert acted == [task.ticket_id]
-    assert len(added) == 1
     assert len(dispatched) == 1
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    # No sibling minted (#2100) -- the (default BLOCKED_ON_USER) row already
+    # owns the ticket, so the guard's success path is a no-op beyond the tick.
+    assert len(load_dev_queue().tasks) == 1
 
 
 def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
@@ -1434,9 +1490,10 @@ def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
         cross_repo_override=True,
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
-    added: list[TicketTask] = []
-    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+    dispatched: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
+    )
 
     with caplog.at_level("WARNING"):
         acted = _act_auto_fix_ci(
@@ -1445,7 +1502,7 @@ def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
         )
 
     assert acted == [task.ticket_id]
-    assert len(added) == 1
+    assert len(dispatched) == 1
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
     assert "review_recipe_repo_mismatch_override" in caplog.text
     assert task.ticket_id in caplog.text
@@ -1465,9 +1522,10 @@ def test_auto_fix_ci_unparseable_pr_url_fails_open(
         pr_state=_pr_state(attention_state="ci_failing"),
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
-    added: list[TicketTask] = []
-    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+    dispatched: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
+    )
 
     acted = _act_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
@@ -1475,7 +1533,7 @@ def test_auto_fix_ci_unparseable_pr_url_fails_open(
     )
 
     assert acted == [task.ticket_id]
-    assert len(added) == 1
+    assert len(dispatched) == 1
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
 
 
@@ -1486,9 +1544,10 @@ def test_auto_fix_ci_unresolvable_client_fails_open(
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
-    added: list[TicketTask] = []
-    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+    dispatched: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
+    )
 
     # clients={} -> client_cfg is None -> guard fails open, dispatch proceeds.
     acted = _act_auto_fix_ci(
@@ -1496,7 +1555,7 @@ def test_auto_fix_ci_unresolvable_client_fails_open(
     )
 
     assert acted == [task.ticket_id]
-    assert len(added) == 1
+    assert len(dispatched) == 1
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
 
 

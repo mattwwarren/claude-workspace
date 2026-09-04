@@ -83,6 +83,7 @@ from cw.models.tasks import (
     TicketTask,
     _validate_gate_recipe_keys,
     _validate_review_recipe_keys,
+    occupies_lane_slot,
 )
 
 __all__ = [
@@ -146,4 +147,5 @@ __all__ = [
     "_validate_gate_recipe_keys",
     "_validate_review_recipe_keys",
     "extract_unresolved_spawn_count",
+    "occupies_lane_slot",
 ]

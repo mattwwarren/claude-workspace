@@ -673,7 +673,7 @@ def _dispatch_client_lanes(
     )
     lane_stats: dict[str, dict[str, int]] = {}
     # Per-lane occupant {ticket_id, status} lists for the dispatch.tick payload
-    # (#1243). Computed once here (all lanes), the same OCCUPIED_LANE_STATUSES
+    # (#1243). Computed once here (all lanes), the same occupies_lane_slot()
     # join _lane_stats_for_client uses -- so blocked_in_lane/signoff_in_lane
     # below derive from it rather than re-scanning the queue.
     occupants_by_lane = _lane_occupants_for_client(client, queue_snapshot)
@@ -715,7 +715,7 @@ def _dispatch_client_lanes(
             )
             continue
         # running_in_lane = RUNNING + BLOCKED_ON_USER + AWAITING_OPERATOR_SIGNOFF
-        # (total occupied slots, OCCUPIED_LANE_STATUSES, #990).
+        # (total occupied slots, occupies_lane_slot(), #990/#2100).
         running_in_lane = running_by_lane.get(lane_cfg.name, 0)
         breakdown = _lane_slot_breakdown(
             occupants_by_lane.get(lane_cfg.name, []),
