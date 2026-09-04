@@ -468,12 +468,22 @@ class Review(BaseModel):
     # `.claude/review-verdict.json` artifact) sees it too. Without it, a pass
     # that mechanically deleted findings reports `must_fix_initial: 0` and is
     # indistinguishable from one that genuinely found nothing. Additive and
-    # purely advisory, defaulting to `0`/`{}` so every pre-#2000 payload
-    # parses unchanged — same shape of change as `agents_run` (v5) and
-    # `had_real_commit`, and no `schema_version` bump (docs/headless-
-    # contract.md §8, Note A13).
-    rejected_count: int = 0
-    rejected_count_by_severity: dict[str, int] = Field(default_factory=dict)
+    # purely advisory, no `schema_version` bump (docs/headless-contract.md §8,
+    # Note A13).
+    #
+    # #2098: defaults to `None`, not `0`/`{}`. The #2000 producer half
+    # (`.claude/commands/auto-dev-review.md`) never actually landed a Freeze
+    # rule entry or a sentinel-template key for these two fields, so every
+    # real producer omitted them and this default fired on every payload —
+    # including the ones with real rejections. A defaulted `0` is
+    # indistinguishable from a producer-confirmed "nothing was rejected", so
+    # the omitted-vs-zero ambiguity this field exists to resolve for
+    # `must_fix_initial` was silently reintroduced one level up. `None` means
+    # "the producer did not report this field"; a producer that ran
+    # `cw review consolidate` and got a real count must emit it, never
+    # round it down to omission.
+    rejected_count: int | None = None
+    rejected_count_by_severity: dict[str, int] | None = None
 
 
 class AgentHealthEntry(BaseModel):
@@ -741,6 +751,19 @@ class AutoDevResult(BaseModel):
     # rejects a coercible non-bool ("true"/1) rather than silently lax-mode
     # coercing it to True and defeating the consumer's identity check in
     # `productivity.py`. See GitHub issue #1896 R3.
+    #
+    # #2098: this is scoped to Step 1c.0 settlement ONLY — a resumed round
+    # that transcribes an operator's reply to a parked ambiguity/premise via
+    # its own step 5 candidate. A Step 1b `## Binding Pre-flight Resolutions`
+    # merge (an operator comment folded into the plan-agent prompt before the
+    # plan is even generated) is a *different* mechanism and never mints a
+    # `resolution_evidence` candidate, even though it is also an "operator
+    # resolution" in the colloquial sense — its trace lives in the plan's own
+    # `## Pre-flight Resolution Conformance` section and `friction_highlights`,
+    # not here. Widening this field to cover every merged pre-flight
+    # resolution would make any re-dispatch of a ticket carrying one emit
+    # `resolution_consumed: true` forever, defeating the anti-gaming ceiling
+    # `cw.dispatch.productivity` relies on this field for.
     resolution_consumed: StrictBool = False
     # Provenance for resolution_consumed above: the settlement round's source
     # comment id/URL and the settled item ids. None when resolution_consumed
