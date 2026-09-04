@@ -150,12 +150,27 @@ def _blocking_findings_rule_section() -> str:
 
 
 def test_step1a_excludes_blocking_findings_header_from_plan_detection() -> None:
-    """The Step 1a exclusion parenthetical grows a third fixed header."""
+    """This header is excluded from Step 1a plan detection.
+
+    #2097 moved the hand-maintained header list out of Step 1a and into
+    auto-dev.md's "Comment provenance rule" (Step 1a now references it), so
+    the guard asserts the reference here and membership there rather than a
+    literal list at a site that had already drifted against its own Decision
+    branch.
+    """
     section = _step1a_section()
-    window = _after(section, "Pipeline-authored comment exclusion (#1650):", span=250)
-    assert HEADER in window
-    assert "## Pending Verification Scan" in window
-    assert "## Multi-Marker Gate Blocked" in window
+    window = _after(section, "Pipeline-authored comment exclusion (#1650):", span=350)
+    assert "**pipeline fixed header**" in window
+    assert "*Comment provenance rule* in `.claude/commands/auto-dev.md`" in window
+    rule = _cmd("auto-dev.md")
+    rule_section = rule[
+        rule.index("## Comment provenance rule (#2097)") : rule.index(
+            "## Tool-Use Denial Exit"
+        )
+    ]
+    assert HEADER in rule_section
+    assert "## Pending Verification Scan" in rule_section
+    assert "## Multi-Marker Gate Blocked" in rule_section
 
 
 # ---------------------------------------------------------------------------

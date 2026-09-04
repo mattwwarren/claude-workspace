@@ -2362,3 +2362,110 @@ class TestGateRecipesValidator:
         gate_recipes field validators without raising."""
         assert LaneConfig(name="default", gate_recipes=None).gate_recipes is None
         assert _make_task(gate_recipes=None).gate_recipes is None
+
+
+# ---------------------------------------------------------------------------
+# auto_adopt_clean_plan on a non-GitHub tracker (the #1906 follow-up): the
+# plan-of-record read skips the GitHub-only fetch and resolves the real
+# branch-derived worktree for rows whose worktree_path is never stamped.
+# ---------------------------------------------------------------------------
+
+
+def _linear_clients(ws: Path) -> dict[str, ClientConfig]:
+    """`_seam1_clients` shape, but rooted at a real tmp workspace that carries
+    a ``tracking.primary.system: linear`` project config."""
+    from tests.conftest import _write_project_config_yaml
+
+    ws.mkdir(parents=True, exist_ok=True)
+    _write_project_config_yaml(ws, "tracking:\n  primary:\n    system: linear\n")
+    both_on = {RECIPE_AUTO_APPROVE_REVIEW: True, RECIPE_AUTO_ADOPT_PLAN: True}
+    return {
+        "acme": ClientConfig(
+            name="acme",
+            workspace_path=ws,
+            default_branch="main",
+            lanes=[LaneConfig(name="default", gate_recipes=dict(both_on))],
+        )
+    }
+
+
+def _fetch_must_not_run(_ticket_id: str, **_k: Any) -> str | None:
+    msg = "fetch_approved_plan_comment must not be called for a linear tracker"
+    raise AssertionError(msg)
+
+
+class TestDetectAdoptPlanTrackerAware:
+    def test_linear_tracker_reads_branch_worktree_without_gh(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Linear client, reviewed plan.md in the branch-derived worktree,
+        worktree_path=None on the row (the dispatch-driven shape): the
+        recipe fires from the local file and never shells out to gh."""
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipes.fetch_approved_plan_comment",
+            _fetch_must_not_run,
+        )
+        wt = tmp_path / "wt"
+        (wt / ".cw").mkdir(parents=True)
+        (wt / ".cw" / "plan.md").write_text(plan_body(), encoding="utf-8")
+        monkeypatch.setattr(
+            "cw.dev_queue.lifecycle.worktree_path_for", lambda _c, _b: wt
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.lifecycle._checked_out_branch", lambda _wt: "dev/GEN-1"
+        )
+        task = _make_task(stage=Stage.PLAN, worktree_path=None)
+        state = CwState(sessions=[_make_session(last_result=_plan_result())])
+
+        candidates = _detect_auto_adopt_plan(
+            state, [task], clients=_linear_clients(tmp_path / "ws"), config=_config()
+        )
+
+        assert len(candidates) == 1
+        assert candidates[0].evidence == _PLAN_SNAPSHOT
+
+    def test_linear_tracker_no_worktree_yields_no_candidate(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No local plan and no GitHub to ask: fail closed, gh untouched."""
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipes.fetch_approved_plan_comment",
+            _fetch_must_not_run,
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.lifecycle.worktree_path_for",
+            lambda _c, _b: tmp_path / "missing",
+        )
+        task = _make_task(stage=Stage.PLAN, worktree_path=None)
+        state = CwState(sessions=[_make_session(last_result=_plan_result())])
+
+        assert (
+            _detect_auto_adopt_plan(
+                state,
+                [task],
+                clients=_linear_clients(tmp_path / "ws"),
+                config=_config(),
+            )
+            == []
+        )
+
+    def test_dangling_client_keeps_github_first_behavior(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A row whose client is absent from the clients dict resolves no
+        tracker, so the pre-existing GitHub-first fetch still runs."""
+        calls: list[str] = []
+
+        def _fetch(ticket_id: str, **_k: Any) -> str | None:
+            calls.append(ticket_id)
+            return None
+
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipes.fetch_approved_plan_comment", _fetch
+        )
+        task = _make_task(stage=Stage.PLAN, worktree_path=None)
+        state = CwState(sessions=[_make_session(last_result=_plan_result())])
+
+        _detect_auto_adopt_plan(state, [task], clients={}, config=_config())
+
+        assert calls == ["GEN-1"]

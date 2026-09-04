@@ -2968,3 +2968,50 @@ class TestRenderAnchorDegraded:
             raw={"value": 42}, reviewer_role="R", reason="schema_invalid"
         )
         assert _render_rejected_finding_text(rf) == []
+
+
+class TestRenderOutOfPlanScope:
+    """#2101: the posted comment flags a finding outside the plan's scope."""
+
+    def test_diff_changed_file_stays_unannotated_despite_plan_omission(self) -> None:
+        # A diff-changed file always counts as in scope regardless of the
+        # plan manifest (see TestConsolidateVerdictPlanScope in
+        # test_review_findings.py for the membership rule itself), so this
+        # asserts the annotation's absence, not its presence.
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(summary="scope creep"))],
+            _make_diff(),
+            reviewed_sha="sha",
+            planned_files=["src/cw/other.py"],
+        )
+        assert verdict.accepted[0].in_plan_scope is True
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "outside planned file set" not in body
+
+    def test_in_plan_scope_false_renders_the_annotation(self) -> None:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(summary="scope creep"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        # Stamp in_plan_scope=False directly -- consolidate_verdict's own
+        # membership rule always counts a diff-changed file as in scope (see
+        # cw.review_findings._consolidate._in_plan_scope), so exercising the
+        # renderer's False branch needs a hand-stamped AcceptedFinding rather
+        # than trying to coax consolidate_verdict into producing one.
+        out_of_scope = verdict.accepted[0].model_copy(update={"in_plan_scope": False})
+        verdict = verdict.model_copy(update={"accepted": [out_of_scope]})
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert (
+            "- **src/cw/foo.py:10** _(outside planned file set)_ — scope creep"
+        ) in body
+
+    def test_in_plan_scope_none_carries_no_annotation(self) -> None:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(summary="ordinary"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        assert verdict.accepted[0].in_plan_scope is None
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "outside planned file set" not in body
