@@ -105,6 +105,25 @@ def _select_run_failures_with_discards(
     ]
 
 
+def _in_plan_scope(
+    finding: Finding, planned_files: list[str] | None, changed: frozenset[str]
+) -> bool | None:
+    """Tag *finding* against the plan's declared file set (#2101).
+
+    ``None`` when no plan was supplied at all (``planned_files is None``) or
+    when *finding* has no diff anchor (``no_diff_anchor`` — which the model
+    guarantees pairs with ``file == "N/A"``): plan-file-set membership is a
+    category error for a finding that names no real path. Otherwise ``True``
+    iff *finding*'s file is in *planned_files* OR in *changed* — the diff's own
+    changed-file set counts as in scope even when the plan's manifest omits it,
+    so an incomplete ``## Files Modified`` list can never manufacture a false
+    exclusion for a file the diff genuinely touches.
+    """
+    if planned_files is None or finding.no_diff_anchor:
+        return None
+    return finding.file in planned_files or finding.file in changed
+
+
 def consolidate_verdict(
     documents: list[ReviewerFindingsDocument],
     diff: CapturedDiff,
@@ -115,6 +134,7 @@ def consolidate_verdict(
     fix_cycles_used: int = 0,
     metrics_by_role: dict[str, ReviewerRunMetrics] | None = None,
     pre_validation_rejected: list[RejectedFinding] | None = None,
+    planned_files: list[str] | None = None,
 ) -> ReviewVerdict:
     """Consolidate every reviewer's document into a single :class:`ReviewVerdict`.
 
@@ -198,9 +218,24 @@ def consolidate_verdict(
     (:func:`write_review_verdict`). A role recorded only via
     ``failed_reviewers`` has no document and so no ``detail`` to copy; its
     record keeps the ``""`` default.
+
+    ``planned_files`` (#2101, default ``None``) is the plan's ``## Files
+    Modified`` manifest — ``cw review consolidate``'s ``--plan`` option parses
+    it via :func:`cw.plan_files.parse_plan_files_modified` and passes it
+    through unchanged. It stamps ``AcceptedFinding.in_plan_scope`` on every
+    accepted finding (see :func:`_in_plan_scope`) — see that attribute's
+    docstring for the tri-state semantics. Defaulting to ``None``
+    keeps every pre-#2101 caller producing a byte-identical verdict (every
+    ``in_plan_scope`` stays ``None``). **This is adjudication input only — it
+    never rejects, drops, or otherwise filters a finding here.** A mechanical
+    file-set membership check silently dropping a finding is exactly the
+    #1632 regression the ``"unanchored"`` routing exists to prevent; the
+    coordinating session (``.claude/commands/auto-dev-review.md`` Checkpoint
+    3a (4d)) decides what an out-of-scope finding's disposition should be.
     """
     failures = failed_reviewers if failed_reviewers is not None else []
     metrics = metrics_by_role if metrics_by_role is not None else {}
+    changed = frozenset(diff.files)
     candidates: list[tuple[str, Finding]] = []
     all_rejected: list[RejectedFinding] = list(pre_validation_rejected or [])
     all_stripped: list[StrippedEscalation] = []
@@ -235,7 +270,12 @@ def consolidate_verdict(
         for failure in failures
     )
 
-    accepted_findings = dedupe_findings(candidates)
+    accepted_findings = [
+        af.model_copy(
+            update={"in_plan_scope": _in_plan_scope(af.finding, planned_files, changed)}
+        )
+        for af in dedupe_findings(candidates)
+    ]
     # #2000: computed ONCE, from the same `all_rejected` list `rejected_must_fix`
     # is selected from, and threaded into both the nested `Review` (which
     # becomes `AutoDevResult.review`, what an unattended orchestrator reads) and

@@ -371,12 +371,31 @@ class AcceptedFinding(BaseModel):
     with its own ``reason`` Literal. Blank for the default disposition; the
     adjudication rationale (reject/defer) or the downgrade explanation
     (dropped) otherwise.
+
+    ``in_plan_scope`` (#2101) is a mechanical tag, not a gate: whether this
+    finding's ``file`` falls inside the plan's declared scope. ``None`` means
+    either "no plan was supplied to :func:`consolidate_verdict`" (the default
+    — every pre-#2101 call site stays byte-identical) or "this finding has no
+    diff anchor at all" (``file == "N/A"`` / ``no_diff_anchor``), for which
+    plan-file-set membership is a category error. ``True``/``False`` otherwise,
+    computed by :func:`consolidate_verdict` as "``file`` appears in the plan's
+    ``## Files Modified`` manifest OR in the diff's own changed-file set" — a
+    file the diff genuinely touches is in scope even when the plan's manifest
+    omits it (an incomplete manifest must never manufacture a false exclusion).
+    Never used to reject, drop, or otherwise filter a finding here — see
+    :func:`consolidate_verdict`'s docstring for why: a mechanical file-set
+    membership check is exactly the kind of automated filter that would
+    resurrect the #1632 silent-drop the ``"unanchored"`` routing exists to
+    prevent. It is adjudication input only; the coordinating session
+    (``.claude/commands/auto-dev-review.md`` Checkpoint 3a (4d)) decides what
+    to do with it.
     """
 
     finding: Finding
     reviewers: list[str]
     disposition: Disposition = "fixed"
     disposition_detail: str = ""
+    in_plan_scope: bool | None = None
 
 
 class ReviewerRunMetrics(TypedDict, total=False):
