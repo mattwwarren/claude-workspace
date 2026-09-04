@@ -39,6 +39,9 @@ from cw.review_findings import (
     _evidence_diff_pair,
     _evidence_in_claimed_lines,
     _evidence_removed_in_fix_diff,
+    _formatting_normalized_text,
+    _formatting_tolerant_contains,
+    _formatting_tolerant_window,
     _line_exceeds_file_length,
     _line_reference_valid,
     _normalize_diff_text,
@@ -830,6 +833,43 @@ def _issue1879_captured_diff() -> CapturedDiff:
     return _captured_diff_from_text(_ISSUE1879_DIFF)
 
 
+def _routed_for_unmatched_evidence(
+    accepted: list[Finding], rejected: list[RejectedFinding]
+) -> Finding:
+    """Assert #2099's adjudication routing fired, and return the finding.
+
+    ``validate_reviewer_document``'s outcome for a finding classified
+    ``evidence_not_in_diff``: nothing rejected, one accepted finding carrying
+    the flag and the reason that tell a consumer its quote is unverified. Used
+    by every test that used to assert ``rejected[0].reason ==
+    "evidence_not_in_diff"`` — the classification those tests pin is unchanged
+    and is still asserted directly via ``_classify_finding`` where it is the
+    point; what moved is only where the finding lands afterwards.
+    """
+    assert rejected == []
+    assert len(accepted) == 1
+    assert accepted[0].anchor_degraded is True
+    assert accepted[0].anchor_degraded_reason == "evidence_not_in_diff"
+    return accepted[0]
+
+
+def _unmatched_evidence_routing_log(records: list[logging.LogRecord]) -> str:
+    """Return the one #2099 routing line in *records*, asserting it is unique.
+
+    The ``detail=`` payload on that line is ``_rejection_detail``'s message —
+    the same #1792/#2019 diagnosis that used to live on
+    ``RejectedFinding.detail``, which is why the tests pinning that wording
+    read it from here now.
+    """
+    matches = [
+        record.getMessage()
+        for record in records
+        if "routed finding whose evidence did not match" in record.getMessage()
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
 class TestSeverityAndDispositionLiterals:
     def test_valid_severities_round_trip(self) -> None:
         for sev in ("MUST_FIX", "SHOULD_FIX", "DEBT", "NIT", "PRINCIPLE"):
@@ -1326,13 +1366,42 @@ class TestValidateReviewerDocument:
         assert not accepted
         assert rejected[0].reason == "missing_evidence"
 
-    def test_evidence_not_in_diff_rejected(self) -> None:
+    def test_evidence_not_in_diff_routed_to_adjudication(self) -> None:
+        # #2099: still classified `evidence_not_in_diff` (the matcher is
+        # unchanged for genuinely-absent text), but no longer DISCARDED --
+        # routed to adjudication as a flagged finding, the same way #1632's
+        # "unanchored" and #2081's "line_anchor_degraded" already were. The
+        # line endpoints survive: they resolved, only the quote did not.
         f = _make_finding(evidence="not present anywhere")
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(f), _make_diff()
         )
-        assert not accepted
-        assert rejected[0].reason == "evidence_not_in_diff"
+        assert rejected == []
+        assert len(accepted) == 1
+        assert accepted[0].anchor_degraded is True
+        assert accepted[0].anchor_degraded_reason == "evidence_not_in_diff"
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 10
+        assert accepted[0].evidence == "not present anywhere"
+
+    def test_evidence_not_in_diff_routing_logs_info_with_detail(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The routing is announced at INFO like every other one, and carries
+        # `_rejection_detail`'s diagnosis so the operator still learns which
+        # normalization/rescue stages ran (#2099 keeps #1792/#1976's message).
+        f = _make_finding(evidence="not present anywhere")
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            validate_reviewer_document(_make_reviewer_doc(f), _make_diff())
+        assert any(
+            "routed finding whose evidence did not match" in rec.getMessage()
+            and "normalization applied" in rec.getMessage()
+            for rec in caplog.records
+        )
+        assert not any(
+            "mechanically rejected finding" in rec.getMessage()
+            for rec in caplog.records
+        )
 
     def test_unknown_file_rejected_without_worktree(self) -> None:
         # Exercises the worktree=None back-compat path (#1632): with no
@@ -1366,9 +1435,15 @@ class TestValidateReviewerDocument:
         # at all -- not in the log, not on the verdict, not in the comment. The
         # counter is only half the fix; the operator reading the session log
         # must be able to see WHICH finding was deleted and why.
+        #
+        # #2099 moved this test off `evidence_not_in_diff` (now routed to
+        # adjudication, so nothing is deleted) onto `unknown_file`, which
+        # stays a mechanical rejection. The assertion is about the log line's
+        # SHAPE at a sub-MUST_FIX severity, not about which reason produced
+        # it, so the substitution costs the test nothing.
         f = _make_finding(
             severity="SHOULD_FIX",
-            evidence="not present anywhere",
+            file="src/cw/other.py",
             summary="silently dropped finding",
         )
         with caplog.at_level(logging.INFO, logger="cw.review_findings"):
@@ -1376,12 +1451,12 @@ class TestValidateReviewerDocument:
                 _make_reviewer_doc(f, reviewer_role="Code Quality Reviewer"),
                 _make_diff(),
             )
-        assert rejected[0].reason == "evidence_not_in_diff"
+        assert rejected[0].reason == "unknown_file"
         assert any(
             "mechanically rejected finding" in rec.getMessage()
             and "Code Quality Reviewer" in rec.getMessage()
             and "SHOULD_FIX" in rec.getMessage()
-            and "evidence_not_in_diff" in rec.getMessage()
+            and "unknown_file" in rec.getMessage()
             and "silently dropped finding" in rec.getMessage()
             for rec in caplog.records
         )
@@ -1473,9 +1548,13 @@ class TestValidateReviewerDocument:
         # unaffected — see test_quote_matches_full_diff_not_only_added_lines.
         diff = _make_diff(extra_text="-removed_context_line = 1")
         f = _make_finding(evidence="removed_context_line = 1")
+        assert (
+            _classify_finding(f, diff, frozenset(diff.files)) == "evidence_not_in_diff"
+        )
+        # #2099: the CLASSIFICATION above is what R6 pinned and is unchanged;
+        # the finding is now routed to adjudication rather than discarded.
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
-        assert not accepted
-        assert rejected[0].reason == "evidence_not_in_diff"
+        _routed_for_unmatched_evidence(accepted, rejected)
 
     def test_evidence_from_other_line_same_file_is_now_content_rescued(self) -> None:
         # R6 (#1236) originally pinned this as rejected: a quote that IS the
@@ -1527,9 +1606,13 @@ class TestValidateReviewerDocument:
             line_start=10,
             line_end=10,
         )
+        # The file-scoping claim is the classification, which #2099 leaves
+        # untouched; only the routing of the result changed.
+        assert (
+            _classify_finding(f, diff, frozenset(diff.files)) == "evidence_not_in_diff"
+        )
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
-        assert not accepted
-        assert rejected[0].reason == "evidence_not_in_diff"
+        _routed_for_unmatched_evidence(accepted, rejected)
 
     def test_single_endpoint_finding_checks_that_line(self) -> None:
         # A finding with only line_start set (line_end None) checks evidence
@@ -1657,9 +1740,14 @@ class TestValidateReviewerDocument:
         # the loosened anchor bound must not loosen the evidence check.
         diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
         f = _make_finding(line_start=12, line_end=12, evidence="totally unrelated text")
+        assert (
+            _classify_finding(f, diff, frozenset(diff.files)) == "evidence_not_in_diff"
+        )
+        # #2099 routes the result to adjudication; the point of this test is
+        # that the evidence check still FAILS, which the classification above
+        # pins directly.
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
-        assert not accepted
-        assert rejected[0].reason == "evidence_not_in_diff"
+        _routed_for_unmatched_evidence(accepted, rejected)
 
     def test_widened_range_window_does_not_admit_third_unrelated_line(self) -> None:
         # line_start=8 snaps to 10 (distance 2); line_end=15 snaps to 16
@@ -1786,11 +1874,17 @@ class TestValidateReviewerDocument:
             line_end=9494,
             evidence="OPERATOR_UNAVAILABLE_BLOCKER_REASONS.",
         )
+        assert (
+            _classify_finding(removed_line_evidence, diff, frozenset(diff.files))
+            == "evidence_not_in_diff"
+        )
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(removed_line_evidence), diff
         )
-        assert not accepted
-        assert rejected[0].reason == "evidence_not_in_diff"
+        # #2099: routed to adjudication, flagged -- the negative control this
+        # test asserts is that the evidence gate MISSES (the classification
+        # above), never that the finding is thrown away.
+        _routed_for_unmatched_evidence(accepted, rejected)
 
 
 class Test9491MustFixCaseReconstruction:
@@ -1847,6 +1941,17 @@ class Test9491MustFixCaseReconstruction:
       whole-function structural claim with no verbatim diff quote) is a
       defect in the reviewer/codex output contract, not in this matcher —
       out of scope for a matcher fix. See #1816 for the full investigation.
+
+    #2099 re-examined the DISPOSITION rather than the predicate and left
+    #1816's conclusion standing: the matcher still says ``evidence_not_in_diff``
+    for this fixture, and the new reflow-tolerant comparison stage cannot
+    change that (there is no wrapping of any string that turns aggregate prose
+    into diff-resident text). What changed is that the verdict now routes the
+    finding to adjudication with its text intact instead of deleting it — an
+    aggregate structural claim is a reviewer-contract defect, but it is not
+    thereby a false claim, and an adjudicator reading it can locate the
+    function and decide. See the two ``routed``/``reaches_adjudication`` tests
+    below for the new shape.
     """
 
     def test_9491_line_reference_valid_via_near_line_tolerance(self) -> None:
@@ -1884,15 +1989,35 @@ class Test9491MustFixCaseReconstruction:
         changed = frozenset(diff.files)
         assert _classify_finding(finding, diff, changed) == "evidence_not_in_diff"
 
-    def test_9491_rejected_via_validate_reviewer_document(self) -> None:
+    def test_9491_routed_to_adjudication_via_validate_reviewer_document(self) -> None:
+        # #2099: the MATCHER verdict this class exists to pin is unchanged
+        # (see test_9491_classified_evidence_not_in_diff above -- an aggregate
+        # structural claim has no diff-resident string form at any offset, and
+        # the new reflow-tolerant stage cannot conjure one). What changed is
+        # the disposition: the finding is now handed to the adjudicator with
+        # its text intact and its citation flagged, instead of being deleted.
+        # #1816's conclusion survives intact -- it was about the predicate,
+        # and the predicate still says no.
         diff = _pr1729_captured_diff()
         finding = Finding(**_PR1729_9491_MUST_FIX_FINDING_KWARGS)
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff
         )
-        assert accepted == []
-        assert rejected[0].reason == "evidence_not_in_diff"
-        assert rejected[0].detail == (
+        routed = _routed_for_unmatched_evidence(accepted, rejected)
+        assert routed.summary == finding.summary
+        assert routed.evidence == finding.evidence
+
+    def test_9491_routing_detail_reports_discrepancy(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The #1792/#2019 diagnosis text is unchanged and still emitted -- it
+        # moved from RejectedFinding.detail onto the routing log line, so an
+        # operator can still see which normalization and rescue stages ran.
+        diff = _pr1729_captured_diff()
+        finding = Finding(**_PR1729_9491_MUST_FIX_FINDING_KWARGS)
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        expected = (
             "evidence is 1 line(s) long but the declared range "
             "line_start=9491, line_end=None spans 1 line(s); no window "
             "within ±3 lines of the declared range contains the "
@@ -1900,22 +2025,25 @@ class Test9491MustFixCaseReconstruction:
             + _UNBOUNDED_RESCUE_MISS_DIAGNOSIS
             + _RESCUE_NOT_ATTEMPTED_DIAGNOSIS
         )
+        assert any(expected in rec.getMessage() for rec in caplog.records)
 
-    def test_9491_parks_as_rejected_must_fix_via_consolidate_verdict(self) -> None:
-        # Mirrors
-        # test_mechanically_rejected_must_fix_populates_rejected_must_fix_field's
-        # shape: blocking stays False (R4 -- an unreliable/unadjudicated
-        # MUST_FIX must never enter the autofix loop), but rejected_must_fix
-        # is the independent signal that surfaces it to the operator.
+    def test_9491_reaches_adjudication_via_consolidate_verdict(self) -> None:
+        # #2099 inverts this test's #1714 park. Before: blocking False,
+        # rejected_must_fix populated, and an operator round-trip that ended
+        # in the finding never being read. After: the MUST_FIX is an ordinary
+        # blocking finding the coordinating session adjudicates on its merits
+        # (and, if it cannot locate the code, records as a REJECT with a
+        # rationale) -- nothing is parked and nothing is lost.
         diff = _pr1729_captured_diff()
         finding = Finding(**_PR1729_9491_MUST_FIX_FINDING_KWARGS)
         doc = _make_reviewer_doc(finding)
         verdict = consolidate_verdict([doc], diff, reviewed_sha="b5c8119e")
-        assert verdict.blocking is False
-        assert verdict.must_fix == []
-        assert len(verdict.rejected_must_fix) == 1
-        assert verdict.rejected_must_fix[0].reason == "evidence_not_in_diff"
-        assert verdict.rejected_must_fix[0].raw["severity"] == "MUST_FIX"
+        assert verdict.blocking is True
+        assert len(verdict.must_fix) == 1
+        assert verdict.must_fix[0].anchor_degraded is True
+        assert verdict.must_fix[0].anchor_degraded_reason == "evidence_not_in_diff"
+        assert verdict.rejected_must_fix == []
+        assert verdict.rejected_count == 0
 
 
 class TestEvidenceWindowReconciliation:
@@ -2059,16 +2187,27 @@ class TestEvidenceWindowReconciliation:
             line_end=244,
             evidence=_PR1784_ABSENT_EVIDENCE,
         )
+        assert (
+            _classify_finding(finding, diff, frozenset(diff.files))
+            == "evidence_not_in_diff"
+        )
+        # #2099: the negative control is the classification -- reconciliation
+        # (and now the reflow-tolerant stage) must not manufacture a match for
+        # text that is nowhere in the file's diff. The finding is routed to
+        # adjudication rather than deleted, flagged so nobody mistakes it for
+        # a verified citation.
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff
         )
-        assert not accepted
-        assert rejected[0].reason == "evidence_not_in_diff"
+        _routed_for_unmatched_evidence(accepted, rejected)
 
-    def test_rejected_finding_detail_reports_discrepancy(self) -> None:
-        # AC4: the genuinely-absent-evidence rejection populates `detail`
-        # with both the evidence's own line count (11) and the declared
-        # line_start (235).
+    def test_routing_detail_reports_discrepancy(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # AC4: the genuinely-absent-evidence outcome reports `detail` with
+        # both the evidence's own line count (11) and the declared line_start
+        # (235). #2099 moved that message from RejectedFinding.detail onto the
+        # routing log line; the message itself is unchanged.
         diff = _pr1784_captured_diff()
         finding = _make_finding(
             file="scripts/install-skills.sh",
@@ -2076,15 +2215,16 @@ class TestEvidenceWindowReconciliation:
             line_end=244,
             evidence=_PR1784_ABSENT_EVIDENCE,
         )
-        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(finding), diff)
-        assert rejected[0].reason == "evidence_not_in_diff"
-        assert "line_start=235" in rejected[0].detail
-        assert "11" in rejected[0].detail
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        message = _unmatched_evidence_routing_log(caplog.records)
+        assert "line_start=235" in message
+        assert "11" in message
 
-    def test_non_evidence_not_in_diff_rejection_keeps_detail_blank(self) -> None:
-        # A rejection for any other reason (here unknown_file) keeps detail
-        # at its "" default -- detail is populated for evidence_not_in_diff
-        # specifically, not for every rejection reason.
+    def test_non_diagnosable_rejection_keeps_detail_blank(self) -> None:
+        # A rejection for a self-describing reason (here unknown_file) keeps
+        # detail at its "" default -- detail is populated for the two
+        # diagnosable reasons specifically, not for every rejection reason.
         finding = _make_finding(file="src/cw/other.py")
         _, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), _make_diff()
@@ -2114,13 +2254,15 @@ class TestEvidenceWindowReconciliation:
         assert len(verdict.must_fix) == 1
         assert verdict.rejected_must_fix == []
 
-    def test_consolidate_verdict_unmatched_must_fix_still_blocks_via_park_signal(
+    def test_consolidate_verdict_unmatched_must_fix_blocks_as_flagged_finding(
         self,
     ) -> None:
-        # AC5, #1714 preservation (negative case): a MUST_FIX whose evidence
-        # is genuinely absent must still route through the #1714
-        # mechanical-rejection park -- #1792's reconciliation must never
-        # widen far enough to rescue a fabricated quote.
+        # AC5's negative case, re-dispositioned by #2099. #1792's
+        # reconciliation still must not widen far enough to rescue an absent
+        # quote -- the finding is still flagged rather than silently verified
+        # -- but the MUST_FIX now blocks through the ordinary path and is
+        # adjudicated, instead of parking the run via #1714's rejected_must_fix
+        # signal and never being read.
         diff = _pr1784_captured_diff()
         finding = _make_finding(
             severity="MUST_FIX",
@@ -2131,9 +2273,11 @@ class TestEvidenceWindowReconciliation:
         )
         doc = _make_reviewer_doc(finding)
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        assert verdict.blocking is False
-        assert len(verdict.rejected_must_fix) == 1
-        assert verdict.rejected_must_fix[0].reason == "evidence_not_in_diff"
+        assert verdict.blocking is True
+        assert len(verdict.must_fix) == 1
+        assert verdict.must_fix[0].anchor_degraded is True
+        assert verdict.must_fix[0].anchor_degraded_reason == "evidence_not_in_diff"
+        assert verdict.rejected_must_fix == []
 
     def test_persisted_anchor_repaired_when_undershoot_stays_within_added_lines(
         self,
@@ -2166,17 +2310,21 @@ class TestEvidenceWindowReconciliation:
         # directly here so the guard itself is covered rather than dead.
         assert _reconcile_evidence_window({}, "x", start=5, end=3, tolerance=3) is None
 
-    def test_file_level_rejection_detail_reports_no_line_anchor(self) -> None:
-        # AC4, file-level branch: a rejected file-level finding (no line
-        # anchor at all) gets a detail message naming the no-anchor case
-        # rather than a declared-range mismatch.
+    def test_file_level_routing_detail_reports_no_line_anchor(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # AC4, file-level branch: a file-level finding (no line anchor at all)
+        # whose evidence misses gets a detail message naming the no-anchor
+        # case rather than a declared-range mismatch. #2099 keeps the message
+        # and moves it onto the routing log line.
         f = _make_finding(
             line_start=None, line_end=None, evidence="not present anywhere"
         )
-        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), _make_diff())
-        assert rejected[0].reason == "evidence_not_in_diff"
-        assert "no line" in rejected[0].detail
-        assert "file-level fallback" in rejected[0].detail
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            validate_reviewer_document(_make_reviewer_doc(f), _make_diff())
+        message = _unmatched_evidence_routing_log(caplog.records)
+        assert "no line" in message
+        assert "file-level fallback" in message
 
 
 class TestEvidenceGateContentRescue:
@@ -2248,9 +2396,13 @@ class TestEvidenceGateContentRescue:
             files={"src/cw/foo.py": [10, 13, 16, 20]},
         )
         f = _make_finding(line_start=8, line_end=15, evidence="never appears anywhere")
+        assert (
+            _classify_finding(f, diff, frozenset(diff.files)) == "evidence_not_in_diff"
+        )
+        # #2099: no rescue fires (the classification above is the control);
+        # the finding reaches adjudication carrying the flag that says so.
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
-        assert not accepted
-        assert rejected[0].reason == "evidence_not_in_diff"
+        _routed_for_unmatched_evidence(accepted, rejected)
 
     def test_sibling_reviewer_clean_anchor_absorbs_drifted_twin(self) -> None:
         # #2019's suggested fix #5 (the #21 sibling-reviewer-dedup case),
@@ -2457,10 +2609,12 @@ class TestFormattingTolerantEvidenceMatching:
 
     # -- Phase 1 items 10-12: the relaxation stays bounded ----------------
 
-    def test_pair_evidence_against_multi_line_range_stays_rejected(self) -> None:
+    def test_pair_evidence_against_multi_line_range_stays_unmatched(self) -> None:
         # The rescue is scoped to a 1-line declared range: a pair-shaped
         # quote declared against a 3-line range gets no rescue, so the
-        # ordinary windowed rejection stands.
+        # ordinary windowed miss stands (#2099 routes the miss to
+        # adjudication rather than discarding it; the miss itself is the
+        # bound this test pins).
         diff = _issue1879_captured_diff()
         finding = _make_finding(
             file=_ISSUE1879_FILE,
@@ -2468,15 +2622,19 @@ class TestFormattingTolerantEvidenceMatching:
             line_end=_ISSUE1879_ADDED_LINE_NO + 2,
             evidence=_ISSUE1879_DIFF_PAIR_EVIDENCE,
         )
+        assert (
+            _classify_finding(finding, diff, frozenset(diff.files))
+            == "evidence_not_in_diff"
+        )
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff
         )
-        assert accepted == []
-        assert rejected[0].reason == "evidence_not_in_diff"
+        _routed_for_unmatched_evidence(accepted, rejected)
 
-    def test_fabricated_pair_evidence_still_rejected(self) -> None:
+    def test_fabricated_pair_evidence_still_unmatched(self) -> None:
         # #1714 floor: pair-shaped and correctly-anchored, but neither half
-        # is anywhere in the file's raw diff text.
+        # is anywhere in the file's raw diff text -- and no normalization,
+        # #2099's reflow stage included, invents one.
         diff = _issue1879_captured_diff()
         finding = _make_finding(
             file=_ISSUE1879_FILE,
@@ -2484,13 +2642,16 @@ class TestFormattingTolerantEvidenceMatching:
             line_end=_ISSUE1879_ADDED_LINE_NO,
             evidence="-    ghost_removed = 1\n+    ghost_added = 2",
         )
+        assert (
+            _classify_finding(finding, diff, frozenset(diff.files))
+            == "evidence_not_in_diff"
+        )
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff
         )
-        assert accepted == []
-        assert rejected[0].reason == "evidence_not_in_diff"
+        _routed_for_unmatched_evidence(accepted, rejected)
 
-    def test_fabricated_non_pair_evidence_still_rejected(self) -> None:
+    def test_fabricated_non_pair_evidence_still_unmatched(self) -> None:
         diff = _issue1879_captured_diff()
         finding = _make_finding(
             file=_ISSUE1879_FILE,
@@ -2498,15 +2659,23 @@ class TestFormattingTolerantEvidenceMatching:
             line_end=_ISSUE1879_ADDED_LINE_NO,
             evidence="    this line was never written by anyone",
         )
+        assert (
+            _classify_finding(finding, diff, frozenset(diff.files))
+            == "evidence_not_in_diff"
+        )
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff
         )
-        assert accepted == []
-        assert rejected[0].reason == "evidence_not_in_diff"
+        _routed_for_unmatched_evidence(accepted, rejected)
 
-    # -- Phase 1 item 13: per-stage rejection diagnostics -----------------
+    # -- Phase 1 item 13: per-stage diagnostics ---------------------------
+    #
+    # #2099 moved these from RejectedFinding.detail onto the routing log
+    # line; the message they assert is byte-identical.
 
-    def test_detail_reports_rescue_not_attempted_for_non_pair_evidence(self) -> None:
+    def test_detail_reports_rescue_not_attempted_for_non_pair_evidence(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         diff = _issue1879_captured_diff()
         finding = _make_finding(
             file=_ISSUE1879_FILE,
@@ -2514,10 +2683,14 @@ class TestFormattingTolerantEvidenceMatching:
             line_end=_ISSUE1879_ADDED_LINE_NO,
             evidence="    this line was never written by anyone",
         )
-        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(finding), diff)
-        assert rejected[0].detail.endswith(_RESCUE_NOT_ATTEMPTED_DIAGNOSIS)
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        message = _unmatched_evidence_routing_log(caplog.records)
+        assert message.endswith(_RESCUE_NOT_ATTEMPTED_DIAGNOSIS)
 
-    def test_detail_reports_rescue_not_attempted_for_multi_line_range(self) -> None:
+    def test_detail_reports_rescue_not_attempted_for_multi_line_range(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         diff = _issue1879_captured_diff()
         finding = _make_finding(
             file=_ISSUE1879_FILE,
@@ -2525,10 +2698,14 @@ class TestFormattingTolerantEvidenceMatching:
             line_end=_ISSUE1879_ADDED_LINE_NO + 2,
             evidence="-    ghost_removed = 1\n+    ghost_added = 2",
         )
-        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(finding), diff)
-        assert rejected[0].detail.endswith(_RESCUE_NOT_ATTEMPTED_DIAGNOSIS)
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        message = _unmatched_evidence_routing_log(caplog.records)
+        assert message.endswith(_RESCUE_NOT_ATTEMPTED_DIAGNOSIS)
 
-    def test_detail_reports_rescue_attempted_for_single_line_pair(self) -> None:
+    def test_detail_reports_rescue_attempted_for_single_line_pair(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         diff = _issue1879_captured_diff()
         finding = _make_finding(
             file=_ISSUE1879_FILE,
@@ -2536,10 +2713,14 @@ class TestFormattingTolerantEvidenceMatching:
             line_end=_ISSUE1879_ADDED_LINE_NO,
             evidence="-    ghost_removed = 1\n+    ghost_added = 2",
         )
-        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(finding), diff)
-        assert rejected[0].detail.endswith(_RESCUE_ATTEMPTED_DIAGNOSIS)
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        message = _unmatched_evidence_routing_log(caplog.records)
+        assert message.endswith(_RESCUE_ATTEMPTED_DIAGNOSIS)
 
-    def test_detail_reports_rescue_not_applicable_for_file_level_finding(self) -> None:
+    def test_detail_reports_rescue_not_applicable_for_file_level_finding(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         # File-level fallback: no line anchor at all, so neither the declared
         # range nor the pair shape has anything to resolve against.
         diff = _issue1879_captured_diff()
@@ -2549,8 +2730,10 @@ class TestFormattingTolerantEvidenceMatching:
             line_end=None,
             evidence="    this line was never written by anyone",
         )
-        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(finding), diff)
-        assert rejected[0].detail.endswith(_RESCUE_NOT_APPLICABLE_DIAGNOSIS)
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        message = _unmatched_evidence_routing_log(caplog.records)
+        assert message.endswith(_RESCUE_NOT_APPLICABLE_DIAGNOSIS)
 
     # -- Phase 1 items 15-16: the escalation-quote path -------------------
 
@@ -2582,6 +2765,191 @@ class TestFormattingTolerantEvidenceMatching:
         assert accepted[0].escalation is None
         assert len(stripped) == 1
         assert stripped[0].reason == "escalation_evidence_not_in_diff"
+
+    # -- #2099: formatter-reflow tolerance --------------------------------
+    #
+    # Round-3 shape: a PostToolUse formatter hook (black/ruff-format) rewrote
+    # the file after the reviewer authored its quote, so the quote and the
+    # diff carry the SAME code, wrapped differently. Every stage above
+    # compares line for line and therefore matched nothing.
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            # Whitespace runs, newlines included, collapse to ONE space.
+            ("a  =  b", "a = b"),
+            ("call(\n    x,\n    y\n)", "call(x, y)"),
+            ("  leading and trailing  ", "leading and trailing"),
+            # Spaces immediately inside a bracket are dropped...
+            ("f( a, b )", "f(a, b)"),
+            ("[ 1, 2 ]", "[1, 2]"),
+            ("{ 'k': 1 }", "{'k': 1}"),
+            # ...as is black's magic trailing comma before a closing bracket,
+            # including in a nested call.
+            ("f(\n    a,\n    b,\n)", "f(a, b)"),
+            ("f(\n    g(\n        a,\n    ),\n)", "f(g(a))"),
+            # The diff-marker strip and unicode fold still run first.
+            ("+    f(\n+        a,\n+    )", "f(a)"),
+            # Not touched: a space between two tokens survives as one space,
+            # and a comma not adjacent to a closing bracket is untouched.
+            ("a b", "a b"),
+            ("f(a, b) + 1", "f(a, b) + 1"),
+        ],
+    )
+    def test_formatting_normalized_text(self, raw: str, expected: str) -> None:
+        assert _formatting_normalized_text(raw) == expected
+
+    def test_formatting_tolerant_contains_rejects_an_empty_needle(self) -> None:
+        # The vacuous `"" in haystack` truth must never rescue anything: an
+        # empty quote is `missing_evidence`'s business, not this stage's.
+        assert _formatting_tolerant_contains("anything at all", "   ") is False
+        assert _formatting_tolerant_contains("anything at all", "at all") is True
+
+    def test_formatting_tolerant_window_direct_empty_evidence_no_match(self) -> None:
+        # Direct unit test of the same guard one layer up: unreachable through
+        # validate_reviewer_document (a blank evidence is rejected before any
+        # matching runs, and _reconcile_evidence_window's own substring check
+        # would match it first), but exercised here so the guard is covered
+        # rather than dead -- same rationale as
+        # test_reconcile_evidence_window_direct_start_after_end_no_match.
+        assert _formatting_tolerant_window({10: "real content"}, "  ") is None
+
+    def test_formatting_tolerant_window_direct_gap_ends_the_run(self) -> None:
+        # A window never spans a missing line: line 11 is absent, so the run
+        # starting at 10 stops there and the two-line quote finds no home.
+        candidates = {10: "call(", 12: "arg)"}
+        assert _formatting_tolerant_window(candidates, "call(arg)") is None
+
+    def test_wrapped_call_quoted_as_one_line_is_accepted(self) -> None:
+        # The diff carries the formatter's wrapped form (hanging indent plus
+        # black's magic trailing comma); the reviewer quotes the joined call.
+        # MUST fail red pre-fix: no window of those lines contains the joined
+        # string, and phase 2's exact-equality widening cannot bridge the
+        # re-wrapping either.
+        diff = _make_diff(
+            "result = compute_value(",
+            "alpha,",
+            "beta,",
+            ")",
+            files={"src/cw/foo.py": [10, 11, 12, 13]},
+        )
+        finding = _make_finding(
+            line_start=10,
+            line_end=13,
+            evidence="result = compute_value(alpha, beta)",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert rejected == []
+        assert len(accepted) == 1
+        assert accepted[0].anchor_degraded is False
+
+    def test_one_line_call_quoted_as_wrapped_is_accepted(self) -> None:
+        # The mirror image, which is just as real: the reviewer read the file
+        # AFTER the hook wrapped it while the diff still carries the joined
+        # line. Same normalization, applied to both sides, covers both.
+        diff = _make_diff(
+            "result = compute_value(alpha, beta)",
+            files={"src/cw/foo.py": [10]},
+        )
+        finding = _make_finding(
+            line_start=10,
+            line_end=10,
+            evidence="result = compute_value(\n    alpha,\n    beta,\n)",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert rejected == []
+        assert len(accepted) == 1
+        assert accepted[0].anchor_degraded is False
+
+    def test_intra_line_whitespace_difference_is_accepted(self) -> None:
+        # The cheapest formatter edit of all: collapsing (or introducing)
+        # runs of spaces inside a line. Pre-fix this was a content mismatch.
+        diff = _make_diff(
+            "value = lookup(key)  # aligned comment",
+            files={"src/cw/foo.py": [10]},
+        )
+        finding = _make_finding(
+            line_start=10,
+            line_end=10,
+            evidence="value  =  lookup(key)   # aligned comment",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert rejected == []
+        assert len(accepted) == 1
+        assert accepted[0].anchor_degraded is False
+
+    def test_reflowed_evidence_beyond_the_anchor_is_content_rescued(self) -> None:
+        # Both defects at once, which is the shape the ticket actually
+        # reported: the hook re-wrapped the file AND the line number no
+        # longer resolves. The anchor gate misses, and #2007's content rescue
+        # -- which sizes its windows by the evidence's own line count, so it
+        # cannot see a differently-wrapped match either -- falls through to
+        # the content-sized reflow search, which finds the true span. The
+        # persisted anchor is corrected to it.
+        diff = _make_diff(
+            "result = compute_value(",
+            "alpha,",
+            "beta,",
+            ")",
+            files={"src/cw/foo.py": [10, 11, 12, 13]},
+        )
+        finding = _make_finding(
+            line_start=30,
+            line_end=30,
+            evidence="result = compute_value(alpha, beta)",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert rejected == []
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 13
+
+    def test_reflow_tolerance_does_not_accept_a_changed_token(self) -> None:
+        # The floor #2099 must not lower: the new stage re-wraps whitespace,
+        # never content. One argument renamed is a different claim, and stays
+        # unmatched (routed to adjudication flagged, not silently verified).
+        diff = _make_diff(
+            "result = compute_value(",
+            "alpha,",
+            "beta,",
+            ")",
+            files={"src/cw/foo.py": [10, 11, 12, 13]},
+        )
+        finding = _make_finding(
+            line_start=10,
+            line_end=13,
+            evidence="result = compute_value(alpha, gamma)",
+        )
+        assert (
+            _classify_finding(finding, diff, frozenset(diff.files))
+            == "evidence_not_in_diff"
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        _routed_for_unmatched_evidence(accepted, rejected)
+
+    def test_reflow_tolerance_does_not_join_adjacent_words(self) -> None:
+        # Whitespace runs collapse to ONE space, never to nothing, so two
+        # tokens can never fuse into one -- the guard that keeps this stage
+        # from matching `ab` against `a b`.
+        diff = _make_diff("total = a b", files={"src/cw/foo.py": [10]})
+        finding = _make_finding(line_start=10, line_end=10, evidence="total = ab")
+        assert (
+            _classify_finding(finding, diff, frozenset(diff.files))
+            == "evidence_not_in_diff"
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        _routed_for_unmatched_evidence(accepted, rejected)
 
 
 class TestUnanchoredFindings:
@@ -2979,10 +3347,17 @@ class TestEnclosingDefAnchor:
             line_end=6,
             evidence="target_function does too many things",
         )
-        _, rejected, _ = validate_reviewer_document(
+        # The #1743 claim is that the ANCHOR gate now passes and the check
+        # order moves on to the evidence gate -- asserted on the
+        # classification, which #2099 leaves untouched.
+        assert (
+            _classify_finding(finding, diff, frozenset(diff.files), tmp_path)
+            == "evidence_not_in_diff"
+        )
+        accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff, worktree=tmp_path
         )
-        assert rejected[0].reason == "evidence_not_in_diff"
+        _routed_for_unmatched_evidence(accepted, rejected)
 
     def test_def_line_anchor_rejected_without_worktree(self, tmp_path: Path) -> None:
         _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
@@ -3050,10 +3425,14 @@ class TestEnclosingDefAnchor:
             line_end=1,
             evidence="Foo does too many things",
         )
-        _, rejected, _ = validate_reviewer_document(
+        assert (
+            _classify_finding(finding, diff, frozenset(diff.files), tmp_path)
+            == "evidence_not_in_diff"
+        )
+        accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff, worktree=tmp_path
         )
-        assert rejected[0].reason == "evidence_not_in_diff"
+        _routed_for_unmatched_evidence(accepted, rejected)
 
     def test_syntax_error_source_falls_back_to_degraded_anchor(
         self, tmp_path: Path
@@ -3140,10 +3519,14 @@ class TestEnclosingDefAnchorRealFileRegression:
             line_end=def_line,
             evidence="_run_fix_and_commit does too many things",
         )
-        _, rejected, _ = validate_reviewer_document(
+        assert (
+            _classify_finding(finding, diff, frozenset(diff.files), repo_root)
+            == "evidence_not_in_diff"
+        )
+        accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(finding), diff, worktree=repo_root
         )
-        assert rejected[0].reason == "evidence_not_in_diff"
+        _routed_for_unmatched_evidence(accepted, rejected)
 
     def test_def_line_anchor_rejected_without_worktree(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -3234,7 +3617,11 @@ class TestPromptsGetPurposePromptStructuralFinding:
             == "evidence_not_in_diff"
         )
 
-    def test_1703_rejected_via_consolidate_verdict(self) -> None:
+    def test_1703_reaches_adjudication_via_consolidate_verdict(self) -> None:
+        # #2099: the classification above is unchanged (this really is a
+        # structural claim with no diff-resident quote); the disposition is
+        # not. The MUST_FIX blocks and is adjudicated on its text instead of
+        # parking the run through #1714's rejected_must_fix signal.
         repo_root = Path(__file__).resolve().parents[1]
         def_line = self._discover_def_line(repo_root)
         diff = _pr1703_captured_diff()
@@ -3243,11 +3630,11 @@ class TestPromptsGetPurposePromptStructuralFinding:
         verdict = consolidate_verdict(
             [doc], diff, reviewed_sha="535fbd23", worktree=repo_root
         )
-        assert verdict.blocking is False
-        assert verdict.must_fix == []
-        assert len(verdict.rejected_must_fix) == 1
-        assert verdict.rejected_must_fix[0].reason == "evidence_not_in_diff"
-        assert verdict.rejected_must_fix[0].raw["severity"] == "MUST_FIX"
+        assert verdict.blocking is True
+        assert len(verdict.must_fix) == 1
+        assert verdict.must_fix[0].anchor_degraded is True
+        assert verdict.must_fix[0].anchor_degraded_reason == "evidence_not_in_diff"
+        assert verdict.rejected_must_fix == []
 
 
 class TestLineReferenceValidWorktreeParam:
@@ -3805,9 +4192,18 @@ class TestConsolidateVerdict:
         ]
         doc = _make_reviewer_doc(*findings, reviewer_role="Reviewer A")
         verdict = consolidate_verdict([doc], diff, "deadbeef")
-        assert len(verdict.accepted) == 3
-        assert len(verdict.rejected) == 1
-        assert verdict.rejected[0].reason == "evidence_not_in_diff"
+        # #2099: all four survive to adjudication. The negative control is
+        # unchanged in substance -- the fabricated-evidence finding is the
+        # only one flagged `anchor_degraded`, so it is still distinguishable
+        # from the three whose citations verified.
+        assert len(verdict.accepted) == 4
+        assert verdict.rejected == []
+        flagged = [af for af in verdict.accepted if af.finding.anchor_degraded]
+        assert len(flagged) == 1
+        assert (
+            flagged[0].finding.evidence == "fabricated absent text not in diff anywhere"
+        )
+        assert flagged[0].finding.anchor_degraded_reason == "evidence_not_in_diff"
 
 
 class TestConsolidateVerdictDetail:
@@ -5157,3 +5553,111 @@ class TestLineAnchorDegraded:
         reloaded = ReviewVerdict.model_validate_json(verdict.model_dump_json())
         assert reloaded.accepted[0].finding.anchor_degraded is True
         assert reloaded.accepted[0].finding.line_start is None
+
+
+# -- #2099: an unmatched evidence quote is adjudicated, not discarded ---------
+
+
+class TestUnmatchedEvidenceAdjudicationRouting:
+    """#2099: ``evidence_not_in_diff`` joins ``unanchored`` (#1632) and
+    ``line_anchor_degraded`` (#2081) as a verdict that routes a finding INTO
+    adjudication rather than into ``rejected``. Observed cause of the
+    false-rejects it closes: a PostToolUse formatter hook rewrote the file
+    after the reviewer authored its quote, so a verbatim quote of real code
+    matched nothing. The two routings must stay distinguishable downstream,
+    which is what ``Finding.anchor_degraded_reason`` carries.
+    """
+
+    def test_reason_pairs_with_the_flag_and_defaults_blank(self) -> None:
+        assert _make_finding().anchor_degraded_reason == ""
+        assert "evidence_not_in_diff" in get_args(RejectedFindingReason)
+
+    def test_reason_is_hidden_from_reviewer_schema(self) -> None:
+        # Same rule as the flag it pairs with: validation output, never
+        # reviewer input, so the codex strict schema must not carry it.
+        assert "anchor_degraded_reason" not in Finding.model_json_schema()["properties"]
+        doc_schema = ReviewerFindingsDocument.model_json_schema()
+        assert (
+            "anchor_degraded_reason" not in doc_schema["$defs"]["Finding"]["properties"]
+        )
+
+    def test_reviewer_supplied_reason_is_reset(self) -> None:
+        # A reviewer cannot pre-declare its own citation degraded: the value
+        # is discarded before classification, exactly like the flag.
+        finding = _make_finding(
+            anchor_degraded=True, anchor_degraded_reason="evidence_not_in_diff"
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+        assert rejected == []
+        assert accepted[0].anchor_degraded is False
+        assert accepted[0].anchor_degraded_reason == ""
+
+    def test_routing_keeps_the_resolved_line_anchor(self) -> None:
+        # The half that DID verify is kept -- unlike #2081's routing, where
+        # the line is exactly what failed. A consumer tells the two apart by
+        # the carried reason, not by guessing from the endpoints.
+        finding = _make_finding(
+            line_start=10, line_end=10, evidence="not present anywhere"
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+        routed = _routed_for_unmatched_evidence(accepted, rejected)
+        assert routed.line_start == 10
+        assert routed.line_end == 10
+
+    def test_reviewer_text_is_untouched(self) -> None:
+        # Adjudicating on that text is the whole point of the routing.
+        finding = _make_finding(evidence="not present anywhere")
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+        routed = _routed_for_unmatched_evidence(accepted, rejected)
+        assert routed.summary == finding.summary
+        assert routed.consequence == finding.consequence
+        assert routed.suggested_fix == finding.suggested_fix
+        assert routed.evidence == finding.evidence
+
+    def test_escalation_quote_is_still_validated_against_the_diff(self) -> None:
+        # Same rule as #1632/#2081: routing the finding proves nothing about
+        # an escalation's own quote, which still faces the diff check.
+        finding = _make_finding(
+            evidence="not present anywhere",
+            escalation=_make_escalation(evidence_quote="ghost quote"),
+        )
+        accepted, rejected, stripped = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+        routed = _routed_for_unmatched_evidence(accepted, rejected)
+        assert routed.escalation is None
+        assert len(stripped) == 1
+
+    def test_reason_survives_verdict_round_trip(self) -> None:
+        # `cw review adjudicate` and the comment renderer read the verdict
+        # back from JSON; both the flag and its reason must reach them.
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(evidence="not present anywhere"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        reloaded = ReviewVerdict.model_validate_json(verdict.model_dump_json())
+        assert reloaded.accepted[0].finding.anchor_degraded is True
+        assert (
+            reloaded.accepted[0].finding.anchor_degraded_reason
+            == "evidence_not_in_diff"
+        )
+
+    def test_degraded_line_routing_carries_its_own_reason(self, tmp_path: Path) -> None:
+        # The discriminator works in both directions: #2081's routing stamps
+        # its own reason, so a consumer reading `anchor_degraded_reason`
+        # always knows which half of the citation failed.
+        _write_stale_base_source(tmp_path)
+        diff = _make_diff("real added line", files={"src/pkg/mod.py": [2]})
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(_stale_base_finding()), diff, worktree=tmp_path
+        )
+        assert rejected == []
+        assert accepted[0].anchor_degraded_reason == "line_anchor_degraded"
+        assert accepted[0].line_start is None

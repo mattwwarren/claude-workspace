@@ -275,3 +275,11 @@ class TestValidationStampedFields:
         finding_props: dict[str, Any] = result["$defs"]["Finding"]["properties"]
         assert "anchor_degraded" not in finding_props
         assert "anchor_degraded" not in result["$defs"]["Finding"]["required"]
+
+    def test_anchor_degraded_reason_is_absent_from_strict_schema(self) -> None:
+        # #2099: the reason paired with that flag is stamped by the same code
+        # path and is hidden by the same rule.
+        result = to_openai_strict_schema(_schema())
+        finding_props: dict[str, Any] = result["$defs"]["Finding"]["properties"]
+        assert "anchor_degraded_reason" not in finding_props
+        assert "anchor_degraded_reason" not in result["$defs"]["Finding"]["required"]

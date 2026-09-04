@@ -36,6 +36,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.review_findings._text_match import (
+    _formatting_normalized_text,
     _normalize_diff_text,
     _reconcile_evidence_window,
 )
@@ -64,6 +65,14 @@ def _content_rescue_anchor(
     #1714's false-accept floor (no gap synthesis, exact-equality widening)
     and #1976's normalization both carry over unchanged. The lowest matching
     window wins.
+
+    Sizing each candidate window by *evidence*'s own line count is what makes
+    that first pass cheap, and also what makes it blind to a quote the diff
+    wraps across a DIFFERENT number of lines than the quote itself uses - the
+    formatter-reflow shape (#2099). So a miss falls through to
+    :func:`_formatting_tolerant_window`, which sizes its windows by content
+    instead. Strictly additive in the same sense as everything above it: it
+    runs only after the line-count-sized search has already found nothing.
     """
     if not candidates:
         return None
@@ -73,6 +82,52 @@ def _content_rescue_anchor(
         found = _reconcile_evidence_window(candidates, evidence, start, end)
         if found is not None:
             return found
+    return _formatting_tolerant_window(candidates, evidence)
+
+
+def _formatting_tolerant_window(
+    candidates: dict[int, str], evidence: str
+) -> tuple[int, int] | None:
+    """Search *candidates* for *evidence* ignoring how either side is wrapped.
+
+    :func:`_content_rescue_anchor`'s reflow-tolerant fallback (#2099). Every
+    other search in this package compares line for line, so it can only match a
+    quote spanning the same lines the diff does; a formatter hook that re-wraps
+    a file between the diff capture and the reviewer's read breaks exactly that
+    assumption, in both directions (a call joined onto one line in the quote
+    and wrapped over four in the diff, or the reverse).
+
+    Each candidate line in ascending order is tried as a window start, and the
+    window grows one CONTIGUOUS line at a time (a gap ends the run - never
+    synthesize a line the diff does not contain, the same floor
+    :func:`_reconcile_evidence_window` holds) until
+    :func:`~cw.review_findings._text_match._formatting_normalized_text` of the
+    joined window contains the same normalization of the evidence.
+
+    Growth is bounded, not open-ended: a match beginning somewhere inside the
+    start line needs at most that line's own normalized length plus the
+    evidence's, so once the window is that long the search moves on to the next
+    start. That bound is exact rather than a tuned constant - a longer window
+    cannot contain a match this start does not already carry - which keeps the
+    whole scan linear in the substrate size for a fixed quote. The lowest,
+    then shortest, matching window wins, the same tightest-span convention
+    :func:`_reconcile_evidence_window` already follows.
+    """
+    target = _formatting_normalized_text(evidence)
+    if not target:
+        return None
+    for start in sorted(candidates):
+        limit = len(_formatting_normalized_text(candidates[start])) + len(target)
+        end = start
+        run: list[str] = []
+        while end in candidates:
+            run.append(candidates[end])
+            joined = _formatting_normalized_text("\n".join(run))
+            if target in joined:
+                return (start, end)
+            if len(joined) >= limit:
+                break
+            end += 1
     return None
 
 

@@ -163,22 +163,30 @@ def _doc(findings: list[dict[str, object]]) -> str:
     )
 
 
-# #1714: a MUST_FIX whose evidence is absent from the diff is rejected
-# `evidence_not_in_diff` — a MECHANICAL rejection, so it never reaches
-# `verdict.must_fix` and must never enter the fix loop.
-_MF_BAD_EVIDENCE = _finding_dict(
-    severity="MUST_FIX",
-    line=1,
-    evidence="this string appears nowhere in the captured diff",
-    summary="MFX-mechanically-rejected",
-)
+# #1714: a MUST_FIX that fails a mechanical check never reaches
+# `verdict.must_fix` and must never enter the fix loop. The check exercised
+# here is `unknown_file`: the cited path is in neither the captured diff nor
+# the worktree on disk. (#2099 moved `evidence_not_in_diff` — this fixture's
+# original defect — out of the mechanically-rejected set and into
+# adjudication, so it no longer exercises the park; the park is unchanged.)
+_MF_MECHANICAL_DEFECT: dict[str, object] = {
+    "severity": "MUST_FIX",
+    "file": "src/cw/not_in_diff_or_worktree.py",
+    "line_start": 1,
+    "line_end": 1,
+    "summary": "MFX-mechanically-rejected",
+    "consequence": "it breaks",
+    "suggested_fix": "fix it",
+    "evidence": "def broken():",
+    "confidence": "HIGH",
+}
 
 _MF_DOC = _doc([_MF_A])
 _MF_AB_DOC = _doc([_MF_A, _MF_B])
 _MF_SF_DOC = _doc([_MF_A, _SF])
 _SF_DOC = _doc([_SF])
 _CLEAN_DOC = _doc([])
-_MF_MECH_REJECTED_DOC = _doc([_MF_BAD_EVIDENCE])
+_MF_MECH_REJECTED_DOC = _doc([_MF_MECHANICAL_DEFECT])
 
 
 class _FixLoopRunner:
@@ -1320,9 +1328,7 @@ class TestFixLoopNonBlockingPassthrough:
         # same document for each); rejections are not deduped the way accepted
         # findings are, so assert on the reason rather than a role count.
         assert verdict.rejected_must_fix
-        assert {rf.reason for rf in verdict.rejected_must_fix} == {
-            "evidence_not_in_diff"
-        }
+        assert {rf.reason for rf in verdict.rejected_must_fix} == {"unknown_file"}
 
 
 # ---------------------------------------------------------------------------

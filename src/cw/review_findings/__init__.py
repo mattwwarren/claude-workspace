@@ -21,9 +21,12 @@ here via re-exports. Submodules:
 - ``_models`` — type aliases, model-only constants, and every Pydantic/
   TypedDict class the contract exposes. Imports from no sibling.
 - ``_text_match`` — pure text-normalization and window-reconciliation
-  primitives (#1715/#1976/#1792). Stdlib only; imports from no sibling.
+  primitives (#1715/#1976/#1792), plus #2099's last-resort reflow-tolerant
+  comparison. Stdlib only; imports from no sibling.
 - ``_reanchor`` — #2007's content-based rescue for a line citation that
-  drifted past every tolerance-bounded gate. Imports ``_text_match`` only.
+  drifted past every tolerance-bounded gate, and #2099's content-sized
+  sibling for a quote the diff wraps differently. Imports ``_text_match``
+  only.
 - ``_anchor`` — diff-anchoring geometry: which files/lines the diff touches,
   near-miss anchor resolution (#1715), added-line vs hunk-window resolution
   (#1738), the enclosing-def fallback (#1743), and the diff-pair rescue
@@ -59,6 +62,22 @@ JSON→model boundary both executor paths call in place of
 needs it directly, mirroring ``_select_rejected_must_fix``'s precedent above.
 Its remaining helpers (``_raw_finding_payload``,
 ``_select_run_failures_with_discards``) stay package-private.
+
+#2099 keeps that economy and shrinks the reason vocabulary's *effective* size
+rather than growing it: ``"evidence_not_in_diff"`` joins ``"unanchored"`` and
+``"line_anchor_degraded"`` in ``_document._ADJUDICATION_ROUTED_REASONS``, so
+three of the nine ``RejectedFindingReason`` values now never become a
+``RejectedFinding.reason`` in normal operation — they name a finding whose text
+is intact and whose citation is merely unverified, which an adjudicator can
+decide and a mechanical filter cannot. The routing carries its reason on the
+existing ``Finding.anchor_degraded`` flag's new companion field,
+``anchor_degraded_reason``, so no new disposition or counter appears. Its
+matcher half adds three names to the re-export block —
+``_formatting_normalized_text``/``_formatting_tolerant_contains`` (the
+reflow-tolerant comparison stage) and ``_formatting_tolerant_window`` (the
+content-sized rescue search) — matching how every other normalization and
+rescue primitive here is exported: each is directly test-asserted, the same
+bar ``_select_rejected_must_fix`` clears.
 
 Import-cycle note (#1818, revised #2054): ``cw.review_finding_dispositions``
 documents a load-bearing cycle broken only by that module refusing any
@@ -138,11 +157,14 @@ from cw.review_findings._reanchor import (
     _cited_lines_on_disk,
     _content_rescue_anchor,
     _evidence_removed_in_fix_diff,
+    _formatting_tolerant_window,
     _line_exceeds_file_length,
 )
 from cw.review_findings._text_match import (
     _LINE_ANCHOR_TOLERANCE,
     _evidence_diff_pair,
+    _formatting_normalized_text,
+    _formatting_tolerant_contains,
     _normalize_diff_text,
     _normalize_unicode_punctuation,
     _reconcile_evidence_window,
@@ -186,6 +208,9 @@ __all__ = [
     "_evidence_diff_pair",
     "_evidence_in_claimed_lines",
     "_evidence_removed_in_fix_diff",
+    "_formatting_normalized_text",
+    "_formatting_tolerant_contains",
+    "_formatting_tolerant_window",
     "_line_exceeds_file_length",
     "_line_reference_valid",
     "_normalize_diff_text",

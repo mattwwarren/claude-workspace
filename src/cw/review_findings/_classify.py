@@ -175,20 +175,41 @@ def _finding_with_anchor(finding: Finding, start: int, end: int) -> Finding:
     return finding.model_copy(update=updates)
 
 
-def _degraded_finding(finding: Finding) -> Finding:
-    """Copy *finding* with its line anchor dropped and ``anchor_degraded`` set.
+def _degraded_finding(finding: Finding, reason: RejectedFindingReason) -> Finding:
+    """Copy *finding* flagged as adjudication-routed for *reason*.
 
-    The persisted shape of a ``line_anchor_degraded`` classification (#2081):
-    a file-level finding — both endpoints ``None``, exactly what a reviewer
-    would have filed had it cited no line at all — carrying the flag that
+    The persisted shape of the two classifications
+    :func:`~cw.review_findings._document.validate_reviewer_document` routes to
+    adjudication with a flag rather than to ``rejected``. Both carry
+    ``anchor_degraded=True`` plus ``anchor_degraded_reason=reason``, which
     tells every downstream reader (the verdict comment, the adjudicator) that
-    the file-level anchor is validation's doing, not the reviewer's. The
+    the citation is validation-annotated and WHICH half of it failed. The
     reviewer's text (summary, consequence, evidence, suggested fix) is
-    untouched: adjudicating on that text is the whole point of the routing.
+    untouched in both cases: adjudicating on that text is the whole point of
+    the routing.
+
+    They differ in exactly one respect, and only because the citations differ:
+
+    - ``"line_anchor_degraded"`` (#2081) drops both endpoints, producing a
+      file-level finding — exactly what a reviewer would have filed had it
+      cited no line at all — because the cited line resolved against nothing
+      in the diff and keeping it would point the adjudicator at a position
+      validation has just proven meaningless.
+    - ``"evidence_not_in_diff"`` (#2099) keeps them. Here the endpoints DID
+      resolve (the finding passed ``_line_reference_valid``); it is the
+      evidence quote that failed to match the resulting window, typically
+      because a formatter hook rewrote the file after the reviewer quoted it.
+      Dropping the one part of the citation that verified would destroy
+      information, which is the defect this routing exists to stop.
     """
-    return finding.model_copy(
-        update={"line_start": None, "line_end": None, "anchor_degraded": True}
-    )
+    updates: dict[str, object] = {
+        "anchor_degraded": True,
+        "anchor_degraded_reason": reason,
+    }
+    if reason == "line_anchor_degraded":
+        updates["line_start"] = None
+        updates["line_end"] = None
+    return finding.model_copy(update=updates)
 
 
 def _classify_unanchored_file(
@@ -286,9 +307,14 @@ def _rejection_detail(
 ) -> str:
     """Build the ``RejectedFinding.detail`` for *reason*, or ``""`` if it has none.
 
-    Two of the seven reasons carry a diagnosable message: #1792's
+    Two of the reasons carry a diagnosable message: #1792's
     ``evidence_not_in_diff`` and #2007's ``line_reference_out_of_range``. The
-    rest are self-describing from the reason alone. ``worktree`` is guaranteed
+    rest are self-describing from the reason alone. Since #2099 the first of
+    those two no longer produces a :class:`RejectedFinding` at all — it is
+    routed to adjudication — so its message is emitted on the routing log line
+    instead; this function stays the single reason-to-detail mapping either
+    way, rather than the message being re-derived at the new call site.
+    ``worktree`` is guaranteed
     non-``None`` for the out-of-range case — that reason is only reachable via
     a worktree-measured length check — and is re-narrowed here for the type
     checker rather than asserted.
@@ -384,6 +410,15 @@ def _classify_mislocated_finding(
     the evidence text is genuinely present anywhere else in the file's diff,
     that is a stronger signal than the stale line number and the finding is
     accepted rather than mechanically discarded on citation mechanics.
+
+    The ``"evidence_not_in_diff"`` this returns on a miss is no longer a
+    discard either (#2099):
+    :func:`~cw.review_findings._document.validate_reviewer_document` routes it
+    to adjudication as a flagged finding, the same way it already routed
+    ``"unanchored"`` and ``"line_anchor_degraded"``. The rescues above still
+    matter and still run first — a finding they rescue is accepted with a
+    repaired anchor and no flag at all, which is strictly better than one an
+    adjudicator has to re-locate by hand.
     """
     rescued = _content_rescue_anchor(
         diff.file_window_text.get(finding.file, {}), finding.evidence
