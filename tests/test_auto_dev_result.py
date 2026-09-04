@@ -4498,12 +4498,17 @@ class TestReviewRejectedCount:
     The counts an orchestrator reading ONLY the terminal ``AUTO_DEV_RESULT``
     sentinel needs in order to tell "nothing was found" apart from "findings
     were mechanically deleted before anyone looked at them".
+
+    #2098: both fields default to ``None`` ("producer did not report"), not
+    ``0``/``{}`` — a defaulted ``0`` is indistinguishable from a
+    producer-confirmed "nothing rejected" and silently reintroduces the exact
+    omitted-vs-zero ambiguity this field exists to resolve, one level up.
     """
 
-    def test_rejected_count_defaults_to_zero_when_omitted(self) -> None:
+    def test_rejected_count_defaults_to_none_when_omitted(self) -> None:
         review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
-        assert review.rejected_count == 0
-        assert review.rejected_count_by_severity == {}
+        assert review.rejected_count is None
+        assert review.rejected_count_by_severity is None
 
     def test_rejected_count_parses_explicit_value(self) -> None:
         review = Review.model_validate(
@@ -4518,14 +4523,29 @@ class TestReviewRejectedCount:
         assert review.rejected_count == 4
         assert review.rejected_count_by_severity == {"SHOULD_FIX": 3, "NIT": 1}
 
+    def test_rejected_count_parses_explicit_zero(self) -> None:
+        # A producer-confirmed zero is distinct from an omitted field — both
+        # must round-trip as their own value, not collapse to the same thing.
+        review = Review.model_validate(
+            {
+                "must_fix_initial": 0,
+                "should_fix": 0,
+                "fix_cycles_used": 0,
+                "rejected_count": 0,
+                "rejected_count_by_severity": {},
+            }
+        )
+        assert review.rejected_count == 0
+        assert review.rejected_count_by_severity == {}
+
     def test_pre_2000_payload_without_rejected_count_parses_unchanged(self) -> None:
         # Backward compatibility, proven rather than asserted in prose: the
         # shipped-payload helper's "review" dict omits both new fields, exactly
         # like every pre-#2000 producer's does.
         result = parse_stdout(_wrap_sentinel(_shipped_payload()))
         assert isinstance(result, AutoDevResult)
-        assert result.review.rejected_count == 0
-        assert result.review.rejected_count_by_severity == {}
+        assert result.review.rejected_count is None
+        assert result.review.rejected_count_by_severity is None
 
     def test_rejected_count_survives_auto_dev_result_round_trip(self) -> None:
         payload = _shipped_payload()
