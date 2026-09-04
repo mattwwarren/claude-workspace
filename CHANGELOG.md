@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.45.7] - 2026-09-04
+
 ### Fixed
 
 - **The Codex review backend no longer loses a Linear-tracked ticket's review verdict to a `gh issue comment` that can only fail, and every verdict now leaves a durable copy in the worktree (#2095):** `_post_review_comment` posted the rendered Stage-3 verdict via `gh` unconditionally, so on a Linear client every post died with `invalid issue format` and was swallowed into a log line — combined with #2094 the review stage could leave zero record of what it concluded. The daemon cannot post to Linear at all (ADR-0013 keeps cw's only programmatic tracker client GitHub-only), so the verdict is now first written to `.claude/review-verdict.md` in the ticket's worktree, unconditionally and before any post is attempted; then, when the client's tracker is positively known to be non-GitHub, the `gh` call is skipped and a WARNING names the tracker and the artifact path instead of pretending to post. GitHub-tracked and unresolvable-tracker clients post exactly as before.
