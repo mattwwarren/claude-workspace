@@ -63,12 +63,23 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 # The `_classify_finding` verdicts that route a finding INTO adjudication
-# instead of into `rejected`: #1632's "unanchored" and #2081's
-# "line_anchor_degraded". Both are honest members of RejectedFindingReason
-# (the discriminator type covers every value `_classify_finding` can return)
-# that never become a RejectedFinding.reason in normal operation.
+# instead of into `rejected`: #1632's "unanchored", #2081's
+# "line_anchor_degraded", and #2099's "evidence_not_in_diff". All three are
+# honest members of RejectedFindingReason (the discriminator type covers every
+# value `_classify_finding` can return) that never become a
+# RejectedFinding.reason in normal operation.
+#
+# What the three share is that the finding's TEXT is intact and only its
+# CITATION is unverified -- a file the diff does not touch, a line that does
+# not resolve, a quote that does not match its window. An adjudicator can read
+# such a finding and decide it; the mechanical filter cannot. Every remaining
+# reason is different in kind: "schema_invalid" has no Finding to route (the
+# item never validated), "missing_evidence"/"invalid_severity" fail the
+# finding's own contract rather than its citation, and
+# "unknown_file"/"invalid_line_reference"/"line_reference_out_of_range" name
+# positions that provably do not exist.
 _ADJUDICATION_ROUTED_REASONS: frozenset[str] = frozenset(
-    {"unanchored", "line_anchor_degraded"}
+    {"unanchored", "line_anchor_degraded", "evidence_not_in_diff"}
 )
 
 
@@ -105,6 +116,23 @@ def validate_reviewer_document(
     finding that is unverified rather than contradicted. ``anchor_degraded``
     is validation output only — a value a reviewer sends is reset before
     classification, so the flag can never mean "the reviewer said so".
+
+    #2099 adds the third and last of these routings, and the only one that
+    needs no ``worktree`` opt-in: ``"evidence_not_in_diff"``. A finding whose
+    line anchor resolved but whose evidence quote matched no window — after
+    every normalization and both content rescues — is accepted with
+    ``anchor_degraded`` set and ``anchor_degraded_reason`` naming that reason,
+    KEEPING its line endpoints (see :func:`_degraded_finding` for why this
+    routing keeps what ``"line_anchor_degraded"`` drops). The observed cause is
+    a formatter hook rewriting the file between the diff capture and the
+    reviewer's read, which makes a verbatim quote of real code match nothing;
+    the rejection that used to follow discarded correct findings, twice a live
+    production bug on a single ticket. Two consequences to read deliberately:
+    such a finding now counts toward ``must_fix``, and therefore ``blocking``,
+    in :func:`~cw.review_findings.consolidate_verdict`, and it no longer counts
+    toward ``rejected_count``/``rejected_must_fix``. Both are intended — an
+    unmatched-evidence MUST_FIX is adjudicated on its merits rather than parked
+    as a citation error nobody reads.
     """
     accepted: list[Finding] = []
     rejected: list[RejectedFinding] = []
@@ -113,8 +141,10 @@ def validate_reviewer_document(
 
     for index, source in enumerate(doc.findings):
         finding = (
-            source.model_copy(update={"anchor_degraded": False})
-            if source.anchor_degraded
+            source.model_copy(
+                update={"anchor_degraded": False, "anchor_degraded_reason": ""}
+            )
+            if source.anchor_degraded or source.anchor_degraded_reason
             else source
         )
         reason = _classify_finding(finding, diff, changed, worktree)
@@ -169,7 +199,29 @@ def validate_reviewer_document(
                 finding.line_start,
                 finding.line_end,
             )
-            finding = _degraded_finding(finding)
+            finding = _degraded_finding(finding, reason)
+        if reason == "evidence_not_in_diff":
+            # #2099: same routing, different half of the citation. The detail
+            # string is _rejection_detail's, unchanged -- the diagnosis of
+            # which normalization and rescue stages ran is exactly as useful
+            # on a routing line as it was on a RejectedFinding, and deriving
+            # it here rather than duplicating it keeps one reason-to-detail
+            # mapping in the package.
+            _log.info(
+                "auto-dev: routed finding whose evidence did not match its "
+                "claimed diff window to adjudication (line anchor resolved; "
+                "quote unverified -- re-anchor from the finding's text) "
+                "(reviewer_role=%s, finding_index=%d, severity=%s, file=%s, "
+                "line_start=%s, line_end=%s) detail: %s",
+                doc.reviewer_role,
+                index,
+                finding.severity,
+                finding.file,
+                finding.line_start,
+                finding.line_end,
+                _rejection_detail(finding, reason, worktree),
+            )
+            finding = _degraded_finding(finding, reason)
         if finding.no_diff_anchor:
             # Mirrors the "unanchored" INFO above: a finding that skipped the
             # mechanical checks is always announced, so an operator can tell a

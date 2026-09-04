@@ -131,6 +131,16 @@ def consolidate_verdict(
     in document order. ``blocking`` is True iff at least one accepted,
     non-deferred MUST_FIX finding exists.
 
+    Since #2099 a finding classified ``evidence_not_in_diff`` reaches
+    ``accepted`` (flagged, via ``validate_reviewer_document``'s adjudication
+    routing) instead of ``rejected``. It therefore participates in
+    ``must_fix``/``blocking`` like any other accepted finding and is absent
+    from ``rejected_count``/``rejected_count_by_severity``/
+    ``rejected_must_fix``. Nothing in this function changed to make that
+    happen — the derivations below already read exactly the lists the routing
+    decision moved it between, which is what made that fix a routing change
+    rather than a counting one.
+
     ``rejected_must_fix`` (#1714) is the MUST_FIX-severity subset of
     ``rejected`` — see :func:`_select_rejected_must_fix`. It is computed
     independently of ``blocking``/``must_fix``, which continue to read accepted

@@ -79,9 +79,13 @@ class TestReviewConsolidateCommand:
         assert verdict["review"]["must_fix_initial"] == 1
         assert len(verdict["must_fix"]) == 1
 
-    def test_finding_whose_evidence_is_not_in_diff_is_rejected(
+    def test_finding_whose_evidence_is_not_in_diff_reaches_adjudication(
         self, runner: CliRunner
     ) -> None:
+        # #2099: end-to-end through the CLI, the unmatched-evidence MUST_FIX
+        # is no longer deleted -- it is emitted as an accepted finding
+        # carrying `anchor_degraded`/`anchor_degraded_reason`, so the
+        # coordinating session re-anchors and bucket-sorts it on its merits.
         finding = _make_finding(
             severity="MUST_FIX",
             line_start=2,
@@ -97,10 +101,13 @@ class TestReviewConsolidateCommand:
         )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
-        assert len(verdict["rejected"]) == 1
-        assert verdict["rejected"][0]["reason"] == "evidence_not_in_diff"
-        assert verdict["must_fix"] == []
-        assert verdict["review"]["must_fix_initial"] == 0
+        assert verdict["rejected"] == []
+        assert len(verdict["accepted"]) == 1
+        degraded = verdict["accepted"][0]["finding"]
+        assert degraded["anchor_degraded"] is True
+        assert degraded["anchor_degraded_reason"] == "evidence_not_in_diff"
+        assert len(verdict["must_fix"]) == 1
+        assert verdict["review"]["must_fix_initial"] == 1
 
     def test_two_reviewers_reporting_identical_finding_dedupe_to_one(
         self, runner: CliRunner
@@ -1421,10 +1428,15 @@ class TestReviewConsolidateRegressionFixtures:
         assert "src/cw/foo.py" in result.output
         assert '"blocking"' not in result.output
 
-    def test_regression_paraphrased_evidence_hand_typed_envelope_still_rejects(
+    def test_regression_paraphrased_evidence_hand_typed_envelope_still_unmatched(
         self, runner: CliRunner
     ) -> None:
-        """Control: retyping the evidence one word off still fails the matcher."""
+        """Control: retyping the evidence one word off still fails the matcher.
+
+        #2099 changed where the miss LANDS (adjudication, flagged) but not
+        that it misses: `def broke():` is not `def broken():` under any
+        normalization, reflow-tolerant comparison included.
+        """
         doc = _make_reviewer_doc(
             _make_finding(line_start=2, line_end=2, evidence="def broke():"),
             status="ok",
@@ -1439,7 +1451,11 @@ class TestReviewConsolidateRegressionFixtures:
 
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
-        assert verdict["rejected"][0]["reason"] == "evidence_not_in_diff"
+        assert verdict["rejected"] == []
+        assert (
+            verdict["accepted"][0]["finding"]["anchor_degraded_reason"]
+            == "evidence_not_in_diff"
+        )
 
     def test_regression_paraphrased_evidence_avoided_via_documents_from(
         self, runner: CliRunner, tmp_path: Path

@@ -84,6 +84,19 @@ FINGERPRINT_VERSION: Literal["FINGERPRINT_V1"] = "FINGERPRINT_V1"
 # rescue but DOES exist in the file on disk: the stale-base shape, where the
 # reviewer's line number drifted while its text did not.
 #
+# "evidence_not_in_diff" (#2099) is the third "unanchored"-shaped value, and
+# for the same reason as the other two: a reviewer's evidence quote failing to
+# match its declared window is overwhelmingly a citation defect (a formatter
+# hook rewrote the file after the quote was authored; a hunk moved under a
+# re-capture), not a fabricated claim — and rejecting it discarded correct
+# findings, twice a live production bug on one ticket. validate_reviewer_document
+# routes it to `accepted` with `Finding.anchor_degraded` stamped and
+# `Finding.anchor_degraded_reason` naming this value, keeping the LINE anchor
+# (unlike "line_anchor_degraded", the endpoints did resolve here). The
+# discarded-information asymmetry is the argument: a quote genuinely absent
+# from the diff costs an adjudicator one REJECT bucket entry, while a
+# mechanically-dropped MUST_FIX costs a shipped defect.
+#
 # "schema_invalid" (#2029) is the only value produced BEFORE _classify_finding
 # ever runs. The other seven describe a well-formed Finding whose diff anchor
 # or evidence failed a mechanical check; this one describes a findings[] item
@@ -175,6 +188,20 @@ class Finding(BaseModel):
     of the reviewer-facing schema (the codex strict schema included): it is
     validation output, not reviewer input, and any value a reviewer does send
     is reset before classification.
+
+    ``anchor_degraded_reason`` (#2099) is the free-text "why" paired with that
+    flag, mirroring how :attr:`AcceptedFinding.disposition_detail` pairs with
+    ``disposition`` and :attr:`RejectedFinding.detail` with ``reason``. It
+    carries the :data:`RejectedFindingReason` value that routed the finding to
+    adjudication, which is what lets a consumer tell the two routings apart:
+    ``"line_anchor_degraded"`` means the cited LINE resolved against nothing
+    (and the endpoints were dropped), ``"evidence_not_in_diff"`` means the line
+    resolved but the evidence QUOTE did not match its window — the
+    formatter-hook shape, where a hook rewrote the file after the reviewer
+    quoted it (so the endpoints are kept: they are the one part of the citation
+    that did verify). Blank whenever ``anchor_degraded`` is ``False``, stamped
+    and reset by the same code path, and hidden from the reviewer-facing schema
+    under the same ``SkipJsonSchema`` rule.
     """
 
     severity: Severity
@@ -189,6 +216,7 @@ class Finding(BaseModel):
     escalation: EscalationMetadata | None = None
     no_diff_anchor: bool = False
     anchor_degraded: SkipJsonSchema[bool] = False
+    anchor_degraded_reason: SkipJsonSchema[str] = ""
     # #1837: the two fields a reviewer uses to argue a finding on code the
     # latest fix cycle did NOT touch still belongs in this fix loop.
     # ``transitive_impact_evidence`` is a verbatim quote from the delta

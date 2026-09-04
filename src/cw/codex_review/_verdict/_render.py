@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from cw.review_findings import (
         AcceptedFinding,
         AgentSpecStatus,
+        Finding,
         RejectedFinding,
         ReviewerRunRecord,
         ReviewVerdict,
@@ -57,6 +58,18 @@ _ANCHOR_DEGRADED_ANNOTATION = (
     "diff; adjudicate on the finding's text)_"
 )
 
+# #2099: the sibling routing, where the line anchor DID resolve and the
+# evidence quote did not match its window (a formatter hook rewriting the file
+# after the reviewer quoted it is the observed cause). A reader must be able to
+# tell the two apart from the comment alone — the location here is a real,
+# validated one, and it is the quote that needs re-locating, which is the
+# opposite of the annotation above. Display-only, same as every annotation here.
+_EVIDENCE_DEGRADED_ANNOTATION = (
+    " _(evidence unmatched — the cited line resolved but the quote was not "
+    "found in its diff window; re-anchor from the finding's text before "
+    "bucketing)_"
+)
+
 
 def _disposition_annotation(accepted: AcceptedFinding) -> str:
     """Annotate a finding whose disposition says it is no longer blocking.
@@ -74,6 +87,24 @@ def _disposition_annotation(accepted: AcceptedFinding) -> str:
     return _DISPOSITION_ANNOTATION.format(
         disposition=accepted.disposition, detail=detail
     )
+
+
+def _degraded_annotation(finding: Finding) -> str:
+    """Annotate a finding validation flagged as adjudication-routed (#2099).
+
+    ``""`` unless ``anchor_degraded`` is set, exactly like the two annotation
+    helpers above return ``""`` for the uncluttered common case. The flag has
+    carried a reason since #2099, and the two reasons say opposite things about
+    the finding's location, so this reads it rather than rendering one message
+    for both. A flag with no reason (a verdict artifact persisted before #2099,
+    reloaded) keeps the original #2081 wording — the older routing was the only
+    one that existed then.
+    """
+    if not finding.anchor_degraded:
+        return ""
+    if finding.anchor_degraded_reason == "evidence_not_in_diff":
+        return _EVIDENCE_DEGRADED_ANNOTATION
+    return _ANCHOR_DEGRADED_ANNOTATION
 
 
 def _render_findings(
@@ -96,7 +127,7 @@ def _render_findings(
             else _CONFIDENCE_ANNOTATION.format(confidence=finding.confidence)
         )
         suppression = _disposition_annotation(af)
-        degraded = _ANCHOR_DEGRADED_ANNOTATION if finding.anchor_degraded else ""
+        degraded = _degraded_annotation(finding)
         lines.append(
             f"- **{loc}**{annotation}{suppression}{degraded} — {finding.summary}"
         )

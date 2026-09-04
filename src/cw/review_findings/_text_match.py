@@ -1,4 +1,5 @@
-"""Pure text-normalization and window-reconciliation primitives (#1715/#1976/#1792).
+"""Pure text-normalization and window-reconciliation primitives
+(#1715/#1976/#1792/#2099).
 
 Extracted verbatim by #2007 from the then-single ``_validation`` module, since
 split three ways into :mod:`cw.review_findings._anchor`,
@@ -15,6 +16,8 @@ names from :mod:`cw.review_findings`, not from this private submodule.
 """
 
 from __future__ import annotations
+
+import re
 
 # Reviewer-supplied line anchors observed drifting off the true added line by
 # one to three lines in fleet review runs (#1715) — usually a stale line
@@ -42,6 +45,29 @@ _UNICODE_PUNCTUATION: dict[int, str] = {
     0x201D: '"',  # RIGHT DOUBLE QUOTATION MARK
     0x00A0: " ",  # NO-BREAK SPACE
 }
+
+
+# Formatter-reflow normalization (#2099). A PostToolUse formatter hook that
+# rewrites a file after the reviewer authored its quote is the observed cause
+# of a genuine finding being rejected `evidence_not_in_diff`: the quote and the
+# diff carry the same code, re-wrapped. These three substitutions are applied
+# ONLY as a last-resort comparison stage, after every existing check has
+# already failed, and identically to both sides.
+#
+# 1. every whitespace run (newlines included) collapses to a single space, so a
+#    call joined onto one line and the same call wrapped across several compare
+#    equal, as do two lines differing only in intra-line spacing;
+# 2. a space immediately inside a bracket is dropped, because (1) turns a
+#    hanging-indent wrap into `f( a, b )` where the joined form is `f(a, b)`;
+# 3. a comma immediately before a closing bracket is dropped — black's magic
+#    trailing comma, which exists in the wrapped form and not in the joined one.
+#
+# Deliberately NOT a general whitespace strip: collapsing runs to a single
+# space (rather than to nothing) keeps token boundaries intact, so `a b` can
+# never match `ab`.
+_WHITESPACE_RUN = re.compile(r"\s+")
+_BRACKET_INTERIOR_SPACE = re.compile(r"(?<=[(\[{]) | (?=[)\]}])")
+_BRACKET_TRAILING_COMMA = re.compile(r",(?=[)\]}])")
 
 
 def _strip_diff_markers(text: str) -> str:
@@ -89,6 +115,40 @@ def _normalize_diff_text(text: str) -> str:
     return _normalize_unicode_punctuation(_strip_diff_markers(text))
 
 
+def _formatting_normalized_text(text: str) -> str:
+    """Normalize *text* for the last-resort, reflow-tolerant comparison (#2099).
+
+    :func:`_normalize_diff_text` first (so this stage is strictly wider than
+    the one it backs up, never a different one), then the three substitutions
+    documented on :data:`_WHITESPACE_RUN` and its siblings: whitespace runs
+    collapse to a single space, spaces immediately inside a bracket are
+    dropped, and a comma immediately before a closing bracket is dropped.
+
+    The net effect is a comparison insensitive to how a formatter chose to
+    wrap the code and where it put the resulting indentation, and to nothing
+    else: no content is added, removed, or reordered, and token boundaries
+    survive (a run of whitespace becomes one space, never none), so text that
+    is genuinely absent from the diff stays absent under it.
+    """
+    collapsed = _WHITESPACE_RUN.sub(" ", _normalize_diff_text(text))
+    collapsed = _BRACKET_INTERIOR_SPACE.sub("", collapsed)
+    return _BRACKET_TRAILING_COMMA.sub("", collapsed).strip()
+
+
+def _formatting_tolerant_contains(haystack: str, needle: str) -> bool:
+    """True iff *needle* occurs in *haystack* once both are reflow-normalized.
+
+    The single chokepoint for #2099's last-resort stage — every caller reaches
+    it through this function rather than normalizing one side itself, so the
+    two sides can never be normalized asymmetrically. A *needle* that
+    normalizes to the empty string returns ``False`` rather than the vacuous
+    ``"" in haystack`` truth: an empty evidence quote is already
+    ``missing_evidence``'s business, and must never be rescued here.
+    """
+    target = _formatting_normalized_text(needle)
+    return bool(target) and target in _formatting_normalized_text(haystack)
+
+
 def _evidence_diff_pair(text: str) -> tuple[str, str] | None:
     """Return *text*'s ``(removed, added)`` halves iff it is a ``-``/``+`` pair.
 
@@ -128,7 +188,13 @@ def _reconcile_evidence_window(
        behavior byte-for-byte — required so every already-passing
        #1236/#1715/#1738 case is untouched, including ones where the
        evidence is a short fragment inside a wider, near-line-tolerance-
-       widened window that itself has gaps.
+       widened window that itself has gaps. Only if THAT substring check
+       fails is the same window re-checked through
+       :func:`_formatting_tolerant_contains` (#2099) — same window, same
+       gap-tolerant join, one strictly wider normalization — so a quote the
+       reviewer took before a formatter hook re-wrapped the file (or after
+       it re-wrapped the file the diff was captured from) still matches its
+       own declared window.
     2. Only when that fails does this grow the start backward and/or the
        end forward by up to *tolerance* lines each. A widened candidate
        counts ONLY when every line in its range is present in *candidates*
@@ -162,6 +228,8 @@ def _reconcile_evidence_window(
         candidates[n] for n in range(start, end + 1) if n in candidates
     )
     if target in _normalize_diff_text(base_joined):
+        return (start, end)
+    if _formatting_tolerant_contains(base_joined, text):
         return (start, end)
 
     best: tuple[int, int] | None = None

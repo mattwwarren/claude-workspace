@@ -44,6 +44,7 @@ from cw.review_findings import (
     ReviewerRunRecord,
     ReviewVerdict,
     consolidate_verdict,
+    parse_reviewer_document,
 )
 from cw.review_findings._consolidate import _count_rejected_by_severity
 from tests._codex_review_helpers import _task
@@ -55,6 +56,8 @@ from tests._reconcile_helpers import (
     _scope_guard_git,
 )
 from tests.conftest import (
+    _doc_payload,
+    _finding_kwargs,
     _make_debt_record,
     _make_diff,
     _make_finding,
@@ -794,24 +797,35 @@ def _mechanically_rejected_must_fix_doc() -> ReviewerFindingsDocument:
     )
 
 
-def _evidence_not_in_diff_must_fix_doc() -> ReviewerFindingsDocument:
-    """A doc whose MUST_FIX finding resolves to a real diff line window but
-    whose evidence text is absent from it (#1792).
+def _detail_bearing_rejection(severity: str, summary: str) -> RejectedFinding:
+    """A real rejection whose ``detail`` is populated, at *severity*.
 
-    Sibling of :func:`_mechanically_rejected_must_fix_doc`: that fixture is
-    rejected ``unknown_file`` (a reason ``RejectedFinding.detail`` is never
-    populated for); this one is rejected ``evidence_not_in_diff``, the one
-    reason #1792 populates ``detail`` for.
+    #2029's ``schema_invalid``, produced by :func:`parse_reviewer_document`
+    from a findings[] item that cannot become a ``Finding`` (here: a severity
+    outside the Literal), which stamps pydantic's own error text as ``detail``.
+
+    Replaces this file's former ``evidence_not_in_diff`` fixture, which #2099
+    routed to adjudication -- that reason no longer produces a
+    ``RejectedFinding`` at all, so it could no longer exercise the rendering
+    of a populated ``detail``. The rendering under test is reason-agnostic,
+    so the substitution costs the assertions nothing.
     """
-    return _make_reviewer_doc(
-        _make_finding(
-            severity="MUST_FIX",
-            file="src/cw/foo.py",
-            line_start=10,
-            line_end=10,
-            evidence="not present anywhere",
-            summary="evidence mismatch",
-        )
+    payload = _doc_payload(
+        _finding_kwargs(severity="NOT_A_SEVERITY", summary=summary),
+        reviewer_role="Code Quality Reviewer",
+        # Once the invalid item is rescued out, the document has no findings
+        # left, and a `status="ok"` document with none must justify itself.
+        detail="reviewed the diff; the one finding filed was unusable",
+    )
+    _document, rejected = parse_reviewer_document(payload)
+    assert len(rejected) == 1
+    assert rejected[0].detail != ""
+    # The claimed severity is read off `raw` by every downstream selector, so
+    # restore a usable one there -- the item's DEFECT is the severity value,
+    # and what this fixture needs is a detail-bearing rejection at a chosen
+    # severity, not a specific defect.
+    return rejected[0].model_copy(
+        update={"raw": {**rejected[0].raw, "severity": severity}}
     )
 
 
@@ -1479,12 +1493,17 @@ class TestRenderVerdictComment:
         assert "bad thing" in body
         assert "dropped one" in body
 
-    def test_render_verdict_comment_includes_discrepancy_detail(self) -> None:
-        # #1792: an evidence_not_in_diff rejection's populated `detail`
-        # (unlike a mechanically-rejected unknown_file's blank one, covered
-        # above) surfaces on the rendered comment.
+    def test_render_verdict_comment_includes_rejection_detail(self) -> None:
+        # #1792: a rejection's populated `detail` (unlike a mechanically-
+        # rejected unknown_file's blank one, covered above) surfaces on the
+        # rendered comment.
         verdict = consolidate_verdict(
-            [_evidence_not_in_diff_must_fix_doc()], _make_diff(), reviewed_sha="sha"
+            [],
+            _make_diff(),
+            reviewed_sha="sha",
+            pre_validation_rejected=[
+                _detail_bearing_rejection("MUST_FIX", "evidence mismatch")
+            ],
         )
         assert verdict.rejected_must_fix[0].detail != ""
         body = render_verdict_comment(verdict, fix_loop_enabled=False)
@@ -1535,21 +1554,18 @@ class TestRenderVerdictComment:
         assert "second drop" in body
 
     def test_sub_must_fix_rejected_line_renders_anchor_and_detail(self) -> None:
-        # A line-anchored SHOULD_FIX rejected `evidence_not_in_diff` is the one
-        # reason that populates RejectedFinding.detail (#1792) -- both the
-        # `file:line` anchor and the indented discrepancy line must reach the
-        # new section, not just the MUST_FIX one.
-        doc = _make_reviewer_doc(
-            _make_finding(
-                severity="SHOULD_FIX",
-                file="src/cw/foo.py",
-                line_start=10,
-                line_end=10,
-                evidence="not present anywhere",
-                summary="evidence mismatch",
-            )
+        # A line-anchored SHOULD_FIX rejection whose reason populates
+        # RejectedFinding.detail -- both the `file:line` anchor and the
+        # indented detail line must reach the new section, not just the
+        # MUST_FIX one.
+        verdict = consolidate_verdict(
+            [],
+            _make_diff(),
+            reviewed_sha="sha",
+            pre_validation_rejected=[
+                _detail_bearing_rejection("SHOULD_FIX", "evidence mismatch")
+            ],
         )
-        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
         assert verdict.rejected[0].detail != ""
         body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "- **src/cw/foo.py:10** — evidence mismatch" in body
@@ -2867,6 +2883,33 @@ class TestRenderAnchorDegraded:
             "Required base update was skipped"
         ) in body
         # It is adjudicated, not parked: no mechanical-rejection section.
+        assert "mechanically rejected" not in body
+
+    def test_unmatched_evidence_finding_gets_its_own_annotation(self) -> None:
+        # #2099: the sibling routing renders a DIFFERENT note, because it says
+        # the opposite thing about the location -- here the cited line is real
+        # and it is the quote that needs re-locating. One shared message would
+        # tell the adjudicator to distrust a line that actually verified.
+        verdict = consolidate_verdict(
+            [
+                _make_reviewer_doc(
+                    _make_finding(
+                        summary="quote did not match",
+                        evidence="not present anywhere",
+                    )
+                )
+            ],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert (
+            "- **src/cw/foo.py:10** _(evidence unmatched — the cited line "
+            "resolved but the quote was not found in its diff window; "
+            "re-anchor from the finding's text before bucketing)_ — "
+            "quote did not match"
+        ) in body
+        assert "line anchor degraded" not in body
         assert "mechanically rejected" not in body
 
     def test_undegraded_finding_carries_no_annotation(self) -> None:
