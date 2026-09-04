@@ -503,7 +503,7 @@ def _register_cw_exclude(git_cwd: Path) -> None:
 def _resolve_branch_start_point(client: ClientConfig, git_cwd: Path) -> str:
     """Resolve the start-point for a new branch in *client*'s repository.
 
-    Three-level fallback matching the convention in ``_has_unpushed_commits``:
+    Three-level fallback matching the convention in ``_unpushed_commits_detail``:
 
     1. ``origin/<default_branch>`` — authoritative remote ref; independent of
        the operator's current checkout.
@@ -700,63 +700,88 @@ def remove_worktree(
     _run_git(*args, cwd=_git_dir(client))
 
 
-def _has_unpushed_commits(client: ClientConfig, branch: str, wt_path: Path) -> bool:
-    """Return True if *branch* has commits not on any known base ref.
+def _commits_ahead(base: str, wt_path: Path) -> int | None:
+    """Return the number of commits in ``<base>..HEAD``, or None if *base* is
+    not resolvable (``git log`` exits non-zero)."""
+    result = _run_git("log", f"{base}..HEAD", "--oneline", cwd=wt_path, check=False)
+    if result.returncode != 0:
+        return None
+    return len([line for line in result.stdout.splitlines() if line.strip()])
 
-    Three-level fallback:
-    1. The worktree's own upstream, resolved via ``@{u}`` on the actual
-       checked-out branch — canonical; used when that branch was pushed,
-       regardless of whether its upstream name matches *branch*.
-    2. ``origin/<default_branch>`` — fallback when no upstream is configured.
+
+def _own_remote_ref(branch: str, wt_path: Path) -> str | None:
+    """Return ``origin/<checked-out branch>`` when that ref exists, else None.
+
+    The checked-out branch is preferred over the caller-supplied *branch*
+    (#2050/#2053: the two can differ); *branch* is the fallback when the
+    checkout cannot be resolved. ``rev-parse --verify`` answers "is this
+    branch pushed" exactly, independent of tracking configuration (#2114).
+    """
+    current = _checked_out_branch(wt_path) or branch
+    ref = f"origin/{current}"
+    verify = _run_git("rev-parse", "--verify", "--quiet", ref, cwd=wt_path, check=False)
+    return ref if verify.returncode == 0 else None
+
+
+def _upstream_ref(wt_path: Path) -> str | None:
+    """Return the checked-out branch's ``@{u}`` tracking ref, or None."""
+    upstream = _run_git(
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{u}",
+        cwd=wt_path,
+        check=False,
+    )
+    if upstream.returncode != 0:
+        return None
+    return upstream.stdout.strip() or None
+
+
+def _unpushed_commits_detail(
+    client: ClientConfig, branch: str, wt_path: Path
+) -> str | None:
+    """Describe *branch*'s unpushed commits, or return None when it is pushed.
+
+    Base-ref ladder, first resolvable level wins:
+
+    0. ``origin/<checked-out branch>`` when that ref exists — the exact
+       answer to "is this branch pushed". This level is what #2114 added:
+       the ``@{u}`` level below trusts whatever tracking ref is configured,
+       and when that is ``origin/<default_branch>`` every commit the feature
+       branch contains reads as unpushed, so a clean, fully-pushed worktree
+       parked ``dirty_worktree`` forever.
+    1. The worktree's own ``@{u}`` upstream (a branch pushed under another
+       name, #2050/#2053).
+    2. ``origin/<default_branch>`` — no own remote ref, no upstream.
     3. Local ``<default_branch>`` — offline / bare-clone fallback.
-    Returns True conservatively on subprocess failure or all-refs-absent.
+
+    Levels 1-3 cannot distinguish "pushed under a name we cannot see" from
+    "never pushed", so their message says which base was measured against;
+    the caller surfaces it in the park breadcrumb. Returns a description
+    conservatively on subprocess failure or when no base ref resolves.
     """
     try:
-        upstream = _run_git(
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{u}",
-            cwd=wt_path,
-            check=False,
+        own = _own_remote_ref(branch, wt_path)
+        if own is not None:
+            ahead = _commits_ahead(own, wt_path)
+            if ahead is not None:
+                return None if ahead == 0 else f"{ahead} commit(s) not on {own}"
+        candidates = (
+            _upstream_ref(wt_path),
+            f"origin/{client.default_branch}",
+            client.default_branch,
         )
-        if upstream.returncode == 0:
-            upstream_ref = upstream.stdout.strip()
-            if upstream_ref:
-                # Level 1: own upstream configured — canonical happy path.
-                log_result = _run_git(
-                    "log",
-                    f"{upstream_ref}..HEAD",
-                    "--oneline",
-                    cwd=wt_path,
-                    check=False,
-                )
-                if log_result.returncode == 0:
-                    return bool(log_result.stdout.strip())
-
-        # Level 2: no upstream configured — compare against origin/<default_branch>.
-        default_base = f"origin/{client.default_branch}"
-        log_result = _run_git(
-            "log",
-            f"{default_base}..HEAD",
-            "--oneline",
-            cwd=wt_path,
-            check=False,
-        )
-        if log_result.returncode == 0:
-            return bool(log_result.stdout.strip())
-
-        # Level 3: origin/<default_branch> also absent (offline / bare clone) —
-        # fall back to local default branch ref.
-        log_result = _run_git(
-            "log",
-            f"{client.default_branch}..HEAD",
-            "--oneline",
-            cwd=wt_path,
-            check=False,
-        )
-        if log_result.returncode == 0:
-            return bool(log_result.stdout.strip())
+        for base in (b for b in candidates if b is not None):
+            ahead = _commits_ahead(base, wt_path)
+            if ahead is None:
+                continue
+            if ahead == 0:
+                return None
+            return (
+                f"{ahead} commit(s) ahead of {base} and no origin/<branch> ref"
+                " for the checked-out branch (cannot prove they are pushed)"
+            )
     except (WorktreeError, OSError) as exc:
         _log.warning(
             "worktree_has_unsaved_work: log check failed for %s/%s: %s",
@@ -765,59 +790,24 @@ def _has_unpushed_commits(client: ClientConfig, branch: str, wt_path: Path) -> b
             exc,
         )
         # Fail-safe: treat as having unsaved work.
-        return True
+        return f"unpushed-commit check failed: {exc}"
     # All refs unresolvable — conservative fail-safe.
-    return True
+    return "no base ref resolvable (offline or bare clone)"
 
 
-def worktree_has_unsaved_work(
-    client: ClientConfig, branch: str, *, wt_path: Path | None = None
-) -> bool:
-    """Return True if the worktree for *branch* has unsaved work.
+def _uncommitted_changes_detail(
+    client: ClientConfig, branch: str, wt_path: Path
+) -> str | None:
+    """Describe uncommitted changes in *wt_path*, or return None when clean.
 
-    "Unsaved" means either:
-    - uncommitted changes (``git status --porcelain`` is non-empty), OR
-    - unpushed commits (``git log <upstream>..HEAD`` is non-empty).
-
-    Returns False when the worktree path does not exist (nothing to lose).
-    Resolves the upstream from the worktree's actual checked-out branch
-    (``@{u}``); only when that branch has no upstream configured at all does
-    it fall back to comparing against ``origin/<default_branch>``, then the
-    local ``<default_branch>`` ref. If all refs are unresolvable (e.g.
-    offline), returns True conservatively.
-
-    *wt_path* defaults to the branch's canonical ``worktree_path_for(client,
-    branch)`` location. Passing it explicitly lets a caller check a *foreign*
-    (non-canonical) worktree's dirty state instead — e.g. a worktree
-    collision's holder path, which cw did not create and does not track
-    (#2034).
-
-    Never raises — every git error is swallowed and logged at WARNING level
-    so that a git failure cannot block a cleanup sweep.
+    Filters out cw's own artifacts (``.claude/``) — these are written fresh
+    each session and would otherwise trip the dirty check on every retry.
+    Porcelain format: "XY path" (2-char status + space + path). Rename
+    entries ("R  old -> new") pass through unchanged; cw artifacts never
+    appear as renames so they will still be caught by path check.
     """
-    if wt_path is None:
-        wt_path = worktree_path_for(client, branch)
-    if not wt_path.exists():
-        return False
-
-    # 1. Uncommitted changes check
     try:
         status = _run_git("status", "--porcelain", cwd=wt_path, check=False)
-        # Filter out cw's own artifacts (.claude/) — these are written fresh
-        # each session and would otherwise trip the dirty check on every retry.
-        # Porcelain format: "XY path" (2-char status + space + path). Rename
-        # entries ("R  old -> new") pass through unchanged; cw artifacts never
-        # appear as renames so they will still be caught by path check.
-        lines = [
-            line
-            for line in status.stdout.splitlines()
-            if not (
-                len(line) > _GIT_PORCELAIN_PATH_OFFSET
-                and line[_GIT_PORCELAIN_PATH_OFFSET:].startswith(_CW_SCRATCH_PREFIX)
-            )
-        ]
-        if lines:
-            return True
     except (WorktreeError, OSError) as exc:
         _log.warning(
             "worktree_has_unsaved_work: status check failed for %s/%s: %s",
@@ -826,11 +816,64 @@ def worktree_has_unsaved_work(
             exc,
         )
         # Fail-safe: treat as having unsaved work so we don't silently destroy.
-        return True
+        return f"status check failed: {exc}"
+    lines = [
+        line
+        for line in status.stdout.splitlines()
+        if not (
+            len(line) > _GIT_PORCELAIN_PATH_OFFSET
+            and line[_GIT_PORCELAIN_PATH_OFFSET:].startswith(_CW_SCRATCH_PREFIX)
+        )
+    ]
+    if not lines:
+        return None
+    return f"{len(lines)} uncommitted path(s)"
 
-    # 2. Unpushed commits check — three-level fallback when remote tracking
-    # branch is absent (see _has_unpushed_commits for the strategy).
-    return _has_unpushed_commits(client, branch, wt_path)
+
+def unsaved_work_reason(
+    client: ClientConfig, branch: str, *, wt_path: Path | None = None
+) -> str | None:
+    """Return why the worktree for *branch* has unsaved work, or None if clean.
+
+    "Unsaved" means either:
+    - uncommitted changes (``git status --porcelain`` is non-empty), OR
+    - unpushed commits (``git log <base>..HEAD`` is non-empty, see
+      :func:`_unpushed_commits_detail` for the base-ref ladder).
+
+    The returned string names which predicate fired, the base ref it was
+    measured against, and the count — a park that says only
+    ``dirty_worktree`` on a visibly clean tree cost real operator time
+    before the predicate was read (#2114). Returns None when the worktree
+    path does not exist (nothing to lose).
+
+    *wt_path* defaults to the branch's canonical ``worktree_path_for(client,
+    branch)`` location. Passing it explicitly lets a caller check a *foreign*
+    (non-canonical) worktree's dirty state instead — e.g. a worktree
+    collision's holder path, which cw did not create and does not track
+    (#2034).
+
+    Never raises — every git error is swallowed and logged at WARNING level
+    so that a git failure cannot block a cleanup sweep; it is reported as a
+    reason instead (fail-safe toward "has unsaved work").
+    """
+    if wt_path is None:
+        wt_path = worktree_path_for(client, branch)
+    if not wt_path.exists():
+        return None
+    uncommitted = _uncommitted_changes_detail(client, branch, wt_path)
+    if uncommitted is not None:
+        return uncommitted
+    return _unpushed_commits_detail(client, branch, wt_path)
+
+
+def worktree_has_unsaved_work(
+    client: ClientConfig, branch: str, *, wt_path: Path | None = None
+) -> bool:
+    """Return True if the worktree for *branch* has unsaved work.
+
+    Boolean view of :func:`unsaved_work_reason`; see it for the contract.
+    """
+    return unsaved_work_reason(client, branch, wt_path=wt_path) is not None
 
 
 def _fetch_default_branch(

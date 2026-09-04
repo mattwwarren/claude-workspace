@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -618,6 +619,8 @@ class TestHasUnpushedCommits:
         branch name; log against that ref is empty -> False."""
 
         def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "--show-current" in cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")  # no level 0
             if "@{u}" in cmd:
                 return MagicMock(
                     returncode=0, stdout="origin/renamed-branch\n", stderr=""
@@ -637,6 +640,8 @@ class TestHasUnpushedCommits:
         """AC2: same @{u} resolution, log against it is non-empty -> True."""
 
         def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "--show-current" in cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")  # no level 0
             if "@{u}" in cmd:
                 return MagicMock(returncode=0, stdout="origin/dev/630\n", stderr="")
             if "log" in cmd:
@@ -671,6 +676,8 @@ class TestHasUnpushedCommits:
         """@{u} resolves, but the log check against it fails -> True."""
 
         def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "--show-current" in cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")  # no level 0
             if "@{u}" in cmd:
                 return MagicMock(returncode=0, stdout="origin/dev/630\n", stderr="")
             return MagicMock(returncode=1, stdout="", stderr="error")
@@ -684,6 +691,8 @@ class TestHasUnpushedCommits:
 
     def test_oserror_on_log_returns_true(self, tmp_path: Path) -> None:
         def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "--show-current" in cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")  # no level 0
             if "@{u}" in cmd:
                 return MagicMock(returncode=0, stdout="origin/dev/630\n", stderr="")
             msg = "git log exploded"
@@ -698,6 +707,8 @@ class TestHasUnpushedCommits:
         captured: dict[str, list[str]] = {}
 
         def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "--show-current" in cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")  # no level 0
             if "@{u}" in cmd:
                 return MagicMock(returncode=0, stdout="origin/feature/xyz\n", stderr="")
             captured["log_cmd"] = cmd
@@ -708,10 +719,72 @@ class TestHasUnpushedCommits:
 
         assert "origin/feature/xyz..HEAD" in captured["log_cmd"]
 
+    # ---------------------------------------------------------------------------
+    # remove_worktree_gc
+    # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# remove_worktree_gc
-# ---------------------------------------------------------------------------
+    # --- #2114: level 0 -- origin/<checked-out branch> wins over @{u} ---
+
+    def _level0_side_effect(
+        self, *, own_log: str, own_ref_exists: bool = True, own_log_rc: int = 0
+    ) -> Callable[..., MagicMock]:
+        """@{u} points at origin/main (14 commits ahead); origin/dev/2114 is
+        the checked-out branch's own remote ref."""
+
+        def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "--show-current" in cmd:
+                return MagicMock(returncode=0, stdout="dev/2114\n", stderr="")
+            if "--verify" in cmd and "origin/dev/2114" in cmd:
+                rc = 0 if own_ref_exists else 128
+                return MagicMock(returncode=rc, stdout="abc123\n", stderr="")
+            if "@{u}" in cmd:
+                return MagicMock(returncode=0, stdout="origin/main\n", stderr="")
+            if "log" in cmd and "origin/dev/2114..HEAD" in cmd:
+                return MagicMock(returncode=own_log_rc, stdout=own_log, stderr="")
+            if "log" in cmd and "origin/main..HEAD" in cmd:
+                return MagicMock(returncode=0, stdout="x\n" * 14, stderr="")
+            msg = f"unexpected git call: {cmd}"
+            raise AssertionError(msg)
+
+        return _side_effect
+
+    def test_fully_pushed_branch_tracking_default_branch_is_not_unpushed(
+        self, tmp_path: Path
+    ) -> None:
+        """#2114: @{u} is origin/main, but origin/dev/2114 == HEAD -> False."""
+        with patch(
+            "cw.worktree_gc._sp.run", side_effect=self._level0_side_effect(own_log="")
+        ):
+            assert _has_unpushed_commits(tmp_path) is False
+
+    def test_own_remote_ref_behind_head_is_unpushed(self, tmp_path: Path) -> None:
+        """Level 0 with real unpushed commits still answers True."""
+        with patch(
+            "cw.worktree_gc._sp.run",
+            side_effect=self._level0_side_effect(own_log="abc123 wip\n"),
+        ):
+            assert _has_unpushed_commits(tmp_path) is True
+
+    def test_own_remote_log_failure_falls_through_to_upstream(
+        self, tmp_path: Path
+    ) -> None:
+        """origin/<branch> resolves but the log against it fails -> the @{u}
+        ladder decides (here: 14 commits ahead of origin/main -> True)."""
+        with patch(
+            "cw.worktree_gc._sp.run",
+            side_effect=self._level0_side_effect(own_log="", own_log_rc=128),
+        ):
+            assert _has_unpushed_commits(tmp_path) is True
+
+    def test_missing_own_remote_ref_falls_through_to_upstream(
+        self, tmp_path: Path
+    ) -> None:
+        """No origin/<branch> ref -> the @{u} ladder decides (conservative)."""
+        with patch(
+            "cw.worktree_gc._sp.run",
+            side_effect=self._level0_side_effect(own_log="", own_ref_exists=False),
+        ):
+            assert _has_unpushed_commits(tmp_path) is True
 
 
 class TestRemoveWorktreeGc:
