@@ -57,6 +57,14 @@ _ANCHOR_DEGRADED_ANNOTATION = (
     "diff; adjudicate on the finding's text)_"
 )
 
+# #2101: a finding whose file falls outside the approved plan's declared
+# scope (`AcceptedFinding.in_plan_scope is False`) — a plan supplied, and the
+# file is in neither its `## Files Modified` manifest nor the diff's own
+# changed-file set. Display-only, exactly like the annotations above: nothing
+# here rejects, drops, or reorders the finding, it only flags it for the
+# coordinating session's Checkpoint 3a (4d) plan-scope precedence rule.
+_OUT_OF_PLAN_SCOPE_ANNOTATION = " _(outside planned file set)_"
+
 
 def _disposition_annotation(accepted: AcceptedFinding) -> str:
     """Annotate a finding whose disposition says it is no longer blocking.
@@ -97,8 +105,12 @@ def _render_findings(
         )
         suppression = _disposition_annotation(af)
         degraded = _ANCHOR_DEGRADED_ANNOTATION if finding.anchor_degraded else ""
+        out_of_scope = (
+            _OUT_OF_PLAN_SCOPE_ANNOTATION if af.in_plan_scope is False else ""
+        )
         lines.append(
-            f"- **{loc}**{annotation}{suppression}{degraded} — {finding.summary}"
+            f"- **{loc}**{annotation}{suppression}{degraded}{out_of_scope} — "
+            f"{finding.summary}"
         )
     lines.append("")
     return lines

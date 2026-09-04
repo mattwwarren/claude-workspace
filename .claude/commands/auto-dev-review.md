@@ -79,6 +79,20 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
   ```
   Use `origin/<branch-name>`, not the bare local ref — the branch was pushed from an isolation worktree and may not be visible locally until fetched. Use the Checkpoint-2 fork point SHA for a deterministic diff; do NOT use `origin/main`, which may have advanced. Small scope: include the whole diff. Large scope: you may summarize non-critical files, but always inline the primary ones.
 - Changed file list
+- **`## Planned File Set` block (#2101)** — inline the approved plan's declared scope so reviewers can see it directly, rather than inferring it from the diff:
+  ```
+  ## Planned File Set
+
+  The approved plan's complete file inventory, from `.cw/plan.md`'s `## Files Modified` section:
+
+  <verbatim `## Files Modified` bullets from .cw/plan.md>
+
+  Any lines from `.cw/plan.md`'s `## Decisions` / `## Adopted Assumptions` that explicitly exclude or defer a file (e.g. "Drop the X client work, tracked as #NNNN"):
+
+  <verbatim matching lines, or "None." if none>
+
+  A finding whose `file` is not in this inventory, and not explicitly named as in scope by a `## Decisions` line, describes work outside the plan's scope. Cap its severity at SHOULD_FIX (never MUST_FIX for out-of-scope work) and say in `consequence` that it is outside the planned file set — do not silently drop it, and do not decide its disposition yourself; the coordinating session adjudicates it at Checkpoint 3a.
+  ```
 - **`PROJECT_RUBRICS` block** (inline verbatim if non-null, omit the section entirely if null):
   ```
   ## Project-Specific Rubrics
@@ -154,9 +168,9 @@ REVIEW_FINDINGS>>>
    ```json
    {"diff": "<the same diff text sent to reviewers>", "reviewed_sha": "<HEAD sha>", "failed_reviewers": [...]}
    ```
-3. Run, always passing `--base "$FORK_POINT"` (the same fork point every reviewer's diff was captured from at Step 3a — never `--no-base-check`, which is for tests and human recovery debugging only):
+3. Run, always passing `--base "$FORK_POINT"` (the same fork point every reviewer's diff was captured from at Step 3a — never `--no-base-check`, which is for tests and human recovery debugging only) and `--plan .cw/plan.md` (#2101 — stamps each accepted finding's `in_plan_scope` against the approved plan's `## Files Modified` manifest; see Checkpoint 3a (4d) for what the coordinating session does with the tag):
    ```bash
-   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ --base "$FORK_POINT" -
+   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate --documents-from .cw/review-findings/ --base "$FORK_POINT" --plan .cw/plan.md -
    ```
    A non-zero exit here is a hard pipeline error (the mechanical validation itself failed — e.g. malformed JSON, a *structural* schema violation such as a missing `reviewer_role`/`status` or a document whose surviving findings still cannot satisfy its own invariants — note that since #2029 a single schema-invalid finding is NOT this case: it is rescued out and reported in `.rejected` with `reason: "schema_invalid"`, and its siblings consolidate normally — an unreadable `--documents-from` file, one of the #1924 diff-integrity guards rejecting the payload — a placeholder `diff` that never carried a real diff, or the same hunk repeated for the same file because the diff was reconstructed by hand — or a `DiffBaseMismatchError` from the `--base` check: the payload's diff text did not match the real `git diff $FORK_POINT...$CHECKPOINT_3A_SHA` output) — not a normal adjudication path. Do not attempt to recover by re-running adjudication on the raw prose; treat it the same as any other unrecoverable Stage 3 tool failure.
 3.5. **Consult the voided-findings record — `cw review check-voided` (#1814).** An operator who rejected a finding on a prior pass settled it permanently; a re-review re-deriving it must not re-park the ticket. Assemble `{"verdict": <the verdict step 3 just printed>, "ticket_id": "<ticket id>", "comment_bodies": [<each live-fetched ticket comment body, per the Orientation section's mandatory live fetch>], "new_voided_entries": []}` and run:
@@ -186,6 +200,7 @@ REVIEW_FINDINGS>>>
 
 - **(4a) Non-deferrable pre-pass.** Before bucket assignment, scan every finding: any finding describing an implementation **deviation from an EXPLICIT plan requirement or prohibition** — a `do NOT X` the plan states, a mandated mechanism the plan named, a required test the plan named — is `NON_DEFERRABLE`. A NON_DEFERRABLE finding is eligible for **bucket 1 (FIX NOW) only**; it may never land in REJECT (bucket 2) or DEFER (bucket 3).
 - **(4b) Spec-citation cross-check.** If a proposed bucket-2/3 rationale contains any of the literal trigger phrases — `"required by spec"`, `"plan mandated"`, `"plan requires"`, `"the RFC says"`, `"operator required"`, `"operator decided"`, `"ticket spec"` — the coordinating session MUST verify the claim against `.cw/plan.md` **verbatim** before accepting the rejection/deferral. If `.cw/plan.md` contradicts the justification, the finding is `NON_DEFERRABLE`.
+- **(4d) Plan-scope precedence (#2101).** A MUST_FIX/SHOULD_FIX finding whose printed verdict carries `in_plan_scope: false` — a plan was supplied and the finding's file is in neither the plan's `## Files Modified` manifest nor the diff's own changed-file set — is never eligible for bucket 1 (FIX NOW), **unless** `.cw/plan.md`'s `## Decisions` (or `## Adopted Assumptions`) explicitly names the file as in scope, in which case ignore `in_plan_scope` and bucket-sort the finding normally, on its own merits. Otherwise it is DEFER (bucket 3 — already "Record now, file as a ticket on merge," see below): the `ADJUDICATIONS` rationale must name the plan clause that excluded or deferred the file (quoting `.cw/plan.md`'s `## Decisions`/`## Adopted Assumptions` verbatim) and, when the plan names a follow-up ticket for that work, that ticket. **Precedence with (4a), stated once:** a finding that is both NON_DEFERRABLE and `in_plan_scope: false` means the plan contradicts itself — a requirement the plan mandates for a file the plan's own `## Decisions` excludes. Resolve it via the (4a) Exit rule below (`plan_deviation`), never by silently picking one signal over the other. `in_plan_scope` absent or `null` (no plan was supplied to `cw review consolidate`, or the finding has no diff anchor) carries no signal here — bucket-sort those findings by (4a)-(4c) alone.
 - **(4c) Operator send-back cross-check (#1730).** The live-fetched ticket comments (see Orientation) are a **binding adjudication input**, not background color: a comment in which the operator adjudicated a specific prior finding — accepting, rejecting, or scoping it out — settles that finding here, and the coordinating session may not re-litigate it into a different bucket. When `.claude/cw-context.json`'s `queue_metadata.pending_operator_comment` is `true`, check the comments **before** assigning any MUST_FIX/SHOULD_FIX finding to a bucket, and record which comment settled it in the adjudication rationale. **An operator-settled finding is adjudicated exactly like any other (#1805):** it gets its own entry in the `ADJUDICATIONS` array below, with the `outcome` the comment dictated and — for `reject`/`defer`, where `rationale` is REQUIRED — a `rationale` naming the operator comment (author and date) as the source. Recording the decision only in prose would leave it the one adjudication missing from the array `cw review adjudicate` treats as the single source of truth.
   **Also make the decision durable (#1814).** An `ADJUDICATIONS` entry settles the finding for *this* pass only; the array is session-local and dies with the session. A regress/redispatch, or the codex backend (which has no coordinating session at all and re-derives its findings mechanically every pass), would raise the same finding again with nothing to stop it. So when an operator comment settles a REJECT, **also** append one entry to a session-local `NEW_VOIDED_FINDINGS` list:
   ```json

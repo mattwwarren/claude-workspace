@@ -31,7 +31,8 @@ from cw.cli.review._group import (
     _parse_payload_or_exit,
     review,
 )
-from cw.exceptions import DocumentsFromReadError
+from cw.exceptions import DocumentsFromReadError, PlanReadError
+from cw.plan_files import parse_plan_files_modified
 from cw.review_findings import (
     RejectedFinding,
     ReviewerFindingsDocument,
@@ -187,6 +188,25 @@ def _load_documents_from(
     return documents, rejected
 
 
+def _load_planned_files(plan_path: Path) -> list[str]:
+    """Parse *plan_path*'s ``## Files Modified`` manifest for ``--plan`` (#2101).
+
+    Raises :class:`PlanReadError` naming *plan_path* on any read failure —
+    same shape as :func:`_load_reviewer_document`'s ``--documents-from``
+    read guard. A manifest that parses to an empty list (no matching heading,
+    or a heading with no bulleted paths) is not itself an error here:
+    :func:`~cw.review_findings.consolidate_verdict` reads an empty
+    ``planned_files`` as "the plan excludes every file", a legitimate plan
+    shape, not a parse failure.
+    """
+    try:
+        text = plan_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        msg = f"--plan could not read {plan_path}: {exc}"
+        raise PlanReadError(msg) from exc
+    return parse_plan_files_modified(text)
+
+
 @review.command(name="consolidate")
 @click.argument("path")
 @click.option(
@@ -241,6 +261,19 @@ def _load_documents_from(
     default=False,
     help=_NO_BASE_CHECK_HELP,
 )
+@click.option(
+    "--plan",
+    "plan",
+    default=None,
+    type=click.Path(path_type=Path),
+    help=(
+        "Path to the approved plan (typically .cw/plan.md) whose "
+        "'## Files Modified' manifest tags each accepted finding's "
+        "in_plan_scope, via cw.plan_files.parse_plan_files_modified. "
+        "Defaults to None, which leaves every finding's in_plan_scope at "
+        "null (today's byte-identical output)."
+    ),
+)
 @handle_errors
 def review_consolidate(
     path: str,
@@ -249,6 +282,7 @@ def review_consolidate(
     documents_from: Path | None,
     base: str | None,
     no_base_check: bool,
+    plan: Path | None,
 ) -> None:
     """Validate, dedupe, and aggregate reviewer findings into a ReviewVerdict.
 
@@ -281,6 +315,12 @@ def review_consolidate(
     with or without --base: a placeholder that never carried a diff, and the
     same hunk repeated for the same file.
 
+    --plan reads the approved plan's '## Files Modified' manifest (#2101) and
+    stamps each accepted finding's `in_plan_scope` — True/False when a plan
+    was supplied, null when it wasn't. This is adjudication input only: it
+    never rejects, drops, or reorders a finding. Omit it to leave every
+    finding's `in_plan_scope` at null, byte-identical to pre-#2101 output.
+
     On success: exits 0, prints the ReviewVerdict as JSON to stdout.
     On failure: exits 1, prints 'field.path: message' lines to stderr — or,
     for an integrity-guard rejection, a plain error message; exits 2 if
@@ -289,6 +329,7 @@ def review_consolidate(
     _require_base_xor_no_base_check(base, no_base_check)
 
     parsed = _parse_payload_or_exit(path, _ConsolidateInput)
+    planned_files = _load_planned_files(plan) if plan is not None else None
 
     _check_not_placeholder_diff(parsed.diff)
     _check_no_duplicate_hunks(parsed.diff)
@@ -319,5 +360,6 @@ def review_consolidate(
         worktree=resolved_worktree,
         failed_reviewers=parsed.failed_reviewers,
         pre_validation_rejected=pre_validation_rejected,
+        planned_files=planned_files,
     )
     click.echo(verdict.model_dump_json(indent=2))
