@@ -40,6 +40,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
 from ._group import dev_queue
@@ -211,6 +212,13 @@ def _post_plan_approved_marker(
     True iff the marker is recorded on the issue after this call (either
     found already present, or just posted successfully); False on every
     warn / fail-closed / gh-failure path. See GitHub #1419.
+
+    GitHub-only by construction (``gh issue comment``): when the client's
+    tracker is positively known to be non-GitHub (e.g. ``linear``), the
+    ``gh`` calls can only fail against that ticket id, so they are skipped
+    and the operator is told the approval already lives on the dev-queue
+    row (``plan_approved_at``), which the plan stage reads on re-dispatch.
+    Fail-open on an unresolvable tracker, matching ``requeue.py``'s gate.
     """
     if result["from_stage"] != "plan":
         click.echo(
@@ -220,7 +228,19 @@ def _post_plan_approved_marker(
         )
         return False
 
-    repo_cwd = _git_dir(get_client(resolved))
+    client_cfg = get_client(resolved)
+    tracker = resolve_tracker(client_cfg.workspace_path)
+    if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
+        click.echo(
+            f"--post-marker: tracker is {tracker!r}, not GitHub — the"
+            f" marker comment is not posted to {ticket_id} ({resolved})."
+            " The approval is recorded on the dev-queue row"
+            " (plan_approved_at) and the plan stage honors it on"
+            " re-dispatch."
+        )
+        return False
+
+    repo_cwd = _git_dir(client_cfg)
     comments = fetch_issue_comments(
         ticket_id, timeout=FETCH_COMMENTS_TIMEOUT, cwd=repo_cwd
     )
@@ -262,6 +282,16 @@ def _post_plan_approved_marker(
         err=True,
     )
     return False
+
+
+def _tracker_is_github_or_unknown(client_name: str) -> bool:
+    """True unless *client_name*'s tracker is positively non-GitHub.
+
+    Gates the ``--post-marker`` hint printed after a #968 plan re-queue: the
+    GitHub audit comment is meaningless advice on a Linear-tracked client.
+    """
+    tracker = resolve_tracker(get_client(client_name).workspace_path)
+    return tracker is None or tracker == TRACKER_GITHUB_ISSUES
 
 
 @dev_queue.command(name="approve")
@@ -327,9 +357,11 @@ def dev_queue_approve(ticket_id: str, client: str | None, post_marker: bool) -> 
         click.echo(
             f"Approved {ticket_id} ({resolved}): plan not yet quality-reviewed"
             " — re-queued at plan stage to run Plan Quality Review."
-            " Re-run auto-dev-plan (or dispatch) to proceed."
+            " Re-run auto-dev-plan (or dispatch) to proceed. The approval"
+            " is recorded on the dev-queue row (plan_approved_at); the"
+            " re-dispatched plan stage treats it as operator approval."
         )
-        if not marker_already_recorded:
+        if not marker_already_recorded and _tracker_is_github_or_unknown(resolved):
             click.echo(
                 "Pass --post-marker to also post the plan-approved audit"
                 " marker comment on this ticket."

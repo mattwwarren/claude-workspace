@@ -142,7 +142,18 @@ from cw.review_finding_dispositions import FindingDisposition
 # v34: added TicketTask.pending_fix_dispatch/fix_dispatch_session_id
 #      (GitHub #2017) — the durable, non-worktree handoff surface the review
 #      fix loop's asynchronous dispatch runs on. See PendingFixDispatch below.
-DEV_QUEUE_SCHEMA_VERSION = 34
+# v35: added TicketTask.plan_approved_at (GitHub #968/#1906 follow-up) — the
+#      tracker-neutral record that the PLAN-stage approval gate was released
+#      via `cw dev-queue approve`. Stamped by _approve_ticket_locked; threaded
+#      into the worker's cw-context.json queue_metadata at spawn so the plan
+#      stage's Large-scope carve-out can accept it as approval evidence on a
+#      client whose tracker (e.g. Linear) the GitHub-only `--post-marker`
+#      comment can never reach. One clear site: _stage_regress into
+#      Stage.PLAN (a deliberate re-plan revokes it, #2102). Otherwise durable,
+#      mirroring the `<!-- auto-dev-plan-approved -->` GitHub comment it
+#      stands in for, which is never revoked — #2102 tracks binding both to
+#      the draft that was actually approved.
+DEV_QUEUE_SCHEMA_VERSION = 35
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -366,6 +377,18 @@ class TicketTask(BaseModel):
     # and unconditionally by the review stage's own live-fetch (both backends);
     # this field only says "treat what you are about to read as elevated".
     pending_operator_comment: bool = False
+    # Tracker-neutral record that the PLAN-stage approval gate was released
+    # (v35). Stamped by dev_queue/approval.py's _approve_ticket_locked whenever
+    # a PLAN-stage row is approved — on the #968 same-stage re-park (plan not
+    # yet quality-reviewed) as well as on the direct advance — and threaded
+    # into the worker's cw-context.json queue_metadata at spawn (spawn.py).
+    # auto-dev-plan.md's Checkpoint 1 reads it as operator approval evidence
+    # alongside an approving tracker reply, so a Linear-tracked ticket (whose
+    # tracker the GitHub-only `--post-marker` comment cannot reach) no longer
+    # re-parks at plan_pending_approval on every re-dispatch. Cleared only by
+    # _stage_regress into Stage.PLAN (a re-plan revokes it, #2102); otherwise
+    # durable, like the GitHub marker comment it stands in for.
+    plan_approved_at: datetime | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.
     # Kept only so persisted dev-queue rows that carry the field keep loading.
