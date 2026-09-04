@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Symlink cw slash commands and skill directories, and copy subagents, into
-# ~/.claude/
+# Symlink cw slash commands, skill directories, and helper scripts, and copy
+# subagents, into ~/.claude/
 #
 # SAFETY INVARIANT (manifest-scoped prune):
 #   This script tracks every path it installs in ~/.claude/.cw-skills-manifest.
@@ -17,6 +17,20 @@
 #   and the diff is meant to be reviewed and committed there.  The prune rule
 #   above still holds — an agent that exists only in global-claude never enters
 #   this manifest, so it is never removed by cw.
+#
+# NOTE ON SCRIPTS (~/.claude/scripts):
+#   Same layout as agents on a typical setup — the path is global-claude's
+#   scripts/ directory.  cw's .claude/scripts/ is the authoritative copy of the
+#   scripts its own commands invoke (prep_pr_state.py, prep_pr_finalize.py,
+#   review_monitor.py, ...), so each file is symlinked in individually — never
+#   the directory, which would clobber scripts that exist only in global-claude.
+#   A regular file already at the destination is a tracked duplicate that goes
+#   stale (#2090: a prep_pr_state.py three versions behind silently stripped
+#   /prep-pr's gate-timeout ladder); it is replaced with the symlink and named
+#   in the summary so it can be `git rm --cached` from global-claude.  If its
+#   bytes differ from what cw installs (hand-edits, a newer copy), they are
+#   kept beside the link as <name>.pre-symlink.bak first — ln -sf unlinks the
+#   old content, and a reversal path should be a file, not git archaeology.
 #
 #   Overwrite safety (#1784): a baseline shadow-copy store at
 #   ~/.claude/.cw-agents-baseline/ records the exact content cw itself last
@@ -53,6 +67,16 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# _read_exclusions <file> — print the file's non-empty lines; nothing if absent.
+_read_exclusions() {
+    [ -f "$1" ] || return 0
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        printf '%s\n' "$line"
+    done < "$1"
+}
+
 # Project-scoped commands that must NEVER be installed into ~/.claude/commands.
 #
 # Why: /prep-pr resolves /ship-it against the *current project's*
@@ -64,15 +88,27 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # scripts/excluded-commands.txt is the single source of truth for this list —
 # both this script and cw doctor's skills-commands-drift check (which must
 # not flag an excluded command as "missing" on the global side) read it. See
-# src/cw/doctor/skills_drift.py's _load_excluded_commands (#1535).
+# src/cw/doctor/skills_drift.py's _EXCLUSION_FILES (#1535).
 EXCLUDED_COMMANDS_FILE="$SCRIPT_DIR/excluded-commands.txt"
 EXCLUDED_COMMANDS=()
-if [ -f "$EXCLUDED_COMMANDS_FILE" ]; then
-    while IFS= read -r excluded_name || [ -n "$excluded_name" ]; do
-        [ -n "$excluded_name" ] || continue
-        EXCLUDED_COMMANDS+=("$excluded_name")
-    done < "$EXCLUDED_COMMANDS_FILE"
-fi
+while IFS= read -r excluded_name; do
+    EXCLUDED_COMMANDS+=("$excluded_name")
+done < <(_read_exclusions "$EXCLUDED_COMMANDS_FILE")
+
+# Repo-scoped scripts that must NEVER be installed into ~/.claude/scripts.
+#
+# Why: check_imports.py is this repo's CI smoke-import gate — it hard-codes
+# repo-relative PYTHONPATH groups and means nothing outside this checkout.
+# Entries are paths relative to .claude/scripts/ (e.g. `utils/foo.py`).
+#
+# scripts/excluded-scripts.txt is the single source of truth, read by both
+# this script and cw doctor's skills-commands-drift check, exactly like
+# excluded-commands.txt above.
+EXCLUDED_SCRIPTS_FILE="$SCRIPT_DIR/excluded-scripts.txt"
+EXCLUDED_SCRIPTS=()
+while IFS= read -r excluded_name; do
+    EXCLUDED_SCRIPTS+=("$excluded_name")
+done < <(_read_exclusions "$EXCLUDED_SCRIPTS_FILE")
 
 # Throwaway / experiment-scoped agents that must NEVER be installed globally.
 #
@@ -98,10 +134,12 @@ _is_excluded() {
 COMMANDS_SRC="$PROJECT_DIR/.claude/commands"
 SKILLS_SRC="$PROJECT_DIR/.claude/skills"
 AGENTS_SRC="$PROJECT_DIR/.claude/agents"
+SCRIPTS_SRC="$PROJECT_DIR/.claude/scripts"
 CLAUDE_HOME="${HOME}/.claude"
 COMMANDS_DST="$CLAUDE_HOME/commands"
 SKILLS_DST="$CLAUDE_HOME/skills"
 AGENTS_DST="$CLAUDE_HOME/agents"
+SCRIPTS_DST="$CLAUDE_HOME/scripts"
 MANIFEST="$CLAUDE_HOME/.cw-skills-manifest"
 
 # Baseline shadow-copy store for agent overwrite-safety (#1784): one copy per
@@ -303,6 +341,56 @@ if [ -d "$SKILLS_SRC" ]; then
     done
 fi
 
+script_count=0
+excluded_script_count=0
+replaced_scripts=()
+backed_up_scripts=()
+if [ -d "$SCRIPTS_SRC" ]; then
+    mkdir -p "$SCRIPTS_DST"
+    # find, not a glob: the tree nests (utils/ is a package the top-level
+    # scripts import via Path(__file__).parent, so it must land beside them),
+    # and links are made per FILE — never per directory — so a scripts/ or
+    # utils/ that already holds files cw did not install keeps them (see the
+    # NOTE ON SCRIPTS header). Byte-code caches are never installed.
+    while IFS= read -r src_file; do
+        [ -n "$src_file" ] || continue
+        rel="${src_file#"$SCRIPTS_SRC"/}"
+        if _is_excluded "$rel" "${EXCLUDED_SCRIPTS[@]+"${EXCLUDED_SCRIPTS[@]}"}"; then
+            excluded_script_count=$((excluded_script_count + 1))
+            continue
+        fi
+        dst_file="$SCRIPTS_DST/$rel"
+        mkdir -p "$(dirname "$dst_file")"
+        # A regular file here is a pre-existing copy of a script cw owns —
+        # on the usual layout, global-claude's own tracked duplicate, which
+        # is exactly the copy that goes stale. Replacing it is the point, but
+        # it needs a matching `git rm --cached` over there, so record it.
+        if [ -f "$dst_file" ] && [ ! -L "$dst_file" ]; then
+            replaced_scripts+=("$rel")
+            # ln -sf unlinks the old bytes. When they are more than the same
+            # bytes cw is installing, keep them beside the link (see the NOTE
+            # ON SCRIPTS header); a byte-identical copy has nothing to keep.
+            if ! cmp -s "$src_file" "$dst_file"; then
+                # Never overwrite an earlier generation: until the hand-over
+                # is done, a checkout in global-claude can restore the tracked
+                # file over the link, so this branch can fire again for the
+                # same name with different bytes.
+                backup="$dst_file.pre-symlink.bak"
+                n=1
+                while [ -e "$backup" ]; do
+                    backup="$dst_file.pre-symlink.$n.bak"
+                    n=$((n + 1))
+                done
+                cp -p "$dst_file" "$backup"
+                backed_up_scripts+=("$backup")
+            fi
+        fi
+        ln -sf "$src_file" "$dst_file"
+        new_entries+=("scripts/$rel")
+        script_count=$((script_count + 1))
+    done < <(find "$SCRIPTS_SRC" -type f ! -name '*.pyc' ! -path '*/__pycache__/*' | LC_ALL=C sort)
+fi
+
 # Deferred abort: must happen here, after the skills loop but before the
 # manifest write and (critically) the prune step below. A conflicting agent
 # is deliberately withheld from new_entries above so its destination is left
@@ -429,7 +517,25 @@ echo "  commands skipped: $excluded_count (project-scoped)"
 echo "  skill dirs synced: $skill_count"
 echo "  agents synced   : $agent_count"
 echo "  agents skipped  : $excluded_agent_count (experiment-scoped)"
+echo "  scripts synced  : $script_count"
+echo "  scripts skipped : $excluded_script_count (repo-scoped)"
 echo "  orphans pruned  : $prune_count"
+
+if [ "${#replaced_scripts[@]}" -gt 0 ]; then
+    echo "  scripts replaced (regular file -> symlink):"
+    for p in "${replaced_scripts[@]}"; do
+        echo "    - scripts/$p"
+    done
+    echo "  If ~/.claude/scripts is a git checkout (global-claude), untrack each one"
+    echo "  there — \`git rm --cached scripts/<name>\` plus a .gitignore entry — so the"
+    echo "  symlink cw now owns stops showing up as a modified tracked file."
+    if [ "${#backed_up_scripts[@]}" -gt 0 ]; then
+        echo "  replaced copies that differed from cw's source were kept beside the link:"
+        for p in "${backed_up_scripts[@]}"; do
+            echo "    - $p"
+        done
+    fi
+fi
 
 if [ "${#pruned_names[@]}" -gt 0 ]; then
     echo "  pruned paths:"

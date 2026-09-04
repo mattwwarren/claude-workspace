@@ -395,3 +395,109 @@ class TestExcludedCommands:
         assert result.ok is True
         assert result.warn is False
         assert "ship-it.md" not in result.detail
+
+
+class TestScriptsTracked:
+    """`.claude/scripts` is a tracked root (#2090): the stale-installed-script
+    drift that stripped /prep-pr's gate-timeout ladder must show up here.
+    """
+
+    @staticmethod
+    def _wire(
+        monkeypatch: pytest.MonkeyPatch, repo: Path, claude_home: Path, tracked: str
+    ) -> None:
+        (claude_home / "skills").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("cw.doctor.skills_drift._CLAUDE_HOME", claude_home)
+        monkeypatch.setattr(
+            "cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo
+        )
+        monkeypatch.setattr(
+            "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+        )
+
+    def test_git_ls_files_is_scoped_to_scripts_too(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        seen: list[list[str]] = []
+
+        def _run(args: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            seen.append(args)
+            return _mk_proc("")
+
+        repo = tmp_path / "repo"
+        claude_home = tmp_path / ".claude"
+        (claude_home / "skills").mkdir(parents=True)
+        monkeypatch.setattr("cw.doctor.skills_drift._CLAUDE_HOME", claude_home)
+        monkeypatch.setattr(
+            "cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo
+        )
+        monkeypatch.setattr("cw.doctor.skills_drift._sp.run", _run)
+
+        _check_skills_commands_drift()
+        assert seen[0][-3:] == [".claude/skills", ".claude/commands", ".claude/scripts"]
+
+    def test_stale_installed_script_reports_differs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "repo"
+        claude_home = tmp_path / ".claude"
+        _write(repo / ".claude/scripts/prep_pr_state.py", "# gate-timeout\n")
+        _write(claude_home / "scripts/prep_pr_state.py", "# three versions behind\n")
+        self._wire(monkeypatch, repo, claude_home, ".claude/scripts/prep_pr_state.py\n")
+
+        result = _check_skills_commands_drift()
+        assert result.warn is True
+        assert "1 differ" in result.detail
+        assert ".claude/scripts/prep_pr_state.py" in result.detail
+
+    def test_nested_script_maps_to_scripts_subtree(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "repo"
+        claude_home = tmp_path / ".claude"
+        _write(repo / ".claude/scripts/utils/runtime_paths.py", "# rp\n")
+        _write(claude_home / "scripts/utils/runtime_paths.py", "# rp\n")
+        self._wire(
+            monkeypatch, repo, claude_home, ".claude/scripts/utils/runtime_paths.py\n"
+        )
+
+        result = _check_skills_commands_drift()
+        assert result.warn is False
+        assert result.detail == "1/1 match"
+
+    def test_excluded_script_not_reported_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "repo"
+        claude_home = tmp_path / ".claude"
+        _write(repo / ".claude/scripts/check_imports.py", "# CI gate\n")
+        _write(repo / ".claude/scripts/utils/local.py", "# local\n")
+        _write(
+            repo / "scripts/excluded-scripts.txt", "check_imports.py\nutils/local.py\n"
+        )
+        self._wire(
+            monkeypatch,
+            repo,
+            claude_home,
+            ".claude/scripts/check_imports.py\n.claude/scripts/utils/local.py\n",
+        )
+
+        result = _check_skills_commands_drift()
+        assert result.warn is False
+        assert "check_imports.py" not in result.detail
+
+    def test_scripts_exclusion_does_not_leak_into_commands(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An excluded-scripts entry only exempts the scripts root."""
+        repo = tmp_path / "repo"
+        claude_home = tmp_path / ".claude"
+        _write(repo / ".claude/commands/check_imports.py", "# odd but tracked\n")
+        _write(repo / "scripts/excluded-scripts.txt", "check_imports.py\n")
+        self._wire(
+            monkeypatch, repo, claude_home, ".claude/commands/check_imports.py\n"
+        )
+
+        result = _check_skills_commands_drift()
+        assert result.warn is True
+        assert "1 missing" in result.detail

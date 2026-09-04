@@ -55,7 +55,7 @@ Expected output for a healthy setup:
 - `[WARN] bypass-disclaimer — ...` — disclaimer not yet accepted; run `claude --dangerously-skip-permissions` interactively.
 - `[OK] claude-version` — `claude` binary found and responsive.
 - `[WARN] daemon-reachable` — the Claude native daemon has not been started yet; this resolves automatically when `cw` first spawns a worker session.
-- `[OK/WARN] skills-commands-drift` — repo-tracked `.claude/skills`/`.claude/commands` files compared against `~/.claude`; `[WARN]` means at least one tracked file is missing, content differs, or its `~/.claude` counterpart is a symlink pointing somewhere other than this checkout.
+- `[OK/WARN] skills-commands-drift` — repo-tracked `.claude/skills`/`.claude/commands`/`.claude/scripts` files compared against `~/.claude`; `[WARN]` means at least one tracked file is missing, content differs, or its `~/.claude` counterpart is a symlink pointing somewhere other than this checkout. A `differ` on `.claude/scripts/prep_pr_state.py` is the #2090 shape: a stale copy of a cw-owned script at `~/.claude/scripts/` — re-run `scripts/install-skills.sh`.
 - `[OK/WARN] agent-spec-drift/<client>` — per-client reviewer agent-spec resolution (repo-local / global fallback / absent); `[WARN]` names any reviewer role with no usable spec.
 
 ## Installation
@@ -80,13 +80,17 @@ cd claude-workspace
 ./scripts/install.sh
 ```
 
-The install script runs `uv tool install --from "$PROJECT_DIR" --force --reinstall --no-cache "claude-workspace[mcp]"`, making `cw` globally available, and then syncs cw's bundled skills and commands into `~/.claude/` via `scripts/install-skills.sh`.
+The install script runs `uv tool install --from "$PROJECT_DIR" --force --reinstall --no-cache "claude-workspace[mcp]"`, making `cw` globally available, and then syncs cw's bundled skills, commands, and helper scripts into `~/.claude/` via `scripts/install-skills.sh`.
 
-### How skills/commands stay in sync
+### How skills/commands/scripts stay in sync
 
-`~/.claude/skills/<name>` and `~/.claude/commands/<name>` are **symlinks** into this checkout's `.claude/` tree, not copies — one copy of each file exists on disk, so drift between the two trees is structurally impossible.
+`~/.claude/skills/<name>`, `~/.claude/commands/<name>`, and `~/.claude/scripts/<name>` are **symlinks** into this checkout's `.claude/` tree, not copies — one copy of each file exists on disk, so drift between the two trees is structurally impossible.
 
-Re-running `scripts/install-skills.sh` (directly, or via `./scripts/install.sh`) migrates an existing copy-based install automatically: a stale regular file or directory at the destination is replaced with a symlink, and a symlink already pointing at the wrong target is repointed. No manual `rm` is required.
+Scripts are linked **per file** (including `utils/`), never per directory: `~/.claude/scripts/` is typically the `global-claude` checkout's own `scripts/` directory, which also holds scripts that exist only there (`generate_handoff.py`, `session_complete.py`, ...), and those must keep working. Only the scripts this repo tracks under `.claude/scripts/` are cw's to install — the ones its commands invoke (`prep_pr_state.py`, `prep_pr_finalize.py`, `review_monitor.py`, `post_review.py`, ...). `check_imports.py` is this repo's CI gate and is skipped via `scripts/excluded-scripts.txt`, the same mechanism as `excluded-commands.txt`.
+
+**If `global-claude` still tracks a copy of a cw-owned script** (the #2090 incident: its `prep_pr_state.py` was three versions behind this repo's and silently lacked `/prep-pr`'s `gate-timeout` subcommands), the installer replaces that regular file with the symlink and lists it under `scripts replaced` in its summary. Finish the hand-over in `global-claude` so the symlink stops reading as a modified tracked file: `git rm --cached scripts/<name>` and add `scripts/<name>` to the cw block of its `.gitignore`, exactly as was done for the commands cw owns.
+
+Re-running `scripts/install-skills.sh` (directly, or via `./scripts/install.sh`) migrates an existing copy-based install automatically: a stale regular file or directory at the destination is replaced with a symlink, and a symlink already pointing at the wrong target is repointed. No manual `rm` is required. For commands and skills, uncommitted hand-edits to such a copy are lost in that replacement — commit them (or fold them into this repo) first. For scripts, a replaced copy whose bytes differ from cw's source is kept beside the link as `<name>.pre-symlink.bak` and named in the summary; a byte-identical copy is simply replaced.
 
 **Trade-off, stated plainly, not as a free win:** once installed as a symlink, an "edit to a local skill" *is* an edit to this repo's working tree. It shows up in `git status`, can be committed from any directory, and can be clobbered by a `git checkout`, `git stash`, or branch switch performed in this repo. Dispatched (`cw`-spawned) workers are unaffected — they resolve skills from their own worktree's committed state — but any interactive session running elsewhere sees uncommitted edits to this checkout live.
 

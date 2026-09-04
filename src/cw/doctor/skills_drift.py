@@ -1,15 +1,19 @@
-"""Repo-tracked ``.claude/skills``/``.claude/commands`` drift check for cw doctor.
+"""Repo-tracked ``.claude/{skills,commands,scripts}`` drift check for cw doctor.
 
-Split out as a leaf module (#1514). The project-level ``.claude/skills`` and
-``.claude/commands`` trees checked into this source repo are the ground truth
-a dispatched worker actually loads; ``~/.claude/skills``/``~/.claude/commands``
-symlink into ``global-claude`` and are what an *interactive* skill/command
-invocation resolves instead. This check re-derives the git-tracked file list
-via ``git ls-files`` inside the local source repo (resolved through
-``_resolve_cw_source_path``), maps each tracked path to its ``~/.claude/``
-counterpart, and classifies each into missing / content-differs / wrong-target
-symlink, aggregating the result into one non-fatal ``CheckResult``. Detection
-only — no sync. Leaf module — no cross-``doctor`` dependencies.
+Split out as a leaf module (#1514). The project-level ``.claude/skills``,
+``.claude/commands`` and ``.claude/scripts`` trees checked into this source
+repo are the ground truth a dispatched worker actually loads; the
+``~/.claude/`` counterparts symlink into ``global-claude`` and are what an
+*interactive* skill/command invocation resolves instead. ``.claude/scripts``
+joined the tracked set after #2090, where a ``global-claude`` copy of
+``prep_pr_state.py`` three versions behind this repo's silently stripped
+``/prep-pr``'s gate-timeout ladder — exactly the drift this check exists to
+name. This check re-derives the git-tracked file list via ``git ls-files``
+inside the local source repo (resolved through ``_resolve_cw_source_path``),
+maps each tracked path to its ``~/.claude/`` counterpart, and classifies each
+into missing / content-differs / wrong-target symlink, aggregating the result
+into one non-fatal ``CheckResult``. Detection only — no sync. Leaf module — no
+cross-``doctor`` dependencies.
 """
 
 from __future__ import annotations
@@ -44,7 +48,7 @@ _CHECK_NAME = "skills-commands-drift"
 # Repo-relative roots whose git-tracked contents are compared against
 # _CLAUDE_HOME. Each entry's final path segment is also its _CLAUDE_HOME
 # subdirectory name (".claude/skills" -> _CLAUDE_HOME / "skills").
-_TRACKED_ROOTS = (".claude/skills", ".claude/commands")
+_TRACKED_ROOTS = (".claude/skills", ".claude/commands", ".claude/scripts")
 
 # Bounds the number of example paths named in the aggregated detail string,
 # so a large drift set doesn't dump every filename (tests/test_doctor_skills_
@@ -54,27 +58,38 @@ _MAX_EXAMPLES = 3
 # Timeout (seconds) for the git subprocess call.
 _GIT_TIMEOUT = 10
 
-# Repo-relative path to the installer's project-scoped exclusion list.
-# Both scripts/install-skills.sh and this check read the same file — see #1535.
-_EXCLUDED_COMMANDS_RELPATH = "scripts/excluded-commands.txt"
+# Tracked root -> repo-relative path of the installer's exclusion list for it.
+# Entries name paths relative to the root (a bare ``ship-it.md`` for the flat
+# commands dir; ``check_imports.py`` or ``utils/foo.py`` for scripts). Both
+# scripts/install-skills.sh and this check read the same files — see #1535 —
+# so a never-installed-globally entry is not reported as missing here.
+_EXCLUSION_FILES = {
+    ".claude/commands": "scripts/excluded-commands.txt",
+    ".claude/scripts": "scripts/excluded-scripts.txt",
+}
 
 
-def _load_excluded_commands(source_path: Path) -> set[str]:
-    """Read the installer's excluded-commands file; fail open to empty set.
+def _load_exclusions(source_path: Path, relpath: str) -> set[str]:
+    """Read one installer exclusion file; fail open to empty set.
 
     Only a missing file fails open — the expected case when the file hasn't
     been created yet. Other OSError subtypes (permissions, I/O errors)
     propagate rather than silently disabling the ship-it.md-style exclusion.
     """
     try:
-        lines = (
-            (source_path / _EXCLUDED_COMMANDS_RELPATH)
-            .read_text(encoding="utf-8")
-            .splitlines()
-        )
+        lines = (source_path / relpath).read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return set()
     return {line for line in lines if line}
+
+
+def _is_excluded(repo_relpath: str, exclusions: dict[str, set[str]]) -> bool:
+    """True when *repo_relpath* is listed in its root's installer exclusion set."""
+    for root, names in exclusions.items():
+        prefix = f"{root}/"
+        if repo_relpath.startswith(prefix) and repo_relpath[len(prefix) :] in names:
+            return True
+    return False
 
 
 def _git_tracked_paths(source_path: Path) -> list[str] | None:
@@ -150,17 +165,17 @@ def _build_detail(
 
 
 def _check_skills_commands_drift() -> CheckResult:
-    """Compare repo-tracked .claude/skills+commands against ~/.claude counterparts.
+    """Compare repo-tracked .claude/{skills,commands,scripts} against ~/.claude.
 
     Silent-skips (ok=True, warn=False) for registry/PyPI cw installs (no
     local source repo to diff against — same skip condition as
     _check_cw_version/_check_cw_deps), and when _CLAUDE_HOME/skills doesn't
     exist at all. Warns (ok=True, warn=True) when git ls-files fails, or when
     one or more tracked files are missing, content-differs, or is a symlink
-    pointing somewhere other than the tracked repo path. Commands listed in
-    scripts/excluded-commands.txt (the installer's project-scoped exclusion
-    list) are never installed globally, so they are excluded from tracking
-    before classification.
+    pointing somewhere other than the tracked repo path. Commands and scripts
+    listed in the installer's exclusion files (_EXCLUSION_FILES) are never
+    installed globally, so they are excluded from tracking before
+    classification.
     """
     source_path = _resolve_cw_source_path()
     if isinstance(source_path, CheckResult):
@@ -189,15 +204,11 @@ def _check_skills_commands_drift() -> CheckResult:
             detail=f"could not list git-tracked files under {source_path}",
         )
 
-    excluded_commands = _load_excluded_commands(source_path)
-    tracked = [
-        relpath
-        for relpath in tracked
-        if not (
-            relpath.startswith(".claude/commands/")
-            and Path(relpath).name in excluded_commands
-        )
-    ]
+    exclusions = {
+        root: _load_exclusions(source_path, relpath)
+        for root, relpath in _EXCLUSION_FILES.items()
+    }
+    tracked = [relpath for relpath in tracked if not _is_excluded(relpath, exclusions)]
 
     missing: list[str] = []
     differs: list[str] = []

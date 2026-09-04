@@ -21,12 +21,16 @@ Multi-session workspace orchestrator for Claude Code.
 - `config/` - Example configuration files
 - `tests/` - Test suite
 
-## `.claude/skills`/`.claude/commands` — Repo Copy Is Authoritative
+## `.claude/skills`/`.claude/commands`/`.claude/scripts` — Repo Copy Is Authoritative
 
-This repo's `.claude/skills` and `.claude/commands` directories are git-tracked
-and are the **authoritative copy for anything a dispatched worker loads** —
-`cw` spawns headless sessions rooted in a worktree of this repo, and those
-sessions resolve skills/commands from the worktree's own `.claude/` tree.
+This repo's `.claude/skills`, `.claude/commands`, and `.claude/scripts`
+directories are git-tracked and are the **authoritative copy for anything a
+dispatched worker loads** — `cw` spawns headless sessions rooted in a worktree
+of this repo, and those sessions resolve skills/commands (and the scripts those
+commands invoke, e.g. `/prep-pr` → `prep_pr_state.py`) from the worktree's own
+`.claude/` tree. `scripts/install-skills.sh` symlinks all three into
+`~/.claude/` for interactive use; a copy of a cw-owned script tracked anywhere
+else is a stale duplicate by construction (#2090).
 
 `~/.claude/skills` and `~/.claude/commands` are symlinks into the separate
 `global-claude` repo. They are what an **interactive** `claude` invocation
@@ -36,8 +40,8 @@ resolution path with a different source of truth.
 Because both are single top-level symlinks, `readlink -f` on a path under
 `~/.claude/skills/<name>` or `~/.claude/commands/<name>` proves nothing about
 whether *this* repo's tracked copy matches it — the two trees can silently
-drift apart. `git ls-files .claude/skills/ .claude/commands/` inside this repo
-is the ground truth for what a worker will load. `cw doctor`'s
+drift apart. `git ls-files .claude/skills/ .claude/commands/ .claude/scripts/` inside this
+repo is the ground truth for what a worker will load. `cw doctor`'s
 `skills-commands-drift` check automates the comparison — see
 [docs/INSTALL.md](docs/INSTALL.md#verify-with-cw-doctor).
 

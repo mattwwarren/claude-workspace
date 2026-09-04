@@ -120,7 +120,7 @@ git merge origin/<base>
 
 ## Step 2: Detect Quality Gates
 
-Resolve the backing script before anything else. The checked-out repo's copy is the source of truth: the installed `~/.claude/scripts/...` path is a separate checkout that nothing syncs, and a stale copy there silently lacks Step 7's `gate-timeout` / `gate-elapsed` subcommands (#2090). Probe the repo layouts first and the installed path last, and STOP on a stale hit rather than improvising:
+Resolve the backing script before anything else. The checked-out repo's copy is the source of truth: the installed `~/.claude/scripts/...` path is current only when claude-workspace's `scripts/install-skills.sh` has linked it there, and a stale copy from any other checkout silently lacks Step 7's `gate-timeout` / `gate-elapsed` subcommands (#2090). Probe the repo layouts first and the installed path last, and STOP on a stale hit rather than improvising:
 
 ```bash
 PREP_PR_STATE=""
