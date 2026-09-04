@@ -1322,7 +1322,54 @@ class TestPostIssueComment:
         argv = captured[0]
         assert argv[:3] == ["gh", "issue", "comment"]
         assert "487" in argv
-        assert argv[argv.index("--body") + 1] == "body-text"
+        # The caller's body is posted verbatim as the leading content; #2097
+        # appends the provenance marker after it (asserted below).
+        assert argv[argv.index("--body") + 1].startswith("body-text")
+
+    def _captured_body(
+        self, monkeypatch: pytest.MonkeyPatch, *, operator_authored: bool = False
+    ) -> str:
+        """Post a fixed body and return what reached ``gh --body`` (#2097)."""
+        captured: list[list[str]] = []
+
+        def _fake_run(args: list[str], **_kw: object) -> Any:
+            captured.append(list(args))
+            return _make_run_result(0, "")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        post_issue_comment("487", "body-text", operator_authored=operator_authored)
+        argv = captured[0]
+        return argv[argv.index("--body") + 1]
+
+    def test_agent_marker_appended_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every comment through this choke point is marked agent-authored."""
+        body = self._captured_body(monkeypatch)
+        assert body == f"body-text\n\n{gh.AGENT_COMMENT_MARKER}"
+        assert gh.is_agent_authored(body)
+
+    def test_agent_marker_suppressed_for_operator_authored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """operator_authored=True posts the body untouched (#2097)."""
+        body = self._captured_body(monkeypatch, operator_authored=True)
+        assert body == "body-text"
+        assert not gh.is_agent_authored(body)
+
+
+class TestIsAgentAuthored:
+    """is_agent_authored: the read side of the #2097 provenance marker."""
+
+    def test_true_for_a_marked_body(self) -> None:
+        assert gh.is_agent_authored(f"findings\n\n{gh.AGENT_COMMENT_MARKER}")
+
+    def test_false_for_an_operator_comment(self) -> None:
+        assert not gh.is_agent_authored("please delete the stale branch")
+
+    def test_marker_is_the_documented_literal(self) -> None:
+        """Pinned: the producer skills hard-code this string in their prose."""
+        assert gh.AGENT_COMMENT_MARKER == "<!-- cw-agent-authored -->"
 
     def test_gh_missing_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _raise(*_a: object, **_kw: object) -> Any:

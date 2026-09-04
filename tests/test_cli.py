@@ -7870,6 +7870,78 @@ class TestDevQueueTasksPrState:
         assert human_result.exit_code == 0, human_result.output
         assert "REASON" in human_result.output
         assert "plan_unreviewable" in human_result.output
+        # A registered reason is never flagged (#2097).
+        assert "?plan_unreviewable" not in human_result.output
+
+    def test_tasks_human_flags_an_unregistered_blocked_reason(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """REASON prefixes an unregistered reason with `?` (GitHub #2097).
+
+        A prefix, not a suffix, so the flag survives the column's 20-char
+        truncation -- the long invented reason is exactly the case that
+        motivated the flag.
+        """
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-2097",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="blocked",
+                        blocked_reason="stale_branch_restart_directed",
+                    )
+                ]
+            )
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        # 20-char column: the reason is cut, the leading `?` survives.
+        assert "?stale_branch_restar" in result.output
+        assert "stale_branch_restart_directed" not in result.output
+
+    def test_tasks_human_does_not_flag_a_freeform_blocked_reason(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """An `x_`-prefixed reason declares itself freeform — no flag (#2097)."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-2097X",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="blocked",
+                        blocked_reason="x_producer_local",
+                    )
+                ]
+            )
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert "x_producer_local" in result.output
+        assert "?x_producer_local" not in result.output
+
+    def test_tasks_human_renders_em_dash_for_absent_blocked_reason(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """No blocker reason keeps the pre-#2097 em-dash placeholder."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(tasks=[TicketTask(ticket_id="GEN-0", client="attn-client")])
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert "—" in result.output
 
     def test_tasks_json_includes_scope_hint_large(self, tmp_config_dir: Path) -> None:
         """_task_to_dict carries scope_hint through the JSON contract (#1618)."""
@@ -8450,7 +8522,12 @@ class TestDevQueueApproveCli:
                 ],
             )
         assert result.exit_code == 0, result.output
-        post_mock.assert_called_once_with("ACME-1", _PLAN_APPROVED_MARKER, cwd=ANY)
+        # operator_authored=True (#2097): the plan-approved marker records the
+        # operator's own --post-marker invocation, so it is the one comment
+        # through this choke point that must NOT carry AGENT_COMMENT_MARKER.
+        post_mock.assert_called_once_with(
+            "ACME-1", _PLAN_APPROVED_MARKER, cwd=ANY, operator_authored=True
+        )
         assert "posted the plan-approved marker comment" in result.output
 
     def test_approve_post_marker_dedups_when_already_present(
