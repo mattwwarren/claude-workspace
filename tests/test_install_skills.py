@@ -21,6 +21,9 @@ _REAL_SCRIPT = Path(__file__).parent.parent / "scripts" / "install-skills.sh"
 _REAL_EXCLUDED_COMMANDS_FILE = (
     Path(__file__).parent.parent / "scripts" / "excluded-commands.txt"
 )
+_REAL_EXCLUDED_SCRIPTS_FILE = (
+    Path(__file__).parent.parent / "scripts" / "excluded-scripts.txt"
+)
 
 
 def _scaffold_fake_install(tmp_path: Path, fake_repo: Path) -> Path:
@@ -47,6 +50,11 @@ def _scaffold_fake_install(tmp_path: Path, fake_repo: Path) -> Path:
         shutil.copy2(
             str(_REAL_EXCLUDED_COMMANDS_FILE),
             str(scripts_dir / "excluded-commands.txt"),
+        )
+    if _REAL_EXCLUDED_SCRIPTS_FILE.exists():
+        shutil.copy2(
+            str(_REAL_EXCLUDED_SCRIPTS_FILE),
+            str(scripts_dir / "excluded-scripts.txt"),
         )
     return script_copy
 
@@ -114,6 +122,27 @@ def fake_repo_with_agents(fake_repo: Path) -> Path:
     agents.mkdir(parents=True)
     (agents / "code-quality-reviewer.md").write_text("# code quality reviewer\n")
     (agents / "spike-isolated.md").write_text("# spike (excluded)\n")
+    return fake_repo
+
+
+@pytest.fixture
+def fake_repo_with_scripts(fake_repo: Path) -> Path:
+    """fake_repo plus a .claude/scripts tree shaped like the real one.
+
+    Two top-level scripts, a nested utils/ package (the real
+    prep_pr_finalize.py imports it via ``Path(__file__).parent``), the
+    repo-scoped check_imports.py that must never be installed, and a
+    __pycache__ that must never be installed either.
+    """
+    scripts = fake_repo / ".claude" / "scripts"
+    (scripts / "utils").mkdir(parents=True)
+    (scripts / "__pycache__").mkdir()
+    (scripts / "prep_pr_state.py").write_text("# fresh: gate-timeout\n")
+    (scripts / "review_monitor.py").write_text("# review monitor\n")
+    (scripts / "check_imports.py").write_text("# repo-scoped CI gate\n")
+    (scripts / "utils" / "__init__.py").write_text("")
+    (scripts / "utils" / "runtime_paths.py").write_text("# runtime paths\n")
+    (scripts / "__pycache__" / "prep_pr_state.cpython-313.pyc").write_bytes(b"\0")
     return fake_repo
 
 
@@ -834,3 +863,122 @@ class TestInstallSkillsExclusionFile:
             "fixture's excluded-commands.txt to list review.md instead proves "
             "the installer reads the file rather than a hardcoded array"
         )
+
+
+class TestScriptsInstalled:
+    """`.claude/scripts/` is installed file-by-file into ~/.claude/scripts.
+
+    The motivating incident (#2090): /prep-pr's backing script lives in this
+    repo, but nothing installed it, so the `~/.claude/scripts/` copy came from
+    a separate checkout and silently went stale. Files (never directories) are
+    linked so a scripts/ or utils/ that also holds foreign files keeps them.
+    """
+
+    def test_scripts_symlinked_per_file_including_nested_utils(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        dst = fake_home / ".claude" / "scripts"
+        src = fake_repo_with_scripts / ".claude" / "scripts"
+
+        for rel in ("prep_pr_state.py", "review_monitor.py", "utils/runtime_paths.py"):
+            installed = dst / rel
+            assert installed.is_symlink(), rel
+            assert installed.readlink() == (src / rel).resolve()
+        # utils/ itself is a real directory, not a link to the source dir.
+        assert (dst / "utils").is_dir()
+        assert not (dst / "utils").is_symlink()
+        assert "scripts synced  : 4" in result.stdout
+
+    def test_repo_scoped_script_and_pycache_never_installed(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        dst = fake_home / ".claude" / "scripts"
+        assert not (dst / "check_imports.py").exists()
+        assert not (dst / "__pycache__").exists()
+        assert "scripts skipped : 1 (repo-scoped)" in result.stdout
+        entries = (fake_home / ".claude" / ".cw-skills-manifest").read_text()
+        assert "scripts/check_imports.py" not in entries
+        assert "scripts/prep_pr_state.py" in entries.splitlines()
+        assert "scripts/utils/runtime_paths.py" in entries.splitlines()
+
+    def test_stale_regular_file_replaced_and_named(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        """A pre-existing copy (global-claude's stale duplicate) becomes the
+        symlink, and the summary names it so it can be untracked over there.
+        """
+        dst = fake_home / ".claude" / "scripts"
+        dst.mkdir()
+        stale = dst / "prep_pr_state.py"
+        stale.write_text("# stale: no gate-timeout\n")
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        assert stale.is_symlink()
+        assert "gate-timeout" in stale.read_text()
+        assert "scripts replaced (regular file -> symlink):" in result.stdout
+        assert "    - scripts/prep_pr_state.py" in result.stdout
+        assert "git rm --cached" in result.stdout
+        # Only the replaced file is named — fresh installs are not.
+        assert "    - scripts/review_monitor.py" not in result.stdout
+
+    def test_no_replacement_notice_on_clean_or_repeat_run(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        first = _run(script, fake_home)
+        assert first.returncode == 0, first.stderr
+        assert "scripts replaced" not in first.stdout
+        second = _run(script, fake_home)
+        assert second.returncode == 0, second.stderr
+        assert "scripts replaced" not in second.stdout
+        assert "scripts synced  : 4" in second.stdout
+        assert "orphans pruned  : 0" in second.stdout
+
+    def test_foreign_scripts_survive_install_and_prune(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        """Scripts cw never installed — in scripts/ or inside utils/ — are
+        untouched on install, and untouched when cw's own entries are pruned.
+        """
+        dst = fake_home / ".claude" / "scripts"
+        (dst / "utils").mkdir(parents=True)
+        foreign = dst / "generate_handoff.py"
+        foreign.write_text("# global-claude only\n")
+        foreign_util = dst / "utils" / "other.py"
+        foreign_util.write_text("# global-claude only\n")
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        assert foreign.read_text() == "# global-claude only\n"
+        assert foreign_util.read_text() == "# global-claude only\n"
+
+        # Drop every cw script from source: cw's links are pruned, foreign stay.
+        shutil.rmtree(fake_repo_with_scripts / ".claude" / "scripts")
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        assert not (dst / "prep_pr_state.py").exists()
+        assert not (dst / "utils" / "runtime_paths.py").exists()
+        assert foreign.exists()
+        assert foreign_util.exists()
+        assert "orphans pruned  : 4" in result.stdout
+
+    def test_no_scripts_dir_is_a_noop(self, script: Path, fake_home: Path) -> None:
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        assert "scripts synced  : 0" in result.stdout
+        assert not (fake_home / ".claude" / "scripts").exists()
+
+    def test_installer_reads_scripts_exclusion_file_not_hardcoded(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        """Swapping the fixture's excluded-scripts.txt changes what is skipped."""
+        (script.parent / "excluded-scripts.txt").write_text("review_monitor.py\n")
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        dst = fake_home / ".claude" / "scripts"
+        assert (dst / "check_imports.py").is_symlink()
+        assert not (dst / "review_monitor.py").exists()

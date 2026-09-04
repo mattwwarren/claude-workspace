@@ -9,7 +9,7 @@ echo "Installing cw from $PROJECT_DIR..."
 uv tool install --from "$PROJECT_DIR" --force --reinstall --no-cache "claude-workspace[mcp]"
 
 echo ""
-echo "Syncing cw skills and commands to ~/.claude/..."
+echo "Syncing cw skills, commands, and scripts to ~/.claude/..."
 "$SCRIPT_DIR/install-skills.sh"
 
 echo ""
