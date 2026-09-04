@@ -241,7 +241,13 @@ def _post_plan_approved_marker(
         )
         return True
 
-    post_result = post_issue_comment(ticket_id, _PLAN_APPROVED_MARKER, cwd=repo_cwd)
+    # operator_authored=True (#2097): this marker records the operator's own
+    # `cw dev-queue approve --post-marker` invocation, so it must NOT carry the
+    # agent-authored provenance marker every pipeline-written comment gets. It
+    # is the single operator-decision channel through this choke point.
+    post_result = post_issue_comment(
+        ticket_id, _PLAN_APPROVED_MARKER, cwd=repo_cwd, operator_authored=True
+    )
     if post_result is not None and post_result.returncode == 0:
         click.echo(
             f"--post-marker: posted the plan-approved marker comment"

@@ -8898,6 +8898,21 @@ class TestApplyStagedDecision:
                 id="merge_gate_blocked_without_blocker",
             ),
             pytest.param(
+                # #2097: an invented reason is surfaced verbatim (open enum)
+                # but flagged, so it cannot pass as a documented routing code.
+                "blocked",
+                {"stage": "s3_review", "reason": "stale_branch_restart_directed"},
+                "stale_branch_restart_directed (unrecognized)",
+                id="blocked_unregistered_reason_flagged",
+            ),
+            pytest.param(
+                # #2097: `x_` is the declared freeform namespace -- no flag.
+                "blocked",
+                {"stage": "s3_review", "reason": "x_producer_local"},
+                "x_producer_local",
+                id="blocked_freeform_reason_not_flagged",
+            ),
+            pytest.param(
                 "scope_exceeded",
                 None,
                 "",
@@ -8931,6 +8946,11 @@ class TestApplyStagedDecision:
         (merge_gate_blocked with blocker=None, and scope_exceeded/
         forbidden_area, which the validator forbids from ever carrying a
         blocker).
+
+        #2097 adds the recognition flag: a reason outside
+        KNOWN_BLOCKER_REASONS that does not declare itself freeform via the
+        `x_` prefix is still surfaced verbatim, with ` (unrecognized)`
+        appended.
         """
         from cw.dispatch import apply_staged_decision
 
