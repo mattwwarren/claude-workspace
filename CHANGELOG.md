@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A clean, fully-pushed worktree is no longer parked `dirty_worktree` because its branch happens to track the default branch (#2114):** the unpushed-commit half of `worktree_has_unsaved_work` trusted whatever `@{u}` was configured, and when that was `origin/<default_branch>` the `git log @{u}..HEAD` it ran counted every commit the feature branch contains as unpushed — a static condition, so the stale-worktree guard in dispatch re-parked the same clean ticket on every claim (one ticket eight times in a row), each park burning an attempt and holding a lane slot until an operator hand-set the upstream. The base-ref ladder now starts with `origin/<checked-out branch>` whenever that ref exists (`rev-parse --verify` answers "is this branch pushed" exactly, independent of tracking configuration) and only falls back to `@{u}`, `origin/<default_branch>`, then the local default branch when the branch has no remote counterpart; `worktree_gc`'s mirror of the predicate gets the same level. The park breadcrumb now names which predicate fired, the base ref it measured against, and the count (`<path>: 14 commit(s) ahead of origin/main and no origin/<branch> ref ... (cannot prove they are pushed)` / `2 uncommitted path(s)`) via a new `unsaved_work_reason`, so `dirty_worktree` on a visibly clean tree points straight at the predicate instead of at `git status`.
+
 ## [1.45.6] - 2026-09-04
 
 ### Fixed

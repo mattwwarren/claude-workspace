@@ -32,6 +32,7 @@ from cw.worktree import (
     resolve_scope_guard_default_branch,
     resolve_worktree_base,
     slugify_branch,
+    unsaved_work_reason,
     worktree_has_unsaved_work,
     worktree_path_for,
 )
@@ -2548,6 +2549,167 @@ class TestFetchFeatureBranch:
 # ---------------------------------------------------------------------------
 
 
+class TestUnsavedWorkReason:
+    """#2114: the unpushed-commit check prefers origin/<checked-out branch>
+    over @{u}, and the reason names the predicate, base ref, and count."""
+
+    def _client(self, tmp_path: Path) -> ClientConfig:
+        return ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+
+    def _wt(self, tmp_path: Path) -> Path:
+        wt_path = tmp_path / "wt" / "dev-2114"
+        wt_path.mkdir(parents=True)
+        return wt_path
+
+    @staticmethod
+    def _mock(
+        *,
+        status: str = "",
+        own_ref_exists: bool = True,
+        own_log: str = "",
+        upstream: str | None = "origin/main",
+        default_log: str = "x\n" * 14,
+        default_rc: int = 0,
+    ) -> Callable[..., MagicMock]:
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="", stdout="")
+            joined = " ".join(args)
+            if "status" in args:
+                result.stdout = status
+            elif "--show-current" in args:
+                result.stdout = "dev/2114\n"
+            elif "--verify" in args:
+                result.returncode = 0 if own_ref_exists else 128
+            elif "@{u}" in args:
+                if upstream is None:
+                    result.returncode = 128
+                else:
+                    result.stdout = f"{upstream}\n"
+            elif "log" in args and "origin/dev/2114..HEAD" in joined:
+                result.stdout = own_log
+            elif "log" in args:
+                result.returncode = default_rc
+                result.stdout = default_log
+            return result
+
+        return mock_run
+
+    def test_fully_pushed_branch_tracking_default_branch_is_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reported case: @{u} = origin/main (14 commits "ahead"), tree
+        clean, origin/dev/2114 == HEAD -> no unsaved work."""
+        client = self._client(tmp_path)
+        wt_path = self._wt(tmp_path)
+        monkeypatch.setattr("cw.worktree._run_git", self._mock())
+        assert unsaved_work_reason(client, "dev/2114", wt_path=wt_path) is None
+        assert worktree_has_unsaved_work(client, "dev/2114", wt_path=wt_path) is False
+
+    def test_own_remote_ref_behind_head_names_ref_and_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(tmp_path)
+        wt_path = self._wt(tmp_path)
+        monkeypatch.setattr(
+            "cw.worktree._run_git", self._mock(own_log="a one\nb two\n")
+        )
+        assert (
+            unsaved_work_reason(client, "dev/2114", wt_path=wt_path)
+            == "2 commit(s) not on origin/dev/2114"
+        )
+
+    def test_no_own_ref_measures_against_upstream_and_says_so(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without origin/<branch> the ladder is conservative, and the reason
+        names the base it measured against instead of a bare verdict."""
+        client = self._client(tmp_path)
+        wt_path = self._wt(tmp_path)
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            self._mock(own_ref_exists=False, default_log="x\ny\nz\n"),
+        )
+        reason = unsaved_work_reason(client, "dev/2114", wt_path=wt_path)
+        assert reason is not None
+        assert reason.startswith("3 commit(s) ahead of origin/main")
+        assert "cannot prove" in reason
+
+    def test_no_own_ref_and_no_upstream_uses_default_branch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(tmp_path)
+        wt_path = self._wt(tmp_path)
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            self._mock(own_ref_exists=False, upstream=None, default_log=""),
+        )
+        assert unsaved_work_reason(client, "dev/2114", wt_path=wt_path) is None
+
+    def test_uncommitted_paths_win_and_are_counted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(tmp_path)
+        wt_path = self._wt(tmp_path)
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            self._mock(status="?? foo.py\n M bar.py\n?? .claude/cw-context.json\n"),
+        )
+        assert (
+            unsaved_work_reason(client, "dev/2114", wt_path=wt_path)
+            == "2 uncommitted path(s)"
+        )
+
+    def test_absent_worktree_has_no_reason(self, tmp_path: Path) -> None:
+        client = self._client(tmp_path)
+        assert unsaved_work_reason(client, "dev/absent") is None
+
+    def test_all_refs_unresolvable_reports_offline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(tmp_path)
+        wt_path = self._wt(tmp_path)
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            self._mock(own_ref_exists=False, upstream=None, default_rc=128),
+        )
+        reason = unsaved_work_reason(client, "dev/2114", wt_path=wt_path)
+        assert reason == "no base ref resolvable (offline or bare clone)"
+
+    def test_status_failure_is_reported_as_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(tmp_path)
+        wt_path = self._wt(tmp_path)
+
+        def boom(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            msg = "git exploded"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", boom)
+        reason = unsaved_work_reason(client, "dev/2114", wt_path=wt_path)
+        assert reason == "status check failed: git exploded"
+
+    def test_log_failure_is_reported_as_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(tmp_path)
+        wt_path = self._wt(tmp_path)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            if "status" in args:
+                return MagicMock(returncode=0, stderr="", stdout="")
+            msg = "log exploded"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        reason = unsaved_work_reason(client, "dev/2114", wt_path=wt_path)
+        assert reason == "unpushed-commit check failed: log exploded"
+
+
 class TestWorktreeHasUnsavedWork:
     """Tests for worktree_has_unsaved_work."""
 
@@ -2652,6 +2814,8 @@ class TestWorktreeHasUnsavedWork:
             result = MagicMock(returncode=0, stderr="")
             if "status" in args:
                 result.stdout = ""  # clean working tree
+            elif "--verify" in args:
+                result.returncode = 128  # no origin/<branch> ref (#2114 level 0)
             elif "@{u}" in args:
                 result.stdout = "origin/dev/2044-liveness-gate\n"
             elif "log" in args and "origin/dev/2044-liveness-gate..HEAD" in args:
@@ -2678,6 +2842,8 @@ class TestWorktreeHasUnsavedWork:
             result = MagicMock(returncode=0, stderr="")
             if "status" in args:
                 result.stdout = ""  # clean working tree
+            elif "--verify" in args:
+                result.returncode = 128  # no origin/<branch> ref (#2114 level 0)
             elif "@{u}" in args:
                 result.stdout = "origin/dev/2044-liveness-gate\n"
             elif "log" in args and "origin/dev/2044-liveness-gate..HEAD" in args:
@@ -2731,6 +2897,8 @@ class TestWorktreeHasUnsavedWork:
             result = MagicMock(returncode=0, stderr="")
             if "status" in args:
                 result.stdout = ""  # clean working tree
+            elif "--verify" in args:
+                result.returncode = 128  # no origin/<branch> ref (#2114 level 0)
             elif "@{u}" in args:
                 result.returncode = 128  # no upstream configured
                 result.stdout = ""
@@ -2846,6 +3014,8 @@ class TestWorktreeHasUnsavedWork:
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
             if "status" in args:
                 return MagicMock(returncode=0, stdout="", stderr="")
+            if "--verify" in args:
+                return MagicMock(returncode=128, stdout="", stderr="")  # no own ref
             if "@{u}" in args:
                 msg = "git rev-parse @{u} exploded"
                 raise WorktreeError(msg)
