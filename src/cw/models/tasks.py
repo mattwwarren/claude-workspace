@@ -148,9 +148,11 @@ from cw.review_finding_dispositions import FindingDisposition
 #      into the worker's cw-context.json queue_metadata at spawn so the plan
 #      stage's Large-scope carve-out can accept it as approval evidence on a
 #      client whose tracker (e.g. Linear) the GitHub-only `--post-marker`
-#      comment can never reach. Deliberately has NO clear site — parity with
-#      the `<!-- auto-dev-plan-approved -->` GitHub comment it stands in for,
-#      which is likewise permanent and dedup'd rather than revoked.
+#      comment can never reach. One clear site: _stage_regress into
+#      Stage.PLAN (a deliberate re-plan revokes it, #2102). Otherwise durable,
+#      mirroring the `<!-- auto-dev-plan-approved -->` GitHub comment it
+#      stands in for, which is never revoked — #2102 tracks binding both to
+#      the draft that was actually approved.
 DEV_QUEUE_SCHEMA_VERSION = 35
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
@@ -383,8 +385,9 @@ class TicketTask(BaseModel):
     # auto-dev-plan.md's Checkpoint 1 reads it as operator approval evidence
     # alongside an approving tracker reply, so a Linear-tracked ticket (whose
     # tracker the GitHub-only `--post-marker` comment cannot reach) no longer
-    # re-parks at plan_pending_approval on every re-dispatch. No clear site:
-    # a durable fact, like the GitHub marker comment it stands in for.
+    # re-parks at plan_pending_approval on every re-dispatch. Cleared only by
+    # _stage_regress into Stage.PLAN (a re-plan revokes it, #2102); otherwise
+    # durable, like the GitHub marker comment it stands in for.
     plan_approved_at: datetime | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.

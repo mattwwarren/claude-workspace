@@ -723,6 +723,10 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     consumed and cleared by the next dispatch spawn (dispatch/claim.py) after
     it has been written into the worker's ``queue_metadata``.
 
+    Also clears ``plan_approved_at`` when *target_stage* is ``Stage.PLAN``
+    (GitHub #2102) -- a regress into the plan stage means re-plan, and the
+    approval the operator gave the previous plan must not carry over.
+
     Also stamps ``pending_operator_comment = True`` (GitHub #1730) -- the
     sibling per-arrival marker saying this re-entry may carry an operator
     send-back the reviewer must treat as binding. Stamped unconditionally here,
@@ -755,6 +759,14 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     task.pending_operator_comment = True
     if old_stage == Stage.FINALIZE:
         task.finalize_regress_branch_head = task.stage_base_ref
+    # A deliberate regress INTO the plan stage is a "re-plan": the operator's
+    # earlier plan approval (schema v35, dev_queue/approval.py) was given for
+    # text that is about to be superseded, so it must not auto-clear the next
+    # Large-scope Checkpoint 1 (see GitHub #2102). Same-stage PLAN requeues
+    # never pass through here and keep the approval on purpose -- an
+    # approved draft re-parked for ambiguities still carries its approval.
+    if target_stage == Stage.PLAN:
+        task.plan_approved_at = None
     # unproductive=False (GitHub #1750): the shared chokepoint for every
     # regress (operator `--regress` via requeue.py, routing.py's Rule 5a
     # FINALIZE self-heal). A deliberate backward move is a pipeline-stage

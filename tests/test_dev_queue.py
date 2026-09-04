@@ -10558,6 +10558,27 @@ class TestStageRegress:
         _stage_regress(task, Stage.IMPL)
         assert task.regressed_into_stage == Stage.IMPL
 
+    def test_regress_into_plan_clears_plan_approved_at(self) -> None:
+        """A regress INTO the plan stage is a re-plan: the prior operator
+        approval must not auto-clear the next Large-scope gate (#2102)."""
+        from cw.dev_queue import _stage_regress
+
+        task = _make_stage_task(stage=Stage.IMPL)
+        task.plan_approved_at = datetime(2026, 9, 4, tzinfo=UTC)
+        _stage_regress(task, Stage.PLAN)
+        assert task.plan_approved_at is None
+
+    def test_regress_into_non_plan_stage_keeps_plan_approved_at(self) -> None:
+        """Rule 5a's FINALIZE->IMPL self-heal does not touch the plan and
+        must not revoke its approval."""
+        from cw.dev_queue import _stage_regress
+
+        task = _make_stage_task(stage=Stage.FINALIZE)
+        stamped = datetime(2026, 9, 4, tzinfo=UTC)
+        task.plan_approved_at = stamped
+        _stage_regress(task, Stage.IMPL)
+        assert task.plan_approved_at == stamped
+
     def test_sets_pending_operator_comment(self) -> None:
         """#1730: the shared stamp point also raises the pending-send-back marker."""
         from cw.dev_queue import _stage_regress
