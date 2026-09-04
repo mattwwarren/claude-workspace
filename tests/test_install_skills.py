@@ -929,6 +929,10 @@ class TestScriptsInstalled:
         assert "scripts replaced (regular file -> symlink):" in result.stdout
         assert "    - scripts/prep_pr_state.py" in result.stdout
         assert "git rm --cached" in result.stdout
+        assert (
+            "replaced copies that differed from cw's source were kept beside the link:"
+            in result.stdout
+        )
         assert f"    - {backup}" in result.stdout
         # Only the replaced file is named — fresh installs are not.
         assert "    - scripts/review_monitor.py" not in result.stdout
