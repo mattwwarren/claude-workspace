@@ -28,8 +28,10 @@ import logging
 import threading
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw.atomic import atomic_write_text
 from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_review import make_codex_blocked, render_verdict_comment
 from cw.config import load_effective_config, sessions_lock
@@ -44,11 +46,11 @@ from cw.gh import post_issue_comment
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.review_finding_dispositions import merge_finding_dispositions
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
@@ -239,8 +241,38 @@ def _resolve_codex_fix_loop_enabled(
     return config.default_codex_fix_loop_enabled
 
 
+# Durable copy of the rendered review verdict, written into the worktree's
+# ``.claude/`` beside ``cw-context.json`` before any tracker post is attempted
+# (#2095). On a tracker the daemon cannot write to (Linear -- ADR-0013 keeps
+# cw's only programmatic tracker client GitHub-only), this file IS the record.
+REVIEW_VERDICT_COMMENT_RELATIVE_PATH = Path(".claude") / "review-verdict.md"
+
+
+def _persist_review_verdict(worktree: Path, review_text: str) -> Path | None:
+    """Write *review_text* to the worktree's durable verdict file, best-effort.
+
+    Returns the path written, or None when the write failed (logged). Never
+    raises: this runs on the daemon thread's success path after the sentinel
+    has already been persisted, and a filesystem hiccup must not turn a
+    completed review into an unexpected-error completion.
+    """
+    path = worktree / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, review_text)
+    except OSError as exc:
+        _log.warning("review_verdict_persist_failed path=%s: %s", path, exc)
+        return None
+    return path
+
+
 def _post_review_comment(
-    ticket_id: str, review_text: str, *, cwd: Path | None = None
+    ticket_id: str,
+    review_text: str,
+    *,
+    cwd: Path | None = None,
+    tracker: str | None = None,
+    artifact_path: Path | None = None,
 ) -> None:
     """Post codex review findings as a GitHub issue comment (best-effort, logged).
 
@@ -250,7 +282,27 @@ def _post_review_comment(
     the only destination for the finding text (GitHub #1391).
 
     *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
+
+    *tracker* is the client's resolved ``tracking.primary.system`` (#2095).
+    ``gh issue comment`` is GitHub-only: against a Linear-tracked ticket id it
+    can only fail (``invalid issue format``), and every Linear ticket's review
+    verdict was being lost that way. When the tracker is positively known to
+    be non-GitHub the call is skipped and a WARNING names the tracker and the
+    durable *artifact_path* (see :func:`_persist_review_verdict`) that now
+    carries the verdict instead, so the omission is visible rather than a
+    swallowed subprocess failure. Fail-open on an unresolvable tracker, the
+    same polarity as every other tracker gate in cw.
     """
+    if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
+        _log.warning(
+            "review_comment_skipped ticket=%s tracker=%s: the review verdict"
+            " cannot be posted from the daemon (gh is GitHub-only); durable"
+            " copy at %s",
+            ticket_id,
+            tracker,
+            artifact_path,
+        )
+        return
     result = post_issue_comment(ticket_id, review_text, cwd=cwd)
     if result is None:
         _log.warning("review_comment_post_failed ticket=%s: gh call failed", ticket_id)
@@ -365,10 +417,18 @@ def _run_codex_review_and_complete(
         # a retry on a persist failure cannot post a duplicate comment. verdict
         # is None only when every reviewer failed (no documents to render).
         if verdict is not None:
+            review_text = render_verdict_comment(
+                verdict, fix_loop_enabled=fix_loop_enabled
+            )
+            # #2095: the durable copy is written first, unconditionally, so a
+            # tracker the daemon cannot post to still leaves a record.
+            artifact_path = _persist_review_verdict(worktree, review_text)
             _post_review_comment(
                 task.ticket_id,
-                render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
+                review_text,
                 cwd=_git_dir(client),
+                tracker=resolve_tracker(client.workspace_path),
+                artifact_path=artifact_path,
             )
 
         # Step 5: emit SESSION_COMPLETED — no result payload; dispatch reads
