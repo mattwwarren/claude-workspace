@@ -128,7 +128,7 @@ trusting `is_terminal_snapshot=true` on an old file at face value.
 | `no_op` | Done. Ticket already satisfied; close as completed. |
 | `ambiguities_pending_resolution` | Resolve ambiguities posted on the issue; re-dispatch. |
 | `premises_pending_verification` | Verify flagged premises, record on issue; re-dispatch. |
-| `plan_pending_approval` | Parks only for **large** (or unresolved) scope tier — small-tier plans advance unattended. Read the plan comment, post `<!-- auto-dev-plan-approved -->`, then `cw dev-queue approve`. Advances to impl only once quality-reviewed, else re-queues at plan stage (#968). |
+| `plan_pending_approval` | Parks only for **large** (or unresolved) scope tier — small-tier plans advance unattended. Read the plan comment, then `cw dev-queue approve` (records `plan_approved_at` on the row — tracker-neutral; `--post-marker` additionally posts the `<!-- auto-dev-plan-approved -->` audit comment on GitHub). Advances to impl only once quality-reviewed, else re-queues at plan stage (#968). |
 | `review_pending_approval` | Parks only for large (or unresolved) tier. Review the pushed branch diff, run gates, then `cw dev-queue approve` (advances to FINALIZE, which ships) — or ship manually (PR + auto-merge). With signoff configured, `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again to clear. |
 | `merge_pending` | PR created, CI/merge gate not yet cleared (#899). Not a failure — monitor/merge the PR (`pr_url` is preserved on the task); do not re-dispatch. |
 | `merge_gate_blocked` | Prior pipeline PR still open; merge or close it; re-dispatch. |
