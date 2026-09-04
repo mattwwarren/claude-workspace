@@ -75,6 +75,17 @@ _WEDGE_TERMINAL_SIBLING = "wedge/terminal-sibling-park"
 # the reap path. Sourced from the schema constant so the sets cannot drift.
 _HUMAN_GATED_PARK_DISPOSITIONS: frozenset[str] = PAUSED_FOR_USER_INPUT_STATUSES
 
+# A dirty-worktree park (#425/#2114) is the same shape: session_id is None by
+# construction (the pre-spawn guard in dispatch/claim.py never spawned one;
+# the reconcile paths clear it), so the dead-session heuristic always matches
+# it -- but reverting it to PENDING re-claims the same stale worktree, which
+# re-derives the same park and, before #2114, charged another attempt each
+# time. Its remedy is an operator reading the breadcrumb (which now names the
+# predicate and base ref) and committing, pushing, or removing the tree, then
+# `cw dev-queue requeue`; never the reap path. Kept as a local literal rather
+# than added to the schema set above, which enumerates sentinel statuses.
+_DIRTY_WORKTREE_DISPOSITION = "dirty_worktree"
+
 # Wedge class for ACTIVE/IDLE sessions with no matching daemon entry (crash/SSH
 # failure path that leaves roster absent but session still "active" in cw state).
 _WEDGE_ACTIVE_NO_DAEMON_ENTRY = "wedge/active-no-daemon-entry"
@@ -332,6 +343,7 @@ def _check_wedge_dead_session_blocked_on_user(
         for t in queue.tasks
         if t.status == QueueItemStatus.BLOCKED_ON_USER
         and t.disposition not in _HUMAN_GATED_PARK_DISPOSITIONS
+        and t.disposition != _DIRTY_WORKTREE_DISPOSITION
         and not _is_terminal_sibling_disposition(t)
     ]
     if not candidates:
@@ -506,6 +518,7 @@ def _collapse_blocked_on_user_tasks(
             t
             for t in all_blocked
             if t.disposition not in _HUMAN_GATED_PARK_DISPOSITIONS
+            and t.disposition != _DIRTY_WORKTREE_DISPOSITION
             and not _is_terminal_sibling_disposition(t)
         ]
         if len(tasks_for_ticket) < len(all_blocked):

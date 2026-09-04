@@ -4653,6 +4653,43 @@ class TestWedgeDeadSessionBlockedOnUser:
             ]
             assert gated_findings == [], disposition
 
+    def test_dirty_worktree_park_not_detected_or_reverted(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A dirty_worktree park is not a dead-session wedge (#2114).
+
+        Its session_id is None by construction, so the heuristic would match
+        it -- but a PENDING revert re-claims the same stale tree and re-derives
+        the identical park; the remedy is the operator acting on the
+        breadcrumb, never the reap path.
+        """
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        save_state(CwState(sessions=[]))
+        task = self._make_blocked_task(
+            "TST-2114", session_id=None, disposition="dirty_worktree"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=True)
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "TST-2114")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.disposition == "dirty_worktree"
+        assert [
+            f
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/blocked-on-user-dead-session"
+            and f.ticket_id == "TST-2114"
+        ] == []
+
     def test_collapse_leaves_human_gated_sibling_untouched(
         self,
         tmp_config_dir: Path,

@@ -674,8 +674,20 @@ def _park_running_task_blocked_on_user(
     disposition: str,
     breadcrumbs: str,
     expected_session_id: str | None = None,
+    unproductive: bool = True,
 ) -> None:
     """Move a still-RUNNING claimed task to BLOCKED_ON_USER, clearing session_id.
+
+    ``unproductive`` is forwarded to :func:`transition_task_status` (#2114).
+    The two pre-spawn callers (the dirty-worktree guard and the codex
+    capability gate) pass ``False``: no session was ever spawned for the
+    claim, so there is no RUNNING exit to charge -- and charging it ratchets
+    a park that re-derives on every claim (a false ``dirty_worktree``, a
+    codex-incapable host) toward ``attempt_cap_blocked``, burying the
+    specific signal behind a generic one, exactly as
+    ``_park_stale_dispatch_gate`` already reasons. The post-spawn caller
+    (``cw.reconcile.codex_boot``, a session that really ran and was orphaned)
+    keeps the default charge.
 
     Shared by every pre-spawn park path that needs to leave a task for operator
     inspection rather than silently retrying it (the dirty-worktree guard and
@@ -722,6 +734,7 @@ def _park_running_task_blocked_on_user(
                     stored_task,
                     QueueItemStatus.BLOCKED_ON_USER,
                     disposition=disposition,
+                    unproductive=unproductive,
                 )
                 record_event(
                     OrchestratorEventType.SESSION_NEEDS_ATTENTION,
@@ -826,6 +839,7 @@ def _codex_capability_gate(
         client_name=client.name,
         disposition=probe.diagnosis,
         breadcrumbs=probe.detail,
+        unproductive=False,
     )
     _codex_capability_park_count[0] += 1
     breaker_engaged = (
@@ -1003,6 +1017,7 @@ def _spawn_claimed_task(
                     client_name=client.name,
                     disposition="dirty_worktree",
                     breadcrumbs=f"{worktree_path_for(client, branch)}: {unsaved}",
+                    unproductive=False,
                 )
             else:
                 with contextlib.suppress(WorktreeError, OSError):
