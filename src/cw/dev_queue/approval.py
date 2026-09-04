@@ -17,6 +17,7 @@ Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.config import get_client
@@ -180,6 +181,23 @@ def _record_approve_scope_routing_decision(
     )
 
 
+def _stamp_plan_approval(task: TicketTask, from_stage: str) -> None:
+    """Record the tracker-neutral plan-approval fact (schema v35).
+
+    Stamped on BOTH the #968 same-stage re-park and the direct advance, since
+    either means the operator (or an enabled gate recipe) released this row's
+    ``plan_pending_approval`` gate. ``spawn.py`` threads it into the worker's
+    ``queue_metadata`` so ``auto-dev-plan.md``'s Checkpoint 1 can honor it as
+    approval evidence on a tracker the GitHub-only ``--post-marker`` comment
+    never reaches (Linear). Runs before ``save_dev_queue`` so it lands in the
+    same durable write as the status transition. Extracted from
+    ``_approve_ticket_locked`` to keep that function under the PLR0915
+    statement ceiling, like its sibling helpers above.
+    """
+    if from_stage == Stage.PLAN.value:
+        task.plan_approved_at = datetime.now(UTC)
+
+
 def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
     """True iff neither release condition for the approval gate is met.
 
@@ -243,8 +261,12 @@ def _approve_ticket_locked(
 
     ``plan_reviewed`` (GitHub #968) governs the PLAN-stage review-completeness
     gate: ``None`` (the public/CLI path's default) triggers a live
-    :func:`_plan_is_reviewed` check; the trusted gate-recipe caller
-    (``gate_recipes._act_auto_adopt_plan``) passes ``plan_reviewed=True``
+    :func:`_plan_is_reviewed` check (tracker-gated and worktree-resolving via
+    the client config, so a Linear-tracked row never pays a doomed ``gh``
+    call and a dispatch-driven row -- whose ``worktree_path`` is never
+    stamped -- still finds its on-disk ``.cw/plan.md``); the trusted
+    gate-recipe caller (``gate_recipes._act_auto_adopt_plan``) passes
+    ``plan_reviewed=True``
     explicitly so this function never re-fetches the plan-of-record itself,
     preserving the no-refetch guarantee ``test_fetch_not_recalled_during_act``
     enforces.
@@ -377,12 +399,15 @@ def _approve_ticket_locked(
         _park_signoff_gate(task)
         awaiting_signoff = True
     elif task.stage == Stage.PLAN and not (
-        plan_reviewed if plan_reviewed is not None else _plan_is_reviewed(task)
+        plan_reviewed
+        if plan_reviewed is not None
+        else _plan_is_reviewed(task, client_cfg)
     ):
         _reset_for_same_stage_requeue(task)
         plan_requeued = True
     else:
         _advance_task_pointer(task, stages)
+    _stamp_plan_approval(task, from_stage)
     to_stage = task.stage.value
 
     # #1617 (D4): _approve_ticket_locked is a gate-release site, excluded from
