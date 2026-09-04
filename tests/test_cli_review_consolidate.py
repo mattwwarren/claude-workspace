@@ -31,6 +31,7 @@ from tests.conftest import (
     _make_escalation,
     _make_finding,
     _make_reviewer_doc,
+    _plan_text,
     _without_evidence,
 )
 
@@ -524,6 +525,151 @@ class TestReviewConsolidateWorktreeOption:
         verdict = json.loads(result.output)
         assert verdict["rejected"][0]["reason"] == "unknown_file"
         assert verdict["blocking"] is False
+
+
+class TestReviewConsolidatePlanOption:
+    """#2101: --plan tags each accepted finding's ``in_plan_scope``."""
+
+    def test_absent_plan_leaves_in_plan_scope_null(self, runner: CliRunner) -> None:
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"), status="ok")
+        payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "--no-base-check", "-"],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["accepted"][0]["in_plan_scope"] is None
+
+    def test_plan_manifest_file_is_tagged_in_scope(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(_plan_text(["src/cw/foo.py"]))
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"), status="ok")
+        payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--plan",
+                str(plan_path),
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["accepted"][0]["in_plan_scope"] is True
+
+    def test_diff_changed_file_is_in_scope_even_when_plan_manifest_omits_it(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        # The plan's manifest names a different file entirely; the finding's
+        # file (src/cw/foo.py, _make_finding's default) is still a diff-changed
+        # file, so it must not read as out of scope just because the plan's
+        # own inventory happens to be incomplete.
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(_plan_text(["src/cw/other.py"]))
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"), status="ok")
+        payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--plan",
+                str(plan_path),
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["accepted"][0]["in_plan_scope"] is True
+
+    def test_file_outside_manifest_and_diff_is_tagged_out_of_scope(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        (tmp_path / "docs.md").write_text("real file, not in the diff or plan")
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(_plan_text(["src/cw/other.py"]))
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding, status="ok")
+        payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--worktree",
+                str(tmp_path),
+                "--plan",
+                str(plan_path),
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["accepted"][0]["in_plan_scope"] is False
+
+    def test_no_diff_anchor_finding_stays_null_even_with_plan_supplied(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(_plan_text(["src/cw/foo.py"]))
+        finding = _make_finding(
+            severity="MUST_FIX",
+            file="N/A",
+            line_start=None,
+            line_end=None,
+            no_diff_anchor=True,
+        )
+        doc = _make_reviewer_doc(finding, status="ok")
+        payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--plan",
+                str(plan_path),
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["accepted"][0]["in_plan_scope"] is None
+
+    def test_unreadable_plan_path_exits_1_naming_the_path(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "nope.md"
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--plan",
+                str(missing),
+                "-",
+            ],
+            input=json.dumps(_consolidate_payload()),
+        )
+        assert result.exit_code == 1
+        assert "--plan could not read" in result.output
+        assert str(missing) in result.output
 
 
 # --------------------------------------------------------------------------

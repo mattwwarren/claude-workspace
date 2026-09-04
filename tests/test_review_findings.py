@@ -3968,6 +3968,111 @@ class TestConsolidateVerdictPreValidationRejected:
         assert omitted.run_failures_with_should_fix_discards == []
 
 
+class TestConsolidateVerdictPlanScope:
+    """#2101: ``planned_files`` tags each accepted finding's ``in_plan_scope``."""
+
+    def test_omitted_planned_files_leaves_in_plan_scope_none(self) -> None:
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.accepted[0].in_plan_scope is None
+
+    def test_default_none_is_byte_identical_to_omitting_it(self) -> None:
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        diff = _make_diff()
+        omitted = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        explicit = consolidate_verdict(
+            [doc], diff, reviewed_sha="sha", planned_files=None
+        )
+        assert omitted.model_dump() == explicit.model_dump()
+
+    def test_file_in_planned_manifest_is_in_scope(self) -> None:
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict(
+            [doc],
+            _make_diff(),
+            reviewed_sha="sha",
+            planned_files=["src/cw/foo.py"],
+        )
+        assert verdict.accepted[0].in_plan_scope is True
+
+    def test_diff_changed_file_is_in_scope_even_when_manifest_omits_it(self) -> None:
+        # The finding's file (src/cw/foo.py, _make_diff's default) is a
+        # diff-changed file; an incomplete plan manifest must never turn a
+        # file the diff genuinely touches into a false exclusion.
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict(
+            [doc],
+            _make_diff(),
+            reviewed_sha="sha",
+            planned_files=["src/cw/other.py"],
+        )
+        assert verdict.accepted[0].in_plan_scope is True
+
+    def test_file_outside_manifest_and_diff_is_out_of_scope(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "docs.md").write_text("x")
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict(
+            [doc],
+            _make_diff(),
+            reviewed_sha="sha",
+            worktree=tmp_path,
+            planned_files=["src/cw/other.py"],
+        )
+        assert verdict.accepted[0].in_plan_scope is False
+
+    def test_empty_planned_files_still_reads_diff_changed_file_as_in_scope(
+        self,
+    ) -> None:
+        # An empty manifest ("the plan excludes everything") must not override
+        # the diff itself: a file the diff genuinely touches stays in scope.
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict(
+            [doc], _make_diff(), reviewed_sha="sha", planned_files=[]
+        )
+        assert verdict.accepted[0].in_plan_scope is True
+
+    def test_no_diff_anchor_finding_stays_none_regardless_of_planned_files(
+        self,
+    ) -> None:
+        finding = _make_finding(
+            severity="MUST_FIX",
+            file="N/A",
+            line_start=None,
+            line_end=None,
+            no_diff_anchor=True,
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict(
+            [doc],
+            _make_diff(),
+            reviewed_sha="sha",
+            planned_files=["src/cw/foo.py"],
+        )
+        assert verdict.accepted[0].in_plan_scope is None
+
+    def test_in_plan_scope_never_affects_rejection_or_blocking(self) -> None:
+        # #1632 non-regression: a mechanical file-set check must never become
+        # a silent-drop filter. An accepted MUST_FIX still blocks regardless
+        # of what planned_files says.
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict(
+            [doc],
+            _make_diff(),
+            reviewed_sha="sha",
+            planned_files=["src/cw/other.py"],
+        )
+        # in_plan_scope is True here (diff-changed file), but the real
+        # assertion is that supplying a plan changes nothing about acceptance.
+        assert verdict.blocking is True
+        assert len(verdict.accepted) == 1
+        assert verdict.rejected == []
+
+
 class TestReviewerRunFailureDiscardedFindings:
     """#2029: the residual whole-document discard tally and its gate."""
 
