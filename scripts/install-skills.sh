@@ -27,7 +27,10 @@
 #   A regular file already at the destination is a tracked duplicate that goes
 #   stale (#2090: a prep_pr_state.py three versions behind silently stripped
 #   /prep-pr's gate-timeout ladder); it is replaced with the symlink and named
-#   in the summary so it can be `git rm --cached` from global-claude.
+#   in the summary so it can be `git rm --cached` from global-claude.  If its
+#   bytes differ from what cw installs (hand-edits, a newer copy), they are
+#   kept beside the link as <name>.pre-symlink.bak first — ln -sf unlinks the
+#   old content, and a reversal path should be a file, not git archaeology.
 #
 #   Overwrite safety (#1784): a baseline shadow-copy store at
 #   ~/.claude/.cw-agents-baseline/ records the exact content cw itself last
@@ -341,6 +344,7 @@ fi
 script_count=0
 excluded_script_count=0
 replaced_scripts=()
+backed_up_scripts=()
 if [ -d "$SCRIPTS_SRC" ]; then
     mkdir -p "$SCRIPTS_DST"
     # find, not a glob: the tree nests (utils/ is a package the top-level
@@ -363,6 +367,13 @@ if [ -d "$SCRIPTS_SRC" ]; then
         # it needs a matching `git rm --cached` over there, so record it.
         if [ -f "$dst_file" ] && [ ! -L "$dst_file" ]; then
             replaced_scripts+=("$rel")
+            # ln -sf unlinks the old bytes. When they are more than the same
+            # bytes cw is installing, keep them beside the link (see the NOTE
+            # ON SCRIPTS header); a byte-identical copy has nothing to keep.
+            if ! cmp -s "$src_file" "$dst_file"; then
+                cp -p "$dst_file" "$dst_file.pre-symlink.bak"
+                backed_up_scripts+=("$rel")
+            fi
         fi
         ln -sf "$src_file" "$dst_file"
         new_entries+=("scripts/$rel")
@@ -508,6 +519,12 @@ if [ "${#replaced_scripts[@]}" -gt 0 ]; then
     echo "  If ~/.claude/scripts is a git checkout (global-claude), untrack each one"
     echo "  there — \`git rm --cached scripts/<name>\` plus a .gitignore entry — so the"
     echo "  symlink cw now owns stops showing up as a modified tracked file."
+    if [ "${#backed_up_scripts[@]}" -gt 0 ]; then
+        echo "  replaced copies that differed from cw's source were kept beside the link:"
+        for p in "${backed_up_scripts[@]}"; do
+            echo "    - $SCRIPTS_DST/$p.pre-symlink.bak"
+        done
+    fi
 fi
 
 if [ "${#pruned_names[@]}" -gt 0 ]; then

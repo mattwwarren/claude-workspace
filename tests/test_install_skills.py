@@ -142,6 +142,7 @@ def fake_repo_with_scripts(fake_repo: Path) -> Path:
     (scripts / "check_imports.py").write_text("# repo-scoped CI gate\n")
     (scripts / "utils" / "__init__.py").write_text("")
     (scripts / "utils" / "runtime_paths.py").write_text("# runtime paths\n")
+    (scripts / "utils" / "local_only.py").write_text("# nested, repo-scoped\n")
     (scripts / "__pycache__" / "prep_pr_state.cpython-313.pyc").write_bytes(b"\0")
     return fake_repo
 
@@ -889,7 +890,7 @@ class TestScriptsInstalled:
         # utils/ itself is a real directory, not a link to the source dir.
         assert (dst / "utils").is_dir()
         assert not (dst / "utils").is_symlink()
-        assert "scripts synced  : 4" in result.stdout
+        assert "scripts synced  : 5" in result.stdout
 
     def test_repo_scoped_script_and_pycache_never_installed(
         self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
@@ -905,11 +906,13 @@ class TestScriptsInstalled:
         assert "scripts/prep_pr_state.py" in entries.splitlines()
         assert "scripts/utils/runtime_paths.py" in entries.splitlines()
 
-    def test_stale_regular_file_replaced_and_named(
+    def test_stale_regular_file_replaced_named_and_backed_up(
         self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
     ) -> None:
         """A pre-existing copy (global-claude's stale duplicate) becomes the
-        symlink, and the summary names it so it can be untracked over there.
+        symlink and the summary names it so it can be untracked over there.
+        Its differing bytes survive beside the link — ln -sf would otherwise
+        have unlinked them with no reversal path but git history.
         """
         dst = fake_home / ".claude" / "scripts"
         dst.mkdir()
@@ -920,11 +923,36 @@ class TestScriptsInstalled:
         assert result.returncode == 0, result.stderr
         assert stale.is_symlink()
         assert "gate-timeout" in stale.read_text()
+        backup = dst / "prep_pr_state.py.pre-symlink.bak"
+        assert not backup.is_symlink()
+        assert backup.read_text() == "# stale: no gate-timeout\n"
         assert "scripts replaced (regular file -> symlink):" in result.stdout
         assert "    - scripts/prep_pr_state.py" in result.stdout
         assert "git rm --cached" in result.stdout
+        assert f"    - {backup}" in result.stdout
         # Only the replaced file is named — fresh installs are not.
         assert "    - scripts/review_monitor.py" not in result.stdout
+        # The backup is not cw's to prune: it never enters the manifest.
+        entries = (fake_home / ".claude" / ".cw-skills-manifest").read_text()
+        assert "pre-symlink.bak" not in entries
+
+    def test_identical_regular_file_replaced_without_backup(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        """A byte-identical copy has nothing worth keeping: replaced, named,
+        no .bak dropped into the destination tree.
+        """
+        dst = fake_home / ".claude" / "scripts"
+        dst.mkdir()
+        same = dst / "prep_pr_state.py"
+        same.write_text("# fresh: gate-timeout\n")
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        assert same.is_symlink()
+        assert "    - scripts/prep_pr_state.py" in result.stdout
+        assert not (dst / "prep_pr_state.py.pre-symlink.bak").exists()
+        assert "kept beside the link" not in result.stdout
 
     def test_no_replacement_notice_on_clean_or_repeat_run(
         self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
@@ -935,7 +963,7 @@ class TestScriptsInstalled:
         second = _run(script, fake_home)
         assert second.returncode == 0, second.stderr
         assert "scripts replaced" not in second.stdout
-        assert "scripts synced  : 4" in second.stdout
+        assert "scripts synced  : 5" in second.stdout
         assert "orphans pruned  : 0" in second.stdout
 
     def test_foreign_scripts_survive_install_and_prune(
@@ -964,7 +992,7 @@ class TestScriptsInstalled:
         assert not (dst / "utils" / "runtime_paths.py").exists()
         assert foreign.exists()
         assert foreign_util.exists()
-        assert "orphans pruned  : 4" in result.stdout
+        assert "orphans pruned  : 5" in result.stdout
 
     def test_no_scripts_dir_is_a_noop(self, script: Path, fake_home: Path) -> None:
         result = _run(script, fake_home)
@@ -982,3 +1010,35 @@ class TestScriptsInstalled:
         dst = fake_home / ".claude" / "scripts"
         assert (dst / "check_imports.py").is_symlink()
         assert not (dst / "review_monitor.py").exists()
+
+    def test_nested_exclusion_entry_matches_full_relative_path(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        """Exclusion entries are paths relative to .claude/scripts/, so a
+        `utils/<name>` entry skips exactly that nested file — not its
+        basename anywhere, and not the rest of utils/.
+        """
+        (script.parent / "excluded-scripts.txt").write_text(
+            "check_imports.py\nutils/local_only.py\n"
+        )
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        dst = fake_home / ".claude" / "scripts"
+        assert not (dst / "utils" / "local_only.py").exists()
+        assert (dst / "utils" / "runtime_paths.py").is_symlink()
+        assert "scripts skipped : 2 (repo-scoped)" in result.stdout
+        entries = (fake_home / ".claude" / ".cw-skills-manifest").read_text()
+        assert "scripts/utils/local_only.py" not in entries.splitlines()
+
+    def test_basename_only_exclusion_does_not_match_nested_file(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        """The complement: a bare `local_only.py` entry names a top-level file
+        that does not exist, so the nested utils/local_only.py still installs.
+        """
+        (script.parent / "excluded-scripts.txt").write_text("local_only.py\n")
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        dst = fake_home / ".claude" / "scripts"
+        assert (dst / "utils" / "local_only.py").is_symlink()
+        assert "scripts skipped : 0 (repo-scoped)" in result.stdout
