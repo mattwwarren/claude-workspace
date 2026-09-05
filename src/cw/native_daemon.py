@@ -38,6 +38,15 @@ _log = logging.getLogger(__name__)
 SHORT_SESSION_ID_LEN = 8
 SHORT_SESSION_ID_RE = re.compile(rf"^[0-9a-f]{{{SHORT_SESSION_ID_LEN}}}$")
 
+# Hex characters used in Claude daemon short session ids.
+_HEX_CHARS: frozenset[str] = frozenset("0123456789abcdef")
+
+
+def _is_native_surface_ref(ref: str) -> bool:
+    """Return True if *ref* looks like an 8-char hex daemon short id."""
+    return len(ref) == SHORT_SESSION_ID_LEN and all(c in _HEX_CHARS for c in ref)
+
+
 # Default permission mode for dispatched workers — non-interactive, so a
 # permission prompt would deadlock the session. ``auto`` matches the
 # behavior the issue documents.

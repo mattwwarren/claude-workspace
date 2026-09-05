@@ -32,6 +32,7 @@ from cw.models import (
 )
 from cw.native_daemon import (
     NativeDaemonClient,
+    _is_native_surface_ref,
     get_native_daemon_client,
     resolve_permission_mode,
 )
@@ -55,20 +56,10 @@ from cw.worktree import (
 # idea brainstorms within it; debt stays on the main workspace).
 WORKTREE_PURPOSES: frozenset[str] = frozenset({"impl", "idea"})
 
-# Hex characters used in Claude daemon short session ids.
-_HEX_CHARS: frozenset[str] = frozenset("0123456789abcdef")
-# Length of the Claude daemon short session id (8 hex chars).
-_SHORT_ID_LEN: int = 8
-
 _DETACH_HINT = (
     "Detach with Ctrl+Z. Do NOT use Ctrl+D"
     " (terminates the daemon session in all attached terminals)."
 )
-
-
-def _is_native_surface_ref(ref: str) -> bool:
-    """Return True if *ref* looks like an 8-char hex daemon short id."""
-    return len(ref) == _SHORT_ID_LEN and all(c in _HEX_CHARS for c in ref)
 
 
 def _attach_session(short_id: str) -> None:

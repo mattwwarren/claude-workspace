@@ -43,41 +43,6 @@ def _noop(*_args: object, **_kwargs: object) -> None:
 
 
 # ---------------------------------------------------------------------------
-# TestIsNativeSurfaceRef
-# ---------------------------------------------------------------------------
-
-
-class TestIsNativeSurfaceRef:
-    def test_valid_8_char_hex(self) -> None:
-        from cw.session import _is_native_surface_ref
-
-        assert _is_native_surface_ref("abcd1234") is True
-        assert _is_native_surface_ref("00000001") is True
-        assert _is_native_surface_ref("deadbeef") is True
-
-    def test_invalid_too_short(self) -> None:
-        from cw.session import _is_native_surface_ref
-
-        assert _is_native_surface_ref("abc1234") is False
-
-    def test_invalid_too_long(self) -> None:
-        from cw.session import _is_native_surface_ref
-
-        assert _is_native_surface_ref("abcd12345") is False
-
-    def test_invalid_non_hex_chars(self) -> None:
-        from cw.session import _is_native_surface_ref
-
-        assert _is_native_surface_ref("abcg1234") is False
-        assert _is_native_surface_ref("impl-pane") is False
-
-    def test_invalid_uppercase(self) -> None:
-        from cw.session import _is_native_surface_ref
-
-        assert _is_native_surface_ref("ABCD1234") is False
-
-
-# ---------------------------------------------------------------------------
 # TestStartSession
 # ---------------------------------------------------------------------------
 

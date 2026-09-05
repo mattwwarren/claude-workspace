@@ -31,12 +31,11 @@ from cw.models import (
     Session,
     TicketTask,
 )
-from cw.native_daemon import get_native_daemon_client
+from cw.native_daemon import _is_native_surface_ref, get_native_daemon_client
 from cw.reconcile import (
     _csid_from_transcript,
     _transcript_age_seconds,
 )
-from cw.session import _is_native_surface_ref
 
 from ._group import (
     _WAIT_EXIT_ATTENTION,
