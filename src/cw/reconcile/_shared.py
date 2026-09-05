@@ -1087,11 +1087,25 @@ class SentinelRouteOutcome(NamedTuple):
     guard re-queues to PENDING, so it reports ``routed=True`` and (derived from
     it) ``landed_terminal=False`` -- exactly the signal that keeps the still-
     advancing worker alive rather than stopping it as leaked.
+
+    ``task_already_terminal`` (GitHub #1692) is True only for the raced-to-
+    terminal lookup-miss branch of cause (c) above: a same-ticket/session task
+    was found but had already been landed in a genuinely terminal status
+    (outside ``OCCUPIED_LANE_STATUSES``) by a concurrent caller before this
+    call's own lookup ran. It is mutually exclusive with ``landed_terminal``
+    by construction -- ``landed_terminal`` is set only in the ``target is not
+    None`` arm, ``task_already_terminal`` only in the ``target is None`` arm.
+    Once a task is landed genuinely terminal under this exact session_id, no
+    dispatch path will ever give this session another leg for this ticket, so
+    a caller (``signal_stop``) can safely complete the now-leaked session on
+    this sub-cause -- unlike a stage-mismatch refusal, where a still-advancing
+    worker may legitimately produce a later, matching-stage sentinel.
     """
 
     rescued: bool
     routed: bool
     landed_terminal: bool
+    task_already_terminal: bool = False
 
 
 def _apply_sentinel_to_task(
@@ -1121,6 +1135,14 @@ def _apply_sentinel_to_task(
     ``now`` is the caller's sweep timestamp, threaded through to that liveness
     comparison so a reconcile tick judges every session against one clock;
     it defaults to wall-clock ``now`` for callers that have none.
+
+    GitHub #1692: the returned outcome's ``task_already_terminal`` flag is
+    wired up only at the Stop-hook call site (``cw.cli.stop_hook``), which
+    completes the now-leaked session on this sub-cause. The two reconcile-
+    driven callers (``cw.reconcile.idle._mutations``,
+    ``cw.reconcile.phantom._mutations``) and the LOCAL-DAEMON git-harvest
+    reaper (``cw.reconcile.local``) intentionally do not yet consume this
+    field -- see GitHub issue #2140.
     """
     cw_session_id = session.id
     with dev_queue_lock():
@@ -1134,6 +1156,7 @@ def _apply_sentinel_to_task(
         # match in case a later row has the occupied match (post-review
         # amendment A2).
         matched_excluded = False
+        excluded_status: QueueItemStatus | None = None
         for task in store.tasks:
             if task.ticket_id == ticket_id and task.session_id == cw_session_id:
                 if task.status in OCCUPIED_LANE_STATUSES:
@@ -1141,6 +1164,7 @@ def _apply_sentinel_to_task(
                     target_status = task.status
                     break
                 matched_excluded = True
+                excluded_status = task.status
         if target is None:
             if matched_excluded:
                 # #1189: surface the race so an operator can tell "raced to
@@ -1154,8 +1178,24 @@ def _apply_sentinel_to_task(
                     ticket_id,
                     cw_session_id,
                 )
+                # #1692: durable trace alongside the log line -- record_event
+                # nests _inbox_lock inside dev_queue_lock here, the same safe
+                # nesting order this module's SESSION_SENTINEL_LIVENESS_VETOED
+                # call (below) already relies on.
+                record_event(
+                    OrchestratorEventType.SENTINEL_RACE_MISS,
+                    {
+                        "ticket_id": ticket_id,
+                        "session_id": cw_session_id,
+                        "excluded_status": excluded_status,
+                    },
+                    correlation_id=ticket_id,
+                )
             return SentinelRouteOutcome(
-                rescued=False, routed=not matched_excluded, landed_terminal=False
+                rescued=False,
+                routed=not matched_excluded,
+                landed_terminal=False,
+                task_already_terminal=matched_excluded,
             )
 
         rescued = False

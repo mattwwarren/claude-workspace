@@ -1310,6 +1310,48 @@ the next legitimate sentinel or operator action.
 
 `correlation_id` is the `ticket_id`.
 
+### `sentinel.race_miss`
+
+**Emitter:** `_apply_sentinel_to_task` (`cw.reconcile._shared`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "session_id": "<str>",
+  "excluded_status": "<str | null>"
+}
+```
+**Semantics:** GitHub #1692. `_apply_sentinel_to_task`'s task lookup matches a
+same-ticket/session task, but that task's status is already outside
+`OCCUPIED_LANE_STATUSES` — a concurrent caller (most plausibly a reconcile
+idle/phantom sweep salvaging the same emitted sentinel via
+`ROUTE_EMITTED_SENTINEL`) already landed the task terminal while this call's
+own lookup was blocked on `dev_queue_lock()`. `excluded_status` is the raced
+task's status at the moment of the miss (e.g. `failed`, `completed`).
+
+Sibling to `sentinel.stage_mismatch` above (same emitter family, same
+"a `routed=False` refusal needs a durable trace, not just a log line"
+purpose), but a distinct cause and a distinct caller obligation: a
+stage-mismatch refusal must leave the session untouched (a still-advancing
+worker may legitimately produce a later, matching-stage sentinel), while a
+raced-to-terminal task will never be given another leg by any dispatch path
+under this exact `session_id` — so the Stop-hook call site
+(`cw.cli.stop_hook`) completes the now-leaked session on this cause instead
+of leaving it orphaned until the wall-clock reaper notices. This event is
+therefore a diagnostic trail of *why* the session was auto-healed, not an
+operator page — like `sentinel.stage_mismatch`, deliberately NOT added to
+`_DEFAULT_OPERATOR_EVENT_TYPES`.
+
+The two reconcile-driven callers of `_apply_sentinel_to_task`
+(`cw.reconcile.idle._mutations`, `cw.reconcile.phantom._mutations`) and the
+LOCAL-DAEMON git-harvest reaper (`cw.reconcile.local`) still leave their
+session untouched on this same race (their own existing behavior, unchanged
+by this ticket) — tracked for a follow-up fix in issue #2140. This event
+fires from all four call sites; only the Stop-hook one currently acts on
+`task_already_terminal`.
+
+`correlation_id` is the `ticket_id`.
+
 ### `dispatch.scope_routing_decision`
 
 **Emitter:** `_route_scope_gated_approval`, `_route_stage_success`,

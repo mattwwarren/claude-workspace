@@ -408,6 +408,18 @@ class OrchestratorEventType(StrEnum):
     # observable record naming the park's client, the PR, and the colliding
     # watch, in place of the mutation it declines to make.
     WATCHED_PR_COLLISION = "watched_pr.collision"
+    # GitHub #1692 — sentinel/task raced-to-terminal miss. Emitted by
+    # _apply_sentinel_to_task's lookup-miss branch when a same-ticket/session
+    # task was found but had already been landed terminal (outside
+    # OCCUPIED_LANE_STATUSES) by a concurrent caller before this call's own
+    # lookup ran. Sibling to SENTINEL_STAGE_MISMATCH above (same emitter
+    # module, same "a routed=False refusal needs a durable trace, not just a
+    # log line" purpose) but a distinct cause: this one is followed by the
+    # Stop-hook call site auto-healing the now-leaked session (marking it
+    # COMPLETED), so this event is a diagnostic trail rather than an operator
+    # page — like SENTINEL_STAGE_MISMATCH, deliberately not added to
+    # _DEFAULT_OPERATOR_EVENT_TYPES.
+    SENTINEL_RACE_MISS = "sentinel.race_miss"
 
 
 class DispatchSkipReason(StrEnum):
