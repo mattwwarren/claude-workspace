@@ -28,16 +28,25 @@ import yaml
 from pydantic import ValidationError
 
 from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
-from cw.config import state_file
+from cw.config import load_orchestrator_config, state_file
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.doctor import _deps
 from cw.doctor._shared import WedgeFinding
 from cw.doctor.loop_health import _gh_pr_states, _reap_session_by_selector
 from cw.exceptions import CwError
-from cw.models import QueueItemStatus, ReapReason, SessionStatus
+from cw.models import (
+    QueueItemStatus,
+    ReapReason,
+    SessionOrigin,
+    SessionPurpose,
+    SessionStatus,
+)
 from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
 from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
+    _has_terminal_sentinel,
+    _transcript_age_seconds,
+    _unresolved_subagent_spawn_age_seconds,
     compute_drift,
     feature_branch_key,
     ticket_id_for_session,
@@ -89,6 +98,22 @@ _DIRTY_WORKTREE_DISPOSITION = "dirty_worktree"
 # Wedge class for ACTIVE/IDLE sessions with no matching daemon entry (crash/SSH
 # failure path that leaves roster absent but session still "active" in cw state).
 _WEDGE_ACTIVE_NO_DAEMON_ENTRY = "wedge/active-no-daemon-entry"
+
+# Wedge class for ACTIVE DAEMON sessions still present ("idle") in the daemon
+# roster with a stale transcript and no terminal sentinel (#2078). Mirror of
+# _WEDGE_ACTIVE_NO_DAEMON_ENTRY for the opposite roster shape: that class
+# fires when the daemon entry is ABSENT (crash/SSH failure); this one fires
+# when the entry is PRESENT but the harness never signaled completion (the
+# stop_hook.py background_tasks permanent-defer race) -- see
+# _check_wedge_active_daemon_stale_no_sentinel's docstring for the mechanism.
+_WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL = "wedge/active-daemon-stale-no-sentinel"
+
+# Fallback staleness threshold (minutes) used when
+# OrchestratorConfig.liveness_buckets_minutes is empty (misconfigured) --
+# mirrors the historical top-bucket value in the default [15, 30, 45] list, so
+# a degraded config still eventually flags a stuck session rather than never
+# checking staleness at all.
+_DEFAULT_STALE_THRESHOLD_MINUTES = 45
 
 _log = logging.getLogger(__name__)
 
@@ -479,6 +504,83 @@ def _check_wedge_active_no_daemon_entry(
     return findings
 
 
+def _check_wedge_active_daemon_stale_no_sentinel(
+    state: CwState,
+) -> list[WedgeFinding]:
+    """Detect ACTIVE DAEMON sessions idle in the roster with no terminal sentinel.
+
+    Closes #2078: for a non-headless (plain) DAEMON spawn,
+    ``signal_stop()``'s ``background_tasks`` defer (``stop_hook.py``) can defer
+    forever if the harness's own "next main-agent turn re-fires Stop" contract
+    doesn't hold for one particular turn -- and nothing else in the ordinary
+    lifecycle ever completes the session. The daemon only removes a worker
+    from ``roster.json`` when ``signal_stop()`` itself calls
+    ``native_daemon.stop(surface_ref)`` at the very end of that function
+    (``stop_hook.py:567-572``), which is unreachable on the stuck-deferral
+    path -- so the session's ``surface_ref`` stays in the live roster
+    indefinitely and ``compute_drift``'s phantom check
+    (``_check_wedge_active_no_daemon_entry``, class-6) never fires: that class
+    is gated on the ref being ABSENT from the roster, and it never goes
+    absent here.
+
+    This is therefore the roster-PRESENT mirror of class-6, reusing the exact
+    evidence set ``reconcile/liveness.py``'s distress computation already
+    gathers for the identical scenario (it flags the session for operator
+    attention but never dispositions it, per RFC 0008 W2's signal-only
+    contract): no terminal sentinel (:func:`_has_terminal_sentinel`), a
+    transcript stale past the top liveness bucket
+    (:func:`_transcript_age_seconds`), and no outstanding subagent spawn still
+    within its await deadline (:func:`_unresolved_subagent_spawn_age_seconds`
+    vs. ``fix_loop_await_deadline_minutes``).
+
+    Excludes ``SessionPurpose.ORCHESTRATE``, mirroring ``compute_drift``'s own
+    exclusion -- a long-lived interactive orchestrator session must never be
+    mistaken for a stuck plain spawn.
+    """
+    native_live = get_native_daemon_client().list_live_session_short_ids()
+    config = load_orchestrator_config()
+    thresholds = config.liveness_buckets_minutes
+    stale_threshold_minutes = (
+        thresholds[-1] if thresholds else _DEFAULT_STALE_THRESHOLD_MINUTES
+    )
+    deadline_seconds = config.fix_loop_await_deadline_minutes * 60
+    now = datetime.now(UTC)
+
+    findings: list[WedgeFinding] = []
+    for session in state.sessions:
+        if session.origin is not SessionOrigin.DAEMON:
+            continue
+        if session.status is not SessionStatus.ACTIVE:
+            continue
+        if session.purpose is SessionPurpose.ORCHESTRATE:
+            continue
+        if session.surface_ref is None or session.surface_ref not in native_live:
+            continue
+        if _has_terminal_sentinel(session):
+            continue
+        age_seconds = _transcript_age_seconds(session, now)
+        if age_seconds is None or age_seconds < stale_threshold_minutes * 60:
+            continue
+        spawn_age = _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
+        if spawn_age is not None and spawn_age < deadline_seconds:
+            continue
+        findings.append(
+            WedgeFinding(
+                wedge_class=_WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
+                session_id=session.id,
+                ticket_id=ticket_id_for_session(session.name),
+                recipe=(
+                    "ACTIVE session is idle in the daemon roster with a stale "
+                    "transcript and no terminal sentinel — likely finished but "
+                    "never signaled completion. Run: cw doctor --reap to mark "
+                    "COMPLETED and release the worker."
+                ),
+                state_file=str(state_file()),
+            )
+        )
+    return findings
+
+
 def _collapse_blocked_on_user_tasks(
     queue: DevQueueStore,
     blocked_ticket_ids: set[str],
@@ -593,6 +695,11 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     Class-7 (terminal-sibling-park, #2100): CANCEL every matching row via
         _cancel_terminal_sibling_parks — never a PENDING revert (see that
         function's docstring for why).
+    Class-8 (active-daemon-stale-no-sentinel, #2078): same remedy as class-6
+        — call _reap_session_by_selector per matching session; reused
+        verbatim rather than a new completion-writer since the end state
+        (COMPLETED, daemon stopped, owning task reverted to PENDING) is
+        identical.
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
@@ -608,6 +715,7 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
             _WEDGE_BLOCKED_DEAD_SESSION,
             _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
             _WEDGE_TERMINAL_SIBLING,
+            _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
         }
     }
     blocked_ticket_ids: set[str] = {
@@ -623,7 +731,9 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     phantom_session_ids: list[str] = [
         f.session_id
         for f in findings
-        if f.session_id and f.wedge_class == _WEDGE_ACTIVE_NO_DAEMON_ENTRY
+        if f.session_id
+        and f.wedge_class
+        in {_WEDGE_ACTIVE_NO_DAEMON_ENTRY, _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL}
     ]
 
     if not (
