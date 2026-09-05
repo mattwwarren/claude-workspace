@@ -6358,7 +6358,6 @@ class TestWedgeActiveDaemonStaleNoSentinel:
         surface_ref still in the live roster (unlike class-6's
         roster-absent shape). Regression guard for the fix.
         """
-        from datetime import timedelta
 
         from cw.config import load_state, save_state
         from cw.dev_queue import load_dev_queue, save_dev_queue

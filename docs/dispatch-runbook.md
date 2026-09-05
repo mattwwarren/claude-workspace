@@ -560,6 +560,11 @@ common wedge conditions:
   revert: the ticket's real row already finished, so there is nothing to
   revert it *to* (reverting it just gets it re-parked `terminal_sibling` on
   the very next reconcile pass).
+- `wedge/active-daemon-stale-no-sentinel` (#2078) — an `ACTIVE` session still
+  present in the daemon roster with a stale transcript and no terminal
+  sentinel (a plain/non-headless spawn whose harness never re-fired the Stop
+  hook that would have completed it) — marks the session `COMPLETED`, stops
+  the daemon surface, and reverts the owning task to PENDING.
 
 Run `cw doctor --reap --json` for machine-readable output.
 
