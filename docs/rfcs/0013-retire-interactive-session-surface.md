@@ -280,4 +280,8 @@ Projected into `## References` above.
 
 ## Issues
 
-Issues: _(filled by `/sprint-buildout`)_
+Milestone: [v1.46.0 — Retire the Interactive Session Surface](https://github.com/mattwwarren/claude-workspace/milestone/15)
+
+Epics: #2126 (I — Remove the interactive session surface), #2127 (II — Retire the USER session origin)
+
+Issues: S1 #2128 · A1 #2129 · A2 #2130 · A3 #2131 · B1 #2132 · B2 #2133
