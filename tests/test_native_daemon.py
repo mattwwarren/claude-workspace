@@ -14,6 +14,7 @@ from cw.native_daemon import (
     SKIP_PERMISSIONS_MODE,
     FakeNativeDaemonClient,
     RealNativeDaemonClient,
+    _is_native_surface_ref,
     get_native_daemon_client,
     model_supports_auto,
     read_supervisor_resume_session_id,
@@ -22,6 +23,26 @@ from cw.native_daemon import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+
+class TestIsNativeSurfaceRef:
+    def test_valid_8_char_hex(self) -> None:
+        assert _is_native_surface_ref("abcd1234") is True
+        assert _is_native_surface_ref("00000001") is True
+        assert _is_native_surface_ref("deadbeef") is True
+
+    def test_invalid_too_short(self) -> None:
+        assert _is_native_surface_ref("abc1234") is False
+
+    def test_invalid_too_long(self) -> None:
+        assert _is_native_surface_ref("abcd12345") is False
+
+    def test_invalid_non_hex_chars(self) -> None:
+        assert _is_native_surface_ref("abcg1234") is False
+        assert _is_native_surface_ref("impl-pane") is False
+
+    def test_invalid_uppercase(self) -> None:
+        assert _is_native_surface_ref("ABCD1234") is False
 
 
 class _FakeCompleted:
