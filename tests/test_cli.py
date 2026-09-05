@@ -2891,7 +2891,7 @@ class TestSignalStop:
         assert events == []
         assert daemon.stop_calls == []
 
-    def test_signal_stop_race_already_failed_task_completes_session_and_emits_race_event(
+    def test_signal_stop_race_already_failed_task_completes_and_emits_race_event(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,

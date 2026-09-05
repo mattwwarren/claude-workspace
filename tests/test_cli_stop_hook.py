@@ -322,7 +322,7 @@ def test_resolve_and_complete_headless_session_completes_on_task_already_termina
 
     monkeypatch.setattr(
         "cw.cli.stop_hook._apply_sentinel_to_task",
-        lambda *args, **kwargs: SentinelRouteOutcome(
+        lambda *_args, **_kwargs: SentinelRouteOutcome(
             rescued=False,
             routed=False,
             landed_terminal=False,
