@@ -399,12 +399,12 @@ def build_operator_routes() -> list[BaseRoute]:
     from mcp.server import Server
     from mcp.server.sse import SseServerTransport
     from mcp.shared.message import SessionMessage
-    from mcp.types import JSONRPCMessage, JSONRPCNotification
+    from mcp.types import JSONRPCNotification
     from starlette.routing import Mount, Route
 
     from cw._sse_util import _send_or_close
 
-    mcp_server: Server[None, Any] = Server("cw-operator")
+    mcp_server: Server[None] = Server("cw-operator")
     sse = SseServerTransport("/messages/operator")
 
     async def _sse_asgi(  # pragma: no cover
@@ -443,9 +443,7 @@ def build_operator_routes() -> list[BaseRoute]:
                                     "data": notification,
                                 },
                             )
-                            session_msg = SessionMessage(
-                                message=JSONRPCMessage(json_rpc_notif)
-                            )
+                            session_msg = SessionMessage(message=json_rpc_notif)
                             if not await _send_or_close(write_stream, session_msg):
                                 logger.debug("drain: peer stream closed, exiting")
                                 return

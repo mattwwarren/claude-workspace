@@ -62,10 +62,10 @@ def extract_payload(session_msg: Any, notification_type: str) -> dict[str, Any] 
     """
     from mcp.types import JSONRPCNotification
 
-    root = session_msg.message.root
-    if not isinstance(root, JSONRPCNotification):
+    message = session_msg.message
+    if not isinstance(message, JSONRPCNotification):
         return None
-    params = root.params or {}
+    params = message.params or {}
     data = params.get("data")
     if data is None:
         return None
@@ -85,15 +85,13 @@ def build_outbound_notification(
 ) -> Any:
     """Build a SessionMessage to emit on the stdio MCP connection."""
     from mcp.shared.message import SessionMessage
-    from mcp.types import JSONRPCMessage, JSONRPCNotification
+    from mcp.types import JSONRPCNotification
 
     return SessionMessage(
-        message=JSONRPCMessage(
-            JSONRPCNotification(
-                jsonrpc="2.0",
-                method="notifications/claude/channel",
-                params={"content": json.dumps(data), "meta": build_meta(data)},
-            )
+        message=JSONRPCNotification(
+            jsonrpc="2.0",
+            method="notifications/claude/channel",
+            params={"content": json.dumps(data), "meta": build_meta(data)},
         )
     )
 

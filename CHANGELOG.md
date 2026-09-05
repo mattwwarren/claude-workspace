@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cw pr-channel serve`, `cw queue-channel serve`, and the operator channel no longer crash every SSE subscriber with `TypeError: 'typing.Union' object is not callable`, and the channel proxies no longer fail on `.root` when a relayed event arrives:** the `[mcp]` extra's floor was `mcp>=1.27.1` with no ceiling, so `uv tool install` resolved `mcp` 2.x while `uv.lock` (and therefore CI) stayed on 1.27.1. In 2.x `JSONRPCMessage` is a plain `Union` alias rather than a `RootModel`, so the `_drain` closures' `JSONRPCMessage(notification)` call raised on the first queued notification and `extract_payload`'s `session_msg.message.root` would have raised `AttributeError` on the proxy side. The four producers now hand the `JSONRPCNotification` to `SessionMessage` directly, `extract_payload` reads `session_msg.message` itself, the `Server` annotations drop the removed second type parameter, and the extra's floor is raised to `mcp>=2.1.1` with `uv.lock` regenerated to match, so the version CI tests is the version the operator's tool install runs.
+
 ## [1.45.7] - 2026-09-04
 
 ### Fixed

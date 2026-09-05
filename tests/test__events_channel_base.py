@@ -23,7 +23,7 @@ starlette = pytest.importorskip(
 )
 
 from mcp.shared.message import SessionMessage
-from mcp.types import JSONRPCMessage, JSONRPCNotification, JSONRPCResponse
+from mcp.types import JSONRPCNotification, JSONRPCResponse
 
 from cw._events_channel_base import (
     ChannelProxyConfig,
@@ -58,12 +58,10 @@ def _make_channel_session_message(
         "title": title,
     }
     return SessionMessage(
-        message=JSONRPCMessage(
-            JSONRPCNotification(
-                jsonrpc="2.0",
-                method="notifications/message",
-                params={"level": "info", "logger": logger, "data": data},
-            )
+        message=JSONRPCNotification(
+            jsonrpc="2.0",
+            method="notifications/message",
+            params={"level": "info", "logger": logger, "data": data},
         )
     )
 
@@ -119,7 +117,7 @@ class TestExtractPayload:
 
     def test_non_notification_root(self) -> None:
         response = JSONRPCResponse(jsonrpc="2.0", id=1, result={})
-        msg = SessionMessage(message=JSONRPCMessage(response))
+        msg = SessionMessage(message=response)
         assert extract_payload(msg, self.NOTIFICATION_TYPE) is None
 
     def test_notification_type_mismatch(self) -> None:
@@ -132,7 +130,7 @@ class TestExtractPayload:
             method="notifications/message",
             params={"level": "info"},
         )
-        msg = SessionMessage(message=JSONRPCMessage(notif))
+        msg = SessionMessage(message=notif)
         assert extract_payload(msg, self.NOTIFICATION_TYPE) is None
 
     def test_malformed_json_in_message(self) -> None:
@@ -148,7 +146,7 @@ class TestExtractPayload:
                 },
             },
         )
-        msg = SessionMessage(message=JSONRPCMessage(notif))
+        msg = SessionMessage(message=notif)
         assert extract_payload(msg, self.NOTIFICATION_TYPE) is None
 
     def test_missing_message_key(self) -> None:
@@ -160,7 +158,7 @@ class TestExtractPayload:
                 "data": {"notification_type": self.NOTIFICATION_TYPE},
             },
         )
-        msg = SessionMessage(message=JSONRPCMessage(notif))
+        msg = SessionMessage(message=notif)
         assert extract_payload(msg, self.NOTIFICATION_TYPE) is None
 
 
@@ -182,16 +180,16 @@ class TestBuildOutboundNotification:
 
     def test_root_is_json_rpc_notification(self) -> None:
         result = build_outbound_notification(self._data(), self._build_meta)
-        assert isinstance(result.message.root, JSONRPCNotification)
+        assert isinstance(result.message, JSONRPCNotification)
 
     def test_method_is_notifications_claude_channel(self) -> None:
         result = build_outbound_notification(self._data(), self._build_meta)
-        assert result.message.root.method == "notifications/claude/channel"
+        assert result.message.method == "notifications/claude/channel"
 
     def test_content_and_meta_from_build_meta_callback(self) -> None:
         data = self._data()
         result = build_outbound_notification(data, self._build_meta)
-        params = result.message.root.params or {}
+        params = result.message.params or {}
         assert json.loads(params["content"]) == data
         assert params["meta"] == {"meta_key": "meta_value"}
 

@@ -458,12 +458,12 @@ def make_app() -> Starlette:
     from mcp.server import Server
     from mcp.server.sse import SseServerTransport
     from mcp.shared.message import SessionMessage
-    from mcp.types import JSONRPCMessage, JSONRPCNotification
+    from mcp.types import JSONRPCNotification
 
     from cw._sse_util import _send_or_close
     from cw.cw_operator_events import build_operator_routes
 
-    mcp_server: Server[None, Any] = Server("cw-queue-events")
+    mcp_server: Server[None] = Server("cw-queue-events")
     sse = SseServerTransport("/messages")
 
     operator_routes = build_operator_routes()
@@ -506,9 +506,7 @@ def make_app() -> Starlette:
                                     "data": notification,
                                 },
                             )
-                            session_msg = SessionMessage(
-                                message=JSONRPCMessage(json_rpc_notif)
-                            )
+                            session_msg = SessionMessage(message=json_rpc_notif)
                             if not await _send_or_close(write_stream, session_msg):
                                 logger.debug("drain: peer stream closed, exiting")
                                 return
