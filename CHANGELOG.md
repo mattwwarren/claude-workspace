@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.45.8] - 2026-09-05
+
 ### Fixed
 
 - **`cw doctor` now detects an ACTIVE daemon session stuck roster-present with no terminal sentinel (#2078):** `signal_stop()`'s `background_tasks` defer can permanently stall for a plain (non-headless) DAEMON spawn when the harness's "next Stop hook re-fires" contract doesn't hold for one turn, so nothing completes the session and it never leaves `roster.json` — a case `compute_drift`'s existing phantom check missed entirely, since that check is gated on the session being *absent* from the roster and it never goes absent here. The new `wedge/active-daemon-stale-no-sentinel` class is the roster-present mirror of that check, reusing the exact evidence `reconcile/liveness.py`'s distress computation already gathers (no terminal sentinel, a transcript stale past the top liveness bucket, no outstanding subagent spawn still within its await deadline) and the canonical `_classify_liveness_bucket` for its staleness threshold — so it honors per-stage floor overrides and degraded `liveness_buckets_minutes` configs the same way reconcile's own liveness sweep does, rather than re-deriving a threshold that could diverge and misfire against this class's destructive `--reap` path. `--reap`'s `SESSION_REAP_AUTHORIZED` audit event now threads the specific wedge class through as `proposed_action`, so a post-hoc investigator can tell which of the two reaped classes fired instead of seeing one bare session-id list.
