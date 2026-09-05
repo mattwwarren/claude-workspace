@@ -23,12 +23,14 @@ from tests.conftest import (
     _make_daemon_session,
     _make_tick_summary,
     _make_ticket_task,
+    _write_idle_transcript,
 )
 
 if TYPE_CHECKING:
     import pytest
 
-    from cw.models import ClientConfig, Session, TicketTask
+    from cw.models import ClientConfig, Session, SessionPurpose, TicketTask
+    from cw.native_daemon import FakeNativeDaemonClient
 
 
 def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6242,6 +6244,332 @@ class TestWedgeActiveNoDaemonEntry:
             ticket_id="new-sess-2",
             origin=SessionOrigin.DAEMON,
         )
+
+
+# ---------------------------------------------------------------------------
+# TestWedgeActiveDaemonStaleNoSentinel (#2078)
+# ---------------------------------------------------------------------------
+
+
+class TestWedgeActiveDaemonStaleNoSentinel:
+    """wedge/active-daemon-stale-no-sentinel: ACTIVE DAEMON session still
+
+    present ("idle") in the daemon roster with a stale transcript and no
+    terminal sentinel -- the roster-PRESENT mirror of
+    wedge/active-no-daemon-entry, closing the permanent-defer race described
+    in #2078.
+    """
+
+    _SURFACE_REF = "fake-short-id"
+
+    def _write_roster(self, tmp_path: Path, *, supervisor_pid: int = 12345) -> Path:
+        roster_path = tmp_path / "roster.json"
+        roster_path.write_text(
+            json.dumps({"supervisorPid": supervisor_pid, "workers": {}}),
+            encoding="utf-8",
+        )
+        return roster_path
+
+    def _make_session(
+        self,
+        tmp_path: Path,
+        worktree: Path,
+        *,
+        sid: str = "stuck-sess-1",
+        purpose: SessionPurpose | None = None,
+        last_result: dict[str, Any] | None = None,
+    ) -> Session:
+        from cw.models import SessionPurpose, SessionStatus
+
+        return _make_daemon_session(
+            id=sid,
+            name=f"client-a/auto-dev/{sid}",
+            client="client-a",
+            purpose=purpose or SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=tmp_path / "ws",
+            worktree_path=worktree,
+            surface_ref=self._SURFACE_REF,
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+            last_result=last_result,
+        )
+
+    def _write_spawn_stamp(
+        self, worktree: Path, *, unresolved_count: int, stamped_at: datetime
+    ) -> None:
+        from cw.models import HOOK_CONTEXT_RELATIVE_PATH
+
+        (worktree / ".claude").mkdir(parents=True, exist_ok=True)
+        payload = {
+            "agent_spawn_stamp": {
+                "unresolved_count": unresolved_count,
+                "last_stamped_at": stamped_at.isoformat(),
+            }
+        }
+        (worktree / HOOK_CONTEXT_RELATIVE_PATH).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    def _setup_common(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[Path, FakeNativeDaemonClient]:
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        self._write_roster(tmp_path)
+        roster_path = tmp_path / "roster.json"
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        daemon = FakeNativeDaemonClient()
+        daemon._live.add(self._SURFACE_REF)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
+        )
+        return home, daemon
+
+    def _stamp_transcript(
+        self, home: Path, worktree: Path, *, stale_minutes: float
+    ) -> Path:
+        import os
+        from datetime import timedelta
+
+        transcript = _write_idle_transcript(home, worktree)
+        ts = (datetime.now(UTC) - timedelta(minutes=stale_minutes)).timestamp()
+        os.utime(str(transcript), (ts, ts))
+        return transcript
+
+    def test_stuck_session_detected_and_reaped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ACTIVE, roster-present, stale transcript, no sentinel -> finding + COMPLETED.
+
+        Reproduces the #2078 residual state: the stop_hook.py background_tasks
+        defer never resolves, so the session stays ACTIVE forever with its
+        surface_ref still in the live roster (unlike class-6's
+        roster-absent shape). Regression guard for the fix.
+        """
+        from datetime import timedelta
+
+        from cw.config import load_state, save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import (
+            CompletionReason,
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            SessionStatus,
+            TicketTask,
+        )
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=50)
+
+        sess = self._make_session(tmp_path, worktree)
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id="stuck-sess-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="stuck-sess-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-daemon-stale-no-sentinel" in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "stuck-sess-1")
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.completed_reason == CompletionReason.USER
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "stuck-sess-1")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_terminal_sentinel_present_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A real terminal sentinel (#1692 boundary) suppresses the finding."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionStatus
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=50)
+
+        sess = self._make_session(
+            tmp_path,
+            worktree,
+            sid="sentinel-sess-1",
+            last_result={"status": "shipped"},
+        )
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-daemon-stale-no-sentinel" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "sentinel-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_outstanding_subagent_within_deadline_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A subagent spawn still within its await deadline suppresses the finding."""
+        from datetime import timedelta
+
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionStatus
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=50)
+        # Default fix_loop_await_deadline_minutes is 30; 5m old is well inside it.
+        self._write_spawn_stamp(
+            worktree,
+            unresolved_count=1,
+            stamped_at=datetime.now(UTC) - timedelta(minutes=5),
+        )
+
+        sess = self._make_session(tmp_path, worktree, sid="spawn-sess-1")
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-daemon-stale-no-sentinel" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "spawn-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_fresh_transcript_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A recently-active transcript (still working) is never flagged."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionStatus
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=2)
+
+        sess = self._make_session(tmp_path, worktree, sid="fresh-sess-1")
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-daemon-stale-no-sentinel" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "fresh-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_orchestrate_purpose_excluded(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A long-lived ORCHESTRATE session is never mistaken for a stuck spawn."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionPurpose, SessionStatus
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=50)
+
+        sess = self._make_session(
+            tmp_path,
+            worktree,
+            sid="orch-sess-1",
+            purpose=SessionPurpose.ORCHESTRATE,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-daemon-stale-no-sentinel" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "orch-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_signal_only_without_reap(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """cw doctor (no --reap) surfaces the finding but leaves session ACTIVE."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionStatus
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=50)
+
+        sess = self._make_session(tmp_path, worktree, sid="signal-only-sess-1")
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-daemon-stale-no-sentinel" in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "signal-only-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_json_output_includes_wedge_class(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--json rendering carries the new wedge_class string."""
+        from cw.config import save_state
+        from cw.doctor import format_report_json
+        from cw.models import CwState
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=50)
+
+        sess = self._make_session(tmp_path, worktree, sid="json-sess-1")
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=False)
+        rendered = json.loads(format_report_json(report))
+
+        wedge_classes = [f["wedge_class"] for f in rendered["wedge_findings"]]
+        assert "wedge/active-daemon-stale-no-sentinel" in wedge_classes
 
 
 # ---------------------------------------------------------------------------
