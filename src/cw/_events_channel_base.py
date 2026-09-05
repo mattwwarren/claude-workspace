@@ -32,6 +32,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def build_server_notification(logger_name: str, notification: dict[str, Any]) -> Any:
+    """Build the SessionMessage an SSE channel server's drain emits per event.
+
+    Shared by the three server ``_drain`` closures (pr/queue/operator), which
+    are ``pragma: no cover`` — this is the one covered site that pins the
+    ``SessionMessage(message=JSONRPCNotification(...))`` shape the mcp package
+    expects (it changed once already: 1.x wrapped it in a ``JSONRPCMessage``
+    RootModel, 2.x takes the notification directly).
+    """
+    from mcp.shared.message import SessionMessage
+    from mcp.types import JSONRPCNotification
+
+    return SessionMessage(
+        message=JSONRPCNotification(
+            jsonrpc="2.0",
+            method="notifications/message",
+            params={"level": "info", "logger": logger_name, "data": notification},
+        )
+    )
+
+
 @dataclass(frozen=True)
 class ChannelProxyConfig:
     """Per-channel wiring for the shared stdio MCP proxy.
@@ -62,10 +83,10 @@ def extract_payload(session_msg: Any, notification_type: str) -> dict[str, Any] 
     """
     from mcp.types import JSONRPCNotification
 
-    root = session_msg.message.root
-    if not isinstance(root, JSONRPCNotification):
+    message = session_msg.message
+    if not isinstance(message, JSONRPCNotification):
         return None
-    params = root.params or {}
+    params = message.params or {}
     data = params.get("data")
     if data is None:
         return None
@@ -85,15 +106,13 @@ def build_outbound_notification(
 ) -> Any:
     """Build a SessionMessage to emit on the stdio MCP connection."""
     from mcp.shared.message import SessionMessage
-    from mcp.types import JSONRPCMessage, JSONRPCNotification
+    from mcp.types import JSONRPCNotification
 
     return SessionMessage(
-        message=JSONRPCMessage(
-            JSONRPCNotification(
-                jsonrpc="2.0",
-                method="notifications/claude/channel",
-                params={"content": json.dumps(data), "meta": build_meta(data)},
-            )
+        message=JSONRPCNotification(
+            jsonrpc="2.0",
+            method="notifications/claude/channel",
+            params={"content": json.dumps(data), "meta": build_meta(data)},
         )
     )
 

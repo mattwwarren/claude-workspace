@@ -15,7 +15,7 @@ starlette = pytest.importorskip(
 )
 
 from mcp.shared.message import SessionMessage
-from mcp.types import JSONRPCMessage, JSONRPCNotification, JSONRPCResponse
+from mcp.types import JSONRPCNotification, JSONRPCResponse
 
 from cw.cw_operator_events_channel import (
     _DEFAULT_BASE_URL,
@@ -44,12 +44,10 @@ def _make_operator_session_message(
         "title": f"Operator: {event_type}",
     }
     return SessionMessage(
-        message=JSONRPCMessage(
-            JSONRPCNotification(
-                jsonrpc="2.0",
-                method="notifications/message",
-                params={"level": "info", "logger": "cw-operator", "data": data},
-            )
+        message=JSONRPCNotification(
+            jsonrpc="2.0",
+            method="notifications/message",
+            params={"level": "info", "logger": "cw-operator", "data": data},
         )
     )
 
@@ -72,7 +70,7 @@ class TestExtractPayload:
 
     def test_non_notification_root(self) -> None:
         response = JSONRPCResponse(jsonrpc="2.0", id=1, result={})
-        msg = SessionMessage(message=JSONRPCMessage(response))
+        msg = SessionMessage(message=response)
         assert _extract_payload(msg) is None
 
     def test_notification_type_mismatch(self) -> None:
@@ -88,7 +86,7 @@ class TestExtractPayload:
                 },
             },
         )
-        msg = SessionMessage(message=JSONRPCMessage(notif))
+        msg = SessionMessage(message=notif)
         assert _extract_payload(msg) is None
 
     def test_missing_data_key(self) -> None:
@@ -97,7 +95,7 @@ class TestExtractPayload:
             method="notifications/message",
             params={"level": "info"},
         )
-        msg = SessionMessage(message=JSONRPCMessage(notif))
+        msg = SessionMessage(message=notif)
         assert _extract_payload(msg) is None
 
     def test_malformed_json_in_message(self) -> None:
@@ -113,7 +111,7 @@ class TestExtractPayload:
                 },
             },
         )
-        msg = SessionMessage(message=JSONRPCMessage(notif))
+        msg = SessionMessage(message=notif)
         assert _extract_payload(msg) is None
 
     def test_missing_message_key(self) -> None:
@@ -125,7 +123,7 @@ class TestExtractPayload:
                 "data": {"notification_type": _NOTIFICATION_TYPE},
             },
         )
-        msg = SessionMessage(message=JSONRPCMessage(notif))
+        msg = SessionMessage(message=notif)
         assert _extract_payload(msg) is None
 
 
@@ -172,16 +170,16 @@ class TestBuildOutboundNotification:
 
     def test_root_is_json_rpc_notification(self) -> None:
         result = _build_outbound_notification(self._data())
-        assert isinstance(result.message.root, JSONRPCNotification)
+        assert isinstance(result.message, JSONRPCNotification)
 
     def test_method_is_notifications_claude_channel(self) -> None:
         result = _build_outbound_notification(self._data())
-        assert result.message.root.method == "notifications/claude/channel"
+        assert result.message.method == "notifications/claude/channel"
 
     def test_data_preserved(self) -> None:
         data = self._data()
         result = _build_outbound_notification(data)
-        params = result.message.root.params or {}
+        params = result.message.params or {}
         assert json.loads(params["content"]) == data
 
 
@@ -214,7 +212,7 @@ class TestRelayUpstream:
 
         result = anyio.run(_run)
         assert result is not None
-        root = result.message.root
+        root = result.message
         assert isinstance(root, JSONRPCNotification)
         assert root.method == "notifications/claude/channel"
         params = root.params or {}
@@ -252,7 +250,7 @@ class TestRelayUpstream:
             method="notifications/message",
             params={"data": {"notification_type": "other"}},
         )
-        msg = SessionMessage(message=JSONRPCMessage(notif))
+        msg = SessionMessage(message=notif)
 
         async def _run() -> int:
             send_in, recv_in = anyio.create_memory_object_stream[Any](max_buffer_size=5)
