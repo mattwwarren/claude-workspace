@@ -698,7 +698,9 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         the oldest task already has pr_url set.
     Class-6 (active-no-daemon-entry): call _reap_session_by_selector per
         phantom session; that helper marks COMPLETED, reverts queue task to
-        PENDING, stops the daemon surface, and emits an audit event.
+        PENDING, stops the daemon surface, and emits an audit event. The
+        wedge_class is threaded through as proposed_action so the audit
+        event can tell this near-certain-crash class apart from class-8.
     Class-7 (terminal-sibling-park, #2100): CANCEL every matching row via
         _cancel_terminal_sibling_parks — never a PENDING revert (see that
         function's docstring for why).
@@ -706,7 +708,10 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         — call _reap_session_by_selector per matching session; reused
         verbatim rather than a new completion-writer since the end state
         (COMPLETED, daemon stopped, owning task reverted to PENDING) is
-        identical.
+        identical. Also passes its own wedge_class as proposed_action, since
+        this class is inferred from a heuristic (unlike class-6's harder
+        roster-absent signal) and a post-hoc investigator needs to tell them
+        apart.
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
@@ -735,8 +740,13 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         for f in findings
         if f.ticket_id and f.wedge_class == _WEDGE_TERMINAL_SIBLING
     }
-    phantom_session_ids: list[str] = [
-        f.session_id
+    # (session_id, wedge_class) pairs rather than a bare id list (#2078 fix
+    # cycle): the audit trail needs to tell "daemon entry actually absent"
+    # (_WEDGE_ACTIVE_NO_DAEMON_ENTRY, near-certain crash) apart from
+    # "inferred stale from the liveness heuristic"
+    # (_WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL, can misfire) after the fact.
+    daemon_reap_findings: list[tuple[str, str]] = [
+        (f.session_id, f.wedge_class)
         for f in findings
         if f.session_id
         and f.wedge_class
@@ -747,7 +757,7 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         running_ticket_ids
         or blocked_ticket_ids
         or terminal_sibling_ticket_ids
-        or phantom_session_ids
+        or daemon_reap_findings
     ):
         return
 
@@ -773,8 +783,9 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         if changed:
             save_dev_queue(queue)
 
-    # Reap phantom sessions outside the queue lock — _reap_session_by_selector
-    # acquires sessions_lock and dev_queue_lock internally (sequential, no
-    # deadlock risk since we already released dev_queue_lock above).
-    for session_id in phantom_session_ids:
-        _reap_session_by_selector(session_id)
+    # Reap phantom/stale sessions outside the queue lock —
+    # _reap_session_by_selector acquires sessions_lock and dev_queue_lock
+    # internally (sequential, no deadlock risk since we already released
+    # dev_queue_lock above).
+    for session_id, wedge_class in daemon_reap_findings:
+        _reap_session_by_selector(session_id, proposed_action=wedge_class)

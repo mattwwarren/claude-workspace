@@ -6666,6 +6666,60 @@ class TestWedgeActiveDaemonStaleNoSentinel:
         updated = next(s for s in state.sessions if s.id == "degraded-sess-1")
         assert updated.status == SessionStatus.ACTIVE
 
+    def test_reap_audit_event_names_the_wedge_class(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SESSION_REAP_AUTHORIZED.proposed_action names this heuristic class.
+
+        Regression guard for the #2078 fix-cycle finding: class-6
+        (roster-absent, near-certain crash) and class-8 (inferred stale from
+        this heuristic, can misfire per the per-stage-floor/degraded-config
+        tests above) used to reap through the identical
+        ``_reap_session_by_selector(session_id)`` call with no indication of
+        which class fired, so a post-hoc investigator reading the audit trail
+        couldn't tell them apart.
+        """
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.events import read_events
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            OrchestratorEventType,
+            QueueItemStatus,
+        )
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=50)
+
+        sess = self._make_session(tmp_path, worktree, sid="audit-class-sess-1")
+        save_state(CwState(sessions=[sess]))
+        task = _make_ticket_task(
+            ticket_id="audit-class-sess-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="audit-class-sess-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        run_doctor(reap=True)
+
+        events = read_events(
+            consumer="test-wedge-stale-audit-class",
+            event_types=[OrchestratorEventType.SESSION_REAP_AUTHORIZED],
+        )
+        assert len(events) == 1, (
+            f"Expected 1 SESSION_REAP_AUTHORIZED event, got {events}"
+        )
+        assert (
+            events[0].payload["proposed_action"]
+            == "wedge/active-daemon-stale-no-sentinel"
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestCheckInboxSize (issue #856)
