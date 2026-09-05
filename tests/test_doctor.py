@@ -6570,6 +6570,102 @@ class TestWedgeActiveDaemonStaleNoSentinel:
         wedge_classes = [f["wedge_class"] for f in rendered["wedge_findings"]]
         assert "wedge/active-daemon-stale-no-sentinel" in wedge_classes
 
+    def test_per_stage_floor_suppresses_false_positive(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A per-stage floor at/above the top threshold must not be ignored.
+
+        Regression guard for the #2078 fix-cycle finding: the detector used
+        to re-derive its threshold as ``liveness_buckets_minutes[-1]``,
+        ignoring ``liveness_first_bucket_by_stage`` entirely. An IMPL session
+        with a 100m floor is not yet stale at 50m by the canonical classifier
+        (``_classify_liveness_bucket``) — the old code would have flagged and
+        reaped it anyway since 50 >= the hardcoded top threshold of 45.
+        """
+        from cw.config import load_state, save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            OrchestratorConfig,
+            QueueItemStatus,
+            SessionStatus,
+            Stage,
+        )
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=50)
+
+        monkeypatch.setattr(
+            "cw.doctor.wedge.load_orchestrator_config",
+            lambda: OrchestratorConfig(
+                liveness_first_bucket_by_stage={Stage.IMPL: 100}
+            ),
+        )
+
+        sess = self._make_session(tmp_path, worktree, sid="floored-sess-1")
+        save_state(CwState(sessions=[sess]))
+        task = _make_ticket_task(
+            ticket_id="floored-sess-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="floored-sess-1",
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-daemon-stale-no-sentinel" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "floored-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_degraded_config_fewer_than_three_buckets_never_flags(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A misconfigured 2-entry bucket list must never reach STALE_45M.
+
+        Regression guard: the old code took ``thresholds[-1]`` as its
+        staleness threshold, so a 2-entry ``[15, 30]`` list made 30m the
+        "top" and would flag/reap a 35m-stale session. The canonical
+        classifier (``_classify_liveness_bucket``) instead treats a config
+        shorter than 3 entries as making STALE_45M unreachable — this
+        detector must agree and never fire.
+        """
+        from cw.config import load_state, save_state
+        from cw.models import CwState, OrchestratorConfig, SessionStatus
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=35)
+
+        monkeypatch.setattr(
+            "cw.doctor.wedge.load_orchestrator_config",
+            lambda: OrchestratorConfig(liveness_buckets_minutes=[15, 30]),
+        )
+
+        sess = self._make_session(tmp_path, worktree, sid="degraded-sess-1")
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-daemon-stale-no-sentinel" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "degraded-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
 
 # ---------------------------------------------------------------------------
 # TestCheckInboxSize (issue #856)

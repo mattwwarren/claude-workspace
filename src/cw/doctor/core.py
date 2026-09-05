@@ -133,7 +133,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
         report.wedge_findings.extend(_check_wedge_terminal_sibling_park(queue))
         report.wedge_findings.extend(_check_wedge_active_no_daemon_entry(link_state))
         report.wedge_findings.extend(
-            _check_wedge_active_daemon_stale_no_sentinel(link_state)
+            _check_wedge_active_daemon_stale_no_sentinel(link_state, queue)
         )
         if reap and report.wedge_findings:
             _reap_wedge_findings(report.wedge_findings)

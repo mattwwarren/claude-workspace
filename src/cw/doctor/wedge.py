@@ -35,6 +35,8 @@ from cw.doctor._shared import WedgeFinding
 from cw.doctor.loop_health import _gh_pr_states, _reap_session_by_selector
 from cw.exceptions import CwError
 from cw.models import (
+    DEFAULT_STAGE,
+    LivenessBucket,
     QueueItemStatus,
     ReapReason,
     SessionOrigin,
@@ -51,6 +53,7 @@ from cw.reconcile import (
     feature_branch_key,
     ticket_id_for_session,
 )
+from cw.reconcile.liveness import _classify_liveness_bucket
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, DevQueueStore, Session, TicketTask
@@ -107,13 +110,6 @@ _WEDGE_ACTIVE_NO_DAEMON_ENTRY = "wedge/active-no-daemon-entry"
 # stop_hook.py background_tasks permanent-defer race) -- see
 # _check_wedge_active_daemon_stale_no_sentinel's docstring for the mechanism.
 _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL = "wedge/active-daemon-stale-no-sentinel"
-
-# Fallback staleness threshold (minutes) used when
-# OrchestratorConfig.liveness_buckets_minutes is empty (misconfigured) --
-# mirrors the historical top-bucket value in the default [15, 30, 45] list, so
-# a degraded config still eventually flags a stuck session rather than never
-# checking staleness at all.
-_DEFAULT_STALE_THRESHOLD_MINUTES = 45
 
 _log = logging.getLogger(__name__)
 
@@ -506,6 +502,7 @@ def _check_wedge_active_no_daemon_entry(
 
 def _check_wedge_active_daemon_stale_no_sentinel(
     state: CwState,
+    queue: DevQueueStore,
 ) -> list[WedgeFinding]:
     """Detect ACTIVE DAEMON sessions idle in the roster with no terminal sentinel.
 
@@ -528,10 +525,15 @@ def _check_wedge_active_daemon_stale_no_sentinel(
     gathers for the identical scenario (it flags the session for operator
     attention but never dispositions it, per RFC 0008 W2's signal-only
     contract): no terminal sentinel (:func:`_has_terminal_sentinel`), a
-    transcript stale past the top liveness bucket
-    (:func:`_transcript_age_seconds`), and no outstanding subagent spawn still
-    within its await deadline (:func:`_unresolved_subagent_spawn_age_seconds`
-    vs. ``fix_loop_await_deadline_minutes``).
+    transcript classified into the top liveness bucket by the canonical
+    classifier (:func:`~cw.reconcile.liveness._classify_liveness_bucket` --
+    same function ``record_session_liveness_changes`` latches onto
+    ``Session.liveness_bucket``, so this detector can never disagree with it
+    about what counts as stale, including per-stage floor overrides and a
+    degraded ``liveness_buckets_minutes`` config), and no outstanding subagent
+    spawn still within its await deadline
+    (:func:`_unresolved_subagent_spawn_age_seconds` vs.
+    ``fix_loop_await_deadline_minutes``).
 
     Excludes ``SessionPurpose.ORCHESTRATE``, mirroring ``compute_drift``'s own
     exclusion -- a long-lived interactive orchestrator session must never be
@@ -539,11 +541,8 @@ def _check_wedge_active_daemon_stale_no_sentinel(
     """
     native_live = get_native_daemon_client().list_live_session_short_ids()
     config = load_orchestrator_config()
-    thresholds = config.liveness_buckets_minutes
-    stale_threshold_minutes = (
-        thresholds[-1] if thresholds else _DEFAULT_STALE_THRESHOLD_MINUTES
-    )
     deadline_seconds = config.fix_loop_await_deadline_minutes * 60
+    task_by_ticket = {t.ticket_id: t for t in queue.tasks}
     now = datetime.now(UTC)
 
     findings: list[WedgeFinding] = []
@@ -559,7 +558,15 @@ def _check_wedge_active_daemon_stale_no_sentinel(
         if _has_terminal_sentinel(session):
             continue
         age_seconds = _transcript_age_seconds(session, now)
-        if age_seconds is None or age_seconds < stale_threshold_minutes * 60:
+        if age_seconds is None:
+            continue
+        ticket_id = ticket_id_for_session(session.name)
+        task = task_by_ticket.get(ticket_id) if ticket_id else None
+        stage = task.stage if task is not None else DEFAULT_STAGE
+        bucket = _classify_liveness_bucket(
+            age_seconds / 60.0, stage=stage, config=config
+        )
+        if bucket is not LivenessBucket.STALE_45M:
             continue
         spawn_age = _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
         if spawn_age is not None and spawn_age < deadline_seconds:
@@ -568,7 +575,7 @@ def _check_wedge_active_daemon_stale_no_sentinel(
             WedgeFinding(
                 wedge_class=_WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
                 session_id=session.id,
-                ticket_id=ticket_id_for_session(session.name),
+                ticket_id=ticket_id,
                 recipe=(
                     "ACTIVE session is idle in the daemon roster with a stale "
                     "transcript and no terminal sentinel — likely finished but "
