@@ -398,10 +398,9 @@ def build_operator_routes() -> list[BaseRoute]:
     import anyio
     from mcp.server import Server
     from mcp.server.sse import SseServerTransport
-    from mcp.shared.message import SessionMessage
-    from mcp.types import JSONRPCNotification
     from starlette.routing import Mount, Route
 
+    from cw._events_channel_base import build_server_notification
     from cw._sse_util import _send_or_close
 
     mcp_server: Server[None] = Server("cw-operator")
@@ -434,16 +433,9 @@ def build_operator_routes() -> list[BaseRoute]:
                             except queue.Empty:
                                 await anyio.sleep(0.05)
                                 continue
-                            json_rpc_notif = JSONRPCNotification(
-                                jsonrpc="2.0",
-                                method="notifications/message",
-                                params={
-                                    "level": "info",
-                                    "logger": "cw-operator",
-                                    "data": notification,
-                                },
+                            session_msg = build_server_notification(
+                                "cw-operator", notification
                             )
-                            session_msg = SessionMessage(message=json_rpc_notif)
                             if not await _send_or_close(write_stream, session_msg):
                                 logger.debug("drain: peer stream closed, exiting")
                                 return

@@ -28,6 +28,7 @@ from mcp.types import JSONRPCNotification, JSONRPCResponse
 from cw._events_channel_base import (
     ChannelProxyConfig,
     build_outbound_notification,
+    build_server_notification,
     extract_payload,
     relay_upstream,
     run_proxy,
@@ -192,6 +193,43 @@ class TestBuildOutboundNotification:
         params = result.message.params or {}
         assert json.loads(params["content"]) == data
         assert params["meta"] == {"meta_key": "meta_value"}
+
+
+# ---------------------------------------------------------------------------
+# TestBuildServerNotification
+# ---------------------------------------------------------------------------
+
+
+class TestBuildServerNotification:
+    """Covers the construction the three server ``_drain`` closures share.
+
+    The drains themselves are ``pragma: no cover``; this is the executed
+    assertion that the mcp ``SessionMessage``/``JSONRPCNotification`` shape
+    still fits (the 1.x -> 2.x change raised ``TypeError`` here in production).
+    """
+
+    def _notification(self) -> dict[str, Any]:
+        return {"notification_type": "cw-pr-event", "message": "{}", "title": "t"}
+
+    def test_returns_session_message_wrapping_notification(self) -> None:
+        result = build_server_notification("cw-pr-events", self._notification())
+        assert isinstance(result, SessionMessage)
+        assert isinstance(result.message, JSONRPCNotification)
+
+    def test_method_and_params(self) -> None:
+        data = self._notification()
+        result = build_server_notification("cw-queue-events", data)
+        assert result.message.method == "notifications/message"
+        params = result.message.params or {}
+        assert params["level"] == "info"
+        assert params["logger"] == "cw-queue-events"
+        assert params["data"] == data
+
+    def test_round_trips_through_extract_payload(self) -> None:
+        payload = {"client": "c", "ticket_id": "1"}
+        data = {"notification_type": "cw-op", "message": json.dumps(payload)}
+        result = build_server_notification("cw-operator", data)
+        assert extract_payload(result, "cw-op") == payload
 
 
 # ---------------------------------------------------------------------------
