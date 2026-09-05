@@ -1061,6 +1061,19 @@ def classify_sentinel_stage_position(
     return _classify_sentinel_stage_position(task, last_result, clients)
 
 
+# #1692: genuinely terminal QueueItemStatus values -- distinct from
+# "outside OCCUPIED_LANE_STATUSES", which also includes PENDING (redispatch-
+# eligible, not terminal). Used by _apply_sentinel_to_task's lookup-miss
+# branch to classify task_already_terminal precisely.
+_GENUINELY_TERMINAL_QUEUE_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    [
+        QueueItemStatus.COMPLETED,
+        QueueItemStatus.FAILED,
+        QueueItemStatus.CANCELLED,
+    ]
+)
+
+
 class SentinelRouteOutcome(NamedTuple):
     """Result of routing a sentinel through ``_apply_sentinel_to_task`` (#1019).
 
@@ -1090,9 +1103,14 @@ class SentinelRouteOutcome(NamedTuple):
 
     ``task_already_terminal`` (GitHub #1692) is True only for the raced-to-
     terminal lookup-miss branch of cause (c) above: a same-ticket/session task
-    was found but had already been landed in a genuinely terminal status
-    (outside ``OCCUPIED_LANE_STATUSES``) by a concurrent caller before this
-    call's own lookup ran. It is mutually exclusive with ``landed_terminal``
+    was found but had already been landed in a genuinely terminal status --
+    ``COMPLETED``, ``FAILED``, or ``CANCELLED`` (see ``_GENUINELY_TERMINAL_
+    QUEUE_STATUSES``) -- by a concurrent caller before this call's own lookup
+    ran. A match outside ``OCCUPIED_LANE_STATUSES`` but not in that terminal
+    set (i.e. ``PENDING``) is not terminal -- it is redispatch-eligible, so
+    ``task_already_terminal`` is False for it and the ordinary
+    ``routed=True`` miss path applies instead. It is mutually exclusive with
+    ``landed_terminal``
     by construction -- ``landed_terminal`` is set only in the ``target is not
     None`` arm, ``task_already_terminal`` only in the ``target is None`` arm.
     Once a task is landed genuinely terminal under this exact session_id, no
@@ -1191,11 +1209,14 @@ def _apply_sentinel_to_task(
                     },
                     correlation_id=ticket_id,
                 )
+            already_terminal = matched_excluded and (
+                excluded_status in _GENUINELY_TERMINAL_QUEUE_STATUSES
+            )
             return SentinelRouteOutcome(
                 rescued=False,
                 routed=not matched_excluded,
                 landed_terminal=False,
-                task_already_terminal=matched_excluded,
+                task_already_terminal=already_terminal,
             )
 
         rescued = False

@@ -2532,6 +2532,37 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         assert t.disposition == "abandoned"
         assert t.completed_at == completed_at
 
+    def test_apply_sentinel_to_task_race_pending_task_not_already_terminal(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A same-ticket/session task raced to PENDING → task_already_terminal=False.
+
+        PENDING is outside ``OCCUPIED_LANE_STATUSES`` but is redispatch-
+        eligible, not terminal (#1692) -- unlike the FAILED/COMPLETED/
+        CANCELLED case above, this must NOT be classified as safe-to-complete.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1692-race-pending", "sess-1692-race-pending"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.PENDING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+        assert outcome == SentinelRouteOutcome(
+            rescued=False,
+            routed=False,
+            landed_terminal=False,
+            task_already_terminal=False,
+        )
+
     def test_apply_sentinel_to_task_race_miss_logs_warning(
         self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
