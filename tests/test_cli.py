@@ -2891,23 +2891,28 @@ class TestSignalStop:
         assert events == []
         assert daemon.stop_calls == []
 
-    def test_signal_stop_race_already_failed_task_does_not_complete_session(
+    def test_signal_stop_race_already_failed_task_completes_session_and_emits_race_event(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """GitHub #1189: a task raced to FAILED by a concurrent caller must not
-        be completed by signal_stop (R5 mandatory, the Stop-hook symmetric
-        case).
+        """GitHub #1692: a task raced to FAILED by a concurrent caller must now
+        complete the leaked session (supersedes #1189's opposite assertion).
 
         Mirrors ``test_signal_stop_stage_mismatch_does_not_orphan_task_or_
         complete_session`` structurally, except the dev-queue task is already
         FAILED/abandoned with a matching session_id (instead of advanced to
         REVIEW) by the time signal_stop's own lookup runs, while the Stop-
-        hook's own transcript carries an ordinary successful sentinel. The
-        lookup-miss race (R3(a)) must report routed=False just like a stage
-        mismatch: session and task both left exactly as they were.
+        hook's own transcript carries an ordinary successful sentinel. Unlike
+        the stage-mismatch case -- where a still-advancing worker may
+        legitimately produce a later matching-stage sentinel -- a task raced
+        to a genuinely terminal status under this exact session_id will never
+        be given another leg by any dispatch path, so completing the session
+        here is safe: it stops the leaked DAEMON worker instead of leaving it
+        orphaned until the wall-clock reaper notices. The task row itself
+        stays byte-for-byte unchanged -- this fix only unblocks the session
+        side.
         """
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
@@ -2969,20 +2974,30 @@ class TestSignalStop:
         assert result.exit_code == 0, result.output
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
-        assert updated.status != SessionStatus.COMPLETED
+        assert updated.status == SessionStatus.COMPLETED
 
+        # Task-side invariants are untouched -- this fix only unblocks the
+        # session side of the race.
         task = next(
             t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
         )
         assert task.status == QueueItemStatus.FAILED
         assert task.disposition == "abandoned"
 
-        events = read_events(
+        completed_events = read_events(
             consumer="test-1189-race",
             event_types=[OrchestratorEventType.SESSION_COMPLETED],
         )
-        assert events == []
-        assert daemon.stop_calls == []
+        assert len(completed_events) == 1
+        assert completed_events[0].payload["task_already_terminal"] is True
+
+        race_miss_events = read_events(
+            consumer="test-1189-race-miss",
+            event_types=[OrchestratorEventType.SENTINEL_RACE_MISS],
+        )
+        assert len(race_miss_events) == 1
+
+        assert daemon.stop_calls == ["sfref-1189-race"]
 
     def test_signal_stop_schema_version_unsupported_marks_failed(
         self,

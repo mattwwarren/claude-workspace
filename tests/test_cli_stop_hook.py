@@ -35,11 +35,16 @@ from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
+    CwState,
+    SessionStatus,
 )
+from cw.reconcile._shared import SentinelRouteOutcome
+from tests._reconcile_helpers import _stage_complete_payload
 from tests.conftest import (
     _invoke_hook_command,
     _make_daemon_session,
     _write_hook_context_file,
+    _write_stop_hook_transcript,
 )
 
 if TYPE_CHECKING:
@@ -275,3 +280,66 @@ def test_signal_stop_stamp_write_fails_open_on_lock_contention(
     assert result.exit_code == 0, result.output
     # The write never landed -- stamp stays at its seeded value (0).
     assert _read_stamp(worktree)[AGENT_SPAWN_UNRESOLVED_COUNT_KEY] == 0
+
+
+def test_resolve_and_complete_headless_session_completes_on_task_already_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation-proof for #1692: force ``_apply_sentinel_to_task`` to return
+    ``routed=False, task_already_terminal=True`` for a valid sentinel and
+    assert the session still completes.
+
+    This is the literal "force ``_apply_sentinel_to_task`` to return
+    ``routed=False``" mutation the ticket asks for -- RED before the fix
+    (``_HeadlessResolution.task_already_terminal`` does not exist and the
+    bail returns ``rescued=None`` without completing the session), GREEN
+    after. Calls ``_resolve_and_complete_headless_session`` directly rather
+    than going through the ``signal-stop`` CLI entrypoint, isolating the
+    fix to its exact seam.
+    """
+    from cw.cli.stop_hook import _resolve_and_complete_headless_session
+
+    home = tmp_path / "fake-home-1692-mut"
+    worktree = tmp_path / "worktree-1692-mut"
+    worktree.mkdir(parents=True)
+
+    session = _make_daemon_session(
+        id="sess-1692-mut",
+        worktree_path=worktree,
+        surface_ref="sfref-1692-mut",
+    )
+    state = CwState(sessions=[session])
+
+    claude_session_id = "sfref-1692-mut-uuid"
+    payload = _stage_complete_payload()
+    payload["ticket_id"] = "1692-mut"
+    sentinel_text = (
+        "<<<AUTO_DEV_RESULT\n" + json.dumps(payload) + "\nAUTO_DEV_RESULT>>>"
+    )
+    _write_stop_hook_transcript(home, worktree, claude_session_id, sentinel_text)
+    monkeypatch.setattr("cw._util.Path.home", lambda: home)
+
+    monkeypatch.setattr(
+        "cw.cli.stop_hook._apply_sentinel_to_task",
+        lambda *args, **kwargs: SentinelRouteOutcome(
+            rescued=False,
+            routed=False,
+            landed_terminal=False,
+            task_already_terminal=True,
+        ),
+    )
+
+    resolution = _resolve_and_complete_headless_session(
+        state,
+        session,
+        cwd_value=str(worktree),
+        claude_session_id=claude_session_id,
+        ticket_id_value="1692-mut",
+        is_headless=True,
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert resolution.rescued is False
+    assert resolution.task_already_terminal is True
+    assert session.status == SessionStatus.COMPLETED

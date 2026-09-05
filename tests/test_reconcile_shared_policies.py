@@ -2522,7 +2522,10 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome == SentinelRouteOutcome(
-            rescued=False, routed=False, landed_terminal=False
+            rescued=False,
+            routed=False,
+            landed_terminal=False,
+            task_already_terminal=True,
         )
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
@@ -2563,6 +2566,15 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             "sentinel_race_miss_detected" in rec.message for rec in caplog.records
         )
         assert any(ticket_id in rec.message for rec in caplog.records)
+
+        events = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SENTINEL_RACE_MISS
+        ]
+        assert len(events) == 1
+        assert events[0].payload["ticket_id"] == ticket_id
+        assert events[0].payload["session_id"] == session_id
 
     def test_apply_sentinel_to_task_unrelated_task_present_still_returns_routed_true(
         self, tmp_config_dir: Path
