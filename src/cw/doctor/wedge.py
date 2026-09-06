@@ -642,11 +642,17 @@ def _check_wedge_orphan_active_pending_row(
     Structural rather than age-based, unlike class-8 — a non-RUNNING row can
     never legitimately own a live worker, so there is no staleness to wait out
     and no threshold to tune.
+
+    Flags ANY non-RUNNING row, not just PENDING (#2142 follow-up): RUNNING is
+    the only status a row can legitimately hold a live worker under, so a
+    BLOCKED_ON_USER row — e.g. one carrying a live fix-dispatch handoff via the
+    dispatch_fix_agent race described above — is just as orphaned as PENDING
+    when it names a live session.
     """
     session_by_id = {s.id: s for s in state.sessions}
     findings: list[WedgeFinding] = []
     for task in queue.tasks:
-        if task.status != QueueItemStatus.PENDING:
+        if task.status == QueueItemStatus.RUNNING:
             continue
         candidate_session_id = task.session_id or task.fix_dispatch_session_id
         if candidate_session_id is None:

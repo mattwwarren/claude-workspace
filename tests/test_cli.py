@@ -7708,10 +7708,13 @@ class TestDevQueueStatusRunningRowDivergence:
         assert result.exit_code == 0, result.output
         assert "[ORPHAN?" not in result.output
 
-    def test_status_no_divergence_annotation_for_blocked_only_occupancy(
+    def test_status_no_divergence_annotation_when_running_matches_with_blocked(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Blocked rows hold lane slots but spawn no session — never a divergence."""
+        """A BLOCKED_ON_USER row alongside a matched tick.running/task_running
+        count must not spuriously trigger the annotation — this does not
+        exercise real lane accounting (see TestDevQueueStatusRunningRowDivergence's
+        other tests for that), just the annotation's own comparison."""
         from cw.dev_queue import add_ticket
         from cw.models import QueueItemStatus, TicketTask
 

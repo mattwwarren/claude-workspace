@@ -6810,6 +6810,14 @@ class TestWedgeOrphanActivePendingRow(_WedgeFixDispatchHarness):
         ``ticket_id_for_session``, which returns None for a FIX session's name.
         The residual field is cleared by ``run_fix_dispatch``'s completions
         phase on the following tick — asserted here rather than assumed.
+
+        This fixture also models shape 3 from the ticket (comment
+        2026-09-05T18:26:00Z): a session that completed its work normally but
+        whose ``session.status`` was never flipped to a terminal value by the
+        Stop hook — ``_live_daemon_session`` cannot distinguish that from
+        shape 1 (never claimed), which is exactly why the check is structural
+        rather than history-aware. See Self-Verified Premise #2 in
+        ``.cw/plan.md``.
         """
         from cw.config import load_state, save_state
         from cw.dev_queue import load_dev_queue, save_dev_queue
@@ -6874,6 +6882,39 @@ class TestWedgeOrphanActivePendingRow(_WedgeFixDispatchHarness):
                         client="client-a",
                         status=QueueItemStatus.PENDING,
                         session_id="orphan-1",
+                    )
+                ]
+            )
+        )
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/orphan-active-pending-row" in classes
+
+    def test_blocked_on_user_row_referencing_live_session_id_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RUNNING is the only status a row can legitimately hold a live
+        worker under — BLOCKED_ON_USER referencing one is just as orphaned as
+        PENDING (#2142 follow-up: the filter used to only catch PENDING)."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        self._setup_common(tmp_path, monkeypatch)
+        save_state(CwState(sessions=[self._fix_session(tmp_path, id="orphan-2")]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="2142",
+                        client="client-a",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        session_id="orphan-2",
                     )
                 ]
             )
@@ -7127,6 +7168,48 @@ class TestWedgeFixDispatchRunningStale(_WedgeFixDispatchHarness):
         self._seed(tmp_path, monkeypatch, stale_minutes=3)
 
         report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/fix-dispatch-running-stale" not in classes
+
+    def test_running_row_with_fix_session_at_exact_deadline_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pins the exact 1800s (30min) deadline boundary.
+
+        The check is ``age_seconds < deadline_seconds: continue`` — strictly
+        less than skips, so age_seconds == deadline_seconds must still flag.
+        An accidental ``<=`` would silently swallow this case, and the
+        existing directional tests (3min, 35min) are both far enough from the
+        threshold to miss an off-by-one here. Time is frozen so the seeded
+        30.0-minute-old transcript produces exactly 1800.0s of age rather than
+        a wall-clock-dependent value.
+        """
+        from freezegun import freeze_time
+
+        with freeze_time("2026-01-01T01:00:00+00:00"):
+            self._seed(tmp_path, monkeypatch, stale_minutes=30.0)
+            report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/fix-dispatch-running-stale" in classes
+
+    def test_running_row_with_fix_session_just_under_deadline_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Complement of the exact-deadline case: one second under 1800s must
+        stay unflagged, together pinning the ``<`` boundary from both sides."""
+        from freezegun import freeze_time
+
+        with freeze_time("2026-01-01T01:00:00+00:00"):
+            self._seed(tmp_path, monkeypatch, stale_minutes=(1800 - 1) / 60)
+            report = run_doctor(reap=False)
 
         classes = [f.wedge_class for f in report.wedge_findings]
         assert "wedge/fix-dispatch-running-stale" not in classes

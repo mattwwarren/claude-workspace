@@ -183,6 +183,48 @@ class _DispatchJob(NamedTuple):
     lane: str
 
 
+def _emit_fix_dispatch_operator_signal(
+    *,
+    session_id: str,
+    ticket_id: str,
+    client: str,
+    lane: str,
+    error_kind: str,
+    breadcrumbs: str,
+) -> None:
+    """Emit the STAGE_ERRORED + SESSION_NEEDS_ATTENTION event pair for a
+    fix-dispatch problem — shared by ``_drop_stale_handoff`` and
+    ``_stamp_dispatch_failure``, which differ only in *error_kind*,
+    *breadcrumbs*, and whether the row also gets unparked.
+    """
+    record_event(
+        OrchestratorEventType.STAGE_ERRORED,
+        {
+            "session_id": session_id,
+            "ticket_id": ticket_id,
+            "stage": _STAGE_FIX_LOOP,
+            "started_at": datetime.now(UTC).isoformat(),
+            "error_kind": error_kind,
+        },
+        correlation_id=ticket_id,
+    )
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": session_id,
+            "session_name": "",
+            "client": client,
+            "ticket_id": ticket_id,
+            "claude_session_id": None,
+            "paused_status": error_kind,
+            "breadcrumbs": breadcrumbs,
+            "crashed": False,
+            "lane": lane,
+        },
+        correlation_id=ticket_id,
+    )
+
+
 def _drop_stale_handoff(task: TicketTask) -> None:
     """Clear a handoff whose row is no longer RUNNING and page the operator (#2142).
 
@@ -195,31 +237,13 @@ def _drop_stale_handoff(task: TicketTask) -> None:
     if pending is None:  # pragma: no cover - caller checked
         return
     task.pending_fix_dispatch = None
-    record_event(
-        OrchestratorEventType.STAGE_ERRORED,
-        {
-            "session_id": pending.requested_by_session_id,
-            "ticket_id": task.ticket_id,
-            "stage": _STAGE_FIX_LOOP,
-            "started_at": datetime.now(UTC).isoformat(),
-            "error_kind": _ERROR_KIND_STALE_HANDOFF,
-        },
-        correlation_id=task.ticket_id,
-    )
-    record_event(
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {
-            "session_id": pending.requested_by_session_id,
-            "session_name": "",
-            "client": task.client,
-            "ticket_id": task.ticket_id,
-            "claude_session_id": None,
-            "paused_status": _ERROR_KIND_STALE_HANDOFF,
-            "breadcrumbs": f"row status={task.status.value}",
-            "crashed": False,
-            "lane": task.lane,
-        },
-        correlation_id=task.ticket_id,
+    _emit_fix_dispatch_operator_signal(
+        session_id=pending.requested_by_session_id,
+        ticket_id=task.ticket_id,
+        client=task.client,
+        lane=task.lane,
+        error_kind=_ERROR_KIND_STALE_HANDOFF,
+        breadcrumbs=f"row status={task.status.value}",
     )
 
 
@@ -341,31 +365,13 @@ def _stamp_dispatch_failure(job: _DispatchJob, exc: CwError) -> None:
         # session_id degrades to the REVIEW session that recorded the handoff:
         # this tick owns no session of its own, and that is the closest thing to
         # the $CW_SESSION the equivalent in-session emissions carry.
-        record_event(
-            OrchestratorEventType.STAGE_ERRORED,
-            {
-                "session_id": job.pending.requested_by_session_id,
-                "ticket_id": job.ticket_id,
-                "stage": _STAGE_FIX_LOOP,
-                "started_at": datetime.now(UTC).isoformat(),
-                "error_kind": _ERROR_KIND_DISPATCH_FAILED,
-            },
-            correlation_id=job.ticket_id,
-        )
-        record_event(
-            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-            {
-                "session_id": job.pending.requested_by_session_id,
-                "session_name": "",
-                "client": job.client,
-                "ticket_id": job.ticket_id,
-                "claude_session_id": None,
-                "paused_status": _ERROR_KIND_DISPATCH_FAILED,
-                "breadcrumbs": str(exc),
-                "crashed": False,
-                "lane": job.lane,
-            },
-            correlation_id=job.ticket_id,
+        _emit_fix_dispatch_operator_signal(
+            session_id=job.pending.requested_by_session_id,
+            ticket_id=job.ticket_id,
+            client=job.client,
+            lane=job.lane,
+            error_kind=_ERROR_KIND_DISPATCH_FAILED,
+            breadcrumbs=str(exc),
         )
 
 
