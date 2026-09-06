@@ -565,6 +565,19 @@ common wedge conditions:
   sentinel (a plain/non-headless spawn whose harness never re-fired the Stop
   hook that would have completed it) — marks the session `COMPLETED`, stops
   the daemon surface, and reverts the owning task to PENDING.
+- `wedge/orphan-active-pending-row` (#2142) — a `PENDING` row referencing a
+  live `ACTIVE` daemon session (via `session_id` or `fix_dispatch_session_id`).
+  The fix agent spawns with no dev-queue correlation, so a stray revert on the
+  row leaves a session that the session-based client ceiling counts but no
+  task-row metric does — the `running=2/2 cap_full` beside one RUNNING row
+  shape. Marks the session `COMPLETED` and stops the daemon surface; the row's
+  residual `fix_dispatch_session_id` clears on the next reconcile tick.
+- `wedge/fix-dispatch-running-stale` (#2142) — a `RUNNING` row waiting on a
+  `FIX` session whose transcript has been idle past
+  `fix_loop_await_deadline_minutes` (default 30). Same underlying Stop-hook
+  deferral as `active-daemon-stale-no-sentinel`, but scoped to the fix loop and
+  at a threshold matched to its ~3-minute cycle rather than that class's 45
+  minutes. Marks the session `COMPLETED`; the next tick unparks the row.
 
 Run `cw doctor --reap --json` for machine-readable output.
 

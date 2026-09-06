@@ -149,6 +149,27 @@ def _stale_tick_annotation(
     )
 
 
+def _running_row_divergence_annotation(tick_running: int, task_running: int) -> str:
+    """Render the suffix for a tick counting more sessions than RUNNING rows (#2142).
+
+    The two numbers on this line come from two independently-computed metrics.
+    ``tick.running`` is session-based by deliberate design (``dispatch/lanes.py``:
+    a pre-existing DAEMON session is real host load whether or not the queue
+    tracks it) and is what ``cap_full`` gates on; the table above counts task
+    rows. So an excess is not a contradiction the admission math should
+    resolve — but it IS the exact shape an orphaned fix-agent session produces,
+    and an operator reading ``running=2/2 cap_full`` beside a single RUNNING row
+    otherwise has no way to tell that from ordinary snapshot lag.
+
+    Reporting only: this annotates the divergence, it never changes what is
+    admitted. Phrased as a question because snapshot lag can produce it too.
+    """
+    return (
+        f" [ORPHAN? — {tick_running} session(s) counted against the ceiling"
+        f" vs {task_running} RUNNING row(s); run cw doctor]"
+    )
+
+
 @dev_queue.command(name="status")
 @click.option("--client", "-c", default=None, help="Filter by client.")
 @click.option("--json", "output_json", is_flag=True, help="JSON dict keyed by client.")
@@ -252,6 +273,19 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
                 if age_secs > TICK_STALE_SECONDS:
                     tick_line += _stale_tick_annotation(
                         client_name, age=age, markers=markers, now=now
+                    )
+                # Re-derived from by_client rather than read off tick.lanes:
+                # a client gated at cap_full breaks out of the lane loop before
+                # any lane_stats entry is written, so tick.lanes is empty in
+                # exactly the case this annotation exists for.
+                task_running = sum(
+                    1
+                    for t in by_client[client_name]
+                    if t.status == QueueItemStatus.RUNNING
+                )
+                if tick.running > task_running:
+                    tick_line += _running_row_divergence_annotation(
+                        tick.running, task_running
                     )
                 click.echo(tick_line)
                 if tick.skip_reason == DispatchSkipReason.FRESHNESS_GATE:
