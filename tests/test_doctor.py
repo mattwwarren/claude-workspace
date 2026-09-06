@@ -7159,7 +7159,33 @@ class TestWedgeFixDispatchRunningStale(_WedgeFixDispatchHarness):
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A plain RUNNING row is class-4's territory, not this class's."""
-        self._seed(tmp_path, monkeypatch, stale_minutes=35, fix_dispatch_session_id=None)
+        self._seed(
+            tmp_path, monkeypatch, stale_minutes=35, fix_dispatch_session_id=None
+        )
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/fix-dispatch-running-stale" not in classes
+
+    def test_unresolvable_fix_dispatch_session_id_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A session cw cannot resolve at all is finished, not stale.
+
+        ``_act_on_fix_dispatch_completions`` already treats an unresolvable id
+        as terminal and unparks the row on the next tick; flagging it here
+        would page an operator for something already self-healing.
+        """
+        self._seed(
+            tmp_path,
+            monkeypatch,
+            stale_minutes=35,
+            fix_dispatch_session_id="vanished",
+        )
 
         report = run_doctor(reap=False)
 
