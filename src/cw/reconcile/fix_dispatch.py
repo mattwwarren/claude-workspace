@@ -39,12 +39,14 @@ The detect/act/deferred-post-lock-dispatch *shape* is still borrowed from
 The #2064 hoist also runs this module one step later, per tick, relative to
 ``cw.reconcile.escalation.run_escalation_sweep`` (previously before it inside
 ``core._run_terminal_backstops_and_sweeps``, now after ``_reconcile_locked``
-returns). Inert: ``run_fix_dispatch`` only ever touches RUNNING rows and
-transitions them RUNNING->PENDING (status stays RUNNING for the whole handoff,
-per the paragraph above), while escalation eligibility requires
+returns). Inert: the only status this module ever writes is
+RUNNING->PENDING (status stays RUNNING for the whole handoff, per the
+paragraph above), while escalation eligibility requires
 BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF/FAILED. Neither RUNNING nor PENDING
 is ever escalation-eligible, so this module cannot move a row into or out of
-the set the sweep scans, in either order.
+the set the sweep scans, in either order. The #2142 stale-handoff drop is the
+one path that touches a non-RUNNING row at all, and it only clears
+``pending_fix_dispatch`` — never the status — so the same argument holds.
 
 Throughout, the row's ``status`` is left at RUNNING for the whole handoff. That
 is load-bearing, not incidental: ``dispatch/claim.py`` only ever claims PENDING
@@ -93,6 +95,12 @@ FIX_LOOP_PENDING_DISPATCH = "fix_loop_pending_dispatch"
 
 _STAGE_FIX_LOOP = "s3_fix_loop"
 _ERROR_KIND_DISPATCH_FAILED = "fix_dispatch_failed"
+
+# error_kind/paused_status for a handoff found on a row that is no longer
+# RUNNING (#2142). Distinct from _ERROR_KIND_DISPATCH_FAILED: nothing was
+# attempted and nothing failed — the row moved out from under an unconsumed
+# record, and dispatching onto it would have spawned an uncorrelated session.
+_ERROR_KIND_STALE_HANDOFF = "fix_dispatch_stale_row"
 
 # How long a HookContextConflictError stays "transient by construction" (#2075).
 # The expected conflict window is one tick or two: the REVIEW session that
@@ -175,13 +183,54 @@ class _DispatchJob(NamedTuple):
     lane: str
 
 
+def _drop_stale_handoff(task: TicketTask) -> None:
+    """Clear a handoff whose row is no longer RUNNING and page the operator (#2142).
+
+    Called with ``dev_queue_lock()`` held; the caller owns the ``save_dev_queue``.
+    Emits ``_stamp_dispatch_failure``'s event pair with its own error_kind, since
+    the operator signal is identical in shape (nothing is running to carry a
+    blocker.reason) even though nothing was actually attempted here.
+    """
+    pending = task.pending_fix_dispatch
+    if pending is None:  # pragma: no cover - caller checked
+        return
+    task.pending_fix_dispatch = None
+    record_event(
+        OrchestratorEventType.STAGE_ERRORED,
+        {
+            "session_id": pending.requested_by_session_id,
+            "ticket_id": task.ticket_id,
+            "stage": _STAGE_FIX_LOOP,
+            "started_at": datetime.now(UTC).isoformat(),
+            "error_kind": _ERROR_KIND_STALE_HANDOFF,
+        },
+        correlation_id=task.ticket_id,
+    )
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": pending.requested_by_session_id,
+            "session_name": "",
+            "client": task.client,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": _ERROR_KIND_STALE_HANDOFF,
+            "breadcrumbs": f"row status={task.status.value}",
+            "crashed": False,
+            "lane": task.lane,
+        },
+        correlation_id=task.ticket_id,
+    )
+
+
 def _build_dispatch_jobs(
     candidates: list[_FixDispatchCandidate],
     clients: dict[str, ClientConfig],
 ) -> list[_DispatchJob]:
     """Re-validate each candidate under the lock and build its deferred job.
 
-    Read-only under the lock — unlike ``address_review``'s equivalent, no latch
+    Mutates only to drop a stale handoff (#2142, see below); otherwise
+    read-only under the lock — unlike ``address_review``'s equivalent, no latch
     is stamped here. The latch IS ``pending_fix_dispatch`` itself, and it must
     survive until the dispatch actually succeeds so a transient conflict retries
     on the next tick instead of dropping the action list on the floor.
@@ -189,12 +238,33 @@ def _build_dispatch_jobs(
     if not candidates:
         return []
     jobs: list[_DispatchJob] = []
+    dropped = False
     with dev_queue_lock():
         store = load_dev_queue()
         for candidate in candidates:
             task = _find_task(store, candidate.ticket_id, candidate.client)
             if task is None or task.pending_fix_dispatch is None:
                 continue  # concurrently dispatched or removed — silent skip
+            if task.status != QueueItemStatus.RUNNING:
+                # #2142: some other non-sentinel RUNNING->PENDING revert
+                # (crash/phantom/stall/salvage sweep) moved the row while this
+                # handoff sat unconsumed. Dispatching now spawns a fix-agent
+                # session with no dev-queue correlation at all —
+                # dispatch_fix_agent passes no task= kwarg, so nothing
+                # transitions the row and the session becomes a roster-ACTIVE
+                # orphan holding a client-ceiling slot against a PENDING row.
+                # Drop the handoff instead: the row is already back in the
+                # normal lifecycle and claim.py's reclaim picks it up once
+                # _is_fix_dispatch_held stops matching it.
+                _log.warning(
+                    "fix_dispatch: dropping stale handoff for ticket %s — "
+                    "row status is %s, not RUNNING",
+                    task.ticket_id,
+                    task.status.value,
+                )
+                _drop_stale_handoff(task)
+                dropped = True
+                continue
             if task.fix_dispatch_session_id is not None:
                 # A prior fix session for this ticket hasn't been unparked yet
                 # (completion watcher hasn't cleared fix_dispatch_session_id).
@@ -226,6 +296,8 @@ def _build_dispatch_jobs(
                     lane=task.lane,
                 )
             )
+        if dropped:
+            save_dev_queue(store)
     return jobs
 
 

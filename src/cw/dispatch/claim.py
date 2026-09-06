@@ -282,8 +282,11 @@ def _is_fix_dispatch_held(task: TicketTask) -> bool:
     a fresh REVIEW session whose live worktree makes every subsequent
     ``dispatch_fix_agent`` attempt raise ``HookContextConflictError`` — the
     silent never-spawns loop #2075 reported. Skipping here leaves the row for
-    the fix-dispatch pass, which dispatches regardless of row status and
-    unparks it cleanly when the fix session completes.
+    the fix-dispatch pass, which (as of #2142) checks ``task.status !=
+    QueueItemStatus.RUNNING`` before dispatching and drops a stale handoff
+    (clearing ``pending_fix_dispatch``, paging via ``SESSION_NEEDS_ATTENTION``)
+    instead of spawning an orphaned session; a healthy RUNNING row still
+    dispatches normally and unparks cleanly when the fix session completes.
     """
     return (
         task.pending_fix_dispatch is not None
