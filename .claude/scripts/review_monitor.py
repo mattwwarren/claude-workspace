@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3
+#!/usr/bin/env python3
 """
 Review monitor: track PR review threads and nudge authors/reviewers.
 
