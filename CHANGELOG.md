@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`review_monitor.py` invocations no longer depend on the file's own shebang being executable on the host (#2144):** `prep_pr_finalize.py` and `src/cw/orchestrate.py`'s `_invoke_review_monitor_complete()` both exec'd `review_monitor.py` by raw path, so a non-executable file or a stale/foreign shebang line failed the call outright — in `orchestrate.py`'s case, silently swallowed into a `logger.warning` during PR-merge cleanup. Both call sites now invoke the script via `sys.executable <path> ...` instead of executing it directly, which is immune to the file's shebang entirely; `review_monitor.py`'s own shebang is also switched to the portable `#!/usr/bin/env python3` form for any remaining direct-exec path. Regression tests cover both invocation sites.
+
 ## [1.45.8] - 2026-09-05
 
 ### Fixed

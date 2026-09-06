@@ -250,7 +250,17 @@ def check_monitor_registered(summary: ShipSummary, required: bool) -> CheckResul
             detail=f"could not resolve repo via gh: {repo_result.stderr.strip()[:200]}",
             required=required,
         )
-    result = run([str(MONITOR_SCRIPT), "status", "--repo", repo, "--json"])
+    try:
+        result = run(
+            [sys.executable, str(MONITOR_SCRIPT), "status", "--repo", repo, "--json"]
+        )
+    except OSError as e:
+        return CheckResult(
+            name="monitor-registered",
+            passed=False,
+            detail=f"could not invoke review_monitor.py: {e}",
+            required=required,
+        )
     if result.returncode != 0:
         return CheckResult(
             name="monitor-registered",

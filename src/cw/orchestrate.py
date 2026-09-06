@@ -24,6 +24,7 @@ import json
 import logging
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -237,6 +238,7 @@ def _invoke_review_monitor_complete(
         script = Path(which)
 
     cmd = [
+        sys.executable,
         str(script),
         "complete",
         str(pr_number),
@@ -246,7 +248,17 @@ def _invoke_review_monitor_complete(
         "merged",
     ]
     invoke = runner or _default_runner
-    result = invoke(cmd)
+    try:
+        result = invoke(cmd)
+    except OSError as e:
+        logger.warning(
+            "could not invoke review_monitor.py at %s for %s#%s: %s",
+            script,
+            repo,
+            pr_number,
+            e,
+        )
+        return False
     if result.returncode != 0:
         logger.warning(
             "review_monitor complete failed for %s#%s: %s",
