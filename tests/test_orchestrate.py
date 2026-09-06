@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -38,6 +40,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.orchestrate import (
+    _REVIEW_MONITOR_SCRIPT,
     EventSummary,
     MissingWorkerEntry,
     OrchestratorStatus,
@@ -45,6 +48,7 @@ from cw.orchestrate import (
     TickSummary,
     WorkerEntry,
     _aggregate_feed,
+    _invoke_review_monitor_complete,
     _load_monitored_prs,
     clear_completed_pr_sessions,
     orchestrator_parent,
@@ -345,6 +349,49 @@ class TestRetireMergedPRs:
         # Second call is a no-op (cursor advanced).
         retired_second = retire_merged_prs(runner=runner)
         assert retired_second == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: _invoke_review_monitor_complete invocation hardening
+# ---------------------------------------------------------------------------
+
+
+class TestInvokeReviewMonitorComplete:
+    def test_invoke_review_monitor_complete_uses_sys_executable(
+        self,
+        tmp_orchestrate_dirs: Path,
+        fake_runner: tuple[list[list[str]], _RunnerFn],
+    ) -> None:
+        """The monitor is invoked as `sys.executable <script> ...`, not by path."""
+        calls, runner = fake_runner
+
+        result = _invoke_review_monitor_complete("owner/repo", 123, runner=runner)
+
+        assert result is True
+        assert calls[-1][0] == sys.executable
+        assert calls[-1][1] == str(_REVIEW_MONITOR_SCRIPT)
+
+    def test_invoke_review_monitor_complete_logs_oserror_not_raise(
+        self,
+        tmp_orchestrate_dirs: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An OSError from the runner is logged at WARNING and swallowed."""
+
+        def _oserror_runner(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+            raise OSError(2, "No such file or directory")
+
+        with caplog.at_level(logging.WARNING):
+            result = _invoke_review_monitor_complete(
+                "owner/repo", 123, runner=_oserror_runner
+            )
+
+        assert result is False
+        assert any(
+            str(_REVIEW_MONITOR_SCRIPT) in record.getMessage()
+            and "No such file or directory" in record.getMessage()
+            for record in caplog.records
+        )
 
 
 # ---------------------------------------------------------------------------
