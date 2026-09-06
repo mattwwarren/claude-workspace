@@ -301,6 +301,88 @@ def test_act_on_pending_fix_dispatches_clears_and_escalates_on_hard_failure(
     assert attention[0].payload["crashed"] is False
 
 
+def test_act_on_pending_fix_dispatches_drops_stale_handoff_when_row_reverted_to_pending(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+) -> None:
+    """A row re-parked to PENDING under an unconsumed handoff must not spawn (#2142).
+
+    The observed race: some other non-sentinel RUNNING->PENDING revert
+    (crash/phantom/stall/salvage sweep) fires on a row carrying a
+    ``pending_fix_dispatch``. Dispatching anyway spawns a FIX session that
+    ``dispatch_fix_agent`` never correlates to the row (it passes no ``task=``
+    kwarg), producing a roster-ACTIVE orphan that inflates the session-based
+    client ceiling while the row itself stays PENDING.
+    """
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is None
+    assert task.fix_dispatch_session_id is None
+    # No bogus transition: the row was already PENDING and stays there, so
+    # claim.py's ordinary reclaim can pick it up now that the latch is gone.
+    assert task.status == QueueItemStatus.PENDING
+
+    errored = read_events(event_types=[OrchestratorEventType.STAGE_ERRORED])
+    assert len(errored) == 1
+    assert errored[0].correlation_id == _TICKET
+    assert errored[0].payload["session_id"] == "review-sess"
+    assert errored[0].payload["ticket_id"] == _TICKET
+    assert errored[0].payload["stage"] == "s3_fix_loop"
+    assert errored[0].payload["error_kind"] == "fix_dispatch_stale_row"
+
+    attention = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    assert len(attention) == 1
+    assert attention[0].correlation_id == _TICKET
+    assert attention[0].payload["session_id"] == "review-sess"
+    assert attention[0].payload["client"] == _CLIENT
+    assert attention[0].payload["paused_status"] == "fix_dispatch_stale_row"
+    assert attention[0].payload["crashed"] is False
+    assert "pending" in attention[0].payload["breadcrumbs"]
+
+
+def test_act_on_pending_fix_dispatches_drops_stale_handoff_when_row_blocked_on_user(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+) -> None:
+    """The guard is ``!= RUNNING``, not ``== PENDING`` (#2142).
+
+    A row parked BLOCKED_ON_USER under an unconsumed handoff is the same
+    orphan-spawn hazard: nothing about the fix agent's spawn path checks the
+    row's status, so any non-RUNNING status must drop the handoff.
+    """
+    _seed_task(status=QueueItemStatus.BLOCKED_ON_USER, pending_fix_dispatch=_pending())
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is None
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+    errored = read_events(event_types=[OrchestratorEventType.STAGE_ERRORED])
+    assert len(errored) == 1
+    assert errored[0].payload["error_kind"] == "fix_dispatch_stale_row"
+
+    attention = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    assert len(attention) == 1
+    assert attention[0].payload["paused_status"] == "fix_dispatch_stale_row"
+    assert "blocked_on_user" in attention[0].payload["breadcrumbs"]
+
+
 def test_act_on_pending_fix_dispatches_skips_unresolvable_client(
     tmp_config_dir: Path,
     stub_dispatch: _DispatchRecorder,
