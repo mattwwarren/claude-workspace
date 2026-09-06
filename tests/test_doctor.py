@@ -6721,6 +6721,473 @@ class TestWedgeActiveDaemonStaleNoSentinel:
         )
 
 
+class _WedgeFixDispatchHarness:
+    """Shared setup for the two #2142 fix-dispatch wedge classes (9 and 10).
+
+    Both detectors key off a queue row referencing a live FIX session, so both
+    need the same roster/daemon isolation class-8's own harness establishes —
+    without it, ``_daemon_supervisor_alive`` reads the operator's real
+    ``~/.claude/daemon/roster.json`` (``cw.doctor.wedge._ROSTER_PATH`` is a
+    module-level import, so ``tmp_config_dir``'s native_daemon patch does not
+    reach it) and class-6 can fire on the fixture session.
+    """
+
+    _SURFACE_REF = "fake-short-id"
+
+    def _setup_common(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[Path, FakeNativeDaemonClient]:
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        roster_path.write_text(
+            json.dumps({"supervisorPid": 12345, "workers": {}}), encoding="utf-8"
+        )
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        daemon = FakeNativeDaemonClient()
+        daemon._live.add(self._SURFACE_REF)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
+        )
+        return home, daemon
+
+    def _fix_session(self, tmp_path: Path, **overrides: Any) -> Session:
+        """A FIX-purpose DAEMON session named the way fix_dispatch spawns them.
+
+        The name carries the agent-chosen ``PendingFixDispatch.label``, never
+        ``AUTO_DEV_LABEL_PREFIX + ticket_id`` (``fix_dispatch.py``'s
+        ``label=job.pending.label``), so ``ticket_id_for_session`` returns None
+        for it — the naming mismatch that makes these sessions invisible to
+        every ticket-keyed reconcile path (#2142).
+        """
+        from cw.models import SessionPurpose, SessionStatus
+
+        kwargs: dict[str, Any] = {
+            "id": "fix-sess-1",
+            "name": "client-a/fix-2142",
+            "client": "client-a",
+            "purpose": SessionPurpose.FIX,
+            "status": SessionStatus.ACTIVE,
+            "workspace_path": tmp_path / "ws",
+            "worktree_path": tmp_path / "wt",
+            "surface_ref": self._SURFACE_REF,
+        }
+        kwargs.update(overrides)
+        return _make_daemon_session(**kwargs)
+
+
+class TestWedgeOrphanActivePendingRow(_WedgeFixDispatchHarness):
+    """wedge/orphan-active-pending-row: live session held by a non-RUNNING row.
+
+    The #2142 residual state. A same-stage RUNNING->PENDING revert fires while
+    a fix-dispatch handoff is unconsumed; the next tick spawns the fix agent
+    anyway (``dispatch_fix_agent`` calls ``transition_task_status`` zero
+    times), leaving a roster-ACTIVE session that inflates the session-based
+    client ceiling while its row reads PENDING to every task-row metric.
+
+    Detection is structural, not age-based — the row/session relationship is
+    already wrong the instant it exists, so unlike class-8 there is nothing to
+    wait out.
+    """
+
+    def test_pending_row_referencing_live_fix_dispatch_session_flagged_and_reaped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Flagged, session reaped COMPLETED, and the row self-heals next tick.
+
+        The reap alone cannot clear ``fix_dispatch_session_id``:
+        ``_reap_session_by_selector`` resolves its owning row via
+        ``ticket_id_for_session``, which returns None for a FIX session's name.
+        The residual field is cleared by ``run_fix_dispatch``'s completions
+        phase on the following tick — asserted here rather than assumed.
+        """
+        from cw.config import load_state, save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            OrchestratorConfig,
+            QueueItemStatus,
+            SessionStatus,
+            TicketTask,
+        )
+        from cw.reconcile import fix_dispatch
+
+        self._setup_common(tmp_path, monkeypatch)
+        save_state(CwState(sessions=[self._fix_session(tmp_path)]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="2142",
+                        client="client-a",
+                        status=QueueItemStatus.PENDING,
+                        fix_dispatch_session_id="fix-sess-1",
+                    )
+                ]
+            )
+        )
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/orphan-active-pending-row" in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "fix-sess-1")
+        assert updated.status == SessionStatus.COMPLETED
+
+        fix_dispatch.run_fix_dispatch(config=OrchestratorConfig())
+
+        row = next(t for t in load_dev_queue().tasks if t.ticket_id == "2142")
+        assert row.fix_dispatch_session_id is None
+        assert row.status == QueueItemStatus.PENDING
+
+    def test_pending_row_referencing_live_session_id_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The generic shape: a PENDING row whose plain session_id is still live."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        self._setup_common(tmp_path, monkeypatch)
+        save_state(CwState(sessions=[self._fix_session(tmp_path, id="orphan-1")]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="2142",
+                        client="client-a",
+                        status=QueueItemStatus.PENDING,
+                        session_id="orphan-1",
+                    )
+                ]
+            )
+        )
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/orphan-active-pending-row" in classes
+
+    def test_running_row_with_live_session_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The healthy steady state — a claimed row working its session."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        self._setup_common(tmp_path, monkeypatch)
+        save_state(CwState(sessions=[self._fix_session(tmp_path, id="live-1")]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="2142",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="live-1",
+                    )
+                ]
+            )
+        )
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/orphan-active-pending-row" not in classes
+
+    def test_pending_row_with_dead_session_reference_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """This class is about LIVE orphans; a dead reference is class-5 territory."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            SessionStatus,
+            TicketTask,
+        )
+
+        self._setup_common(tmp_path, monkeypatch)
+        save_state(
+            CwState(
+                sessions=[
+                    self._fix_session(
+                        tmp_path, id="dead-1", status=SessionStatus.COMPLETED
+                    )
+                ]
+            )
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="2142",
+                        client="client-a",
+                        status=QueueItemStatus.PENDING,
+                        fix_dispatch_session_id="dead-1",
+                    )
+                ]
+            )
+        )
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/orphan-active-pending-row" not in classes
+
+    def test_orchestrate_session_purpose_excluded(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Mirrors every sibling detector's ORCHESTRATE exclusion."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            SessionPurpose,
+            TicketTask,
+        )
+
+        self._setup_common(tmp_path, monkeypatch)
+        save_state(
+            CwState(
+                sessions=[
+                    self._fix_session(
+                        tmp_path, id="orch-1", purpose=SessionPurpose.ORCHESTRATE
+                    )
+                ]
+            )
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="2142",
+                        client="client-a",
+                        status=QueueItemStatus.PENDING,
+                        session_id="orch-1",
+                    )
+                ]
+            )
+        )
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/orphan-active-pending-row" not in classes
+
+
+class TestWedgeFixDispatchRunningStale(_WedgeFixDispatchHarness):
+    """wedge/fix-dispatch-running-stale: a RUNNING row's fix session went quiet.
+
+    The second #2142 mechanism (comment #4): the row is correctly RUNNING and
+    correctly linked, but the fix session's Stop hook deferred forever on a
+    non-empty ``background_tasks`` list, so nothing ever completes it. Class-8
+    eventually catches this at its 45-minute ``STALE_45M`` bucket — far slower
+    than a fix cycle's observed ~3-minute duration, and only via
+    ``DEFAULT_STAGE``'s floor since a FIX session's name resolves to no ticket.
+    This class is the RUNNING-row-scoped, tighter-latency sibling: it reuses
+    ``fix_loop_await_deadline_minutes`` (30) as its threshold.
+    """
+
+    def _stamp_transcript(
+        self, home: Path, worktree: Path, *, stale_minutes: float
+    ) -> None:
+        import os
+        from datetime import timedelta
+
+        transcript = _write_idle_transcript(home, worktree)
+        ts = (datetime.now(UTC) - timedelta(minutes=stale_minutes)).timestamp()
+        os.utime(str(transcript), (ts, ts))
+
+    def _write_spawn_stamp(
+        self, worktree: Path, *, unresolved_count: int, stamped_at: datetime
+    ) -> None:
+        from cw.models import HOOK_CONTEXT_RELATIVE_PATH
+
+        (worktree / ".claude").mkdir(parents=True, exist_ok=True)
+        (worktree / HOOK_CONTEXT_RELATIVE_PATH).write_text(
+            json.dumps(
+                {
+                    "agent_spawn_stamp": {
+                        "unresolved_count": unresolved_count,
+                        "last_stamped_at": stamped_at.isoformat(),
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _seed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        stale_minutes: float,
+        session_overrides: dict[str, Any] | None = None,
+        fix_dispatch_session_id: str | None = "fix-sess-2",
+    ) -> Path:
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=stale_minutes)
+        session = self._fix_session(
+            tmp_path, id="fix-sess-2", **(session_overrides or {})
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="2142",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="fix-sess-2",
+                        fix_dispatch_session_id=fix_dispatch_session_id,
+                    )
+                ]
+            )
+        )
+        return worktree
+
+    def test_running_row_with_stale_fix_session_flagged_and_reaped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Past the deadline: flagged, reaped COMPLETED, row unparks next tick.
+
+        35 minutes is deliberately inside class-8's 45-minute bucket and past
+        this class's 30-minute deadline, so the assertion proves the tighter
+        latency rather than re-testing class-8.
+        """
+        from cw.config import load_state
+        from cw.dev_queue import load_dev_queue
+        from cw.models import OrchestratorConfig, QueueItemStatus, SessionStatus
+        from cw.reconcile import fix_dispatch
+
+        self._seed(tmp_path, monkeypatch, stale_minutes=35)
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/fix-dispatch-running-stale" in classes
+        assert "wedge/active-daemon-stale-no-sentinel" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "fix-sess-2")
+        assert updated.status == SessionStatus.COMPLETED
+
+        fix_dispatch.run_fix_dispatch(config=OrchestratorConfig())
+
+        row = next(t for t in load_dev_queue().tasks if t.ticket_id == "2142")
+        assert row.fix_dispatch_session_id is None
+        assert row.status == QueueItemStatus.PENDING
+
+    def test_running_row_with_fresh_fix_session_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A fix loop genuinely mid-flight (~3 minutes is typical) is left alone."""
+        self._seed(tmp_path, monkeypatch, stale_minutes=3)
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/fix-dispatch-running-stale" not in classes
+
+    def test_running_row_with_unresolved_subagent_spawn_under_deadline_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A session awaiting a subagent it dispatched must not be reaped mid-flight."""
+        from datetime import timedelta
+
+        worktree = self._seed(tmp_path, monkeypatch, stale_minutes=35)
+        self._write_spawn_stamp(
+            worktree,
+            unresolved_count=1,
+            stamped_at=datetime.now(UTC) - timedelta(minutes=5),
+        )
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/fix-dispatch-running-stale" not in classes
+
+    def test_running_row_without_fix_dispatch_session_id_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A plain RUNNING row is class-4's territory, not this class's."""
+        self._seed(tmp_path, monkeypatch, stale_minutes=35, fix_dispatch_session_id=None)
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/fix-dispatch-running-stale" not in classes
+
+    def test_non_fix_purpose_session_referenced_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Defence in depth: fix_dispatch_session_id should only name a FIX session."""
+        from cw.models import SessionPurpose
+
+        self._seed(
+            tmp_path,
+            monkeypatch,
+            stale_minutes=35,
+            session_overrides={"purpose": SessionPurpose.IMPL},
+        )
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/fix-dispatch-running-stale" not in classes
+
+
 # ---------------------------------------------------------------------------
 # TestCheckInboxSize (issue #856)
 # ---------------------------------------------------------------------------

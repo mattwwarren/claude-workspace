@@ -7637,6 +7637,99 @@ class TestDevQueueStatusBlockedAnnotation:
         assert "[BLOCKED" not in result.output
 
 
+class TestDevQueueStatusRunningRowDivergence:
+    """`[ORPHAN?]` when the tick's session count exceeds the RUNNING row count.
+
+    Admission math deliberately counts DAEMON sessions rather than task rows
+    (``dispatch/lanes.py``: a pre-existing session is real host load whether or
+    not the queue tracks it), so ``running=2/2 cap_full`` alongside a single
+    RUNNING row is not a contradiction the gating should resolve — but it is
+    exactly the shape an orphaned fix-agent session produces (#2142), and an
+    operator reading the two numbers has no way to tell. Reporting-only: this
+    annotates the divergence, it does not change what gets admitted.
+    """
+
+    @staticmethod
+    def _patch_tick(
+        monkeypatch: pytest.MonkeyPatch,
+        client_name: str,
+        *,
+        running: int,
+        skip_reason: str = "none",
+    ) -> None:
+        from tests.conftest import _make_tick_summary
+
+        tick = _make_tick_summary(running=running, cap=2, skip_reason=skip_reason)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
+            lambda: {client_name: tick},
+        )
+
+    def test_status_flags_running_session_count_exceeding_running_rows(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="2142",
+                client="orphan-client",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        self._patch_tick(
+            monkeypatch, "orphan-client", running=2, skip_reason="cap_full"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[ORPHAN?" in result.output
+        assert "cw doctor" in result.output
+
+    def test_status_no_divergence_annotation_when_counts_match(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="2143",
+                client="matched-client",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        self._patch_tick(monkeypatch, "matched-client", running=1)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[ORPHAN?" not in result.output
+
+    def test_status_no_divergence_annotation_for_blocked_only_occupancy(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blocked rows hold lane slots but spawn no session — never a divergence."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="2144",
+                client="blocked-only-client",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+            )
+        )
+        self._patch_tick(monkeypatch, "blocked-only-client", running=0)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[ORPHAN?" not in result.output
+
+
 class TestDevQueueTasksPrState:
     """`cw dev-queue tasks` surfaces pr_state fields/column (#929)."""
 
