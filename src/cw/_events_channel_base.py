@@ -32,7 +32,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def build_server_notification(logger_name: str, notification: dict[str, Any]) -> Any:
+def build_server_notification(
+    logger_name: str, notification: dict[str, Any], *, level: str = "info"
+) -> Any:
     """Build the SessionMessage an SSE channel server's drain emits per event.
 
     Shared by the three server ``_drain`` closures (pr/queue/operator), which
@@ -48,7 +50,7 @@ def build_server_notification(logger_name: str, notification: dict[str, Any]) ->
         message=JSONRPCNotification(
             jsonrpc="2.0",
             method="notifications/message",
-            params={"level": "info", "logger": logger_name, "data": notification},
+            params={"level": level, "logger": logger_name, "data": notification},
         )
     )
 
@@ -73,6 +75,13 @@ class ChannelProxyConfig:
     filter_by_client: bool = True
     always_relay: Callable[[dict[str, Any]], bool] | None = None
     instructions: str = ""
+    # filter_by_repo/resolve_repo are the repo axis, independent of
+    # filter_by_client's ``client`` payload axis. Unlike either per-event
+    # filter, a configured resolve_repo that FAILS for a given client is a
+    # hard isolation boundary: it forwards nothing at all (ARCHITECTURE.md
+    # §7 principle 12), not everything.
+    filter_by_repo: bool = False
+    resolve_repo: Callable[[str], str | None] | None = None
 
 
 def extract_payload(session_msg: Any, notification_type: str) -> dict[str, Any] | None:
@@ -117,14 +126,48 @@ def build_outbound_notification(
     )
 
 
+async def _send_repo_resolution_failure(
+    stdio_write: Any, client_id: str | None, config: ChannelProxyConfig
+) -> None:
+    """Surface a fail-closed repo-resolution failure on the stdio side."""
+    await stdio_write.send(
+        build_server_notification(
+            config.server_name,
+            {
+                "event": "repo_resolution_failed",
+                "client": client_id,
+                "message": (
+                    f"repo resolution failed for client {client_id!r}; "
+                    "forwarding no events for this client (fail closed). See "
+                    "server logs for the resolution step that failed. Pass "
+                    "--all-repos for unfiltered forwarding."
+                ),
+            },
+            level="error",
+        )
+    )
+
+
 async def relay_upstream(
     sse_read: Any,
     stdio_write: Any,
     client_id: str | None = None,
     *,
     config: ChannelProxyConfig,
+    repo: str | None = None,
+    block_all: bool = False,
 ) -> None:
-    """Read from SSE stream, write matching-type notifications to stdio."""
+    """Read from SSE stream, write matching-type notifications to stdio.
+
+    ``block_all`` is the fail-closed signal from :func:`_resolve_effective_repo`
+    and is checked before every per-event filter: it means repo resolution was
+    attempted for *client_id* and failed, so nothing is forwarded at all.
+    """
+    if block_all:
+        await _send_repo_resolution_failure(stdio_write, client_id, config)
+        async for _item in sse_read:
+            pass
+        return
     async for item in sse_read:
         if isinstance(item, Exception):
             logger.debug("sse read error: %s", item)
@@ -139,11 +182,44 @@ async def relay_upstream(
         # Proxy-side client filter: skip events for other clients
         if config.filter_by_client and client_id and payload.get("client") != client_id:
             continue
+        # Proxy-side repo filter: skip events for other repos (#2146)
+        if (
+            config.filter_by_repo
+            and repo
+            and str(payload.get("repo", "")).casefold() != repo.casefold()
+        ):
+            continue
         outbound = build_outbound_notification(payload, config.build_meta)
         await stdio_write.send(outbound)
 
 
-def run_proxy(client_id: str | None = None, *, config: ChannelProxyConfig) -> None:
+def _resolve_effective_repo(
+    filter_client: str | None, config: ChannelProxyConfig, *, all_repos: bool
+) -> tuple[str | None, bool]:
+    """Resolve ``(repo, block_all)`` for *filter_client*.
+
+    ``block_all`` is True only when a client id WAS given, ``config.resolve_repo``
+    IS configured for this channel, and it returned None (genuine resolution
+    failure) -- the fail-closed case: forward nothing (see ARCHITECTURE.md
+    §7 principle 12). In every other case -- ``all_repos``, no ``resolve_repo``
+    configured for this channel, or no client id given at all -- ``block_all``
+    is False; these are the legitimate pass-through/unfiltered cases and must
+    never be conflated with a genuine failure.
+    """
+    if all_repos or config.resolve_repo is None or not filter_client:
+        return None, False
+    resolved = config.resolve_repo(filter_client)
+    if resolved is None:
+        return None, True
+    return resolved, False
+
+
+def run_proxy(
+    client_id: str | None = None,
+    *,
+    config: ChannelProxyConfig,
+    all_repos: bool = False,
+) -> None:
     """Start the stdio MCP proxy. Blocks until the SSE connection closes."""
     import anyio
     from mcp.client.sse import sse_client
@@ -156,6 +232,9 @@ def run_proxy(client_id: str | None = None, *, config: ChannelProxyConfig) -> No
     # cursor_id: the SSE subscription identity for replay cursor tracking
     cursor_id = filter_client or socket.gethostname()
     sse_url = f"{base_url}{config.sse_path}?client_id={urllib.parse.quote(cursor_id)}"
+    repo, block_all = _resolve_effective_repo(
+        filter_client, config, all_repos=all_repos
+    )
 
     mcp_server: Server = Server(config.server_name)
     init_options = mcp_server.create_initialization_options(
@@ -170,7 +249,9 @@ def run_proxy(client_id: str | None = None, *, config: ChannelProxyConfig) -> No
         ):
             tg.start_soon(mcp_server.run, stdio_read, stdio_write, init_options)
             tg.start_soon(
-                functools.partial(relay_upstream, config=config),
+                functools.partial(
+                    relay_upstream, config=config, repo=repo, block_all=block_all
+                ),
                 sse_read,
                 stdio_write,
                 filter_client,

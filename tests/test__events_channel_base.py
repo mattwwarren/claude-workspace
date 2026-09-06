@@ -395,12 +395,13 @@ class TestRelayUpstream:
         assert anyio.run(_run) == 0
 
     def _repo_config(self, **overrides: Any) -> ChannelProxyConfig:
-        return _make_test_config(
-            notification_type=self.NOTIFICATION_TYPE,
-            filter_by_client=False,
-            filter_by_repo=True,
-            **overrides,
-        )
+        kwargs: dict[str, Any] = {
+            "notification_type": self.NOTIFICATION_TYPE,
+            "filter_by_client": False,
+            "filter_by_repo": True,
+        }
+        kwargs.update(overrides)
+        return _make_test_config(**kwargs)
 
     def _repo_msg(self, repo: str) -> SessionMessage:
         return _make_channel_session_message(self.NOTIFICATION_TYPE, {"repo": repo})

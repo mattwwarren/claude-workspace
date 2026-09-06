@@ -341,9 +341,7 @@ async def _drain_pr(
         await send_in.send(m)
     await send_in.aclose()
 
-    await _relay_upstream(
-        recv_in, send_out, client_id, repo=repo, block_all=block_all
-    )
+    await _relay_upstream(recv_in, send_out, client_id, repo=repo, block_all=block_all)
     await send_out.aclose()
 
     return [item async for item in recv_out]
@@ -416,10 +414,17 @@ class TestRelayUpstreamRepoFilter:
 
 
 class TestResolveClientRepo:
-    """Source-module mocks: _resolve_client_repo uses function-local imports.
+    """Patch the names bound in cw_pr_events_channel's own namespace.
 
-    The sibling helpers in tests/test_reconcile_stale_dispatch_watch.py patch
-    names bound in that module's own namespace and would silently no-op here.
+    Same shape as tests/test_reconcile_stale_dispatch_watch.py's
+    _stub_slug/_no_clients helpers: both modules import these helpers at
+    module level, so the importing module is the mock target. Written inline
+    rather than extracted to a shared conftest helper -- two occurrences is
+    "consider", not "must", under this repo's DRY threshold, and a helper
+    parameterized on the target-module string would only save two lines.
+
+    _is_dangling_client is deliberately NOT mocked: it is pure dict logic, so
+    the dangling condition is exercised for real from the clients mapping.
     """
 
     def _patch(
@@ -430,9 +435,7 @@ class TestResolveClientRepo:
         cwd: Path | None = None,
         slug: str | None = "acme/widgets",
     ) -> list[Path]:
-        import cw.config
-        import cw.pr_hydrate
-        import cw.reconcile.tasks
+        import cw.cw_pr_events_channel as channel
 
         slug_calls: list[Path] = []
 
@@ -440,9 +443,9 @@ class TestResolveClientRepo:
             slug_calls.append(git_dir)
             return slug
 
-        monkeypatch.setattr(cw.config, "load_clients", lambda: clients)
-        monkeypatch.setattr(cw.reconcile.tasks, "_client_cwd", lambda _n, _c: cwd)
-        monkeypatch.setattr(cw.pr_hydrate, "_resolve_repo_slug", _fake_slug)
+        monkeypatch.setattr(channel, "load_clients", lambda: clients)
+        monkeypatch.setattr(channel, "_client_cwd", lambda _n, _c: cwd)
+        monkeypatch.setattr(channel, "_resolve_repo_slug", _fake_slug)
         return slug_calls
 
     def test_dangling_client_fails_closed(
@@ -468,9 +471,7 @@ class TestResolveClientRepo:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         git_dir = Path("/workspace/acme")
-        slug_calls = self._patch(
-            monkeypatch, clients={"acme": object()}, cwd=git_dir
-        )
+        slug_calls = self._patch(monkeypatch, clients={"acme": object()}, cwd=git_dir)
         with caplog.at_level(logging.ERROR):
             assert _resolve_client_repo("acme") == "acme/widgets"
         assert slug_calls == [git_dir]
@@ -480,9 +481,7 @@ class TestResolveClientRepo:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         git_dir = Path("/workspace/acme")
-        self._patch(
-            monkeypatch, clients={"acme": object()}, cwd=git_dir, slug=None
-        )
+        self._patch(monkeypatch, clients={"acme": object()}, cwd=git_dir, slug=None)
         with caplog.at_level(logging.ERROR):
             assert _resolve_client_repo("acme") is None
         assert "origin remote" in caplog.text
@@ -649,9 +648,7 @@ class TestCLI:
         from cw.cli import main
 
         calls: list[dict[str, Any]] = []
-        monkeypatch.setattr(
-            _channel_mod, "run_proxy", lambda **kw: calls.append(kw)
-        )
+        monkeypatch.setattr(_channel_mod, "run_proxy", lambda **kw: calls.append(kw))
 
         result = CliRunner().invoke(
             main, ["pr-channel", "proxy", "--client-id", "acme", "--all-repos"]
@@ -664,9 +661,7 @@ class TestCLI:
         from cw.cli import main
 
         calls: list[dict[str, Any]] = []
-        monkeypatch.setattr(
-            _channel_mod, "run_proxy", lambda **kw: calls.append(kw)
-        )
+        monkeypatch.setattr(_channel_mod, "run_proxy", lambda **kw: calls.append(kw))
 
         result = CliRunner().invoke(main, ["pr-channel", "proxy"])
         assert result.exit_code == 0
