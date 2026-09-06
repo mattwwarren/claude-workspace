@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import logging
 import socket
 import urllib.parse
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -17,13 +20,16 @@ starlette = pytest.importorskip(
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCNotification, JSONRPCResponse
 
+from cw._events_channel_base import _resolve_effective_repo
 from cw.cw_pr_events_channel import (
+    _CONFIG,
     _DEFAULT_BASE_URL,
     _NOTIFICATION_TYPE,
     _build_meta,
     _build_outbound_notification,
     _extract_payload,
     _relay_upstream,
+    _resolve_client_repo,
 )
 
 # ---------------------------------------------------------------------------
@@ -315,6 +321,220 @@ class TestRelayUpstream:
 
 
 # ---------------------------------------------------------------------------
+# _relay_upstream: repo filtering (#2146)
+# ---------------------------------------------------------------------------
+
+
+async def _drain_pr(
+    messages: list[Any],
+    *,
+    client_id: str | None = None,
+    repo: str | None = None,
+    block_all: bool = False,
+) -> list[Any]:
+    """Drive the real pr-channel _relay_upstream, returning what it sent."""
+    import anyio
+
+    send_in, recv_in = anyio.create_memory_object_stream[Any](max_buffer_size=10)
+    send_out, recv_out = anyio.create_memory_object_stream[Any](max_buffer_size=10)
+    for m in messages:
+        await send_in.send(m)
+    await send_in.aclose()
+
+    await _relay_upstream(
+        recv_in, send_out, client_id, repo=repo, block_all=block_all
+    )
+    await send_out.aclose()
+
+    return [item async for item in recv_out]
+
+
+class TestRelayUpstreamRepoFilter:
+    def test_relay_upstream_matching_repo_forwarded(self) -> None:
+        import anyio
+
+        msg = _make_session_message("acme/widgets", 7, "merged")
+
+        async def _run() -> list[Any]:
+            return await _drain_pr([msg], repo="acme/widgets")
+
+        assert len(anyio.run(_run)) == 1
+
+    def test_relay_upstream_non_matching_repo_dropped(self) -> None:
+        import anyio
+
+        msg = _make_session_message("acme/other", 7, "merged")
+
+        async def _run() -> list[Any]:
+            return await _drain_pr([msg], repo="acme/widgets")
+
+        assert anyio.run(_run) == []
+
+    def test_relay_upstream_all_repos_forwards_both(self) -> None:
+        import anyio
+
+        messages = [
+            _make_session_message("acme/widgets", 7, "merged"),
+            _make_session_message("acme/other", 8, "merged"),
+        ]
+
+        async def _run() -> list[Any]:
+            return await _drain_pr(messages, repo=None, block_all=False)
+
+        assert len(anyio.run(_run)) == 2
+
+    def test_relay_upstream_block_all_drops_everything_for_pr_channel(self) -> None:
+        import anyio
+
+        msg = _make_session_message("acme/widgets", 7, "merged")
+
+        async def _run() -> list[Any]:
+            return await _drain_pr([msg], client_id="acme", block_all=True)
+
+        items = anyio.run(_run)
+        assert len(items) == 1
+        assert items[0].message.method == "notifications/message"
+        params = items[0].message.params or {}
+        assert params["level"] == "error"
+        assert params["data"]["client"] == "acme"
+
+    def test_relay_upstream_no_client_id_unchanged(self) -> None:
+        """Regression guard: today's unfiltered behavior is byte-identical."""
+        import anyio
+
+        msg = _make_session_message("someone/else", 7, "merged")
+
+        async def _run() -> list[Any]:
+            return await _drain_pr([msg])
+
+        assert len(anyio.run(_run)) == 1
+
+
+# ---------------------------------------------------------------------------
+# _resolve_client_repo (#2146)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveClientRepo:
+    """Source-module mocks: _resolve_client_repo uses function-local imports.
+
+    The sibling helpers in tests/test_reconcile_stale_dispatch_watch.py patch
+    names bound in that module's own namespace and would silently no-op here.
+    """
+
+    def _patch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        clients: dict[str, Any],
+        cwd: Path | None = None,
+        slug: str | None = "acme/widgets",
+    ) -> list[Path]:
+        import cw.config
+        import cw.pr_hydrate
+        import cw.reconcile.tasks
+
+        slug_calls: list[Path] = []
+
+        def _fake_slug(git_dir: Path) -> str | None:
+            slug_calls.append(git_dir)
+            return slug
+
+        monkeypatch.setattr(cw.config, "load_clients", lambda: clients)
+        monkeypatch.setattr(cw.reconcile.tasks, "_client_cwd", lambda _n, _c: cwd)
+        monkeypatch.setattr(cw.pr_hydrate, "_resolve_repo_slug", _fake_slug)
+        return slug_calls
+
+    def test_dangling_client_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        slug_calls = self._patch(monkeypatch, clients={"other": object()})
+        with caplog.at_level(logging.ERROR):
+            assert _resolve_client_repo("acme") is None
+        assert slug_calls == []
+        assert "dangling client" in caplog.text
+        assert "acme" in caplog.text
+
+    def test_empty_clients_yaml_falls_back_to_cwd(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        slug_calls = self._patch(monkeypatch, clients={}, cwd=None)
+        with caplog.at_level(logging.ERROR):
+            assert _resolve_client_repo("acme") == "acme/widgets"
+        assert slug_calls == [Path.cwd()]
+        assert caplog.text == ""
+
+    def test_happy_path_returns_slug(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        git_dir = Path("/workspace/acme")
+        slug_calls = self._patch(
+            monkeypatch, clients={"acme": object()}, cwd=git_dir
+        )
+        with caplog.at_level(logging.ERROR):
+            assert _resolve_client_repo("acme") == "acme/widgets"
+        assert slug_calls == [git_dir]
+        assert caplog.text == ""
+
+    def test_unresolvable_remote_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        git_dir = Path("/workspace/acme")
+        self._patch(
+            monkeypatch, clients={"acme": object()}, cwd=git_dir, slug=None
+        )
+        with caplog.at_level(logging.ERROR):
+            assert _resolve_client_repo("acme") is None
+        assert "origin remote" in caplog.text
+        assert "acme" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed vs pass-through wiring (#2146)
+# ---------------------------------------------------------------------------
+
+
+class TestFailClosedWiring:
+    """The two outcomes that both leave ``repo`` None must not be conflated."""
+
+    def _messages(self) -> list[Any]:
+        return [
+            _make_session_message("acme/widgets", 7, "merged"),
+            _make_session_message("acme/other", 8, "merged"),
+        ]
+
+    def test_all_repos_passes_through_unfiltered(self) -> None:
+        import anyio
+
+        repo, block_all = _resolve_effective_repo("acme", _CONFIG, all_repos=True)
+        assert (repo, block_all) == (None, False)
+
+        async def _run() -> list[Any]:
+            return await _drain_pr(
+                self._messages(), client_id="acme", repo=repo, block_all=block_all
+            )
+
+        assert len(anyio.run(_run)) == 2
+
+    def test_resolution_failure_forwards_zero_events(self) -> None:
+        import anyio
+
+        config = dataclasses.replace(_CONFIG, resolve_repo=lambda _c: None)
+        repo, block_all = _resolve_effective_repo("acme", config, all_repos=False)
+        assert (repo, block_all) == (None, True)
+
+        async def _run() -> list[Any]:
+            return await _drain_pr(
+                self._messages(), client_id="acme", repo=repo, block_all=block_all
+            )
+
+        items = anyio.run(_run)
+        assert len(items) == 1
+        params = items[0].message.params or {}
+        assert params["level"] == "error"
+
+
+# ---------------------------------------------------------------------------
 # run_proxy: env var / URL construction
 #
 # Strategy: patch anyio.run to call a real async runner that intercepts
@@ -419,3 +639,35 @@ class TestCLI:
         result = CliRunner().invoke(main, ["pr-channel", "proxy", "--help"])
         assert result.exit_code == 0
         assert "--client-id" in result.output
+        assert "--all-repos" in result.output
+        assert "unfiltered by client" in result.output
+
+    def test_all_repos_flag_passed_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import cw.cw_pr_events_channel as _channel_mod
+        from cw.cli import main
+
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            _channel_mod, "run_proxy", lambda **kw: calls.append(kw)
+        )
+
+        result = CliRunner().invoke(
+            main, ["pr-channel", "proxy", "--client-id", "acme", "--all-repos"]
+        )
+        assert result.exit_code == 0
+        assert calls == [{"client_id": "acme", "all_repos": True}]
+
+    def test_all_repos_defaults_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import cw.cw_pr_events_channel as _channel_mod
+        from cw.cli import main
+
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            _channel_mod, "run_proxy", lambda **kw: calls.append(kw)
+        )
+
+        result = CliRunner().invoke(main, ["pr-channel", "proxy"])
+        assert result.exit_code == 0
+        assert calls == [{"client_id": None, "all_repos": False}]
