@@ -111,6 +111,17 @@ _WEDGE_ACTIVE_NO_DAEMON_ENTRY = "wedge/active-no-daemon-entry"
 # _check_wedge_active_daemon_stale_no_sentinel's docstring for the mechanism.
 _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL = "wedge/active-daemon-stale-no-sentinel"
 
+# Wedge class for a LIVE ACTIVE DAEMON session referenced by a queue row that
+# is no longer RUNNING (#2142). Structural, not age-based: the row/session
+# relationship is already wrong the instant it exists, so unlike class-8 there
+# is nothing to wait out. See _check_wedge_orphan_active_pending_row.
+_WEDGE_ORPHAN_ACTIVE_PENDING_ROW = "wedge/orphan-active-pending-row"
+
+# Wedge class for a RUNNING row whose dispatched fix session has gone quiet
+# past the fix-loop await deadline (#2142 comment #4). The RUNNING-row-scoped,
+# fix-loop-specific, tighter-latency sibling of class-8 — not a replacement.
+_WEDGE_FIX_DISPATCH_RUNNING_STALE = "wedge/fix-dispatch-running-stale"
+
 _log = logging.getLogger(__name__)
 
 
@@ -588,6 +599,146 @@ def _check_wedge_active_daemon_stale_no_sentinel(
     return findings
 
 
+def _live_daemon_session(
+    session: Session | None,
+) -> bool:
+    """True iff *session* is a live, reapable DAEMON worker.
+
+    ORCHESTRATE is excluded the same way ``compute_drift`` excludes it: a
+    long-lived interactive orchestrator must never be reaped as a stuck spawn.
+    """
+    return (
+        session is not None
+        and session.origin is SessionOrigin.DAEMON
+        and session.status is SessionStatus.ACTIVE
+        and session.purpose is not SessionPurpose.ORCHESTRATE
+    )
+
+
+def _check_wedge_orphan_active_pending_row(
+    state: CwState,
+    queue: DevQueueStore,
+) -> list[WedgeFinding]:
+    """Detect a live DAEMON session referenced by a row that is not RUNNING (#2142).
+
+    The residual state of the fix-dispatch race: a non-sentinel
+    RUNNING->PENDING revert fires on a row carrying an unconsumed
+    ``pending_fix_dispatch``, and the next reconcile tick dispatches the fix
+    agent anyway. ``dispatch_fix_agent`` calls ``transition_task_status`` zero
+    times, so the spawned session is correlated to no row at all: it is counted
+    by ``dispatch/tick.py``'s session-based ``running_count`` (which feeds
+    ``cap_full``) but by no task-row occupancy metric, because no row's status
+    is RUNNING for it. The guard in ``reconcile/fix_dispatch.py`` stops new
+    ones being minted; this detector finds the ones already out there, plus
+    every other shape that produces the same linkage (a session that completed
+    its work while the roster never went terminal).
+
+    Deliberately does NOT route through ``ticket_id_for_session``: a FIX
+    session is named from the agent-chosen ``PendingFixDispatch.label``, never
+    ``AUTO_DEV_LABEL_PREFIX + ticket_id``, so that parser returns None for
+    exactly the sessions this class targets. The row's own
+    ``session_id``/``fix_dispatch_session_id`` is the only reliable link.
+
+    Structural rather than age-based, unlike class-8 — a non-RUNNING row can
+    never legitimately own a live worker, so there is no staleness to wait out
+    and no threshold to tune.
+    """
+    session_by_id = {s.id: s for s in state.sessions}
+    findings: list[WedgeFinding] = []
+    for task in queue.tasks:
+        if task.status != QueueItemStatus.PENDING:
+            continue
+        candidate_session_id = task.session_id or task.fix_dispatch_session_id
+        if candidate_session_id is None:
+            continue
+        if not _live_daemon_session(session_by_id.get(candidate_session_id)):
+            continue
+        findings.append(
+            WedgeFinding(
+                wedge_class=_WEDGE_ORPHAN_ACTIVE_PENDING_ROW,
+                session_id=candidate_session_id,
+                ticket_id=task.ticket_id,
+                recipe=(
+                    "PENDING queue row references a live ACTIVE daemon session "
+                    "— an orphaned worker holding a client-ceiling slot that no "
+                    "task-row metric counts. Run: cw doctor --reap to mark it "
+                    "COMPLETED and release the slot."
+                ),
+                state_file=str(state_file()),
+            )
+        )
+    return findings
+
+
+def _check_wedge_fix_dispatch_running_stale(
+    state: CwState,
+    queue: DevQueueStore,
+) -> list[WedgeFinding]:
+    """Detect a RUNNING row whose dispatched fix session has gone quiet (#2142).
+
+    The complement of :func:`_check_wedge_orphan_active_pending_row`: here the
+    row IS correctly RUNNING and correctly linked, but the fix session's Stop
+    hook deferred forever on a non-empty ``background_tasks`` list
+    (``stop_hook.py``'s unconditional early return — the same mechanism
+    class-8's docstring describes), so nothing in the ordinary lifecycle ever
+    completes it and ``_act_on_fix_dispatch_completions`` waits on a session
+    that will never go terminal.
+
+    Class-8 does eventually catch this, but only at ``STALE_45M`` — and since
+    a FIX session's name resolves to no ticket, only via ``DEFAULT_STAGE``'s
+    floor rather than a fix-loop-specific one. A fix cycle's observed duration
+    is ~3 minutes, so 45 minutes is materially slower than the loop it is
+    guarding. This class is the tighter-latency sibling, scoped to rows that
+    actually name a fix session and reusing the existing
+    ``fix_loop_await_deadline_minutes`` (default 30) rather than adding a knob.
+
+    The subagent-await exclusion is class-8's, kept verbatim: a fix session
+    legitimately blocked on a background subagent it dispatched must not be
+    reaped mid-flight.
+    """
+    config = load_orchestrator_config()
+    deadline_seconds = config.fix_loop_await_deadline_minutes * 60
+    session_by_id = {s.id: s for s in state.sessions}
+    now = datetime.now(UTC)
+
+    findings: list[WedgeFinding] = []
+    for task in queue.tasks:
+        if task.status != QueueItemStatus.RUNNING:
+            continue
+        if task.fix_dispatch_session_id is None:
+            continue
+        session = session_by_id.get(task.fix_dispatch_session_id)
+        if session is None or not _live_daemon_session(session):
+            continue
+        if session.purpose is not SessionPurpose.FIX:
+            # fix_dispatch_session_id should only ever name a FIX session; if
+            # that invariant is broken elsewhere, do not compound it by
+            # reaping whatever it does name.
+            continue
+        age_seconds = _transcript_age_seconds(session, now)
+        if age_seconds is None or age_seconds < deadline_seconds:
+            continue
+        spawn_age = _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
+        if spawn_age is not None and spawn_age < deadline_seconds:
+            continue
+        findings.append(
+            WedgeFinding(
+                wedge_class=_WEDGE_FIX_DISPATCH_RUNNING_STALE,
+                session_id=session.id,
+                ticket_id=task.ticket_id,
+                recipe=(
+                    "RUNNING row is waiting on a fix session whose transcript "
+                    "has been idle past the fix-loop await deadline — likely "
+                    "finished but never signaled completion. Run: cw doctor "
+                    "--reap to mark it COMPLETED; the next reconcile tick "
+                    "unparks the row."
+                ),
+                state_file=str(state_file()),
+            )
+        )
+    return findings
+
+
 def _collapse_blocked_on_user_tasks(
     queue: DevQueueStore,
     blocked_ticket_ids: set[str],
@@ -712,6 +863,16 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         this class is inferred from a heuristic (unlike class-6's harder
         roster-absent signal) and a post-hoc investigator needs to tell them
         apart.
+    Class-9 (orphan-active-pending-row, #2142): same remedy as class-6/8 —
+        _reap_session_by_selector per matching session, reused verbatim. Note
+        it cannot clear the row's residual ``fix_dispatch_session_id``: that
+        helper resolves its owning row through ``ticket_id_for_session``,
+        which returns None for a FIX session's label-derived name. The field
+        is cleared instead by ``run_fix_dispatch``'s completions phase on the
+        next tick, once this reap has marked the session terminal.
+    Class-10 (fix-dispatch-running-stale, #2142): same remedy and the same
+        residual-field caveat as class-9; the completions phase additionally
+        unparks the RUNNING row to PENDING once the session reads terminal.
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
@@ -728,6 +889,8 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
             _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
             _WEDGE_TERMINAL_SIBLING,
             _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
+            _WEDGE_ORPHAN_ACTIVE_PENDING_ROW,
+            _WEDGE_FIX_DISPATCH_RUNNING_STALE,
         }
     }
     blocked_ticket_ids: set[str] = {
@@ -750,7 +913,12 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         for f in findings
         if f.session_id
         and f.wedge_class
-        in {_WEDGE_ACTIVE_NO_DAEMON_ENTRY, _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL}
+        in {
+            _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+            _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
+            _WEDGE_ORPHAN_ACTIVE_PENDING_ROW,
+            _WEDGE_FIX_DISPATCH_RUNNING_STALE,
+        }
     ]
 
     if not (

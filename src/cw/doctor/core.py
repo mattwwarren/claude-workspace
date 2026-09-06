@@ -55,6 +55,8 @@ from cw.doctor.wedge import (
     _check_wedge_active_daemon_stale_no_sentinel,
     _check_wedge_active_no_daemon_entry,
     _check_wedge_dead_session_blocked_on_user,
+    _check_wedge_fix_dispatch_running_stale,
+    _check_wedge_orphan_active_pending_row,
     _check_wedge_repo_ahead,
     _check_wedge_task_running_completed_session,
     _check_wedge_task_running_no_session,
@@ -134,6 +136,12 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
         report.wedge_findings.extend(_check_wedge_active_no_daemon_entry(link_state))
         report.wedge_findings.extend(
             _check_wedge_active_daemon_stale_no_sentinel(link_state, queue)
+        )
+        report.wedge_findings.extend(
+            _check_wedge_orphan_active_pending_row(link_state, queue)
+        )
+        report.wedge_findings.extend(
+            _check_wedge_fix_dispatch_running_stale(link_state, queue)
         )
         if reap and report.wedge_findings:
             _reap_wedge_findings(report.wedge_findings)
