@@ -39,6 +39,7 @@ def test_review_monitor_direct_exec_clean_exit(tmp_path: Path) -> None:
         [str(_mod.MONITOR_SCRIPT), "status", "--repo", "fake/repo", "--json"],
         capture_output=True,
         text=True,
+        check=False,
         env={**os.environ, "GLOBAL_CLAUDE_REVIEW_MONITOR_DIR": str(tmp_path)},
     )
     assert result.returncode == 0, result.stderr
@@ -107,7 +108,8 @@ def test_monitor_registered_catches_oserror(monkeypatch: pytest.MonkeyPatch) -> 
         calls.append(list(cmd))
         if len(calls) == 1:
             return repo_view_result
-        raise OSError("[Errno 2] No such file or directory: 'review_monitor.py'")
+        msg = "[Errno 2] No such file or directory: 'review_monitor.py'"
+        raise OSError(msg)
 
     monkeypatch.setattr(_mod, "run", _fake_run)
 
