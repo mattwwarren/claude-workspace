@@ -225,25 +225,39 @@ def _emit_fix_dispatch_operator_signal(
     )
 
 
-def _drop_stale_handoff(task: TicketTask) -> None:
-    """Clear a handoff whose row is no longer RUNNING and page the operator (#2142).
+class _StaleHandoffRecord(NamedTuple):
+    """Fields needed to page the operator for a dropped stale handoff (#2142).
+
+    Collected by ``_drop_stale_handoff`` while ``dev_queue_lock()`` is held;
+    emitted by the caller only after the lock releases, since event emission
+    is I/O and must not run while the lock is held.
+    """
+
+    session_id: str
+    ticket_id: str
+    client: str
+    lane: str
+    breadcrumbs: str
+
+
+def _drop_stale_handoff(task: TicketTask) -> _StaleHandoffRecord | None:
+    """Clear a handoff whose row is no longer RUNNING (#2142).
 
     Called with ``dev_queue_lock()`` held; the caller owns the ``save_dev_queue``.
-    Emits ``_stamp_dispatch_failure``'s event pair with its own error_kind, since
-    the operator signal is identical in shape (nothing is running to carry a
-    blocker.reason) even though nothing was actually attempted here.
+    Returns the record the caller pages the operator with, via
+    ``_emit_fix_dispatch_operator_signal``, once the lock releases — nothing
+    is emitted here.
     """
     pending = task.pending_fix_dispatch
     if pending is None:  # pragma: no cover - caller checked
-        return
+        return None
     task.pending_fix_dispatch = None
-    _emit_fix_dispatch_operator_signal(
+    return _StaleHandoffRecord(
         session_id=pending.requested_by_session_id,
         ticket_id=task.ticket_id,
         client=task.client,
         lane=task.lane,
-        error_kind=_ERROR_KIND_STALE_HANDOFF,
-        breadcrumbs=f"row status={task.status.value}",
+        breadcrumbs=f"row status={task.status.value} dropped_label={pending.label!r}",
     )
 
 
@@ -258,11 +272,18 @@ def _build_dispatch_jobs(
     is stamped here. The latch IS ``pending_fix_dispatch`` itself, and it must
     survive until the dispatch actually succeeds so a transient conflict retries
     on the next tick instead of dropping the action list on the floor.
+
+    A dropped stale handoff's operator-signal event pair is emitted AFTER the
+    lock releases (#2142 fix-loop cycle 2): ``_emit_fix_dispatch_operator_signal``
+    is I/O (two ``record_event`` calls) and must not run while
+    ``dev_queue_lock()`` is held, mirroring how real dispatch jobs are executed
+    post-lock by this function's caller and how ``_stamp_dispatch_failure``
+    already runs outside the lock.
     """
     if not candidates:
         return []
     jobs: list[_DispatchJob] = []
-    dropped = False
+    stale_records: list[_StaleHandoffRecord] = []
     with dev_queue_lock():
         store = load_dev_queue()
         for candidate in candidates:
@@ -286,8 +307,9 @@ def _build_dispatch_jobs(
                     task.ticket_id,
                     task.status.value,
                 )
-                _drop_stale_handoff(task)
-                dropped = True
+                record = _drop_stale_handoff(task)
+                if record is not None:
+                    stale_records.append(record)
                 continue
             if task.fix_dispatch_session_id is not None:
                 # A prior fix session for this ticket hasn't been unparked yet
@@ -320,8 +342,17 @@ def _build_dispatch_jobs(
                     lane=task.lane,
                 )
             )
-        if dropped:
+        if stale_records:
             save_dev_queue(store)
+    for record in stale_records:
+        _emit_fix_dispatch_operator_signal(
+            session_id=record.session_id,
+            ticket_id=record.ticket_id,
+            client=record.client,
+            lane=record.lane,
+            error_kind=_ERROR_KIND_STALE_HANDOFF,
+            breadcrumbs=record.breadcrumbs,
+        )
     return jobs
 
 

@@ -654,21 +654,35 @@ def _check_wedge_orphan_active_pending_row(
     for task in queue.tasks:
         if task.status == QueueItemStatus.RUNNING:
             continue
-        candidate_session_id = task.session_id or task.fix_dispatch_session_id
-        if candidate_session_id is None:
-            continue
-        if not _live_daemon_session(session_by_id.get(candidate_session_id)):
+        # Check both fields independently — either can name a live orphan,
+        # so first-truthy-wins (`or`) would miss a live session sitting in
+        # the field that happened to come second.
+        candidate_session_ids = [
+            sid
+            for sid in (task.session_id, task.fix_dispatch_session_id)
+            if sid is not None
+        ]
+        live_session_id = next(
+            (
+                sid
+                for sid in candidate_session_ids
+                if _live_daemon_session(session_by_id.get(sid))
+            ),
+            None,
+        )
+        if live_session_id is None:
             continue
         findings.append(
             WedgeFinding(
                 wedge_class=_WEDGE_ORPHAN_ACTIVE_PENDING_ROW,
-                session_id=candidate_session_id,
+                session_id=live_session_id,
                 ticket_id=task.ticket_id,
                 recipe=(
-                    "PENDING queue row references a live ACTIVE daemon session "
-                    "— an orphaned worker holding a client-ceiling slot that no "
-                    "task-row metric counts. Run: cw doctor --reap to mark it "
-                    "COMPLETED and release the slot."
+                    f"{task.status.value} queue row references a live ACTIVE "
+                    "daemon session — an orphaned worker holding a "
+                    "client-ceiling slot that no task-row metric counts. Run: "
+                    "cw doctor --reap to mark it COMPLETED and release the "
+                    "slot."
                 ),
                 state_file=str(state_file()),
             )

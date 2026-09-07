@@ -7046,6 +7046,109 @@ class TestWedgeOrphanActivePendingRow(_WedgeFixDispatchHarness):
         classes = [f.wedge_class for f in report.wedge_findings]
         assert "wedge/orphan-active-pending-row" not in classes
 
+    def test_user_origin_session_referenced_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``_live_daemon_session``'s ``origin is DAEMON`` guard, false branch.
+
+        Every other session in this class defaults to DAEMON origin via
+        ``_fix_session`` — this pins the USER-origin path is excluded too.
+        """
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            SessionOrigin,
+            TicketTask,
+        )
+
+        self._setup_common(tmp_path, monkeypatch)
+        save_state(
+            CwState(
+                sessions=[
+                    self._fix_session(tmp_path, id="user-1", origin=SessionOrigin.USER)
+                ]
+            )
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="2142",
+                        client="client-a",
+                        status=QueueItemStatus.PENDING,
+                        session_id="user-1",
+                    )
+                ]
+            )
+        )
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/orphan-active-pending-row" not in classes
+
+    def test_both_fields_set_live_fix_dispatch_session_still_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both fields set simultaneously, differing liveness — must not
+        collapse to first-truthy-wins (#2142 fix-loop cycle 2).
+
+        ``session_id`` names a dead (COMPLETED) session while
+        ``fix_dispatch_session_id`` names a live one; checking each field
+        independently must still flag the row. An ``or``-truthiness
+        regression (``task.session_id or task.fix_dispatch_session_id``)
+        would pick ``session_id`` first, see it is dead, and silently miss
+        the live orphan.
+        """
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            SessionStatus,
+            TicketTask,
+        )
+
+        self._setup_common(tmp_path, monkeypatch)
+        save_state(
+            CwState(
+                sessions=[
+                    self._fix_session(
+                        tmp_path, id="stale-1", status=SessionStatus.COMPLETED
+                    ),
+                    self._fix_session(tmp_path, id="live-1"),
+                ]
+            )
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="2142",
+                        client="client-a",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        session_id="stale-1",
+                        fix_dispatch_session_id="live-1",
+                    )
+                ]
+            )
+        )
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/orphan-active-pending-row" in classes
+
 
 class TestWedgeFixDispatchRunningStale(_WedgeFixDispatchHarness):
     """wedge/fix-dispatch-running-stale: a RUNNING row's fix session went quiet.
@@ -7289,6 +7392,31 @@ class TestWedgeFixDispatchRunningStale(_WedgeFixDispatchHarness):
             monkeypatch,
             stale_minutes=35,
             session_overrides={"purpose": SessionPurpose.IMPL},
+        )
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/fix-dispatch-running-stale" not in classes
+
+    def test_user_origin_session_referenced_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``_live_daemon_session``'s ``origin is DAEMON`` guard, false branch.
+
+        Every other session in this class defaults to DAEMON origin via
+        ``_fix_session`` — this pins the USER-origin path is excluded too.
+        """
+        from cw.models import SessionOrigin
+
+        self._seed(
+            tmp_path,
+            monkeypatch,
+            stale_minutes=35,
+            session_overrides={"origin": SessionOrigin.USER},
         )
 
         report = run_doctor(reap=False)
