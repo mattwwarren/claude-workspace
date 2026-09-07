@@ -395,6 +395,7 @@ class TestRelayUpstreamRepoFilter:
         params = items[0].message.params or {}
         assert params["level"] == "error"
         assert params["data"]["client"] == "acme"
+        assert params["data"]["event"] == "repo_resolution_failed"
 
     def test_relay_upstream_no_client_id_unchanged(self) -> None:
         """Regression guard: today's unfiltered behavior is byte-identical."""
@@ -531,6 +532,7 @@ class TestFailClosedWiring:
         assert len(items) == 1
         params = items[0].message.params or {}
         assert params["level"] == "error"
+        assert params["data"]["event"] == "repo_resolution_failed"
 
 
 # ---------------------------------------------------------------------------

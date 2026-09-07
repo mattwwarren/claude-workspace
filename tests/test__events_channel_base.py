@@ -105,6 +105,14 @@ class TestChannelProxyConfig:
         with pytest.raises(dataclasses.FrozenInstanceError):
             config.server_name = "changed"  # type: ignore[misc]
 
+    def test_filter_by_repo_true_without_resolve_repo_raises(self) -> None:
+        with pytest.raises(ValueError, match="filter_by_repo"):
+            _make_test_config(filter_by_repo=True, resolve_repo=None)
+
+    def test_resolve_repo_set_without_filter_by_repo_raises(self) -> None:
+        with pytest.raises(ValueError, match="filter_by_repo"):
+            _make_test_config(filter_by_repo=False, resolve_repo=lambda c: c)
+
 
 # ---------------------------------------------------------------------------
 # TestExtractPayload
@@ -399,6 +407,10 @@ class TestRelayUpstream:
             "notification_type": self.NOTIFICATION_TYPE,
             "filter_by_client": False,
             "filter_by_repo": True,
+            # relay_upstream's per-event repo filter never reads resolve_repo
+            # (that's _resolve_effective_repo's concern) -- this dummy only
+            # satisfies ChannelProxyConfig.__post_init__'s pairing invariant.
+            "resolve_repo": lambda _c: "acme/widgets",
         }
         kwargs.update(overrides)
         return _make_test_config(**kwargs)
@@ -451,7 +463,7 @@ class TestRelayUpstream:
     def test_filter_by_repo_false_relays_regardless_of_repo(self) -> None:
         import anyio
 
-        config = self._repo_config(filter_by_repo=False)
+        config = self._repo_config(filter_by_repo=False, resolve_repo=None)
 
         async def _run() -> int:
             return await self._drain(
@@ -489,6 +501,7 @@ class TestRelayUpstream:
         params = items[0].message.params or {}
         assert params["level"] == "error"
         assert params["data"]["client"] == "acme"
+        assert params["data"]["event"] == "repo_resolution_failed"
 
     def test_block_all_true_with_zero_upstream_events_still_sends_notification(
         self,
@@ -504,6 +517,7 @@ class TestRelayUpstream:
         assert len(items) == 1
         params = items[0].message.params or {}
         assert params["level"] == "error"
+        assert params["data"]["event"] == "repo_resolution_failed"
 
     def test_block_all_false_default_sends_no_extra_notification(self) -> None:
         import anyio
@@ -535,7 +549,7 @@ class TestResolveEffectiveRepo:
             calls.append(client)
             return result
 
-        return _make_test_config(resolve_repo=_resolve), calls
+        return _make_test_config(filter_by_repo=True, resolve_repo=_resolve), calls
 
     def test_all_repos_skips_resolution(self) -> None:
         config, calls = self._spy_config("acme/widgets")
@@ -564,6 +578,23 @@ class TestResolveEffectiveRepo:
         config, calls = self._spy_config(None)
         assert _resolve_effective_repo("acme", config, all_repos=False) == (None, True)
         assert calls == ["acme"]
+
+    def test_resolve_repo_raising_blocks_all(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Fail closed even when resolve_repo raises instead of returning None."""
+
+        def _raise(_client: str) -> str | None:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        config = _make_test_config(filter_by_repo=True, resolve_repo=_raise)
+        with caplog.at_level("ERROR"):
+            assert _resolve_effective_repo("acme", config, all_repos=False) == (
+                None,
+                True,
+            )
+        assert "acme" in caplog.text
 
 
 # ---------------------------------------------------------------------------

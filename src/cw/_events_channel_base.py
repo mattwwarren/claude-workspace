@@ -83,6 +83,15 @@ class ChannelProxyConfig:
     filter_by_repo: bool = False
     resolve_repo: Callable[[str], str | None] | None = None
 
+    def __post_init__(self) -> None:
+        if self.filter_by_repo != (self.resolve_repo is not None):
+            msg = (
+                "filter_by_repo and resolve_repo must be set together: "
+                f"filter_by_repo={self.filter_by_repo!r}, "
+                f"resolve_repo={'set' if self.resolve_repo is not None else None!r}"
+            )
+            raise ValueError(msg)
+
 
 def extract_payload(session_msg: Any, notification_type: str) -> dict[str, Any] | None:
     """Extract the event dict from an upstream SSE msg.
@@ -208,7 +217,18 @@ def _resolve_effective_repo(
     """
     if all_repos or config.resolve_repo is None or not filter_client:
         return None, False
-    resolved = config.resolve_repo(filter_client)
+    try:
+        resolved = config.resolve_repo(filter_client)
+    except Exception:
+        # resolve_repo is a cross-tenant isolation boundary (#2146): any
+        # failure must fail closed (block_all=True), never crash run_proxy
+        # and never silently forward nothing *or* everything.
+        logger.exception(
+            "repo resolution raised for client %r; forwarding no events "
+            "for this client (fail closed)",
+            filter_client,
+        )
+        return None, True
     if resolved is None:
         return None, True
     return resolved, False
