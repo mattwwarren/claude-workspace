@@ -229,7 +229,7 @@ def _resolve_effective_repo(
             filter_client,
         )
         return None, True
-    if resolved is None:
+    if not resolved:
         return None, True
     return resolved, False
 

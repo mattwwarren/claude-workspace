@@ -579,6 +579,18 @@ class TestResolveEffectiveRepo:
         assert _resolve_effective_repo("acme", config, all_repos=False) == (None, True)
         assert calls == ["acme"]
 
+    def test_resolve_repo_empty_string_blocks_all(self) -> None:
+        """Fail closed even when resolve_repo returns '' instead of None.
+
+        '' is falsy but not None -- a resolve_repo implementation that
+        returns it on failure must not be treated as a legitimate resolved
+        repo (which would then relay unfiltered, since relay_upstream's
+        per-event filter short-circuits on a falsy repo value).
+        """
+        config, calls = self._spy_config("")
+        assert _resolve_effective_repo("acme", config, all_repos=False) == (None, True)
+        assert calls == ["acme"]
+
     def test_resolve_repo_raising_blocks_all(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -595,6 +607,8 @@ class TestResolveEffectiveRepo:
                 True,
             )
         assert "acme" in caplog.text
+        assert caplog.records[-1].exc_info is not None
+        assert "boom" in caplog.text
 
 
 # ---------------------------------------------------------------------------
