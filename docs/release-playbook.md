@@ -136,6 +136,12 @@ PR number automatically.
 way to silence the check out of habit; use it only when you have a specific
 reason the commit subject won't match and you've confirmed that's fine.
 
+The `dispatch-drift` label is reserved for issues opened by
+`.github/workflows/dispatch-guard.yml`. Those issues carry the
+`<!-- dispatch-guard-auto -->` provenance marker, which the automated
+`release-tag.yml` closer requires; applying the label to a human-filed issue
+does not make it eligible for automatic closure.
+
 ### Keeping `uv.lock` in sync
 
 **Before cutting a release, ensure `uv.lock` is re-locked to the new version**

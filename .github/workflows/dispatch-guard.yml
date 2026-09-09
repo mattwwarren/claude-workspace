@@ -16,6 +16,7 @@ jobs:
       contents: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DISPATCH_DRIFT_AUTO_MARKER: "<!-- dispatch-guard-auto -->"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
@@ -89,4 +90,6 @@ jobs:
 
           Cut a new release to close this issue automatically.
 
-          > Opened automatically by the [Dispatch Guard workflow](/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."
+          > Opened automatically by the [Dispatch Guard workflow](/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed.
+
+          ${DISPATCH_DRIFT_AUTO_MARKER}"
