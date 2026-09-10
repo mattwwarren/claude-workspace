@@ -592,19 +592,30 @@ def _stub_gh_issue_list(tmp_path: Path, *, list_json: str) -> Path:
         "#!/bin/sh\n"
         'if [ "$1 $2" = "issue list" ]; then\n'
         "  jq_filter=\n"
+        "  app_filter=\n"
         "  previous=\n"
         '  for arg in "$@"; do\n'
+        '    if [ "$previous" = "--app" ]; then\n'
+        '      app_filter="$arg"\n'
+        "    fi\n"
         '    if [ "$previous" = "--jq" ]; then\n'
         '      jq_filter="$arg"\n'
         "      break\n"
         "    fi\n"
         '    previous="$arg"\n'
         "  done\n"
+        '  if [ "$app_filter" != "github-actions" ]; then\n'
+        '    echo "missing --app github-actions filter" >&2\n'
+        "    exit 2\n"
+        "  fi\n"
         '  if [ -z "$jq_filter" ]; then\n'
         '    echo "missing --jq filter" >&2\n'
         "    exit 2\n"
         "  fi\n"
-        f"  /usr/bin/jq -r \"$jq_filter\" <<'GH_LIST_EOF'\n{list_json}\nGH_LIST_EOF\n"
+        "  /usr/bin/jq "
+        f"'map(select(.author.login == \"{DISPATCH_DRIFT_AUTO_AUTHOR}\"))' "
+        "<<'GH_LIST_EOF' | /usr/bin/jq -r \"$jq_filter\"\n"
+        f"{list_json}\nGH_LIST_EOF\n"
         "else\n"
         '  echo "$@" >> "$(dirname "$0")/../gh-calls.log"\n'
         "fi\n"
@@ -646,7 +657,6 @@ def test_close_drift_step_closes_marker_and_legacy_issues_not_human_labels(
         tmp_path,
         extra_env={
             "RELEASE_TAG": CLOSE_RELEASE_TAG,
-            "DISPATCH_DRIFT_AUTO_AUTHOR": DISPATCH_DRIFT_AUTO_AUTHOR,
             "DISPATCH_DRIFT_AUTO_MARKER": DISPATCH_DRIFT_AUTO_MARKER,
             "DISPATCH_DRIFT_LEGACY_MARKER": DISPATCH_DRIFT_LEGACY_MARKER,
             "PATH": f"{fake_bin}:/usr/bin:/bin",
@@ -674,7 +684,6 @@ def test_close_drift_step_closes_nothing_when_no_drift_issues_open(
         tmp_path,
         extra_env={
             "RELEASE_TAG": CLOSE_RELEASE_TAG,
-            "DISPATCH_DRIFT_AUTO_AUTHOR": DISPATCH_DRIFT_AUTO_AUTHOR,
             "DISPATCH_DRIFT_AUTO_MARKER": DISPATCH_DRIFT_AUTO_MARKER,
             "DISPATCH_DRIFT_LEGACY_MARKER": DISPATCH_DRIFT_LEGACY_MARKER,
             "PATH": f"{fake_bin}:/usr/bin:/bin",
@@ -693,8 +702,9 @@ def test_close_drift_step_queries_only_open_drift_labelled_issues() -> None:
 
 def test_close_drift_step_queries_number_and_body_fields() -> None:
     script = _script(CLOSE_DRIFT_STEP_ID)
+    assert "--app github-actions" in script
     assert "--limit 1000" in script
-    assert "--json number,body,author" in script
+    assert "--json number,body" in script
 
 
 def test_close_drift_step_jq_filters_on_automation_marker() -> None:
@@ -702,7 +712,6 @@ def test_close_drift_step_jq_filters_on_automation_marker() -> None:
     assert "contains(" in script
     assert "$DISPATCH_DRIFT_AUTO_MARKER" in script
     assert "$DISPATCH_DRIFT_LEGACY_MARKER" in script
-    assert "$DISPATCH_DRIFT_AUTO_AUTHOR" in script
 
 
 def test_job_declares_dispatch_drift_label_once_for_both_consumers() -> None:
@@ -716,10 +725,6 @@ def test_job_declares_dispatch_drift_label_once_for_both_consumers() -> None:
 
 def test_job_declares_dispatch_drift_marker_once_for_both_consumers() -> None:
     assert (
-        _workflow()["jobs"][JOB]["env"]["DISPATCH_DRIFT_AUTO_AUTHOR"]
-        == DISPATCH_DRIFT_AUTO_AUTHOR
-    )
-    assert (
         _workflow()["jobs"][JOB]["env"]["DISPATCH_DRIFT_AUTO_MARKER"]
         == DISPATCH_DRIFT_AUTO_MARKER
     )
@@ -731,7 +736,6 @@ def test_job_declares_dispatch_drift_marker_once_for_both_consumers() -> None:
     assert "$DISPATCH_DRIFT_LEGACY_MARKER" in _script(CLOSE_DRIFT_STEP_ID)
     assert "$DISPATCH_DRIFT_AUTO_MARKER" in _dry_run_summary_script()
     assert "$DISPATCH_DRIFT_LEGACY_MARKER" in _dry_run_summary_script()
-    assert "$DISPATCH_DRIFT_AUTO_AUTHOR" in _dry_run_summary_script()
 
 
 def test_close_drift_step_has_continue_on_error() -> None:
@@ -791,7 +795,6 @@ def _run_dry_run_summary(
         env={
             **_clean_git_env(),
             "DISPATCH_DRIFT_LABEL": DRIFT_LABEL,
-            "DISPATCH_DRIFT_AUTO_AUTHOR": DISPATCH_DRIFT_AUTO_AUTHOR,
             "DISPATCH_DRIFT_AUTO_MARKER": DISPATCH_DRIFT_AUTO_MARKER,
             "DISPATCH_DRIFT_LEGACY_MARKER": DISPATCH_DRIFT_LEGACY_MARKER,
             "PATH": f"{fake_bin}:/usr/bin:/bin",

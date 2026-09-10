@@ -38,10 +38,6 @@ def _existing_issue_step() -> dict[str, Any]:
 
 def test_job_env_declares_dispatch_drift_marker() -> None:
     assert (
-        _workflow()["jobs"][JOB]["env"]["DISPATCH_DRIFT_AUTO_AUTHOR"]
-        == DISPATCH_DRIFT_AUTO_AUTHOR
-    )
-    assert (
         _workflow()["jobs"][JOB]["env"]["DISPATCH_DRIFT_AUTO_MARKER"]
         == DISPATCH_DRIFT_AUTO_MARKER
     )
@@ -57,9 +53,9 @@ def test_open_issue_step_body_references_marker_env_var() -> None:
 
 def test_existing_issue_step_filters_by_provenance() -> None:
     script = _existing_issue_step()["run"]
+    assert "--app github-actions" in script
     assert "--limit 1000" in script
-    assert "--json number,body,author" in script
-    assert "$DISPATCH_DRIFT_AUTO_AUTHOR" in script
+    assert "--json number,body" in script
     assert "$DISPATCH_DRIFT_AUTO_MARKER" in script
     assert "$DISPATCH_DRIFT_LEGACY_MARKER" in script
 
@@ -100,19 +96,30 @@ def _stub_gh_issue_list(tmp_path: Path, *, list_json: str) -> Path:
         "  exit 2\n"
         "fi\n"
         "jq_filter=\n"
+        "app_filter=\n"
         "previous=\n"
         'for arg in "$@"; do\n'
+        '  if [ "$previous" = "--app" ]; then\n'
+        '    app_filter="$arg"\n'
+        "  fi\n"
         '  if [ "$previous" = "--jq" ]; then\n'
         '    jq_filter="$arg"\n'
         "    break\n"
         "  fi\n"
         '  previous="$arg"\n'
         "done\n"
+        'if [ "$app_filter" != "github-actions" ]; then\n'
+        '  echo "missing --app github-actions filter" >&2\n'
+        "  exit 2\n"
+        "fi\n"
         'if [ -z "$jq_filter" ]; then\n'
         '  echo "missing --jq filter" >&2\n'
         "  exit 2\n"
         "fi\n"
-        f"/usr/bin/jq -r \"$jq_filter\" <<'GH_LIST_EOF'\n{list_json}\nGH_LIST_EOF\n"
+        "/usr/bin/jq "
+        f"'map(select(.author.login == \"{DISPATCH_DRIFT_AUTO_AUTHOR}\"))' "
+        "<<'GH_LIST_EOF' | /usr/bin/jq -r \"$jq_filter\"\n"
+        f"{list_json}\nGH_LIST_EOF\n"
     )
     fake_gh.chmod(0o755)
     return fake_bin
@@ -174,7 +181,6 @@ def test_existing_issue_step_ignores_human_labels_and_keeps_legacy_guard_issue(
         env={
             **_clean_git_env(),
             "GITHUB_OUTPUT": str(output_file),
-            "DISPATCH_DRIFT_AUTO_AUTHOR": DISPATCH_DRIFT_AUTO_AUTHOR,
             "DISPATCH_DRIFT_AUTO_MARKER": DISPATCH_DRIFT_AUTO_MARKER,
             "DISPATCH_DRIFT_LEGACY_MARKER": DISPATCH_DRIFT_LEGACY_MARKER,
             "PATH": f"{fake_bin}:/usr/bin:/bin",
