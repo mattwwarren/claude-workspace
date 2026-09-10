@@ -15,6 +15,7 @@ JOB = "check-drift"
 OPEN_ISSUE_STEP_NAME = "Open dispatch-drift issue"
 EXISTING_ISSUE_STEP_NAME = "Check for existing open dispatch-drift issue"
 DISPATCH_DRIFT_AUTO_MARKER = "<!-- dispatch-guard-auto -->"
+DISPATCH_DRIFT_AUTO_AUTHOR = "app/github-actions"
 DISPATCH_DRIFT_LEGACY_MARKER = (
     "Opened automatically by the [Dispatch Guard workflow]"
     "(/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."
@@ -37,6 +38,10 @@ def _existing_issue_step() -> dict[str, Any]:
 
 def test_job_env_declares_dispatch_drift_marker() -> None:
     assert (
+        _workflow()["jobs"][JOB]["env"]["DISPATCH_DRIFT_AUTO_AUTHOR"]
+        == DISPATCH_DRIFT_AUTO_AUTHOR
+    )
+    assert (
         _workflow()["jobs"][JOB]["env"]["DISPATCH_DRIFT_AUTO_MARKER"]
         == DISPATCH_DRIFT_AUTO_MARKER
     )
@@ -52,7 +57,9 @@ def test_open_issue_step_body_references_marker_env_var() -> None:
 
 def test_existing_issue_step_filters_by_provenance() -> None:
     script = _existing_issue_step()["run"]
-    assert "--json number,body" in script
+    assert "--limit 1000" in script
+    assert "--json number,body,author" in script
+    assert "$DISPATCH_DRIFT_AUTO_AUTHOR" in script
     assert "$DISPATCH_DRIFT_AUTO_MARKER" in script
     assert "$DISPATCH_DRIFT_LEGACY_MARKER" in script
 
@@ -141,9 +148,21 @@ def test_existing_issue_step_ignores_human_labels_and_keeps_legacy_guard_issue(
         tmp_path,
         list_json=json.dumps(
             [
-                {"number": 101, "body": f"{DISPATCH_DRIFT_AUTO_MARKER}\n"},
-                {"number": 202, "body": "Human-applied dispatch-drift label\n"},
-                {"number": 303, "body": DISPATCH_DRIFT_LEGACY_MARKER},
+                {
+                    "number": 101,
+                    "body": f"{DISPATCH_DRIFT_AUTO_MARKER}\n",
+                    "author": {"login": DISPATCH_DRIFT_AUTO_AUTHOR},
+                },
+                {
+                    "number": 202,
+                    "body": f"Human-applied label\n{DISPATCH_DRIFT_AUTO_MARKER}",
+                    "author": {"login": "human-user"},
+                },
+                {
+                    "number": 303,
+                    "body": DISPATCH_DRIFT_LEGACY_MARKER,
+                    "author": {"login": DISPATCH_DRIFT_AUTO_AUTHOR},
+                },
             ]
         ),
     )
@@ -155,6 +174,7 @@ def test_existing_issue_step_ignores_human_labels_and_keeps_legacy_guard_issue(
         env={
             **_clean_git_env(),
             "GITHUB_OUTPUT": str(output_file),
+            "DISPATCH_DRIFT_AUTO_AUTHOR": DISPATCH_DRIFT_AUTO_AUTHOR,
             "DISPATCH_DRIFT_AUTO_MARKER": DISPATCH_DRIFT_AUTO_MARKER,
             "DISPATCH_DRIFT_LEGACY_MARKER": DISPATCH_DRIFT_LEGACY_MARKER,
             "PATH": f"{fake_bin}:/usr/bin:/bin",

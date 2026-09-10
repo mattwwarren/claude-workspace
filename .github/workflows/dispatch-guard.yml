@@ -16,6 +16,7 @@ jobs:
       contents: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DISPATCH_DRIFT_AUTO_AUTHOR: "app/github-actions"
       DISPATCH_DRIFT_AUTO_MARKER: "<!-- dispatch-guard-auto -->"
       # Recognize issues created before the provenance marker was introduced
       # so release closers can migrate them without trusting a bare
@@ -68,8 +69,9 @@ jobs:
           COUNT=$(gh issue list \
             --label dispatch-drift \
             --state open \
-            --json number,body \
-            --jq "[.[] | select(((.body // \"\") | contains(\"$DISPATCH_DRIFT_AUTO_MARKER\")) or ((.body // \"\") | contains(\"$DISPATCH_DRIFT_LEGACY_MARKER\")))] | length")
+            --limit 1000 \
+            --json number,body,author \
+            --jq "[.[] | select(.author.login == \"$DISPATCH_DRIFT_AUTO_AUTHOR\" and (((.body // \"\") | contains(\"$DISPATCH_DRIFT_AUTO_MARKER\")) or ((.body // \"\") | contains(\"$DISPATCH_DRIFT_LEGACY_MARKER\"))))] | length")
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
 
       - name: Open dispatch-drift issue

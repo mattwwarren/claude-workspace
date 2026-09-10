@@ -141,6 +141,8 @@ The `dispatch-drift` label is reserved for issues opened by
 `<!-- dispatch-guard-auto -->` provenance marker, which the automated
 `release-tag.yml` and manual-tag `release.yml` closers require; applying the
 label to a human-filed issue does not make it eligible for automatic closure.
+The closers also require the immutable `app/github-actions` issue author, so
+copying the marker into a human-authored issue cannot make it eligible.
 For backward compatibility, both closers also recognize the exact attribution
 written by the pre-marker guard so existing guard issues are not stranded.
 

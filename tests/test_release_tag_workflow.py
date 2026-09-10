@@ -509,6 +509,7 @@ CLOSE_COMMENT = (
 )
 NO_DRIFT_LINE = "No open dispatch-drift issues — WOULD close 0 issues"
 DISPATCH_DRIFT_AUTO_MARKER = "<!-- dispatch-guard-auto -->"
+DISPATCH_DRIFT_AUTO_AUTHOR = "app/github-actions"
 DISPATCH_DRIFT_LEGACY_MARKER = (
     "Opened automatically by the [Dispatch Guard workflow]"
     "(/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."
@@ -622,9 +623,21 @@ def test_close_drift_step_closes_marker_and_legacy_issues_not_human_labels(
 ) -> None:
     list_json = json.dumps(
         [
-            {"number": 101, "body": f"{DISPATCH_DRIFT_AUTO_MARKER}\n"},
-            {"number": 202, "body": "Human-applied dispatch-drift label\n"},
-            {"number": 303, "body": DISPATCH_DRIFT_LEGACY_MARKER},
+            {
+                "number": 101,
+                "body": f"{DISPATCH_DRIFT_AUTO_MARKER}\n",
+                "author": {"login": DISPATCH_DRIFT_AUTO_AUTHOR},
+            },
+            {
+                "number": 202,
+                "body": f"Human-applied label\n{DISPATCH_DRIFT_AUTO_MARKER}",
+                "author": {"login": "human-user"},
+            },
+            {
+                "number": 303,
+                "body": DISPATCH_DRIFT_LEGACY_MARKER,
+                "author": {"login": DISPATCH_DRIFT_AUTO_AUTHOR},
+            },
         ]
     )
     fake_bin = _stub_gh_issue_list(tmp_path, list_json=list_json)
@@ -633,6 +646,7 @@ def test_close_drift_step_closes_marker_and_legacy_issues_not_human_labels(
         tmp_path,
         extra_env={
             "RELEASE_TAG": CLOSE_RELEASE_TAG,
+            "DISPATCH_DRIFT_AUTO_AUTHOR": DISPATCH_DRIFT_AUTO_AUTHOR,
             "DISPATCH_DRIFT_AUTO_MARKER": DISPATCH_DRIFT_AUTO_MARKER,
             "DISPATCH_DRIFT_LEGACY_MARKER": DISPATCH_DRIFT_LEGACY_MARKER,
             "PATH": f"{fake_bin}:/usr/bin:/bin",
@@ -660,6 +674,7 @@ def test_close_drift_step_closes_nothing_when_no_drift_issues_open(
         tmp_path,
         extra_env={
             "RELEASE_TAG": CLOSE_RELEASE_TAG,
+            "DISPATCH_DRIFT_AUTO_AUTHOR": DISPATCH_DRIFT_AUTO_AUTHOR,
             "DISPATCH_DRIFT_AUTO_MARKER": DISPATCH_DRIFT_AUTO_MARKER,
             "DISPATCH_DRIFT_LEGACY_MARKER": DISPATCH_DRIFT_LEGACY_MARKER,
             "PATH": f"{fake_bin}:/usr/bin:/bin",
@@ -677,7 +692,9 @@ def test_close_drift_step_queries_only_open_drift_labelled_issues() -> None:
 
 
 def test_close_drift_step_queries_number_and_body_fields() -> None:
-    assert "--json number,body" in _script(CLOSE_DRIFT_STEP_ID)
+    script = _script(CLOSE_DRIFT_STEP_ID)
+    assert "--limit 1000" in script
+    assert "--json number,body,author" in script
 
 
 def test_close_drift_step_jq_filters_on_automation_marker() -> None:
@@ -685,6 +702,7 @@ def test_close_drift_step_jq_filters_on_automation_marker() -> None:
     assert "contains(" in script
     assert "$DISPATCH_DRIFT_AUTO_MARKER" in script
     assert "$DISPATCH_DRIFT_LEGACY_MARKER" in script
+    assert "$DISPATCH_DRIFT_AUTO_AUTHOR" in script
 
 
 def test_job_declares_dispatch_drift_label_once_for_both_consumers() -> None:
@@ -698,6 +716,10 @@ def test_job_declares_dispatch_drift_label_once_for_both_consumers() -> None:
 
 def test_job_declares_dispatch_drift_marker_once_for_both_consumers() -> None:
     assert (
+        _workflow()["jobs"][JOB]["env"]["DISPATCH_DRIFT_AUTO_AUTHOR"]
+        == DISPATCH_DRIFT_AUTO_AUTHOR
+    )
+    assert (
         _workflow()["jobs"][JOB]["env"]["DISPATCH_DRIFT_AUTO_MARKER"]
         == DISPATCH_DRIFT_AUTO_MARKER
     )
@@ -709,6 +731,7 @@ def test_job_declares_dispatch_drift_marker_once_for_both_consumers() -> None:
     assert "$DISPATCH_DRIFT_LEGACY_MARKER" in _script(CLOSE_DRIFT_STEP_ID)
     assert "$DISPATCH_DRIFT_AUTO_MARKER" in _dry_run_summary_script()
     assert "$DISPATCH_DRIFT_LEGACY_MARKER" in _dry_run_summary_script()
+    assert "$DISPATCH_DRIFT_AUTO_AUTHOR" in _dry_run_summary_script()
 
 
 def test_close_drift_step_has_continue_on_error() -> None:
@@ -768,6 +791,7 @@ def _run_dry_run_summary(
         env={
             **_clean_git_env(),
             "DISPATCH_DRIFT_LABEL": DRIFT_LABEL,
+            "DISPATCH_DRIFT_AUTO_AUTHOR": DISPATCH_DRIFT_AUTO_AUTHOR,
             "DISPATCH_DRIFT_AUTO_MARKER": DISPATCH_DRIFT_AUTO_MARKER,
             "DISPATCH_DRIFT_LEGACY_MARKER": DISPATCH_DRIFT_LEGACY_MARKER,
             "PATH": f"{fake_bin}:/usr/bin:/bin",
@@ -784,8 +808,16 @@ def test_dry_run_summary_reports_would_close_open_drift_issues(tmp_path: Path) -
         tmp_path,
         list_json=json.dumps(
             [
-                {"number": 101, "body": DISPATCH_DRIFT_AUTO_MARKER},
-                {"number": 202, "body": DISPATCH_DRIFT_LEGACY_MARKER},
+                {
+                    "number": 101,
+                    "body": DISPATCH_DRIFT_AUTO_MARKER,
+                    "author": {"login": DISPATCH_DRIFT_AUTO_AUTHOR},
+                },
+                {
+                    "number": 202,
+                    "body": DISPATCH_DRIFT_LEGACY_MARKER,
+                    "author": {"login": DISPATCH_DRIFT_AUTO_AUTHOR},
+                },
             ]
         ),
     )
@@ -810,8 +842,16 @@ def test_dry_run_summary_would_close_count_excludes_non_marker_issues(
         tmp_path,
         list_json=json.dumps(
             [
-                {"number": 101, "body": DISPATCH_DRIFT_AUTO_MARKER},
-                {"number": 202, "body": "Human-applied dispatch-drift label"},
+                {
+                    "number": 101,
+                    "body": DISPATCH_DRIFT_AUTO_MARKER,
+                    "author": {"login": DISPATCH_DRIFT_AUTO_AUTHOR},
+                },
+                {
+                    "number": 202,
+                    "body": f"Human-applied label\n{DISPATCH_DRIFT_AUTO_MARKER}",
+                    "author": {"login": "human-user"},
+                },
             ]
         ),
     )
@@ -840,8 +880,16 @@ def test_dry_run_summary_skips_drift_report_when_subject_did_not_match(
         tmp_path,
         list_json=json.dumps(
             [
-                {"number": 101, "body": DISPATCH_DRIFT_AUTO_MARKER},
-                {"number": 202, "body": DISPATCH_DRIFT_AUTO_MARKER},
+                {
+                    "number": 101,
+                    "body": DISPATCH_DRIFT_AUTO_MARKER,
+                    "author": {"login": DISPATCH_DRIFT_AUTO_AUTHOR},
+                },
+                {
+                    "number": 202,
+                    "body": DISPATCH_DRIFT_AUTO_MARKER,
+                    "author": {"login": DISPATCH_DRIFT_AUTO_AUTHOR},
+                },
             ]
         ),
     )
