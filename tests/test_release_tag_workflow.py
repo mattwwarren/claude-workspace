@@ -509,6 +509,10 @@ CLOSE_COMMENT = (
 )
 NO_DRIFT_LINE = "No open dispatch-drift issues — WOULD close 0 issues"
 DISPATCH_DRIFT_AUTO_MARKER = "<!-- dispatch-guard-auto -->"
+DISPATCH_DRIFT_LEGACY_MARKER = (
+    "Opened automatically by the [Dispatch Guard workflow]"
+    "(/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."
+)
 
 
 def _step_index_by_name(name: str) -> int:
@@ -613,13 +617,14 @@ def _close_calls(tmp_path: Path) -> list[str]:
     return log.read_text().splitlines() if log.exists() else []
 
 
-def test_close_drift_step_closes_only_marker_carrying_issues_with_release_citation(
+def test_close_drift_step_closes_marker_and_legacy_issues_not_human_labels(
     tmp_path: Path,
 ) -> None:
     list_json = json.dumps(
         [
             {"number": 101, "body": f"{DISPATCH_DRIFT_AUTO_MARKER}\n"},
             {"number": 202, "body": "Human-applied dispatch-drift label\n"},
+            {"number": 303, "body": DISPATCH_DRIFT_LEGACY_MARKER},
         ]
     )
     fake_bin = _stub_gh_issue_list(tmp_path, list_json=list_json)
@@ -629,12 +634,14 @@ def test_close_drift_step_closes_only_marker_carrying_issues_with_release_citati
         extra_env={
             "RELEASE_TAG": CLOSE_RELEASE_TAG,
             "DISPATCH_DRIFT_AUTO_MARKER": DISPATCH_DRIFT_AUTO_MARKER,
+            "DISPATCH_DRIFT_LEGACY_MARKER": DISPATCH_DRIFT_LEGACY_MARKER,
             "PATH": f"{fake_bin}:/usr/bin:/bin",
         },
     )
     assert result.returncode == 0, result.stderr
     assert _close_calls(tmp_path) == [
         f"issue close 101 --comment {CLOSE_COMMENT}",
+        f"issue close 303 --comment {CLOSE_COMMENT}",
     ]
 
 
@@ -653,6 +660,8 @@ def test_close_drift_step_closes_nothing_when_no_drift_issues_open(
         tmp_path,
         extra_env={
             "RELEASE_TAG": CLOSE_RELEASE_TAG,
+            "DISPATCH_DRIFT_AUTO_MARKER": DISPATCH_DRIFT_AUTO_MARKER,
+            "DISPATCH_DRIFT_LEGACY_MARKER": DISPATCH_DRIFT_LEGACY_MARKER,
             "PATH": f"{fake_bin}:/usr/bin:/bin",
         },
     )
@@ -675,6 +684,7 @@ def test_close_drift_step_jq_filters_on_automation_marker() -> None:
     script = _script(CLOSE_DRIFT_STEP_ID)
     assert "contains(" in script
     assert "$DISPATCH_DRIFT_AUTO_MARKER" in script
+    assert "$DISPATCH_DRIFT_LEGACY_MARKER" in script
 
 
 def test_job_declares_dispatch_drift_label_once_for_both_consumers() -> None:
@@ -691,8 +701,14 @@ def test_job_declares_dispatch_drift_marker_once_for_both_consumers() -> None:
         _workflow()["jobs"][JOB]["env"]["DISPATCH_DRIFT_AUTO_MARKER"]
         == DISPATCH_DRIFT_AUTO_MARKER
     )
+    assert (
+        _workflow()["jobs"][JOB]["env"]["DISPATCH_DRIFT_LEGACY_MARKER"]
+        == DISPATCH_DRIFT_LEGACY_MARKER
+    )
     assert "$DISPATCH_DRIFT_AUTO_MARKER" in _script(CLOSE_DRIFT_STEP_ID)
+    assert "$DISPATCH_DRIFT_LEGACY_MARKER" in _script(CLOSE_DRIFT_STEP_ID)
     assert "$DISPATCH_DRIFT_AUTO_MARKER" in _dry_run_summary_script()
+    assert "$DISPATCH_DRIFT_LEGACY_MARKER" in _dry_run_summary_script()
 
 
 def test_close_drift_step_has_continue_on_error() -> None:
@@ -753,6 +769,7 @@ def _run_dry_run_summary(
             **_clean_git_env(),
             "DISPATCH_DRIFT_LABEL": DRIFT_LABEL,
             "DISPATCH_DRIFT_AUTO_MARKER": DISPATCH_DRIFT_AUTO_MARKER,
+            "DISPATCH_DRIFT_LEGACY_MARKER": DISPATCH_DRIFT_LEGACY_MARKER,
             "PATH": f"{fake_bin}:/usr/bin:/bin",
         },
         capture_output=True,
@@ -768,7 +785,7 @@ def test_dry_run_summary_reports_would_close_open_drift_issues(tmp_path: Path) -
         list_json=json.dumps(
             [
                 {"number": 101, "body": DISPATCH_DRIFT_AUTO_MARKER},
-                {"number": 202, "body": DISPATCH_DRIFT_AUTO_MARKER},
+                {"number": 202, "body": DISPATCH_DRIFT_LEGACY_MARKER},
             ]
         ),
     )

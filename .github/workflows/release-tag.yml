@@ -60,6 +60,9 @@ jobs:
       # the automated release closer (#2151). The dispatch guard stamps this
       # same marker into issues it creates.
       DISPATCH_DRIFT_AUTO_MARKER: "<!-- dispatch-guard-auto -->"
+      # Keep pre-marker guard issues eligible while the provenance marker is
+      # being introduced by recognizing the exact attribution the old guard wrote.
+      DISPATCH_DRIFT_LEGACY_MARKER: "Opened automatically by the [Dispatch Guard workflow](/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
@@ -287,7 +290,7 @@ jobs:
             --label "$DISPATCH_DRIFT_LABEL" \
             --state open \
             --json number,body \
-            --jq ".[] | select((.body // \"\") | contains(\"$DISPATCH_DRIFT_AUTO_MARKER\")) | .number" | \
+            --jq ".[] | select(((.body // \"\") | contains(\"$DISPATCH_DRIFT_AUTO_MARKER\")) or ((.body // \"\") | contains(\"$DISPATCH_DRIFT_LEGACY_MARKER\"))) | .number" | \
           while read -r NUM; do
             gh issue close "$NUM" \
               --comment "Closed by release ${RELEASE_TAG} — dispatch/reconcile/spawn changes are now shipped."
@@ -325,7 +328,7 @@ jobs:
             # close`. The query is repo-global (not scoped to this ref), so a
             # close reachable from the dry-run arm would sweep every open
             # drift issue on a run contracted to change nothing.
-            DRIFT_ISSUES=$(gh issue list --label "$DISPATCH_DRIFT_LABEL" --state open --json number,body --jq ".[] | select((.body // \"\") | contains(\"$DISPATCH_DRIFT_AUTO_MARKER\")) | .number")
+            DRIFT_ISSUES=$(gh issue list --label "$DISPATCH_DRIFT_LABEL" --state open --json number,body --jq ".[] | select(((.body // \"\") | contains(\"$DISPATCH_DRIFT_AUTO_MARKER\")) or ((.body // \"\") | contains(\"$DISPATCH_DRIFT_LEGACY_MARKER\"))) | .number")
             if [ -z "$DRIFT_ISSUES" ]; then
               echo "No open dispatch-drift issues — WOULD close 0 issues"
             else

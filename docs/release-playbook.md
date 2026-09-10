@@ -139,8 +139,10 @@ reason the commit subject won't match and you've confirmed that's fine.
 The `dispatch-drift` label is reserved for issues opened by
 `.github/workflows/dispatch-guard.yml`. Those issues carry the
 `<!-- dispatch-guard-auto -->` provenance marker, which the automated
-`release-tag.yml` closer requires; applying the label to a human-filed issue
-does not make it eligible for automatic closure.
+`release-tag.yml` and manual-tag `release.yml` closers require; applying the
+label to a human-filed issue does not make it eligible for automatic closure.
+For backward compatibility, both closers also recognize the exact attribution
+written by the pre-marker guard so existing guard issues are not stranded.
 
 ### Keeping `uv.lock` in sync
 
