@@ -883,3 +883,117 @@ def test_settled_item_cannot_yield_second_resolution_evidence_candidate() -> Non
         "prior round is not among" in window
     )
     assert "can never mint a second `resolution_evidence` candidate" in window
+
+
+# ---------------------------------------------------------------------------
+# #2154 -- draft-fold + round-cap reset + resolution_consumed emission scope
+# ---------------------------------------------------------------------------
+
+LAST_EVALUATED_MARKER = "plan-stage-last-evaluated"
+DELTA_RESET_ANCHOR = "**Tracker-state-delta reset (#2154).**"
+FINGERPRINT_READ_ANCHOR = "**Fingerprint read (#2154).**"
+BODY_FOLD_ANCHOR = "**Body-consistency fold (resumed rounds only, #2154).**"
+ELIGIBLE_CARRIER_PHRASE = "eligible carrier for `resolution_consumed`"
+
+
+def test_cap_check_blocker_details_names_comment_id_timestamp_and_updated_at() -> None:
+    """Cap-exhaustion blocker.details names the fingerprint evaluated (closes #2160)."""
+    cap = _cap_check_block()
+    assert "naming the still-open item(s) verbatim" in cap
+    assert "comment id/timestamp" in cap
+    assert "`updated_at`" in cap
+    assert "#2160" in cap
+
+
+def test_cap_check_documents_tracker_state_delta_reset() -> None:
+    """The cap check resets N on a tracker-state delta, quoting the #1653 vocabulary."""
+    cap = _cap_check_block()
+    assert DELTA_RESET_ANCHOR in cap
+    window = _after(cap, DELTA_RESET_ANCHOR, span=1200)
+    assert "a new operator comment, a body edit, or an approval reply" in window
+    assert LAST_EVALUATED_MARKER in window
+    assert "reset `N` to 0" in window
+
+
+def test_last_evaluated_marker_grammar_documented() -> None:
+    """The new plan-stage-last-evaluated marker has a documented closed format."""
+    cap = _cap_check_block()
+    assert f"<!-- {LAST_EVALUATED_MARKER}:" in cap
+    assert "updated_at" in cap
+    assert "newest-comment-id" in cap
+    assert "plan_approved_at" in cap
+
+
+def test_draft_persistence_rule_preserves_fingerprint_line() -> None:
+    """The draft-persistence rule keeps the new fingerprint line across rewrites."""
+    section = _step1c_headless_section()
+    window = _after(section, "**Draft-persistence rule", span=1600)
+    assert f"`<!-- {LAST_EVALUATED_MARKER}: ... -->` fingerprint" in window
+    assert "never dropped on a rewrite" in window
+
+
+def test_round_counter_definition_cross_references_delta_reset() -> None:
+    """The round-counter definition names the new delta-reset mechanism (#2154)."""
+    section = _step1c_section()
+    window = _after(
+        section, "**Round counter (`plan-stage-scan-round`, #1683).**", span=700
+    )
+    assert "resets `N` to 0 on a detected tracker-state delta (#2154)" in window
+
+
+def test_step1c0_gains_fingerprint_read_step_zero() -> None:
+    """Step 1c.0 reads the persisted fingerprint before step 1's park-comment lookup."""
+    block = _step1c0_block()
+    assert FINGERPRINT_READ_ANCHOR in block
+    assert LAST_EVALUATED_MARKER in block
+    idx_zero = block.index(FINGERPRINT_READ_ANCHOR)
+    idx_one = block.index(
+        "Locate the newest `## Pending Verification Scan` comment"
+    )
+    assert idx_zero < idx_one
+
+
+def test_step1c0_gains_body_consistency_fold_step() -> None:
+    """A new body-consistency fold step exists, gated and independent-axis/capped-1."""
+    block = _step1c0_block()
+    assert BODY_FOLD_ANCHOR in block
+    window = _after(block, BODY_FOLD_ANCHOR, span=1700)
+    assert "settled ≥1 item in this round's own transcription pass" in window
+    assert "### Advisory plan-review findings" in window
+    assert "persisting MUST_FIX" in window
+    assert "independent axis" in window
+    assert "Capped at **1 attempt** per round." in window
+    assert "## Files Modified" in window
+    assert "## Touch-point Contract" in window
+    assert "forbidding new scope" in window
+    assert "## Ambiguities" in window
+
+
+def test_body_consistency_fold_runs_before_fresh_scan() -> None:
+    """The fold step is explicitly ordered before Step 1c's step 1 (fresh scan)."""
+    block = _step1c0_block()
+    window = _after(block, BODY_FOLD_ANCHOR, span=1700)
+    assert "Runs BEFORE step 1 above" in window
+
+
+def test_stub_and_cap_checks_are_eligible_resolution_consumed_carriers() -> None:
+    """Both pre-branch hard-exits are named as eligible resolution_consumed carriers.
+
+    Distinct wording from the three Step 4c EXIT bullets' own clause (#2154) --
+    reusing that literal clause here would break
+    test_step_4c_exit_bullets_state_consumed_or_omit_rule's exact count==3
+    assertion, since the stub/cap checks live in the same headless section.
+    """
+    stub = _stub_check_block()
+    cap = _cap_check_block()
+    for block in (stub, cap):
+        assert ELIGIBLE_CARRIER_PHRASE in block
+        assert "Stage 1 Completion emission rule" in block
+
+    section = _step1c_headless_section()
+    exit_clause = (
+        "If this round settled ≥1 item via Step 1c.0 step 5, include "
+        "`resolution_consumed: true` and `resolution_evidence`; otherwise omit "
+        "both keys."
+    )
+    assert section.count(exit_clause) == 3
