@@ -941,7 +941,11 @@ def test_last_evaluated_marker_grammar_documented() -> None:
     cap = _cap_check_block()
     assert f"<!-- {LAST_EVALUATED_MARKER}: operator_comment=" in cap
     assert "body_sha=" in cap
-    for removed in ("newest-comment-id", "newest-comment-timestamp", "plan_approved_at"):
+    for removed in (
+        "newest-comment-id",
+        "newest-comment-timestamp",
+        "plan_approved_at",
+    ):
         assert removed not in cap
 
 
@@ -1063,7 +1067,11 @@ def test_fingerprint_read_cites_provenance_rule_by_name_only() -> None:
     window = _after(block, FINGERPRINT_READ_ANCHOR, span=900)
     assert "Comment provenance rule" in window
     assert ".claude/commands/auto-dev.md" in window
-    for restated in ("cw-agent-authored", "pipeline fixed header", "plan-of-record post"):
+    for restated in (
+        "cw-agent-authored",
+        "pipeline fixed header",
+        "plan-of-record post",
+    ):
         assert restated not in window
 
 
@@ -1079,7 +1087,11 @@ def test_cap_check_delta_reset_cites_provenance_rule_by_name_only() -> None:
     window = _after(cap, DELTA_RESET_ANCHOR, span=1900)
     assert "Comment provenance rule" in window
     assert ".claude/commands/auto-dev.md" in window
-    for restated in ("cw-agent-authored", "pipeline fixed header", "plan-of-record post"):
+    for restated in (
+        "cw-agent-authored",
+        "pipeline fixed header",
+        "plan-of-record post",
+    ):
         assert restated not in window
 
 
@@ -1229,7 +1241,7 @@ def test_step1b_checkpoint_cites_draft_rewrite_rule() -> None:
     assert "draft-rewrite rule" in window
 
 
-def test_step1f4_checkpoint_cites_draft_rewrite_rule_and_preserves_bookkeeping() -> None:
+def test_step1f4_checkpoint_cites_draft_rewrite_rule() -> None:
     """A Step 1f.4-style rewrite keeps all three bookkeeping lines (required test)."""
     section = _cmd("auto-dev-plan.md")
     window = _after(
