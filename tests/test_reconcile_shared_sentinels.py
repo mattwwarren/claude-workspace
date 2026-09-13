@@ -2202,20 +2202,6 @@ def test_dirty_worktree_push_fires_once_not_per_tick_completed_silent(
     )
 
 
-def test_compute_worktree_dirty_returns_false_when_get_client_raises(
-    tmp_config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """_compute_worktree_dirty returns False when get_client raises (fail-safe)."""
-    from cw.reconcile import _compute_worktree_dirty
-
-    monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
-        lambda _name: (_ for _ in ()).throw(ValueError("no such client")),
-    )
-    assert _compute_worktree_dirty("missing-client", "some-branch") is False
-
-
 def test_worktree_dirty_by_path_passes_actual_wt_path_not_rederived_path(
     tmp_config_dir: Path,
     tmp_path: Path,

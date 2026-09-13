@@ -83,7 +83,6 @@ from cw.worktree import (
     reconcile_result_scope,
     resolve_scope_guard_default_branch,
     unsaved_work_reason,
-    worktree_has_unsaved_work,
 )
 
 if TYPE_CHECKING:
@@ -1582,22 +1581,6 @@ def _apply_salvaged_completion(
     return outcome
 
 
-def _compute_worktree_dirty(client_name: str, branch: str | None) -> bool:
-    """Return True when the worktree has unpushed commits or uncommitted changes.
-
-    Fail-safe: returns False when branch is None or empty, the client config is
-    absent, or any other error occurs — mirrors _cleanup_timed_out_worktree's
-    pattern.
-    """
-    if not branch:
-        return False
-    try:
-        client = get_client(client_name)
-        return worktree_has_unsaved_work(client, branch)
-    except Exception:  # noqa: BLE001 — fail-safe on any error (client lookup or git); mirrors _cleanup_timed_out_worktree
-        return False
-
-
 def _worktree_dirty_reason_by_path(
     client_name: str, worktree_path: Path | None
 ) -> str | None:
@@ -1605,12 +1588,12 @@ def _worktree_dirty_reason_by_path(
 
     Uses worktree_path (always set on DAEMON sessions) instead of
     session.branch (always None on DAEMON sessions, making the branch-based
-    check a production no-op). Mirror _compute_worktree_dirty's fail-safe
-    *direction*: a None/empty worktree_path, an unresolvable checked-out
-    branch, or any other error all return None (not dirty) — the opposite
-    direction from unsaved_work_reason's own inner fail-safe (which leans
-    toward "has unsaved work" on a git-level error), preserved here
-    unchanged since the three direct unit tests on this outer wrapper pin it.
+    check a production no-op). Fail-safe *direction*: a None/empty
+    worktree_path, an unresolvable checked-out branch, or any other error all
+    return None (not dirty) — the opposite direction from
+    unsaved_work_reason's own inner fail-safe (which leans toward "has
+    unsaved work" on a git-level error), preserved here unchanged since the
+    three direct unit tests on this outer wrapper pin it.
     """
     if not worktree_path:
         return None
@@ -1620,7 +1603,7 @@ def _worktree_dirty_reason_by_path(
             return None
         client = get_client(client_name)
         return unsaved_work_reason(client, branch, wt_path=worktree_path)
-    except Exception:  # noqa: BLE001 — fail-safe on any error; mirrors _compute_worktree_dirty
+    except Exception:  # noqa: BLE001 — fail-safe on any error (client lookup or git)
         return None
 
 
