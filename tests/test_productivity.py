@@ -176,6 +176,31 @@ class TestExtractClaimEvidence:
 
         assert extract_claim_evidence(dumped).resolution_consumed is True
 
+    def test_blocked_status_with_resolution_consumed_is_credited(self) -> None:
+        """#2154: a plan-stage cap/stub hard-exit still credits a settled round.
+
+        The extractor reads ``resolution_consumed``/``resolution_evidence`` off
+        the payload with no status branch at all, so a ``status: "blocked"``
+        sentinel from the cap-check hard-exit (``blocker.reason:
+        "ambiguity_scan_unconverged"``) is credited exactly like a
+        ``status: "ambiguities_pending_resolution"`` pause. This locks in that
+        the consumer needs zero changes for #2154 — the emission-scope
+        broadening is markdown-only.
+        """
+        payload: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {
+                "stage": "stage1_plan",
+                "reason": "ambiguity_scan_unconverged",
+                "details": "A2 still open after 2 rounds",
+            },
+            "resolution_consumed": True,
+            "resolution_evidence": {"comment_id": "1", "items": ["A2"]},
+        }
+        assert extract_claim_evidence(payload) == ClaimEvidence(
+            had_commits=False, had_findings=False, resolution_consumed=True
+        )
+
 
 class TestIsUnproductive:
     """OR-combination truth table across the three evidence fields."""

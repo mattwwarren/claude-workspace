@@ -2482,6 +2482,61 @@ class TestResolutionConsumedField:
         assert result.resolution_consumed is False
         assert result.resolution_evidence is None
 
+    def test_blocked_status_with_resolution_consumed_round_trips(self) -> None:
+        """#2154: schema-level twin of productivity's blocked-status test.
+
+        ``status="blocked"`` (the plan-stage cap/stub-check hard-exit shape)
+        round-trips ``resolution_consumed=True`` with valid ``resolution_evidence``
+        without a validation error — proving the schema needs zero changes for
+        the emission-scope broadening, which is markdown-only.
+        """
+        payload: dict[str, object] = {
+            "schema_version": 4,
+            "ticket_id": "T-1",
+            "status": "blocked",
+            "stage_reached": "stage1_plan",
+            "scope": {
+                "tier": None,
+                "files": 3,
+                "lines_estimate": 40,
+                "lines_actual": None,
+                "forbidden_touched": False,
+            },
+            "plan_source": "generated",
+            "branch": None,
+            "worktree_path": "/tmp/wt",
+            "fork_point_sha": None,
+            "commits": [],
+            "pr": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": None,
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": {
+                "stage": "stage1_plan",
+                "reason": "ambiguity_scan_unconverged",
+                "details": "A2 still open after 2 rounds",
+                "retry_eligible": True,
+            },
+            "next_actions": [],
+            "resolution_consumed": True,
+            "resolution_evidence": {"comment_id": "123", "items": ["A2"]},
+        }
+        result = AutoDevResult.model_validate(payload)
+        assert result.resolution_consumed is True
+        assert result.resolution_evidence == {"comment_id": "123", "items": ["A2"]}
+
+        dumped = result.model_dump(mode="json")
+        restored = AutoDevResult.model_validate(dumped)
+        assert restored.resolution_consumed is True
+        assert restored.resolution_evidence == {"comment_id": "123", "items": ["A2"]}
+
 
 # ---------------------------------------------------------------------------
 # Issue #430 — coerce legitimate-but-sparse sentinels
