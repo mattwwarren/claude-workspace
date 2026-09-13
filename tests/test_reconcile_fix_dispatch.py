@@ -530,6 +530,113 @@ def test_run_fix_dispatch_spawns_real_fix_session_through_sessions_lock(
     assert read_events(event_types=[OrchestratorEventType.STAGE_ERRORED]) == []
 
 
+def test_dispatch_fix_agent_falls_back_to_parent_none_when_unresolvable(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unresolvable ``requested_by_session_id`` spawns anyway with parent=None.
+
+    Regression for #2149: pre-fix, ``dispatch_fix_agent`` -> ``spawn_create_impl``
+    raised ``CwError: Parent session not found`` for ANY id that wasn't an exact
+    hot cw id/name match -- including a same-cycle review session whose row had
+    aged into an archive, or (unreproducibly in-repo, per the ticket) a claude
+    session id. This exercises the fully unresolvable case: no session anywhere
+    (hot or archived) matches. The fix session must still spawn, carrying a
+    friction note in its prompt and a log-only fallback -- no STAGE_ERRORED.
+    """
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2023"
+    _seed_origin(client, branch)
+    monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: mock_native_daemon)
+    monkeypatch.setattr(
+        fix_dispatch, "load_effective_clients", lambda: {_CLIENT: client}
+    )
+
+    task = _make_ticket_task(
+        ticket_id="2023",
+        client=_CLIENT,
+        status=QueueItemStatus.RUNNING,
+    )
+    task.pending_fix_dispatch = _pending(
+        label="fix-2023", requested_by_session_id="totally-unresolvable-id"
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    reconcile()
+
+    fix_sessions = [s for s in load_state().sessions if s.purpose == SessionPurpose.FIX]
+    assert len(fix_sessions) == 1
+    assert fix_sessions[0].parent_session_id is None
+    updated = _only_task()
+    assert updated.pending_fix_dispatch is None
+    assert updated.fix_dispatch_session_id == fix_sessions[0].id
+    assert updated.status == QueueItemStatus.RUNNING
+    assert read_events(event_types=[OrchestratorEventType.STAGE_ERRORED]) == []
+
+    prompt_sent = mock_native_daemon.spawn_calls[-1][1]
+    assert "could not be resolved" in prompt_sent
+
+
+def test_dispatch_fix_agent_resolves_parent_via_claude_session_id_end_to_end(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``requested_by_session_id`` holding a claude_session_id still resolves.
+
+    Mirrors ``test_run_fix_dispatch_spawns_real_fix_session_through_sessions_lock``
+    but the parent session's cw id deliberately differs from the claude id
+    stamped into ``requested_by_session_id`` -- the exact id-space mismatch
+    named in #2149.
+    """
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2024"
+    _seed_origin(client, branch)
+    monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: mock_native_daemon)
+    monkeypatch.setattr(
+        fix_dispatch, "load_effective_clients", lambda: {_CLIENT: client}
+    )
+
+    claude_id = "1a2b3c4d-5e6f-7890-abcd-ef0123456789"
+    save_state(
+        CwState(
+            sessions=[
+                _make_daemon_session(
+                    id="review-cw1",
+                    name=f"{_CLIENT}/review/2024",
+                    client=_CLIENT,
+                    status=SessionStatus.COMPLETED,
+                    claude_session_id=claude_id,
+                )
+            ]
+        )
+    )
+    task = _make_ticket_task(
+        ticket_id="2024",
+        client=_CLIENT,
+        status=QueueItemStatus.RUNNING,
+    )
+    task.pending_fix_dispatch = _pending(
+        label="fix-2024", requested_by_session_id=claude_id
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    reconcile()
+
+    fix_sessions = [s for s in load_state().sessions if s.purpose == SessionPurpose.FIX]
+    assert len(fix_sessions) == 1
+    assert fix_sessions[0].parent_session_id == "review-cw1"
+    updated = _only_task()
+    assert updated.pending_fix_dispatch is None
+    assert updated.fix_dispatch_session_id == fix_sessions[0].id
+    assert read_events(event_types=[OrchestratorEventType.STAGE_ERRORED]) == []
+
+
 # --- per-tick spawn cap (#2064) -----------------------------------------------
 
 
