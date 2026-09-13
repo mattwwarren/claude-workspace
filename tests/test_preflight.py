@@ -821,3 +821,122 @@ class TestMainRepoResolution:
         assert check["passed"] is False
         assert check["severity"] == "hard"
         assert "clients.yaml" in check["detail"]
+
+    def test_unreadable_clients_yaml_hard_fails_with_structured_json(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An unreadable clients.yaml (OSError from read_text) must not crash
+        main() (round-2 operator resolution, #2158)."""
+        pf = _load()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n  acme:\n    workspace_path: /tmp/acme\n", encoding="utf-8"
+        )
+        original_read_text = Path.read_text
+
+        def _raise_permission_error(
+            self: Path, *args: object, **kwargs: object
+        ) -> str:
+            if self.name == "clients.yaml":
+                msg = "Permission denied"
+                raise PermissionError(msg)
+            return original_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", _raise_permission_error)
+        monkeypatch.setattr(
+            sys, "argv", ["preflight.py", "--ticket-id", "1", "--client", "acme"]
+        )
+
+        rc = pf.main()
+        report = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert report["ok"] is False
+        assert len(report["checks"]) == 1
+        check = report["checks"][0]
+        assert check["name"] == "client_repo_resolved"
+        assert check["passed"] is False
+        assert check["severity"] == "hard"
+        assert "clients.yaml" in check["detail"]
+
+    def test_non_utf8_clients_yaml_hard_fails_with_structured_json(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A non-UTF-8 clients.yaml (UnicodeDecodeError from read_text) must
+        not crash main() (round-2 operator resolution, #2158)."""
+        pf = _load()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n  acme:\n    workspace_path: /tmp/acme\n", encoding="utf-8"
+        )
+        original_read_text = Path.read_text
+
+        def _raise_unicode_decode_error(
+            self: Path, *args: object, **kwargs: object
+        ) -> str:
+            if self.name == "clients.yaml":
+                raise UnicodeDecodeError(
+                    "utf-8", b"\xff\xfe", 0, 1, "invalid start byte"
+                )
+            return original_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", _raise_unicode_decode_error)
+        monkeypatch.setattr(
+            sys, "argv", ["preflight.py", "--ticket-id", "1", "--client", "acme"]
+        )
+
+        rc = pf.main()
+        report = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert report["ok"] is False
+        assert len(report["checks"]) == 1
+        check = report["checks"][0]
+        assert check["name"] == "client_repo_resolved"
+        assert check["passed"] is False
+        assert check["severity"] == "hard"
+        assert "clients.yaml" in check["detail"]
+
+    def test_empty_clients_yaml_hard_fails_without_fallback(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An existing, empty clients.yaml with --client X must fail loudly,
+        never silently fall back to _resolve_repo_root() (round-2 operator
+        resolution, #2158)."""
+        pf = _load()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text("", encoding="utf-8")
+
+        def _fail_if_called() -> Path:
+            msg = "_resolve_repo_root() must not be called for a populated file"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(pf, "_resolve_repo_root", _fail_if_called)
+        monkeypatch.setattr(
+            sys, "argv", ["preflight.py", "--ticket-id", "1", "--client", "acme"]
+        )
+
+        rc = pf.main()
+        report = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert report["ok"] is False
+        assert len(report["checks"]) == 1
+        check = report["checks"][0]
+        assert check["name"] == "client_repo_resolved"
+        assert check["passed"] is False
+        assert check["severity"] == "hard"
+        assert "clients.yaml" in check["detail"]
+        assert "acme" in check["detail"]
