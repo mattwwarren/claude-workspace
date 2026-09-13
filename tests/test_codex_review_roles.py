@@ -21,6 +21,7 @@ from cw.codex_review import (
     _codex_scratch_dir,
     _is_audit_flag_rejection,
     _is_model_capacity_error,
+    _reasoning_effort_argv,
     _run_codex_role,
     run_codex_roles,
 )
@@ -72,6 +73,7 @@ class TestBuildGenericCodexArgv:
     def test_with_model(self, tmp_path: Path) -> None:
         argv = _build_generic_codex_argv(
             model="gpt-5",
+            reasoning_effort=None,
             schema_path=tmp_path / "s.json",
             output_path=tmp_path / "o.json",
         )
@@ -82,15 +84,52 @@ class TestBuildGenericCodexArgv:
 
     def test_no_model(self, tmp_path: Path) -> None:
         argv = _build_generic_codex_argv(
-            model=None, schema_path=tmp_path / "s.json", output_path=tmp_path / "o.json"
+            model=None,
+            reasoning_effort=None,
+            schema_path=tmp_path / "s.json",
+            output_path=tmp_path / "o.json",
         )
         assert "-m" not in argv
+
+    def test_reasoning_effort_pinned_before_trailing_model(
+        self, tmp_path: Path
+    ) -> None:
+        argv = _build_generic_codex_argv(
+            model="gpt-5",
+            reasoning_effort="max",
+            schema_path=tmp_path / "s.json",
+            output_path=tmp_path / "o.json",
+        )
+        idx = argv.index("-c")
+        assert argv[idx + 1] == "model_reasoning_effort=max"
+        assert idx < argv.index("--output-schema")
+        assert argv[-2:] == ["-m", "gpt-5"]
+
+    def test_unpinned_reasoning_effort_emits_no_override(self, tmp_path: Path) -> None:
+        # None must leave codex's own config in force: no -c at all.
+        argv = _build_generic_codex_argv(
+            model=None,
+            reasoning_effort=None,
+            schema_path=tmp_path / "s.json",
+            output_path=tmp_path / "o.json",
+        )
+        assert "-c" not in argv
+
+    def test_explicit_none_level_still_emits_override(self) -> None:
+        # "none" is a real codex level, distinct from the unpinned None.
+        assert _reasoning_effort_argv("none") == [
+            "-c",
+            "model_reasoning_effort=none",
+        ]
 
     def test_read_only_sandbox_always_set(self, tmp_path: Path) -> None:
         # MUST_FIX 4 (#1236): ticket AC requires read-only sandboxing on
         # every generic codex exec invocation, model or no model.
         argv = _build_generic_codex_argv(
-            model=None, schema_path=tmp_path / "s.json", output_path=tmp_path / "o.json"
+            model=None,
+            reasoning_effort=None,
+            schema_path=tmp_path / "s.json",
+            output_path=tmp_path / "o.json",
         )
         idx = argv.index("--sandbox")
         assert argv[idx + 1] == "read-only"
@@ -103,6 +142,7 @@ class TestBuildGenericCodexArgv:
         # unconditional, model or no model.
         argv = _build_generic_codex_argv(
             model=model,
+            reasoning_effort=None,
             schema_path=tmp_path / "s.json",
             output_path=tmp_path / "o.json",
         )
@@ -132,6 +172,7 @@ class TestRunCodexRoles:
                 "SysAdmin Reviewer": "p2",
             },
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=3600,
             session_id="s-review",
         )
@@ -152,6 +193,7 @@ class TestRunCodexRoles:
                 "SysAdmin Reviewer": "p2",
             },
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="s-review",
         )
@@ -174,6 +216,7 @@ class TestRunCodexRoles:
             roles=["Code Quality Reviewer"],
             prompts_by_role={"Code Quality Reviewer": "p1"},
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=100,
             session_id="s-review",
         )
@@ -208,6 +251,7 @@ class TestRunCodexRoles:
                     "Data Safety Reviewer": "p3",
                 },
                 model=None,
+                reasoning_effort=None,
                 wall_clock_budget_seconds=100,
                 session_id="s-review",
             )
@@ -233,6 +277,7 @@ class TestRunCodexRoles:
                 roles=["Code Quality Reviewer"],
                 prompts_by_role={"Code Quality Reviewer": "p"},
                 model=None,
+                reasoning_effort=None,
                 wall_clock_budget_seconds=None,
                 session_id="s-review",
             )
@@ -265,6 +310,7 @@ class TestRunCodexRoles:
                 "SysAdmin Reviewer": "p2",
             },
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="s-review",
         )
@@ -310,6 +356,7 @@ class TestRunCodexRoles:
                 "SysAdmin Reviewer": "p2",
             },
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="s-review",
         )
@@ -328,6 +375,7 @@ class TestRunCodexRoles:
             roles=["Code Quality Reviewer"],
             prompts_by_role={"Code Quality Reviewer": "PROMPT BODY"},
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="s-review",
         )
@@ -347,6 +395,7 @@ class TestRunCodexRoles:
             roles=["Code Quality Reviewer"],
             prompts_by_role={"Code Quality Reviewer": "p"},
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="s-review",
         )
@@ -367,6 +416,7 @@ class TestRunCodexRoles:
             roles=["Code Quality Reviewer"],
             prompts_by_role={"Code Quality Reviewer": "p"},
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="s-review",
         )
@@ -496,6 +546,7 @@ def _run_one_role(
         role=role,
         prompt="p",
         model=None,
+        reasoning_effort=None,
         timeout_seconds=None,
         scratch_dir=scratch,
         session_id=session_id,
@@ -704,6 +755,7 @@ class TestRunCodexRoleWritesStrictSchema:
             role="Code Quality Reviewer",
             prompt="p",
             model=None,
+            reasoning_effort=None,
             timeout_seconds=None,
             scratch_dir=scratch,
             session_id="sess-strict",
@@ -739,6 +791,7 @@ def test_run_codex_roles_scratch_dir_still_removed_after_persist(
         roles=["Code Quality Reviewer"],
         prompts_by_role={"Code Quality Reviewer": "p"},
         model=None,
+        reasoning_effort=None,
         wall_clock_budget_seconds=None,
         session_id="sess-scratch",
     )
@@ -1236,6 +1289,7 @@ class TestRunCodexRolesAggregatesPreValidationRejects:
                 "SysAdmin Reviewer": "p2",
             },
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="s-2029-agg",
         )
@@ -1256,6 +1310,7 @@ class TestRunCodexRolesAggregatesPreValidationRejects:
             roles=["Code Quality Reviewer"],
             prompts_by_role={"Code Quality Reviewer": "p1"},
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="s-2029-clean",
         )

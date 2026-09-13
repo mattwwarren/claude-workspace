@@ -478,6 +478,7 @@ def _drive_loop(
         worktree=repo,
         default_branch="main",
         model=None,
+        reasoning_effort=None,
         wall_clock_budget_seconds=None,
         session_id="s-convergence",
         fix_loop_enabled=True,
