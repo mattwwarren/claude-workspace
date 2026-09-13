@@ -1,0 +1,15 @@
+# CHANGELOG.md is append-mostly: nearly every feat/fix PR adds one bullet under
+# `## [Unreleased]` (gate-changelog enforces it). Concurrent branches therefore
+# conflict on it constantly, and a conflict here aborts cw's fix-dispatch merge
+# of origin/main into a worker branch, killing the review fix loop. Git's
+# built-in union driver keeps both sides' lines instead of conflicting. The
+# known cost: if both sides add the same `### Section` heading, it can appear
+# twice; tidy that when cutting a release.
+#
+# Relationship to .claude/scripts/classify_merge_conflict.py (#1850): its
+# `doc_append` category also resolves CHANGELOG conflicts, but only where
+# /auto-dev-finalize invokes it on a post-push rebase. This attribute is
+# authoritative for CHANGELOG.md in every git merge/rebase (fix-dispatch
+# included), so CHANGELOG.md conflicts no longer reach that script. It still
+# owns `docs/` appends. Change one mechanism, reconsider the other.
+CHANGELOG.md merge=union

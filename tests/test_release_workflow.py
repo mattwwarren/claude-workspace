@@ -27,6 +27,11 @@ RELEASE_JOB = "release"
 DELETED_VERIFY_JOB = "verify"
 CREATE_RELEASE_STEP_NAME = "Create GitHub Release"
 CLOSE_DRIFT_STEP_NAME = "Close dispatch-drift issues"
+DISPATCH_DRIFT_AUTO_MARKER = "<!-- dispatch-guard-auto -->"
+DISPATCH_DRIFT_LEGACY_MARKER = (
+    "Opened automatically by the [Dispatch Guard workflow]"
+    "(/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."
+)
 
 
 def _workflow() -> dict[Any, Any]:
@@ -73,3 +78,22 @@ def test_release_job_keeps_the_permissions_its_surviving_steps_need() -> None:
         "contents": "write",
         "issues": "write",
     }
+
+
+def test_manual_tag_closer_is_provenance_aware_and_migrates_legacy_issues() -> None:
+    close_step = next(
+        step
+        for step in _release_job()["steps"]
+        if step.get("name") == CLOSE_DRIFT_STEP_NAME
+    )
+    script = close_step["run"]
+    assert close_step["env"]["DISPATCH_DRIFT_AUTO_MARKER"] == DISPATCH_DRIFT_AUTO_MARKER
+    assert (
+        close_step["env"]["DISPATCH_DRIFT_LEGACY_MARKER"]
+        == DISPATCH_DRIFT_LEGACY_MARKER
+    )
+    assert "--app github-actions" in script
+    assert "--limit 1000" in script
+    assert "--json number,body" in script
+    assert "$DISPATCH_DRIFT_AUTO_MARKER" in script
+    assert "$DISPATCH_DRIFT_LEGACY_MARKER" in script
