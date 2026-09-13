@@ -223,6 +223,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     )
     click.echo(header)
     click.echo("-" * 90)
+    running_row_counts: dict[str, int] = {}
     for client_name in clients_seen:
         client_tasks = by_client[client_name]
         pending_tasks = [t for t in client_tasks if t.status == QueueItemStatus.PENDING]
@@ -236,6 +237,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
         cancelled_tasks = [
             t for t in client_tasks if t.status == QueueItemStatus.CANCELLED
         ]
+        running_row_counts[client_name] = len(running_tasks)
         needs_attn = _count_needs_attn(client_tasks)
         display_tasks = (
             client_tasks
@@ -274,15 +276,11 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
                     tick_line += _stale_tick_annotation(
                         client_name, age=age, markers=markers, now=now
                     )
-                # Re-derived from by_client rather than read off tick.lanes:
-                # a client gated at cap_full breaks out of the lane loop before
-                # any lane_stats entry is written, so tick.lanes is empty in
-                # exactly the case this annotation exists for.
-                task_running = sum(
-                    1
-                    for t in by_client[client_name]
-                    if t.status == QueueItemStatus.RUNNING
-                )
+                # Reuses the count the table above already computed, not
+                # tick.lanes: a client gated at cap_full breaks out of the lane
+                # loop before any lane_stats entry is written, so tick.lanes is
+                # empty in exactly the case this annotation exists for.
+                task_running = running_row_counts[client_name]
                 if tick.running > task_running:
                     tick_line += _running_row_divergence_annotation(
                         tick.running, task_running
