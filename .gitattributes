@@ -1,0 +1,8 @@
+# CHANGELOG.md is append-mostly: nearly every feat/fix PR adds one bullet under
+# `## [Unreleased]` (gate-changelog enforces it). Concurrent branches therefore
+# conflict on it constantly, and a conflict here aborts cw's fix-dispatch merge
+# of origin/main into a worker branch, killing the review fix loop. Git's
+# built-in union driver keeps both sides' lines instead of conflicting. The
+# known cost: if both sides add the same `### Section` heading, it can appear
+# twice; tidy that when cutting a release.
+CHANGELOG.md merge=union
