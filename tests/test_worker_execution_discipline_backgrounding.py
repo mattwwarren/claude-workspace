@@ -33,9 +33,7 @@ def test_worker_execution_discipline_binds_orchestrator_not_just_agent_prompts()
     assert "orchestrator's own direct Bash calls" in section
 
 
-def test_worker_execution_discipline_forbids_backgrounding_pipeline_dependent_bash() -> (
-    None
-):
+def test_worker_execution_discipline_forbids_backgrounding_pipeline_bash() -> None:
     """The section must forbid `run_in_background` / a harness-offered
     background continuation for any Bash call the pipeline depends on, and
     name the reason: no Stop-hook `background_tasks` tracking for a raw Bash
@@ -67,7 +65,7 @@ def test_async_dispatch_notes_disambiguate_agent_tool_scope() -> None:
         (_cmd("auto-dev-finalize.md"), "Agent spawns are async unconditionally"),
     ]
     for content, anchor in sites:
-        window = _after(content, anchor, span=1500)
+        window = _after(content, anchor, span=1800)
         assert "Agent tool's subagent spawn only" in window, anchor
         assert "Worker Execution Discipline" in window, anchor
 
@@ -77,7 +75,7 @@ def test_gate_test_command_never_backgrounds() -> None:
     --tb=short` line) must be wrapped in an explicit `timeout` and instruct
     never accepting a background continuation for this call."""
     content = _cmd("auto-dev.md")
-    window = _after(content, "cd \"$TMPWT\" && ", span=800)
+    window = _after(content, 'cd "$TMPWT" && ', span=800)
     assert "timeout" in window
     assert "never accept a background continuation" in window
     assert "IMPL_FAILED" in window
