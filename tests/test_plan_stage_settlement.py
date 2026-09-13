@@ -893,7 +893,6 @@ LAST_EVALUATED_MARKER = "plan-stage-last-evaluated"
 DELTA_RESET_ANCHOR = "**Tracker-state-delta reset (#2154).**"
 FINGERPRINT_READ_ANCHOR = "**Fingerprint read (#2154).**"
 BODY_FOLD_ANCHOR = "**Body-consistency fold (resumed rounds only, #2154).**"
-ELIGIBLE_CARRIER_PHRASE = "eligible carrier for `resolution_consumed`"
 
 
 def test_cap_check_blocker_details_names_comment_id_timestamp_and_updated_at() -> None:
@@ -909,7 +908,7 @@ def test_cap_check_documents_tracker_state_delta_reset() -> None:
     """The cap check resets N on a tracker-state delta, quoting the #1653 vocabulary."""
     cap = _cap_check_block()
     assert DELTA_RESET_ANCHOR in cap
-    window = _after(cap, DELTA_RESET_ANCHOR, span=1200)
+    window = _after(cap, DELTA_RESET_ANCHOR, span=1700)
     assert "a new operator comment, a body edit, or an approval reply" in window
     assert LAST_EVALUATED_MARKER in window
     assert "reset `N` to 0" in window
@@ -974,19 +973,23 @@ def test_body_consistency_fold_runs_before_fresh_scan() -> None:
     assert "Runs BEFORE step 1 above" in window
 
 
-def test_stub_and_cap_checks_are_eligible_resolution_consumed_carriers() -> None:
-    """Both pre-branch hard-exits are named as eligible resolution_consumed carriers.
+def test_stub_and_cap_checks_are_never_resolution_consumed_carriers() -> None:
+    """Neither pre-branch hard-exit is an eligible resolution_consumed carrier.
 
-    Distinct wording from the three Step 4c EXIT bullets' own clause (#2154) --
-    reusing that literal clause here would break
-    test_step_4c_exit_bullets_state_consumed_or_omit_rule's exact count==3
-    assertion, since the stub/cap checks live in the same headless section.
+    Reverted from the #2154 widening the Codex review flagged as blocking
+    (findings 7-9): crediting the cap/stub hard-exits would let a round that
+    merely reset its own round cap read as productive to
+    ``cw.dispatch.productivity``'s #1750 crashloop ceiling, since that
+    consumer ORs ``resolution_consumed`` into its productivity signal. Neither
+    block carries the "eligible carrier" clause the three Step 4c EXIT
+    bullets use, and that clause's count stays exactly 3.
     """
     stub = _stub_check_block()
     cap = _cap_check_block()
     for block in (stub, cap):
-        assert ELIGIBLE_CARRIER_PHRASE in block
-        assert "Stage 1 Completion emission rule" in block
+        assert "eligible carrier for `resolution_consumed`" not in block
+        assert "resolution_consumed" not in block
+        assert "resolution_evidence" not in block
 
     section = _step1c_headless_section()
     exit_clause = (
@@ -995,3 +998,155 @@ def test_stub_and_cap_checks_are_eligible_resolution_consumed_carriers() -> None
         "both keys."
     )
     assert section.count(exit_clause) == 3
+
+
+def test_emission_rule_names_cap_and_stub_checks_as_never_eligible() -> None:
+    """The Stage 1 Completion emission rule explicitly excludes both hard-exits.
+
+    Root cause 3 of the operator's review disposition: widening
+    ``resolution_consumed`` emission to the cap/stub hard-exits bypassed the
+    #1750 dispatch productivity ceiling. The revert is stated as a positive
+    rule, not merely an absence, so a future editor cannot silently re-widen
+    the scope without also removing this sentence.
+    """
+    section = _stage1_completion_section()
+    anchor = "**`resolution_consumed`/`resolution_evidence` emission rule (#1896).**"
+    window = _after(section, anchor, span=1200)
+    assert (
+        "AND the round still exits paused through one of the three Step 4c "
+        "EXIT bullets; must not include them otherwise." in window
+    )
+    assert "never eligible carriers for these two keys" in window
+    assert "ambiguity_scan_unconverged" in window
+    assert "deferred_stub_unresolved" in window
+    assert "#1750" in window
+
+
+# ---------------------------------------------------------------------------
+# Operator review disposition (root cause 1) -- provenance-gated fingerprint
+# ---------------------------------------------------------------------------
+
+
+def test_fingerprint_read_gates_newest_comment_by_provenance() -> None:
+    """Step 1c.0's fingerprint read excludes pipeline-authored comments (#2097).
+
+    Root cause 1 of the operator's review disposition: without this gate, the
+    fingerprint's "newest comment" reads the pipeline's own prior park
+    comment on the very next resumed round, so the fingerprint always
+    diverges and N resets to 0 every round -- "the cap never resets" becomes
+    "the cap always resets".
+    """
+    block = _step1c0_block()
+    window = _after(block, FINGERPRINT_READ_ANCHOR, span=900)
+    assert "Provenance gate (#2097)" in window
+    assert "Comment provenance rule" in window
+    assert "cw-agent-authored" in window
+    assert "pipeline fixed header" in window
+    assert "plan-of-record post" in window
+    assert "never operator progress" in window
+
+
+def test_cap_check_delta_reset_gates_newest_comment_by_provenance() -> None:
+    """The cap check's own delta-reset comparison reuses the #2097 gate.
+
+    A resumed round whose only new comment is its own prior park comment must
+    not read as a tracker-state delta -- pipeline-authored comments (the
+    park comment included) never count as operator progress. The core doc's
+    cap-check copy of the fingerprint read must state this identically to
+    the appendix's Step 1c.0 copy, not via a second, independently-invented
+    filter.
+    """
+    cap = _cap_check_block()
+    window = _after(cap, DELTA_RESET_ANCHOR, span=1400)
+    assert "Provenance gate (#2097)" in window
+    assert "Comment provenance rule" in window
+    assert "cw-agent-authored" in window
+    assert "pipeline fixed header" in window
+    assert "plan-of-record post" in window
+    assert "never operator progress" in window
+    assert "## Pending Verification Scan" in window
+
+
+def test_provenance_gate_wording_matches_step1c0_step3_pattern() -> None:
+    """The new fingerprint-read provenance gates reuse #2097's existing phrasing.
+
+    The operator's binding instruction: "Reuse the #2097 provenance gate
+    rather than a second filter." Step 1c.0's step 3 (locating the operator's
+    settlement reply) already applies this gate; the fingerprint-read
+    additions below must name the identical marker/header/post triple, not
+    an independently-reworded equivalent.
+    """
+    block = _step1c0_block()
+    step3_window = _after(block, "**Provenance gate (#2097):**", span=400)
+    assert "cw-agent-authored" in step3_window
+    assert "pipeline fixed header" in step3_window
+    assert "plan-of-record post" in step3_window
+    # The fingerprint-read step (step 0) carries its own provenance-gate
+    # sentence, distinct in position from step 3's -- both must exist.
+    assert block.count("**Provenance gate (#2097):**") >= 2
+
+
+# ---------------------------------------------------------------------------
+# Operator review disposition (root cause 2) -- fingerprint/settlement-marker
+# line ordering no longer competes for the same slot
+# ---------------------------------------------------------------------------
+
+
+def test_settlement_marker_grammar_documents_fingerprint_coexistence() -> None:
+    """#2154: the settlement-marker grammar and the fingerprint line coexist.
+
+    Root cause 2 of the operator's review disposition: the settlement-marker
+    grammar previously claimed "immediately after the round-counter line" --
+    the exact slot the fingerprint line also claims. The grammar now states
+    an explicit, non-competing order: round counter first, fingerprint
+    second when present, settlement markers after both.
+    """
+    section = _step1c_section()
+    window = _after(
+        section,
+        f"**Settlement marker grammar (`{SETTLED_MARKER}`, #1683).**",
+        span=800,
+    )
+    assert "Bookkeeping-line order (#2154)" in window
+    assert "round-counter line is always first" in window
+    assert LAST_EVALUATED_MARKER in window
+    assert "is always second" in window
+    assert f"every `{SETTLED_MARKER}` marker line is appended after both" in window
+    assert "never onto the fingerprint's own line" in window
+
+
+def test_draft_with_both_bookkeeping_markers_present_parses_unambiguously() -> None:
+    """A draft carrying both a settlement marker and a fingerprint parses.
+
+    Three independent statements of the same bookkeeping order must agree:
+    the settlement-marker grammar (this test's primary anchor), the
+    draft-persistence rule, and the body-consistency fold's preservation
+    clause. All three name round-counter/fingerprint/settlement-marker in
+    that order, so a draft carrying all three lines is unambiguous under
+    every reader.
+    """
+    grammar_section = _step1c_section()
+    grammar_window = _after(
+        grammar_section,
+        f"**Settlement marker grammar (`{SETTLED_MARKER}`, #1683).**",
+        span=800,
+    )
+    assert LAST_EVALUATED_MARKER in grammar_window
+    assert SETTLED_MARKER in grammar_window
+
+    persistence_section = _step1c_headless_section()
+    persistence_window = _after(
+        persistence_section, "**Draft-persistence rule", span=1600
+    )
+    assert f"`<!-- {ROUND_MARKER}: N -->` round-counter first line" in (
+        persistence_window
+    )
+    assert f"`<!-- {LAST_EVALUATED_MARKER}: ... -->` fingerprint" in persistence_window
+    assert f"every `<!-- {SETTLED_MARKER}: ... -->` marker line" in persistence_window
+
+    fold_block = _step1c0_block()
+    fold_window = _after(fold_block, BODY_FOLD_ANCHOR, span=1700)
+    assert (
+        "preserving the leading bookkeeping lines (round counter, fingerprint, "
+        "settlement markers)" in fold_window
+    )

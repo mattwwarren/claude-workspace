@@ -2483,12 +2483,15 @@ class TestResolutionConsumedField:
         assert result.resolution_evidence is None
 
     def test_blocked_status_with_resolution_consumed_round_trips(self) -> None:
-        """#2154: schema-level twin of productivity's blocked-status test.
+        """Schema-level twin of productivity's status-agnostic blocked test.
 
-        ``status="blocked"`` (the plan-stage cap/stub-check hard-exit shape)
-        round-trips ``resolution_consumed=True`` with valid ``resolution_evidence``
-        without a validation error — proving the schema needs zero changes for
-        the emission-scope broadening, which is markdown-only.
+        ``status="blocked"`` (the shape a plan-stage cap/stub-check hard-exit
+        sentinel carries) round-trips ``resolution_consumed=True`` with valid
+        ``resolution_evidence`` without a validation error. Generic
+        regression-lock on the schema's status-agnostic validation for these
+        two keys — independent of which markdown exit actually emits them;
+        the cap/stub hard-exits do not, per the operator's #2154 review
+        disposition (see ``auto-dev-plan.md``'s emission rule).
         """
         payload: dict[str, object] = {
             "schema_version": 4,

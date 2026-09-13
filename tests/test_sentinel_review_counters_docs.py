@@ -99,23 +99,6 @@ def test_resolution_rule_names_pre_flight_resolution_conformance_as_trace() -> N
     section and friction_highlights — not resolution_consumed (#2098).
     """
     content = _cmd("auto-dev-plan.md")
-    window = _after(content, RESOLUTION_RULE_ANCHOR, span=1500)
+    window = _after(content, RESOLUTION_RULE_ANCHOR, span=1700)
     assert "Pre-flight Resolution Conformance" in window
     assert "friction_highlights" in window
-
-
-def test_resolution_rule_also_covers_pre_branch_hard_exits() -> None:
-    """#2154: the emission rule now also names the cap/stub hard-exits as
-    covered — a round that settles an item but then trips the round cap or
-    the stub check (routed through consolidated park, not a Step 4c bullet)
-    must not be structurally excluded from ever reporting the settlement.
-    Every existing #2098 assertion in this file must keep passing unchanged.
-    """
-    content = _cmd("auto-dev-plan.md")
-    window = _after(content, RESOLUTION_RULE_ANCHOR, span=1500)
-    assert "ambiguity_scan_unconverged" in window
-    assert "deferred_stub_unresolved" in window
-    assert "Scoped to Step 1c.0 settlement only" in window
-    assert "Binding Pre-flight Resolutions" in window
-    assert "NOT a settlement" in window
-    assert "never emits these keys" in window

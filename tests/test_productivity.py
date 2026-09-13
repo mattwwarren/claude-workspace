@@ -191,15 +191,18 @@ class TestExtractClaimEvidence:
         assert extract_claim_evidence(dumped).resolution_consumed is True
 
     def test_blocked_status_with_resolution_consumed_is_credited(self) -> None:
-        """#2154: a plan-stage cap/stub hard-exit still credits a settled round.
+        """The extractor is status-agnostic for resolution_consumed (#2154).
 
         The extractor reads ``resolution_consumed``/``resolution_evidence`` off
         the payload with no status branch at all, so a ``status: "blocked"``
-        sentinel from the cap-check hard-exit (``blocker.reason:
-        "ambiguity_scan_unconverged"``) is credited exactly like a
-        ``status: "ambiguities_pending_resolution"`` pause. This locks in that
-        the consumer needs zero changes for #2154 — the emission-scope
-        broadening is markdown-only.
+        sentinel (here, a plan-stage cap-check hard-exit shape — ``blocker.
+        reason: "ambiguity_scan_unconverged"``) is credited exactly like a
+        ``status: "ambiguities_pending_resolution"`` pause. This is a generic
+        regression-lock on the consumer's shape, independent of which markdown
+        exit actually emits these two keys — the cap/stub hard-exits do not,
+        per the operator's #2154 review disposition (see
+        ``auto-dev-plan.md``'s emission rule), but nothing here depends on
+        that; only the payload shape matters to this consumer.
         """
         payload: dict[str, object] = {
             "status": "blocked",
