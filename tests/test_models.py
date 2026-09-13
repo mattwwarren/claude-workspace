@@ -899,7 +899,12 @@ class TestStageExecutorConfigExtraForbid:
         # Only an explicit level on a non-codex backend is an error; the
         # default riding along on a claude-native stage is not.
         cfg = StageExecutorConfig(backend="claude-native", model="m")
-        assert cfg.backend == "claude-native"
+        assert cfg.reasoning_effort is ReasoningEffort.HIGH
+
+    def test_explicit_null_on_non_codex_backend_is_allowed(self) -> None:
+        # An explicit null pins nothing, so it cannot look pinned-but-ignored.
+        cfg = StageExecutorConfig(backend="claude-native", reasoning_effort=None)
+        assert cfg.reasoning_effort is None
 
     def test_reasoning_effort_accepts_codex_level(self) -> None:
         cfg = StageExecutorConfig(backend="codex", reasoning_effort="max")
