@@ -1,4 +1,4 @@
-"""Tests for .claude/scripts/review_monitor.py comment-review reconstruction.
+"""Tests for .claude/scripts/review_monitor.py.
 
 Uses importlib to load the script directly (it lives outside the src/ tree),
 following tests/test_prep_pr_finalize.py's convention.
@@ -194,3 +194,71 @@ def test_blank_body_own_review_no_matching_inline_comments_still_skipped() -> No
         inline_by_review=inline_by_review,
     )
     assert "100" not in pr.comment_reviews
+
+
+def test_no_env_var_falls_back_to_repo_dict_and_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CW_CANONICAL_REPO_PATHS", raising=False)
+    assert _mod._canonical_repo_path("acme/widgets", "/tmp/wt") == "/tmp/wt"
+
+
+def test_env_var_overrides_given_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "CW_CANONICAL_REPO_PATHS",
+        json.dumps({"acme/widgets": "/home/x/clones/widgets"}),
+    )
+    assert (
+        _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
+        == "/home/x/clones/widgets"
+    )
+
+
+def test_env_var_only_overrides_matching_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "CW_CANONICAL_REPO_PATHS",
+        json.dumps({"other/repo": "/home/x/clones/other"}),
+    )
+    assert _mod._canonical_repo_path("acme/widgets", "/tmp/wt") == "/tmp/wt"
+
+
+def test_malformed_json_falls_back_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("CW_CANONICAL_REPO_PATHS", "{not json")
+    with caplog.at_level("WARNING"):
+        result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
+    assert result == "/tmp/wt"
+    assert any("CW_CANONICAL_REPO_PATHS" in r.message for r in caplog.records)
+
+
+def test_non_object_json_falls_back_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("CW_CANONICAL_REPO_PATHS", json.dumps(["a", "b"]))
+    with caplog.at_level("WARNING"):
+        result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
+    assert result == "/tmp/wt"
+    assert any("CW_CANONICAL_REPO_PATHS" in r.message for r in caplog.records)
+
+
+def test_non_string_value_falls_back_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv(
+        "CW_CANONICAL_REPO_PATHS", json.dumps({"acme/widgets": 123})
+    )
+    with caplog.at_level("WARNING"):
+        result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
+    assert result == "/tmp/wt"
+    assert any("CW_CANONICAL_REPO_PATHS" in r.message for r in caplog.records)
+
+
+def test_empty_string_env_var_treated_as_unset(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("CW_CANONICAL_REPO_PATHS", "")
+    with caplog.at_level("WARNING"):
+        result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
+    assert result == "/tmp/wt"
+    assert not any("CW_CANONICAL_REPO_PATHS" in r.message for r in caplog.records)
