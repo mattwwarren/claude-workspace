@@ -82,6 +82,7 @@ from cw.unavailability import FAMILY_PROVIDER_OVERLOAD, classify_provider_unavai
 from cw.worktree import (
     reconcile_result_scope,
     resolve_scope_guard_default_branch,
+    unsaved_work_reason,
     worktree_has_unsaved_work,
 )
 
@@ -382,6 +383,13 @@ class ReapCandidate:
     proposed_action: ProposedAction
     ticket_id: str | None = None
     worktree_dirty: bool = False
+    # Why the worktree is dirty (uncommitted changes or unpushed commits),
+    # or None for a clean worktree. Computed in phantom detect alongside
+    # worktree_dirty, from the same worktree_path, and carried payload-only
+    # into the SESSION_PHANTOM_REVERTED event for operator visibility — never
+    # read by resolve_reap_policy or any routing decision. Non-null iff
+    # worktree_dirty is True. See GitHub #2118.
+    worktree_dirty_reason: str | None = None
     salvage_result: AutoDevResult | None = None
     salvage_csid: str | None = None
     # ROUTE_EMITTED_SENTINEL carries the full parsed result (any status).
@@ -1590,24 +1598,39 @@ def _compute_worktree_dirty(client_name: str, branch: str | None) -> bool:
         return False
 
 
-def _worktree_dirty_by_path(client_name: str, worktree_path: Path | None) -> bool:
-    """Return True if the worktree at *worktree_path* has unsaved work.
+def _worktree_dirty_reason_by_path(
+    client_name: str, worktree_path: Path | None
+) -> str | None:
+    """Return why the worktree at *worktree_path* has unsaved work, or None.
 
     Uses worktree_path (always set on DAEMON sessions) instead of
     session.branch (always None on DAEMON sessions, making the branch-based
-    check a production no-op).  Mirror _compute_worktree_dirty's fail-safe:
-    returns False on any error, None path, or missing path.
+    check a production no-op). Mirror _compute_worktree_dirty's fail-safe
+    *direction*: a None/empty worktree_path, an unresolvable checked-out
+    branch, or any other error all return None (not dirty) — the opposite
+    direction from unsaved_work_reason's own inner fail-safe (which leans
+    toward "has unsaved work" on a git-level error), preserved here
+    unchanged since the three direct unit tests on this outer wrapper pin it.
     """
     if not worktree_path:
-        return False
+        return None
     try:
         branch = _deps.checked_out_branch(worktree_path)
         if not branch:
-            return False
+            return None
         client = get_client(client_name)
-        return worktree_has_unsaved_work(client, branch, wt_path=worktree_path)
+        return unsaved_work_reason(client, branch, wt_path=worktree_path)
     except Exception:  # noqa: BLE001 — fail-safe on any error; mirrors _compute_worktree_dirty
-        return False
+        return None
+
+
+def _worktree_dirty_by_path(client_name: str, worktree_path: Path | None) -> bool:
+    """Return True if the worktree at *worktree_path* has unsaved work.
+
+    Boolean view of :func:`_worktree_dirty_reason_by_path`; see it for the
+    fail-safe contract.
+    """
+    return _worktree_dirty_reason_by_path(client_name, worktree_path) is not None
 
 
 def _read_agent_spawn_stamp_context(
@@ -1976,4 +1999,5 @@ detect_provider_overload = _detect_provider_overload
 usage_limit_is_recent = _usage_limit_is_recent
 salvage_terminal_result = _salvage_terminal_result
 worktree_dirty_by_path = _worktree_dirty_by_path
+worktree_dirty_reason_by_path = _worktree_dirty_reason_by_path
 read_unresolved_subagent_spawn = _read_unresolved_subagent_spawn
