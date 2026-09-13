@@ -2492,44 +2492,44 @@ class TestResolutionConsumedField:
         two keys — independent of which markdown exit actually emits them;
         the cap/stub hard-exits do not, per the operator's #2154 review
         disposition (see ``auto-dev-plan.md``'s emission rule).
+
+        Builds on the file's existing ``_blocked_payload`` fixture (module
+        scope, above) rather than a second hand-built dict — mutated to the
+        plan-stage cap-exhaustion shape and the two resolution keys added.
         """
-        payload: dict[str, object] = {
-            "schema_version": 4,
-            "ticket_id": "T-1",
-            "status": "blocked",
-            "stage_reached": "stage1_plan",
-            "scope": {
-                "tier": None,
-                "files": 3,
-                "lines_estimate": 40,
-                "lines_actual": None,
-                "forbidden_touched": False,
-            },
-            "plan_source": "generated",
-            "branch": None,
-            "worktree_path": "/tmp/wt",
-            "fork_point_sha": None,
-            "commits": [],
-            "pr": None,
-            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
-            "health": {
-                "lowest_agent_confidence": None,
-                "any_incomplete_risk": False,
-                "shortcuts": [],
-                "recommendation": "EXIT_FOR_HUMAN_REVIEW",
-                "downgrade_applied": False,
-                "fix_loop_escalated": False,
-            },
-            "friction_highlights": [],
-            "blocker": {
-                "stage": "stage1_plan",
-                "reason": "ambiguity_scan_unconverged",
-                "details": "A2 still open after 2 rounds",
-                "retry_eligible": True,
-            },
-            "next_actions": [],
-            "resolution_consumed": True,
-            "resolution_evidence": {"comment_id": "123", "items": ["A2"]},
+        payload = _blocked_payload(blocker_reason="ambiguity_scan_unconverged")
+        payload.update(
+            schema_version=4,
+            stage_reached="stage1_plan",
+            plan_source="generated",
+            branch=None,
+            worktree_path="/tmp/wt",
+            fork_point_sha=None,
+            commits=[],
+            friction_highlights=[],
+            resolution_consumed=True,
+            resolution_evidence={"comment_id": "123", "items": ["A2"]},
+        )
+        payload["scope"] = {
+            "tier": None,
+            "files": 3,
+            "lines_estimate": 40,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        }
+        payload["health"] = {
+            "lowest_agent_confidence": None,
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        }
+        payload["blocker"] = {
+            "stage": "stage1_plan",
+            "reason": "ambiguity_scan_unconverged",
+            "details": "A2 still open after 2 rounds",
+            "retry_eligible": True,
         }
         result = AutoDevResult.model_validate(payload)
         assert result.resolution_consumed is True

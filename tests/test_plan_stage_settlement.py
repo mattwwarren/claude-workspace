@@ -895,32 +895,54 @@ FINGERPRINT_READ_ANCHOR = "**Fingerprint read (#2154).**"
 BODY_FOLD_ANCHOR = "**Body-consistency fold (resumed rounds only, #2154).**"
 
 
-def test_cap_check_blocker_details_names_comment_id_timestamp_and_updated_at() -> None:
-    """Cap-exhaustion blocker.details names the fingerprint evaluated (closes #2160)."""
+def test_cap_check_blocker_details_names_fingerprint_components() -> None:
+    """Cap-exhaustion blocker.details names the fingerprint evaluated (closes #2160).
+
+    Operator round-2 disposition (#2154): the fingerprint is exactly two
+    components, `operator_comment` (a comment id, or `none`) and `body_sha` —
+    never a timestamp and never the issue's raw `updated_at`.
+    """
     cap = _cap_check_block()
     assert "naming the still-open item(s) verbatim" in cap
-    assert "comment id/timestamp" in cap
-    assert "`updated_at`" in cap
+    assert "operator_comment" in cap
+    assert "body_sha" in cap
     assert "#2160" in cap
+    assert "comment id/timestamp" not in cap
 
 
 def test_cap_check_documents_tracker_state_delta_reset() -> None:
-    """The cap check resets N on a tracker-state delta, quoting the #1653 vocabulary."""
+    """The cap check resets N on a tracker-state delta — exactly two components.
+
+    Operator round-2 disposition (#2154): the round-1 fingerprint's third
+    component, `plan_approved_at`, and its "approval reply" trigger wording
+    (quoting #1653's own vocabulary) are gone — an approval reply with no
+    accompanying comment or body edit no longer resets the cap. This is an
+    intentional narrowing to the operator's exact two-component spec, not an
+    oversight; see the friction report for this round.
+    """
     cap = _cap_check_block()
     assert DELTA_RESET_ANCHOR in cap
-    window = _after(cap, DELTA_RESET_ANCHOR, span=1700)
-    assert "a new operator comment, a body edit, or an approval reply" in window
+    window = _after(cap, DELTA_RESET_ANCHOR, span=1900)
+    assert "exactly two components" in window
+    assert "a new (non-agent-authored) operator comment, or a body edit" in window
     assert LAST_EVALUATED_MARKER in window
     assert "reset `N` to 0" in window
+    assert "an approval reply" not in window
 
 
 def test_last_evaluated_marker_grammar_documented() -> None:
-    """The new plan-stage-last-evaluated marker has a documented closed format."""
+    """The plan-stage-last-evaluated marker has a documented closed format.
+
+    Operator round-2 disposition (#2154): exactly two components,
+    `operator_comment` and `body_sha` — the round-1 `updated_at`,
+    `newest-comment-id`/`newest-comment-timestamp`, and `plan_approved_at`
+    components are removed.
+    """
     cap = _cap_check_block()
-    assert f"<!-- {LAST_EVALUATED_MARKER}:" in cap
-    assert "updated_at" in cap
-    assert "newest-comment-id" in cap
-    assert "plan_approved_at" in cap
+    assert f"<!-- {LAST_EVALUATED_MARKER}: operator_comment=" in cap
+    assert "body_sha=" in cap
+    for removed in ("newest-comment-id", "newest-comment-timestamp", "plan_approved_at"):
+        assert removed not in cap
 
 
 def test_draft_persistence_rule_preserves_fingerprint_line() -> None:
@@ -1027,63 +1049,219 @@ def test_emission_rule_names_cap_and_stub_checks_as_never_eligible() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fingerprint_read_gates_newest_comment_by_provenance() -> None:
-    """Step 1c.0's fingerprint read excludes pipeline-authored comments (#2097).
+def test_fingerprint_read_cites_provenance_rule_by_name_only() -> None:
+    """Step 1c.0's fingerprint read cites the #2097 rule by name, not restated (#2154).
 
-    Root cause 1 of the operator's review disposition: without this gate, the
-    fingerprint's "newest comment" reads the pipeline's own prior park
-    comment on the very next resumed round, so the fingerprint always
-    diverges and N resets to 0 every round -- "the cap never resets" becomes
-    "the cap always resets".
+    Operator round-2 disposition, item 1: the canonical #2097 implementation
+    is the Comment provenance rule in `auto-dev.md`; every other plan-stage
+    consumer cites it by name rather than re-deriving its criteria. Round 1
+    restated the full marker/header/plan-of-record list here instead of
+    citing the rule -- this locks in the fix: one citing sentence, no
+    restated criteria list.
     """
     block = _step1c0_block()
     window = _after(block, FINGERPRINT_READ_ANCHOR, span=900)
-    assert "Provenance gate (#2097)" in window
     assert "Comment provenance rule" in window
-    assert "cw-agent-authored" in window
-    assert "pipeline fixed header" in window
-    assert "plan-of-record post" in window
-    assert "never operator progress" in window
+    assert ".claude/commands/auto-dev.md" in window
+    for restated in ("cw-agent-authored", "pipeline fixed header", "plan-of-record post"):
+        assert restated not in window
 
 
-def test_cap_check_delta_reset_gates_newest_comment_by_provenance() -> None:
-    """The cap check's own delta-reset comparison reuses the #2097 gate.
+def test_cap_check_delta_reset_cites_provenance_rule_by_name_only() -> None:
+    """The cap check's own delta-reset comparison cites the #2097 rule by name (#2154).
 
-    A resumed round whose only new comment is its own prior park comment must
-    not read as a tracker-state delta -- pipeline-authored comments (the
-    park comment included) never count as operator progress. The core doc's
-    cap-check copy of the fingerprint read must state this identically to
-    the appendix's Step 1c.0 copy, not via a second, independently-invented
-    filter.
+    Same fix as the appendix copy: the core doc's cap-check fingerprint
+    description must cite the Comment provenance rule by name for what
+    counts as `operator_comment`, not restate its marker/header/post
+    criteria a second time.
     """
     cap = _cap_check_block()
-    window = _after(cap, DELTA_RESET_ANCHOR, span=1400)
-    assert "Provenance gate (#2097)" in window
+    window = _after(cap, DELTA_RESET_ANCHOR, span=1900)
     assert "Comment provenance rule" in window
-    assert "cw-agent-authored" in window
-    assert "pipeline fixed header" in window
-    assert "plan-of-record post" in window
-    assert "never operator progress" in window
-    assert "## Pending Verification Scan" in window
+    assert ".claude/commands/auto-dev.md" in window
+    for restated in ("cw-agent-authored", "pipeline fixed header", "plan-of-record post"):
+        assert restated not in window
 
 
-def test_provenance_gate_wording_matches_step1c0_step3_pattern() -> None:
-    """The new fingerprint-read provenance gates reuse #2097's existing phrasing.
+def test_provenance_criteria_stated_exactly_once_in_step1c0() -> None:
+    """The full marker/header/plan-of-record criteria list appears exactly once.
 
-    The operator's binding instruction: "Reuse the #2097 provenance gate
-    rather than a second filter." Step 1c.0's step 3 (locating the operator's
-    settlement reply) already applies this gate; the fingerprint-read
-    additions below must name the identical marker/header/post triple, not
-    an independently-reworded equivalent.
+    Step 1c.0's step 3 (locating the operator's settlement reply) is the one
+    place in this block that still restates the #2097 criteria (pre-existing,
+    out of this ticket's scope); the new fingerprint-read step (step 0) must
+    not add a second restatement alongside it.
     """
     block = _step1c0_block()
-    step3_window = _after(block, "**Provenance gate (#2097):**", span=400)
-    assert "cw-agent-authored" in step3_window
-    assert "pipeline fixed header" in step3_window
-    assert "plan-of-record post" in step3_window
-    # The fingerprint-read step (step 0) carries its own provenance-gate
-    # sentence, distinct in position from step 3's -- both must exist.
-    assert block.count("**Provenance gate (#2097):**") >= 2
+    assert block.count("cw-agent-authored") == 1
+    assert block.count("pipeline fixed header") == 1
+    assert block.count("plan-of-record post") == 1
+
+
+# ---------------------------------------------------------------------------
+# Operator round-2 disposition -- fingerprint is exactly two components
+# (operator_comment id + body_sha), never the issue's raw updated_at, never
+# plan_approved_at. Required spec/contract cases (a)-(d) from the operator's
+# binding round-2 comment.
+# ---------------------------------------------------------------------------
+
+
+def test_fingerprint_has_exactly_two_components_everywhere() -> None:
+    """Both fingerprint-read sites (appendix step 0, core-doc cap check) agree.
+
+    Operator round-2 disposition, item 2: `operator_comment` (a comment id,
+    or `none`) and `body_sha` (a SHA-256 of the live-fetched body, over the
+    raw string) -- and nothing else. No `updated_at`/`updatedAt`, no
+    `plan_approved_at`, no comment timestamp, anywhere in either copy.
+    """
+    block = _step1c0_block()
+    fingerprint_window = _after(block, FINGERPRINT_READ_ANCHOR, span=900)
+    cap = _cap_check_block()
+    cap_window = _after(cap, DELTA_RESET_ANCHOR, span=1900)
+    for window in (fingerprint_window, cap_window):
+        assert "operator_comment" in window
+        assert "body_sha" in window
+        assert "exactly two components" in window
+        assert "SHA-256" in window
+        assert "raw string" in window
+        # The fingerprint marker itself never carries updated_at/plan_approved_at
+        # as a component value -- explanatory prose may still name the term to
+        # say why it was dropped (checked by the narrower marker-grammar test).
+        assert "updated_at=" not in window
+        for forbidden in ("plan_approved_at", "newest-comment-timestamp"):
+            assert forbidden not in window
+
+
+def test_delta_case_a_own_park_comment_leaves_round_unchanged() -> None:
+    """(a) A resumed round whose only new comment is its own prior park comment.
+
+    Required case (a): posting the pipeline's own park comment must change
+    neither fingerprint component, so it never resets the round cap.
+    """
+    cap = _cap_check_block()
+    window = _after(cap, DELTA_RESET_ANCHOR, span=1900)
+    assert "an agent-authored comment never becomes `operator_comment`" in window
+    assert "so posting one changes neither component" in window
+    assert "can never read as a tracker-state delta" in window
+
+
+def test_delta_case_b_new_operator_comment_resets_round() -> None:
+    """(b) A new (non-agent-authored) operator comment resets N."""
+    cap = _cap_check_block()
+    window = _after(cap, DELTA_RESET_ANCHOR, span=1900)
+    assert "a new (non-agent-authored) operator comment, or a body edit" in window
+    assert "reset `N` to 0" in window
+
+
+def test_delta_case_c_body_edit_resets_round() -> None:
+    """(c) An issue body edit resets N.
+
+    Shares its trigger sentence with case (b) -- either component alone is
+    sufficient, per the operator's "either component differs" wording.
+    """
+    cap = _cap_check_block()
+    window = _after(cap, DELTA_RESET_ANCHOR, span=1900)
+    assert "A tracker-state change exists only when either component differs" in (
+        window
+    )
+    assert "or a body edit" in window
+
+
+def test_delta_case_d_agent_comment_after_operator_comment_leaves_round_unchanged() -> (
+    None
+):
+    """(d) An agent-authored comment posted after an operator comment.
+
+    Required case (d): even when the agent-authored comment (carrying the
+    `<!-- cw-agent-authored -->` marker) is chronologically the newest
+    comment on the ticket, it never becomes `operator_comment` -- the
+    provenance-gated "newest surviving comment" is unaffected by a later
+    excluded comment, so N stays unchanged.
+    """
+    cap = _cap_check_block()
+    window = _after(cap, DELTA_RESET_ANCHOR, span=1900)
+    assert (
+        "never becomes `operator_comment`, however recently it was posted, "
+        "including one posted after the operator's own comment" in window
+    )
+
+
+# ---------------------------------------------------------------------------
+# Operator round-2 disposition, item 3 -- every draft rewrite preserves
+# bookkeeping (round counter, fingerprint, settlement markers).
+# ---------------------------------------------------------------------------
+
+DRAFT_REWRITE_RULE_ANCHOR = "**Draft-rewrite rule"
+
+
+def _draft_rewrite_rule_window(span: int = 1200) -> str:
+    section = _step1c_headless_section()
+    return _after(section, DRAFT_REWRITE_RULE_ANCHOR, span=span)
+
+
+def test_draft_rewrite_rule_stated_once_next_to_persistence_rule() -> None:
+    """The draft-rewrite rule is stated once, immediately after the persistence rule."""
+    section = _step1c_headless_section()
+    assert section.count(DRAFT_REWRITE_RULE_ANCHOR) == 1
+    assert section.index("**Draft-persistence rule") < section.index(
+        DRAFT_REWRITE_RULE_ANCHOR
+    )
+    window = _draft_rewrite_rule_window()
+    assert "not only a headless EXIT" in window
+    assert f"`<!-- {ROUND_MARKER}: N -->`" in window
+    assert f"`<!-- {LAST_EVALUATED_MARKER}: ... -->`" in window
+    assert f"`<!-- {SETTLED_MARKER}: ... -->`" in window
+
+
+def test_draft_rewrite_rule_names_all_three_rewrite_sites() -> None:
+    """The rule names the three additional rewrite sites the operator listed."""
+    window = _draft_rewrite_rule_window()
+    assert "Step 1b checkpoint" in window
+    assert "Step 1f.4 post-revision checkpoint" in window
+    assert "body-consistency fold" in window
+
+
+def test_step1b_checkpoint_cites_draft_rewrite_rule() -> None:
+    """The Step 1b checkpoint site cites the draft-rewrite rule."""
+    section = _cmd("auto-dev-plan.md")
+    window = _after(
+        section, "**Headless only — checkpoint the draft before review runs", span=900
+    )
+    assert "draft-rewrite rule" in window
+
+
+def test_step1f4_checkpoint_cites_draft_rewrite_rule_and_preserves_bookkeeping() -> None:
+    """A Step 1f.4-style rewrite keeps all three bookkeeping lines (required test)."""
+    section = _cmd("auto-dev-plan.md")
+    window = _after(
+        section,
+        "**Headless only — checkpoint the revised draft (#1778).**",
+        span=900,
+    )
+    assert "draft-rewrite rule" in window
+
+
+def test_body_consistency_fold_cites_draft_rewrite_rule() -> None:
+    """The body-consistency fold's write-back cites the same draft-rewrite rule."""
+    block = _step1c0_block()
+    window = _after(block, BODY_FOLD_ANCHOR, span=1700)
+    assert "draft-rewrite rule" in window
+
+
+def test_body_consistency_fold_validates_before_overwrite() -> None:
+    """SHOULD_FIX (binding): validate fold output before overwriting the draft.
+
+    On validation failure the prior draft is kept unchanged, a
+    `friction_highlights` line is appended, and the round continues -- never
+    a partial or invalid draft written.
+    """
+    block = _step1c0_block()
+    window = _after(block, BODY_FOLD_ANCHOR, span=2600)
+    assert "Validate before overwrite" in window
+    assert "leading bookkeeping lines" in window
+    assert "plan's required sections must still be present" in window
+    assert "keep the prior draft unchanged" in window
+    assert "friction_highlights" in window
+    assert "never write a partial or invalid draft" in window
 
 
 # ---------------------------------------------------------------------------
