@@ -64,6 +64,11 @@ uv run --project "$(git rev-parse --show-toplevel)" python \
   --ticket-id <NUMBER> --client <CLIENT>
 ```
 
+`--repo` is no longer defaulted and is derived per-client from `--client`'s
+resolved repo root (#2158) — operators dispatching against a non-
+`claude-workspace` client no longer need (and should not pass) an explicit
+`--repo` override.
+
 Each call emits one JSON object with `ok` (bool) and `checks`. Aggregate into a
 table: one row per ticket, `ok` plus any failing hard checks. Then:
 
