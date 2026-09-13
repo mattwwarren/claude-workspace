@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 import pytest
 from pydantic import ValidationError
@@ -3991,7 +3991,7 @@ class TestQueueStatusForTerminalSentinel:
     @pytest.mark.parametrize("status", sorted(SALVAGE_HOLD_STATUSES))
     def test_hold_statuses_route_to_blocked_on_user(self, status: str) -> None:
         assert (
-            queue_status_for_terminal_sentinel(status)
+            queue_status_for_terminal_sentinel(cast("Status", status))
             == QueueItemStatus.BLOCKED_ON_USER
         )
 
@@ -3999,7 +3999,10 @@ class TestQueueStatusForTerminalSentinel:
         "status", sorted(set(get_args(Status)) - SALVAGE_HOLD_STATUSES)
     )
     def test_non_hold_statuses_route_to_completed(self, status: str) -> None:
-        assert queue_status_for_terminal_sentinel(status) == QueueItemStatus.COMPLETED
+        assert (
+            queue_status_for_terminal_sentinel(cast("Status", status))
+            == QueueItemStatus.COMPLETED
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -947,9 +947,7 @@ def test_step1c0_gains_fingerprint_read_step_zero() -> None:
     assert FINGERPRINT_READ_ANCHOR in block
     assert LAST_EVALUATED_MARKER in block
     idx_zero = block.index(FINGERPRINT_READ_ANCHOR)
-    idx_one = block.index(
-        "Locate the newest `## Pending Verification Scan` comment"
-    )
+    idx_one = block.index("Locate the newest `## Pending Verification Scan` comment")
     assert idx_zero < idx_one
 
 
