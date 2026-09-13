@@ -619,7 +619,7 @@ def _check_wedge_orphan_active_pending_row(
     state: CwState,
     queue: DevQueueStore,
 ) -> list[WedgeFinding]:
-    """Detect a live DAEMON session referenced by a row that is not RUNNING (#2142).
+    """Detect a live DAEMON session referenced by a PENDING row (#2142).
 
     The residual state of the fix-dispatch race: a non-sentinel
     RUNNING->PENDING revert fires on a row carrying an unconsumed
@@ -639,20 +639,26 @@ def _check_wedge_orphan_active_pending_row(
     exactly the sessions this class targets. The row's own
     ``session_id``/``fix_dispatch_session_id`` is the only reliable link.
 
-    Structural rather than age-based, unlike class-8 — a non-RUNNING row can
+    Structural rather than age-based, unlike class-8 — a PENDING row can
     never legitimately own a live worker, so there is no staleness to wait out
     and no threshold to tune.
 
-    Flags ANY non-RUNNING row, not just PENDING (#2142 follow-up): RUNNING is
-    the only status a row can legitimately hold a live worker under, so a
-    BLOCKED_ON_USER row — e.g. one carrying a live fix-dispatch handoff via the
-    dispatch_fix_agent race described above — is just as orphaned as PENDING
-    when it names a live session.
+    Scoped to PENDING only, per the approved plan's Touch-point Contract —
+    NOT every non-RUNNING status. A BLOCKED_ON_USER row can legitimately keep
+    ``fix_dispatch_session_id`` pointing at a still-live fix agent: dirty-
+    worktree salvage (``reconcile/tasks.py``) moves a RUNNING row to
+    BLOCKED_ON_USER and clears ``task.session_id``, but does not clear
+    ``fix_dispatch_session_id``, while the fix agent is still mid-commit in
+    that same worktree. Flagging that row as an orphan and reaping it would
+    mark the live session COMPLETED and stop the daemon underneath it,
+    killing the fix agent instead of catching an orphan. A wider orphan class
+    covering other non-RUNNING statuses needs its own ticket and a way to
+    tell a live fix session from an orphaned one — it does not ship here.
     """
     session_by_id = {s.id: s for s in state.sessions}
     findings: list[WedgeFinding] = []
     for task in queue.tasks:
-        if task.status == QueueItemStatus.RUNNING:
+        if task.status != QueueItemStatus.PENDING:
             continue
         # Check both fields independently — either can name a live orphan,
         # so first-truthy-wins (`or`) would miss a live session sitting in

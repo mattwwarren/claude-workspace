@@ -6784,7 +6784,7 @@ class _WedgeFixDispatchHarness:
 
 
 class TestWedgeOrphanActivePendingRow(_WedgeFixDispatchHarness):
-    """wedge/orphan-active-pending-row: live session held by a non-RUNNING row.
+    """wedge/orphan-active-pending-row: live session held by a PENDING row.
 
     The #2142 residual state. A same-stage RUNNING->PENDING revert fires while
     a fix-dispatch handoff is unconsumed; the next tick spawns the fix agent
@@ -6795,6 +6795,12 @@ class TestWedgeOrphanActivePendingRow(_WedgeFixDispatchHarness):
     Detection is structural, not age-based — the row/session relationship is
     already wrong the instant it exists, so unlike class-8 there is nothing to
     wait out.
+
+    Scoped to PENDING only (operator review, 2026-09-13) — NOT every
+    non-RUNNING status. See
+    ``test_blocked_on_user_row_with_live_fix_dispatch_session_not_flagged``
+    for why a BLOCKED_ON_USER row referencing a live fix session must NOT be
+    flagged.
     """
 
     def test_pending_row_referencing_live_fix_dispatch_session_flagged_and_reaped(
@@ -6892,15 +6898,23 @@ class TestWedgeOrphanActivePendingRow(_WedgeFixDispatchHarness):
         classes = [f.wedge_class for f in report.wedge_findings]
         assert "wedge/orphan-active-pending-row" in classes
 
-    def test_blocked_on_user_row_referencing_live_session_id_flagged(
+    def test_blocked_on_user_row_with_live_fix_dispatch_session_not_flagged(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """RUNNING is the only status a row can legitimately hold a live
-        worker under — BLOCKED_ON_USER referencing one is just as orphaned as
-        PENDING (#2142 follow-up: the filter used to only catch PENDING)."""
+        """Scoped to PENDING only (operator review, 2026-09-13): a
+        BLOCKED_ON_USER row can legitimately keep ``fix_dispatch_session_id``
+        pointing at a still-live fix agent. Dirty-worktree salvage
+        (``reconcile/tasks.py``) moves a RUNNING row to BLOCKED_ON_USER and
+        clears ``task.session_id``, but never clears
+        ``fix_dispatch_session_id`` while the fix agent is still mid-commit
+        in that same worktree. This class used to flag ANY non-RUNNING row
+        (#2142 follow-up) — that widening was never in the approved plan's
+        Touch-point Contract (PENDING-only) and would reap a live fix agent
+        out from under itself. See the last comment on this ticket for the
+        observed incident this regresses against."""
         from cw.config import save_state
         from cw.dev_queue import save_dev_queue
         from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
@@ -6914,7 +6928,7 @@ class TestWedgeOrphanActivePendingRow(_WedgeFixDispatchHarness):
                         ticket_id="2142",
                         client="client-a",
                         status=QueueItemStatus.BLOCKED_ON_USER,
-                        session_id="orphan-2",
+                        fix_dispatch_session_id="orphan-2",
                     )
                 ]
             )
@@ -6923,7 +6937,7 @@ class TestWedgeOrphanActivePendingRow(_WedgeFixDispatchHarness):
         report = run_doctor(reap=False)
 
         classes = [f.wedge_class for f in report.wedge_findings]
-        assert "wedge/orphan-active-pending-row" in classes
+        assert "wedge/orphan-active-pending-row" not in classes
 
     def test_running_row_with_live_session_not_flagged(
         self,
@@ -7136,7 +7150,7 @@ class TestWedgeOrphanActivePendingRow(_WedgeFixDispatchHarness):
                     TicketTask(
                         ticket_id="2142",
                         client="client-a",
-                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        status=QueueItemStatus.PENDING,
                         session_id="stale-1",
                         fix_dispatch_session_id="live-1",
                     )
