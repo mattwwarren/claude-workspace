@@ -30,8 +30,24 @@ Checks performed:
                                    ticket. Other trackers: keyed off the
                                    ``auto-dev/<id>`` branch head instead.
 
-The active tracker is resolved from ``.claude/project-config.yaml``
-(``tracking.primary.system``); absent/unrecognized falls back to ``linear``.
+The tracker and the GitHub ``owner/repo`` slug are both resolved from
+``--client``'s repo root (via ``clients.yaml``, the same way ``cw doctor``
+resolves a client's repo) rather than the script's own on-disk location:
+- ``client_repo_resolved`` (hard) ``--client`` names an entry in
+                                  ``clients.yaml`` (or ``clients.yaml``
+                                  doesn't exist at all, single-tenant mode).
+                                  A populated ``clients.yaml`` missing the
+                                  named client fails loudly instead of
+                                  silently falling back to a default repo.
+- ``repo_resolved``        (hard) a GitHub ``owner/repo`` slug was derived
+                                  from the resolved repo root's ``origin``
+                                  remote, or supplied explicitly via
+                                  ``--repo``. Only skipped when a slug was
+                                  resolved.
+
+Tracker resolution reads ``.claude/project-config.yaml``
+(``tracking.primary.system``) from that same client repo root;
+absent/unrecognized falls back to ``linear``.
 - ``not_already_queued``    (hard)  the ticket is not already RUNNING or
                                    PENDING in ``cw dev-queue status``.
 """
@@ -46,6 +62,46 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+# sys.path bootstrap: must run before any `cw` import so this standalone script
+# works under bare python3 too (not just `uv run`), matching the sibling
+# skill scripts (cw-followup/scripts/parse_sentinel.py,
+# cw-validate-result/scripts/validate_sentinel.py).
+#
+# Why: this cannot be extracted to a shared module — it must run BEFORE any cw
+# import, so there is no shared cw path yet to import it from. Each standalone
+# script that imports cw carries its own copy. Do not deduplicate.
+
+
+def _bootstrap_sys_path() -> None:
+    """Add <repo>/src to sys.path so ``cw`` is importable under bare python3.
+
+    This script's documented invocation (``cw-smoke-test/SKILL.md``) runs via
+    ``uv run --project "$(git rev-parse --show-toplevel)" python ...`` --
+    inside the repo venv, where ``cw`` is editable-installed and its compiled
+    deps (e.g. ``pydantic_core``) are ABI-matched to that interpreter. Under a
+    bare ``/usr/bin/python3`` this bootstrap does NOT make ``cw`` importable:
+    the failure is missing dependencies, not ``sys.path`` reachability
+    (``import pydantic`` fails there too, #1598).
+    """
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").exists():
+            src = str(parent / "src")
+            if src not in sys.path:
+                sys.path.insert(0, src)
+            return
+    msg = (
+        f"Could not locate pyproject.toml walking up from {__file__} — bootstrap failed"
+    )
+    raise RuntimeError(msg)
+
+
+_bootstrap_sys_path()
+
+from cw.config import load_clients
+from cw.pr_hydrate import _resolve_repo_slug as _cw_resolve_repo_slug
+from cw.tracker import resolve_tracker as _cw_resolve_tracker
+from cw.worktree import _git_dir
 
 _GLOBAL_AGENTS = Path.home() / ".claude" / "agents"
 _REQUIRED_AGENTS = ("plan-reviewer.md", "plan-soundness-reviewer.md")
@@ -70,23 +126,57 @@ _DEFAULT_TRACKER = "linear"  # legacy default per auto-dev-intake.md
 _AUTO_DEV_BRANCH_PREFIX = "auto-dev/"
 
 
-def _resolve_tracker(repo_root: Path) -> str:
-    """Resolve ``tracking.primary.system`` from .claude/project-config.yaml.
+class _ClientRepoUnresolvedError(Exception):
+    """Raised when --client names a client whose repo cannot be resolved (#2158)."""
 
-    Defaults to the legacy ``linear`` behavior when the file is absent or the
-    value is missing/unrecognized. Uses a minimal line scan (the file format is
-    controlled and has a single ``system:`` key) so this standalone script has
-    no hard PyYAML dependency.
+
+def _resolve_tracker(repo_root: Path) -> str:
+    """Resolve ``tracking.primary.system`` from *repo_root*'s project-config.yaml.
+
+    Delegates to ``cw.tracker.resolve_tracker`` (the same resolution
+    ``spawn.py``/``session.py``/``cw.doctor`` share) and applies this script's
+    own allowlist/default on top: defaults to the legacy ``linear`` behavior
+    when the file is absent or the value is missing/unrecognized.
     """
-    path = repo_root / ".claude" / "project-config.yaml"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return _DEFAULT_TRACKER
-    match = re.search(r"^\s*system:\s*(\S+)", text, re.MULTILINE)
-    if match and match.group(1) in _RECOGNIZED_TRACKERS:
-        return match.group(1)
-    return _DEFAULT_TRACKER
+    system = _cw_resolve_tracker(repo_root)
+    return system if system in _RECOGNIZED_TRACKERS else _DEFAULT_TRACKER
+
+
+def _resolve_client_repo_root(client: str) -> Path:
+    """Map --client to a filesystem repo root via clients.yaml (#2158).
+
+    Mirrors ``cw doctor``'s ``project-config/<client>`` check
+    (``src/cw/doctor/config_checks.py``): ``repo_path`` wins for worktree-mode
+    clients, ``workspace_path`` otherwise (``cw.worktree._git_dir``).
+
+    No ``clients.yaml`` at all is single-tenant mode, not a failure — falls
+    back to :func:`_resolve_repo_root` (the script's own location), exactly as
+    ``cw.reconcile.tasks._client_cwd``/``_is_dangling_client`` distinguish
+    "absent" from "populated but missing this client" elsewhere in cw. A
+    populated ``clients.yaml`` missing *client* is drift: raise loudly rather
+    than silently falling back to a default repo.
+    """
+    clients = load_clients()
+    if not clients:
+        return _resolve_repo_root()
+    cfg = clients.get(client)
+    if cfg is None:
+        msg = (
+            f"--client {client!r} has no entry in clients.yaml; refusing to "
+            "fall back to a default repo (GitHub #2158) — add it to "
+            "clients.yaml or pass an explicit --repo"
+        )
+        raise _ClientRepoUnresolvedError(msg)
+    return _git_dir(cfg)
+
+
+def _resolve_repo_slug(repo_root: Path) -> str | None:
+    """Resolve *repo_root*'s ``origin`` remote to a GitHub ``owner/repo`` slug.
+
+    Thin wrapper over ``cw.pr_hydrate._resolve_repo_slug`` (kept local for
+    mockability). Fail-open: returns ``None`` on any unresolvable case.
+    """
+    return _cw_resolve_repo_slug(repo_root)
 
 
 def _check_agents(repo_root: Path) -> dict[str, Any]:
@@ -416,8 +506,14 @@ def _check_not_queued(ticket: str, client: str) -> dict[str, Any]:
 
 
 def _resolve_repo_root() -> Path:
-    # The script lives at <repo>/.claude/skills/cw-smoke-test/scripts/preflight.py
-    # — climb four parents to land on the repo root.
+    """Single-tenant fallback: the script's own repo root.
+
+    Used only from :func:`_resolve_client_repo_root` when ``clients.yaml``
+    doesn't exist at all (#2158) — not the general-purpose repo-root
+    resolution it used to be. The script lives at
+    ``<repo>/.claude/skills/cw-smoke-test/scripts/preflight.py`` — climb four
+    parents to land on the repo root.
+    """
     return Path(__file__).resolve().parents[4]
 
 
@@ -430,26 +526,70 @@ def main() -> int:
     )
     parser.add_argument(
         "--repo",
-        default="mattwwarren/claude-workspace",
-        help="GitHub repo in OWNER/NAME form (default: mattwwarren/claude-workspace).",
+        default=None,
+        help=(
+            "GitHub repo in OWNER/NAME form. Explicit override — when "
+            "omitted, derived from --client's resolved repo (its git "
+            "remote 'origin')."
+        ),
     )
     parser.add_argument(
         "--client",
         default="claude-workspace",
-        help="cw client name for the dev-queue lookup.",
+        help=(
+            "cw client name — resolves the repo root/tracker (via "
+            "clients.yaml) as well as the dev-queue lookup."
+        ),
     )
     args = parser.parse_args()
     ticket = args.ticket_id.lstrip("#")
-    repo_root = _resolve_repo_root()
-    tracker = _resolve_tracker(repo_root)
 
-    checks: list[dict[str, Any]] = []
-    checks.append(_check_agents(repo_root))
+    try:
+        repo_root = _resolve_client_repo_root(args.client)
+    except _ClientRepoUnresolvedError as exc:
+        report = {
+            "ok": False,
+            "ticket_id": ticket,
+            "client": args.client,
+            "repo": args.repo,
+            "repo_root": None,
+            "tracker": None,
+            "checks": [
+                {
+                    "name": "client_repo_resolved",
+                    "passed": False,
+                    "severity": "hard",
+                    "detail": str(exc),
+                }
+            ],
+        }
+        json.dump(report, sys.stdout)
+        sys.stdout.write("\n")
+        return 1
+
+    tracker = _resolve_tracker(repo_root)
+    repo = args.repo or _resolve_repo_slug(repo_root)
+
+    checks: list[dict[str, Any]] = [_check_agents(repo_root)]
     hard_doctor, soft_doctor = _check_cw_doctor()
     checks.append(hard_doctor)
     checks.append(soft_doctor)
-    checks.append(_check_ticket_open(ticket, args.repo, tracker))
-    checks.append(_check_no_open_pr(ticket, args.repo, tracker))
+    if repo is None:
+        checks.append(
+            {
+                "name": "repo_resolved",
+                "passed": False,
+                "severity": "hard",
+                "detail": (
+                    f"could not resolve a github owner/repo slug from "
+                    f"{repo_root}'s origin remote; pass --repo OWNER/NAME "
+                    "explicitly"
+                ),
+            }
+        )
+    else:
+        checks.append(_check_ticket_open(ticket, repo, tracker))
+        checks.append(_check_no_open_pr(ticket, repo, tracker))
     checks.append(_check_not_queued(ticket, args.client))
 
     hard_failed = any(
@@ -459,7 +599,8 @@ def main() -> int:
         "ok": not hard_failed,
         "ticket_id": ticket,
         "client": args.client,
-        "repo": args.repo,
+        "repo": repo,
+        "repo_root": str(repo_root),
         "tracker": tracker,
         "checks": checks,
     }
