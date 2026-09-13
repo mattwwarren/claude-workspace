@@ -1316,7 +1316,9 @@ def _extract_login(comment: dict[str, Any]) -> str:
     author = comment.get("author", "")
     if isinstance(author, str):
         return author
-    return (author or {}).get("login", "")
+    if isinstance(author, dict):
+        return str(author.get("login", ""))
+    return ""
 
 
 def _discover_author_threads(
