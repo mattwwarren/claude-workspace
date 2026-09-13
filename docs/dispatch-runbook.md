@@ -317,6 +317,17 @@ for scripting and field reads; it prints two distinct sections:
     granted vs. the cap at dispatch time — **not** the current live session
     count.
   - For current live session count, use the top table or `cw status`.
+  - `[ORPHAN? — N session(s) counted against the ceiling vs M RUNNING row(s)]`
+    (#2142) appears when that tick counted more sessions than the top table has
+    RUNNING rows for the client. The two numbers are independent metrics by
+    design — `running` is session-based, because a pre-existing DAEMON session
+    is real host load whether or not the queue tracks it — so an excess is not
+    itself a contradiction, and ordinary snapshot lag produces it too. It is,
+    however, the exact shape an uncorrelated fix-agent session makes: it holds
+    a client-ceiling slot that no task row accounts for, so the client reads
+    `running=2/2 cap_full` beside a single RUNNING row and stops admitting
+    work. The annotation is reporting only and never changes what is admitted;
+    run `cw doctor` to see whether a real session is behind it.
 
 ---
 
@@ -565,20 +576,6 @@ common wedge conditions:
   sentinel (a plain/non-headless spawn whose harness never re-fired the Stop
   hook that would have completed it) — marks the session `COMPLETED`, stops
   the daemon surface, and reverts the owning task to PENDING.
-- `wedge/orphan-active-pending-row` (#2142) — a `PENDING` row referencing a
-  live `ACTIVE` daemon session (via `session_id` or `fix_dispatch_session_id`).
-  The fix agent spawns with no dev-queue correlation, so a stray revert on the
-  row leaves a session that the session-based client ceiling counts but no
-  task-row metric does — the `running=2/2 cap_full` beside one RUNNING row
-  shape. Marks the session `COMPLETED` and stops the daemon surface; the row's
-  residual `fix_dispatch_session_id` clears on the next reconcile tick.
-- `wedge/fix-dispatch-running-stale` (#2142) — a `RUNNING` row waiting on a
-  `FIX` session whose transcript has been idle past
-  `fix_loop_await_deadline_minutes` (default 30). Same underlying Stop-hook
-  deferral as `active-daemon-stale-no-sentinel`, but scoped to the fix loop and
-  at a threshold matched to its ~3-minute cycle rather than that class's 45
-  minutes. Marks the session `COMPLETED`; the next tick unparks the row.
-
 Run `cw doctor --reap --json` for machine-readable output.
 
 #### `terminal_sibling` duplicate rows (GitHub #2100)

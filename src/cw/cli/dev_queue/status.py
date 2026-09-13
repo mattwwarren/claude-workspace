@@ -170,6 +170,48 @@ def _running_row_divergence_annotation(tick_running: int, task_running: int) -> 
     )
 
 
+def _echo_client_rows(
+    clients_seen: list[str],
+    by_client: dict[str, list[TicketTask]],
+    *,
+    show_all: bool,
+) -> dict[str, int]:
+    """Print one per-client summary row and return each client's RUNNING count.
+
+    The returned counts are what ``_running_row_divergence_annotation`` compares
+    the dispatch tick's session-based ``running`` against, so the table and the
+    annotation can never disagree about how many RUNNING rows a client has.
+    """
+    running_row_counts: dict[str, int] = {}
+    for client_name in clients_seen:
+        client_tasks = by_client[client_name]
+        pending_tasks = [t for t in client_tasks if t.status == QueueItemStatus.PENDING]
+        running_tasks = [t for t in client_tasks if t.status == QueueItemStatus.RUNNING]
+        blocked_tasks = [
+            t for t in client_tasks if t.status == QueueItemStatus.BLOCKED_ON_USER
+        ]
+        completed_tasks = [
+            t for t in client_tasks if t.status == QueueItemStatus.COMPLETED
+        ]
+        cancelled_tasks = [
+            t for t in client_tasks if t.status == QueueItemStatus.CANCELLED
+        ]
+        running_row_counts[client_name] = len(running_tasks)
+        needs_attn = _count_needs_attn(client_tasks)
+        display_tasks = (
+            client_tasks
+            if show_all
+            else [t for t in client_tasks if t.status in _ACTIVE_STATUSES]
+        )
+        ticket_ids = ", ".join(t.ticket_id for t in display_tasks) or "—"
+        click.echo(
+            f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
+            f"  {len(blocked_tasks):>7}  {len(completed_tasks):>9}"
+            f"  {len(cancelled_tasks):>9}  {needs_attn:>10}  {ticket_ids}"
+        )
+    return running_row_counts
+
+
 @dev_queue.command(name="status")
 @click.option("--client", "-c", default=None, help="Filter by client.")
 @click.option("--json", "output_json", is_flag=True, help="JSON dict keyed by client.")
@@ -223,33 +265,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     )
     click.echo(header)
     click.echo("-" * 90)
-    running_row_counts: dict[str, int] = {}
-    for client_name in clients_seen:
-        client_tasks = by_client[client_name]
-        pending_tasks = [t for t in client_tasks if t.status == QueueItemStatus.PENDING]
-        running_tasks = [t for t in client_tasks if t.status == QueueItemStatus.RUNNING]
-        blocked_tasks = [
-            t for t in client_tasks if t.status == QueueItemStatus.BLOCKED_ON_USER
-        ]
-        completed_tasks = [
-            t for t in client_tasks if t.status == QueueItemStatus.COMPLETED
-        ]
-        cancelled_tasks = [
-            t for t in client_tasks if t.status == QueueItemStatus.CANCELLED
-        ]
-        running_row_counts[client_name] = len(running_tasks)
-        needs_attn = _count_needs_attn(client_tasks)
-        display_tasks = (
-            client_tasks
-            if show_all
-            else [t for t in client_tasks if t.status in _ACTIVE_STATUSES]
-        )
-        ticket_ids = ", ".join(t.ticket_id for t in display_tasks) or "—"
-        click.echo(
-            f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
-            f"  {len(blocked_tasks):>7}  {len(completed_tasks):>9}"
-            f"  {len(cancelled_tasks):>9}  {needs_attn:>10}  {ticket_ids}"
-        )
+    running_row_counts = _echo_client_rows(clients_seen, by_client, show_all=show_all)
 
     tick_data = latest_tick_summary_by_client()
     if tick_data:
