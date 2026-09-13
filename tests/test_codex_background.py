@@ -270,6 +270,7 @@ def _run(
         sid=sid,
         sess_name=f"{client.name}/auto-dev/{task.ticket_id}",
         config_model=None,
+        config_reasoning_effort=None,
     )
 
 

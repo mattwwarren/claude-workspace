@@ -1316,7 +1316,9 @@ def _extract_login(comment: dict[str, Any]) -> str:
     author = comment.get("author", "")
     if isinstance(author, str):
         return author
-    return (author or {}).get("login", "")
+    if isinstance(author, dict):
+        return str(author.get("login", ""))
+    return ""
 
 
 def _discover_author_threads(
@@ -1525,19 +1527,71 @@ def _refresh_comment_reviews(
             if ref.submitted_at > formal_cutoff
         }
 
-    _collect_new_comment_reviews(pr, reviews, formal_cutoff)
+    inline_by_review: dict[str, list[str]] = {}
+    if any(
+        r.get("state") == "COMMENTED"
+        and (r.get("user") or {}).get("login") == our_username
+        and not (r.get("body") or "").strip()
+        for r in reviews
+    ):
+        inline_by_review = _fetch_inline_comment_bodies_by_review(repo, pr_number)
+
+    _collect_new_comment_reviews(
+        pr,
+        reviews,
+        formal_cutoff,
+        our_username=our_username,
+        inline_by_review=inline_by_review,
+    )
     return _has_engaged_human_reviewer(reviews, our_username)
 
 
+def _fetch_inline_comment_bodies_by_review(
+    repo: str, pr_number: int
+) -> dict[str, list[str]]:
+    """Map ``pull_request_review_id`` to active inline-comment bodies for a PR.
+
+    Only comments still anchored to a live diff position are included —
+    GitHub sets ``line`` to ``null`` once a comment's diff position is
+    outdated, and a stale thread must not resurrect an already-handled
+    review's body.
+    """
+    raw = _run_gh(["api", f"repos/{repo}/pulls/{pr_number}/comments"])
+    try:
+        comments: list[dict[str, Any]] = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    by_review: dict[str, list[str]] = {}
+    for comment in comments:
+        if comment.get("line") is None:
+            continue
+        review_id = comment.get("pull_request_review_id")
+        body = (comment.get("body") or "").strip()
+        if review_id is None or not body:
+            continue
+        by_review.setdefault(str(review_id), []).append(body)
+    return by_review
+
+
 def _collect_new_comment_reviews(
-    pr: MonitoredPR, reviews: list[dict[str, Any]], formal_cutoff: str
+    pr: MonitoredPR,
+    reviews: list[dict[str, Any]],
+    formal_cutoff: str,
+    our_username: str = "",
+    inline_by_review: dict[str, list[str]] | None = None,
 ) -> None:
     """Insert untracked non-bot ``COMMENTED`` reviews into ``pr.comment_reviews``.
 
-    Skips bot authors, bodies emptied to carry only inline file comments, and
-    reviews at/before ``formal_cutoff``. Already-tracked reviews are left as-is
-    so their persisted classification survives.
+    Skips bot authors, and reviews at/before ``formal_cutoff``. A blank body
+    is normally just the carrier for inline file-level comments — those are
+    tracked through threads — but when the review is ours (``author ==
+    our_username``) and *inline_by_review* has entries for it, the body is
+    reconstructed by joining those inline comment bodies, since a
+    ``COMMENTED`` review whose entire substance lives in inline comments
+    would otherwise look empty and be skipped. Already-tracked reviews are
+    left as-is so their persisted classification survives.
     """
+    inline_by_review = inline_by_review or {}
     for r in reviews:
         if r.get("state") != "COMMENTED":
             continue
@@ -1547,12 +1601,13 @@ def _collect_new_comment_reviews(
         submitted_at = r.get("submitted_at", "") or ""
         if formal_cutoff and submitted_at <= formal_cutoff:
             continue
+        rid = str(r.get("id"))
         body = (r.get("body") or "").strip()
         if not body:
-            # Bare COMMENTED with no body is just the carrier for inline
-            # file-level comments — those are tracked through threads.
-            continue
-        rid = str(r.get("id"))
+            if author == our_username and rid in inline_by_review:
+                body = "\n\n".join(inline_by_review[rid])
+            if not body:
+                continue
         if rid in pr.comment_reviews:
             continue  # already tracked; preserve classification
         pr.comment_reviews[rid] = CommentReviewRef(
