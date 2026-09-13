@@ -65,7 +65,7 @@ def test_blank_body_own_review_reconstructed_from_inline_comments(
             "body": "consider a guard clause",
         },
     ]
-    monkeypatch.setattr(_mod, "_run_gh", lambda args, repo=None: json.dumps(comments))
+    monkeypatch.setattr(_mod, "_run_gh", lambda *_a, **_k: json.dumps(comments))
     inline_by_review = _mod._fetch_inline_comment_bodies_by_review("acme/widgets", 42)
 
     pr = _make_pr()
@@ -161,7 +161,7 @@ def test_outdated_line_none_comments_excluded_from_reconstruction(
             "body": "live comment",
         },
     ]
-    monkeypatch.setattr(_mod, "_run_gh", lambda args, repo=None: json.dumps(comments))
+    monkeypatch.setattr(_mod, "_run_gh", lambda *_a, **_k: json.dumps(comments))
     result = _mod._fetch_inline_comment_bodies_by_review("acme/widgets", 42)
     assert result["100"] == ["live comment"]
 
@@ -169,7 +169,7 @@ def test_outdated_line_none_comments_excluded_from_reconstruction(
 def test_fetch_inline_comment_bodies_handles_malformed_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_mod, "_run_gh", lambda args, repo=None: "not json")
+    monkeypatch.setattr(_mod, "_run_gh", lambda *_a, **_k: "not json")
     result = _mod._fetch_inline_comment_bodies_by_review("acme/widgets", 42)
     assert result == {}
 
