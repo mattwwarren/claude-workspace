@@ -440,6 +440,7 @@ def _park_fix_failure(
     exit_code: int | None,
     verdict: ReviewVerdict | None,
     snapshot: _PersistedSnapshot,
+    reasoning_effort: str | None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Park the ticket on a failed fix invocation, persisting a diagnostics bundle.
 
@@ -464,7 +465,9 @@ def _park_fix_failure(
         category=category,
         executor_name="codex",
         session_id=session_id,
-        argv=_build_fix_codex_argv(model=None, reasoning_effort=None),
+        # The effort pin is threaded, not assumed: a diagnostic argv that
+        # omits the pin that actually ran would mislead the next reader.
+        argv=_build_fix_codex_argv(model=None, reasoning_effort=reasoning_effort),
         stdout_excerpt=stdout,
         stderr_excerpt=stderr,
         reviewer_role=f"fix-cycle-{cycle}",
@@ -726,6 +729,7 @@ def _run_fix_and_commit(
                 exit_code=result.returncode,
                 verdict=verdict,
                 snapshot=snapshot,
+                reasoning_effort=reasoning_effort,
             ),
             None,
         )
@@ -765,6 +769,7 @@ def _run_fix_and_commit(
                 exit_code=exc.returncode,
                 verdict=verdict,
                 snapshot=snapshot,
+                reasoning_effort=reasoning_effort,
             ),
             None,
         )

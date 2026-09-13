@@ -220,20 +220,29 @@ longer depends on the operator's personal codex config.
   `ultra`. Anything else fails config load.
 - Not every model supports every level (see `~/.codex/models_cache.json`); an
   unsupported level fails at codex runtime, not at config load.
-- Codex backend only: setting it on any other backend is a config error.
-- Unset (`null`, the default) emits nothing, and codex's own config decides.
+- Default `high` (#1711): a starting position, not a benchmarked optimum.
+  An explicit `null` emits nothing, and codex's own config decides.
+- Codex backend only: explicitly setting a level on any other backend is a
+  config error (the `high` default is simply unused there).
+- Cost multiplies: the pin governs every codex call in a review, meaning each
+  reviewer role and, with the fix loop enabled, every fix invocation and
+  re-review (up to 5 cycles). Size `max`/`ultra` against that, not one pass.
 - Like `model`, a lane's stage config replaces the client's stage config
-  wholesale, so repeat `backend` and `model` on the lane.
+  wholesale, so repeat `backend` and `model` on the lane. A lane that omits
+  `reasoning_effort` gets `high`, not the client's value.
 
 ```yaml
+clients:
+  my-project:
+    workspace_path: /path/to/repo
     lanes:
-    - name: default
-      pipeline:
-        executors:
-          review:
-            backend: codex
-            model: gpt-5.6-luna
-            reasoning_effort: max
+      - name: default
+        pipeline:
+          executors:
+            review:
+              backend: codex
+              model: gpt-5.6-luna
+              reasoning_effort: max
 ```
 
 Each `backend` here corresponds to a harvest-authority mechanism documented in

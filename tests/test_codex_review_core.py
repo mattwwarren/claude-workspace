@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-def test_run_review_threads_session_id_to_run_codex_role(
+def test_run_review_threads_session_id_and_reasoning_effort_to_run_codex_role(
     make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     worktree = make_git_repo("wt-run-review-thread")

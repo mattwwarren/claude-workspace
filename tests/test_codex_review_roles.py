@@ -21,6 +21,7 @@ from cw.codex_review import (
     _codex_scratch_dir,
     _is_audit_flag_rejection,
     _is_model_capacity_error,
+    _reasoning_effort_argv,
     _run_codex_role,
     run_codex_roles,
 )
@@ -113,6 +114,13 @@ class TestBuildGenericCodexArgv:
             output_path=tmp_path / "o.json",
         )
         assert "-c" not in argv
+
+    def test_explicit_none_level_still_emits_override(self) -> None:
+        # "none" is a real codex level, distinct from the unpinned None.
+        assert _reasoning_effort_argv("none") == [
+            "-c",
+            "model_reasoning_effort=none",
+        ]
 
     def test_read_only_sandbox_always_set(self, tmp_path: Path) -> None:
         # MUST_FIX 4 (#1236): ticket AC requires read-only sandboxing on

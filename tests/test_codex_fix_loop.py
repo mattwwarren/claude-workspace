@@ -537,6 +537,24 @@ class TestFixInvocation:
         bundle = diagnostics_bundle_dir("s-fix-error")
         assert list(bundle.glob("fix-cycle-1-nonzero_exit-*.json"))
 
+    def test_fix_failure_diagnostics_argv_carries_real_effort_pin(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # #1711 operator ruling: a parked-failure diagnostic must report the
+        # argv that actually ran, including the effort pin.
+        worktree = _worktree(make_git_repo, "wt-fix-error-effort")
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[CodexRunResult(returncode=1, stdout="", stderr="boom")],
+        )
+        _run_loop(
+            runner, worktree, session_id="s-fix-error-effort", reasoning_effort="max"
+        )
+
+        bundle = diagnostics_bundle_dir("s-fix-error-effort")
+        (path,) = bundle.glob("fix-cycle-1-nonzero_exit-*.json")
+        assert "model_reasoning_effort=max" in path.read_text()
+
     def test_fix_failure_persists_cycle0_snapshot(
         self, make_git_repo: Callable[..., Path]
     ) -> None:

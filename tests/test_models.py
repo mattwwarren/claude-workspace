@@ -886,8 +886,20 @@ class TestStageExecutorConfigExtraForbid:
         with pytest.raises(ValidationError):
             StageExecutorConfig(bogus_field="x")
 
-    def test_reasoning_effort_unpinned_by_default(self) -> None:
-        assert StageExecutorConfig().reasoning_effort is None
+    def test_reasoning_effort_defaults_to_high(self) -> None:
+        # #1711 R1: the field default is the default tier of lane > client >
+        # default, so a bare config pins high.
+        assert StageExecutorConfig().reasoning_effort is ReasoningEffort.HIGH
+
+    def test_reasoning_effort_explicit_null_unpins(self) -> None:
+        cfg = StageExecutorConfig(backend="codex", reasoning_effort=None)
+        assert cfg.reasoning_effort is None
+
+    def test_high_default_does_not_trip_codex_only_check(self) -> None:
+        # Only an explicit level on a non-codex backend is an error; the
+        # default riding along on a claude-native stage is not.
+        cfg = StageExecutorConfig(backend="claude-native", model="m")
+        assert cfg.backend == "claude-native"
 
     def test_reasoning_effort_accepts_codex_level(self) -> None:
         cfg = StageExecutorConfig(backend="codex", reasoning_effort="max")
@@ -2010,8 +2022,8 @@ class TestPackageExportCompleteness:
             "PrState",
             "QueueItemStatus",
             "ReapPolicy",
-            "ReasoningEffort",
             "ReapReason",
+            "ReasoningEffort",
             "Session",
             "SessionOrigin",
             "SessionPurpose",
