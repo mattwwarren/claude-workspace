@@ -291,8 +291,15 @@ def test_plan_live_fetch_rule_covers_body() -> None:
 
 
 def test_plan_body_fetch_op_named() -> None:
-    """The github-issues fetch op is named with the body field included."""
-    assert "`gh issue view <n> --json body,comments`" in _cmd("auto-dev-plan.md")
+    """The github-issues fetch op is named with the body field included.
+
+    #2154 widened the field list with `updatedAt` (the round-cap delta
+    check's fingerprint source), so this now matches the widened op rather
+    than the original two-field form.
+    """
+    assert "`gh issue view <n> --json body,comments,updatedAt`" in _cmd(
+        "auto-dev-plan.md"
+    )
 
 
 def test_step1b_greps_body_resolutions_section() -> None:
