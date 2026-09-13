@@ -63,6 +63,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 # sys.path bootstrap: must run before any `cw` import so this standalone script
 # works under bare python3 too (not just `uv run`), matching the sibling
 # skill scripts (cw-followup/scripts/parse_sentinel.py,
@@ -99,6 +101,7 @@ def _bootstrap_sys_path() -> None:
 _bootstrap_sys_path()
 
 from cw.config import load_clients
+from cw.exceptions import CwError
 from cw.pr_hydrate import _resolve_repo_slug as _cw_resolve_repo_slug
 from cw.tracker import resolve_tracker as _cw_resolve_tracker
 from cw.worktree import _git_dir
@@ -155,8 +158,21 @@ def _resolve_client_repo_root(client: str) -> Path:
     "absent" from "populated but missing this client" elsewhere in cw. A
     populated ``clients.yaml`` missing *client* is drift: raise loudly rather
     than silently falling back to a default repo.
+
+    A ``clients.yaml`` that fails to load or validate (malformed YAML, or a
+    client entry that fails ``ClientConfig`` schema validation) is the same
+    "cannot resolve" outcome as a missing entry, not a crash: :func:`load_clients`
+    can raise ``CwError``/``ConfigValidationError`` (invalid client name or
+    schema) or a raw ``yaml.YAMLError`` (unparseable YAML), and none of those
+    are specific to *this* client, so they are wrapped into the same
+    :class:`_ClientRepoUnresolvedError` main() already turns into a structured
+    ``client_repo_resolved`` failed check (#2158).
     """
-    clients = load_clients()
+    try:
+        clients = load_clients()
+    except (CwError, yaml.YAMLError) as exc:
+        msg = f"failed to load clients.yaml: {exc}"
+        raise _ClientRepoUnresolvedError(msg) from exc
     if not clients:
         return _resolve_repo_root()
     cfg = clients.get(client)
@@ -164,7 +180,7 @@ def _resolve_client_repo_root(client: str) -> Path:
         msg = (
             f"--client {client!r} has no entry in clients.yaml; refusing to "
             "fall back to a default repo (GitHub #2158) — add it to "
-            "clients.yaml or pass an explicit --repo"
+            "clients.yaml"
         )
         raise _ClientRepoUnresolvedError(msg)
     return _git_dir(cfg)
@@ -517,6 +533,18 @@ def _resolve_repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
 
 
+def _emit(report: dict[str, Any], rc: int) -> int:
+    """Write *report* as one JSON line to stdout and return *rc*.
+
+    Single emission point for main()'s two report shapes (hard-fail-early on
+    an unresolvable client, and the full end-of-run report) so a future field
+    added to one is not silently missed in the other (#2158).
+    """
+    json.dump(report, sys.stdout)
+    sys.stdout.write("\n")
+    return rc
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Pre-flight checks for /cw-smoke-test."
@@ -563,9 +591,7 @@ def main() -> int:
                 }
             ],
         }
-        json.dump(report, sys.stdout)
-        sys.stdout.write("\n")
-        return 1
+        return _emit(report, 1)
 
     tracker = _resolve_tracker(repo_root)
     repo = args.repo or _resolve_repo_slug(repo_root)
@@ -604,9 +630,7 @@ def main() -> int:
         "tracker": tracker,
         "checks": checks,
     }
-    json.dump(report, sys.stdout)
-    sys.stdout.write("\n")
-    return 1 if hard_failed else 0
+    return _emit(report, 1 if hard_failed else 0)
 
 
 if __name__ == "__main__":
