@@ -16,13 +16,14 @@ import argparse
 import functools
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
@@ -66,12 +67,49 @@ CANONICAL_REPO_PATHS: dict[str, str] = {
 }
 
 
+def _canonical_repo_paths_override() -> dict[str, str]:
+    """Parse CW_CANONICAL_REPO_PATHS, a JSON object of repo -> path strings.
+
+    Lets an operator recover machine-local canonical repo paths (e.g. after
+    `install-skills.sh` replaces a locally-edited CANONICAL_REPO_PATHS with
+    this repo's empty tracked copy) without editing this file. Any parse or
+    shape failure is logged and treated as no override — never partially
+    applied.
+    """
+    raw = os.environ.get("CW_CANONICAL_REPO_PATHS")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "_canonical_repo_paths_override: invalid JSON in "
+            "CW_CANONICAL_REPO_PATHS (%s); ignoring override",
+            e,
+        )
+        return {}
+    if not isinstance(parsed, dict) or not all(
+        isinstance(v, str) for v in parsed.values()
+    ):
+        logger.warning(
+            "_canonical_repo_paths_override: CW_CANONICAL_REPO_PATHS must be "
+            "a JSON object of repo->path strings, got %s; ignoring override",
+            type(parsed).__name__,
+        )
+        return {}
+    return cast(dict[str, str], parsed)
+
+
 def _canonical_repo_path(repo: str, given: str) -> str:
     """Return the canonical clone path for *repo*, falling back to *given*.
 
     Normalizes away ephemeral agent-worktree paths at registration time.
+    Consults the CW_CANONICAL_REPO_PATHS env-var override before the
+    tracked CANONICAL_REPO_PATHS dict.
     """
-    return CANONICAL_REPO_PATHS.get(repo, given)
+    return _canonical_repo_paths_override().get(repo) or CANONICAL_REPO_PATHS.get(
+        repo, given
+    )
 
 
 # Minimum wall-clock time between DM escalations for the same PR.

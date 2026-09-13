@@ -191,6 +191,27 @@ _agent_conflict_reason() {
     return 0
 }
 
+# _warn_script_local_changes <rel> <dst_file> <backup>
+_warn_script_local_changes() {
+    local rel="$1"
+    local dst_file="$2"
+    local backup="$3"
+
+    {
+        echo "WARNING: replaced $rel with local changes (backup: $backup)."
+        echo ""
+        if [ "$rel" = "review_monitor.py" ]; then
+            echo "  Machine-local review-monitor config (CANONICAL_REPO_PATHS) is not"
+            echo "  preserved by symlinking. Reapply it via the CW_CANONICAL_REPO_PATHS"
+            echo "  JSON env var (see docs/INSTALL.md) instead of re-editing $dst_file."
+        else
+            echo "  If $rel reads machine-local config, check"
+            echo "  .claude/scripts/utils/runtime_paths.py for a supported env-var"
+            echo "  override before reapplying changes by hand."
+        fi
+    } >&2
+}
+
 # _print_agent_conflict <name> <src_file> <dst_file> <reason>
 _print_agent_conflict() {
     local name="$1"
@@ -383,6 +404,7 @@ if [ -d "$SCRIPTS_SRC" ]; then
                 done
                 cp -p "$dst_file" "$backup"
                 backed_up_scripts+=("$backup")
+                _warn_script_local_changes "$rel" "$dst_file" "$backup"
             fi
         fi
         ln -sf "$src_file" "$dst_file"
