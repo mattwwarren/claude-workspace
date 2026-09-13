@@ -196,16 +196,26 @@ def test_blank_body_own_review_no_matching_inline_comments_still_skipped() -> No
     assert "100" not in pr.comment_reviews
 
 
-def test_no_env_var_falls_back_to_repo_dict_and_given(
+def test_no_env_var_falls_back_to_given_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("CW_CANONICAL_REPO_PATHS", raising=False)
+    monkeypatch.delenv(_mod.CANONICAL_REPO_PATHS_ENV, raising=False)
     assert _mod._canonical_repo_path("acme/widgets", "/tmp/wt") == "/tmp/wt"
+
+
+def test_no_env_var_falls_back_to_repo_dict_when_no_given_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(_mod.CANONICAL_REPO_PATHS_ENV, raising=False)
+    monkeypatch.setattr(
+        _mod, "CANONICAL_REPO_PATHS", {"acme/widgets": "/canonical/widgets"}
+    )
+    assert _mod._canonical_repo_path("acme/widgets", "/tmp/wt") == "/canonical/widgets"
 
 
 def test_env_var_overrides_given_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
-        "CW_CANONICAL_REPO_PATHS",
+        _mod.CANONICAL_REPO_PATHS_ENV,
         json.dumps({"acme/widgets": "/home/x/clones/widgets"}),
     )
     assert (
@@ -215,7 +225,7 @@ def test_env_var_overrides_given_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_env_var_only_overrides_matching_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
-        "CW_CANONICAL_REPO_PATHS",
+        _mod.CANONICAL_REPO_PATHS_ENV,
         json.dumps({"other/repo": "/home/x/clones/other"}),
     )
     assert _mod._canonical_repo_path("acme/widgets", "/tmp/wt") == "/tmp/wt"
@@ -224,38 +234,53 @@ def test_env_var_only_overrides_matching_key(monkeypatch: pytest.MonkeyPatch) ->
 def test_malformed_json_falls_back_and_warns(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv("CW_CANONICAL_REPO_PATHS", "{not json")
+    monkeypatch.setenv(_mod.CANONICAL_REPO_PATHS_ENV, "{not json")
     with caplog.at_level("WARNING"):
         result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
     assert result == "/tmp/wt"
-    assert any("CW_CANONICAL_REPO_PATHS" in r.message for r in caplog.records)
+    assert any(_mod.CANONICAL_REPO_PATHS_ENV in r.message for r in caplog.records)
 
 
 def test_non_object_json_falls_back_and_warns(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv("CW_CANONICAL_REPO_PATHS", json.dumps(["a", "b"]))
+    monkeypatch.setenv(_mod.CANONICAL_REPO_PATHS_ENV, json.dumps(["a", "b"]))
     with caplog.at_level("WARNING"):
         result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
     assert result == "/tmp/wt"
-    assert any("CW_CANONICAL_REPO_PATHS" in r.message for r in caplog.records)
+    assert any(_mod.CANONICAL_REPO_PATHS_ENV in r.message for r in caplog.records)
 
 
-def test_non_string_value_falls_back_and_warns(
+def test_non_string_value_falls_back_and_warns_with_key_and_type(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv("CW_CANONICAL_REPO_PATHS", json.dumps({"acme/widgets": 123}))
+    monkeypatch.setenv(_mod.CANONICAL_REPO_PATHS_ENV, json.dumps({"acme/widgets": 123}))
     with caplog.at_level("WARNING"):
         result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
     assert result == "/tmp/wt"
-    assert any("CW_CANONICAL_REPO_PATHS" in r.message for r in caplog.records)
+    messages = [r.message for r in caplog.records]
+    assert any(_mod.CANONICAL_REPO_PATHS_ENV in m for m in messages)
+    assert any("acme/widgets" in m for m in messages)
+    assert any("int" in m for m in messages)
 
 
-def test_empty_string_env_var_treated_as_unset(
+def test_empty_string_env_var_warns_and_falls_back(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv("CW_CANONICAL_REPO_PATHS", "")
+    monkeypatch.setenv(_mod.CANONICAL_REPO_PATHS_ENV, "")
     with caplog.at_level("WARNING"):
         result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
     assert result == "/tmp/wt"
-    assert not any("CW_CANONICAL_REPO_PATHS" in r.message for r in caplog.records)
+    assert any(_mod.CANONICAL_REPO_PATHS_ENV in r.message for r in caplog.records)
+
+
+def test_empty_path_entry_warns_and_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv(_mod.CANONICAL_REPO_PATHS_ENV, json.dumps({"acme/widgets": ""}))
+    with caplog.at_level("WARNING"):
+        result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
+    assert result == "/tmp/wt"
+    messages = [r.message for r in caplog.records]
+    assert any(_mod.CANONICAL_REPO_PATHS_ENV in m for m in messages)
+    assert any("acme/widgets" in m for m in messages)

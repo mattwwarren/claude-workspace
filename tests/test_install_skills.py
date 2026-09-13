@@ -985,6 +985,7 @@ class TestScriptsInstalled:
         assert "    - scripts/prep_pr_state.py" in result.stdout
         assert not (dst / "prep_pr_state.py.pre-symlink.bak").exists()
         assert "kept beside the link" not in result.stdout
+        assert "WARNING:" not in result.stderr
 
     def test_no_replacement_notice_on_clean_or_repeat_run(
         self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
@@ -1110,18 +1111,6 @@ class TestScriptsInstalled:
         assert str(backup) in result.stderr
         assert "CW_CANONICAL_REPO_PATHS" in result.stderr
         assert ".claude/scripts/utils/runtime_paths.py" not in result.stderr
-
-    def test_no_warning_on_byte_identical_replacement(
-        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
-    ) -> None:
-        dst = fake_home / ".claude" / "scripts"
-        dst.mkdir()
-        same = dst / "prep_pr_state.py"
-        same.write_text("# fresh: gate-timeout\n")
-
-        result = _run(script, fake_home)
-        assert result.returncode == 0, result.stderr
-        assert "WARNING:" not in result.stderr
 
     def test_no_warning_on_fresh_install(
         self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
