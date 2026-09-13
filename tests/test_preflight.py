@@ -517,7 +517,7 @@ class TestResolveClientRepoRoot:
     def test_malformed_yaml_raises_client_repo_unresolved(
         self, tmp_config_dir: Path
     ) -> None:
-        """A clients.yaml that isn't even valid YAML must not crash preflight (#2158)."""
+        """Not-even-valid-YAML clients.yaml must not crash preflight (#2158)."""
         pf = _load()
         config_dir = tmp_config_dir / ".config" / "cw"
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -531,7 +531,7 @@ class TestResolveClientRepoRoot:
     def test_schema_invalid_yaml_raises_client_repo_unresolved(
         self, tmp_config_dir: Path
     ) -> None:
-        """Valid YAML that fails ClientConfig validation must not crash preflight (#2158)."""
+        """Valid YAML failing ClientConfig validation must not crash (#2158)."""
         pf = _load()
         config_dir = tmp_config_dir / ".config" / "cw"
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -768,7 +768,7 @@ class TestMainRepoResolution:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """A malformed clients.yaml must not crash main() with a traceback (#2158)."""
+        """A malformed clients.yaml must not crash main() (#2158)."""
         pf = _load()
         config_dir = tmp_config_dir / ".config" / "cw"
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -797,7 +797,7 @@ class TestMainRepoResolution:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """A schema-invalid clients.yaml must not crash main() with a traceback (#2158)."""
+        """A schema-invalid clients.yaml must not crash main() (#2158)."""
         pf = _load()
         config_dir = tmp_config_dir / ".config" / "cw"
         config_dir.mkdir(parents=True, exist_ok=True)
