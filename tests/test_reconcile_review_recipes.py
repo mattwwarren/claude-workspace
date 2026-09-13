@@ -2740,11 +2740,29 @@ def test_dispatch_fix_agent_provisions_worktree_and_spawns(
     stub_spawn: _SpawnRecorder,
 ) -> None:
     """Happy path: local ref absent, origin/<branch> present -> provision + spawn."""
+    from cw.config import save_state
+    from cw.models import CwState, Session
     from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
 
     client = _make_fix_client(make_git_repo, tmp_path)
     branch = "dev/2017"
     _seed_origin(client, branch)
+    # dispatch_fix_agent resolves parent= via find_session_by_id (#2149), so a
+    # real session must exist for "parent-session" to flow through unchanged.
+    save_state(
+        CwState(
+            sessions=[
+                Session(
+                    id="parent-session",
+                    name="acme/review/2017",
+                    client="acme",
+                    purpose=SessionPurpose.IMPL,
+                    workspace_path=client.workspace_path,
+                    status=SessionStatus.COMPLETED,
+                )
+            ]
+        )
+    )
 
     session_id = dispatch_fix_agent(
         client=client,
