@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-def test_run_review_threads_session_id_to_run_codex_role(
+def test_run_review_threads_session_id_and_reasoning_effort_to_run_codex_role(
     make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     worktree = make_git_repo("wt-run-review-thread")
@@ -33,6 +33,7 @@ def test_run_review_threads_session_id_to_run_codex_role(
 
     def _spy_run_codex_role(**kwargs: object) -> tuple[object, object, object, object]:
         captured["session_id"] = kwargs["session_id"]
+        captured["reasoning_effort"] = kwargs["reasoning_effort"]
         return _make_reviewer_doc(), None, {}, []
 
     monkeypatch.setattr("cw.codex_review._roles._run_codex_role", _spy_run_codex_role)
@@ -44,11 +45,13 @@ def test_run_review_threads_session_id_to_run_codex_role(
         worktree=worktree,
         default_branch="main",
         model=None,
+        reasoning_effort="max",
         wall_clock_budget_seconds=None,
         session_id="sess-thread",
         fix_loop_enabled=False,
     )
     assert captured["session_id"] == "sess-thread"
+    assert captured["reasoning_effort"] == "max"
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +93,7 @@ class TestPrepareReviewPass:
             worktree=repo,
             default_branch="main",
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="sess-prepare-run",
             fix_loop_enabled=False,
@@ -144,6 +148,7 @@ class TestPrepareReviewPass:
             worktree=repo,
             default_branch="main",
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="sess-voided-run",
             fix_loop_enabled=False,
@@ -201,6 +206,7 @@ class TestPrepareReviewPass:
             worktree=repo,
             default_branch="main",
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="sess-dispositions-run",
             fix_loop_enabled=False,
@@ -250,6 +256,7 @@ def test_run_review_threads_metrics_onto_verdict_agents_run(
         worktree=repo,
         default_branch="main",
         model=None,
+        reasoning_effort=None,
         wall_clock_budget_seconds=None,
         session_id="sess-run-review-metrics",
         fix_loop_enabled=False,

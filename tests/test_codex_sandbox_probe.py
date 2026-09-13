@@ -151,6 +151,7 @@ class TestCodexSandboxReadOnlyProbe:
             role="Sandbox Probe",
             prompt=_sandbox_probe_prompt(sentinel_token),
             model=None,
+            reasoning_effort=None,
             timeout_seconds=120,
             scratch_dir=_scratch(base),
             session_id="sandbox-probe-suite",

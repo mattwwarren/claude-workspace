@@ -352,6 +352,7 @@ def _run_codex_review_and_complete(
     sid: str,
     sess_name: str,
     config_model: str | None,
+    config_reasoning_effort: str | None,
 ) -> None:
     """Run the review, persist its result, post the verdict, emit completion.
 
@@ -404,6 +405,7 @@ def _run_codex_review_and_complete(
             worktree=worktree,
             default_branch=client.default_branch,
             model=config_model,
+            reasoning_effort=config_reasoning_effort,
             wall_clock_budget_seconds=wall_clock_budget_seconds,
             session_id=sid,
             fix_loop_enabled=fix_loop_enabled,

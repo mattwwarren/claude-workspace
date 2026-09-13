@@ -289,6 +289,121 @@ class TestSpawnCreate:
         assert state.sessions == []
         assert daemon.spawn_calls == []
 
+    def test_parent_resolves_by_claude_session_id(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """A parent= value that is a claude_session_id (not the cw id) resolves.
+
+        Regression for #2149: find_by_name_or_id only checked (name, id);
+        find_session_by_id also checks claude_session_id.
+        """
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-parent-claude-id")
+
+        parent_workspace = tmp_path / "workspace" / "orch"
+        parent_workspace.mkdir(parents=True)
+        claude_id = "0f2901e1-bb58-4a2c-9c1e-abcdef012345"
+        parent = Session(
+            name="orch/impl",
+            client="orch",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=parent_workspace,
+            claude_session_id=claude_id,
+        )
+        state = load_state()
+        state.sessions.append(parent)
+        save_state(state)
+
+        worker_id = spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-9 --headless",
+            label="auto-dev-GEN-9",
+            native_daemon=daemon,
+            parent=claude_id,
+        )
+
+        state = load_state()
+        worker = state.find_by_name_or_id(worker_id)
+        assert worker is not None
+        # Resolved to the parent's cw id, not the claude id passed in.
+        assert worker.parent_session_id == parent.id
+        assert worker.parent_session_id != claude_id
+        refreshed_parent = state.find_by_name_or_id(parent.id)
+        assert refreshed_parent is not None
+        assert worker_id in refreshed_parent.worker_session_ids
+
+    def test_parent_resolves_from_archive(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """A parent= value present only in an archived sessions.<date>.json resolves.
+
+        Regression for #2149: find_by_name_or_id never scans archives at all;
+        find_session_by_id does. The archived parent is not in state.sessions,
+        so the reverse-link worker_session_ids mutation must be safely skipped
+        rather than crashing.
+        """
+        from datetime import timedelta
+
+        from freezegun import freeze_time
+
+        from cw.session_retention import _SESSION_RETENTION_DAYS, prune_sessions
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-parent-archive")
+
+        now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+        old = now - timedelta(days=_SESSION_RETENTION_DAYS + 10)
+        parent_workspace = tmp_path / "workspace" / "orch"
+        parent_workspace.mkdir(parents=True)
+        parent = Session(
+            id="archpar1",
+            name="orch/impl",
+            client="orch",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=parent_workspace,
+            status=SessionStatus.COMPLETED,
+            started_at=old,
+            completed_at=old,
+        )
+        state = load_state()
+        state.sessions.append(parent)
+        save_state(state)
+
+        with freeze_time(now):
+            result = prune_sessions()
+        assert result.archived_count == 1
+        # Confirm the parent is genuinely gone from the hot file.
+        assert load_state().sessions == []
+
+        worker_id = spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-9 --headless",
+            label="auto-dev-GEN-9",
+            native_daemon=daemon,
+            parent="archpar1",
+        )
+
+        state = load_state()
+        worker = state.find_by_name_or_id(worker_id)
+        assert worker is not None
+        assert worker.parent_session_id == "archpar1"
+        # The archived parent never re-enters the hot file, and no crash
+        # occurred trying to append to its (non-hot) worker_session_ids.
+        assert [s.id for s in state.sessions] == [worker_id]
+
     def test_spawn_create_impl_stamps_lane(
         self,
         tmp_config_dir: Path,

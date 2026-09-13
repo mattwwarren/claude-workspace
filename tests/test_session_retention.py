@@ -14,7 +14,7 @@ from cw.cli import main
 from cw.config import load_state, save_state, sessions_lock, state_dir
 from cw.dev_queue import save_dev_queue
 from cw.exceptions import SessionsLockReentryError
-from cw.models import DevQueueStore, Session, SessionStatus
+from cw.models import CwState, DevQueueStore, Session, SessionStatus
 from cw.session_retention import (
     _SESSION_RETENTION_DAYS,
     find_session_by_id,
@@ -468,6 +468,51 @@ class TestFindSessionById:
             prune_sessions()
         assert _archive_files() != []
         assert find_session_by_id("zzzz") is None
+
+    def test_find_session_by_id_accepts_preloaded_state_and_skips_reload(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``state=`` snapshot resolves without ever calling ``load_state()``.
+
+        The passed-in state carries a session never written to sessions.json —
+        proof that resolution used the snapshot, not a disk re-read (#2149).
+        """
+        preloaded = CwState(
+            sessions=[
+                _make_daemon_session(id="pre00001", name="client-a/auto-dev/T-pre")
+            ]
+        )
+
+        def _boom() -> CwState:
+            msg = "load_state() must not be called when state= is passed"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.session_retention.load_state", _boom)
+
+        found = find_session_by_id("pre0", state=preloaded)
+        assert found is not None
+        assert found.id == "pre00001"
+
+    def test_find_session_by_id_default_state_arg_unchanged(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Omitting ``state=`` still resolves via ``load_state()`` (no regression)."""
+        _seed_sessions(
+            _make_daemon_session(id="def00001", name="client-a/auto-dev/T-def")
+        )
+        calls: list[None] = []
+        original_load_state = load_state
+
+        def _tracking() -> CwState:
+            calls.append(None)
+            return original_load_state()
+
+        monkeypatch.setattr("cw.session_retention.load_state", _tracking)
+
+        found = find_session_by_id("def0")
+        assert found is not None
+        assert found.id == "def00001"
+        assert len(calls) == 1
 
 
 class TestCliSessionPrune:
