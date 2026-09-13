@@ -861,22 +861,14 @@ class TestMainRepoResolution:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """An unreadable clients.yaml (OSError from read_text) must not crash
-        main() (round-2 operator resolution, #2158)."""
+        main() (round-2 operator resolution, #2158). clients.yaml is a
+        directory, so Path.read_text() raises a genuine IsADirectoryError
+        (an OSError subclass) with no monkeypatching (round-3 operator
+        resolution, #2158)."""
         pf = _load()
         config_dir = tmp_config_dir / ".config" / "cw"
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n  acme:\n    workspace_path: /tmp/acme\n", encoding="utf-8"
-        )
-        original_read_text = Path.read_text
-
-        def _raise_permission_error(self: Path, *args: object, **kwargs: object) -> str:
-            if self.name == "clients.yaml":
-                msg = "Permission denied"
-                raise PermissionError(msg)
-            return original_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(Path, "read_text", _raise_permission_error)
+        (config_dir / "clients.yaml").mkdir()
         monkeypatch.setattr(
             sys, "argv", ["preflight.py", "--ticket-id", "1", "--client", "acme"]
         )
@@ -900,25 +892,14 @@ class TestMainRepoResolution:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """A non-UTF-8 clients.yaml (UnicodeDecodeError from read_text) must
-        not crash main() (round-2 operator resolution, #2158)."""
+        not crash main() (round-2 operator resolution, #2158). Writing real
+        non-UTF-8 bytes makes Path.read_text()'s default UTF-8 decode raise a
+        genuine UnicodeDecodeError with no monkeypatching (round-3 operator
+        resolution, #2158)."""
         pf = _load()
         config_dir = tmp_config_dir / ".config" / "cw"
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n  acme:\n    workspace_path: /tmp/acme\n", encoding="utf-8"
-        )
-        original_read_text = Path.read_text
-
-        def _raise_unicode_decode_error(
-            self: Path, *args: object, **kwargs: object
-        ) -> str:
-            if self.name == "clients.yaml":
-                encoding = "utf-8"
-                reason = "invalid start byte"
-                raise UnicodeDecodeError(encoding, b"\xff\xfe", 0, 1, reason)
-            return original_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(Path, "read_text", _raise_unicode_decode_error)
+        (config_dir / "clients.yaml").write_bytes(b"\xff\xfe\x00\x01")
         monkeypatch.setattr(
             sys, "argv", ["preflight.py", "--ticket-id", "1", "--client", "acme"]
         )
