@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+
+from tests.conftest import init_repo_with_remote
 
 _PREFLIGHT = (
     Path(__file__).resolve().parents[1]
@@ -70,24 +71,6 @@ def _write_clients_yaml(
         lines.append(f"    repo_path: {repo_path}")
         lines.append(f"    branch: {branch}")
     (config_dir / "clients.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _init_repo_with_remote(path: Path, remote_url: str | None) -> Path:
-    """Build a minimal git repo at *path*, optionally with an ``origin`` remote.
-
-    Raw subprocess (not the shared ``make_git_repo`` fixture): file-local copy
-    of the identical helper in tests/test_pr_hydrate.py, per that file's own
-    precedent of not cross-importing it.
-    """
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "-C", str(path), "init"], capture_output=True, check=True)
-    if remote_url is not None:
-        subprocess.run(
-            ["git", "-C", str(path), "remote", "add", "origin", remote_url],
-            capture_output=True,
-            check=True,
-        )
-    return path
 
 
 def _make_agent_repo(root: Path, *, tracker: str | None = "github-issues") -> Path:
@@ -531,20 +514,50 @@ class TestResolveClientRepoRoot:
         monkeypatch.setattr(pf, "_resolve_repo_root", lambda: sentinel)
         assert pf._resolve_client_repo_root("anything") == sentinel
 
+    def test_malformed_yaml_raises_client_repo_unresolved(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A clients.yaml that isn't even valid YAML must not crash preflight (#2158)."""
+        pf = _load()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n  acme:\n    workspace_path: [unterminated\n", encoding="utf-8"
+        )
+        with pytest.raises(pf._ClientRepoUnresolvedError) as exc_info:
+            pf._resolve_client_repo_root("acme")
+        assert "clients.yaml" in str(exc_info.value)
+
+    def test_schema_invalid_yaml_raises_client_repo_unresolved(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Valid YAML that fails ClientConfig validation must not crash preflight (#2158)."""
+        pf = _load()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n  acme:\n    workspace_path: /tmp/acme\n"
+            "    not_a_real_field: true\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(pf._ClientRepoUnresolvedError) as exc_info:
+            pf._resolve_client_repo_root("acme")
+        assert "clients.yaml" in str(exc_info.value)
+
 
 class TestResolveRepoSlugWrapper:
     """_resolve_repo_slug thin-wraps cw.pr_hydrate's slug resolver."""
 
     def test_delegates_to_cw_pr_hydrate(self, tmp_path: Path) -> None:
         pf = _load()
-        repo = _init_repo_with_remote(
+        repo = init_repo_with_remote(
             tmp_path / "widgets", "git@github.com:acme/widgets.git"
         )
         assert pf._resolve_repo_slug(repo) == "acme/widgets"
 
     def test_none_when_unresolvable(self, tmp_path: Path) -> None:
         pf = _load()
-        repo = _init_repo_with_remote(tmp_path / "no-remote", None)
+        repo = init_repo_with_remote(tmp_path / "no-remote", None)
         assert pf._resolve_repo_slug(repo) is None
 
 
@@ -748,3 +761,63 @@ class TestMainRepoResolution:
         repo_check = next(c for c in report["checks"] if c["name"] == "repo_resolved")
         assert repo_check["passed"] is False
         assert repo_check["severity"] == "hard"
+
+    def test_malformed_clients_yaml_hard_fails_with_structured_json(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A malformed clients.yaml must not crash main() with a traceback (#2158)."""
+        pf = _load()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n  acme:\n    workspace_path: [unterminated\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            sys, "argv", ["preflight.py", "--ticket-id", "1", "--client", "acme"]
+        )
+
+        rc = pf.main()
+        report = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert report["ok"] is False
+        assert len(report["checks"]) == 1
+        check = report["checks"][0]
+        assert check["name"] == "client_repo_resolved"
+        assert check["passed"] is False
+        assert check["severity"] == "hard"
+        assert "clients.yaml" in check["detail"]
+
+    def test_schema_invalid_clients_yaml_hard_fails_with_structured_json(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A schema-invalid clients.yaml must not crash main() with a traceback (#2158)."""
+        pf = _load()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n  acme:\n    workspace_path: /tmp/acme\n"
+            "    not_a_real_field: true\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            sys, "argv", ["preflight.py", "--ticket-id", "1", "--client", "acme"]
+        )
+
+        rc = pf.main()
+        report = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert report["ok"] is False
+        assert len(report["checks"]) == 1
+        check = report["checks"][0]
+        assert check["name"] == "client_repo_resolved"
+        assert check["passed"] is False
+        assert check["severity"] == "hard"
+        assert "clients.yaml" in check["detail"]
