@@ -66,45 +66,80 @@ CANONICAL_REPO_PATHS: dict[str, str] = {
     # "owner/repo": "/path/to/canonical/clone",
 }
 
+# Env var an operator can set to recover machine-local canonical repo paths
+# (e.g. after `install-skills.sh` replaces a locally-edited CANONICAL_REPO_PATHS
+# with this repo's empty tracked copy) without editing this file.
+CANONICAL_REPO_PATHS_ENV = "CW_CANONICAL_REPO_PATHS"
+
 
 def _canonical_repo_paths_override() -> dict[str, str]:
-    """Parse CW_CANONICAL_REPO_PATHS, a JSON object of repo -> path strings.
+    """Parse CANONICAL_REPO_PATHS_ENV, a JSON object of repo -> path strings.
 
-    Lets an operator recover machine-local canonical repo paths (e.g. after
-    `install-skills.sh` replaces a locally-edited CANONICAL_REPO_PATHS with
-    this repo's empty tracked copy) without editing this file. Any parse or
-    shape failure is logged and treated as no override — never partially
-    applied.
+    Any parse or shape failure is logged and treated as no override — never
+    partially applied. A per-entry empty path is dropped (with its own
+    warning) rather than silently falling through to the tracked dict/given
+    path; every rejection is logged, never silent.
     """
-    raw = os.environ.get("CW_CANONICAL_REPO_PATHS")
-    if not raw:
+    raw = os.environ.get(CANONICAL_REPO_PATHS_ENV)
+    if raw is None:
+        return {}
+    if raw == "":
+        logger.warning(
+            "_canonical_repo_paths_override: %s is set but empty; using default",
+            CANONICAL_REPO_PATHS_ENV,
+        )
         return {}
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as e:
         logger.warning(
-            "_canonical_repo_paths_override: invalid JSON in "
-            "CW_CANONICAL_REPO_PATHS (%s); ignoring override",
+            "_canonical_repo_paths_override: invalid JSON in %s (%s); "
+            "ignoring override",
+            CANONICAL_REPO_PATHS_ENV,
             e,
         )
         return {}
-    if not isinstance(parsed, dict) or not all(
-        isinstance(v, str) for v in parsed.values()
-    ):
+    if not isinstance(parsed, dict):
         logger.warning(
-            "_canonical_repo_paths_override: CW_CANONICAL_REPO_PATHS must be "
-            "a JSON object of repo->path strings, got %s; ignoring override",
+            "_canonical_repo_paths_override: %s must be a JSON object of "
+            "repo->path strings, got %s; ignoring override",
+            CANONICAL_REPO_PATHS_ENV,
             type(parsed).__name__,
         )
         return {}
-    return cast("dict[str, str]", parsed)
+    bad_value = next(
+        ((k, v) for k, v in parsed.items() if not isinstance(v, str)), None
+    )
+    if bad_value is not None:
+        key, value = bad_value
+        logger.warning(
+            "_canonical_repo_paths_override: %s value for %r is %s, expected "
+            "str; ignoring override",
+            CANONICAL_REPO_PATHS_ENV,
+            key,
+            type(value).__name__,
+        )
+        return {}
+    parsed_str = cast("dict[str, str]", parsed)
+    overrides: dict[str, str] = {}
+    for key, value in parsed_str.items():
+        if value == "":
+            logger.warning(
+                "_canonical_repo_paths_override: %s entry %r is empty; "
+                "ignoring this entry",
+                CANONICAL_REPO_PATHS_ENV,
+                key,
+            )
+            continue
+        overrides[key] = value
+    return overrides
 
 
 def _canonical_repo_path(repo: str, given: str) -> str:
     """Return the canonical clone path for *repo*, falling back to *given*.
 
     Normalizes away ephemeral agent-worktree paths at registration time.
-    Consults the CW_CANONICAL_REPO_PATHS env-var override before the
+    Consults the CANONICAL_REPO_PATHS_ENV env-var override before the
     tracked CANONICAL_REPO_PATHS dict.
     """
     return _canonical_repo_paths_override().get(repo) or CANONICAL_REPO_PATHS.get(
