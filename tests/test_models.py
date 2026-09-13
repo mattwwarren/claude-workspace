@@ -27,6 +27,7 @@ from cw.models import (
     PrState,
     QueueItemStatus,
     ReapPolicy,
+    ReasoningEffort,
     Session,
     SessionPurpose,
     SessionStatus,
@@ -884,6 +885,21 @@ class TestStageExecutorConfigExtraForbid:
     def test_unknown_key_raises(self) -> None:
         with pytest.raises(ValidationError):
             StageExecutorConfig(bogus_field="x")
+
+    def test_reasoning_effort_unpinned_by_default(self) -> None:
+        assert StageExecutorConfig().reasoning_effort is None
+
+    def test_reasoning_effort_accepts_codex_level(self) -> None:
+        cfg = StageExecutorConfig(backend="codex", reasoning_effort="max")
+        assert cfg.reasoning_effort is ReasoningEffort.MAX
+
+    def test_reasoning_effort_rejects_unknown_level(self) -> None:
+        with pytest.raises(ValidationError):
+            StageExecutorConfig(backend="codex", reasoning_effort="maximum")
+
+    def test_reasoning_effort_rejects_non_codex_backend(self) -> None:
+        with pytest.raises(ValidationError, match="only honored by the codex"):
+            StageExecutorConfig(reasoning_effort="max")
 
 
 class TestStagePipelineConfigExtraForbid:
@@ -1994,6 +2010,7 @@ class TestPackageExportCompleteness:
             "PrState",
             "QueueItemStatus",
             "ReapPolicy",
+            "ReasoningEffort",
             "ReapReason",
             "Session",
             "SessionOrigin",

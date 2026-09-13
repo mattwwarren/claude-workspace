@@ -471,3 +471,23 @@ class ReapPolicy(StrEnum):
 
     SIGNAL_ONLY = "signal_only"
     AUTO = "auto"
+
+
+class ReasoningEffort(StrEnum):
+    """Codex ``model_reasoning_effort`` levels a codex stage may pin.
+
+    Emitted as ``-c model_reasoning_effort=<value>`` on every codex reviewer
+    and fix invocation (see ``StageExecutorConfig.reasoning_effort``). A closed
+    set so a typo fails at config load instead of surfacing mid-run as a
+    degraded review role. Not every model supports every level; an
+    unsupported one is a codex runtime error, not a config error.
+    """
+
+    NONE = "none"
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+    ULTRA = "ultra"

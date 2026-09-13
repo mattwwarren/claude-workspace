@@ -70,6 +70,7 @@ from cw.codex_review import (
     _load_sensitive_hits,
     _load_ticket_context,
     _prepare_review_pass,
+    _reasoning_effort_argv,
     make_codex_blocked,
     render_verdict_comment,
     run_codex_roles,
@@ -201,7 +202,9 @@ def _with_snapshot_pointer(highlights: list[str], snapshot_pointer: str) -> list
     return [*highlights, snapshot_pointer]
 
 
-def _build_fix_codex_argv(*, model: str | None) -> list[str]:
+def _build_fix_codex_argv(
+    *, model: str | None, reasoning_effort: str | None
+) -> list[str]:
     """Return the ``codex exec`` argv for a fix invocation (write-capable).
 
     Structurally distinct from ``codex_review._build_generic_codex_argv``: it
@@ -209,7 +212,13 @@ def _build_fix_codex_argv(*, model: str | None) -> list[str]:
     would be wrong) and omits ``--output-schema``/``-o`` entirely — a fix
     invocation mutates the worktree, it does not emit a structured document.
     """
-    argv = ["codex", "exec", "--sandbox", "workspace-write"]
+    argv = [
+        "codex",
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        *_reasoning_effort_argv(reasoning_effort),
+    ]
     if model:
         argv += ["-m", model]
     return argv
@@ -455,7 +464,7 @@ def _park_fix_failure(
         category=category,
         executor_name="codex",
         session_id=session_id,
-        argv=_build_fix_codex_argv(model=None),
+        argv=_build_fix_codex_argv(model=None, reasoning_effort=None),
         stdout_excerpt=stdout,
         stderr_excerpt=stderr,
         reviewer_role=f"fix-cycle-{cycle}",
@@ -675,6 +684,7 @@ def _run_fix_and_commit(
     worktree: Path,
     open_findings: dict[_OpenFindingKey, AcceptedFinding],
     model: str | None,
+    reasoning_effort: str | None,
     timeout_seconds: int | None,
     session_id: str,
     cycle: int,
@@ -701,7 +711,7 @@ def _run_fix_and_commit(
     prompt = _build_fix_prompt(
         findings, plan_text=plan_text, ticket_text=ticket_text, cycle=cycle
     )
-    argv = _build_fix_codex_argv(model=model)
+    argv = _build_fix_codex_argv(model=model, reasoning_effort=reasoning_effort)
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
     if result.timed_out or result.returncode != 0:
         return (
@@ -768,6 +778,7 @@ def _rereview(
     worktree: Path,
     default_branch: str,
     model: str | None,
+    reasoning_effort: str | None,
     remaining: float | None,
     session_id: str,
     previous_reviewed_sha: str,
@@ -799,6 +810,7 @@ def _rereview(
         roles=prepared.roles,
         prompts_by_role=prepared.prompts_by_role,
         model=model,
+        reasoning_effort=reasoning_effort,
         wall_clock_budget_seconds=_budget_seconds(remaining),
         session_id=session_id,
     )
@@ -856,6 +868,7 @@ def run_review_with_fix_loop(
     worktree: Path,
     default_branch: str,
     model: str | None,
+    reasoning_effort: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
     fix_loop_enabled: bool,
@@ -883,6 +896,7 @@ def run_review_with_fix_loop(
         worktree=worktree,
         default_branch=default_branch,
         model=model,
+        reasoning_effort=reasoning_effort,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=session_id,
         fix_loop_enabled=fix_loop_enabled,
@@ -941,6 +955,7 @@ def run_review_with_fix_loop(
             worktree=worktree,
             open_findings=open_findings,
             model=model,
+            reasoning_effort=reasoning_effort,
             timeout_seconds=_fix_timeout(remaining),
             session_id=session_id,
             cycle=cycle,
@@ -963,6 +978,7 @@ def run_review_with_fix_loop(
             worktree=worktree,
             default_branch=default_branch,
             model=model,
+            reasoning_effort=reasoning_effort,
             remaining=_remaining_budget(deadline),
             session_id=session_id,
             previous_reviewed_sha=previous_reviewed_sha,

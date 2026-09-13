@@ -265,6 +265,7 @@ def _run_loop(
     session_id: str = "sess-fix",
     fix_loop_enabled: bool = True,
     task: TicketTask | None = None,
+    reasoning_effort: str | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     return run_review_with_fix_loop(
         runner=runner,
@@ -272,6 +273,7 @@ def _run_loop(
         worktree=worktree,
         default_branch="main",
         model=None,
+        reasoning_effort=reasoning_effort,
         wall_clock_budget_seconds=budget,
         session_id=session_id,
         fix_loop_enabled=fix_loop_enabled,
@@ -391,6 +393,34 @@ class TestFixCycleFloor:
         assert len(runner.calls) == 1
         assert "workspace-write" in runner.calls[0]["argv"]  # type: ignore[operator]
         assert out.status == "stage_complete"
+
+    def test_reasoning_effort_reaches_review_fix_and_rereview(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # One pinned effort must govern every codex call in the loop: the
+        # cycle-0 review, the fix invocation, and the re-review.
+        worktree = _worktree(make_git_repo, "wt-effort")
+        result0, verdict = _blocking_stub(worktree)
+        seen: dict[str, object] = {}
+
+        def _review(**kwargs: object) -> tuple[AutoDevResult, ReviewVerdict]:
+            seen["review"] = kwargs["reasoning_effort"]
+            return result0, verdict
+
+        clean_result, clean_verdict = _stage_complete(worktree)
+
+        def _rereview(**kwargs: object) -> tuple[object, object, object]:
+            seen["rereview"] = kwargs["reasoning_effort"]
+            return clean_result, clean_verdict, _stub_prepared()
+
+        monkeypatch.setattr("cw.codex_fix_loop.run_review", _review)
+        monkeypatch.setattr("cw.codex_fix_loop._rereview", _rereview)
+        runner = _SequencedRunner([CodexRunResult(returncode=0, stdout="", stderr="")])
+        _run_loop(runner, worktree, session_id="s-effort", reasoning_effort="max")
+
+        assert seen == {"review": "max", "rereview": "max"}
+        fix_argv = runner.calls[0]["argv"]
+        assert "model_reasoning_effort=max" in fix_argv  # type: ignore[operator]
 
     def test_floor_constant_is_two_role_floors(self) -> None:
         assert _FIX_CYCLE_FLOOR_SECONDS == 2 * _MIN_ROLE_TIMEOUT_SECONDS == 60
@@ -1279,6 +1309,7 @@ class TestFixLoopNonBlockingPassthrough:
             worktree=worktree,
             default_branch="main",
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="s-pass-plain",
             fix_loop_enabled=False,
@@ -1367,6 +1398,7 @@ class TestFixLoopDisabledGate:
             worktree=worktree,
             default_branch="main",
             model=None,
+            reasoning_effort=None,
             wall_clock_budget_seconds=None,
             session_id="s-gate",
             fix_loop_enabled=False,
@@ -1785,10 +1817,18 @@ class TestFixPromptAndArgv:
         assert "minimal change" in prompt
 
     def test_argv_omits_schema_and_output_flags(self) -> None:
-        argv = _build_fix_codex_argv(model="gpt-x")
+        argv = _build_fix_codex_argv(model="gpt-x", reasoning_effort=None)
         assert argv[:4] == ["codex", "exec", "--sandbox", "workspace-write"]
         assert "--output-schema" not in argv
         assert "-o" not in argv
+        assert argv[-2:] == ["-m", "gpt-x"]
+        assert "-c" not in argv
+
+    def test_argv_pins_reasoning_effort(self) -> None:
+        argv = _build_fix_codex_argv(model="gpt-x", reasoning_effort="max")
+        assert argv[:4] == ["codex", "exec", "--sandbox", "workspace-write"]
+        idx = argv.index("-c")
+        assert argv[idx + 1] == "model_reasoning_effort=max"
         assert argv[-2:] == ["-m", "gpt-x"]
 
 
@@ -2057,6 +2097,7 @@ class TestRereviewForwardsFindingDispositions:
             worktree=worktree,
             default_branch="main",
             model=None,
+            reasoning_effort=None,
             remaining=None,
             session_id="s-1838-rereview",
             previous_reviewed_sha=base,

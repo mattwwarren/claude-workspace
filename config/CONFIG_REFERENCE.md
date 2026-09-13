@@ -209,6 +209,33 @@ clients:
 
 `backend` defaults to `claude-native` and can be omitted.
 
+### Codex Reasoning Effort
+
+`reasoning_effort` pins codex's `model_reasoning_effort` on a `backend: codex`
+stage. cw emits `-c model_reasoning_effort=<value>` on every reviewer and
+fix-cycle invocation, which overrides `~/.codex/config.toml`, so review depth no
+longer depends on the operator's personal codex config.
+
+- Accepted values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
+  `ultra`. Anything else fails config load.
+- Not every model supports every level (see `~/.codex/models_cache.json`); an
+  unsupported level fails at codex runtime, not at config load.
+- Codex backend only: setting it on any other backend is a config error.
+- Unset (`null`, the default) emits nothing, and codex's own config decides.
+- Like `model`, a lane's stage config replaces the client's stage config
+  wholesale, so repeat `backend` and `model` on the lane.
+
+```yaml
+    lanes:
+    - name: default
+      pipeline:
+        executors:
+          review:
+            backend: codex
+            model: gpt-5.6-luna
+            reasoning_effort: max
+```
+
 Each `backend` here corresponds to a harvest-authority mechanism documented in
 [`docs/headless-contract.md` §11](../docs/headless-contract.md#11-result-publishing-harvest-authority-rfc-0012)
 — `claude-native` harvests via the Stop hook (`stop_hook_harvest`), `codex`
