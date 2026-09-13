@@ -259,12 +259,63 @@ exactly where it left off — no replay, no gap, since the orchestrator inbox
 cursor semantics (`cw.events.read_events`) are already at-least-once and
 idempotent for this consumer.
 
+## `cw pr-channel proxy` repo scoping (#2146)
+
+The `cw-pr-events` proxy is a sibling of this channel with a different
+scoping axis, documented here because operators wire both from the same
+`.mcp.json`.
+
+One `cw pr-channel serve` process serves every client, so a proxy started
+with `--client-id <client>` used to still forward every repo's PR events
+into that client's session. It now forwards only events whose `repo` matches
+the repo `<client>` resolves to — `clients.yaml` entry → workspace path →
+`origin` remote → `owner/repo` slug, the same composition
+`reconcile/stale_dispatch_watch.py` already uses. The compare is
+case-insensitive.
+
+Scoping is by **repo, not ticket**: a PR event carries `repo`/`pr_number`
+and no lane or ticket identity (`PREventRequest` has no client field), and
+adding one would be a server-side schema change. The repo a client works in
+is the coarsest identity already present on every event.
+
+```json
+{
+  "mcpServers": {
+    "cw-pr-events": {
+      "command": "cw",
+      "args": ["pr-channel", "proxy", "--client-id", "<client-name>"]
+    }
+  }
+}
+```
+
+### Fail-closed on resolution failure
+
+Repo resolution is a cross-tenant isolation boundary, so it **fails closed**
+(ARCHITECTURE.md §7 principle 12). If `--client-id` was given and the repo
+cannot be resolved — the client is missing from a populated `clients.yaml`
+("dangling client"), or its workspace has no parseable GitHub `origin`
+remote — the proxy forwards **nothing** for that client rather than falling
+open to every repo. An operator sees both of:
+
+- a `logger.error` on the proxy naming the client and which resolution step
+  failed, and
+- one `notifications/message` at level `error` on the subscribed session,
+  carrying `event: repo_resolution_failed` and the client name.
+
+The fix is to repair `clients.yaml` or the workspace remote. `--all-repos`
+is the only supported path to an intentionally unfiltered stream; it skips
+repo resolution entirely and therefore never trips the fail-closed path.
+Omitting `--client-id` (and `CW_PR_EVENTS_CLIENT_ID`) is also unfiltered —
+no filtering was requested, so there is nothing to fail.
+
 ## Related docs
 
 - [`docs/events.md`](events.md) — full `OrchestratorEventType` catalogue and
   the underlying event bus this channel filters.
 - [`docs/dispatch-runbook.md`](dispatch-runbook.md) §10 — the `cw-pr-events`
   push producer, whose push/poll degradation framing this channel's
-  degradation contract mirrors.
+  degradation contract mirrors, and the server-side webhook relay setup
+  behind the repo-scoped proxy documented above.
 - `config/CONFIG_REFERENCE.md` — `operator_channel_forward` field reference
   alongside the rest of `orchestrator.yaml`.
