@@ -64,6 +64,10 @@ its build/test commands inside its own turn rather than backgrounding them and
 returning. (`run_in_background` is still a valid `Bash` parameter; only the
 Agent spawn lost it.)
 
+This async-dispatch exemption is scoped to the Agent tool's subagent spawn only —
+it does not extend to a raw Bash call; see `auto-dev.md`'s Worker Execution Discipline
+section for the no-backgrounding rule that applies there.
+
 ---
 
 ## Pre-Stage Detector Guard: resume dispositions and the staleness check (#1794)
