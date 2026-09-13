@@ -822,6 +822,38 @@ class TestMainRepoResolution:
         assert check["severity"] == "hard"
         assert "clients.yaml" in check["detail"]
 
+    def test_structurally_malformed_clients_yaml_hard_fails_with_structured_json(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A 'clients:' key whose value is a list, not a mapping, is a
+        ConfigValidationError from load_clients() (#2158's root-cause fix in
+        cw.config) and must not crash main() (operator round-3 resolution,
+        #2158)."""
+        pf = _load()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n  - acme\n  - beta\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            sys, "argv", ["preflight.py", "--ticket-id", "1", "--client", "acme"]
+        )
+
+        rc = pf.main()
+        report = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert report["ok"] is False
+        assert len(report["checks"]) == 1
+        check = report["checks"][0]
+        assert check["name"] == "client_repo_resolved"
+        assert check["passed"] is False
+        assert check["severity"] == "hard"
+        assert "clients.yaml" in check["detail"]
+
     def test_unreadable_clients_yaml_hard_fails_with_structured_json(
         self,
         tmp_config_dir: Path,
