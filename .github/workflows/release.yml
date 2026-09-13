@@ -35,12 +35,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
+          DISPATCH_DRIFT_AUTO_MARKER: "<!-- dispatch-guard-auto -->"
+          # Keep pre-marker guard issues eligible while the provenance marker
+          # is being introduced without trusting a bare human-applied label.
+          DISPATCH_DRIFT_LEGACY_MARKER: "Opened automatically by the [Dispatch Guard workflow](/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."
         run: |
           gh issue list \
             --label "dispatch-drift" \
             --state open \
-            --json number \
-            --jq '.[].number' | \
+            --app github-actions \
+            --limit 1000 \
+            --json number,body \
+            --jq ".[] | select(((.body // \"\") | contains(\"$DISPATCH_DRIFT_AUTO_MARKER\")) or ((.body // \"\") | contains(\"$DISPATCH_DRIFT_LEGACY_MARKER\"))) | .number" | \
           while read -r NUM; do
             gh issue close "$NUM" \
               --comment "Closed by release ${RELEASE_TAG} — dispatch/reconcile/spawn changes are now shipped."
