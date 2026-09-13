@@ -193,7 +193,8 @@ def _emit_fix_dispatch_operator_signal(
     breadcrumbs: str,
 ) -> None:
     """Emit the STAGE_ERRORED + SESSION_NEEDS_ATTENTION event pair for a
-    fix-dispatch problem — shared by ``_drop_stale_handoff`` and
+    fix-dispatch problem — shared by the stale-handoff drop in
+    ``_build_dispatch_jobs`` and
     ``_stamp_dispatch_failure``, which differ only in *error_kind*,
     *breadcrumbs*, and whether the row also gets unparked.
     """
@@ -226,12 +227,7 @@ def _emit_fix_dispatch_operator_signal(
 
 
 class _StaleHandoffRecord(NamedTuple):
-    """Fields needed to page the operator for a dropped stale handoff (#2142).
-
-    Collected by ``_drop_stale_handoff`` while ``dev_queue_lock()`` is held;
-    emitted by the caller only after the lock releases, since event emission
-    is I/O and must not run while the lock is held.
-    """
+    """Fields needed to page the operator for a dropped stale handoff (#2142)."""
 
     session_id: str
     ticket_id: str
@@ -240,18 +236,16 @@ class _StaleHandoffRecord(NamedTuple):
     breadcrumbs: str
 
 
-def _drop_stale_handoff(task: TicketTask) -> _StaleHandoffRecord | None:
-    """Clear a handoff whose row is no longer RUNNING (#2142).
+def _stale_handoff_record(task: TicketTask) -> _StaleHandoffRecord | None:
+    """Describe a handoff whose row is no longer RUNNING (#2142).
 
-    Called with ``dev_queue_lock()`` held; the caller owns the ``save_dev_queue``.
-    Returns the record the caller pages the operator with, via
-    ``_emit_fix_dispatch_operator_signal``, once the lock releases — nothing
-    is emitted here.
+    Pure: reads the row and returns the operator-signal payload. The caller
+    clears ``pending_fix_dispatch`` only after that payload has been emitted,
+    so a failed emission cannot leave the handoff durably dropped.
     """
     pending = task.pending_fix_dispatch
     if pending is None:  # pragma: no cover - caller checked
         return None
-    task.pending_fix_dispatch = None
     return _StaleHandoffRecord(
         session_id=pending.requested_by_session_id,
         ticket_id=task.ticket_id,
@@ -273,17 +267,17 @@ def _build_dispatch_jobs(
     survive until the dispatch actually succeeds so a transient conflict retries
     on the next tick instead of dropping the action list on the floor.
 
-    A dropped stale handoff's operator-signal event pair is emitted AFTER the
-    lock releases (#2142 fix-loop cycle 2): ``_emit_fix_dispatch_operator_signal``
-    is I/O (two ``record_event`` calls) and must not run while
-    ``dev_queue_lock()`` is held, mirroring how real dispatch jobs are executed
-    post-lock by this function's caller and how ``_stamp_dispatch_failure``
-    already runs outside the lock.
+    A dropped stale handoff's operator-signal event pair is emitted BEFORE the
+    row is durably cleared, under this same lock (#2142): those two
+    ``record_event`` calls are the only audit trail a dropped handoff ever
+    gets, so clearing first would make a failed emission a silent loss. Held
+    under the lock deliberately, matching ``_stamp_dispatch_failure``, which
+    emits the same pair inside its own ``dev_queue_lock()`` block.
     """
     if not candidates:
         return []
     jobs: list[_DispatchJob] = []
-    stale_records: list[_StaleHandoffRecord] = []
+    stale: list[tuple[TicketTask, _StaleHandoffRecord]] = []
     with dev_queue_lock():
         store = load_dev_queue()
         for candidate in candidates:
@@ -307,9 +301,9 @@ def _build_dispatch_jobs(
                     task.ticket_id,
                     task.status.value,
                 )
-                record = _drop_stale_handoff(task)
+                record = _stale_handoff_record(task)
                 if record is not None:
-                    stale_records.append(record)
+                    stale.append((task, record))
                 continue
             if task.fix_dispatch_session_id is not None:
                 # A prior fix session for this ticket hasn't been unparked yet
@@ -342,17 +336,22 @@ def _build_dispatch_jobs(
                     lane=task.lane,
                 )
             )
-        if stale_records:
+        for _task, record in stale:
+            # Audit first, clear second (#2142). A raise here propagates out of
+            # the `with`, so save_dev_queue below is never reached and the
+            # handoff survives on disk for the next tick to re-detect.
+            _emit_fix_dispatch_operator_signal(
+                session_id=record.session_id,
+                ticket_id=record.ticket_id,
+                client=record.client,
+                lane=record.lane,
+                error_kind=_ERROR_KIND_STALE_HANDOFF,
+                breadcrumbs=record.breadcrumbs,
+            )
+        if stale:
+            for task, _record in stale:
+                task.pending_fix_dispatch = None
             save_dev_queue(store)
-    for record in stale_records:
-        _emit_fix_dispatch_operator_signal(
-            session_id=record.session_id,
-            ticket_id=record.ticket_id,
-            client=record.client,
-            lane=record.lane,
-            error_kind=_ERROR_KIND_STALE_HANDOFF,
-            breadcrumbs=record.breadcrumbs,
-        )
     return jobs
 
 

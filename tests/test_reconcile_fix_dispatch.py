@@ -383,6 +383,40 @@ def test_act_on_pending_fix_dispatches_drops_stale_handoff_when_row_blocked_on_u
     assert "blocked_on_user" in attention[0].payload["breadcrumbs"]
 
 
+def test_stale_handoff_survives_when_its_audit_event_cannot_be_persisted(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed audit emission must not leave the handoff durably dropped (#2142).
+
+    The event pair is the only record that a handoff was ever dropped. If it
+    cannot be written, the drop must not be persisted either — otherwise the
+    action list vanishes with nothing anywhere naming the ticket it came from.
+    The next tick re-detects the still-present handoff and retries the page.
+    """
+
+    def _explode(*_args: Any, **_kwargs: Any) -> None:
+        msg = "events file unwritable"
+        raise OSError(msg)
+
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+    monkeypatch.setattr(fix_dispatch, "record_event", _explode)
+
+    with pytest.raises(OSError, match="events file unwritable"):
+        fix_dispatch._act_on_pending_fix_dispatches(
+            [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+            clients={_CLIENT: acme_client},
+        )
+
+    assert stub_dispatch.calls == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is not None
+    assert task.pending_fix_dispatch.label == f"fix-{_TICKET}"
+    assert task.status == QueueItemStatus.PENDING
+
+
 def test_act_on_pending_fix_dispatches_skips_unresolvable_client(
     tmp_config_dir: Path,
     stub_dispatch: _DispatchRecorder,
