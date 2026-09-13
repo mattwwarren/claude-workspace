@@ -17,9 +17,9 @@ case. The review session's responsibility ends at recording a
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING
 
-from cw.config import load_state
 from cw.events import record_event
 from cw.exceptions import CwError, HookContextConflictError
 from cw.models import (
@@ -28,12 +28,15 @@ from cw.models import (
     OrchestratorEventType,
     SessionPurpose,
 )
+from cw.session_retention import find_session_by_id
 from cw.worktree import _git_dir, _run_git, create_worktree, worktree_path_for
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig
+
+_log = logging.getLogger("cw.reconcile.review_recipes")
 
 
 def _refuse_if_worktree_references_live_session(
@@ -63,7 +66,7 @@ def _refuse_if_worktree_references_live_session(
         return
     if prior_session_id is None:
         return
-    prior_sess = load_state().find_by_name_or_id(prior_session_id)
+    prior_sess = find_session_by_id(prior_session_id)
     if prior_sess is None or prior_sess.status in TERMINAL_SESSION_STATUSES:
         return
     msg = (
@@ -125,7 +128,34 @@ def dispatch_fix_agent(
     (``cw.reconcile.fix_dispatch``) distinguishes a transient
     :exc:`HookContextConflictError` (retry next tick) from a hard failure
     (clear the latch and escalate), and can only do so if both reach it.
+
+    ``parent`` is resolved via :func:`cw.session_retention.find_session_by_id`
+    (cw id, ``claude_session_id``, or an archived session -- #2149) rather
+    than passed straight through to ``spawn_create_impl``. When it cannot be
+    resolved at all, this is NOT treated as a hard failure: a friction note is
+    prepended to *prompt* and a warning is logged, but the fix agent still
+    spawns with ``parent=None``. Losing parent lineage is strictly better than
+    losing the fix-loop handoff outright -- the caller's broad ``except
+    CwError`` would otherwise clear the latch and page the operator for a
+    problem the fix agent itself doesn't need the parent link to solve.
     """
+    resolved_parent = find_session_by_id(parent)
+    effective_parent: str | None = None
+    effective_prompt = prompt
+    if resolved_parent is not None:
+        effective_parent = resolved_parent.id
+    else:
+        effective_prompt = (
+            f"_Friction note: parent session {parent!r} could not be resolved "
+            "(checked hot and archived state) -- this fix agent has no "
+            "recorded parent session lineage._\n\n"
+        ) + prompt
+        _log.warning(
+            "dispatch_fix_agent: could not resolve parent %r (checked hot and "
+            "archived state); spawning with parent=None",
+            parent,
+        )
+
     _refuse_if_worktree_references_live_session(client, branch)
     worktree = create_worktree(client, branch, allow_dirty_reuse=True)
 
@@ -160,12 +190,12 @@ def dispatch_fix_agent(
     session_id = spawn_create_impl(
         client=client,
         worktree=worktree,
-        prompt=prompt,
+        prompt=effective_prompt,
         label=label,
         headless=False,
         ticket_id=ticket_id,
         lane=lane,
-        parent=parent,
+        parent=effective_parent,
         purpose=SessionPurpose.FIX,
     )
     # R24 MUST_FIX: mirrors dispatch/claim.py's own post-spawn emission, so a

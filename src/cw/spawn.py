@@ -39,6 +39,7 @@ from cw.models import (
 )
 from cw.native_daemon import get_native_daemon_client, resolve_permission_mode
 from cw.reconcile import _csid_from_transcript, ticket_id_for_session
+from cw.session_retention import find_session_by_id
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -576,10 +577,16 @@ def spawn_create_impl(
     chars) is stored on the Session as ``surface_ref`` so reconcile can
     check liveness against the daemon's roster.
 
-    When *parent* is supplied, writes bidirectional linkage in the same
-    state save: ``sess.parent_session_id = parent.id`` and appends
-    ``sess.id`` to ``parent.worker_session_ids``. Raises :class:`CwError`
-    if the parent session is not in state.
+    When *parent* is supplied, it is resolved via
+    :func:`cw.session_retention.find_session_by_id` — matching by cw ``id``,
+    ``claude_session_id``, or an archived session, hot-then-archived
+    (#2149) — and writes bidirectional linkage in the same state save:
+    ``sess.parent_session_id = parent.id`` and appends ``sess.id`` to
+    ``parent.worker_session_ids``. The reverse link is only written when the
+    resolved parent is still in the hot ``sessions.json`` (an archived
+    parent's ``worker_session_ids`` mutation would never be persisted, so it
+    is skipped rather than attempted). Raises :class:`CwError` if *parent*
+    cannot be resolved at all.
 
     After spawning, polls the daemon roster to verify the worker was
     actually adopted. Raises :class:`~cw.exceptions.SpawnUnregisteredError`
@@ -591,7 +598,7 @@ def spawn_create_impl(
     # Validate parent exists before spawning (fail fast, no daemon call yet).
     if parent is not None:
         _pre_state = load_state()
-        if _pre_state.find_by_name_or_id(parent) is None:
+        if find_session_by_id(parent, state=_pre_state) is None:
             msg = f"Parent session not found: {parent}"
             raise CwError(msg)
 
@@ -661,12 +668,17 @@ def spawn_create_impl(
     with sessions_lock():
         state = load_state()
         if parent is not None:
-            parent_session = state.find_by_name_or_id(parent)
+            parent_session = find_session_by_id(parent, state=state)
             if parent_session is None:
                 msg = f"Parent session not found: {parent}"
                 raise CwError(msg)
             sess.parent_session_id = parent_session.id
-            parent_session.worker_session_ids.append(sess.id)
+            # An archive-resolved parent is not in state.sessions, so
+            # mutating its worker_session_ids here would never be persisted
+            # by this save_state() call — skip the reverse link rather than
+            # silently no-op it (#2149).
+            if any(s.id == parent_session.id for s in state.sessions):
+                parent_session.worker_session_ids.append(sess.id)
         state.sessions.append(sess)
         save_state(state)
     return sess.id
