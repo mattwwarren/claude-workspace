@@ -97,7 +97,7 @@ def _canonical_repo_paths_override() -> dict[str, str]:
             type(parsed).__name__,
         )
         return {}
-    return cast(dict[str, str], parsed)
+    return cast("dict[str, str]", parsed)
 
 
 def _canonical_repo_path(repo: str, given: str) -> str:

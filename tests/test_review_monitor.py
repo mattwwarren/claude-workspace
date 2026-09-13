@@ -209,8 +209,7 @@ def test_env_var_overrides_given_path(monkeypatch: pytest.MonkeyPatch) -> None:
         json.dumps({"acme/widgets": "/home/x/clones/widgets"}),
     )
     assert (
-        _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
-        == "/home/x/clones/widgets"
+        _mod._canonical_repo_path("acme/widgets", "/tmp/wt") == "/home/x/clones/widgets"
     )
 
 
@@ -245,9 +244,7 @@ def test_non_object_json_falls_back_and_warns(
 def test_non_string_value_falls_back_and_warns(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv(
-        "CW_CANONICAL_REPO_PATHS", json.dumps({"acme/widgets": 123})
-    )
+    monkeypatch.setenv("CW_CANONICAL_REPO_PATHS", json.dumps({"acme/widgets": 123}))
     with caplog.at_level("WARNING"):
         result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
     assert result == "/tmp/wt"
