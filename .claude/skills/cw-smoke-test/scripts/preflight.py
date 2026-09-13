@@ -100,7 +100,7 @@ def _bootstrap_sys_path() -> None:
 
 _bootstrap_sys_path()
 
-from cw.config import load_clients
+from cw.config import clients_file, load_clients
 from cw.exceptions import CwError
 from cw.pr_hydrate import _resolve_repo_slug as _cw_resolve_repo_slug
 from cw.tracker import resolve_tracker as _cw_resolve_tracker
@@ -156,24 +156,32 @@ def _resolve_client_repo_root(client: str) -> Path:
     back to :func:`_resolve_repo_root` (the script's own location), exactly as
     ``cw.reconcile.tasks._client_cwd``/``_is_dangling_client`` distinguish
     "absent" from "populated but missing this client" elsewhere in cw. A
-    populated ``clients.yaml`` missing *client* is drift: raise loudly rather
-    than silently falling back to a default repo.
+    ``clients.yaml`` that *exists* but has no entry for *client* — including
+    one that defines no clients at all — is drift: raise loudly rather than
+    silently falling back to a default repo. Branch on file existence
+    (:func:`cw.config.clients_file`), not on whether ``load_clients()``
+    returned an empty dict — both "absent" and "present but empty" produce
+    ``{}``, and conflating them would silently re-introduce the fallback this
+    ticket removes (operator round-2 resolution, #2158).
 
-    A ``clients.yaml`` that fails to load or validate (malformed YAML, or a
-    client entry that fails ``ClientConfig`` schema validation) is the same
-    "cannot resolve" outcome as a missing entry, not a crash: :func:`load_clients`
-    can raise ``CwError``/``ConfigValidationError`` (invalid client name or
-    schema) or a raw ``yaml.YAMLError`` (unparseable YAML), and none of those
-    are specific to *this* client, so they are wrapped into the same
+    A ``clients.yaml`` that fails to load or validate (malformed YAML, a
+    client entry that fails ``ClientConfig`` schema validation, or an I/O
+    failure reading the file) is the same "cannot resolve" outcome as a
+    missing entry, not a crash: :func:`load_clients` can raise
+    ``CwError``/``ConfigValidationError`` (invalid client name or schema), a
+    raw ``yaml.YAMLError`` (unparseable YAML), or — from its own
+    ``path.read_text()`` — ``OSError`` (e.g. permission denied) or
+    ``UnicodeDecodeError`` (non-UTF-8 file). None of those are specific to
+    *this* client, so they are wrapped into the same
     :class:`_ClientRepoUnresolvedError` main() already turns into a structured
     ``client_repo_resolved`` failed check (#2158).
     """
     try:
         clients = load_clients()
-    except (CwError, yaml.YAMLError) as exc:
+    except (CwError, yaml.YAMLError, OSError, UnicodeDecodeError) as exc:
         msg = f"failed to load clients.yaml: {exc}"
         raise _ClientRepoUnresolvedError(msg) from exc
-    if not clients:
+    if not clients_file().exists():
         return _resolve_repo_root()
     cfg = clients.get(client)
     if cfg is None:

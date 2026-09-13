@@ -838,9 +838,7 @@ class TestMainRepoResolution:
         )
         original_read_text = Path.read_text
 
-        def _raise_permission_error(
-            self: Path, *args: object, **kwargs: object
-        ) -> str:
+        def _raise_permission_error(self: Path, *args: object, **kwargs: object) -> str:
             if self.name == "clients.yaml":
                 msg = "Permission denied"
                 raise PermissionError(msg)
@@ -883,9 +881,9 @@ class TestMainRepoResolution:
             self: Path, *args: object, **kwargs: object
         ) -> str:
             if self.name == "clients.yaml":
-                raise UnicodeDecodeError(
-                    "utf-8", b"\xff\xfe", 0, 1, "invalid start byte"
-                )
+                encoding = "utf-8"
+                reason = "invalid start byte"
+                raise UnicodeDecodeError(encoding, b"\xff\xfe", 0, 1, reason)
             return original_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(Path, "read_text", _raise_unicode_decode_error)
