@@ -24,7 +24,11 @@ Two phases, in this order:
 2. **Pending dispatches** — a row carrying a ``pending_fix_dispatch`` gets its
    fix agent spawned, unless the row has drifted off RUNNING since the handoff
    was recorded, in which case the handoff is dropped instead (#2142; see
-   ``_build_dispatch_jobs`` and ``_drop_stale_handoffs``).
+   ``_build_dispatch_jobs`` and ``_drop_stale_handoffs``). A row can also drift
+   off RUNNING *after* its job was already built, during the stale-handoff
+   drop's own unlocked emission window — ``_revalidate_dispatch_jobs`` re-checks
+   every built job immediately before dispatch to close that window (#2142
+   round 5).
 
 Deliberately NOT an RFC-0010 review recipe, and deliberately not registered in
 ``run_review_recipes``: that family gates on ``review_recipes_enabled``, which
@@ -345,6 +349,65 @@ def _drop_stale_handoffs(snapshots: list[_StaleHandoffSnapshot]) -> None:
             save_dev_queue(store)
 
 
+def _job_still_valid(task: TicketTask | None) -> bool:
+    """True if a row is still eligible to receive a fix-agent dispatch.
+
+    The single definition of "eligible" — RUNNING, with no
+    ``fix_dispatch_session_id`` already outstanding — shared by
+    ``_build_dispatch_jobs`` (first check, under its own lock) and
+    ``_revalidate_dispatch_jobs`` (second check, immediately before dispatch,
+    #2142 round 5). Deliberately does NOT check ``pending_fix_dispatch``: the
+    two call sites disagree on what a missing handoff means (build treats it
+    as "already handled, skip"; revalidate treats a job it already built as
+    carrying its own copy of the handoff, so the row losing it mid-tick is
+    just another form of "no longer eligible").
+    """
+    return (
+        task is not None
+        and task.status == QueueItemStatus.RUNNING
+        and task.fix_dispatch_session_id is None
+    )
+
+
+def _revalidate_dispatch_jobs(jobs: list[_DispatchJob]) -> list[_DispatchJob]:
+    """Re-check each already-built job's row immediately before dispatch.
+
+    (#2142 round 5.)
+
+    ``_build_dispatch_jobs`` snapshots ``jobs`` under one ``dev_queue_lock()``
+    acquisition, then releases it. ``_drop_stale_handoffs`` — run on the
+    *other* return value, ``stale`` — then spends real wall-clock time
+    unlocked emitting audit events, during which a *different* row's
+    non-sentinel RUNNING->PENDING revert (the same class ``_build_dispatch_jobs``'s
+    own inline comment names) can land on a row this tick already built a job
+    for. Re-running ``_job_still_valid`` here, under one fresh lock
+    acquisition, closes that window: a row that no longer qualifies is
+    dropped from this tick's dispatch rather than spawning an uncorrelated fix
+    agent for it. Dropping is silent beyond a debug log — the row's own
+    ``pending_fix_dispatch`` is left untouched, so the next reconcile tick's
+    ``_build_dispatch_jobs`` re-detects it under whatever status it now holds
+    and routes it through the ordinary build-or-stale path from there.
+    """
+    if not jobs:
+        return jobs
+    with dev_queue_lock():
+        store = load_dev_queue()
+        survivors = []
+        for job in jobs:
+            task = _find_task(store, job.ticket_id, job.client)
+            if _job_still_valid(task):
+                survivors.append(job)
+            else:
+                _log.debug(
+                    "fix_dispatch: dropping ticket %s from this tick's dispatch "
+                    "— row no longer eligible after the unlocked stale-handoff "
+                    "phase (status=%s)",
+                    job.ticket_id,
+                    task.status.value if task is not None else "row missing",
+                )
+        return survivors
+
+
 def _build_dispatch_jobs(
     candidates: list[_FixDispatchCandidate],
     clients: dict[str, ClientConfig],
@@ -359,7 +422,8 @@ def _build_dispatch_jobs(
     A row that has drifted off RUNNING is only *snapshotted* here (#2142 round 3)
     — no clearing, no event I/O under this lock. The caller runs
     ``_drop_stale_handoffs`` on the returned snapshots strictly after this lock
-    has released.
+    has released, then ``_revalidate_dispatch_jobs`` on the returned jobs
+    (#2142 round 5) — this function itself does not re-check ``jobs`` again.
     """
     if not candidates:
         return [], []
@@ -371,39 +435,41 @@ def _build_dispatch_jobs(
             task = _find_task(store, candidate.ticket_id, candidate.client)
             if task is None or task.pending_fix_dispatch is None:
                 continue  # concurrently dispatched or removed — silent skip
-            if task.status != QueueItemStatus.RUNNING:
-                # #2142: some other non-sentinel RUNNING->PENDING revert
-                # (crash/phantom/stall/salvage sweep) moved the row while this
-                # handoff sat unconsumed. Dispatching now spawns a fix-agent
-                # session with no dev-queue correlation at all —
-                # dispatch_fix_agent passes no task= kwarg, so nothing
-                # transitions the row and the session becomes a roster-ACTIVE
-                # orphan holding a client-ceiling slot against a PENDING row.
-                # Drop the handoff instead: the row is already back in the
-                # normal lifecycle and claim.py's reclaim picks it up once
-                # _is_fix_dispatch_held stops matching it.
-                _log.warning(
-                    "fix_dispatch: identified stale handoff for ticket %s — "
-                    "row status is %s, not RUNNING",
-                    task.ticket_id,
-                    task.status.value,
-                )
-                snap = _stale_handoff_snapshot(task)
-                if snap is not None:
-                    stale.append(snap)
-                continue
-            if task.fix_dispatch_session_id is not None:
-                # A prior fix session for this ticket hasn't been unparked yet
-                # (completion watcher hasn't cleared fix_dispatch_session_id).
-                # Dispatching a second one here would orphan the first — the
-                # two fields are meant to be mutually exclusive by convention,
-                # not enforced by the model, so guard it here defensively.
-                _log.warning(
-                    "fix_dispatch: skipping ticket %s — fix_dispatch_session_id "
-                    "%r still set, prior fix session not yet unparked",
-                    task.ticket_id,
-                    task.fix_dispatch_session_id,
-                )
+            if not _job_still_valid(task):
+                if task.status != QueueItemStatus.RUNNING:
+                    # #2142: some other non-sentinel RUNNING->PENDING revert
+                    # (crash/phantom/stall/salvage sweep) moved the row while
+                    # this handoff sat unconsumed. Dispatching now spawns a
+                    # fix-agent session with no dev-queue correlation at all —
+                    # dispatch_fix_agent passes no task= kwarg, so nothing
+                    # transitions the row and the session becomes a
+                    # roster-ACTIVE orphan holding a client-ceiling slot
+                    # against a PENDING row. Drop the handoff instead: the row
+                    # is already back in the normal lifecycle and claim.py's
+                    # reclaim picks it up once _is_fix_dispatch_held stops
+                    # matching it.
+                    _log.warning(
+                        "fix_dispatch: identified stale handoff for ticket %s — "
+                        "row status is %s, not RUNNING",
+                        task.ticket_id,
+                        task.status.value,
+                    )
+                    snap = _stale_handoff_snapshot(task)
+                    if snap is not None:
+                        stale.append(snap)
+                else:
+                    # A prior fix session for this ticket hasn't been unparked
+                    # yet (completion watcher hasn't cleared
+                    # fix_dispatch_session_id). Dispatching a second one here
+                    # would orphan the first — the two fields are meant to be
+                    # mutually exclusive by convention, not enforced by the
+                    # model, so guard it here defensively.
+                    _log.warning(
+                        "fix_dispatch: skipping ticket %s — fix_dispatch_session_id "
+                        "%r still set, prior fix session not yet unparked",
+                        task.ticket_id,
+                        task.fix_dispatch_session_id,
+                    )
                 continue
             client_cfg = clients.get(task.client)
             if client_cfg is None:
@@ -487,7 +553,9 @@ def _act_on_pending_fix_dispatches(
 
     - ``dev_queue_lock()`` is genuinely never nested: every ``dispatch_fix_agent``
       call below runs strictly AFTER ``_build_dispatch_jobs``'s own
-      ``dev_queue_lock()`` releases.
+      ``dev_queue_lock()`` releases, AND after ``_revalidate_dispatch_jobs``'s
+      own separate, later acquisition of it also releases (#2142 round 5) —
+      three non-overlapping acquisitions of the same lock, never nested.
     - ``sessions_lock()`` is NOT nested only because the call site
       (``core.reconcile()``) invokes ``run_fix_dispatch`` after its own
       ``sessions_lock()`` releases (#2064) — that guarantee lives at the call
@@ -517,6 +585,7 @@ def _act_on_pending_fix_dispatches(
     acted: list[str] = []
     jobs, stale = _build_dispatch_jobs(capped, clients)
     _drop_stale_handoffs(stale)
+    jobs = _revalidate_dispatch_jobs(jobs)
     for job in jobs:
         try:
             session_id = dispatch_fix_agent(

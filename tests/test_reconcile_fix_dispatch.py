@@ -606,6 +606,94 @@ def test_stale_handoff_phase_two_tolerates_row_removed_before_revalidation(
     assert len(errored) == 1
 
 
+def test_act_on_pending_fix_dispatches_drops_job_mutated_during_stale_handoff_window(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job built alongside a stale candidate is re-checked before dispatch.
+
+    (#2142 round 5.)
+
+    ``_build_dispatch_jobs`` snapshots ``jobs`` and ``stale`` together under one
+    lock, then releases it. ``_drop_stale_handoffs`` then spends real
+    wall-clock time unlocked emitting the stale candidate's audit events —
+    during that window, a *different* row (already built into a job this same
+    tick) can be reverted RUNNING->PENDING by some other non-sentinel sweep.
+    Simulates that exact interleaving from inside the stale candidate's own
+    emit hook and asserts the mutated row's job is dropped from this tick's
+    dispatch while an untouched job in the same tick still spawns.
+    """
+    mutated_ticket = _TICKET
+    stale_ticket = "2018"
+    untouched_ticket = "2019"
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id=mutated_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.RUNNING,
+                    pending_fix_dispatch=_pending(label=f"fix-{mutated_ticket}"),
+                ),
+                _make_ticket_task(
+                    ticket_id=stale_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.PENDING,
+                    pending_fix_dispatch=_pending(label=f"fix-{stale_ticket}"),
+                ),
+                _make_ticket_task(
+                    ticket_id=untouched_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.RUNNING,
+                    pending_fix_dispatch=_pending(label=f"fix-{untouched_ticket}"),
+                ),
+            ]
+        )
+    )
+
+    real_emit = fix_dispatch._emit_fix_dispatch_operator_signal
+
+    def _emit_then_revert_other_row(**kwargs: Any) -> None:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            task = fix_dispatch._find_task(store, mutated_ticket, _CLIENT)
+            assert task is not None
+            task.status = QueueItemStatus.PENDING
+            save_dev_queue(store)
+        real_emit(**kwargs)
+
+    monkeypatch.setattr(
+        fix_dispatch, "_emit_fix_dispatch_operator_signal", _emit_then_revert_other_row
+    )
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [
+            fix_dispatch._FixDispatchCandidate(
+                ticket_id=mutated_ticket, client=_CLIENT
+            ),
+            fix_dispatch._FixDispatchCandidate(ticket_id=stale_ticket, client=_CLIENT),
+            fix_dispatch._FixDispatchCandidate(
+                ticket_id=untouched_ticket, client=_CLIENT
+            ),
+        ],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == [untouched_ticket]
+    dispatched_tickets = {call["ticket_id"] for call in stub_dispatch.calls}
+    assert dispatched_tickets == {untouched_ticket}
+
+    mutated_task = fix_dispatch._find_task(load_dev_queue(), mutated_ticket, _CLIENT)
+    assert mutated_task is not None
+    # Dropped from dispatch only — the handoff itself is left in place for the
+    # next tick's _build_dispatch_jobs to re-detect under the row's new
+    # (non-RUNNING) status and route through the ordinary stale-handling path.
+    assert mutated_task.pending_fix_dispatch is not None
+    assert mutated_task.status == QueueItemStatus.PENDING
+
+
 def test_act_on_pending_fix_dispatches_skips_unresolvable_client(
     tmp_config_dir: Path,
     stub_dispatch: _DispatchRecorder,
