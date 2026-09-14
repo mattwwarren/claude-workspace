@@ -892,7 +892,6 @@ def test_settled_item_cannot_yield_second_resolution_evidence_candidate() -> Non
 LAST_EVALUATED_MARKER = "plan-stage-last-evaluated"
 DELTA_RESET_ANCHOR = "**Tracker-state-delta reset (#2154).**"
 FINGERPRINT_READ_ANCHOR = "**Fingerprint read (#2154).**"
-BODY_FOLD_ANCHOR = "**Body-consistency fold (resumed rounds only, #2154).**"
 
 
 def test_cap_check_blocker_details_names_fingerprint_components() -> None:
@@ -974,29 +973,6 @@ def test_step1c0_gains_fingerprint_read_step_zero() -> None:
     idx_zero = block.index(FINGERPRINT_READ_ANCHOR)
     idx_one = block.index("Locate the newest `## Pending Verification Scan` comment")
     assert idx_zero < idx_one
-
-
-def test_step1c0_gains_body_consistency_fold_step() -> None:
-    """A new body-consistency fold step exists, gated and independent-axis/capped-1."""
-    block = _step1c0_block()
-    assert BODY_FOLD_ANCHOR in block
-    window = _after(block, BODY_FOLD_ANCHOR, span=1700)
-    assert "settled ≥1 item in this round's own transcription pass" in window
-    assert "### Advisory plan-review findings" in window
-    assert "persisting MUST_FIX" in window
-    assert "independent axis" in window
-    assert "Capped at **1 attempt** per round." in window
-    assert "## Files Modified" in window
-    assert "## Touch-point Contract" in window
-    assert "forbidding new scope" in window
-    assert "## Ambiguities" in window
-
-
-def test_body_consistency_fold_runs_before_fresh_scan() -> None:
-    """The fold step is explicitly ordered before Step 1c's step 1 (fresh scan)."""
-    block = _step1c0_block()
-    window = _after(block, BODY_FOLD_ANCHOR, span=1700)
-    assert "Runs BEFORE step 1 above" in window
 
 
 def test_stub_and_cap_checks_are_never_resolution_consumed_carriers() -> None:
@@ -1224,12 +1200,11 @@ def test_draft_rewrite_rule_stated_once_next_to_persistence_rule() -> None:
     assert f"`<!-- {SETTLED_MARKER}: ... -->`" in window
 
 
-def test_draft_rewrite_rule_names_all_three_rewrite_sites() -> None:
-    """The rule names the three additional rewrite sites the operator listed."""
+def test_draft_rewrite_rule_names_both_rewrite_sites() -> None:
+    """The rule names the two additional rewrite sites the operator listed."""
     window = _draft_rewrite_rule_window()
     assert "Step 1b checkpoint" in window
     assert "Step 1f.4 post-revision checkpoint" in window
-    assert "body-consistency fold" in window
 
 
 def test_step1b_checkpoint_cites_draft_rewrite_rule() -> None:
@@ -1250,30 +1225,6 @@ def test_step1f4_checkpoint_cites_draft_rewrite_rule() -> None:
         span=900,
     )
     assert "draft-rewrite rule" in window
-
-
-def test_body_consistency_fold_cites_draft_rewrite_rule() -> None:
-    """The body-consistency fold's write-back cites the same draft-rewrite rule."""
-    block = _step1c0_block()
-    window = _after(block, BODY_FOLD_ANCHOR, span=1700)
-    assert "draft-rewrite rule" in window
-
-
-def test_body_consistency_fold_validates_before_overwrite() -> None:
-    """SHOULD_FIX (binding): validate fold output before overwriting the draft.
-
-    On validation failure the prior draft is kept unchanged, a
-    `friction_highlights` line is appended, and the round continues -- never
-    a partial or invalid draft written.
-    """
-    block = _step1c0_block()
-    window = _after(block, BODY_FOLD_ANCHOR, span=2600)
-    assert "Validate before overwrite" in window
-    assert "leading bookkeeping lines" in window
-    assert "plan's required sections must still be present" in window
-    assert "keep the prior draft unchanged" in window
-    assert "friction_highlights" in window
-    assert "never write a partial or invalid draft" in window
 
 
 # ---------------------------------------------------------------------------
@@ -1308,12 +1259,11 @@ def test_settlement_marker_grammar_documents_fingerprint_coexistence() -> None:
 def test_draft_with_both_bookkeeping_markers_present_parses_unambiguously() -> None:
     """A draft carrying both a settlement marker and a fingerprint parses.
 
-    Three independent statements of the same bookkeeping order must agree:
-    the settlement-marker grammar (this test's primary anchor), the
-    draft-persistence rule, and the body-consistency fold's preservation
-    clause. All three name round-counter/fingerprint/settlement-marker in
-    that order, so a draft carrying all three lines is unambiguous under
-    every reader.
+    Two independent statements of the same bookkeeping order must agree:
+    the settlement-marker grammar (this test's primary anchor) and the
+    draft-persistence rule. Both name round-counter/fingerprint/settlement-
+    marker in that order, so a draft carrying all three lines is
+    unambiguous under every reader.
     """
     grammar_section = _step1c_section()
     grammar_window = _after(
@@ -1333,10 +1283,3 @@ def test_draft_with_both_bookkeeping_markers_present_parses_unambiguously() -> N
     )
     assert f"`<!-- {LAST_EVALUATED_MARKER}: ... -->` fingerprint" in persistence_window
     assert f"every `<!-- {SETTLED_MARKER}: ... -->` marker line" in persistence_window
-
-    fold_block = _step1c0_block()
-    fold_window = _after(fold_block, BODY_FOLD_ANCHOR, span=1700)
-    assert (
-        "preserving the leading bookkeeping lines (round counter, fingerprint, "
-        "settlement markers)" in fold_window
-    )
