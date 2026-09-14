@@ -33,6 +33,7 @@ from cw.models import (
     QueueItemStatus,
     SessionPurpose,
     SessionStatus,
+    Stage,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import fix_dispatch, reconcile
@@ -694,6 +695,100 @@ def test_act_on_pending_fix_dispatches_drops_job_mutated_during_stale_handoff_wi
     assert mutated_task.status == QueueItemStatus.PENDING
 
 
+def test_act_on_pending_fix_dispatches_drops_job_stage_changed_mid_window(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job whose row stays RUNNING but changes stage is re-checked before dispatch.
+
+    (#2142 round 6.)
+
+    Round 5's ``_revalidate_dispatch_jobs`` only re-checked RUNNING + no
+    ``fix_dispatch_session_id`` — a row that leaves and re-enters RUNNING at a
+    *different* stage during the unlocked stale-handoff window (reverted, then
+    re-claimed for a later stage) still passed that check, so the fix agent
+    built for the old stage would still spawn against it. Simulates that
+    interleaving from inside the stale candidate's own emit hook and asserts
+    the stage-mutated row's job is dropped from this tick's dispatch while an
+    untouched job in the same tick still spawns.
+    """
+    mutated_ticket = _TICKET
+    stale_ticket = "2018"
+    untouched_ticket = "2019"
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id=mutated_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.RUNNING,
+                    stage=Stage.REVIEW,
+                    pending_fix_dispatch=_pending(label=f"fix-{mutated_ticket}"),
+                ),
+                _make_ticket_task(
+                    ticket_id=stale_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.PENDING,
+                    pending_fix_dispatch=_pending(label=f"fix-{stale_ticket}"),
+                ),
+                _make_ticket_task(
+                    ticket_id=untouched_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.RUNNING,
+                    stage=Stage.REVIEW,
+                    pending_fix_dispatch=_pending(label=f"fix-{untouched_ticket}"),
+                ),
+            ]
+        )
+    )
+
+    real_emit = fix_dispatch._emit_fix_dispatch_operator_signal
+
+    def _emit_then_advance_other_row_stage(**kwargs: Any) -> None:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            task = fix_dispatch._find_task(store, mutated_ticket, _CLIENT)
+            assert task is not None
+            # Status stays RUNNING — only the stage moves, e.g. reverted and
+            # re-claimed for finalize while this tick's job was already built.
+            task.stage = Stage.FINALIZE
+            save_dev_queue(store)
+        real_emit(**kwargs)
+
+    monkeypatch.setattr(
+        fix_dispatch,
+        "_emit_fix_dispatch_operator_signal",
+        _emit_then_advance_other_row_stage,
+    )
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [
+            fix_dispatch._FixDispatchCandidate(
+                ticket_id=mutated_ticket, client=_CLIENT
+            ),
+            fix_dispatch._FixDispatchCandidate(ticket_id=stale_ticket, client=_CLIENT),
+            fix_dispatch._FixDispatchCandidate(
+                ticket_id=untouched_ticket, client=_CLIENT
+            ),
+        ],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == [untouched_ticket]
+    dispatched_tickets = {call["ticket_id"] for call in stub_dispatch.calls}
+    assert dispatched_tickets == {untouched_ticket}
+
+    mutated_task = fix_dispatch._find_task(load_dev_queue(), mutated_ticket, _CLIENT)
+    assert mutated_task is not None
+    # Dropped from dispatch only — the handoff itself is left in place for the
+    # next tick's _build_dispatch_jobs to re-detect under the row's new stage.
+    assert mutated_task.pending_fix_dispatch is not None
+    assert mutated_task.status == QueueItemStatus.RUNNING
+    assert mutated_task.stage == Stage.FINALIZE
+
+
 def test_act_on_pending_fix_dispatches_skips_unresolvable_client(
     tmp_config_dir: Path,
     stub_dispatch: _DispatchRecorder,
@@ -748,6 +843,7 @@ def test_stamp_helpers_tolerate_a_row_removed_after_dispatch(
         ticket_id=_TICKET,
         client=_CLIENT,
         lane="default",
+        stage=Stage.REVIEW,
     )
 
     fix_dispatch._stamp_dispatch_success(job, "fix-sess")

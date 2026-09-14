@@ -313,9 +313,10 @@ for scripting and field reads; it prints two distinct sections:
   most recent `DISPATCH_TICK` event stored in the event history. It can be
   stale, especially after idle periods or when no dispatch has run since the
   last queue mutation.
-  - `running=N/M` reflects that tick's grant math — how many workers were
-    granted vs. the cap at dispatch time — **not** the current live session
-    count.
+  - `running=N/M` is session-based (a count of DAEMON sessions in ACTIVE/IDLE
+    status against the client's cap) — but it is a snapshot taken **at that
+    tick**, not the current live session count as of when you read the
+    footer.
   - For current live session count, use the top table or `cw status`.
   - `[ORPHAN? — N session(s) counted against the ceiling vs M RUNNING row(s)]`
     (#2142) appears when that tick counted more sessions than the top table has

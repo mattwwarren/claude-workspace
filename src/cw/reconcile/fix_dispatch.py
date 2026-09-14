@@ -25,10 +25,11 @@ Two phases, in this order:
    fix agent spawned, unless the row has drifted off RUNNING since the handoff
    was recorded, in which case the handoff is dropped instead (#2142; see
    ``_build_dispatch_jobs`` and ``_drop_stale_handoffs``). A row can also drift
-   off RUNNING *after* its job was already built, during the stale-handoff
-   drop's own unlocked emission window — ``_revalidate_dispatch_jobs`` re-checks
-   every built job immediately before dispatch to close that window (#2142
-   round 5).
+   off RUNNING — or stay RUNNING but move to a *different* stage — *after* its
+   job was already built, during the stale-handoff drop's own unlocked
+   emission window — ``_revalidate_dispatch_jobs`` re-checks every built job's
+   status AND stage immediately before dispatch to close that window (#2142
+   rounds 5-6).
 
 Deliberately NOT an RFC-0010 review recipe, and deliberately not registered in
 ``run_review_recipes``: that family gates on ``review_recipes_enabled``, which
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
         DevQueueStore,
         OrchestratorConfig,
         PendingFixDispatch,
+        Stage,
         TicketTask,
     )
 
@@ -187,6 +189,11 @@ class _DispatchJob(NamedTuple):
     ticket_id: str
     client: str
     lane: str
+    # Row's stage at build time (#2142 round 6). Captured here so
+    # ``_revalidate_dispatch_jobs`` can require the row to still be at the
+    # SAME stage immediately before dispatch, not just still RUNNING — see
+    # ``_job_still_valid``.
+    stage: Stage
 
 
 def _emit_fix_dispatch_operator_signal(
@@ -349,23 +356,35 @@ def _drop_stale_handoffs(snapshots: list[_StaleHandoffSnapshot]) -> None:
             save_dev_queue(store)
 
 
-def _job_still_valid(task: TicketTask | None) -> bool:
+def _job_still_valid(
+    task: TicketTask | None, expected_stage: Stage | None = None
+) -> bool:
     """True if a row is still eligible to receive a fix-agent dispatch.
 
-    The single definition of "eligible" — RUNNING, with no
-    ``fix_dispatch_session_id`` already outstanding — shared by
+    The single definition of "eligible" — RUNNING, at ``expected_stage`` (if
+    given), with no ``fix_dispatch_session_id`` already outstanding — shared by
     ``_build_dispatch_jobs`` (first check, under its own lock) and
     ``_revalidate_dispatch_jobs`` (second check, immediately before dispatch,
-    #2142 round 5). Deliberately does NOT check ``pending_fix_dispatch``: the
+    #2142 rounds 5-6). Deliberately does NOT check ``pending_fix_dispatch``: the
     two call sites disagree on what a missing handoff means (build treats it
     as "already handled, skip"; revalidate treats a job it already built as
     carrying its own copy of the handoff, so the row losing it mid-tick is
     just another form of "no longer eligible").
+
+    ``expected_stage`` defaults to ``None`` for ``_build_dispatch_jobs``'s own
+    call: at that point there is no previously-captured stage to compare
+    against yet — the build pass is what *captures* ``task.stage`` onto the
+    job record for ``_revalidate_dispatch_jobs`` to compare against later
+    (#2142 round 6). A row that left and re-entered RUNNING at a different
+    stage during the unlocked stale-handoff window (reverted, then re-claimed
+    for a later stage) would otherwise still pass the RUNNING-only check and
+    spawn a fix agent built for its old stage.
     """
     return (
         task is not None
         and task.status == QueueItemStatus.RUNNING
         and task.fix_dispatch_session_id is None
+        and (expected_stage is None or task.stage == expected_stage)
     )
 
 
@@ -380,13 +399,17 @@ def _revalidate_dispatch_jobs(jobs: list[_DispatchJob]) -> list[_DispatchJob]:
     unlocked emitting audit events, during which a *different* row's
     non-sentinel RUNNING->PENDING revert (the same class ``_build_dispatch_jobs``'s
     own inline comment names) can land on a row this tick already built a job
-    for. Re-running ``_job_still_valid`` here, under one fresh lock
-    acquisition, closes that window: a row that no longer qualifies is
-    dropped from this tick's dispatch rather than spawning an uncorrelated fix
-    agent for it. Dropping is silent beyond a debug log — the row's own
-    ``pending_fix_dispatch`` is left untouched, so the next reconcile tick's
-    ``_build_dispatch_jobs`` re-detects it under whatever status it now holds
-    and routes it through the ordinary build-or-stale path from there.
+    for. A row can also leave and re-enter RUNNING at a *different* stage
+    during that same window (reverted, then re-claimed for a later stage,
+    #2142 round 6) — RUNNING alone would not catch that. Re-running
+    ``_job_still_valid`` here against the job's captured ``stage``, under one
+    fresh lock acquisition, closes both windows: a row that no longer
+    qualifies is dropped from this tick's dispatch rather than spawning an
+    uncorrelated (or stage-stale) fix agent for it. Dropping is silent beyond
+    a debug log — the row's own ``pending_fix_dispatch`` is left untouched, so
+    the next reconcile tick's ``_build_dispatch_jobs`` re-detects it under
+    whatever status/stage it now holds and routes it through the ordinary
+    build-or-stale path from there.
     """
     if not jobs:
         return jobs
@@ -395,15 +418,17 @@ def _revalidate_dispatch_jobs(jobs: list[_DispatchJob]) -> list[_DispatchJob]:
         survivors = []
         for job in jobs:
             task = _find_task(store, job.ticket_id, job.client)
-            if _job_still_valid(task):
+            if _job_still_valid(task, expected_stage=job.stage):
                 survivors.append(job)
             else:
                 _log.debug(
                     "fix_dispatch: dropping ticket %s from this tick's dispatch "
                     "— row no longer eligible after the unlocked stale-handoff "
-                    "phase (status=%s)",
+                    "phase (status=%s, stage=%s, expected_stage=%s)",
                     job.ticket_id,
                     task.status.value if task is not None else "row missing",
+                    task.stage.value if task is not None else "row missing",
+                    job.stage.value,
                 )
         return survivors
 
@@ -487,6 +512,7 @@ def _build_dispatch_jobs(
                     ticket_id=task.ticket_id,
                     client=task.client,
                     lane=task.lane,
+                    stage=task.stage,
                 )
             )
     return jobs, stale
