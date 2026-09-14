@@ -30,6 +30,7 @@ from cw.codex_review._capability import (
     _CodexFilesystemCapability,
     _CodexFingerprint,
 )
+from cw.codex_review._verdict._health import _READ_ONLY_SANDBOX_EXEMPT_ROLES
 from cw.codex_review._verdict._render import _render_rejected_finding_text
 from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
@@ -603,13 +604,6 @@ class TestSynthesizeCodexReviewResultHealth:
         assert verdict.agents_run[0].detail == "sandbox lacked filesystem access"
 
 
-_READ_ONLY_SANDBOX_EXEMPT_ROLES = [
-    "Test Reviewer",
-    "Code Quality Reviewer",
-    "SysAdmin Reviewer",
-]
-
-
 class TestReadOnlySandboxDegradedCarveOut:
     """#1856 (Test Reviewer), widened by #2174 to Code Quality Reviewer and
     SysAdmin Reviewer: each of these three roles' rubric structurally cannot
@@ -625,7 +619,7 @@ class TestReadOnlySandboxDegradedCarveOut:
     (<exempt role>, "degraded") only.
     """
 
-    @pytest.mark.parametrize("reviewer_role", _READ_ONLY_SANDBOX_EXEMPT_ROLES)
+    @pytest.mark.parametrize("reviewer_role", sorted(_READ_ONLY_SANDBOX_EXEMPT_ROLES))
     def test_read_only_sandbox_degraded_status_excluded_from_health(
         self, make_git_repo: Callable[[str], Path], reviewer_role: str
     ) -> None:
@@ -648,7 +642,7 @@ class TestReadOnlySandboxDegradedCarveOut:
         assert result.health.recommendation == "PROCEED"
         assert verdict is not None
 
-    @pytest.mark.parametrize("reviewer_role", _READ_ONLY_SANDBOX_EXEMPT_ROLES)
+    @pytest.mark.parametrize("reviewer_role", sorted(_READ_ONLY_SANDBOX_EXEMPT_ROLES))
     def test_read_only_sandbox_role_failed_status_still_downgrades_health(
         self, make_git_repo: Callable[[str], Path], reviewer_role: str
     ) -> None:
