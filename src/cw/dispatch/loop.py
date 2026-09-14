@@ -65,6 +65,7 @@ if TYPE_CHECKING:
         DevQueueStore,
         OrchestratorConfig,
         OrchestratorEvent,
+        TicketTask,
     )
     from cw.native_daemon import NativeDaemonClient
 from cw.dispatch.lanes import _notify_stale_clients_with_pending
@@ -92,6 +93,43 @@ def _resolve_loaded_version() -> str:
 
 # Captured at import time; remains the version that was actually loaded.
 _LOADED_VERSION: str = _resolve_loaded_version()
+
+
+def _event_session_id_disagrees_with_task(
+    task: TicketTask,
+    ticket_id: str,
+    event_session_id: object,
+) -> bool:
+    """Should this SESSION_COMPLETED event be skipped for *task* (GitHub #97, #1692)?
+
+    A genuinely legacy event (no ``session_id`` at all) always matches by
+    ticket_id alone -- ``event_session_id`` isn't a ``str`` in that case, so
+    this returns False without inspecting ``task.session_id``.
+
+    When the event does carry a ``session_id``:
+    - ``task.session_id`` set and disagreeing -> skip (#97: a stale event
+      from an old session must not complete a freshly-respawned task).
+    - ``task.session_id`` is ``None`` -> skip (#1692: the window between
+      ``_screen_and_claim`` setting a requeued row RUNNING and
+      ``_stamp_spawn_success`` recording the new attempt's session_id. The
+      ticket-id-only fallback would otherwise apply a stale, raced-to-
+      terminal session's completion to this fresh attempt. A row not yet
+      stamped with a session cannot own a session-tagged completion. If the
+      spawn itself crashes before ``_stamp_spawn_success`` ever runs, this
+      event is skipped too -- that crash window belongs to the reaper.)
+    - ``task.session_id`` set and agreeing -> apply.
+    """
+    if not isinstance(event_session_id, str):
+        return False
+    if task.session_id is None:
+        _log.debug(
+            "stale_session_completed_event_skipped: ticket=%s "
+            "event_session=%s task_session=None (not yet stamped)",
+            ticket_id,
+            event_session_id,
+        )
+        return True
+    return task.session_id != event_session_id
 
 
 def _apply_events_to_store(
@@ -141,16 +179,8 @@ def _apply_events_to_store(
             # would shadow BLOCKED_ON_USER, which downstream operators need.
             if task.status != QueueItemStatus.RUNNING:
                 continue
-            # Disambiguate stale events: when the event carries a
-            # session_id and the task has been stamped with one, they
-            # must agree. Either side missing a session_id falls back to
-            # ticket_id-only matching for backward compatibility with
-            # legacy tasks/events that predate the field.
-            if (
-                isinstance(event_session_id, str)
-                and task.session_id is not None
-                and task.session_id != event_session_id
-            ):
+            # Disambiguate stale events -- see _event_session_id_disagrees_with_task.
+            if _event_session_id_disagrees_with_task(task, ticket_id, event_session_id):
                 continue
             state = load_state()
             session = next(

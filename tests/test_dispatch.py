@@ -584,10 +584,17 @@ class TestConsumeCompletesTasks:
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
+        # GitHub #1692: the event carries a session_id, so the task must be
+        # stamped with the matching one -- otherwise the new raced-to-
+        # terminal guard skips it (see
+        # test_consume_skips_session_tagged_event_against_unstamped_task).
+        # This test's own subject is the session_name->ticket_id recovery
+        # path, not that guard, so give the task the matching session_id.
         task = TicketTask(
             ticket_id="GEN-700",
             client="test-client",
             status=QueueItemStatus.RUNNING,
+            session_id="abc123",
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -749,7 +756,15 @@ class TestConsumeCompletesTasks:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """Legacy tasks without session_id still match by ticket_id alone."""
+        """A genuinely legacy event (no session_id key at all) still matches
+        by ticket_id alone.
+
+        The ticket-id-only fallback is reserved for events that predate the
+        session_id field entirely -- distinct from GitHub #1692's raced-to-
+        terminal window, where the event DOES carry a session_id but the
+        task hasn't been stamped with one yet (see
+        test_consume_skips_session_tagged_event_against_unstamped_task).
+        """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
         # Task predates the session_id field — session_id stays None.
@@ -760,11 +775,11 @@ class TestConsumeCompletesTasks:
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
+        # No "session_id" key at all — a genuinely legacy event.
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
             {
                 "ticket_id": "GEN-LEGACY",
-                "session_id": "any-session",
                 "client": "test-client",
             },
         )
@@ -773,6 +788,50 @@ class TestConsumeCompletesTasks:
         completed = consume_completed_sessions()
         assert completed == 1
         assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_consume_skips_session_tagged_event_against_unstamped_task(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """GitHub #1692: a stale completion event can otherwise be applied to
+        a later run.
+
+        Window: ticket T's session A raced to terminal and emitted
+        SESSION_COMPLETED (with session_id=A). T is requeued;
+        _screen_and_claim sets the new row RUNNING but task.session_id stays
+        None until _stamp_spawn_success runs after session B spawns. If A's
+        event is applied in that window, the ticket-id-only fallback would
+        wrongly apply A's stale completion to T's fresh attempt. A row that
+        hasn't been stamped with a session cannot own a session-tagged
+        completion — it must be skipped, not fall back to ticket_id-only
+        matching.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Fresh respawn: RUNNING but not yet stamped with a session_id.
+        task = TicketTask(
+            ticket_id="GEN-RACE",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        # Event from the PRIOR (raced-to-terminal) session — carries a
+        # session_id the task was never stamped with.
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-RACE",
+                "session_id": "stale-raced-session",
+                "client": "test-client",
+            },
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
     def test_consume_completes_extended_event_shape(
         self,
