@@ -122,7 +122,8 @@ common path (no baseline, or a strict override applies) never needs this.
 **Detection — both conditions required, evaluated at `$FORK_POINT`:**
 
 1. A baseline file is tracked: `git ls-tree -r --name-only "$FORK_POINT"` lists
-   it (e.g. `mypy-baseline.txt`, `.mypy/baseline.json`).
+   it (e.g. `mypy-baseline.txt`, `.mypy/baseline.json`). Record its
+   repo-relative path, verbatim, as `MYPY_BASELINE_FILE`.
 2. The repo's own gate consumes it: its pre-commit config, CI workflow, or lint
    script (as of `$FORK_POINT`) runs mypy through a mechanism that reads that
    file — e.g. `mypy ... | mypy-baseline filter`, or basedmypy's
@@ -154,9 +155,34 @@ unrelated lines, leave the file untouched.
 
 **Orchestrator record (Step 2.5 gate 4 and Step 3b only).** For each touched
 file carrying baselined pre-existing errors, append one bare-shape entry to the
-`DEFERRED-REVIEW-FINDINGS` block in `.cw/deferred-findings.md` (create the file
-with just that block if absent — `cw review adjudicate` reads and merges bare
-entries as prior content). Skip a file that already has an entry:
+`DEFERRED-REVIEW-FINDINGS` block in `.cw/deferred-findings.md`. Skip a file
+that already has an entry. `cw review adjudicate` merges this as prior content,
+but its parser fails closed (`src/cw/review_adjudication/_deferred_md.py`), so
+the shape is a contract:
+
+- **File absent or empty** — create it with exactly this skeleton, then the
+  entries inside the block (the title and provenance lines are required; a
+  file without the title makes Stage 3's next `cw review adjudicate` refuse to
+  run):
+
+  ```
+  # Deferred Review Findings
+  <!-- written by Stage 3 (auto-dev-review.md), consumed by Stage 4 Step 4d (auto-dev-finalize.md) -->
+
+  ## Review adjudication
+
+  <!-- DEFERRED-REVIEW-FINDINGS
+  <entries>
+  DEFERRED-REVIEW-FINDINGS -->
+  ```
+
+- **File present without a `DEFERRED-REVIEW-FINDINGS` block** — append the
+  block (with the entries) at the end, leaving existing lines untouched.
+- **Block present** — insert the entries immediately before its closing
+  `DEFERRED-REVIEW-FINDINGS -->` line.
+
+Each entry, exactly four lines, no `round:`/`recorded_at:` lines (those are
+written only by the CLI), and no `"` inside the quoted values:
 
 ```
 - severity: SHOULD_FIX
