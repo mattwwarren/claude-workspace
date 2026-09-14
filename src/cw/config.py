@@ -503,7 +503,7 @@ def load_clients() -> dict[str, ClientConfig]:
             raise ConfigValidationError(msg)
         try:
             client = ClientConfig(name=name, **data)
-        except ValidationError as exc:
+        except (ValidationError, TypeError) as exc:
             msg = f"{path}: invalid config for client '{name}': {exc}"
             raise ConfigValidationError(msg) from exc
         # Apply global notification default if not set per-client

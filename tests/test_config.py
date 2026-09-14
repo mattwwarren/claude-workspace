@@ -275,6 +275,24 @@ class TestLoadClients:
         with pytest.raises(ConfigValidationError, match=r"clients\.yaml"):
             load_clients()
 
+    def test_non_string_key_in_client_mapping_raises_config_validation_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A client mapping with a non-string key (e.g. {1: x, repo_path: y})
+        passes the isinstance(data, dict) shape check but raises a bare
+        TypeError ('keywords must be strings') from ClientConfig(**data),
+        which the existing `except ValidationError` doesn't catch. Must raise
+        ConfigValidationError naming clients.yaml, the client name, and the
+        underlying error instead (operator round-4 resolution, #2158)."""
+        from cw.exceptions import ConfigValidationError
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n  acme:\n    1: x\n    repo_path: /tmp/acme\n"
+        )
+        with pytest.raises(ConfigValidationError, match=r"clients\.yaml.*acme"):
+            load_clients()
+
 
 class TestLoadWorktreeClients:
     def test_worktree_client_from_yaml(
