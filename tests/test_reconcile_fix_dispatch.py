@@ -19,8 +19,9 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw.config import load_state, save_state
-from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import read_events
+from cw.events import record_event as _real_record_event
 from cw.exceptions import CwError, HookContextConflictError
 from cw.models import (
     ClientConfig,
@@ -391,10 +392,13 @@ def test_stale_handoff_survives_when_its_audit_event_cannot_be_persisted(
 ) -> None:
     """A failed audit emission must not leave the handoff durably dropped (#2142).
 
-    The event pair is the only record that a handoff was ever dropped. If it
-    cannot be written, the drop must not be persisted either — otherwise the
-    action list vanishes with nothing anywhere naming the ticket it came from.
-    The next tick re-detects the still-present handoff and retries the page.
+    Round-3 binding contract: emission now happens per candidate, unlocked.
+    A failure is logged and that candidate is dropped from this tick — it does
+    NOT raise out of ``_act_on_pending_fix_dispatches`` (round 1's emit-under-
+    the-lock design had to let it propagate, since nothing else in the shared
+    transaction could be reasoned about; the unlocked per-candidate design no
+    longer needs that). The handoff survives on disk; the next reconcile tick
+    re-detects it and retries the page.
     """
 
     def _explode(*_args: Any, **_kwargs: Any) -> None:
@@ -404,17 +408,166 @@ def test_stale_handoff_survives_when_its_audit_event_cannot_be_persisted(
     _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
     monkeypatch.setattr(fix_dispatch, "record_event", _explode)
 
-    with pytest.raises(OSError, match="events file unwritable"):
-        fix_dispatch._act_on_pending_fix_dispatches(
-            [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
-            clients={_CLIENT: acme_client},
-        )
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
 
+    assert acted == []
     assert stub_dispatch.calls == []
     task = _only_task()
     assert task.pending_fix_dispatch is not None
     assert task.pending_fix_dispatch.label == f"fix-{_TICKET}"
     assert task.status == QueueItemStatus.PENDING
+    # No audit event was actually persisted -- record_event exploded on the
+    # first call of the pair.
+    assert read_events(event_types=[OrchestratorEventType.STAGE_ERRORED]) == []
+
+
+def test_stale_handoff_events_emit_without_holding_dev_queue_lock(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase-2 audit events fire only after ``dev_queue_lock()`` releases.
+
+    (#2142 round 3.)
+
+    Verified with a real, non-blocking ``flock`` probe against the exact lock
+    file ``fix_dispatch.py`` itself acquires — not a timing heuristic. If the
+    probe's own ``LOCK_EX | LOCK_NB`` acquisition fails, the module's lock was
+    still held while ``record_event`` ran.
+    """
+    import fcntl
+
+    from cw.config import dev_queue_lock as dev_queue_lock_file
+
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+
+    lock_was_free: list[bool] = []
+
+    def _probing_record_event(*args: Any, **kwargs: Any) -> Any:
+        lock_path = dev_queue_lock_file()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        probe_fd = lock_path.open("w")
+        try:
+            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock_was_free.append(False)
+        else:
+            lock_was_free.append(True)
+            fcntl.flock(probe_fd, fcntl.LOCK_UN)
+        finally:
+            probe_fd.close()
+        return _real_record_event(*args, **kwargs)
+
+    monkeypatch.setattr(fix_dispatch, "record_event", _probing_record_event)
+
+    fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    # Two record_event calls (STAGE_ERRORED + SESSION_NEEDS_ATTENTION), both
+    # probed while the module's dev_queue_lock() was free.
+    assert lock_was_free == [True, True]
+
+
+def test_stale_handoff_not_cleared_when_row_reclaimed_before_revalidation(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row reclaimed back to RUNNING between phase 1 and phase 2 wins (#2142 round 3).
+
+    Simulates a fresh REVIEW dispatch claiming the row while phase 2's event
+    emission is in flight (unlocked). Phase 2's re-validation must see the
+    live RUNNING status and skip the clear — silently, no exception — even
+    though the event pair already fired describing the moment-ago condition.
+    """
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+
+    real_emit = fix_dispatch._emit_fix_dispatch_operator_signal
+
+    def _emit_then_reclaim(**kwargs: Any) -> None:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            task = fix_dispatch._find_task(store, _TICKET, _CLIENT)
+            assert task is not None
+            task.status = QueueItemStatus.RUNNING
+            save_dev_queue(store)
+        real_emit(**kwargs)
+
+    monkeypatch.setattr(
+        fix_dispatch, "_emit_fix_dispatch_operator_signal", _emit_then_reclaim
+    )
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is not None
+    assert task.status == QueueItemStatus.RUNNING
+
+    # The event pair still fired -- it described a real condition at the
+    # moment phase 1 ran, and is not clawed back after the fact.
+    errored = read_events(event_types=[OrchestratorEventType.STAGE_ERRORED])
+    assert len(errored) == 1
+
+
+def test_stale_handoff_not_cleared_when_rearmed_with_a_new_handoff(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handoff replaced by a fresh one between phase 1 and phase 2 wins.
+
+    (#2142 round 3.)
+
+    Same race as the RUNNING case, but the row stays non-RUNNING while a new
+    REVIEW round records a *different* handoff (a new ``requested_at``/
+    ``cycle``) before phase 2 re-validates. The old snapshot's identity no
+    longer matches, so the new handoff must survive uncleared.
+    """
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+
+    real_emit = fix_dispatch._emit_fix_dispatch_operator_signal
+
+    def _emit_then_rearm(**kwargs: Any) -> None:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            task = fix_dispatch._find_task(store, _TICKET, _CLIENT)
+            assert task is not None
+            task.pending_fix_dispatch = _pending(
+                cycle=2,
+                requested_by_session_id="new-review-sess",
+                requested_at=datetime(2026, 8, 27, tzinfo=UTC),
+            )
+            save_dev_queue(store)
+        real_emit(**kwargs)
+
+    monkeypatch.setattr(
+        fix_dispatch, "_emit_fix_dispatch_operator_signal", _emit_then_rearm
+    )
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is not None
+    assert task.pending_fix_dispatch.cycle == 2
+    assert task.pending_fix_dispatch.requested_by_session_id == "new-review-sess"
 
 
 def test_act_on_pending_fix_dispatches_skips_unresolvable_client(
