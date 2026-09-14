@@ -177,7 +177,12 @@ the shape is a contract:
   ```
 
 - **File present without a `DEFERRED-REVIEW-FINDINGS` block** — append the
-  block (with the entries) at the end, leaving existing lines untouched.
+  block (with the entries) at the end, leaving existing lines untouched. Only
+  safe when every existing non-blank line is one of the skeleton's structural
+  lines or a well-formed `- <file> — "<summary>" — <rationale>` rejected
+  bullet (the parser rejects anything else). If any line is neither, do not
+  write: report `deferred_findings_unparseable` in friction with the file's
+  contents and leave the file untouched.
 - **Block present** — insert the entries immediately before its closing
   `DEFERRED-REVIEW-FINDINGS -->` line.
 

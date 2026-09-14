@@ -12,8 +12,10 @@ through the real parser here.
 """
 
 from cw.review_adjudication._deferred_md import (
+    _DEFERRED_MD_HEADING,
     _DEFERRED_MD_PROVENANCE,
     _DEFERRED_MD_TITLE,
+    _DEFERRED_SENTINEL,
     parse_deferred_findings_md,
 )
 from tests.conftest import _cmd
@@ -64,14 +66,14 @@ def test_documented_skeleton_and_entry_parse_as_one_deferral() -> None:
     the fail-closed parser as exactly one `defer` adjudication."""
     text = (
         f"{_DEFERRED_MD_TITLE}\n{_DEFERRED_MD_PROVENANCE}\n\n"
-        "## Review adjudication\n\n"
-        "<!-- DEFERRED-REVIEW-FINDINGS\n"
+        f"{_DEFERRED_MD_HEADING}\n\n"
+        f"<!-- {_DEFERRED_SENTINEL}\n"
         "- severity: SHOULD_FIX\n"
         '  summary: "pre-existing baselined mypy errors in src/app.py"\n'
         "  file: src/app.py\n"
         '  rationale: "baselined debt in a file this change touched; not '
         'introduced by it: src/app.py:12 [arg-type]"\n'
-        "DEFERRED-REVIEW-FINDINGS -->\n"
+        f"{_DEFERRED_SENTINEL} -->\n"
     )
 
     entries = parse_deferred_findings_md(text)
