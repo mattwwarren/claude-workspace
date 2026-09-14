@@ -827,7 +827,7 @@ def _detail_bearing_rejection(severity: str, summary: str) -> RejectedFinding:
     so the substitution costs the assertions nothing.
     """
     payload = _doc_payload(
-        _finding_kwargs(severity="NOT_A_SEVERITY", summary=summary),
+        dict(_finding_kwargs(severity="NOT_A_SEVERITY", summary=summary)),
         reviewer_role="Code Quality Reviewer",
         # Once the invalid item is rescued out, the document has no findings
         # left, and a `status="ok"` document with none must justify itself.
@@ -1193,7 +1193,9 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
     def _doc(self, *findings: Finding) -> ReviewerFindingsDocument:
         return _make_reviewer_doc(*findings)
 
-    def _ledger(self, finding: Finding, **overrides: object) -> dict[str, object]:
+    def _ledger(
+        self, finding: Finding, **overrides: object
+    ) -> dict[str, FindingDisposition]:
         key = _disposition_key(finding.file, finding.summary)
         assert key is not None
         payload: dict[str, object] = {
