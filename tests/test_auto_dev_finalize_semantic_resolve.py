@@ -139,20 +139,98 @@ def test_prep_pr_step1_merge_conflict_refusal_untouched() -> None:
 
 
 def test_classify_merge_conflict_script_referenced_repo_relative() -> None:
-    """The new script ships only to this repo's .claude/scripts/ — never to
-    the global ~/.claude/scripts/ — so it must be invoked repo-relative via
-    `uv run python`, matching check_impl_guard_staleness.py's own convention.
+    """The script resolves repo-local-then-global-then-marker-verified (#2141).
+
+    ``install-skills.sh`` has symlinked this script into ``~/.claude/scripts/``
+    since #2096, so the old repo-relative-only invocation silently no-opped in
+    a client repo with no local ``.claude/scripts/``. The repo copy still wins
+    resolution order; the global copy is a real fallback candidate, and either
+    one must carry a current ``cw-script-version`` marker before it is run.
     """
     section = _semantic_resolve_section()
-    assert "uv run python .claude/scripts/classify_merge_conflict.py" in section
-    assert "~/.claude/scripts/classify_merge_conflict.py" not in section
+    assert ".claude/scripts/classify_merge_conflict.py" in section
+    assert '"$HOME/.claude/scripts/classify_merge_conflict.py"' in section
+    assert 'uv run python "$RESOLVED" resolve' in section
 
 
 def test_gate_failure_park_is_terminal_no_retry() -> None:
     """Exactly one resolver invocation and one gate-detection invocation in
     the whole file, plus an explicit instruction covering the gate step
-    itself — not just the resolver — never being retried."""
+    itself — not just the resolver — never being retried.
+
+    #2141 moved the invocation onto the resolved path (``"$RESOLVED"``), so the
+    counted literal follows it; the "exactly one invocation" intent is
+    unchanged.
+    """
     section = _semantic_resolve_section()
-    assert _finalize().count("classify_merge_conflict.py resolve") == 1
+    assert _finalize().count('uv run python "$RESOLVED" resolve') == 1
     assert section.count('"$PREP_PR_STATE" detect-gates') == 1
     assert "do NOT re-run the gate" in section
+
+
+def test_semantic_resolve_resolves_repo_local_then_global_script_path() -> None:
+    """Both candidates present, repo-local first (#2141)."""
+    section = _semantic_resolve_section()
+    repo_idx = section.index(".claude/scripts/classify_merge_conflict.py")
+    global_idx = section.index('"$HOME/.claude/scripts/classify_merge_conflict.py"')
+    assert repo_idx < global_idx
+
+
+def test_semantic_resolve_absent_from_both_locations_skips_with_labeled_friction() -> (
+    None
+):
+    """Absent still escalates to human review — honestly labelled (#2141).
+
+    Unlike the other three guard sites, absence here is NOT "continue the
+    pipeline": a conflict the resolver never ran on was always going to reach
+    ``merge_conflict_post_push``. What changes is the label — today a missing
+    file exits 2 and is misattributed as a "refused" classification.
+    """
+    section = _semantic_resolve_section()
+    assert "classify_merge_conflict: script absent, skipped" in section
+    assert "merge_conflict_post_push" in section
+
+
+def test_semantic_resolve_greps_cw_script_version_marker_and_headless_blocks_on_stale() -> (
+    None
+):
+    """A stale resolver is a tooling-integrity failure, not a merge outcome.
+
+    It must NOT fold into ``merge_conflict_post_push`` alongside genuine
+    refusals: a copy of the script that predates the current contract cannot
+    be trusted to have classified the conflict at all (#2141).
+    """
+    section = _semantic_resolve_section()
+    assert "cw-script-version" in section
+    assert "HEADLESS BLOCK" in section
+    stale_lines = [line for line in section.splitlines() if "HEADLESS BLOCK" in line]
+    assert stale_lines
+    assert any('blocker.reason: "agent_block"' in line for line in stale_lines)
+    assert all("merge_conflict_post_push" not in line for line in stale_lines)
+
+
+def test_resolver_table_referenced_not_duplicated() -> None:
+    """Step 4c.5 cross-references auto-dev-impl.md's table, never re-embeds it."""
+    section = _semantic_resolve_section()
+    assert "Guard-script path resolution and staleness marker" in section
+    for other in (
+        "check_not_main_checkout.py",
+        "check_plan_scope_conformance.py",
+        "check_impl_guard_staleness.py",
+    ):
+        assert other not in section
+
+
+def test_grouping_comment_no_longer_claims_repo_only_install() -> None:
+    """Both clauses of the #1850 comment went stale when #2096 landed (#2141).
+
+    "never to the global ~/.claude/scripts/" became false, and the "Same
+    convention as ..." framing inverted — it is now the same convention, which
+    is precisely why the claim of difference has to go.
+    """
+    content = _finalize()
+    assert "never to the global" not in content
+    assert (
+        "Same convention as `check_impl_guard_staleness.py`"
+        "/`check_plan_scope_conformance.py`" not in content
+    )

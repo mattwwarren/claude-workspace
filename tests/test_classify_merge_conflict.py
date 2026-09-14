@@ -373,3 +373,9 @@ def test_cli_human_summary_on_refusal(tmp_path: Path) -> None:
     result = _run_cli(_list_file(tmp_path, [bad]), json_flag=False)
     assert result.returncode == 1
     assert result.stdout.startswith("classify_merge_conflict: refused")
+
+
+def test_classify_merge_conflict_declares_cw_script_version_header() -> None:
+    """Line 2 (index 1) carries the marker the #2141 resolvers grep for."""
+    lines = _SCRIPT.read_text(encoding="utf-8").splitlines()
+    assert lines[1] == "# cw-script-version: 1"

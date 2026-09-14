@@ -27,6 +27,27 @@ def _doc(relative: str) -> str:
     return (_REPO_ROOT / relative).read_text(encoding="utf-8")
 
 
+_GATE2_START = "2. **File set is within the plan's enumeration**"
+_GATE2_END = "3. **Test command exit code is 0:**"
+_RESOLVER_SUBSECTION = "### Guard-script path resolution and staleness marker (#2141)"
+
+
+def _gate2_section() -> str:
+    """Step 2.5 gate 2, from its numbered bullet to gate 3's (#2141)."""
+    content = _cmd("auto-dev-impl.md")
+    start = content.index(_GATE2_START)
+    end = content.index(_GATE2_END, start)
+    return content[start:end]
+
+
+def _resolver_table_section() -> str:
+    """The shared resolver/marker subsection in auto-dev-impl.md (#2141)."""
+    content = _cmd("auto-dev-impl.md")
+    start = content.index(_RESOLVER_SUBSECTION)
+    end = content.index("\n### ", start + len(_RESOLVER_SUBSECTION))
+    return content[start:end]
+
+
 def test_impl_step2_5_gate2_invokes_scope_conformance_script() -> None:
     """Step 2.5 gate 2 must call the mechanical gate, not eyeball the file set."""
     content = _cmd("auto-dev-impl.md")
@@ -197,6 +218,62 @@ def test_plan_reviewer_check2_flags_missing_files_modified_entry() -> None:
     window = content[start:end]
     assert "missing from `## Files Modified`" in window
     assert "#1881" in window
+
+
+def test_gate2_resolves_repo_local_then_global_script_path() -> None:
+    """Gate 2 must probe the installed copy too, not just the repo copy (#2141).
+
+    ``scripts/install-skills.sh`` has symlinked this script into
+    ``~/.claude/scripts/`` since #2096; a client repo without a local
+    ``.claude/scripts/`` previously made the gate silently no-op.
+    """
+    content = _cmd("auto-dev-impl.md")
+    assert ".claude/scripts/check_plan_scope_conformance.py" in content
+    assert '"$HOME/.claude/scripts/check_plan_scope_conformance.py"' in content
+
+
+def test_gate2_absent_from_both_locations_skips_non_blocking() -> None:
+    """Absent from both locations is explicitly non-blocking (#2141).
+
+    Previously a missing file exited 2 and was swallowed by the appendix's
+    generic "parse error" branch — non-blocking by accident, under the wrong
+    label. This pins the honest label and the continue-to-gate-3 disposition.
+    """
+    section = _gate2_section()
+    assert "check_plan_scope_conformance: script absent, skipped" in section
+    assert "continue to gate 3" in section
+
+
+def test_gate2_greps_cw_script_version_marker_and_headless_blocks_on_stale() -> None:
+    """The marker-stale branch is a hard stop, textually distinct from the
+    non-blocking absent-from-both-locations branch (#2141)."""
+    section = _gate2_section()
+    assert "cw-script-version" in section
+    assert "HEADLESS BLOCK" in section
+
+    absent_lines = [
+        line
+        for line in section.splitlines()
+        if "check_plan_scope_conformance: script absent, skipped" in line
+    ]
+    stale_lines = [line for line in section.splitlines() if "HEADLESS BLOCK" in line]
+    assert absent_lines
+    assert stale_lines
+    assert all("HEADLESS BLOCK" not in line for line in absent_lines)
+    assert all("script absent, skipped" not in line for line in stale_lines)
+
+
+def test_resolver_table_lists_all_four_scripts_with_minimum_version() -> None:
+    """One shared table in auto-dev-impl.md covers all four guard scripts."""
+    section = _resolver_table_section()
+    for script in (
+        "check_not_main_checkout.py",
+        "check_plan_scope_conformance.py",
+        "check_impl_guard_staleness.py",
+        "classify_merge_conflict.py",
+    ):
+        assert script in section
+    assert "cw-script-version" in section
 
 
 def test_plan_spec_marker_not_bumped() -> None:

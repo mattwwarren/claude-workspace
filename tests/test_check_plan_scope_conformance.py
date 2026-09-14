@@ -739,3 +739,13 @@ def test_no_file_list_found_and_matched_are_distinct_outcomes(
     assert result_c.returncode == 1
 
     assert len({result_a.returncode, result_b.returncode, result_c.returncode}) == 3
+
+
+def test_check_plan_scope_conformance_declares_cw_script_version_header() -> None:
+    """Line 2 (index 1) carries the marker the #2141 resolvers grep for.
+
+    Directly under the shebang and above the module docstring: a comment
+    preceding the first statement does not disturb ``__doc__`` binding.
+    """
+    lines = _SCRIPT.read_text(encoding="utf-8").splitlines()
+    assert lines[1] == "# cw-script-version: 1"
