@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# cw-script-version: 1
 """Gate script: is the impl stage's `impl-complete` trailer still valid? (#1794)
 
 Usage (from `/auto-dev-impl`'s Pre-Stage Detector Guard):

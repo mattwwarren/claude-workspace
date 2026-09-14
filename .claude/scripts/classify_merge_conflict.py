@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# cw-script-version: 1
 """Gate script: mechanically resolve only provably-safe merge conflicts (#1850).
 
 Usage (from `/auto-dev-finalize` Step 4c.5, semantic auto-resolve attempt):
