@@ -1113,9 +1113,12 @@ class SentinelRouteOutcome(NamedTuple):
     QUEUE_STATUSES``) -- by a concurrent caller before this call's own lookup
     ran. A match outside ``OCCUPIED_LANE_STATUSES`` but not in that terminal
     set (i.e. ``PENDING``) is not terminal -- it is redispatch-eligible, so
-    ``task_already_terminal`` is False for it and the ordinary
-    ``routed=True`` miss path applies instead. It is mutually exclusive with
-    ``landed_terminal``
+    ``task_already_terminal`` is False for it. ``routed`` is still False in
+    that case too, same as the terminal sub-cause -- both are a
+    ``matched_excluded`` miss, and ``routed`` is ``not matched_excluded``
+    regardless of which excluded status was matched; only a true "no such
+    task anywhere" miss (R3b) reports ``routed=True``. It is mutually
+    exclusive with ``landed_terminal``
     by construction -- ``landed_terminal`` is set only in the ``target is not
     None`` arm, ``task_already_terminal`` only in the ``target is None`` arm.
     Once a task is landed genuinely terminal under this exact session_id, no
@@ -1180,6 +1183,7 @@ def _apply_sentinel_to_task(
         # amendment A2).
         matched_excluded = False
         excluded_status: QueueItemStatus | None = None
+        excluded_client: str | None = None
         for task in store.tasks:
             if task.ticket_id == ticket_id and task.session_id == cw_session_id:
                 if task.status in OCCUPIED_LANE_STATUSES:
@@ -1188,6 +1192,7 @@ def _apply_sentinel_to_task(
                     break
                 matched_excluded = True
                 excluded_status = task.status
+                excluded_client = task.client
         if target is None:
             if matched_excluded:
                 # #1189: surface the race so an operator can tell "raced to
@@ -1201,22 +1206,31 @@ def _apply_sentinel_to_task(
                     ticket_id,
                     cw_session_id,
                 )
+            # Round-2 (#1692): SENTINEL_RACE_MISS fires only for a genuinely
+            # terminal excluded row -- the same condition as
+            # task_already_terminal below. A non-terminal excluded row (e.g.
+            # PENDING) is redispatch-eligible, not a race, so it emits
+            # nothing.
+            already_terminal = matched_excluded and (
+                excluded_status in _GENUINELY_TERMINAL_QUEUE_STATUSES
+            )
+            if already_terminal:
                 # #1692: durable trace alongside the log line -- record_event
                 # nests _inbox_lock inside dev_queue_lock here, the same safe
                 # nesting order this module's SESSION_SENTINEL_LIVENESS_VETOED
-                # call (below) already relies on.
+                # call (below) already relies on. No queue/session mutation
+                # precedes this in this branch, so there is nothing for a
+                # failed write to leave half-applied.
                 record_event(
                     OrchestratorEventType.SENTINEL_RACE_MISS,
                     {
                         "ticket_id": ticket_id,
+                        "client": excluded_client,
                         "session_id": cw_session_id,
                         "excluded_status": excluded_status,
                     },
                     correlation_id=ticket_id,
                 )
-            already_terminal = matched_excluded and (
-                excluded_status in _GENUINELY_TERMINAL_QUEUE_STATUSES
-            )
             return SentinelRouteOutcome(
                 rescued=False,
                 routed=not matched_excluded,

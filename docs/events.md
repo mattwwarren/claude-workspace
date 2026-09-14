@@ -1322,6 +1322,7 @@ the next legitimate sentinel or operator action.
 ```json
 {
   "ticket_id": "<str>",
+  "client": "<str | null>",
   "session_id": "<str>",
   "excluded_status": "<str | null>"
 }
@@ -1332,7 +1333,16 @@ same-ticket/session task, but that task's status is already outside
 idle/phantom sweep salvaging the same emitted sentinel via
 `ROUTE_EMITTED_SENTINEL`) already landed the task terminal while this call's
 own lookup was blocked on `dev_queue_lock()`. `excluded_status` is the raced
-task's status at the moment of the miss (e.g. `failed`, `completed`).
+task's status at the moment of the miss (e.g. `failed`, `completed`). `client`
+is the raced task's `client` field, matching the sibling
+`session.sentinel_liveness_vetoed` payload below.
+
+Round-2 (#1692): this event fires **only** when `excluded_status` is
+genuinely terminal (`COMPLETED`, `FAILED`, or `CANCELLED` — the same
+`_GENUINELY_TERMINAL_QUEUE_STATUSES` set that gates `task_already_terminal`
+on `SentinelRouteOutcome`). A non-terminal excluded match (`PENDING`) is
+redispatch-eligible, not a race, and emits nothing — only the `WARNING` log
+line fires for it.
 
 Sibling to `sentinel.stage_mismatch` above (same emitter family, same
 "a `routed=False` refusal needs a durable trace, not just a log line"

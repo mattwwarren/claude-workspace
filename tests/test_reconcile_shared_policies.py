@@ -2562,6 +2562,14 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             landed_terminal=False,
             task_already_terminal=False,
         )
+        # Round-2 (#1692): a non-terminal excluded row (PENDING) is
+        # redispatch-eligible, not a race -- it must emit no race-miss event.
+        events = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SENTINEL_RACE_MISS
+        ]
+        assert events == []
 
     def test_apply_sentinel_to_task_race_miss_logs_warning(
         self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
@@ -2606,6 +2614,9 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         assert len(events) == 1
         assert events[0].payload["ticket_id"] == ticket_id
         assert events[0].payload["session_id"] == session_id
+        # Round-2 (#1692): client field added, matching the sibling
+        # SESSION_SENTINEL_LIVENESS_VETOED payload.
+        assert events[0].payload["client"] == "staged-client"
 
     def test_apply_sentinel_to_task_unrelated_task_present_still_returns_routed_true(
         self, tmp_config_dir: Path
