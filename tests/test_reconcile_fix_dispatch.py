@@ -570,6 +570,42 @@ def test_stale_handoff_not_cleared_when_rearmed_with_a_new_handoff(
     assert task.pending_fix_dispatch.requested_by_session_id == "new-review-sess"
 
 
+def test_stale_handoff_phase_two_tolerates_row_removed_before_revalidation(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row cancelled between phase 1 and phase 2 is skipped, not crashed on.
+
+    Same family as ``test_act_phases_tolerate_a_row_removed_mid_tick``, but
+    for the specific window this round-3 rework introduces: between phase 1's
+    snapshot and phase 2's re-acquired lock.
+    """
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+
+    real_emit = fix_dispatch._emit_fix_dispatch_operator_signal
+
+    def _emit_then_cancel(**kwargs: Any) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        real_emit(**kwargs)
+
+    monkeypatch.setattr(
+        fix_dispatch, "_emit_fix_dispatch_operator_signal", _emit_then_cancel
+    )
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    assert load_dev_queue().tasks == []
+    errored = read_events(event_types=[OrchestratorEventType.STAGE_ERRORED])
+    assert len(errored) == 1
+
+
 def test_act_on_pending_fix_dispatches_skips_unresolvable_client(
     tmp_config_dir: Path,
     stub_dispatch: _DispatchRecorder,
