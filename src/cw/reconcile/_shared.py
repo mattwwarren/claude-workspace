@@ -1607,15 +1607,6 @@ def _worktree_dirty_reason_by_path(
         return None
 
 
-def _worktree_dirty_by_path(client_name: str, worktree_path: Path | None) -> bool:
-    """Return True if the worktree at *worktree_path* has unsaved work.
-
-    Boolean view of :func:`_worktree_dirty_reason_by_path`; see it for the
-    fail-safe contract.
-    """
-    return _worktree_dirty_reason_by_path(client_name, worktree_path) is not None
-
-
 def _read_agent_spawn_stamp_context(
     worktree_path: Path | None,
 ) -> dict[str, Any] | None:
@@ -1637,7 +1628,7 @@ def _read_agent_spawn_stamp_context(
     try:
         context_path = worktree_path / HOOK_CONTEXT_RELATIVE_PATH
         context = json.loads(context_path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 — fail-safe on any error; mirrors _worktree_dirty_by_path
+    except Exception:  # noqa: BLE001 — fail-safe on any error; mirrors _worktree_dirty_reason_by_path
         return None
     return context if isinstance(context, dict) else None
 
@@ -1695,7 +1686,7 @@ def _read_unresolved_subagent_spawn(worktree_path: Path | None) -> bool:
     spawn started and its matching Post hook never fired — the worker died or
     hung mid-spawn.
 
-    Fail-open in one direction only, mirroring ``_worktree_dirty_by_path``:
+    Fail-open in one direction only, mirroring ``_worktree_dirty_reason_by_path``:
     a None path, a missing worktree, a missing or pre-v5 context, malformed
     JSON, a non-dict payload, a non-dict stamp, a non-int count, or any other
     error all return False. Reporting an unresolved spawn on ambiguous evidence
@@ -1981,6 +1972,5 @@ detect_usage_limit = _detect_usage_limit
 detect_provider_overload = _detect_provider_overload
 usage_limit_is_recent = _usage_limit_is_recent
 salvage_terminal_result = _salvage_terminal_result
-worktree_dirty_by_path = _worktree_dirty_by_path
 worktree_dirty_reason_by_path = _worktree_dirty_reason_by_path
 read_unresolved_subagent_spawn = _read_unresolved_subagent_spawn
