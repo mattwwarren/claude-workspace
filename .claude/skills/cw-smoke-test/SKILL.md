@@ -18,10 +18,10 @@ This is pure orchestration. No new parsing or validation logic; the heavy liftin
 ## Inputs
 
 One required argument:
-- ticket id (e.g. `171` or `#171`) — a GitHub issue in `mattwwarren/claude-workspace` (or `--repo OWNER/NAME` to target another).
+- ticket id (e.g. `171` or `#171`) — a GitHub issue in the resolved `--client`'s repo (or `--repo OWNER/NAME` to target another).
 
 Optional flags:
-- `--client <NAME>` — cw client name for the dev-queue lookup (default `claude-workspace`).
+- `--client <NAME>` — cw client name; resolves the repo root/tracker (via `clients.yaml`) as well as the dev-queue lookup (default `claude-workspace`).
 - `--skip-preflight` — run pre-flight in advisory mode (still report; do not abort). Useful when the operator already knows about an issue (e.g. cw doctor reports stale linkage drift).
 
 ## How it works
@@ -33,13 +33,15 @@ Run the bundled checker:
 ```bash
 uv run --project "$(git rev-parse --show-toplevel)" python \
   .claude/skills/cw-smoke-test/scripts/preflight.py \
-  --ticket-id <NUMBER>
+  --ticket-id <NUMBER> --client <CLIENT>
 ```
 
 The script emits one JSON object with `ok` (bool) and `checks` (list). Each row carries `name`, `passed`, `severity` (`hard` | `soft`), and `detail`.
 
 Hard checks (must pass):
-- `agents_present` — `plan-reviewer.md` and `plan-soundness-reviewer.md` exist under `~/.claude/agents/` or repo-local `.claude/agents/`.
+- `client_repo_resolved` — `--client` resolves to a repo root: either it has an entry in `clients.yaml`, or `clients.yaml` doesn't exist at all (single-tenant fallback to this repo). Fails loudly on a populated `clients.yaml` missing the client, or one that fails to load/validate — never silently falls back to the wrong repo.
+- `repo_resolved` — a GitHub `owner/repo` slug was derived from the resolved repo root's `origin` remote, or supplied via `--repo`.
+- `agents_present` — `plan-reviewer.md` and `plan-soundness-reviewer.md` exist under `~/.claude/agents/` or the resolved client repo's `.claude/agents/`.
 - `cw_backend_healthy` — `cw doctor` reports backend + config + state file all OK.
 - `ticket_open` — `gh issue view <id>` returns `state=OPEN`.
 - `no_open_pr_for_ticket` — no open PR in the repo whose title references the ticket number.
