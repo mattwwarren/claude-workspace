@@ -538,7 +538,8 @@ def test_phantom_reverted_event_emitted_with_dirty_worktree(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
+        "cw.reconcile._shared.unsaved_work_reason",
+        lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
     reconcile()
@@ -553,6 +554,7 @@ def test_phantom_reverted_event_emitted_with_dirty_worktree(
     assert p["ticket_id"] == "TICK-PD"
     assert p["client"] == "client-a"
     assert p["worktree_dirty"] is True
+    assert p["worktree_dirty_reason"] == "2 uncommitted path(s)"
     assert p["worktree_path"] == str(wt_path)
     assert events[0].correlation_id == "TICK-PD"
 
@@ -602,7 +604,7 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
+        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
     )
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
@@ -618,6 +620,7 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
     assert p["ticket_id"] == "TICK-PC"
     assert p["client"] == "client-a"
     assert p["worktree_dirty"] is False
+    assert p["worktree_dirty_reason"] is None
     assert p["worktree_path"] == str(wt_path)
     assert events[0].correlation_id == "TICK-PC"
 
@@ -691,7 +694,8 @@ def test_phantom_dirty_worktree_routes_to_blocked_on_user(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
+        "cw.reconcile._shared.unsaved_work_reason",
+        lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
     report = reconcile()
@@ -755,7 +759,7 @@ def test_phantom_clean_worktree_routes_to_pending(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
+        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
     )
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
@@ -817,7 +821,8 @@ def test_dirty_phantom_task_not_re_claimable(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
+        "cw.reconcile._shared.unsaved_work_reason",
+        lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
     reconcile()
@@ -873,7 +878,8 @@ def test_phantom_reverted_event_carries_queue_status_blocked(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
+        "cw.reconcile._shared.unsaved_work_reason",
+        lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
     reconcile()
 
@@ -928,7 +934,7 @@ def test_phantom_reverted_event_carries_queue_status_pending(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
+        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
     )
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
     reconcile()
@@ -1138,7 +1144,8 @@ def test_detect_phantom_candidates_worktree_dirty_on_candidate(
     snap = _state_queue_snapshot()
 
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: True
+        "cw.reconcile._shared.worktree_dirty_reason_by_path",
+        lambda _c, _p: "2 uncommitted path(s)",
     )
 
     candidates = _detect_phantom_candidates(
@@ -1149,6 +1156,40 @@ def test_detect_phantom_candidates_worktree_dirty_on_candidate(
 
     assert len(candidates) == 1
     assert candidates[0].worktree_dirty is True
+    assert candidates[0].worktree_dirty_reason == "2 uncommitted path(s)"
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_phantom_candidates_worktree_clean_reason_none_on_candidate(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phantom with clean worktree → worktree_dirty False, reason None (#2118)."""
+    from cw.reconcile import _detect_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    wt = tmp_path / "wt-clean"
+    wt.mkdir()
+    sess = _mk_phantom_daemon_session("phantom-clean-1", started_at, worktree_path=wt)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_reason_by_path", lambda _c, _p: None
+    )
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        now=started_at,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].worktree_dirty is False
+    assert candidates[0].worktree_dirty_reason is None
     assert _state_queue_snapshot() == snap
 
 
@@ -2039,6 +2080,7 @@ def test_act_on_phantom_dirty_routes_blocked(
         proposed_action=ProposedAction.CRASH_COMPLETE,
         ticket_id="phantom-act-dirty-1",
         worktree_dirty=True,
+        worktree_dirty_reason="2 uncommitted path(s)",
         client="client-a",
         worktree_path=None,
     )
@@ -2055,6 +2097,7 @@ def test_act_on_phantom_dirty_routes_blocked(
     )
     assert len(events) == 1
     assert events[0].payload["worktree_dirty"] is True
+    assert events[0].payload["worktree_dirty_reason"] == "2 uncommitted path(s)"
 
 
 def test_act_on_phantom_crash_payload_carries_provider_overload_detected_clean(
@@ -2127,6 +2170,7 @@ def test_act_on_phantom_crash_payload_carries_provider_overload_detected_dirty(
         proposed_action=ProposedAction.CRASH_COMPLETE,
         ticket_id="phantom-529-payload-dirty",
         worktree_dirty=True,
+        worktree_dirty_reason="2 uncommitted path(s)",
         provider_overload_detected=True,
         client="client-a",
         worktree_path=None,
@@ -2140,6 +2184,7 @@ def test_act_on_phantom_crash_payload_carries_provider_overload_detected_dirty(
     )
     assert len(events) == 1
     assert events[0].payload["provider_overload_detected"] is True
+    assert events[0].payload["worktree_dirty_reason"] == "2 uncommitted path(s)"
 
 
 def test_provider_overload_detected_does_not_bypass_signal_only_routing(
