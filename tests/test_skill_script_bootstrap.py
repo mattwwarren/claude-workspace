@@ -36,6 +36,9 @@ _VALIDATE_SENTINEL = (
     / "scripts"
     / "validate_sentinel.py"
 )
+_PREFLIGHT = (
+    _REPO_ROOT / ".claude" / "skills" / "cw-smoke-test" / "scripts" / "preflight.py"
+)
 # Venv purelib provides pydantic (a cw dep) without exposing cw itself:
 # the editable-install .pth file is not processed when the path is added via
 # PYTHONPATH rather than being a real site-packages directory activated by Python.
@@ -76,6 +79,14 @@ class TestSkillScriptBootstrap:
         result = _run_help(_VALIDATE_SENTINEL)
         assert result.returncode == 0, (
             f"validate_sentinel.py --help failed under bare python\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "usage" in result.stdout.lower()
+
+    def test_preflight_help_bare_python(self) -> None:
+        result = _run_help(_PREFLIGHT)
+        assert result.returncode == 0, (
+            f"preflight.py --help failed under bare python\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
         assert "usage" in result.stdout.lower()
