@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 
 def _revert_running_tasks_for_sessions(
     session_ids: set[str],
-    dirty_session_ids: set[str] | None = None,
+    dirty_session_reasons: dict[str, str] | None = None,
     sessions_by_id: dict[str, Session] | None = None,
 ) -> list[str]:
     """Revert RUNNING TicketTasks whose ``session_id`` is in *session_ids*.
@@ -68,9 +68,10 @@ def _revert_running_tasks_for_sessions(
     only — BLOCKED_ON_USER tickets are excluded from the return value so they
     do not enter ReconcileReport.reverted_ticket_ids).
 
-    When *dirty_session_ids* is provided, tasks whose session_id is in the
-    set are routed to BLOCKED_ON_USER instead of PENDING to preserve in-flight
-    worktree state for operator inspection (GitHub issue #421).
+    When *dirty_session_reasons* is provided, tasks whose session id is a key
+    in the dict are routed to BLOCKED_ON_USER instead of PENDING to preserve
+    in-flight worktree state for operator inspection (GitHub issue #421); the
+    mapped reason string is folded into the breadcrumb (GitHub #2118).
 
     When *sessions_by_id* is provided, ``record_event(SESSION_NEEDS_ATTENTION)``
     and ``fire_push_notification`` are called **after** ``dev_queue_lock`` releases
@@ -93,7 +94,7 @@ def _revert_running_tasks_for_sessions(
     if not session_ids:
         return []
 
-    dirty = dirty_session_ids or set()
+    dirty = dirty_session_reasons or {}
     reverted: list[str] = []
     changed = False
     notify_sessions: list[Session] = []
@@ -121,6 +122,10 @@ def _revert_running_tasks_for_sessions(
             save_dev_queue(store)
     # Fire notifications after dev_queue_lock releases (lock-order invariant #765).
     for session in notify_sessions:
+        reason = dirty[session.id]
+        breadcrumbs = (
+            f"{session.worktree_path}: {reason}" if session.worktree_path else reason
+        )
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
             {
@@ -130,9 +135,7 @@ def _revert_running_tasks_for_sessions(
                 "ticket_id": ticket_id_for_session(session.name),
                 "claude_session_id": session.claude_session_id,
                 "paused_status": _DIRTY_WORKTREE_REASON,
-                "breadcrumbs": str(session.worktree_path)
-                if session.worktree_path
-                else "",
+                "breadcrumbs": breadcrumbs,
                 "crashed": False,
                 "lane": session.lane,
             },
@@ -453,13 +456,14 @@ def complete_timed_out_merged_tasks() -> list[str]:
 
 def _build_dirty_session_ids_and_notify(
     sessions: list[Session],
-) -> set[str]:
+) -> dict[str, str]:
     """Identify sessions with dirty worktrees, emit SESSION_NEEDS_ATTENTION.
 
     Called before acquiring dev_queue_lock so that dirtiness is assessed
     outside the lock window (see TOCTOU note in _revert_running_tasks_for_sessions).
 
-    Returns the set of session IDs whose worktrees have unsaved work.
+    Returns a mapping of session id to dirty reason for every session whose
+    worktree has unsaved work (GitHub #2118); clean sessions are omitted.
     Does NOT write session.last_result — this is a queue-level guard, not a
     park-marker update (to avoid interfering with the existing park-marker logic).
 
@@ -469,12 +473,15 @@ def _build_dirty_session_ids_and_notify(
     routed to BLOCKED_ON_USER, providing the edge-trigger: each fires at most
     once per dirty episode rather than once per tick (#763).
     """
-    dirty_session_ids: set[str] = set()
+    dirty_session_reasons: dict[str, str] = {}
     for session in sessions:
-        if not _shared.worktree_dirty_by_path(session.client, session.worktree_path):
+        reason = _shared.worktree_dirty_reason_by_path(
+            session.client, session.worktree_path
+        )
+        if reason is None:
             continue
-        dirty_session_ids.add(session.id)
-    return dirty_session_ids
+        dirty_session_reasons[session.id] = reason
+    return dirty_session_reasons
 
 
 def revert_timed_out_tasks() -> list[str]:
@@ -531,9 +538,9 @@ def revert_timed_out_tasks() -> list[str]:
     # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
     # _revert_running_tasks_for_sessions docstring).
     sessions_by_id = {s.id: s for s in target_sessions}
-    dirty_session_ids = _build_dirty_session_ids_and_notify(target_sessions)
+    dirty_session_reasons = _build_dirty_session_ids_and_notify(target_sessions)
     return _revert_running_tasks_for_sessions(
-        session_ids, dirty_session_ids, sessions_by_id
+        session_ids, dirty_session_reasons, sessions_by_id
     )
 
 
@@ -592,9 +599,9 @@ def revert_completed_silent_tasks() -> list[str]:
     # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
     # _revert_running_tasks_for_sessions docstring).
     sessions_by_id = {s.id: s for s in target_sessions}
-    dirty_session_ids = _build_dirty_session_ids_and_notify(target_sessions)
+    dirty_session_reasons = _build_dirty_session_ids_and_notify(target_sessions)
     return _revert_running_tasks_for_sessions(
-        session_ids, dirty_session_ids, sessions_by_id
+        session_ids, dirty_session_reasons, sessions_by_id
     )
 
 

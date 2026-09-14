@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 import pytest
 from pydantic import ValidationError
@@ -2482,6 +2482,64 @@ class TestResolutionConsumedField:
         assert result.resolution_consumed is False
         assert result.resolution_evidence is None
 
+    def test_blocked_status_with_resolution_consumed_round_trips(self) -> None:
+        """Schema-level twin of productivity's status-agnostic blocked test.
+
+        ``status="blocked"`` (the shape a plan-stage cap/stub-check hard-exit
+        sentinel carries) round-trips ``resolution_consumed=True`` with valid
+        ``resolution_evidence`` without a validation error. Generic
+        regression-lock on the schema's status-agnostic validation for these
+        two keys — independent of which markdown exit actually emits them;
+        the cap/stub hard-exits do not, per the operator's #2154 review
+        disposition (see ``auto-dev-plan.md``'s emission rule).
+
+        Builds on the file's existing ``_blocked_payload`` fixture (module
+        scope, above) rather than a second hand-built dict — mutated to the
+        plan-stage cap-exhaustion shape and the two resolution keys added.
+        """
+        payload = _blocked_payload(blocker_reason="ambiguity_scan_unconverged")
+        payload.update(
+            schema_version=4,
+            stage_reached="stage1_plan",
+            plan_source="generated",
+            branch=None,
+            worktree_path="/tmp/wt",
+            fork_point_sha=None,
+            commits=[],
+            friction_highlights=[],
+            resolution_consumed=True,
+            resolution_evidence={"comment_id": "123", "items": ["A2"]},
+        )
+        payload["scope"] = {
+            "tier": None,
+            "files": 3,
+            "lines_estimate": 40,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        }
+        payload["health"] = {
+            "lowest_agent_confidence": None,
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        }
+        payload["blocker"] = {
+            "stage": "stage1_plan",
+            "reason": "ambiguity_scan_unconverged",
+            "details": "A2 still open after 2 rounds",
+            "retry_eligible": True,
+        }
+        result = AutoDevResult.model_validate(payload)
+        assert result.resolution_consumed is True
+        assert result.resolution_evidence == {"comment_id": "123", "items": ["A2"]}
+
+        dumped = result.model_dump(mode="json")
+        restored = AutoDevResult.model_validate(dumped)
+        assert restored.resolution_consumed is True
+        assert restored.resolution_evidence == {"comment_id": "123", "items": ["A2"]}
+
 
 # ---------------------------------------------------------------------------
 # Issue #430 — coerce legitimate-but-sparse sentinels
@@ -3936,7 +3994,7 @@ class TestQueueStatusForTerminalSentinel:
     @pytest.mark.parametrize("status", sorted(SALVAGE_HOLD_STATUSES))
     def test_hold_statuses_route_to_blocked_on_user(self, status: str) -> None:
         assert (
-            queue_status_for_terminal_sentinel(status)
+            queue_status_for_terminal_sentinel(cast("Status", status))
             == QueueItemStatus.BLOCKED_ON_USER
         )
 
@@ -3944,7 +4002,10 @@ class TestQueueStatusForTerminalSentinel:
         "status", sorted(set(get_args(Status)) - SALVAGE_HOLD_STATUSES)
     )
     def test_non_hold_statuses_route_to_completed(self, status: str) -> None:
-        assert queue_status_for_terminal_sentinel(status) == QueueItemStatus.COMPLETED
+        assert (
+            queue_status_for_terminal_sentinel(cast("Status", status))
+            == QueueItemStatus.COMPLETED
+        )
 
 
 # ---------------------------------------------------------------------------

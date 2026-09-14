@@ -31,6 +31,7 @@ def run_review(
     worktree: Path,
     default_branch: str,
     model: str | None,
+    reasoning_effort: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
     fix_loop_enabled: bool,
@@ -65,6 +66,7 @@ def run_review(
         roles=prepared.roles,
         prompts_by_role=prepared.prompts_by_role,
         model=model,
+        reasoning_effort=reasoning_effort,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=session_id,
     )

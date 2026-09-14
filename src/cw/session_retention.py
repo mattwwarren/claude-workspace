@@ -33,6 +33,8 @@ from cw.reconcile import ticket_id_for_session
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cw.models import CwState
+
 # Age (days) past which a terminal session is eligible for archival out of the
 # hot sessions.json. 30 days comfortably outlasts any live dispatch episode
 # while still bounding the file; sessions that are still referenced by a live
@@ -187,19 +189,30 @@ def _find_by_prefix(sessions: list[Session], prefix: str) -> Session | None:
     return None
 
 
-def find_session_by_id(prefix: str) -> Session | None:
+def find_session_by_id(prefix: str, *, state: CwState | None = None) -> Session | None:
     """Resolve *prefix* against sessions.json, then archives newest-first.
 
-    Single-key, stop-on-first-hit point lookup — the one archive-reading
-    consumer this module builds, for
-    ``cw.cli.session_inspect._resolve_session``. Not a generic
+    Single-key, stop-on-first-hit point lookup — matches by cw ``id`` or
+    ``claude_session_id``, hot-then-archived. Originally built as the one
+    archive-reading consumer for ``cw.cli.session_inspect._resolve_session``;
+    now also consumed by ``cw.spawn`` and
+    ``cw.reconcile.review_recipes.fix_agent`` to resolve a spawn's ``parent=``
+    argument, which ``CwState.find_by_name_or_id`` cannot do — that helper
+    only checks ``(name, id)`` against the hot state (#2149). Not a generic
     ``iter_all_sessions()`` primitive: deliberately not offered, because a
     full-scan helper would reintroduce the unbounded read this module exists
     to remove. Bounded: each archive file is read at most once per call, and
     the scan stops at the first match per collection (id-priority within
     that collection — see :func:`_find_by_prefix`).
+
+    *state*: an already-loaded ``CwState`` to search instead of calling
+    ``load_state()`` again. Lets a caller holding a snapshot from inside
+    ``sessions_lock()`` (e.g. ``cw.spawn.spawn_create_impl``) reuse it rather
+    than re-reading ``sessions.json`` a second time within the same lock.
+    Defaults to ``None``, which preserves the original always-reload behavior.
     """
-    state = load_state()
+    if state is None:
+        state = load_state()
     hot_match = _find_by_prefix(state.sessions, prefix)
     if hot_match is not None:
         return hot_match

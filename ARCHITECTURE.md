@@ -212,6 +212,13 @@ cites one of these.
     by reading. Where the set exceeds two or three, the change routes
     through one shared seam rather than N patched sites. — Source:
     `.claude/skills/harden-ticket/SKILL.md`
+12. Cross-tenant isolation filters fail closed on resolution failure: when a
+    filter's purpose is cross-tenant/cross-client isolation, resolution
+    failure forwards nothing and surfaces at error level — it never silently
+    falls open to the unfiltered/broadcast state; fail-open is reserved for
+    diagnostic-only inference, not isolation boundaries. — Source: GitHub
+    #2146 (pr-channel proxy repo filtering); see `_resolve_effective_repo`/
+    `relay_upstream` in `src/cw/_events_channel_base.py`.
 
 ## §8 Anti-patterns
 

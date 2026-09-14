@@ -465,23 +465,45 @@ def load_clients() -> dict[str, ClientConfig]:
         return {}
 
     raw = yaml.safe_load(path.read_text())
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        msg = f"{path}: top-level document must be a mapping, got {type(raw).__name__}"
+        raise ConfigValidationError(msg)
     if not raw or "clients" not in raw:
         return {}
+
+    clients_raw = raw["clients"]
+    if not isinstance(clients_raw, dict):
+        msg = f"{path}: 'clients' must be a mapping, got {type(clients_raw).__name__}"
+        raise ConfigValidationError(msg)
 
     # Read global notification default
     global_notifications = bool(raw.get("notifications", False))
 
     clients: dict[str, ClientConfig] = {}
-    for name, data in raw["clients"].items():
+    for name, data in clients_raw.items():
+        if not isinstance(name, str):
+            msg = (
+                f"{path}: client name must be a string, got "
+                f"{type(name).__name__}: {name!r}"
+            )
+            raise ConfigValidationError(msg)
         if not _SAFE_CLIENT_NAME.match(name):
             msg = (
                 f"Invalid client name '{name}':"
                 " must start with alphanumeric and contain only [a-zA-Z0-9._-]"
             )
             raise CwError(msg)
+        if not isinstance(data, dict):
+            msg = (
+                f"{path}: invalid config for client '{name}': expected a "
+                f"mapping, got {type(data).__name__}"
+            )
+            raise ConfigValidationError(msg)
         try:
             client = ClientConfig(name=name, **data)
-        except ValidationError as exc:
+        except (ValidationError, TypeError) as exc:
             msg = f"{path}: invalid config for client '{name}': {exc}"
             raise ConfigValidationError(msg) from exc
         # Apply global notification default if not set per-client

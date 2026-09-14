@@ -101,8 +101,25 @@ def _codex_scratch_dir(session_id: str) -> Path:
     return scratch
 
 
+def _reasoning_effort_argv(reasoning_effort: str | None) -> list[str]:
+    """Return the ``-c model_reasoning_effort=<value>`` pin, or nothing.
+
+    Shared by the reviewer and fix-cycle argv builders so every invocation in
+    one review runs at the same depth. A ``-c`` override beats
+    ``~/.codex/config.toml``; ``None`` emits nothing, leaving codex's own
+    config (else the model default) in force.
+    """
+    if reasoning_effort is None:
+        return []
+    return ["-c", f"model_reasoning_effort={reasoning_effort}"]
+
+
 def _build_generic_codex_argv(
-    *, model: str | None, schema_path: Path, output_path: Path
+    *,
+    model: str | None,
+    reasoning_effort: str | None,
+    schema_path: Path,
+    output_path: Path,
 ) -> list[str]:
     """Return the generic ``codex exec`` argv (no ``review``/``--base``).
 
@@ -118,7 +135,9 @@ def _build_generic_codex_argv(
     persisting a resumable session file under ``~/.codex/sessions``. Both are
     unconditional and independent of the ``-o`` document, which is still
     written normally. They are inserted before ``--output-schema`` so the
-    trailing ``-m <model>`` append contract stays intact.
+    trailing ``-m <model>`` append contract stays intact. The optional
+    reasoning-effort pin (:func:`_reasoning_effort_argv`) sits in the same
+    pre-schema slot for the same reason.
     """
     argv = [
         "codex",
@@ -126,6 +145,7 @@ def _build_generic_codex_argv(
         "--sandbox",
         "read-only",
         *_AUDIT_ARGV_FLAGS,
+        *_reasoning_effort_argv(reasoning_effort),
         "--output-schema",
         str(schema_path),
         "-o",
@@ -287,6 +307,7 @@ def _run_codex_role(
     role: str,
     prompt: str,
     model: str | None,
+    reasoning_effort: str | None,
     timeout_seconds: int | None,
     scratch_dir: Path,
     session_id: str,
@@ -336,7 +357,10 @@ def _run_codex_role(
         encoding="utf-8",
     )
     argv = _build_generic_codex_argv(
-        model=model, schema_path=schema_path, output_path=output_path
+        model=model,
+        reasoning_effort=reasoning_effort,
+        schema_path=schema_path,
+        output_path=output_path,
     )
     start = time.monotonic()
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
@@ -421,6 +445,7 @@ def run_codex_roles(
     roles: list[str],
     prompts_by_role: dict[str, str],
     model: str | None,
+    reasoning_effort: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
 ) -> tuple[
@@ -482,6 +507,7 @@ def run_codex_roles(
                 role=role,
                 prompt=prompts_by_role[role],
                 model=model,
+                reasoning_effort=reasoning_effort,
                 timeout_seconds=timeout,
                 scratch_dir=scratch_dir,
                 session_id=session_id,

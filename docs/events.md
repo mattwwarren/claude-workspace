@@ -615,6 +615,7 @@ convention. No `correlation_id` (same rationale as `focus.set`). Not in
   "ticket_id": "<str>",
   "client": "<str>",
   "worktree_dirty": false,
+  "worktree_dirty_reason": "<str | null>",
   "worktree_path": "<str | null>",
   "queue_status": "pending",
   "provider_overload_detected": false
@@ -625,7 +626,10 @@ phantom (present in state but no longer backed by a live multiplexer surface)
 and whose owning ticket is reverted to PENDING (clean worktree) or routed to
 BLOCKED_ON_USER (dirty worktree, to preserve work for operator inspection).
 `worktree_dirty` is `true` when `worktree_has_unsaved_work` reports uncommitted
-changes in the session's worktree. `worktree_path` is the absolute path to the
+changes in the session's worktree. `worktree_dirty_reason` names which predicate
+fired and the count (`unsaved_work_reason` in `cw.worktree`, e.g. `"2 uncommitted
+path(s)"`) — non-null iff `worktree_dirty` is `true`; `null` for a clean
+worktree (#2118). `worktree_path` is the absolute path to the
 worktree set on the session at time of reap (populated from `session.worktree_path`,
 which is always set for DAEMON sessions; `session.branch` is always `null` for
 DAEMON sessions and is NOT used for path resolution). `queue_status` is
@@ -690,10 +694,11 @@ open enum; consumers MUST tolerate unknown values. Known values:
   pre-spawn stale-worktree guard (`dispatch/claim.py`, a `StaleWorktreeError`
   on a tree it will not remove) and reconcile's phantom-reaped / TIMED_OUT /
   COMPLETED-silent reverts. The owning task is routed to BLOCKED_ON_USER
-  instead of being re-dispatched to avoid clobbering in-flight work. From the
-  dispatch path `breadcrumbs` is `<worktree path>: <reason>` — e.g.
-  `…/dev-2114: 2 uncommitted path(s)` or `…: 3 commit(s) not on
-  origin/dev/2114` (#2114); the reconcile paths still emit the bare path.
+  instead of being re-dispatched to avoid clobbering in-flight work. `breadcrumbs`
+  is `<worktree path>: <reason>` — e.g. `…/dev-2114: 2 uncommitted path(s)` or
+  `…: 3 commit(s) not on origin/dev/2114` — from both the dispatch path
+  (`dispatch/claim.py`, #2114) and the reconcile phantom-reaped / TIMED_OUT /
+  COMPLETED-silent revert paths (#2118).
   Operator should read the reason, commit/push or discard the changes, then
   `cw dev-queue requeue` the task. `cw doctor --reap` deliberately leaves
   this park alone (reverting it re-derives the identical park). The

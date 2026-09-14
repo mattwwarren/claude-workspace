@@ -21,6 +21,10 @@ backgrounds a long command and then ends its turn reports "done" while the
 command is still running. `run_in_background` remains a real and valid `Bash`
 parameter; it is only the Agent-tool spawn that no longer has it.
 
+This async-dispatch exemption is scoped to the Agent tool's subagent spawn only —
+it does not extend to a raw Bash call; see `auto-dev.md`'s Worker Execution Discipline
+section for the no-backgrounding rule that applies there.
+
 ---
 
 ## Blocking-findings comment rule: header, body shape, and the three triggers

@@ -19,6 +19,7 @@ from cw.models.enums import (
     OrchestratorEventType,
     QueueItemStatus,
     ReapPolicy,
+    ReasoningEffort,
     Stage,
 )
 from cw.models.tasks import _validate_gate_recipe_keys, _validate_review_recipe_keys
@@ -169,6 +170,32 @@ class StageExecutorConfig(BaseModel):
     backend: str = CLAUDE_NATIVE_BACKEND
     model: str | None = None
     endpoint: str | None = None  # OpenAI-compatible base URL for local backend
+    # Codex-only: pinned as `-c model_reasoning_effort=<value>` on every codex
+    # reviewer and fix invocation, which beats ~/.codex/config.toml. Defaults
+    # to "high" (#1711 R1: a reviewer's failure mode is a missed MUST_FIX, so
+    # depth beats token savings) -- a starting position, not a benchmarked
+    # optimum. Explicit null unpins it, leaving codex's own config in force.
+    # Resolved like `model`: a lane's stage config replaces the client's
+    # wholesale (resolve_executor_config), so a lane omitting it gets high.
+    reasoning_effort: ReasoningEffort | None = ReasoningEffort.HIGH
+
+    @model_validator(mode="after")
+    def _reasoning_effort_codex_only(self) -> StageExecutorConfig:
+        # Loud rather than silently ignored: no other backend reads it, so a
+        # value here would look pinned while changing nothing.
+        # model_fields_set, not the value: the high default rides on every
+        # stage config, including claude-native ones that never read it.
+        if (
+            "reasoning_effort" in self.model_fields_set
+            and self.reasoning_effort is not None
+            and self.backend != CODEX_BACKEND
+        ):
+            msg = (
+                "reasoning_effort is only honored by the codex backend "
+                f"(got backend={self.backend!r})"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class StagePipelineConfig(BaseModel):

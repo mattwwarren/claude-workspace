@@ -27,6 +27,7 @@ from cw.models import (
     PrState,
     QueueItemStatus,
     ReapPolicy,
+    ReasoningEffort,
     Session,
     SessionPurpose,
     SessionStatus,
@@ -884,6 +885,38 @@ class TestStageExecutorConfigExtraForbid:
     def test_unknown_key_raises(self) -> None:
         with pytest.raises(ValidationError):
             StageExecutorConfig(bogus_field="x")
+
+    def test_reasoning_effort_defaults_to_high(self) -> None:
+        # #1711 R1: the field default is the default tier of lane > client >
+        # default, so a bare config pins high.
+        assert StageExecutorConfig().reasoning_effort is ReasoningEffort.HIGH
+
+    def test_reasoning_effort_explicit_null_unpins(self) -> None:
+        cfg = StageExecutorConfig(backend="codex", reasoning_effort=None)
+        assert cfg.reasoning_effort is None
+
+    def test_high_default_does_not_trip_codex_only_check(self) -> None:
+        # Only an explicit level on a non-codex backend is an error; the
+        # default riding along on a claude-native stage is not.
+        cfg = StageExecutorConfig(backend="claude-native", model="m")
+        assert cfg.reasoning_effort is ReasoningEffort.HIGH
+
+    def test_explicit_null_on_non_codex_backend_is_allowed(self) -> None:
+        # An explicit null pins nothing, so it cannot look pinned-but-ignored.
+        cfg = StageExecutorConfig(backend="claude-native", reasoning_effort=None)
+        assert cfg.reasoning_effort is None
+
+    def test_reasoning_effort_accepts_codex_level(self) -> None:
+        cfg = StageExecutorConfig(backend="codex", reasoning_effort="max")
+        assert cfg.reasoning_effort is ReasoningEffort.MAX
+
+    def test_reasoning_effort_rejects_unknown_level(self) -> None:
+        with pytest.raises(ValidationError):
+            StageExecutorConfig(backend="codex", reasoning_effort="maximum")
+
+    def test_reasoning_effort_rejects_non_codex_backend(self) -> None:
+        with pytest.raises(ValidationError, match="only honored by the codex"):
+            StageExecutorConfig(reasoning_effort="max")
 
 
 class TestStagePipelineConfigExtraForbid:
@@ -1995,6 +2028,7 @@ class TestPackageExportCompleteness:
             "QueueItemStatus",
             "ReapPolicy",
             "ReapReason",
+            "ReasoningEffort",
             "Session",
             "SessionOrigin",
             "SessionPurpose",

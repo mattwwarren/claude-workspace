@@ -55,17 +55,23 @@ class TestExtractClaimEvidence:
         assert extract_claim_evidence({"commits": "abc123"}).had_commits is False
 
     def test_zeroed_review_counts_are_not_findings(self) -> None:
-        payload = {"review": {"must_fix_initial": 0, "should_fix": 0}}
+        payload: dict[str, object] = {
+            "review": {"must_fix_initial": 0, "should_fix": 0}
+        }
         assert extract_claim_evidence(payload).had_findings is False
 
     def test_must_fix_initial_is_findings(self) -> None:
         # The #1727 case: a review claim that parked with real MUST_FIX
         # findings did productive work and must not be charged.
-        payload = {"review": {"must_fix_initial": 2, "should_fix": 0}}
+        payload: dict[str, object] = {
+            "review": {"must_fix_initial": 2, "should_fix": 0}
+        }
         assert extract_claim_evidence(payload).had_findings is True
 
     def test_should_fix_alone_is_findings(self) -> None:
-        payload = {"review": {"must_fix_initial": 0, "should_fix": 3}}
+        payload: dict[str, object] = {
+            "review": {"must_fix_initial": 0, "should_fix": 3}
+        }
         assert extract_claim_evidence(payload).had_findings is True
 
     def test_missing_review_key_is_not_findings(self) -> None:
@@ -75,38 +81,46 @@ class TestExtractClaimEvidence:
         assert extract_claim_evidence({"review": "clean"}).had_findings is False
 
     def test_non_int_review_counts_are_not_findings(self) -> None:
-        payload = {"review": {"must_fix_initial": "2", "should_fix": None}}
+        payload: dict[str, object] = {
+            "review": {"must_fix_initial": "2", "should_fix": None}
+        }
         assert extract_claim_evidence(payload).had_findings is False
 
     def test_bare_resolution_consumed_without_evidence_is_false(self) -> None:
         # R1 STRICT: the boolean alone carries no provenance a later reader can
         # check, so it does NOT credit the claim as productive.
-        payload = {"resolution_consumed": True}
+        payload: dict[str, object] = {"resolution_consumed": True}
         assert extract_claim_evidence(payload).resolution_consumed is False
 
     def test_resolution_consumed_with_empty_evidence_is_false(self) -> None:
-        payload = {"resolution_consumed": True, "resolution_evidence": {}}
+        payload: dict[str, object] = {
+            "resolution_consumed": True,
+            "resolution_evidence": {},
+        }
         assert extract_claim_evidence(payload).resolution_consumed is False
 
     def test_resolution_consumed_with_evidence_is_true(self) -> None:
-        payload = {
+        payload: dict[str, object] = {
             "resolution_consumed": True,
             "resolution_evidence": {"comment_id": "12345", "question": "which cap?"},
         }
         assert extract_claim_evidence(payload).resolution_consumed is True
 
     def test_resolution_evidence_without_the_boolean_is_false(self) -> None:
-        payload = {"resolution_evidence": {"comment_id": "12345"}}
+        payload: dict[str, object] = {"resolution_evidence": {"comment_id": "12345"}}
         assert extract_claim_evidence(payload).resolution_consumed is False
 
     def test_non_dict_resolution_evidence_is_false(self) -> None:
-        payload = {"resolution_consumed": True, "resolution_evidence": "yes"}
+        payload: dict[str, object] = {
+            "resolution_consumed": True,
+            "resolution_evidence": "yes",
+        }
         assert extract_claim_evidence(payload).resolution_consumed is False
 
     def test_blocked_result_shaped_payload_yields_all_false(self) -> None:
         # A BlockedResult carries no commits/review keys at all; plain .get()
         # defaults must make it read as zero evidence rather than raising.
-        payload = {
+        payload: dict[str, object] = {
             "status": "blocked",
             "blocker": {"reason": "merge_gate_blocked", "detail": "CI red"},
         }
@@ -175,6 +189,34 @@ class TestExtractClaimEvidence:
         dumped = result.model_dump(mode="json")
 
         assert extract_claim_evidence(dumped).resolution_consumed is True
+
+    def test_blocked_status_with_resolution_consumed_is_credited(self) -> None:
+        """The extractor is status-agnostic for resolution_consumed (#2154).
+
+        The extractor reads ``resolution_consumed``/``resolution_evidence`` off
+        the payload with no status branch at all, so a ``status: "blocked"``
+        sentinel (here, a plan-stage cap-check hard-exit shape — ``blocker.
+        reason: "ambiguity_scan_unconverged"``) is credited exactly like a
+        ``status: "ambiguities_pending_resolution"`` pause. This is a generic
+        regression-lock on the consumer's shape, independent of which markdown
+        exit actually emits these two keys — the cap/stub hard-exits do not,
+        per the operator's #2154 review disposition (see
+        ``auto-dev-plan.md``'s emission rule), but nothing here depends on
+        that; only the payload shape matters to this consumer.
+        """
+        payload: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {
+                "stage": "stage1_plan",
+                "reason": "ambiguity_scan_unconverged",
+                "details": "A2 still open after 2 rounds",
+            },
+            "resolution_consumed": True,
+            "resolution_evidence": {"comment_id": "1", "items": ["A2"]},
+        }
+        assert extract_claim_evidence(payload) == ClaimEvidence(
+            had_commits=False, had_findings=False, resolution_consumed=True
+        )
 
 
 class TestIsUnproductive:

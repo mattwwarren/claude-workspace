@@ -744,15 +744,16 @@ def test_spawn_returns_before_background_work_completes(
         join_outstanding_codex_threads(timeout_seconds=5.0)
 
 
-def test_spawn_threads_real_session_id_into_run_review(
+def test_spawn_threads_session_id_and_reasoning_effort_into_run_review(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
     """CodexExecutor.spawn passes the real cw session id (its own sid, not a
-    fresh uuid) into run_review so diagnostics land under the right dir."""
+    fresh uuid) into run_review so diagnostics land under the right dir, and
+    forwards the stage config's reasoning_effort rather than a default."""
     worktree = make_git_repo("wt-codex-sid-thread")
     runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    config = StageExecutorConfig(backend=CODEX_BACKEND, reasoning_effort="max")
     executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-sid", client="test", stage=Stage.REVIEW)
@@ -761,6 +762,7 @@ def test_spawn_threads_real_session_id_into_run_review(
 
     def _spy_run_review(**kwargs: object) -> tuple[AutoDevResult, None]:
         captured["session_id"] = kwargs["session_id"]
+        captured["reasoning_effort"] = kwargs["reasoning_effort"]
         blocked = make_blocked(
             ticket_id="T-sid",
             worktree=worktree,
@@ -778,6 +780,7 @@ def test_spawn_threads_real_session_id_into_run_review(
         )
 
     assert captured["session_id"] == sid
+    assert captured["reasoning_effort"] == "max"
 
 
 def test_make_blocked_backward_compat(tmp_path: Path) -> None:

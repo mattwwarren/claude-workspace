@@ -253,15 +253,47 @@ The main session aggregates these reports per the rule documented in the Headles
 
 ## Worker Execution Discipline
 
-Every agent prompt in headless mode MUST ALSO include:
+This section binds every agent prompt in headless mode AND the
+orchestrator's own direct Bash calls — not only text injected into a
+spawned agent's prompt (#2157). Two incidents shipped from that gap: an
+orchestrator-run gate test command with no timeout hit the tool's default
+timeout, and an orchestrator-run tracker-comment post was backgrounded and
+the turn ended "waiting for the notification" that never arrives for a raw
+Bash call. Both are covered by rule 3 below.
 
-1. Wrap gh/git push-fetch-pull/curl Bash calls in a wall-clock guard:
-   `timeout 120 <cmd>`. An unbounded network call in a headless worker
-   has no human to interrupt it.
+1. Wrap any Bash call whose result the pipeline's next step depends on —
+   gh/git push-fetch-pull/curl calls, tracker-comment posts, gate/test
+   commands included — in a wall-clock guard: `timeout <N> <cmd>`, sized to
+   the command (a network call gets `120`; a test suite or build gets up to
+   the Bash tool's max, `600` / 10m). An unbounded call in a headless
+   worker has no human to interrupt it. The shell-level `timeout <N> <cmd>`
+   wrapper and the Bash **tool call's own** `timeout` parameter (in ms,
+   default 120000, max 600000) are independent and both required: the shell
+   wrapper bounds the child process, the tool parameter bounds how long the
+   harness itself waits before backgrounding or timing out the call. Set
+   the tool call's `timeout` to at least `N * 1000` ms — matching or
+   exceeding the shell-level `<N>` — or the harness will time out the call
+   at its 120s default regardless of the shell wrapper (this was the
+   ticket's Stage-2 incident: a gate test command with no *tool-level*
+   timeout raise hit the harness default and the turn ended waiting on a
+   notification that never arrives for a raw Bash call). Mirror
+   `/prep-pr`'s pattern: "Run the gate command via the `Bash` tool with
+   `timeout` set to `foreground_ceiling_s * 1000` (ms; the Bash tool
+   accepts up to 600000ms)."
 2. WebFetch of external documentation sites is prohibited during
    headless runs (codifying the #930 precedent). Workers must rely on
    local repo context, tracker content already fetched, or ask for
    escalation rather than fetching arbitrary external URLs mid-run.
+3. Never background a pipeline-dependent Bash call and never accept a
+   harness-offered background continuation after a foreground timeout —
+   neither `Bash(..., run_in_background: true)` nor that continuation has a
+   completion-notification path for a headless DAEMON session. This is
+   unlike the Agent tool's subagent spawn, which the Stop hook's
+   `background_tasks` list actually tracks (ADR-0003) — a backgrounded raw
+   Bash call has no such tracking, so a turn that ends "waiting for the
+   notification" on one never resumes. If a call can't finish inside its
+   sized timeout, treat it as that stage's existing failure disposition
+   (gate failure / `agent_block`), not as something to wait on.
 
 ---
 
@@ -760,8 +792,17 @@ echo "<files from plan>" | sort > /tmp/planned_files-$$
 comm -23 /tmp/touched_files-$$ /tmp/planned_files-$$ | wc -l
 # (output must be 0 — no unexpected file touches)
 
-# 3. If the plan lists a test command, run it
-cd "$TMPWT" && <test_command> --tb=short > /tmp/test.log-$$ 2>&1
+# 3. If the plan lists a test command, run it.
+cd "$TMPWT" && timeout 600 <test_command> --tb=short > /tmp/test.log-$$ 2>&1
+# Foreground, sized timeout — never accept a background continuation for
+# this call: a timeout here is IMPL_FAILED, not something to resume later
+# (Worker Execution Discipline).
+# The shell-level `timeout 600` above bounds the child process only. Also
+# set the Bash TOOL CALL's own `timeout` parameter to at least 600000ms for
+# this call — its default is 120000ms, which is shorter than the shell
+# wrapper and would time out the call at the harness level first. Mirror
+# /prep-pr: "Run the gate command via the `Bash` tool with `timeout` set to
+# `foreground_ceiling_s * 1000` (ms; the Bash tool accepts up to 600000ms)."
 exit_code=$?
 if [ $exit_code -ne 0 ]; then
   echo "IMPL_FAILED: test exited $exit_code"

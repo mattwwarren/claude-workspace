@@ -14,11 +14,23 @@ def pr_channel() -> None:
 
 @pr_channel.command(name="proxy")
 @click.option("--client-id", default=None, help="Unique client ID for cursor tracking.")
-def pr_channel_proxy(client_id: str | None) -> None:
+@click.option(
+    "--all-repos",
+    is_flag=True,
+    default=False,
+    help=(
+        "Forward pr-events for every repo, unfiltered by client (skips "
+        "per-client repo resolution entirely). The default with --client-id "
+        "is scoped to that client's resolved repo and fails closed -- "
+        "forwards nothing, not everything -- if resolution fails; pass "
+        "--all-repos for an intentionally unfiltered stream."
+    ),
+)
+def pr_channel_proxy(client_id: str | None, all_repos: bool) -> None:
     """Start the MCP stdio proxy for cw-pr-events (add to .mcp.json)."""
     from cw.cw_pr_events_channel import run_proxy
 
-    run_proxy(client_id=client_id)
+    run_proxy(client_id=client_id, all_repos=all_repos)
 
 
 @pr_channel.command(name="serve")

@@ -16,6 +16,11 @@ jobs:
       contents: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DISPATCH_DRIFT_AUTO_MARKER: "<!-- dispatch-guard-auto -->"
+      # Recognize issues created before the provenance marker was introduced
+      # so release closers can migrate them without trusting a bare
+      # human-applied label.
+      DISPATCH_DRIFT_LEGACY_MARKER: "Opened automatically by the [Dispatch Guard workflow](/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
@@ -63,8 +68,10 @@ jobs:
           COUNT=$(gh issue list \
             --label dispatch-drift \
             --state open \
-            --json number \
-            --jq 'length')
+            --app github-actions \
+            --limit 1000 \
+            --json number,body \
+            --jq "[.[] | select(((.body // \"\") | contains(\"$DISPATCH_DRIFT_AUTO_MARKER\")) or ((.body // \"\") | contains(\"$DISPATCH_DRIFT_LEGACY_MARKER\")))] | length")
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
 
       - name: Open dispatch-drift issue
@@ -89,4 +96,6 @@ jobs:
 
           Cut a new release to close this issue automatically.
 
-          > Opened automatically by the [Dispatch Guard workflow](/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."
+          > Opened automatically by the [Dispatch Guard workflow](/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed.
+
+          ${DISPATCH_DRIFT_AUTO_MARKER}"
