@@ -833,6 +833,105 @@ class TestConsumeCompletesTasks:
         assert completed == 0
         assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
+    def test_consume_falls_back_to_ticket_id_when_session_id_explicit_none(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """An explicit ``"session_id": None`` is legacy, same as an absent key.
+
+        Round-2 binding: legacy detection is "key missing OR value is None",
+        not merely "key missing" -- a producer that always includes the key
+        but sometimes writes ``None`` must still hit the ticket-id fallback.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-EXPLICIT-NONE",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-EXPLICIT-NONE",
+                "session_id": None,
+                "client": "test-client",
+            },
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 1
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_consume_skips_event_with_empty_string_session_id(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A present-but-empty-string session_id is malformed, not legacy.
+
+        Round-2 binding: any present non-``None`` value must be a non-empty
+        ``str`` to be treated as a real session_id; an empty string is
+        skipped rather than falling back to ticket-id-only matching.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-EMPTY-SID",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-EMPTY-SID",
+                "session_id": "",
+                "client": "test-client",
+            },
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
+
+    def test_consume_skips_event_with_non_string_session_id(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A present non-str, non-None session_id (e.g. an int) is malformed
+        and must be skipped, never matched by ticket-id-only fallback.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-NONSTR-SID",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-NONSTR-SID",
+                "session_id": 123,
+                "client": "test-client",
+            },
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
+
     def test_consume_completes_extended_event_shape(
         self,
         tmp_dispatch_dirs: Path,

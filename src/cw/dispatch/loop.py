@@ -102,11 +102,16 @@ def _event_session_id_disagrees_with_task(
 ) -> bool:
     """Should this SESSION_COMPLETED event be skipped for *task* (GitHub #97, #1692)?
 
-    A genuinely legacy event (no ``session_id`` at all) always matches by
-    ticket_id alone -- ``event_session_id`` isn't a ``str`` in that case, so
-    this returns False without inspecting ``task.session_id``.
+    A genuinely legacy event -- ``session_id`` absent from the payload, or
+    present with value ``None`` -- always matches by ticket_id alone: this
+    returns False without inspecting ``task.session_id``.
 
-    When the event does carry a ``session_id``:
+    A *present but malformed* ``session_id`` (anything non-``None`` that
+    isn't a non-empty ``str`` -- an empty string, an int, a list, ...) is
+    never legacy and never matches: it is skipped and logged at debug,
+    regardless of ``task.session_id``.
+
+    When the event carries a valid, non-empty ``str`` ``session_id``:
     - ``task.session_id`` set and disagreeing -> skip (#97: a stale event
       from an old session must not complete a freshly-respawned task).
     - ``task.session_id`` is ``None`` -> skip (#1692: the window between
@@ -119,8 +124,16 @@ def _event_session_id_disagrees_with_task(
       event is skipped too -- that crash window belongs to the reaper.)
     - ``task.session_id`` set and agreeing -> apply.
     """
-    if not isinstance(event_session_id, str):
+    if event_session_id is None:
         return False
+    if not isinstance(event_session_id, str) or not event_session_id:
+        _log.debug(
+            "malformed_session_completed_event_skipped: ticket=%s "
+            "event_session_type=%s reason=session_id must be a non-empty str or None",
+            ticket_id,
+            type(event_session_id).__name__,
+        )
+        return True
     if task.session_id is None:
         _log.debug(
             "stale_session_completed_event_skipped: ticket=%s "
