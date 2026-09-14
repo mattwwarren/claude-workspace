@@ -348,7 +348,8 @@ def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
+        "cw.reconcile._shared.unsaved_work_reason",
+        lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
     reverted = revert_timed_out_tasks()
@@ -370,6 +371,7 @@ def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
     assert p["session_id"] == "to-dirty"
     assert p["paused_status"] == _DIRTY_WORKTREE_REASON
     assert p["lane"] == "tasks-lane"
+    assert p["breadcrumbs"] == f"{wt_path}: 2 uncommitted path(s)"
 
 
 def test_revert_timed_out_clean_worktree_routes_to_pending(
@@ -400,7 +402,7 @@ def test_revert_timed_out_clean_worktree_routes_to_pending(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
+        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
     )
 
     reverted = revert_timed_out_tasks()
@@ -445,7 +447,7 @@ def test_revert_timed_out_does_not_touch_regressed_into_stage(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
+        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
     )
 
     reverted = revert_timed_out_tasks()
@@ -486,7 +488,8 @@ def test_revert_completed_silent_dirty_worktree_routes_to_blocked_on_user(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
+        "cw.reconcile._shared.unsaved_work_reason",
+        lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
     reverted = revert_completed_silent_tasks()
@@ -496,6 +499,14 @@ def test_revert_completed_silent_dirty_worktree_routes_to_blocked_on_user(
     assert updated_task.status == QueueItemStatus.BLOCKED_ON_USER
     assert updated_task.session_id is None
     assert "cs-dirty" not in reverted
+
+    events = read_events(
+        consumer="test-cs-dirty-attn",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    p = events[0].payload
+    assert p["breadcrumbs"] == f"{wt_path}: 2 uncommitted path(s)"
 
 
 def test_revert_completed_silent_clean_worktree_routes_to_pending(
@@ -526,7 +537,7 @@ def test_revert_completed_silent_clean_worktree_routes_to_pending(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: False
+        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
     )
 
     reverted = revert_completed_silent_tasks()
@@ -536,6 +547,44 @@ def test_revert_completed_silent_clean_worktree_routes_to_pending(
     assert updated_task.status == QueueItemStatus.PENDING
     assert updated_task.session_id is None
     assert "cs-clean" in reverted
+
+
+def test_build_dirty_session_ids_and_notify_returns_reason_dict(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_build_dirty_session_ids_and_notify returns {session.id: reason} for
+    dirty sessions and omits clean ones (dict[str, str] shape, #2118)."""
+    from cw.reconcile.tasks import _build_dirty_session_ids_and_notify
+
+    wt_dirty = tmp_path / "wt-bd-dirty"
+    wt_clean = tmp_path / "wt-bd-clean"
+    dirty_sess = _mk_daemon_session_with_worktree(
+        "bd-dirty", SessionStatus.TIMED_OUT, wt_dirty
+    )
+    clean_sess = _mk_daemon_session_with_worktree(
+        "bd-clean", SessionStatus.TIMED_OUT, wt_clean
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch",
+        lambda p: "auto-dev/bd-dirty" if p == wt_dirty else "auto-dev/bd-clean",
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.unsaved_work_reason",
+        lambda _c, branch, **_kw: (
+            "2 uncommitted path(s)" if branch == "auto-dev/bd-dirty" else None
+        ),
+    )
+
+    result = _build_dirty_session_ids_and_notify([dirty_sess, clean_sess])
+
+    assert result == {"bd-dirty": "2 uncommitted path(s)"}
 
 
 # ---------------------------------------------------------------------------

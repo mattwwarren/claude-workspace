@@ -222,6 +222,77 @@ class TestLoadClients:
         ):
             load_clients()
 
+    def test_non_mapping_top_level_raises_config_validation_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A top-level YAML list (or any non-mapping document) must raise
+        ConfigValidationError instead of silently being read as 'no clients',
+        or crashing with AttributeError/TypeError (operator round-3
+        resolution, #2158)."""
+        from cw.exceptions import ConfigValidationError
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text("- acme\n- beta\n")
+        with pytest.raises(ConfigValidationError, match=r"clients\.yaml"):
+            load_clients()
+
+    def test_non_mapping_clients_key_raises_config_validation_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A 'clients:' key whose value isn't a mapping must raise
+        ConfigValidationError instead of crashing with AttributeError on
+        .items() (operator round-3 resolution, #2158)."""
+        from cw.exceptions import ConfigValidationError
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text("clients:\n  - acme\n  - beta\n")
+        with pytest.raises(ConfigValidationError, match=r"clients\.yaml"):
+            load_clients()
+
+    def test_non_mapping_client_entry_raises_config_validation_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A client entry whose value isn't a mapping must raise
+        ConfigValidationError instead of crashing with TypeError from
+        ClientConfig(**data) (operator round-3 resolution, #2158)."""
+        from cw.exceptions import ConfigValidationError
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text('clients:\n  acme: "not a mapping"\n')
+        with pytest.raises(ConfigValidationError, match=r"clients\.yaml"):
+            load_clients()
+
+    def test_non_string_client_key_raises_config_validation_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A client key that isn't a string (e.g. a bare int) must raise
+        ConfigValidationError instead of crashing with TypeError from
+        _SAFE_CLIENT_NAME.match(name) (operator round-3 resolution, #2158)."""
+        from cw.exceptions import ConfigValidationError
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text("clients:\n  123:\n    workspace_path: /tmp/acme\n")
+        with pytest.raises(ConfigValidationError, match=r"clients\.yaml"):
+            load_clients()
+
+    def test_non_string_key_in_client_mapping_raises_config_validation_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A client mapping with a non-string key (e.g. {1: x, repo_path: y})
+        passes the isinstance(data, dict) shape check but raises a bare
+        TypeError ('keywords must be strings') from ClientConfig(**data),
+        which the existing `except ValidationError` doesn't catch. Must raise
+        ConfigValidationError naming clients.yaml, the client name, and the
+        underlying error instead (operator round-4 resolution, #2158)."""
+        from cw.exceptions import ConfigValidationError
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n  acme:\n    1: x\n    repo_path: /tmp/acme\n"
+        )
+        with pytest.raises(ConfigValidationError, match=r"clients\.yaml.*acme"):
+            load_clients()
+
 
 class TestLoadWorktreeClients:
     def test_worktree_client_from_yaml(

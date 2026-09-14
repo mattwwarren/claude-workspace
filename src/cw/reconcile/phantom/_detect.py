@@ -264,11 +264,12 @@ def _detect_phantom_candidates(
         # worktree between here and the BLOCKED_ON_USER routing in
         # _act_on_phantom_candidates (TOCTOU). Accepted tradeoff: block > clobber —
         # narrow the window, accept the race. See _act_on_phantom_candidates.
-        worktree_dirty = (
-            _shared.worktree_dirty_by_path(session.client, session.worktree_path)
+        worktree_dirty_reason = (
+            _shared.worktree_dirty_reason_by_path(session.client, session.worktree_path)
             if session.origin is SessionOrigin.DAEMON
-            else False
+            else None
         )
+        worktree_dirty = worktree_dirty_reason is not None
         # Scan for usage-limit text in the transcript so the dispatch loop can
         # engage its backoff when a phantom was killed by a rate limit, not a
         # code bug (#804). Only meaningful for DAEMON sessions (USER sessions
@@ -306,6 +307,7 @@ def _detect_phantom_candidates(
                 proposed_action=ProposedAction.CRASH_COMPLETE,
                 ticket_id=ticket_id,
                 worktree_dirty=worktree_dirty,
+                worktree_dirty_reason=worktree_dirty_reason,
                 unresolved_subagent_spawn=unresolved_subagent_spawn,
                 usage_limit_detected=usage_limit_detected,
                 provider_overload_detected=provider_overload_detected,

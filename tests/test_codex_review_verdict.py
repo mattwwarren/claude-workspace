@@ -30,6 +30,7 @@ from cw.codex_review._capability import (
     _CodexFilesystemCapability,
     _CodexFingerprint,
 )
+from cw.codex_review._verdict._health import _READ_ONLY_SANDBOX_EXEMPT_ROLES
 from cw.codex_review._verdict._render import _render_rejected_finding_text
 from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
@@ -469,13 +470,13 @@ class TestSynthesizeCodexReviewResultHealth:
         # findings (_check_failed_has_no_findings), so both branches share
         # the same no-findings, no-failures shape here.
         #
-        # #1856: "degraded" is pinned to a non-Test-Reviewer role because
-        # ("Test Reviewer", "degraded") is now specifically carved out of
-        # this downgrade (see TestTestReviewerDegradedCarveOut below) --
-        # this test still proves the *general* claim that a degraded/failed
-        # reviewer of some role downgrades health. "failed" stays on the
-        # fixture-default Test Reviewer role to prove a self-reported
-        # failure still downgrades health regardless of role.
+        # #1856/#2174: "degraded" is pinned to a non-exempt role because
+        # the read-only-sandbox-exempt roles are now specifically carved out
+        # of this downgrade (see TestReadOnlySandboxDegradedCarveOut below)
+        # -- this test still proves the *general* claim that a
+        # degraded/failed reviewer of some role downgrades health. "failed"
+        # stays on the fixture-default Test Reviewer role to prove a
+        # self-reported failure still downgrades health regardless of role.
         worktree = make_git_repo(f"wt-synth-health-{status}")
         doc = _make_reviewer_doc(status=status, reviewer_role=reviewer_role)
         result, verdict = synthesize_codex_review_result(
@@ -603,21 +604,27 @@ class TestSynthesizeCodexReviewResultHealth:
         assert verdict.agents_run[0].detail == "sandbox lacked filesystem access"
 
 
-class TestTestReviewerDegradedCarveOut:
-    """#1856: Test Reviewer's read-only-sandbox ``status="degraded"`` is a
-    structurally-forced signal (it was never capable of running pytest under
-    the codex review sandbox, on any ticket, ever — see
-    ``src/cw/codex_review/_roles.py``'s read-only posture), not a substantive
-    coverage gap, so it is excluded from ``_derive_health``'s confidence
-    computation. The carve-out is narrow: (role, status) == ("Test Reviewer",
-    "degraded") only.
+class TestReadOnlySandboxDegradedCarveOut:
+    """#1856 (Test Reviewer), widened by #2174 to Code Quality Reviewer and
+    SysAdmin Reviewer: each of these three roles' rubric structurally cannot
+    be satisfied under the codex review sandbox's unconditional read-only
+    posture (``src/cw/codex_review/_roles.py``'s
+    ``_build_generic_codex_argv``) — Test Reviewer must run pytest, Code
+    Quality Reviewer and SysAdmin Reviewer must verify against the repo's
+    configured lint/quality gates (``## Quality Gates`` injected into every
+    role's prompt via ``_context/core.py``) — so a self-reported
+    ``status="degraded"`` from any of them is environment-caused noise, not a
+    substantive coverage gap, and is excluded from ``_derive_health``'s
+    confidence computation. The carve-out is narrow: (role, status) ==
+    (<exempt role>, "degraded") only.
     """
 
-    def test_test_reviewer_degraded_status_excluded_from_health(
-        self, make_git_repo: Callable[[str], Path]
+    @pytest.mark.parametrize("reviewer_role", sorted(_READ_ONLY_SANDBOX_EXEMPT_ROLES))
+    def test_read_only_sandbox_degraded_status_excluded_from_health(
+        self, make_git_repo: Callable[[str], Path], reviewer_role: str
     ) -> None:
-        worktree = make_git_repo("wt-1856-test-reviewer-degraded")
-        doc = _make_reviewer_doc(status="degraded")  # default role: Test Reviewer
+        worktree = make_git_repo(f"wt-2174-degraded-{reviewer_role}")
+        doc = _make_reviewer_doc(status="degraded", reviewer_role=reviewer_role)
         result, verdict = synthesize_codex_review_result(
             task=_task(),
             worktree=worktree,
@@ -635,14 +642,15 @@ class TestTestReviewerDegradedCarveOut:
         assert result.health.recommendation == "PROCEED"
         assert verdict is not None
 
-    def test_test_reviewer_failed_status_still_downgrades_health(
-        self, make_git_repo: Callable[[str], Path]
+    @pytest.mark.parametrize("reviewer_role", sorted(_READ_ONLY_SANDBOX_EXEMPT_ROLES))
+    def test_read_only_sandbox_role_failed_status_still_downgrades_health(
+        self, make_git_repo: Callable[[str], Path], reviewer_role: str
     ) -> None:
-        # The carve-out is status-scoped, not role-blanket: a Test Reviewer
+        # The carve-out is status-scoped, not role-blanket: an exempt role's
         # document that self-reports "failed" (not "degraded") still
         # downgrades health.
-        worktree = make_git_repo("wt-1856-test-reviewer-failed")
-        doc = _make_reviewer_doc(status="failed")  # default role: Test Reviewer
+        worktree = make_git_repo(f"wt-2174-failed-{reviewer_role}")
+        doc = _make_reviewer_doc(status="failed", reviewer_role=reviewer_role)
         result, verdict = synthesize_codex_review_result(
             task=_task(),
             worktree=worktree,
@@ -660,14 +668,16 @@ class TestTestReviewerDegradedCarveOut:
         assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
         assert verdict is not None
 
-    def test_test_reviewer_degraded_with_another_degraded_role_still_downgrades_health(
+    def test_non_exempt_role_degraded_alongside_exempt_roles_still_downgrades_health(
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
-        # A substantive degradation on another role must still gate, even
-        # when it coexists with the sandbox-caused Test Reviewer one.
-        worktree = make_git_repo("wt-1856-mixed-degraded")
+        # A substantive degradation on a non-exempt role must still gate,
+        # even when it coexists with every sandbox-caused exempt-role one.
+        worktree = make_git_repo("wt-2174-mixed-degraded")
         documents = [
-            _make_reviewer_doc(status="degraded"),  # Test Reviewer, carved out
+            _make_reviewer_doc(status="degraded", reviewer_role=role)
+            for role in _READ_ONLY_SANDBOX_EXEMPT_ROLES
+        ] + [
             _make_reviewer_doc(
                 status="degraded", reviewer_role="Architecture Reviewer"
             ),
@@ -811,7 +821,7 @@ def _detail_bearing_rejection(severity: str, summary: str) -> RejectedFinding:
     so the substitution costs the assertions nothing.
     """
     payload = _doc_payload(
-        _finding_kwargs(severity="NOT_A_SEVERITY", summary=summary),
+        dict(_finding_kwargs(severity="NOT_A_SEVERITY", summary=summary)),
         reviewer_role="Code Quality Reviewer",
         # Once the invalid item is rescued out, the document has no findings
         # left, and a `status="ok"` document with none must justify itself.
@@ -1177,7 +1187,9 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
     def _doc(self, *findings: Finding) -> ReviewerFindingsDocument:
         return _make_reviewer_doc(*findings)
 
-    def _ledger(self, finding: Finding, **overrides: object) -> dict[str, object]:
+    def _ledger(
+        self, finding: Finding, **overrides: object
+    ) -> dict[str, FindingDisposition]:
         key = _disposition_key(finding.file, finding.summary)
         assert key is not None
         payload: dict[str, object] = {
