@@ -3431,27 +3431,6 @@ class TestSentinelPresentInTranscript:
     See GitHub issue #176 Layer 1.
     """
 
-    def _write_transcript(
-        self,
-        worktree: Path,
-        claude_session_id: str,
-        assistant_text: str,
-        home: Path,
-    ) -> None:
-        encoded = str(worktree).replace("/", "-").replace(".", "-")
-        project_dir = home / ".claude" / "projects" / encoded
-        project_dir.mkdir(parents=True, exist_ok=True)
-        record = {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": assistant_text}],
-            },
-        }
-        (project_dir / f"{claude_session_id}.jsonl").write_text(
-            json.dumps(record) + "\n"
-        )
-
     def test_returns_true_when_sentinel_embedded_in_jsonl_assistant_text(
         self,
         tmp_path: Path,
@@ -3478,7 +3457,9 @@ class TestSentinelPresentInTranscript:
             "AUTO_DEV_RESULT>>>\n"
             "```\n"
         )
-        self._write_transcript(worktree, "uuid-with-sentinel", sentinel_text, fake_home)
+        _write_stop_hook_transcript(
+            fake_home, worktree, "uuid-with-sentinel", sentinel_text
+        )
 
         assert _sentinel_present_in_transcript(str(worktree), "uuid-with-sentinel")
 
@@ -3549,8 +3530,8 @@ class TestSentinelPresentInTranscript:
 
         worktree = tmp_path / "wt" / "auto-dev-200"
         worktree.mkdir(parents=True)
-        self._write_transcript(
-            worktree, "uuid-empty", "Plain status update, no sentinel here.", fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, "uuid-empty", "Plain status update, no sentinel here."
         )
 
         assert not _sentinel_present_in_transcript(str(worktree), "uuid-empty")
@@ -4060,6 +4041,10 @@ class TestParseSentinelFromTranscript:
         home: Path,
         extra_records: list[dict[str, object]] | None = None,
     ) -> None:
+        # Not the shared _write_stop_hook_transcript: this one can prefix the
+        # final assistant record with arbitrary extra JSONL records (see the
+        # extra_records=[example_record] call below), a genuinely different
+        # shape than that helper's single-record write.
         encoded = str(worktree).replace("/", "-").replace(".", "-")
         project_dir = home / ".claude" / "projects" / encoded
         project_dir.mkdir(parents=True, exist_ok=True)
@@ -5932,33 +5917,26 @@ class TestPeek:
         save_state(state)
         return session
 
+    @staticmethod
     def _write_transcript(
-        self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         session: Session,
         text: str,
     ) -> None:
-        """Place a Claude-shaped transcript holding one assistant text block.
+        """Place a Claude-shaped transcript for *session* and patch Path.home.
 
-        Patches ``Path.home`` so ``claude_project_dir`` resolves under the
-        tmp tree rather than the real ``~/.claude/projects``.
+        Delegates the actual record write to the shared
+        ``_write_stop_hook_transcript`` (same single-assistant-record shape);
+        this wrapper only adds what every caller here needs on top of it --
+        deriving the cwd from *session* and patching ``Path.home`` so
+        ``claude_project_dir`` resolves under the tmp tree.
         """
         fake_home = tmp_path / "fake-home"
         cwd = session.worktree_path or session.workspace_path
-        encoded = str(cwd).replace("/", "-").replace(".", "-")
-        transcript_dir = fake_home / ".claude" / "projects" / encoded
-        transcript_dir.mkdir(parents=True, exist_ok=True)
-        record = {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": text}],
-            },
-        }
-        (transcript_dir / f"{session.claude_session_id}.jsonl").write_text(
-            json.dumps(record) + "\n"
-        )
+        claude_session_id = session.claude_session_id
+        assert claude_session_id is not None
+        _write_stop_hook_transcript(fake_home, cwd, claude_session_id, text)
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
     @staticmethod
@@ -8853,29 +8831,6 @@ class TestDevQueueWaitSentinelAware:
         "AUTO_DEV_RESULT>>>"
     )
 
-    def _write_transcript(
-        self,
-        worktree: Path,
-        claude_session_id: str,
-        assistant_text: str,
-        fake_home: Path,
-    ) -> Path:
-        """Write a transcript JSONL file and return the transcript path."""
-
-        encoded = str(worktree).replace("/", "-").replace(".", "-")
-        project_dir = fake_home / ".claude" / "projects" / encoded
-        project_dir.mkdir(parents=True, exist_ok=True)
-        record = {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": assistant_text}],
-            },
-        }
-        transcript = project_dir / f"{claude_session_id}.jsonl"
-        transcript.write_text(json.dumps(record) + "\n")
-        return transcript
-
     def _seed_running_task(
         self,
         ticket_id: str,
@@ -8938,7 +8893,7 @@ class TestDevQueueWaitSentinelAware:
 
         session_id = "sess535a"
         csid = "uuid-535a-csid-set-1234"
-        self._write_transcript(worktree, csid, self._SHIPPED_SENTINEL, fake_home)
+        _write_stop_hook_transcript(fake_home, worktree, csid, self._SHIPPED_SENTINEL)
         self._seed_running_task("GEN-535", session_id)
 
         session = self._make_running_session(
@@ -8992,7 +8947,7 @@ class TestDevQueueWaitSentinelAware:
         sentinel_text = self._SHIPPED_SENTINEL.replace(
             '"status": "shipped"', '"status": "merge_pending"'
         )
-        self._write_transcript(worktree, csid, sentinel_text, fake_home)
+        _write_stop_hook_transcript(fake_home, worktree, csid, sentinel_text)
         self._seed_running_task("GEN-899", session_id)
 
         session = self._make_running_session(
@@ -9053,7 +9008,7 @@ class TestDevQueueWaitSentinelAware:
                 '"pr": null',
             )
         )
-        self._write_transcript(worktree, csid, sentinel_text, fake_home)
+        _write_stop_hook_transcript(fake_home, worktree, csid, sentinel_text)
         self._seed_running_task("GEN-699", session_id)
 
         # Non-native surface_ref keeps Step 5's roster probe out of play.
@@ -9120,8 +9075,8 @@ class TestDevQueueWaitSentinelAware:
         csid = f"{surface_ref}-longer-uuid-suffix"
 
         # Transcript written AFTER session.started_at so the mtime guard passes.
-        transcript = self._write_transcript(
-            worktree, csid, self._SHIPPED_SENTINEL, fake_home
+        transcript = _write_stop_hook_transcript(
+            fake_home, worktree, csid, self._SHIPPED_SENTINEL
         )
         # Ensure mtime is fresh (after started_at = epoch).
         import os
@@ -9755,7 +9710,7 @@ class TestDevQueueWaitSentinelAware:
 
         session_id = "sess535f"
         csid = "uuid-535f"
-        self._write_transcript(worktree, csid, self._SHIPPED_SENTINEL, fake_home)
+        _write_stop_hook_transcript(fake_home, worktree, csid, self._SHIPPED_SENTINEL)
         self._seed_running_task("GEN-535F", session_id)
 
         session = self._make_running_session(
