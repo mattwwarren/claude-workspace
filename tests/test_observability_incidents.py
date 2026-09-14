@@ -167,7 +167,8 @@ def test_incident_421_phantom_dirty_worktree(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b, **_kw: True
+        "cw.reconcile._shared.unsaved_work_reason",
+        lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
     reconcile()
