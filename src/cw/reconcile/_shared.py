@@ -56,6 +56,7 @@ from cw.models import (
     DEFAULT_STAGE,
     HOOK_CONTEXT_RELATIVE_PATH,
     OCCUPIED_LANE_STATUSES,
+    TERMINAL_QUEUE_STATUSES,
     ClientConfig,
     CompletionReason,
     LastResultSource,
@@ -1071,14 +1072,11 @@ def classify_sentinel_stage_position(
 # #1692: genuinely terminal QueueItemStatus values -- distinct from
 # "outside OCCUPIED_LANE_STATUSES", which also includes PENDING (redispatch-
 # eligible, not terminal). Used by _apply_sentinel_to_task's lookup-miss
-# branch to classify task_already_terminal precisely.
-_GENUINELY_TERMINAL_QUEUE_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    [
-        QueueItemStatus.COMPLETED,
-        QueueItemStatus.FAILED,
-        QueueItemStatus.CANCELLED,
-    ]
-)
+# branch to classify task_already_terminal precisely. Review round 2 (#1692):
+# this was an independently-defined literal identical to
+# cw.reconcile.review_recipes.auto_fix_ci._REQUEUE_ELIGIBLE_STATUSES --
+# both now alias the single cw.models.TERMINAL_QUEUE_STATUSES definition.
+_GENUINELY_TERMINAL_QUEUE_STATUSES: frozenset[QueueItemStatus] = TERMINAL_QUEUE_STATUSES
 
 
 class SentinelRouteOutcome(NamedTuple):

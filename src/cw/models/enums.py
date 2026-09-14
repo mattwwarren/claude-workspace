@@ -99,6 +99,24 @@ OCCUPIED_LANE_STATUSES: frozenset[QueueItemStatus] = frozenset(
 )
 
 
+# Genuinely terminal QueueItemStatus values -- distinct from "outside
+# OCCUPIED_LANE_STATUSES", which also includes PENDING (redispatch-eligible,
+# not terminal). Single source of truth for the duplicate {COMPLETED, FAILED,
+# CANCELLED} literal independently defined in
+# cw.reconcile._shared._GENUINELY_TERMINAL_QUEUE_STATUSES and
+# cw.reconcile.review_recipes.auto_fix_ci._REQUEUE_ELIGIBLE_STATUSES prior to
+# GitHub #1692 review round 2; both modules now import this constant instead
+# of defining their own copy, following the OCCUPIED_LANE_STATUSES precedent
+# above.
+TERMINAL_QUEUE_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    [
+        QueueItemStatus.COMPLETED,
+        QueueItemStatus.FAILED,
+        QueueItemStatus.CANCELLED,
+    ]
+)
+
+
 class ReapReason(StrEnum):
     """Reason taxonomy for queue.session_reaped bus events.
 
