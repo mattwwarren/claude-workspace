@@ -37,6 +37,12 @@ Safe categories (evaluated in this order, per block):
         disjoint append inside a source file — or inside this repo's own
         orchestration prose, e.g. `.claude/commands/*.md` or
         `.claude/docs/coding/*.md` — is `unsafe`.
+        Note: the repo-root `.gitattributes` puts `CHANGELOG.md` on git's
+        built-in `union` merge driver, so git resolves CHANGELOG.md
+        conflicts before this script ever sees markers. In practice
+        `doc_append` now handles `docs/` appends; its CHANGELOG handling
+        stays as the fail-closed fallback for trees without that attribute.
+        Change one mechanism, reconsider the other.
 
 Anything else — overlapping edits, mixed content, malformed or diff3-style
 markers, a listed file with no markers at all — is `unsafe`.

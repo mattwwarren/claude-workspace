@@ -225,6 +225,12 @@ The `/sprint-buildout` skill wraps this pair end-to-end — presenting the one a
 | `cw review register <pr-url>` | Register a PR you were asked to review as a watched PR |
 | `cw pr-channel` / `cw queue-channel` / `cw operator-channel` | MCP notification servers — wired into a session's `.mcp.json` to push PR/queue/operator events into Claude Code |
 
+`cw pr-channel proxy --client-id <client>` forwards only PR events for the
+repo that client resolves to, and fails closed (forwards nothing, logging the
+failed step) if the repo cannot be resolved; pass `--all-repos` for an
+intentionally unfiltered stream. See
+[`docs/operator-channel.md`](docs/operator-channel.md#cw-pr-channel-proxy-repo-scoping-2146).
+
 ## Slash Commands (Claude Code Skills)
 
 These are invoked inside a Claude Code session and form the daily operational toolkit.

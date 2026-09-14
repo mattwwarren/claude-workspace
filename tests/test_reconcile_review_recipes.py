@@ -2734,6 +2734,30 @@ def _advance_origin_main(client: ClientConfig, relpath: str, content: str) -> No
 _FIX_PROMPT_TEXT = "fix the MUST_FIX items\n"
 
 
+def _seed_fix_parent_session(client: ClientConfig, session_id: str) -> None:
+    """Seed a real Session so dispatch_fix_agent's find_session_by_id(parent)
+    resolution (#2149) resolves *session_id* instead of silently falling back
+    to the unresolvable-parent path (parent=None + friction note).
+    """
+    from cw.config import save_state
+    from cw.models import CwState, Session
+
+    save_state(
+        CwState(
+            sessions=[
+                Session(
+                    id=session_id,
+                    name=f"{client.name}/review/2017",
+                    client=client.name,
+                    purpose=SessionPurpose.IMPL,
+                    workspace_path=client.workspace_path,
+                    status=SessionStatus.COMPLETED,
+                )
+            ]
+        )
+    )
+
+
 def test_dispatch_fix_agent_provisions_worktree_and_spawns(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
@@ -2745,6 +2769,7 @@ def test_dispatch_fix_agent_provisions_worktree_and_spawns(
     client = _make_fix_client(make_git_repo, tmp_path)
     branch = "dev/2017"
     _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
 
     session_id = dispatch_fix_agent(
         client=client,
@@ -2781,6 +2806,7 @@ def test_dispatch_fix_agent_no_task_kwarg(
     client = _make_fix_client(make_git_repo, tmp_path)
     branch = "dev/2017"
     _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
 
     dispatch_fix_agent(
         client=client,
@@ -2806,6 +2832,7 @@ def test_dispatch_fix_agent_resumes_pushed_branch(
     client = _make_fix_client(make_git_repo, tmp_path)
     branch = "dev/2017"
     _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
     kwargs: dict[str, Any] = {
         "client": client,
         "branch": branch,
@@ -2870,6 +2897,7 @@ def test_dispatch_fix_agent_merge_conflict_blocks(
     client = _make_fix_client(make_git_repo, tmp_path)
     branch = "dev/2017"
     _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
     _advance_origin_main(client, "shared.txt", "main side\n")
 
     with pytest.raises(CwError, match=r"shared\.txt"):
@@ -2914,6 +2942,7 @@ def test_dispatch_fix_agent_merge_clean_succeeds(
     client = _make_fix_client(make_git_repo, tmp_path)
     branch = "dev/2017"
     _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
     _advance_origin_main(client, "sibling.txt", "merged sibling\n")
 
     dispatch_fix_agent(
@@ -2943,6 +2972,7 @@ def test_dispatch_fix_agent_propagates_spawn_cwerror(
     client = _make_fix_client(make_git_repo, tmp_path)
     branch = "dev/2017"
     _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
 
     def _boom(**_kwargs: Any) -> None:
         msg = "daemon never adopted the worker"
@@ -3133,6 +3163,7 @@ def test_dispatch_fix_agent_merge_abort_failure_raises_distinct_message(
     client = _make_fix_client(make_git_repo, tmp_path)
     branch = "dev/2017"
     _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
     _advance_origin_main(client, "shared.txt", "main side\n")
 
     real_run_git = fix_agent_mod._run_git
@@ -3173,6 +3204,7 @@ def test_dispatch_fix_agent_records_session_spawned_event(
     client = _make_fix_client(make_git_repo, tmp_path)
     branch = "dev/2017"
     _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
 
     session_id = dispatch_fix_agent(
         client=client,

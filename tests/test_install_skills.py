@@ -985,6 +985,7 @@ class TestScriptsInstalled:
         assert "    - scripts/prep_pr_state.py" in result.stdout
         assert not (dst / "prep_pr_state.py.pre-symlink.bak").exists()
         assert "kept beside the link" not in result.stdout
+        assert "WARNING:" not in result.stderr
 
     def test_no_replacement_notice_on_clean_or_repeat_run(
         self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
@@ -1074,3 +1075,70 @@ class TestScriptsInstalled:
         dst = fake_home / ".claude" / "scripts"
         assert (dst / "utils" / "local_only.py").is_symlink()
         assert "scripts skipped : 0 (repo-scoped)" in result.stdout
+
+    def test_warns_loudly_when_local_changes_are_replaced(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        """The operator sees the WARNING immediately on stderr, not just
+        buried in the end-of-run stdout summary.
+        """
+        dst = fake_home / ".claude" / "scripts"
+        dst.mkdir()
+        stale = dst / "prep_pr_state.py"
+        stale.write_text("# stale: no gate-timeout\n")
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        backup = dst / "prep_pr_state.py.pre-symlink.bak"
+        assert "WARNING:" in result.stderr
+        assert "prep_pr_state.py" in result.stderr
+        assert str(backup) in result.stderr
+        assert "CW_CANONICAL_REPO_PATHS" not in result.stderr
+
+    def test_review_monitor_py_warning_names_canonical_repo_paths_env_var(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        dst = fake_home / ".claude" / "scripts"
+        dst.mkdir()
+        stale = dst / "review_monitor.py"
+        stale.write_text("# stale: no canonical repo paths\n")
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        backup = dst / "review_monitor.py.pre-symlink.bak"
+        assert "WARNING:" in result.stderr
+        assert "review_monitor.py" in result.stderr
+        assert str(backup) in result.stderr
+        assert "CW_CANONICAL_REPO_PATHS" in result.stderr
+        assert ".claude/scripts/utils/runtime_paths.py" not in result.stderr
+
+    def test_no_warning_on_fresh_install(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        assert "WARNING:" not in result.stderr
+
+    def test_second_divergent_replacement_warns_naming_second_backup(
+        self, script: Path, fake_repo_with_scripts: Path, fake_home: Path
+    ) -> None:
+        """The loud warning fires again on a second divergent replacement,
+        naming the second-generation backup — not the first's.
+        """
+        dst = fake_home / ".claude" / "scripts"
+        dst.mkdir()
+        target = dst / "prep_pr_state.py"
+        target.write_text("# generation one\n")
+        first = _run(script, fake_home)
+        assert first.returncode == 0, first.stderr
+
+        target.unlink()
+        target.write_text("# generation two\n")
+        second = _run(script, fake_home)
+        assert second.returncode == 0, second.stderr
+
+        gen1 = dst / "prep_pr_state.py.pre-symlink.bak"
+        gen2 = dst / "prep_pr_state.py.pre-symlink.1.bak"
+        assert "WARNING:" in second.stderr
+        assert str(gen2) in second.stderr
+        assert str(gen1) not in second.stderr

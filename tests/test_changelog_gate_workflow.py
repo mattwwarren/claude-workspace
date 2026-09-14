@@ -91,7 +91,9 @@ def _run_gate_step(
         "PATH": "/usr/bin:/bin",
     }
     return subprocess.run(
-        ["/bin/bash", "-c", _script(GATE_STEP_ID)],
+        # Match GitHub Actions' default bash invocation and avoid loading an
+        # operator's interactive shell configuration into the literal step.
+        ["/bin/bash", "--noprofile", "--norc", "-c", _script(GATE_STEP_ID)],
         env=env,
         capture_output=True,
         text=True,

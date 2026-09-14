@@ -75,7 +75,10 @@ resolved above — Sonnet for Small scope, Opus for Large):
 **Async dispatch note (verified 2026-08-19).** The Agent tool is asynchronous
 unconditionally: waiting for the impl agent means **ending the parent turn** and resuming
 on its completion notification, which is safe in headless. **Never** hold the turn open
-with no-op `Bash` calls (`true`, `sleep`, repeated polls).
+with no-op `Bash` calls (`true`, `sleep`, repeated polls). This async-dispatch exemption is
+scoped to the Agent tool's subagent spawn only — it does not extend to a raw Bash call; see
+`auto-dev.md`'s Worker Execution Discipline section for the no-backgrounding rule that
+applies there.
 
 **A subagent's turn-end is a *return*, not a pause: the impl agent must finish
 its build/test commands inside its own turn rather than backgrounding them and

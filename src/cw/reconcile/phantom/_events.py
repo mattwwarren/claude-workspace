@@ -109,6 +109,7 @@ def _emit_phantom_terminal_events(
                     "ticket_id": candidate.ticket_id,
                     "client": candidate.client,
                     "worktree_dirty": candidate.worktree_dirty,
+                    "worktree_dirty_reason": candidate.worktree_dirty_reason,
                     "worktree_path": wt_path_str,
                     "queue_status": queue_status,
                     "provider_overload_detected": candidate.provider_overload_detected,
