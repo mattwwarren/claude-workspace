@@ -52,6 +52,7 @@ from tests._reconcile_helpers import (
 from tests.conftest import (
     _make_daemon_session,
     _write_project_config_yaml,
+    _write_stop_hook_transcript,
     stub_fetch_plan,
 )
 from tests.test_result import _valid_payload
@@ -1571,27 +1572,6 @@ class TestSignalStop:
         # daemon.stop must NOT have been called.
         assert daemon.stop_calls == []
 
-    def _write_transcript(
-        self,
-        worktree: Path,
-        claude_session_id: str,
-        assistant_text: str,
-        home: Path,
-    ) -> None:
-        encoded = str(worktree).replace("/", "-").replace(".", "-")
-        project_dir = home / ".claude" / "projects" / encoded
-        project_dir.mkdir(parents=True, exist_ok=True)
-        record = {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": assistant_text}],
-            },
-        }
-        (project_dir / f"{claude_session_id}.jsonl").write_text(
-            json.dumps(record) + "\n"
-        )
-
     def _setup_headless_session(
         self,
         tmp_path: Path,
@@ -1661,8 +1641,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-251-no-op"
         fake_home = tmp_path / "fake-home-no-op"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_NO_OP, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_NO_OP
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -1750,8 +1730,8 @@ class TestSignalStop:
         # transcript's no_op outcome instead.
         claude_session_id = "uuid-536-emit"
         fake_home = tmp_path / "fake-home-536-emit"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_NO_OP, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_NO_OP
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -1851,8 +1831,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-536-malformed"
         fake_home = tmp_path / "fake-home-536-malformed"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_NO_OP, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_NO_OP
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -1921,8 +1901,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-316-premises"
         fake_home = tmp_path / "fake-home-316-premises"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_316_PREMISES_PENDING_V2, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_316_PREMISES_PENDING_V2
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -1985,8 +1965,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-316-ambiguities"
         fake_home = tmp_path / "fake-home-316-ambiguities"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_316_AMBIGUITIES_PENDING_V2, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_316_AMBIGUITIES_PENDING_V2
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2050,8 +2030,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-251-vf-under"
         fake_home = tmp_path / "fake-home-vf-under"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2128,8 +2108,8 @@ class TestSignalStop:
         # sessions.py ~:731-737) or the hook is dropped before it's parsed.
         claude_session_id = "sfref-251-vfcap-uuid"
         fake_home = tmp_path / "fake-home-vf-cap"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2201,8 +2181,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-251-blocked-retry"
         fake_home = tmp_path / "fake-home-blocked-retry"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_BLOCKED_RETRY
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2265,8 +2245,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-251-blocked-no-retry"
         fake_home = tmp_path / "fake-home-blocked-no-retry"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_BLOCKED_NO_RETRY, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_BLOCKED_NO_RETRY
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2339,8 +2319,8 @@ class TestSignalStop:
         # Stale hook from session1: UUID starts with "prev0001", not "next0002".
         stale_claude_id = "prev0001-old-session1-uuid"
         fake_home = tmp_path / "fake-home-285-guard"
-        self._write_transcript(
-            worktree, stale_claude_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, stale_claude_id, _SENTINEL_251_BLOCKED_RETRY
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2479,8 +2459,8 @@ class TestSignalStop:
 
         s1_claude_id = "aabb1100-session1-full-uuid"
         fake_home = tmp_path / "fake-home-285-seq"
-        self._write_transcript(
-            worktree, s1_claude_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, s1_claude_id, _SENTINEL_251_BLOCKED_RETRY
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2550,7 +2530,9 @@ class TestSignalStop:
 
         # === Attempt 2: session2 ships ===
         s2_claude_id = "ccdd2200-session2-full-uuid"
-        self._write_transcript(worktree, s2_claude_id, _SENTINEL_285_SHIPPED, fake_home)
+        _write_stop_hook_transcript(
+            fake_home, worktree, s2_claude_id, _SENTINEL_285_SHIPPED
+        )
 
         r2 = self._invoke_signal_stop(
             runner,
@@ -2613,7 +2595,9 @@ class TestSignalStop:
 
         claude_session_id = f"uuid-918-{name}"
         fake_home = tmp_path / f"fake-home-918-{name}"
-        self._write_transcript(worktree, claude_session_id, sentinel_text, fake_home)
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, sentinel_text
+        )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
@@ -2852,8 +2836,8 @@ class TestSignalStop:
         # guard short-circuiting on surface_ref=None.
         claude_session_id = "sfref-1031-mismatch-uuid"
         fake_home = tmp_path / "fake-home-1031-mismatch"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
@@ -2951,8 +2935,8 @@ class TestSignalStop:
         # short-circuiting on surface_ref=None.
         claude_session_id = "sfref-1189-race-uuid"
         fake_home = tmp_path / "fake-home-1189-race"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
@@ -3042,11 +3026,11 @@ class TestSignalStop:
         # sessions.py ~:731-737) or the hook is dropped before it's parsed.
         claude_session_id = "sfref-263-schema-uuid"
         fake_home = tmp_path / "fake-home-263-schema-unsupported"
-        self._write_transcript(
+        _write_stop_hook_transcript(
+            fake_home,
             worktree,
             claude_session_id,
             _SENTINEL_263_SCHEMA_VERSION_UNSUPPORTED,
-            fake_home,
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -3172,8 +3156,8 @@ class TestSignalStop:
         # sessions.py ~:731-737) or the hook is dropped before it's parsed.
         claude_session_id = "sfref-catchall-uuid"
         fake_home = tmp_path / "fake-home-catchall"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_918_MALFORMED, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_918_MALFORMED
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -3248,11 +3232,8 @@ class TestSignalStop:
         # Transcript lives under the DISPATCH worktree's project dir.
         claude_session_id = "uuid-799-fallback"
         fake_home = tmp_path / "fake-home-799"
-        self._write_transcript(
-            worktree,
-            claude_session_id,
-            _SENTINEL_285_SHIPPED,
-            fake_home,
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_285_SHIPPED
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -3338,8 +3319,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-1149-later"
         fake_home = tmp_path / "fake-home-1149-later"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_1149_LATER_STAGE_BLOCKED, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_1149_LATER_STAGE_BLOCKED
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
