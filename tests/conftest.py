@@ -1190,6 +1190,26 @@ def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
     return _make
 
 
+def init_repo_with_remote(path: Path, remote_url: str | None) -> Path:
+    """Build a minimal git repo at *path*, optionally with an ``origin`` remote.
+
+    Raw subprocess (not ``make_git_repo``): no existing fixture sets a
+    remote, and extending the widely-shared factory to add one would be a
+    broader-blast-radius change than the callers need (#1198). Shared by
+    ``test_pr_hydrate.py`` and ``test_preflight.py`` (#2158) so the same
+    ~10-line builder isn't maintained as two independent copies.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "-C", str(path), "init"], capture_output=True, check=True)
+    if remote_url is not None:
+        subprocess.run(
+            ["git", "-C", str(path), "remote", "add", "origin", remote_url],
+            capture_output=True,
+            check=True,
+        )
+    return path
+
+
 def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") -> None:
     """Write *relpath* under *worktree* and commit it as a real tracked file.
 

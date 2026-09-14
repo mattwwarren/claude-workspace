@@ -64,6 +64,11 @@ uv run --project "$(git rev-parse --show-toplevel)" python \
   --ticket-id <NUMBER> --client <CLIENT>
 ```
 
+`--repo` is no longer defaulted and is derived per-client from `--client`'s
+resolved repo root (#2158) — omit `--repo` by default, and pass it explicitly
+only when that automatic derivation fails (e.g. no resolvable GitHub `origin`
+remote on the client's repo).
+
 Each call emits one JSON object with `ok` (bool) and `checks`. Aggregate into a
 table: one row per ticket, `ok` plus any failing hard checks. Then:
 

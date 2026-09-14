@@ -1,6 +1,6 @@
 [project]
 name = "claude-workspace"
-version = "1.45.8"
+version = "1.46.0"
 description = "Multi-session workspace orchestrator for Claude Code"
 readme = "README.md"
 authors = [
@@ -158,6 +158,7 @@ ignore = [
 # must follow the sys.path mutation, not precede it.
 ".claude/skills/cw-followup/scripts/parse_sentinel.py" = ["E402"]
 ".claude/skills/cw-validate-result/scripts/validate_sentinel.py" = ["E402"]
+".claude/skills/cw-smoke-test/scripts/preflight.py" = ["E402"]
 "src/cw/models/*.py" = [
     "TCH003",  # Pydantic models need runtime access to Path, UUID, datetime etc.
     # Cross-submodule model/enum imports (e.g. tasks -> events.WatchedPr) are
