@@ -191,9 +191,7 @@ def test_semantic_resolve_absent_from_both_locations_skips_with_labeled_friction
     assert "merge_conflict_post_push" in section
 
 
-def test_semantic_resolve_greps_cw_script_version_marker_and_headless_blocks_on_stale() -> (
-    None
-):
+def test_semantic_resolve_greps_version_marker_and_headless_blocks_on_stale() -> None:
     """A stale resolver is a tooling-integrity failure, not a merge outcome.
 
     It must NOT fold into ``merge_conflict_post_push`` alongside genuine
