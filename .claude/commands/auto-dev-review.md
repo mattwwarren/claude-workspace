@@ -374,7 +374,7 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
 
 3b. **Orchestrator fix gate** (Subagent Reliability Mitigation 1, fix-loop variant). At the top of the resumed REVIEW session, before re-running review (or before the sparse-feedback gate in step 4):
    - Re-run the test command in the impl worktree. Non-zero exit → fix is false; treat as cycle failure (counts against the 5-cycle hard cap).
-   - Re-run mypy/ruff. Non-zero on touched files → fix is false.
+   - Re-run ruff, and re-run mypy under the same Stage 2 type-check gate rule `auto-dev-impl.md` Step 2.5 gate 4 applies (baseline-filtered command when a mypy baseline applies, plain mypy otherwise — see `auto-dev-impl-appendix.md`, section "Type check gate: mypy baseline detection and comparison"). Non-zero on touched files, or a baseline file that gained entries since `$FORK_POINT` → fix is false. Baselined pre-existing errors in files the fix newly touched are recorded to `.cw/deferred-findings.md` exactly as gate 4 records them, not counted as a failure.
    - Compare pasted `git diff --stat` against live `git diff --stat $FORK_POINT`. Substantial mismatch → fix is false.
    - Verify the fix produced at least one new commit since the prior cycle (`git log $PRIOR_HEAD..HEAD --oneline` must be non-empty). Zero new commits → fix-loop agent did not actually fix anything; treat as cycle failure.
 
