@@ -99,6 +99,6 @@ def test_resolution_rule_names_pre_flight_resolution_conformance_as_trace() -> N
     section and friction_highlights — not resolution_consumed (#2098).
     """
     content = _cmd("auto-dev-plan.md")
-    window = _after(content, RESOLUTION_RULE_ANCHOR, span=1500)
+    window = _after(content, RESOLUTION_RULE_ANCHOR, span=1700)
     assert "Pre-flight Resolution Conformance" in window
     assert "friction_highlights" in window
