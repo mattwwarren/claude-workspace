@@ -313,10 +313,22 @@ for scripting and field reads; it prints two distinct sections:
   most recent `DISPATCH_TICK` event stored in the event history. It can be
   stale, especially after idle periods or when no dispatch has run since the
   last queue mutation.
-  - `running=N/M` reflects that tick's grant math — how many workers were
-    granted vs. the cap at dispatch time — **not** the current live session
-    count.
+  - `running=N/M` is session-based (a count of DAEMON sessions in ACTIVE/IDLE
+    status against the client's cap) — but it is a snapshot taken **at that
+    tick**, not the current live session count as of when you read the
+    footer.
   - For current live session count, use the top table or `cw status`.
+  - `[ORPHAN? — N session(s) counted against the ceiling vs M RUNNING row(s)]`
+    (#2142) appears when that tick counted more sessions than the top table has
+    RUNNING rows for the client. The two numbers are independent metrics by
+    design — `running` is session-based, because a pre-existing DAEMON session
+    is real host load whether or not the queue tracks it — so an excess is not
+    itself a contradiction, and ordinary snapshot lag produces it too. It is,
+    however, the exact shape an uncorrelated fix-agent session makes: it holds
+    a client-ceiling slot that no task row accounts for, so the client reads
+    `running=2/2 cap_full` beside a single RUNNING row and stops admitting
+    work. The annotation is reporting only and never changes what is admitted;
+    run `cw doctor` to see whether a real session is behind it.
 
 ---
 
@@ -565,7 +577,6 @@ common wedge conditions:
   sentinel (a plain/non-headless spawn whose harness never re-fired the Stop
   hook that would have completed it) — marks the session `COMPLETED`, stops
   the daemon surface, and reverts the owning task to PENDING.
-
 Run `cw doctor --reap --json` for machine-readable output.
 
 #### `terminal_sibling` duplicate rows (GitHub #2100)

@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import ANY, MagicMock, patch
@@ -51,6 +51,7 @@ from tests._reconcile_helpers import (
 )
 from tests.conftest import (
     _make_daemon_session,
+    _make_tick_summary,
     _write_project_config_yaml,
     stub_fetch_plan,
 )
@@ -7468,6 +7469,37 @@ class TestDevQueueStatusWithTick:
         assert data["attn-client"]["needs_attn"] == 1
 
 
+def _patch_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    client_name: str,
+    *,
+    age_seconds: int = 0,
+    running: int = 0,
+    cap: int = 3,
+    skip_reason: str = "none",
+) -> None:
+    """Shared ``latest_tick_summary_by_client`` patch for dev-queue status tests.
+
+    Consolidates the two per-class builders ``TestDevQueueStatusBlockedAnnotation``
+    and ``TestDevQueueStatusRunningRowDivergence`` used to maintain independently
+    (#2142 codex round-4). Defaults preserve each existing call's prior behavior:
+    ``age_seconds=0`` gives a fresh ``tick_at`` (the divergence tests' prior
+    default), ``cap=3`` matches the blocked-annotation tests' prior hardcoded
+    value, and the divergence tests pass ``cap=2`` explicitly.
+    """
+    tick = _make_tick_summary(
+        pending=1,
+        running=running,
+        cap=cap,
+        skip_reason=skip_reason,
+        tick_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+    )
+    monkeypatch.setattr(
+        "cw.cli.dev_queue.status.latest_tick_summary_by_client",
+        lambda: {client_name: tick},
+    )
+
+
 class TestDevQueueStatusBlockedAnnotation:
     """`[BLOCKED — <executor> review, ...]` replaces `[STALE]` when live (#1742).
 
@@ -7475,27 +7507,6 @@ class TestDevQueueStatusBlockedAnnotation:
     executor is legitimately mid-review. The executor-blocked marker sidecar
     resolves that ambiguity at the one render site.
     """
-
-    @staticmethod
-    def _patch_tick(
-        monkeypatch: pytest.MonkeyPatch, client_name: str, *, age_seconds: int
-    ) -> None:
-        from datetime import timedelta
-
-        from cw.orchestrate import TickSummary
-
-        tick = TickSummary(
-            claimed=0,
-            pending=1,
-            running=0,
-            cap=3,
-            skip_reason="none",
-            tick_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
-        )
-        monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {client_name: tick},
-        )
 
     @staticmethod
     def _save_marker(
@@ -7532,7 +7543,7 @@ class TestDevQueueStatusBlockedAnnotation:
                 status=QueueItemStatus.PENDING,
             )
         )
-        self._patch_tick(monkeypatch, "blocked-client", age_seconds=850)
+        _patch_tick(monkeypatch, "blocked-client", age_seconds=850)
         self._save_marker("blocked-client", "1723", started_seconds_ago=449)
 
         runner = CliRunner()
@@ -7558,7 +7569,7 @@ class TestDevQueueStatusBlockedAnnotation:
                 status=QueueItemStatus.PENDING,
             )
         )
-        self._patch_tick(monkeypatch, "stale-client", age_seconds=850)
+        _patch_tick(monkeypatch, "stale-client", age_seconds=850)
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
@@ -7580,7 +7591,7 @@ class TestDevQueueStatusBlockedAnnotation:
                 status=QueueItemStatus.PENDING,
             )
         )
-        self._patch_tick(monkeypatch, "client-a", age_seconds=850)
+        _patch_tick(monkeypatch, "client-a", age_seconds=850)
         self._save_marker("client-b", "1723", started_seconds_ago=100)
 
         runner = CliRunner()
@@ -7603,7 +7614,7 @@ class TestDevQueueStatusBlockedAnnotation:
                 status=QueueItemStatus.PENDING,
             )
         )
-        self._patch_tick(monkeypatch, "busy-client", age_seconds=850)
+        _patch_tick(monkeypatch, "busy-client", age_seconds=850)
         self._save_marker("busy-client", "1723", started_seconds_ago=449)
         self._save_marker("busy-client", "1724", started_seconds_ago=100)
 
@@ -7627,7 +7638,7 @@ class TestDevQueueStatusBlockedAnnotation:
                 status=QueueItemStatus.PENDING,
             )
         )
-        self._patch_tick(monkeypatch, "fresh-client", age_seconds=10)
+        _patch_tick(monkeypatch, "fresh-client", age_seconds=10)
         self._save_marker("fresh-client", "1723", started_seconds_ago=5)
 
         runner = CliRunner()
@@ -7635,6 +7646,86 @@ class TestDevQueueStatusBlockedAnnotation:
         assert result.exit_code == 0, result.output
         assert "[STALE" not in result.output
         assert "[BLOCKED" not in result.output
+
+
+class TestDevQueueStatusRunningRowDivergence:
+    """`[ORPHAN?]` when the tick's session count exceeds the RUNNING row count.
+
+    Admission math deliberately counts DAEMON sessions rather than task rows
+    (``dispatch/lanes.py``: a pre-existing session is real host load whether or
+    not the queue tracks it), so ``running=2/2 cap_full`` alongside a single
+    RUNNING row is not a contradiction the gating should resolve — but it is
+    exactly the shape an orphaned fix-agent session produces (#2142), and an
+    operator reading the two numbers has no way to tell. Reporting-only: this
+    annotates the divergence, it does not change what gets admitted.
+    """
+
+    def test_status_flags_running_session_count_exceeding_running_rows(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="2142",
+                client="orphan-client",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        _patch_tick(
+            monkeypatch, "orphan-client", running=2, cap=2, skip_reason="cap_full"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[ORPHAN?" in result.output
+        assert "cw doctor" in result.output
+
+    def test_status_no_divergence_annotation_when_counts_match(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="2143",
+                client="matched-client",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        _patch_tick(monkeypatch, "matched-client", running=1, cap=2)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[ORPHAN?" not in result.output
+
+    def test_status_no_divergence_annotation_when_running_matches_with_blocked(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A BLOCKED_ON_USER row alongside a matched tick.running/task_running
+        count must not spuriously trigger the annotation — this does not
+        exercise real lane accounting (see TestDevQueueStatusRunningRowDivergence's
+        other tests for that), just the annotation's own comparison."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="2144",
+                client="blocked-only-client",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+            )
+        )
+        _patch_tick(monkeypatch, "blocked-only-client", running=0, cap=2)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[ORPHAN?" not in result.output
 
 
 class TestDevQueueTasksPrState:
