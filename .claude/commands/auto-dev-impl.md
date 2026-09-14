@@ -153,7 +153,11 @@ Stage 2 agent spawn:
 - Post-implementation: `uv run ruff check --fix` on changed files
 - **Type check gate (do NOT declare complete until clean):**
   - Run `uv run mypy <touched_files>` (pass the changed paths explicitly, not `.`).
-  - Fix every mypy error in touched files, pre-existing ones included — global CLAUDE.md treats those as active bugs, not noise to inherit.
+  - **Your diff must introduce ZERO new errors.** A newly-introduced error always blocks, in every case below.
+  - **If the repo maintains a mypy baseline** — a checked-in baseline file that the repo's own lint / pre-commit gate consults — then only errors that are NEW relative to that baseline block this gate. Determine "new" by comparing against the baseline as of the fork point, not by comparing error counts. Pre-existing baselined errors in a file you merely touched do NOT block; report them in friction so the orchestrator can track them.
+    Rationale: a repo that ships a baseline has already made a deliberate, gated decision about its inherited debt. A stage gate stricter than the repo's own gate blocks correct implementations over debt the change did not cause — and the usual result is that a small change is asked to absorb an unrelated legacy refactor, or that someone reaches for a suppression to get past it.
+  - **If the repo has no baseline**, fix every mypy error in touched files, pre-existing ones included — treat those as active bugs, not noise to inherit.
+  - A repo's own CLAUDE.md may override either branch and demand pre-existing errors be fixed regardless of a baseline. Where it does, follow it — but report the resulting BLOCK with the error set and a proposed split (this change vs. the inherited debt) rather than silently absorbing a large refactor.
   - Adding `# type: ignore`, `# noqa`, or weakening a type to `Any` requires explicit user approval. If you reach for one, STOP and report it as a BLOCK in friction with the specific error and proposed ignore. Do NOT add it unilaterally.
   - If touched files transitively expose untouched-file mypy errors that did not exist before your edit, those are your errors too — fix them or report as BLOCK.
 - Instruction to read model/schema definitions before writing code
