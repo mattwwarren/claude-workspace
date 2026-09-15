@@ -35,7 +35,7 @@ from cw.events import record_event
 from cw.gh import fetch_approved_plan_comment
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.worktree import _checked_out_branch, worktree_path_for
+from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -827,23 +827,13 @@ def _tracker_allows_github_fetch(client_cfg: ClientConfig | None) -> bool:
 def _local_plan_path(task: TicketTask, client_cfg: ClientConfig | None) -> Path | None:
     """Resolve the on-disk ``.cw/plan.md`` for *task*, or None.
 
-    ``task.worktree_path`` wins when stamped (USER-origin rows, tests). It is
-    ``None`` for every dispatch-driven row -- dispatch stamps
-    ``worktree_path`` on the Session, never the TicketTask (see
-    ``queue_peek.py``) -- so the pre-#1906-follow-up fallback that read only
-    that field never saw a real worktree. Fall back to the branch-derived
-    worktree :func:`worktree_path_for` computes for the feature branch, the
-    same read-only primitives ``create_worktree`` uses to decide reuse, and
-    trust it only when the checked-out branch matches: a stale or foreign
-    checkout must not lend its plan to this ticket.
+    The stamped-wins-then-branch-derived-fallback rule lives in
+    :func:`cw.worktree.resolve_task_worktree`; #2123 extracted it there after a
+    second consumer (``dispatch.review_gates``) needed the same resolution and
+    a duplicate copy read only the never-stamped ``task.worktree_path``.
     """
-    if task.worktree_path is not None:
-        return task.worktree_path / ".cw" / "plan.md"
-    if client_cfg is None:
-        return None
-    branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
-    wt_path = worktree_path_for(client_cfg, branch)
-    if not wt_path.exists() or _checked_out_branch(wt_path) != branch:
+    wt_path = resolve_task_worktree(task, client_cfg)
+    if wt_path is None:
         return None
     return wt_path / ".cw" / "plan.md"
 
