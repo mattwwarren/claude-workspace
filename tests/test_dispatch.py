@@ -12207,6 +12207,20 @@ class TestReviewStalenessGate:
         )
         assert _should_gate_for_review_staleness(task, None) is False
 
+    def test_resolve_reviewed_sha_handles_a_malformed_review_block(self) -> None:
+        """The resolver's own contract, independent of the gate's scoping.
+
+        ``_reports_review_content`` shields the gate from ever reaching this
+        branch, but the resolver is re-exported and documented as safe to call
+        on any raw sentinel dict — a non-dict ``review`` resolves to ``None``
+        rather than raising, like both sibling resolvers.
+        """
+        from cw.dispatch.review_gates import _resolve_review_reviewed_sha
+
+        assert _resolve_review_reviewed_sha({"review": "not-a-dict"}) is None
+        assert _resolve_review_reviewed_sha({"review": None}) is None
+        assert _resolve_review_reviewed_sha(None) is None
+
     def test_non_string_reviewed_sha_gates(
         self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
