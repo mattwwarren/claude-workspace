@@ -112,6 +112,96 @@ plan's enumeration — is the common path and needs nothing from this section.
 
 ---
 
+## Type check gate: mypy baseline detection and comparison
+
+Reached from the core doc's **Type check gate** (Stage 2 agent prompt), from
+Step 2.5 gate 4, and from `auto-dev-review.md` Step 3b — whenever a worker or
+the orchestrator is about to treat a repo as having a mypy baseline. The
+common path (no baseline, or a strict override applies) never needs this.
+
+**Detection — both conditions required, evaluated at `$FORK_POINT`:**
+
+1. A baseline file is tracked: `git ls-tree -r --name-only "$FORK_POINT"` lists
+   it (e.g. `mypy-baseline.txt`, `.mypy/baseline.json`). Record its
+   repo-relative path, verbatim, as `MYPY_BASELINE_FILE`.
+2. The repo's own gate consumes it: its pre-commit config, CI workflow, or lint
+   script (as of `$FORK_POINT`) runs mypy through a mechanism that reads that
+   file — e.g. `mypy ... | mypy-baseline filter`, or basedmypy's
+   `--baseline-file`. Record that exact command, verbatim, as
+   `MYPY_BASELINE_CMD`.
+
+A baseline-looking file that no gate consumes is not a baseline — use the
+no-baseline branch. Never construct a baseline mechanism the repo does not
+already run.
+
+**Blocking set.** Run `MYPY_BASELINE_CMD` (scoped to touched files if the
+command accepts paths; otherwise whole-repo, filtered to touched files). Every
+error it reports in a touched file blocks. Errors plain `uv run mypy
+<touched_files>` reports that `MYPY_BASELINE_CMD` suppresses are the baselined
+pre-existing set — they do not block. The core doc's transitive rule still
+applies: untouched-file errors that did not exist at `$FORK_POINT` block.
+
+**The baseline may never grow in this diff.** Check:
+
+```bash
+git diff "$FORK_POINT" -- "$MYPY_BASELINE_FILE" | grep -E '^\+[^+]'
+```
+
+Any output (an added or rewritten entry line) means the diff baselined an
+error — that is a suppression, same class as `# type: ignore`: STOP and report
+a BLOCK needing explicit user approval. Pure deletions (debt you fixed) are
+fine. Do not run the tool's re-sync/regenerate command; if it would rewrite
+unrelated lines, leave the file untouched.
+
+**Orchestrator record (Step 2.5 gate 4 and Step 3b only).** For each touched
+file carrying baselined pre-existing errors, append one bare-shape entry to the
+`DEFERRED-REVIEW-FINDINGS` block in `.cw/deferred-findings.md`. Skip a file
+that already has an entry. `cw review adjudicate` merges this as prior content,
+but its parser fails closed (`src/cw/review_adjudication/_deferred_md.py`), so
+the shape is a contract:
+
+- **File absent or empty** — create it with exactly this skeleton, then the
+  entries inside the block (the title and provenance lines are required; a
+  file without the title makes Stage 3's next `cw review adjudicate` refuse to
+  run):
+
+  ```
+  # Deferred Review Findings
+  <!-- written by Stage 3 (auto-dev-review.md), consumed by Stage 4 Step 4d (auto-dev-finalize.md) -->
+
+  ## Review adjudication
+
+  <!-- DEFERRED-REVIEW-FINDINGS
+  <entries>
+  DEFERRED-REVIEW-FINDINGS -->
+  ```
+
+- **File present without a `DEFERRED-REVIEW-FINDINGS` block** — append the
+  block (with the entries) at the end, leaving existing lines untouched. Only
+  safe when every existing non-blank line is one of the skeleton's structural
+  lines or a well-formed `- <file> — "<summary>" — <rationale>` rejected
+  bullet (the parser rejects anything else). If any line is neither, do not
+  write: report `deferred_findings_unparseable` in friction with the file's
+  contents and leave the file untouched.
+- **Block present** — insert the entries immediately before its closing
+  `DEFERRED-REVIEW-FINDINGS -->` line.
+
+Each entry, exactly four lines, no `round:`/`recorded_at:` lines (those are
+written only by the CLI), and no `"` inside the quoted values:
+
+```
+- severity: SHOULD_FIX
+  summary: "pre-existing baselined mypy errors in <file>"
+  file: <file>
+  rationale: "baselined debt in a file this change touched; not introduced by it: <file:line [code], ...>"
+```
+
+Stage 4 Step 4d copies these into the PR body and Step H3 files them as
+tickets, so inherited debt surfaced by the gate is never left only in
+`friction_highlights`.
+
+---
+
 ## Step 2.5 gate 1: why the empty-diff check is not the only line of defence (#1870)
 
 Dispatch independently re-verifies the empty-diff condition with its own git

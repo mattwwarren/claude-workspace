@@ -22,7 +22,14 @@ Two phases, in this order:
    fresh REVIEW session that resumes at ``s3_fix_loop, cycle_{N+1}`` via the
    existing ``Auto-Dev-Fix-Cycle`` trailer detection.
 2. **Pending dispatches** — a row carrying a ``pending_fix_dispatch`` gets its
-   fix agent spawned.
+   fix agent spawned, unless the row has drifted off RUNNING since the handoff
+   was recorded, in which case the handoff is dropped instead (#2142; see
+   ``_build_dispatch_jobs`` and ``_drop_stale_handoffs``). A row can also drift
+   off RUNNING — or stay RUNNING but move to a *different* stage — *after* its
+   job was already built, during the stale-handoff drop's own unlocked
+   emission window — ``_revalidate_dispatch_jobs`` re-checks every built job's
+   status AND stage immediately before dispatch to close that window (#2142
+   rounds 5-6).
 
 Deliberately NOT an RFC-0010 review recipe, and deliberately not registered in
 ``run_review_recipes``: that family gates on ``review_recipes_enabled``, which
@@ -39,12 +46,14 @@ The detect/act/deferred-post-lock-dispatch *shape* is still borrowed from
 The #2064 hoist also runs this module one step later, per tick, relative to
 ``cw.reconcile.escalation.run_escalation_sweep`` (previously before it inside
 ``core._run_terminal_backstops_and_sweeps``, now after ``_reconcile_locked``
-returns). Inert: ``run_fix_dispatch`` only ever touches RUNNING rows and
-transitions them RUNNING->PENDING (status stays RUNNING for the whole handoff,
-per the paragraph above), while escalation eligibility requires
+returns). Inert: the only status this module ever writes is
+RUNNING->PENDING (status stays RUNNING for the whole handoff, per the
+paragraph above), while escalation eligibility requires
 BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF/FAILED. Neither RUNNING nor PENDING
 is ever escalation-eligible, so this module cannot move a row into or out of
-the set the sweep scans, in either order.
+the set the sweep scans, in either order. The #2142 stale-handoff drop is the
+one path that touches a non-RUNNING row at all, and it only clears
+``pending_fix_dispatch`` — never the status — so the same argument holds.
 
 Throughout, the row's ``status`` is left at RUNNING for the whole handoff. That
 is load-bearing, not incidental: ``dispatch/claim.py`` only ever claims PENDING
@@ -80,6 +89,7 @@ if TYPE_CHECKING:
         DevQueueStore,
         OrchestratorConfig,
         PendingFixDispatch,
+        Stage,
         TicketTask,
     )
 
@@ -93,6 +103,12 @@ FIX_LOOP_PENDING_DISPATCH = "fix_loop_pending_dispatch"
 
 _STAGE_FIX_LOOP = "s3_fix_loop"
 _ERROR_KIND_DISPATCH_FAILED = "fix_dispatch_failed"
+
+# error_kind/paused_status for a handoff found on a row that is no longer
+# RUNNING (#2142). Distinct from _ERROR_KIND_DISPATCH_FAILED: nothing was
+# attempted and nothing failed — the row moved out from under an unconsumed
+# record, and dispatching onto it would have spawned an uncorrelated session.
+_ERROR_KIND_STALE_HANDOFF = "fix_dispatch_stale_row"
 
 # How long a HookContextConflictError stays "transient by construction" (#2075).
 # The expected conflict window is one tick or two: the REVIEW session that
@@ -173,40 +189,312 @@ class _DispatchJob(NamedTuple):
     ticket_id: str
     client: str
     lane: str
+    # Row's stage at build time (#2142 round 6). Captured here so
+    # ``_revalidate_dispatch_jobs`` can require the row to still be at the
+    # SAME stage immediately before dispatch, not just still RUNNING — see
+    # ``_job_still_valid``.
+    stage: Stage
+
+
+def _emit_fix_dispatch_operator_signal(
+    *,
+    session_id: str,
+    ticket_id: str,
+    client: str,
+    lane: str,
+    error_kind: str,
+    breadcrumbs: str,
+) -> None:
+    """Emit the STAGE_ERRORED + SESSION_NEEDS_ATTENTION event pair for a
+    fix-dispatch problem — shared by the stale-handoff drop in
+    ``_build_dispatch_jobs`` and
+    ``_stamp_dispatch_failure``, which differ only in *error_kind*,
+    *breadcrumbs*, and whether the row also gets unparked.
+    """
+    record_event(
+        OrchestratorEventType.STAGE_ERRORED,
+        {
+            "session_id": session_id,
+            "ticket_id": ticket_id,
+            "stage": _STAGE_FIX_LOOP,
+            "started_at": datetime.now(UTC).isoformat(),
+            "error_kind": error_kind,
+        },
+        correlation_id=ticket_id,
+    )
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": session_id,
+            "session_name": "",
+            "client": client,
+            "ticket_id": ticket_id,
+            "claude_session_id": None,
+            "paused_status": error_kind,
+            "breadcrumbs": breadcrumbs,
+            "crashed": False,
+            "lane": lane,
+        },
+        correlation_id=ticket_id,
+    )
+
+
+class _StaleHandoffSnapshot(NamedTuple):
+    """Phase-1 identification of a handoff seen off RUNNING (#2142 round 3).
+
+    Taken read-only under ``dev_queue_lock()`` inside ``_build_dispatch_jobs``
+    — no clearing, no event I/O happens at that point. ``_drop_stale_handoffs``
+    consumes this snapshot after the lock has released: it emits the operator
+    signal unlocked, then re-acquires the lock once to re-validate that the row
+    still carries this *exact* handoff (identity: requested_by_session_id +
+    requested_at + cycle, the fields a fresh ``PendingFixDispatch`` cannot
+    collide on by construction) before clearing it. A row that changed underneath
+    — reclaimed back to RUNNING, or re-armed with a new handoff — is left alone.
+    """
+
+    session_id: str
+    ticket_id: str
+    client: str
+    lane: str
+    requested_at: datetime
+    cycle: int
+    breadcrumbs: str
+
+
+def _stale_handoff_snapshot(task: TicketTask) -> _StaleHandoffSnapshot | None:
+    """Describe a handoff whose row is no longer RUNNING (#2142).
+
+    Pure: reads the row and returns the phase-1 snapshot. No mutation, no
+    event I/O — see ``_StaleHandoffSnapshot``.
+    """
+    pending = task.pending_fix_dispatch
+    if pending is None:  # pragma: no cover - caller checked
+        return None
+    return _StaleHandoffSnapshot(
+        session_id=pending.requested_by_session_id,
+        ticket_id=task.ticket_id,
+        client=task.client,
+        lane=task.lane,
+        requested_at=pending.requested_at,
+        cycle=pending.cycle,
+        breadcrumbs=f"row status={task.status.value} dropped_label={pending.label!r}",
+    )
+
+
+def _drop_stale_handoffs(snapshots: list[_StaleHandoffSnapshot]) -> None:
+    """Page the operator for each stale handoff, then clear what's still stale.
+
+    (#2142 round 3.)
+
+    Binding two-phase contract (operator, round 3): phase 1 (inside
+    ``_build_dispatch_jobs``, under the lock) only *identifies* a stale
+    handoff. This function is phase 2+3, run strictly after that lock has
+    released:
+
+    - **Emit** (unlocked, per candidate): the STAGE_ERRORED + SESSION_NEEDS_ATTENTION
+      pair is the only audit trail a dropped handoff ever gets. If emitting it
+      raises for a candidate, that candidate is logged and dropped from this
+      tick — not cleared, not re-raised. The handoff survives on disk and the
+      next reconcile tick re-detects and re-pages it. One candidate's I/O
+      failure must not block every other candidate's independent drop or
+      dispatch in the same tick, which is exactly what letting the exception
+      propagate out of a single shared lock (round 1's design) would do.
+    - **Re-validate and clear** (a single fresh ``dev_queue_lock()`` acquisition):
+      for each candidate whose event pair was actually persisted, re-resolve
+      the row and clear ``pending_fix_dispatch`` only if the row is still
+      non-RUNNING AND still carries the identical handoff the snapshot
+      described. If the state moved while the lock was released for
+      emission — the row was reclaimed back to RUNNING, or a fresh REVIEW
+      round re-armed a new handoff — the clear is skipped, silently and
+      without error: the emitted event already describes a real condition
+      that held a moment ago, and is not clawed back after the fact.
+    """
+    if not snapshots:
+        return
+    confirmed: list[_StaleHandoffSnapshot] = []
+    for snap in snapshots:
+        try:
+            _emit_fix_dispatch_operator_signal(
+                session_id=snap.session_id,
+                ticket_id=snap.ticket_id,
+                client=snap.client,
+                lane=snap.lane,
+                error_kind=_ERROR_KIND_STALE_HANDOFF,
+                breadcrumbs=snap.breadcrumbs,
+            )
+        except OSError:
+            _log.warning(
+                "fix_dispatch: stale-handoff audit event failed for ticket %s "
+                "— handoff left in place, will retry next tick",
+                snap.ticket_id,
+                exc_info=True,
+            )
+            continue
+        confirmed.append(snap)
+    if not confirmed:
+        return
+    with dev_queue_lock():
+        store = load_dev_queue()
+        dirty = False
+        for snap in confirmed:
+            task = _find_task(store, snap.ticket_id, snap.client)
+            if task is None or task.pending_fix_dispatch is None:
+                continue  # already cleared or removed concurrently
+            pending = task.pending_fix_dispatch
+            if (
+                task.status == QueueItemStatus.RUNNING
+                or pending.requested_by_session_id != snap.session_id
+                or pending.requested_at != snap.requested_at
+                or pending.cycle != snap.cycle
+            ):
+                # Row reclaimed, or re-armed with a different handoff, while
+                # the lock was released for emission — not ours to clear.
+                continue
+            task.pending_fix_dispatch = None
+            dirty = True
+        if dirty:
+            save_dev_queue(store)
+
+
+def _job_still_valid(
+    task: TicketTask | None, expected_stage: Stage | None = None
+) -> bool:
+    """True if a row is still eligible to receive a fix-agent dispatch.
+
+    The single definition of "eligible" — RUNNING, at ``expected_stage`` (if
+    given), with no ``fix_dispatch_session_id`` already outstanding — shared by
+    ``_build_dispatch_jobs`` (first check, under its own lock) and
+    ``_revalidate_dispatch_jobs`` (second check, immediately before dispatch,
+    #2142 rounds 5-6). Deliberately does NOT check ``pending_fix_dispatch``: the
+    two call sites disagree on what a missing handoff means (build treats it
+    as "already handled, skip"; revalidate treats a job it already built as
+    carrying its own copy of the handoff, so the row losing it mid-tick is
+    just another form of "no longer eligible").
+
+    ``expected_stage`` defaults to ``None`` for ``_build_dispatch_jobs``'s own
+    call: at that point there is no previously-captured stage to compare
+    against yet — the build pass is what *captures* ``task.stage`` onto the
+    job record for ``_revalidate_dispatch_jobs`` to compare against later
+    (#2142 round 6). A row that left and re-entered RUNNING at a different
+    stage during the unlocked stale-handoff window (reverted, then re-claimed
+    for a later stage) would otherwise still pass the RUNNING-only check and
+    spawn a fix agent built for its old stage.
+    """
+    return (
+        task is not None
+        and task.status == QueueItemStatus.RUNNING
+        and task.fix_dispatch_session_id is None
+        and (expected_stage is None or task.stage == expected_stage)
+    )
+
+
+def _revalidate_dispatch_jobs(jobs: list[_DispatchJob]) -> list[_DispatchJob]:
+    """Re-check each already-built job's row immediately before dispatch.
+
+    (#2142 round 5.)
+
+    ``_build_dispatch_jobs`` snapshots ``jobs`` under one ``dev_queue_lock()``
+    acquisition, then releases it. ``_drop_stale_handoffs`` — run on the
+    *other* return value, ``stale`` — then spends real wall-clock time
+    unlocked emitting audit events, during which a *different* row's
+    non-sentinel RUNNING->PENDING revert (the same class ``_build_dispatch_jobs``'s
+    own inline comment names) can land on a row this tick already built a job
+    for. A row can also leave and re-enter RUNNING at a *different* stage
+    during that same window (reverted, then re-claimed for a later stage,
+    #2142 round 6) — RUNNING alone would not catch that. Re-running
+    ``_job_still_valid`` here against the job's captured ``stage``, under one
+    fresh lock acquisition, closes both windows: a row that no longer
+    qualifies is dropped from this tick's dispatch rather than spawning an
+    uncorrelated (or stage-stale) fix agent for it. Dropping is silent beyond
+    a debug log — the row's own ``pending_fix_dispatch`` is left untouched, so
+    the next reconcile tick's ``_build_dispatch_jobs`` re-detects it under
+    whatever status/stage it now holds and routes it through the ordinary
+    build-or-stale path from there.
+    """
+    if not jobs:
+        return jobs
+    with dev_queue_lock():
+        store = load_dev_queue()
+        survivors = []
+        for job in jobs:
+            task = _find_task(store, job.ticket_id, job.client)
+            if _job_still_valid(task, expected_stage=job.stage):
+                survivors.append(job)
+            else:
+                _log.debug(
+                    "fix_dispatch: dropping ticket %s from this tick's dispatch "
+                    "— row no longer eligible after the unlocked stale-handoff "
+                    "phase (status=%s, stage=%s, expected_stage=%s)",
+                    job.ticket_id,
+                    task.status.value if task is not None else "row missing",
+                    task.stage.value if task is not None else "row missing",
+                    job.stage.value,
+                )
+        return survivors
 
 
 def _build_dispatch_jobs(
     candidates: list[_FixDispatchCandidate],
     clients: dict[str, ClientConfig],
-) -> list[_DispatchJob]:
-    """Re-validate each candidate under the lock and build its deferred job.
+) -> tuple[list[_DispatchJob], list[_StaleHandoffSnapshot]]:
+    """Re-validate each candidate under the lock; build jobs, snapshot stale rows.
 
     Read-only under the lock — unlike ``address_review``'s equivalent, no latch
     is stamped here. The latch IS ``pending_fix_dispatch`` itself, and it must
     survive until the dispatch actually succeeds so a transient conflict retries
     on the next tick instead of dropping the action list on the floor.
+
+    A row that has drifted off RUNNING is only *snapshotted* here (#2142 round 3)
+    — no clearing, no event I/O under this lock. The caller runs
+    ``_drop_stale_handoffs`` on the returned snapshots strictly after this lock
+    has released, then ``_revalidate_dispatch_jobs`` on the returned jobs
+    (#2142 round 5) — this function itself does not re-check ``jobs`` again.
     """
     if not candidates:
-        return []
+        return [], []
     jobs: list[_DispatchJob] = []
+    stale: list[_StaleHandoffSnapshot] = []
     with dev_queue_lock():
         store = load_dev_queue()
         for candidate in candidates:
             task = _find_task(store, candidate.ticket_id, candidate.client)
             if task is None or task.pending_fix_dispatch is None:
                 continue  # concurrently dispatched or removed — silent skip
-            if task.fix_dispatch_session_id is not None:
-                # A prior fix session for this ticket hasn't been unparked yet
-                # (completion watcher hasn't cleared fix_dispatch_session_id).
-                # Dispatching a second one here would orphan the first — the
-                # two fields are meant to be mutually exclusive by convention,
-                # not enforced by the model, so guard it here defensively.
-                _log.warning(
-                    "fix_dispatch: skipping ticket %s — fix_dispatch_session_id "
-                    "%r still set, prior fix session not yet unparked",
-                    task.ticket_id,
-                    task.fix_dispatch_session_id,
-                )
+            if not _job_still_valid(task):
+                if task.status != QueueItemStatus.RUNNING:
+                    # #2142: some other non-sentinel RUNNING->PENDING revert
+                    # (crash/phantom/stall/salvage sweep) moved the row while
+                    # this handoff sat unconsumed. Dispatching now spawns a
+                    # fix-agent session with no dev-queue correlation at all —
+                    # dispatch_fix_agent passes no task= kwarg, so nothing
+                    # transitions the row and the session becomes a
+                    # roster-ACTIVE orphan holding a client-ceiling slot
+                    # against a PENDING row. Drop the handoff instead: the row
+                    # is already back in the normal lifecycle and claim.py's
+                    # reclaim picks it up once _is_fix_dispatch_held stops
+                    # matching it.
+                    _log.warning(
+                        "fix_dispatch: identified stale handoff for ticket %s — "
+                        "row status is %s, not RUNNING",
+                        task.ticket_id,
+                        task.status.value,
+                    )
+                    snap = _stale_handoff_snapshot(task)
+                    if snap is not None:
+                        stale.append(snap)
+                else:
+                    # A prior fix session for this ticket hasn't been unparked
+                    # yet (completion watcher hasn't cleared
+                    # fix_dispatch_session_id). Dispatching a second one here
+                    # would orphan the first — the two fields are meant to be
+                    # mutually exclusive by convention, not enforced by the
+                    # model, so guard it here defensively.
+                    _log.warning(
+                        "fix_dispatch: skipping ticket %s — fix_dispatch_session_id "
+                        "%r still set, prior fix session not yet unparked",
+                        task.ticket_id,
+                        task.fix_dispatch_session_id,
+                    )
                 continue
             client_cfg = clients.get(task.client)
             if client_cfg is None:
@@ -224,9 +512,10 @@ def _build_dispatch_jobs(
                     ticket_id=task.ticket_id,
                     client=task.client,
                     lane=task.lane,
+                    stage=task.stage,
                 )
             )
-    return jobs
+    return jobs, stale
 
 
 def _stamp_dispatch_success(job: _DispatchJob, session_id: str) -> None:
@@ -269,31 +558,13 @@ def _stamp_dispatch_failure(job: _DispatchJob, exc: CwError) -> None:
         # session_id degrades to the REVIEW session that recorded the handoff:
         # this tick owns no session of its own, and that is the closest thing to
         # the $CW_SESSION the equivalent in-session emissions carry.
-        record_event(
-            OrchestratorEventType.STAGE_ERRORED,
-            {
-                "session_id": job.pending.requested_by_session_id,
-                "ticket_id": job.ticket_id,
-                "stage": _STAGE_FIX_LOOP,
-                "started_at": datetime.now(UTC).isoformat(),
-                "error_kind": _ERROR_KIND_DISPATCH_FAILED,
-            },
-            correlation_id=job.ticket_id,
-        )
-        record_event(
-            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-            {
-                "session_id": job.pending.requested_by_session_id,
-                "session_name": "",
-                "client": job.client,
-                "ticket_id": job.ticket_id,
-                "claude_session_id": None,
-                "paused_status": _ERROR_KIND_DISPATCH_FAILED,
-                "breadcrumbs": str(exc),
-                "crashed": False,
-                "lane": job.lane,
-            },
-            correlation_id=job.ticket_id,
+        _emit_fix_dispatch_operator_signal(
+            session_id=job.pending.requested_by_session_id,
+            ticket_id=job.ticket_id,
+            client=job.client,
+            lane=job.lane,
+            error_kind=_ERROR_KIND_DISPATCH_FAILED,
+            breadcrumbs=str(exc),
         )
 
 
@@ -308,7 +579,9 @@ def _act_on_pending_fix_dispatches(
 
     - ``dev_queue_lock()`` is genuinely never nested: every ``dispatch_fix_agent``
       call below runs strictly AFTER ``_build_dispatch_jobs``'s own
-      ``dev_queue_lock()`` releases.
+      ``dev_queue_lock()`` releases, AND after ``_revalidate_dispatch_jobs``'s
+      own separate, later acquisition of it also releases (#2142 round 5) —
+      three non-overlapping acquisitions of the same lock, never nested.
     - ``sessions_lock()`` is NOT nested only because the call site
       (``core.reconcile()``) invokes ``run_fix_dispatch`` after its own
       ``sessions_lock()`` releases (#2064) — that guarantee lives at the call
@@ -336,7 +609,10 @@ def _act_on_pending_fix_dispatches(
             _MAX_FIX_DISPATCHES_PER_TICK,
         )
     acted: list[str] = []
-    for job in _build_dispatch_jobs(capped, clients):
+    jobs, stale = _build_dispatch_jobs(capped, clients)
+    _drop_stale_handoffs(stale)
+    jobs = _revalidate_dispatch_jobs(jobs)
+    for job in jobs:
         try:
             session_id = dispatch_fix_agent(
                 client=job.client_cfg,

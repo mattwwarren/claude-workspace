@@ -291,7 +291,16 @@ def test_plan_live_fetch_rule_covers_body() -> None:
 
 
 def test_plan_body_fetch_op_named() -> None:
-    """The github-issues fetch op is named with the body field included."""
+    """The github-issues fetch op is named with the body field included.
+
+    #2154 initially widened the field list with `updatedAt` for the
+    round-cap delta check's fingerprint source, but the operator's round-2
+    disposition dropped `updated_at`/`updatedAt` from the fingerprint
+    entirely (it changes on every comment, including the pipeline's own park
+    comment) in favor of a two-component `operator_comment`/`body_sha`
+    fingerprint sourced from the body/comments fields already fetched here —
+    so this reverts to the original two-field form.
+    """
     assert "`gh issue view <n> --json body,comments`" in _cmd("auto-dev-plan.md")
 
 
