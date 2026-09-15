@@ -12,7 +12,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from cw.models import DEFAULT_LANE, DEFAULT_STAGE, DEV_QUEUE_SCHEMA_VERSION
+from cw.models import (
+    DEFAULT_LANE,
+    DEFAULT_STAGE,
+    DEV_QUEUE_SCHEMA_VERSION,
+    PLAN_APPROVED_FINGERPRINT_KEY,
+)
 
 
 def _fill_task_cost_default(task_raw: dict[str, Any]) -> None:
@@ -240,8 +245,8 @@ def _fill_plan_approved_fingerprint_default(task_raw: dict[str, Any]) -> None:
     Checkpoint 1 re-asks. That is the intended direction — a v35 row's
     unbound approval is exactly the vulnerability this field closes.
     """
-    if "plan_approved_fingerprint" not in task_raw:
-        task_raw["plan_approved_fingerprint"] = None
+    if PLAN_APPROVED_FINGERPRINT_KEY not in task_raw:
+        task_raw[PLAN_APPROVED_FINGERPRINT_KEY] = None
 
 
 def _fill_stale_gate_default(task_raw: dict[str, Any]) -> None:

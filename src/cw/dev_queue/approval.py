@@ -32,7 +32,13 @@ from cw.dev_queue.lifecycle import (
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
-from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.models import (
+    PLAN_APPROVED_FINGERPRINT_KEY,
+    PLAN_DRAFT_FINGERPRINT_KEY,
+    OrchestratorEventType,
+    QueueItemStatus,
+    Stage,
+)
 
 if TYPE_CHECKING:
     from cw.models import DevQueueStore, Session, TicketTask
@@ -207,7 +213,7 @@ def _stamp_plan_approval(task: TicketTask, from_stage: str, session: Session) ->
     """
     if from_stage == Stage.PLAN.value:
         task.plan_approved_at = datetime.now(UTC)
-        fingerprint = (session.last_result or {}).get("plan_draft_fingerprint")
+        fingerprint = (session.last_result or {}).get(PLAN_DRAFT_FINGERPRINT_KEY)
         task.plan_approved_fingerprint = (
             fingerprint if isinstance(fingerprint, str) else None
         )
@@ -352,7 +358,7 @@ def _approve_ticket_locked(
             "awaiting_signoff": False,
             "plan_requeued": False,
             "finalize_held": False,
-            "plan_approved_fingerprint": task.plan_approved_fingerprint,
+            PLAN_APPROVED_FINGERPRINT_KEY: task.plan_approved_fingerprint,
         }
 
     state = load_state()
@@ -453,5 +459,5 @@ def _approve_ticket_locked(
         "awaiting_signoff": awaiting_signoff,
         "plan_requeued": plan_requeued,
         "finalize_held": finalize_held,
-        "plan_approved_fingerprint": task.plan_approved_fingerprint,
+        PLAN_APPROVED_FINGERPRINT_KEY: task.plan_approved_fingerprint,
     }

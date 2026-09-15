@@ -30,6 +30,7 @@ from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
+    PLAN_APPROVED_FINGERPRINT_KEY,
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
     Session,
@@ -539,7 +540,7 @@ def _write_hook_context(
                     # v8 (#2102): the draft the approval above was bound to.
                     # Checkpoint 1 requires it to equal the resumed draft's own
                     # fingerprint before the approval counts as evidence.
-                    "plan_approved_fingerprint": task.plan_approved_fingerprint,
+                    PLAN_APPROVED_FINGERPRINT_KEY: task.plan_approved_fingerprint,
                 },
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,
