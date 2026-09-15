@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
@@ -644,7 +645,14 @@ _GATE2_BRANCH = "dev/gate2-fixture"
 _GATE2_LOCATIONS = ["session_worktree", "global_only"]
 
 
-def _gate2_placement(location: str, body: str) -> dict[str, str | None]:
+class _Gate2Placement(TypedDict):
+    """Where gate 2's resolver should find its candidate, as ``**kwargs``."""
+
+    session_copy: str | None
+    global_copy: str | None
+
+
+def _gate2_placement(location: str, body: str) -> _Gate2Placement:
     if location == "session_worktree":
         return {"session_copy": body, "global_copy": None}
     return {"session_copy": None, "global_copy": body}

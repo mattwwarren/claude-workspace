@@ -344,11 +344,6 @@ Fetching `main` alongside `<branch-name>` ensures `origin/main` is current befor
 **Gate setup: create one trap-cleaned temp worktree at `origin/<branch-name>`**
 
 ```bash
-# Anchor the cw session worktree root NOW, before $TMPWT exists — gate 2's
-# guard-script resolver needs this exact path, and it is the last point in
-# this script where `git rev-parse --show-toplevel` is guaranteed to mean the
-# session worktree rather than the about-to-be-created detached checkout.
-SESSION_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 FORK_POINT=$(git merge-base origin/main origin/<branch-name>)
 : "${CW_SESSION:?CW_SESSION must be set}"
 TMPWT="/tmp/gate-wt-$CW_SESSION"
@@ -369,7 +364,7 @@ trap 'gate_wt_cleanup; exit 143' INT TERM
 git worktree add --detach "$TMPWT" origin/<branch-name> || { echo "IMPL_FAILED: git worktree add exited $?"; exit 1; }
 ```
 
-All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT run those against the cw session worktree with origin-qualified refs — that cwd confusion is the bug this step fixes. FORK_POINT is recomputed from `origin` refs; do not trust the impl agent's reported value. **Exception:** gate 2's guard-script resolver and `--plan` argument deliberately target the session worktree, not `$TMPWT` (a detached checkout of the pushed branch has no `.claude/cw-context.json` and no uncommitted `.cw/` session state) — it uses `$SESSION_ROOT`, captured above, precisely because nothing before gate 2 has `cd`'d into `$TMPWT` yet (only gate 3's `cd "$TMPWT" && <test_command>` does), so a bare re-derivation there would be one reorder away from silently resolving to the wrong worktree.
+All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT run those against the cw session worktree with origin-qualified refs — that cwd confusion is the bug this step fixes. FORK_POINT is recomputed from `origin` refs; do not trust the impl agent's reported value. **Exception:** gate 2's guard-script resolver and its `--plan` argument target the cw session worktree, not `$TMPWT` (the detached checkout has no `.claude/cw-context.json` and no uncommitted `.cw/` state). Gate 2 derives that worktree **inside its own fence** from `git worktree list`, keyed on the branch, because shell variables do not persist between fenced Bash calls.
 
 **Gate checks (all run in `$TMPWT`):**
 
@@ -388,21 +383,18 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    ```bash
    git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > /tmp/touched_files-$CW_SESSION
    MIN_VERSION=1  # per the script version table in auto-dev-impl.md
-   # Anchored to the cw session worktree, NOT $TMPWT — see the note below.
-   if [ -n "${SESSION_ROOT:-}" ]; then
-     # Prefer the anchor Gate setup captured before $TMPWT existed — never
-     # re-derive from ambient cwd here, since by this point in the script that
-     # cwd may already be $TMPWT (a detached checkout with no
-     # .claude/cw-context.json, so the override below would silently miss).
-     GUARD_ROOT="$SESSION_ROOT"
-   else
-     GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
-     CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
-       "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
-     [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+   TMPWT="/tmp/gate-wt-$CW_SESSION"
+   # Derived here, not in an earlier fence: shell state does not persist between
+   # fenced Bash calls, and the ambient cwd may be $TMPWT. Keyed on the branch.
+   SESSION_WT=$(git -C "$TMPWT" worktree list --porcelain \
+     | awk -v b="branch refs/heads/<branch-name>" '/^worktree /{w=substr($0,10)} $0==b{print w; exit}')
+   if [ -z "$SESSION_WT" ] || [ "$SESSION_WT" = "$TMPWT" ]; then
+     echo "IMPL_FAILED: Step 2.5 gate 2: cannot locate cw session worktree for <branch-name>"
+     # HARD STOP: EXIT blocked with impl_failed (see bullet below).
+     exit 3
    fi
    RESOLVED=""
-   for candidate in "$GUARD_ROOT/.claude/scripts/check_plan_scope_conformance.py" "$HOME/.claude/scripts/check_plan_scope_conformance.py"; do
+   for candidate in "$SESSION_WT/.claude/scripts/check_plan_scope_conformance.py" "$HOME/.claude/scripts/check_plan_scope_conformance.py"; do
      if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
    done
    if [ -n "$RESOLVED" ]; then
@@ -416,19 +408,27 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
        # unreviewed scope drift, so the stop lives in the shell, not only prose.
        exit 3
      else
+       if [ ! -f "$SESSION_WT/.cw/plan.md" ]; then
+         echo "IMPL_FAILED: Step 2.5 gate 2: $SESSION_WT/.cw/plan.md not found"
+         exit 3
+       fi
        SCOPE_CONFORMANCE_OUTPUT=$(uv run python "$RESOLVED" \
-         --plan "$GUARD_ROOT/.cw/plan.md" --touched-files /tmp/touched_files-$CW_SESSION)
+         --plan "$SESSION_WT/.cw/plan.md" --touched-files /tmp/touched_files-$CW_SESSION)
        SCOPE_CONFORMANCE_EXIT=$?
      fi
    fi
    ```
-   Resolution follows "Guard-script path resolution and staleness marker (#2141)" above, with one addition specific to this call site: `$GUARD_ROOT` prefers `$SESSION_ROOT` (captured in Gate setup, before `$TMPWT` existed) whenever it is set, falling back to the general `git rev-parse --show-toplevel` / `cw-context.json` derivation only when it isn't (e.g. this fence run standalone). The repo-local candidate is always an **absolute** root, never a bare relative `.claude/scripts/...` probe and never the operator's cwd. `$GUARD_ROOT` resolves to the **cw session worktree**, deliberately not `$TMPWT`: the script and its `.claude/scripts/` copy belong to the session worktree, so substituting `$TMPWT` here would probe a detached checkout that may carry a different (or no) copy of the script. Re-deriving via `git rev-parse --show-toplevel` at this point in the script would be unsafe on its own — nothing stops a future edit from moving a `cd "$TMPWT"` earlier than gate 2, at which point that re-derivation silently returns `$TMPWT` instead (its `.claude/cw-context.json` lookup would simply find nothing, since a detached checkout of the pushed branch never carries that gitignored file) — preferring `$SESSION_ROOT` first removes that dependency on execution order entirely.
+   Resolution follows "Guard-script path resolution and staleness marker (#2141)" above for the marker gate, but this call site anchors differently: instead of `$GUARD_ROOT` (a `git rev-parse --show-toplevel` / `cw-context.json` derivation from the ambient cwd), it uses `$SESSION_WT`, derived **inside this fence** from `git -C "$TMPWT" worktree list --porcelain` keyed on `refs/heads/<branch-name>`. The fence carries no `$GUARD_ROOT`, no `rev-parse`, and no `$PWD` fallback, for two reasons that both have to hold at once: shell variables do not persist between fenced Bash calls, so an anchor captured in the Gate-setup fence may simply be unset here; and by this point the ambient cwd may already be `$TMPWT`, so any ambient re-derivation resolves to the detached gate worktree — the exact bug this gate had. Deriving from the branch is correct either way, whether or not the fences share a shell.
 
-   Note the script itself also runs against the **cw session worktree**, not `$TMPWT`: `.cw/plan.md` is session state that was never committed to the branch, so it does not exist inside the detached gate worktree. The `--plan` argument is anchored to `$GUARD_ROOT` for the same reason — a bare relative `.cw/plan.md` resolves against whatever the ambient cwd happens to be, and only the file-set extraction is deliberately `-C "$TMPWT"`.
+   `$SESSION_WT` is the **cw session worktree**, deliberately not `$TMPWT`: the script and its `.claude/scripts/` copy belong to the session worktree, so probing `$TMPWT` would read a detached checkout that may carry a different (or no) copy of the script. The candidate is always an **absolute** path, never a bare relative `.claude/scripts/...` probe and never the operator's cwd.
+
+   Note the script itself also runs against the **cw session worktree**, not `$TMPWT`: `.cw/plan.md` is session state that was never committed to the branch, so it does not exist inside the detached gate worktree. The `--plan` argument is anchored to `$SESSION_WT` for the same reason — a bare relative `.cw/plan.md` resolves against whatever the ambient cwd happens to be, and only the file-set extraction is deliberately `-C "$TMPWT"`.
 
    **Script absent from both locations** (no repo-local copy, no global install): log `"check_plan_scope_conformance: script absent, skipped"` in `friction_highlights` and continue to gate 3 — non-blocking. This is the honest label for a condition that previously fell through to the appendix's generic exit-2 "parse error" branch by accident (a missing file also exits 2). It is NOT the tooling-failure disposition (`impl_scope_conformance_unparsed` / `impl_failed`), which stays unchanged and applies only to a script that actually ran.
 
    **Candidate found but its marker is missing or below minimum:** do NOT run it, and do NOT take the skip-and-continue path above — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — check_plan_scope_conformance.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP.
+
+   **Session worktree not locatable** (or, once a current script has resolved, `$SESSION_WT/.cw/plan.md` is missing): EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — cannot locate cw session worktree for <branch-name>"`, and STOP.
 
    The script compares the delivered file set against the plan's `## Files Modified` enumeration and allows `max(SCOPE_DRIFT_ABS_FLOOR, round(plan_files * (SCOPE_DRIFT_RATIO - 1)))` unplanned files (v1: floor 5, ratio 1.5; per-repo override via `[tool.cw.scope_conformance]` in `pyproject.toml`). It prints a JSON verdict — `triggered`, `extra_files`, `allowed_extra`, `plan_file_count`, `delivered_file_count` — to stdout, captured above in `$SCOPE_CONFORMANCE_OUTPUT`.
 
