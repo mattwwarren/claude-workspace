@@ -8,19 +8,24 @@ require the ``## Files Modified`` heading the parser anchors on.
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import _appendix, _bash_fences, _cmd
+from tests.conftest import (
+    GUARD_FENCE_INVOKED,
+    _appendix,
+    _bash_fences,
+    _cmd,
+    run_guard_fence,
+)
 from tests.test_auto_dev_preflight_resolutions import _after
 
 # Sentinel replacing the real guard-script invocation, so the executable fence
 # tests observe *whether* a fence reached it rather than running the script.
-_INVOKED = "INVOKED"
+_INVOKED = GUARD_FENCE_INVOKED
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENTS = _REPO_ROOT / ".claude" / "agents"
@@ -392,7 +397,7 @@ def _site_fence(script: str) -> str:
     fences = [
         fence
         for fence in _bash_fences(_cmd(doc))
-        if f"for candidate in .claude/scripts/{script}" in fence
+        if f"/.claude/scripts/{script}" in fence and "for candidate in" in fence
     ]
     assert len(fences) == 1, (
         f"{doc}: expected one fence for {script}, got {len(fences)}"
@@ -401,52 +406,20 @@ def _site_fence(script: str) -> str:
 
 
 def _run_site_fence(
-    tmp_path: Path, script: str, script_body: str
+    tmp_path: Path,
+    script: str,
+    *,
+    repo_local: str | None = None,
+    global_copy: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Execute a site's own fence against a fixture guard script (#2141).
-
-    Both invocation spellings in these docs (``uv run python "$RESOLVED"`` and
-    the bare ``python "$RESOLVED"`` the stdlib-only pre-mutation guard uses) are
-    swapped for an ``echo`` sentinel, and the per-site capture variables are
-    echoed afterwards because three of the four fences assign the invocation
-    into a command substitution rather than letting it print.
-    """
-    repo = tmp_path / "repo"
-    scripts = repo / ".claude" / "scripts"
-    scripts.mkdir(parents=True)
-    (scripts / script).write_text(script_body, encoding="utf-8")
-    home = tmp_path / "home"
-    home.mkdir()
-
-    fence = (
-        _site_fence(script)
-        .replace("uv run python", f"echo {_INVOKED}")
-        .replace('python "$RESOLVED"', f'echo {_INVOKED} "$RESOLVED"')
+    """Execute a site's own fence via the shared runner (#2141)."""
+    return run_guard_fence(
+        tmp_path,
+        _site_fence(script),
+        script,
+        repo_local=repo_local,
+        global_copy=global_copy,
     )
-    captures = '"${VERDICT-}${RESOLVE_OUTPUT-}${SCOPE_CONFORMANCE_OUTPUT-}"'
-    body = f"{fence}\necho {captures}\n"
-    # Scoped to this tmp_path so the gate-2 fence's hard-coded
-    # `/tmp/touched_files-$CW_SESSION` scratch write cannot collide with a
-    # concurrent run; the path is literal in the doc, so it is cleaned up here
-    # rather than redirected.
-    session = tmp_path.name
-    try:
-        return subprocess.run(
-            ["bash", "-c", body],
-            cwd=repo,
-            env={
-                "HOME": str(home),
-                "PATH": os.environ.get("PATH", ""),
-                "CW_SESSION": session,
-                "TMPWT": str(repo),
-                "FORK_POINT": "HEAD",
-            },
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        Path(f"/tmp/touched_files-{session}").unlink(missing_ok=True)
 
 
 _GUARD_SCRIPTS = [
@@ -456,40 +429,124 @@ _GUARD_SCRIPTS = [
     "classify_merge_conflict.py",
 ]
 
+# The one marker value that may reach the invocation: a clean integer at the
+# table minimum.
+_CURRENT_MARKER = "# cw-script-version: 1\n"
+
+# Every marker state that must NOT reach it. Anything that is not
+# ``^[0-9]+$`` is stale by construction — a `grep -oE '[0-9]+'` extraction
+# turned `1.5` into two lines, which made `[ ... -lt ... ]` error out and the
+# condition evaluate false, so the script ran anyway (#2141 review round 2).
+_STALE_MARKERS: list[tuple[str, str]] = [
+    ("below_minimum", "# cw-script-version: 0\n"),
+    ("no_marker", "import sys\n"),
+    ("malformed_float", "# cw-script-version: 1.5\n"),
+    ("malformed_alpha", "# cw-script-version: abc\n"),
+    ("malformed_negative", "# cw-script-version: -1\n"),
+    ("malformed_suffix", "# cw-script-version: 2x\n"),
+    ("malformed_empty", "# cw-script-version:\n"),
+]
+
+# Where the resolved copy lives. ``global_only`` is the branch that motivated
+# this ticket at all (a client repo with no local ``.claude/scripts/``), and it
+# is also the branch an anchoring bug hides in: a cwd-relative repo-local probe
+# silently misses and falls through to the global copy, so a repo-local-only
+# fixture cannot tell a correct resolver from a broken one.
+_LOCATIONS = ["repo_local", "global_only"]
+
+
+def _placement(location: str, body: str) -> dict[str, str | None]:
+    if location == "repo_local":
+        return {"repo_local": body, "global_copy": None}
+    return {"repo_local": None, "global_copy": body}
+
 
 @pytest.mark.parametrize("script", _GUARD_SCRIPTS)
-@pytest.mark.parametrize(
-    ("label", "script_body"),
-    [
-        ("below_minimum", "# cw-script-version: 0\n"),
-        ("no_marker", "import sys\n"),
-    ],
-)
+@pytest.mark.parametrize("location", _LOCATIONS)
+@pytest.mark.parametrize(("label", "script_body"), _STALE_MARKERS)
 def test_every_site_fence_hard_stops_without_invoking(
-    tmp_path: Path, script: str, label: str, script_body: str
+    tmp_path: Path, script: str, location: str, label: str, script_body: str
 ) -> None:
     """Executable proof, per site, that a stale hit cannot reach the script.
 
-    The operator's adjudication made parametrizing over every fence optional;
-    it is done here because Step 2.5 gate 2 is the highest-consequence site —
-    a fall-through there ships scope the approved file set never covered — and
-    a text assertion cannot distinguish an ``exit 3`` that runs from one that
-    merely appears in the prose (#2141).
+    Step 2.5 gate 2 is the highest-consequence site — a fall-through there
+    ships scope the approved file set never covered — and a text assertion
+    cannot distinguish an ``exit 3`` that runs from one that merely appears in
+    the prose. Parametrized over both candidate locations so a marker check
+    that only guards the repo-local branch is red here (#2141).
     """
-    result = _run_site_fence(tmp_path, script, script_body)
-    assert result.returncode != 0, f"{script}/{label}: fence fell through with exit 0"
-    assert _INVOKED not in result.stdout, f"{script}/{label}: script was reached anyway"
+    result = _run_site_fence(tmp_path, script, **_placement(location, script_body))
+    assert result.returncode != 0, (
+        f"{script}/{location}/{label}: fence fell through with exit 0"
+    )
+    assert _INVOKED not in result.stdout, (
+        f"{script}/{location}/{label}: script was reached anyway"
+    )
     assert "STALE:" in result.stdout
 
 
 @pytest.mark.parametrize("script", _GUARD_SCRIPTS)
+@pytest.mark.parametrize("location", _LOCATIONS)
 def test_every_site_fence_reaches_the_script_on_a_current_marker(
+    tmp_path: Path, script: str, location: str
+) -> None:
+    """Companion to the stale cases: the guard must not block the happy path.
+
+    The ``global_only`` case doubles as the anchoring regression: the runner
+    executes the fence from a nested subdirectory, so a resolver that probed a
+    bare relative ``.claude/scripts/`` would reach the global copy here for the
+    wrong reason, and would miss the repo-local copy in the sibling case below.
+    """
+    result = _run_site_fence(tmp_path, script, **_placement(location, _CURRENT_MARKER))
+    assert result.returncode == 0, f"{script}/{location}: {result.stderr}"
+    assert _INVOKED in result.stdout
+    assert "STALE:" not in result.stdout
+
+
+@pytest.mark.parametrize("script", _GUARD_SCRIPTS)
+def test_every_site_fence_prefers_the_repo_local_copy(
     tmp_path: Path, script: str
 ) -> None:
-    """Companion to the stale cases: the guard must not block the happy path."""
-    result = _run_site_fence(tmp_path, script, "# cw-script-version: 1\n")
+    """Repo-local wins when both exist — and is not exempt from the marker.
+
+    Two directions, because only the pair pins precedence: a current repo-local
+    copy must win over a stale global one (no STALE), and a stale repo-local
+    copy must NOT be rescued by a current global one (STALE, no invocation).
+    """
+    current_local = _run_site_fence(
+        tmp_path / "a",
+        script,
+        repo_local=_CURRENT_MARKER,
+        global_copy="# cw-script-version: 0\n",
+    )
+    assert current_local.returncode == 0, f"{script}: {current_local.stderr}"
+    assert _INVOKED in current_local.stdout
+    assert "STALE:" not in current_local.stdout
+
+    stale_local = _run_site_fence(
+        tmp_path / "b",
+        script,
+        repo_local="# cw-script-version: 0\n",
+        global_copy=_CURRENT_MARKER,
+    )
+    assert stale_local.returncode != 0, f"{script}: stale repo-local copy was rescued"
+    assert _INVOKED not in stale_local.stdout
+    assert "STALE:" in stale_local.stdout
+
+
+@pytest.mark.parametrize("script", _GUARD_SCRIPTS)
+def test_every_site_fence_skips_when_absent_from_both_locations(
+    tmp_path: Path, script: str
+) -> None:
+    """Absent from both keeps each site's own non-blocking skip disposition.
+
+    The marker gate applies only to a candidate that was *found*: absence is a
+    separate branch with separate (per-site, prose-level) message text, and the
+    fence must neither invoke anything nor hard-stop the shell.
+    """
+    result = _run_site_fence(tmp_path, script)
     assert result.returncode == 0, f"{script}: {result.stderr}"
-    assert _INVOKED in result.stdout
+    assert _INVOKED not in result.stdout
     assert "STALE:" not in result.stdout
 
 

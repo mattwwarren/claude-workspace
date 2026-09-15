@@ -181,6 +181,96 @@ def _bash_fences(content: str) -> list[str]:
     return fences
 
 
+# Sentinel standing in for a guard script's real invocation inside an executed
+# doc fence, so a test observes *whether* the fence reached the script rather
+# than running it (#2141).
+GUARD_FENCE_INVOKED = "INVOKED"
+
+
+def run_guard_fence(
+    tmp_path: Path,
+    fence: str,
+    script: str,
+    *,
+    repo_local: str | None = None,
+    global_copy: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Execute a guard-script resolver *fence* against fixture copies (#2141).
+
+    Sibling of ``_bash_fences``, and hoisted for the same reason: the
+    ``test_scope_conformance_gate_docs.py`` and
+    ``test_auto_dev_finalize_semantic_resolve.py`` runners had diverged into
+    two near-copies of the same substitute-and-execute technique.
+
+    *repo_local* and *global_copy* are the file bodies to plant at
+    ``<repo>/.claude/scripts/<script>`` and ``$HOME/.claude/scripts/<script>``;
+    ``None`` leaves that location empty, so a caller can exercise the
+    repo-local, global-only, both, and absent branches from one helper.
+
+    The fence is run from a **nested subdirectory** of the repo, not its root:
+    the resolver must anchor its repo-local candidate to an absolute root
+    (``worktree_path``/``git rev-parse --show-toplevel``) rather than probing a
+    bare relative ``.claude/scripts/...``, and a runner that always executed
+    from the root could not tell the two apart. Both invocation spellings in
+    these docs (``uv run python "$RESOLVED"`` and the bare ``python
+    "$RESOLVED"`` the stdlib-only pre-mutation guard uses) are swapped for an
+    ``echo`` sentinel, and the per-site capture variables are echoed afterwards
+    because three of the four fences assign the invocation into a command
+    substitution rather than letting it print.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "init", "-b", "main"],
+        capture_output=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    if repo_local is not None:
+        scripts = repo / ".claude" / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        (scripts / script).write_text(repo_local, encoding="utf-8")
+
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    if global_copy is not None:
+        global_scripts = home / ".claude" / "scripts"
+        global_scripts.mkdir(parents=True, exist_ok=True)
+        (global_scripts / script).write_text(global_copy, encoding="utf-8")
+
+    nested = repo / "nested" / "deep"
+    nested.mkdir(parents=True, exist_ok=True)
+
+    body = (
+        fence.replace("uv run python", f"echo {GUARD_FENCE_INVOKED}").replace(
+            'python "$RESOLVED"', f'echo {GUARD_FENCE_INVOKED} "$RESOLVED"'
+        )
+        + '\necho "${VERDICT-}${RESOLVE_OUTPUT-}${SCOPE_CONFORMANCE_OUTPUT-}"\n'
+    )
+    # Scoped to this tmp_path so the gate-2 fence's hard-coded
+    # `/tmp/touched_files-$CW_SESSION` scratch write cannot collide with a
+    # concurrent run; the path is literal in the doc, so it is cleaned up here
+    # rather than redirected.
+    session = tmp_path.name
+    try:
+        return subprocess.run(
+            ["bash", "-c", body],
+            cwd=nested,
+            env={
+                "HOME": str(home),
+                "PATH": os.environ.get("PATH", ""),
+                "CW_SESSION": session,
+                "TMPWT": str(repo),
+                "FORK_POINT": "HEAD",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        Path(f"/tmp/touched_files-{session}").unlink(missing_ok=True)
+
+
 def _stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
     """Write an executable ``gh`` stub into a fresh bin dir and return it (#1799).
 

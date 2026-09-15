@@ -23,21 +23,39 @@ What is pinned here:
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
-from tests.conftest import _appendix, _bash_fences, _cmd
+from tests.conftest import (
+    GUARD_FENCE_INVOKED,
+    _appendix,
+    _bash_fences,
+    _cmd,
+    run_guard_fence,
+)
 
 _SECTION_HEADING = "Semantic auto-resolve attempt (operator direction, #1850)"
 _TEMPLATE_HEADING = "**Sentinel template — `merge_conflict_post_push` blocker:**"
 
+_SCRIPT = "classify_merge_conflict.py"
+
 # Sentinel standing in for the real resolver invocation, so the executable
 # fence test can observe *whether* the fence reached it without running it.
-_INVOKED = "INVOKED"
+_INVOKED = GUARD_FENCE_INVOKED
+
+# The one marker value that may reach the invocation (the version table's
+# minimum for this script).
+_CURRENT_MARKER = "# cw-script-version: 1\n"
+
+
+def _placement(location: str, body: str) -> dict[str, str | None]:
+    """Plant *body* at the repo-local or the global candidate location."""
+    if location == "repo_local":
+        return {"repo_local": body, "global_copy": None}
+    return {"repo_local": None, "global_copy": body}
 
 
 def _finalize() -> str:
@@ -58,75 +76,92 @@ def _stale_guard_fence() -> str:
     fences = [
         fence
         for fence in _bash_fences(_semantic_resolve_section())
-        if "for candidate in .claude/scripts/classify_merge_conflict.py" in fence
+        if f"/.claude/scripts/{_SCRIPT}" in fence and "for candidate in" in fence
     ]
     assert len(fences) == 1, f"expected exactly one resolver fence, got {len(fences)}"
     return fences[0]
 
 
 def _run_stale_guard(
-    tmp_path: Path, script_body: str
+    tmp_path: Path,
+    *,
+    repo_local: str | None = None,
+    global_copy: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Execute the doc's own fence against a fixture script (#2141).
+    """Execute the doc's own fence against fixture copies (#2141).
 
-    The real ``uv run python`` invocation is swapped for an ``echo`` sentinel so
-    the assertion is about *reachability*, not about the resolver's behaviour.
-    ``$RESOLVE_OUTPUT`` is echoed afterwards because the fence captures the
-    invocation into a command substitution.
+    Thin wrapper over the shared ``run_guard_fence`` runner, which plants the
+    fixture at either candidate location and runs the fence from a nested
+    subdirectory so an anchoring regression is visible.
     """
-    repo = tmp_path / "repo"
-    scripts = repo / ".claude" / "scripts"
-    scripts.mkdir(parents=True)
-    (scripts / "classify_merge_conflict.py").write_text(script_body, encoding="utf-8")
-    home = tmp_path / "home"
-    home.mkdir()
-
-    fence = _stale_guard_fence().replace("uv run python", f"echo {_INVOKED}")
-    return subprocess.run(
-        ["bash", "-c", f'{fence}\necho "$RESOLVE_OUTPUT"\n'],
-        cwd=repo,
-        env={
-            "HOME": str(home),
-            "PATH": os.environ.get("PATH", ""),
-            "CW_SESSION": "fence-test",
-        },
-        capture_output=True,
-        text=True,
-        check=False,
+    return run_guard_fence(
+        tmp_path,
+        _stale_guard_fence(),
+        _SCRIPT,
+        repo_local=repo_local,
+        global_copy=global_copy,
     )
 
 
+@pytest.mark.parametrize("location", ["repo_local", "global_only"])
 def test_stale_guard_fence_reaches_the_resolver_on_a_current_marker(
-    tmp_path: Path,
+    tmp_path: Path, location: str
 ) -> None:
-    """A marker at the table minimum is the happy path: the fence invokes."""
-    result = _run_stale_guard(tmp_path, "# cw-script-version: 1\n")
-    assert result.returncode == 0, result.stderr
+    """A marker at the table minimum is the happy path: the fence invokes.
+
+    ``global_only`` is the branch this ticket exists for — a client repo with
+    no local ``.claude/scripts/`` relying on the ``install-skills.sh`` symlink
+    (#2096) — and it never ran before this round's parametrization.
+    """
+    result = _run_stale_guard(tmp_path, **_placement(location, _CURRENT_MARKER))
+    assert result.returncode == 0, f"{location}: {result.stderr}"
     assert _INVOKED in result.stdout
     assert "STALE:" not in result.stdout
 
 
+@pytest.mark.parametrize("location", ["repo_local", "global_only"])
 @pytest.mark.parametrize(
     ("label", "script_body"),
     [
         ("below_minimum", "# cw-script-version: 0\n"),
         ("no_marker", "import sys\n"),
+        ("malformed_float", "# cw-script-version: 1.5\n"),
+        ("malformed_alpha", "# cw-script-version: abc\n"),
+        ("malformed_empty", "# cw-script-version:\n"),
     ],
 )
 def test_stale_guard_fence_hard_stops_without_invoking(
-    tmp_path: Path, label: str, script_body: str
+    tmp_path: Path, location: str, label: str, script_body: str
 ) -> None:
     """Executable proof that a stale hit cannot reach the resolver (#2141).
 
     The sibling text assertions pin that the prose *says* HEADLESS BLOCK; this
     one runs the fence the worker actually copies and proves the shell itself
     stops. A fence that only echoes ``STALE:`` and falls through would exit 0
-    here — which is exactly the review finding this closes.
+    here — which is exactly the review finding this closes. The malformed
+    cases are the round-2 finding: a non-integer marker made the numeric
+    comparison error out, and the guard failed open.
     """
-    result = _run_stale_guard(tmp_path, script_body)
-    assert result.returncode != 0, f"{label}: fence fell through with exit 0"
-    assert _INVOKED not in result.stdout, f"{label}: resolver was reached anyway"
+    result = _run_stale_guard(tmp_path, **_placement(location, script_body))
+    assert result.returncode != 0, f"{location}/{label}: fence fell through with exit 0"
+    assert _INVOKED not in result.stdout, f"{location}/{label}: resolver was reached"
     assert "STALE:" in result.stdout
+
+
+def test_stale_guard_fence_skips_when_absent_from_both_locations(
+    tmp_path: Path,
+) -> None:
+    """Absence is a separate branch: no invocation, and no shell hard stop.
+
+    Step 4c.5's absent disposition still escalates — prose-level — to the
+    unchanged ``merge_conflict_post_push`` sentinel; what the fence must not do
+    is invoke ``uv run python`` against a nonexistent path or fire the
+    marker-stale stop.
+    """
+    result = _run_stale_guard(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert _INVOKED not in result.stdout
+    assert "STALE:" not in result.stdout
 
 
 def test_semantic_resolve_section_inserted_before_blocker_template() -> None:
