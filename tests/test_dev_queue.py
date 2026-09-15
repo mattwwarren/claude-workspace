@@ -10776,8 +10776,10 @@ class TestStageRegress:
 
         task = _make_stage_task(stage=Stage.IMPL)
         task.plan_approved_at = datetime(2026, 9, 4, tzinfo=UTC)
+        task.plan_approved_fingerprint = "f" * 64
         _stage_regress(task, Stage.PLAN)
         assert task.plan_approved_at is None
+        assert task.plan_approved_fingerprint is None
 
     def test_regress_into_non_plan_stage_keeps_plan_approved_at(self) -> None:
         """Rule 5a's FINALIZE->IMPL self-heal does not touch the plan and
@@ -10787,8 +10789,10 @@ class TestStageRegress:
         task = _make_stage_task(stage=Stage.FINALIZE)
         stamped = datetime(2026, 9, 4, tzinfo=UTC)
         task.plan_approved_at = stamped
+        task.plan_approved_fingerprint = "f" * 64
         _stage_regress(task, Stage.IMPL)
         assert task.plan_approved_at == stamped
+        assert task.plan_approved_fingerprint == "f" * 64
 
     def test_sets_pending_operator_comment(self) -> None:
         """#1730: the shared stamp point also raises the pending-send-back marker."""
@@ -11469,19 +11473,28 @@ def _assert_fetch_not_called(_ticket_id: str, **_kwargs: object) -> str | None:
 
 
 def _seed_plan_pending(
-    tmp_config_dir: Path, tmp_path: Path, *, session_id: str
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    *,
+    session_id: str,
+    last_result_extra: dict[str, object] | None = None,
 ) -> None:
     """Persist a PLAN-stage BLOCKED_ON_USER row + its plan_pending_approval
-    session under the 'genhealth' client."""
+    session under the 'genhealth' client.
+
+    ``last_result_extra`` merges additional sentinel keys into the seeded
+    session's ``last_result`` — used by the #2102 fingerprint tests, which need
+    a ``plan_draft_fingerprint`` alongside the gate status.
+    """
     from cw.config import save_state
     from cw.models import CwState
 
     _write_client_yaml(tmp_config_dir, tmp_path)
     task = _make_blocked_task(stage=Stage.PLAN, session_id=session_id)
     save_dev_queue(DevQueueStore(tasks=[task]))
-    session = _make_session(
-        session_id=session_id, last_result={"status": "plan_pending_approval"}
-    )
+    last_result: dict[str, object] = {"status": "plan_pending_approval"}
+    last_result.update(last_result_extra or {})
+    session = _make_session(session_id=session_id, last_result=last_result)
     save_state(CwState(sessions=[session]))
 
 
@@ -11593,6 +11606,152 @@ class TestPlanApprovedAtStamp:
 
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
         assert t.plan_approved_at is None
+
+
+class TestPlanApprovedFingerprintStamp:
+    """`plan_approved_at` alone is a durable no-op check: it says an approval
+    happened, never which draft it was given for. Schema v36 binds it to the
+    approved draft's content fingerprint (#2102)."""
+
+    def test_migrate_fills_plan_approved_fingerprint_default(self) -> None:
+        """migrate_dev_queue fills plan_approved_fingerprint=None (v36)."""
+        raw: dict[str, object] = {
+            "schema_version": 35,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-36",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["plan_approved_fingerprint"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
+
+    def test_migrate_preserves_plan_approved_fingerprint_idempotently(self) -> None:
+        """A recorded fingerprint survives a second migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 36,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-36",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "plan_approved_fingerprint": "a" * 64,
+                }
+            ],
+        }
+        twice = migrate_dev_queue(migrate_dev_queue(raw))
+        assert twice["tasks"][0]["plan_approved_fingerprint"] == "a" * 64
+
+    def test_model_default_is_none_and_round_trips(self) -> None:
+        task = _make_blocked_task(stage=Stage.PLAN)
+        assert task.plan_approved_fingerprint is None
+        task.plan_approved_fingerprint = "b" * 64
+        restored = TicketTask.model_validate_json(task.model_dump_json())
+        assert restored.plan_approved_fingerprint == "b" * 64
+
+    def test_approve_stamps_plan_approved_fingerprint_from_last_result(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The sentinel's plan_draft_fingerprint is what the row records — it
+        names the exact draft the operator saw."""
+        from cw.dev_queue import approve_ticket
+
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        _seed_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            session_id="sess-fp1",
+            last_result_extra={"plan_draft_fingerprint": "c" * 64},
+        )
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_approved_fingerprint"] == "c" * 64
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_fingerprint == "c" * 64
+
+    def test_approve_stamps_null_fingerprint_when_sentinel_omits_it(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A legacy producer that emits no fingerprint stamps None — the row
+        records the absence rather than inventing a value."""
+        from cw.dev_queue import approve_ticket
+
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        _seed_plan_pending(tmp_config_dir, tmp_path, session_id="sess-fp2")
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_approved_fingerprint"] is None
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_at is not None
+        assert t.plan_approved_fingerprint is None
+
+    def test_approve_review_stage_never_stamps_fingerprint(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Mirrors the plan_approved_at REVIEW-stage-no-stamp rule: a review
+        approve is not a plan approval, whatever the sentinel carries."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-fp3")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-fp3",
+            last_result={
+                "status": "review_pending_approval",
+                "plan_draft_fingerprint": "d" * 64,
+            },
+        )
+        save_state(CwState(sessions=[session]))
+
+        approve_ticket("GEN-500", "genhealth")
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_fingerprint is None
+
+    def test_same_stage_requeue_preserves_plan_approved_fingerprint(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The #968 same-stage re-park keeps the fingerprint alongside the
+        timestamp — an approved draft re-parked for ambiguities is still the
+        same approved draft."""
+        from cw.dev_queue import approve_ticket
+
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        _seed_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            session_id="sess-fp4",
+            last_result_extra={"plan_draft_fingerprint": "e" * 64},
+        )
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_requeued"] is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.plan_approved_fingerprint == "e" * 64
 
 
 class TestPlanIsReviewedTrackerAware:
