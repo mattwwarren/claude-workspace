@@ -1179,7 +1179,7 @@ Empty (`[]`) when the status is anything else. Per the headless contract §4.4, 
 
 **`plan_draft_fingerprint`** (string or null, #2102) — the fingerprint of the plan draft this sentinel was emitted for, computed per the *Plan-draft fingerprint rule* in `.claude/commands/auto-dev-plan.md`. Cite that rule; do not restate the stripping or hashing steps here. Emitted on every plan-stage sentinel that has a draft in hand — the Stage 1 completion sentinel and every park exit — and `null` explicitly when no draft exists. `cw dev-queue approve` copies it onto the dev-queue row so the next round's Checkpoint 1 can tell an approval given for *this* text from one given for a draft that has since changed. `null` on every non-plan-stage sentinel.
 
-**`schema_version: 4`** — increment when fields are added or semantics change so `cw` can version-gate its parser. Bump history:
+**`schema_version: 8`** — the current contract version. Increment when fields are added or semantics change so `cw` can version-gate its parser. Bump history:
 - **v2** — adds the `no_op` status (Stage 1 pre-flight already-satisfied path).
 - **v3** — `no_op` emitted with `stage_reached="stage1_pre_flight"` and `plan_source="none"`.
 - **v4** — promotes `ambiguities_pending_resolution` and `premises_pending_verification` to canonical statuses (previously interim values the parser routed through the synthetic-block fallback), and adds the top-level `ambiguities` / `premises` arrays (non-empty when their corresponding status is set).
@@ -1188,8 +1188,8 @@ Empty (`[]`) when the status is anything else. Per the headless contract §4.4, 
 - **v7** — adds the `stale_dispatch` status and its canonical `pr_already_open` `blocker.reason`, and widens `stage_reached="stage1_pre_flight"`'s allowed statuses (previously `no_op`/`blocked`) to admit it (#1862).
 - **v8** — adds the optional `plan_draft_fingerprint` string-or-null documented above (#2102). Bumped despite being optional because Checkpoint 1 routes on it; older payloads that omit it parse unchanged and default to `null`.
 
-v5-v8 are accepted by the parser under **all** supported schema versions as a rollout exception, so this skill may keep emitting its current `schema_version` while using them. See `docs/headless-contract.md §8` for the authoritative table.
+v5-v8 are accepted by the parser under **all** supported schema versions as a rollout exception, so this skill may keep emitting its current `schema_version` while using them. That exception is why the sentinel examples elsewhere in this file still stamp `"schema_version": 4`: **those are history** — the pre-existing version producers have not yet bumped — never a second statement of the current contract, which is v8. See `docs/headless-contract.md §8` for the authoritative table.
 
-A parser older than the emitted version routes unknown statuses through the synthetic-block fallback, so the consumer side must merge before producers emit a new version. The `cw` parser accepts legacy v1–v3 during the rollout window; the v4 parser side shipped in `claude-workspace#191` and must be deployed before this skill emits `schema_version: 4`.
+A parser older than the emitted version routes unknown statuses through the synthetic-block fallback, so the consumer side must merge before producers emit a new version. **Rollout history:** the `cw` parser accepts legacy v1–v3, and the v4 parser side shipped in `claude-workspace#191`; every bump through v8 has shipped on the parser side since.
 
 **Interactive mode:** this block is NOT emitted. Structured output is headless-only.

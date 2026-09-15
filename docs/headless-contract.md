@@ -100,7 +100,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 8,
   "ticket_id": "GEN-1234",
   "status": "shipped",
   "stage_reached": "stage5_post_create",
@@ -122,7 +122,12 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
     "auto_merge": true,
     "base": "main"
   },
-  "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+  "review": {
+    "must_fix_initial": 0,
+    "should_fix": 1,
+    "fix_cycles_used": 0,
+    "agents_run": 2
+  },
   "health": {
     "lowest_agent_confidence": "MEDIUM",
     "any_incomplete_risk": false,
@@ -133,7 +138,8 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
   },
   "friction_highlights": [],
   "blocker": null,
-  "next_actions": ["wait_for_ci"]
+  "next_actions": ["wait_for_ci"],
+  "plan_draft_fingerprint": null
 }
 ```
 
@@ -141,7 +147,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | int | Currently `8` (legacy `1` through `7` accepted during the rollout window). This is the one current-version statement besides §8's; the §3.2 example above deliberately shows a lower value, because producers keep stamping their pre-existing version while the rollout exceptions in §8 hold. Bump rules and full history in §8. |
+| `schema_version` | int | Currently `8` (legacy `1` through `7` accepted during the rollout window), which is what the §3.2 example above shows — this page states one current version and nothing else. A real producer may still stamp a lower one: the §8 rollout exceptions let it keep its pre-existing version while emitting v5-v8 fields, so consumers must accept that shape too. Bump rules and full history in §8. |
 | `ticket_id` | string | Linear ID, or synthetic for free-text invocations. |
 | `status` | string enum | See §4. Closed set; parsers MUST treat unknown values as §6 (5) errors. |
 | `stage_reached` | string enum | Pipeline-stage marker. Closed set: `stage1_pre_flight`, `stage1_plan`, `stage2_impl`, `stage3_review`, `stage4a_merge_gate`, `stage4b_pr_create`, `stage5_post_create`. Pre-flight exits (e.g. already-satisfied tickets) use `stage1_pre_flight`. Producer and parser must keep this list in lockstep — adding a stage is a `schema_version` bump (see §8). |

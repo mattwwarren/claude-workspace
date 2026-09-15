@@ -3740,6 +3740,15 @@ class TestPlanDraftFingerprintField:
         row = field_notes[start : field_notes.index("\n", start)]
         assert f"Currently `{current}`" in row
 
+    def test_producer_doc_bump_heading_names_the_current_version(self) -> None:
+        """`auto-dev.md`'s bump-history heading is the producer-side twin of the
+        §3.3 row above; left at an older version it tells the producer to stamp
+        a version the parser has already moved past."""
+        from tests.conftest import _cmd
+
+        current = AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
+        assert f"**`schema_version: {current}`**" in _cmd("auto-dev.md")
+
 
 # ---------------------------------------------------------------------------
 # Issue #430 — Case 4: scope_exceeded / forbidden_area emitted at/after
