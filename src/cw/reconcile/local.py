@@ -169,6 +169,17 @@ def _act_on_local_harvest_candidates(
     refusal, the #986 incident), the candidate's session must NOT be
     completed and its ticket_id must NOT be counted as harvested -- the task
     row was left untouched, so completing the session here would orphan it.
+
+    GitHub #2140: a ``not routed`` outcome can also mean
+    ``task_already_terminal`` -- the dev-queue task was raced to a genuinely
+    terminal status by a concurrent caller before this lookup ran, not a
+    stage-mismatch refusal. Without this carve-out, every subsequent tick
+    would re-detect the same dead-PID candidate and re-synthesize the harvest
+    sentinel (a real git/opencode subprocess call) forever, re-hitting the
+    identical race deterministically. That case is now admitted past this
+    bail so it flows into the unconditional ``emit_result_on(source=
+    GIT_SYNTHESIS)`` call below -- the same door call the ordinary path
+    already uses, with the same refusal handling.
     """
     if not candidates:
         return []
@@ -201,12 +212,14 @@ def _act_on_local_harvest_candidates(
         # Task first (before the session status change) so the task is in its
         # terminal/advanced state when revert_completed_silent_tasks runs.
         routed = True
+        task_already_terminal = False
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
                 candidate.ticket_id, session, sentinel, now=now
             )
             routed = outcome.routed
-        if not routed:
+            task_already_terminal = outcome.task_already_terminal
+        if not routed and not task_already_terminal:
             continue
         # RFC 0012 A3 (#1459): route the git-synthesized completion through the
         # door (source=GIT_SYNTHESIS) instead of writing session.last_result

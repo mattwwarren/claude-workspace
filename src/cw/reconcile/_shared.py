@@ -1366,13 +1366,13 @@ def _apply_sentinel_to_task(
     comparison so a reconcile tick judges every session against one clock;
     it defaults to wall-clock ``now`` for callers that have none.
 
-    GitHub #1692: the returned outcome's ``task_already_terminal`` flag is
-    wired up only at the Stop-hook call site (``cw.cli.stop_hook``), which
-    completes the now-leaked session on this sub-cause. The two reconcile-
-    driven callers (``cw.reconcile.idle._mutations``,
-    ``cw.reconcile.phantom._mutations``) and the LOCAL-DAEMON git-harvest
-    reaper (``cw.reconcile.local``) intentionally do not yet consume this
-    field -- see GitHub issue #2140.
+    GitHub #1692/#2140: the returned outcome's ``task_already_terminal`` flag
+    is now consumed at all four call sites -- the Stop-hook (``cw.cli.
+    stop_hook``, #1692's original fix) and the three reconcile-driven callers
+    (``cw.reconcile.idle._mutations``, ``cw.reconcile.phantom._mutations``,
+    and the LOCAL-DAEMON git-harvest reaper ``cw.reconcile.local``, #2140) --
+    each completing the now-leaked session on this sub-cause instead of
+    orphaning it.
     """
     cw_session_id = session.id
     with dev_queue_lock():
