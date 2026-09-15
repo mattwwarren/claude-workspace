@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from cw.models import (
     CompletionReason,
+    LastResultSource,
     SessionStatus,
 )
 from cw.reconcile._shared import (
@@ -18,6 +19,7 @@ from cw.reconcile._shared import (
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     _apply_sentinel_to_task,
 )
+from cw.result import emit_result_on
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -46,6 +48,14 @@ def _apply_idle_routed_mutations(
     is still reported alive by the daemon, so an unconditional completion
     would tear down a live surface, not just orphan a task row.
 
+    GitHub #2140: a ``not routed`` outcome can also mean
+    ``task_already_terminal`` -- the dev-queue task was raced to a genuinely
+    terminal status by a concurrent caller before this lookup ran, not a
+    stage-mismatch refusal. That case now routes through the door
+    (``emit_result_on``) and completes the session instead of falling into
+    the stage-mismatch refusal-marker branch, which would otherwise orphan
+    this session forever (mirrors the Stop-hook's #1692 carve-out).
+
     Returns ``(accepted, state_mutated)``. ``accepted`` is only the candidates
     actually routed, so the caller's downstream event emission fires solely for
     those. ``state_mutated`` is True when any session state changed here --
@@ -60,12 +70,14 @@ def _apply_idle_routed_mutations(
             continue
         session = session_by_id[candidate.session_id]
         routed = True
+        task_already_terminal = False
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
                 candidate.ticket_id, session, candidate.routed_sentinel, now=now
             )
             routed = outcome.routed
-        if not routed:
+            task_already_terminal = outcome.task_already_terminal
+        if not routed and not task_already_terminal:
             # #1149: a stage-mismatch refusal (earlier-stage replay / unresolvable
             # position) leaves the task untouched. Stamp a paused_status-only
             # marker so the next tick's `session.last_result is None` unrouted-check
@@ -75,6 +87,28 @@ def _apply_idle_routed_mutations(
             session.last_result = {
                 _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
             }
+            state_mutated = True
+            continue
+        if not routed and task_already_terminal:
+            # #2140: another authority already landed this ticket's task
+            # genuinely terminal before this call's own lookup ran. Route the
+            # completion through the door instead of the raw assignment below
+            # (that block is reached only when routed is True) so a foreign
+            # authority's already-door-written result is never clobbered.
+            emit_outcome = emit_result_on(
+                session,
+                candidate.routed_sentinel.model_dump(mode="json"),
+                source=LastResultSource.SALVAGE_TRANSCRIPT,
+            )
+            if emit_outcome.refused:
+                # emit_result_on() leaves `session` byte-identical on refusal --
+                # nothing new for this tick to persist.
+                continue
+            session.status = SessionStatus.COMPLETED
+            session.completed_at = now
+            session.completed_reason = CompletionReason.NORMAL
+            session.claude_session_id = candidate.salvage_csid
+            accepted.append(candidate)
             state_mutated = True
             continue
         session.status = SessionStatus.COMPLETED
