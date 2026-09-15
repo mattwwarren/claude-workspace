@@ -38,7 +38,7 @@ from cw.worktree import (
     worktree_path_for,
 )
 from tests._reconcile_helpers import _no_op_salvage_payload
-from tests.conftest import _clean_git_env
+from tests.conftest import _clean_git_env, git_in
 from tests.test_result import _valid_payload
 
 if TYPE_CHECKING:
@@ -3372,33 +3372,20 @@ class TestHasCommitsBeyondBase:
 # ----------------------------------------------------------------------
 
 
-def _git_in(repo: Path, *args: str) -> str:
-    """Run git in *repo* with a GIT_*-stripped env, returning stripped stdout."""
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=clean_env,
-    )
-    return result.stdout.strip()
-
-
 def _commit_files(repo: Path, prefix: str, *, files: int, lines: int) -> None:
     """Add *files* new files of *lines* lines each and commit them."""
     for i in range(files):
         body = "".join(f"{prefix}-{i}-{n}\n" for n in range(lines))
         (repo / f"{prefix}_{i}.txt").write_text(body, encoding="utf-8")
-    _git_in(repo, "add", "-A")
-    _git_in(repo, "commit", "-m", f"{prefix}: {files} files")
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", f"{prefix}: {files} files")
 
 
 def _make_self_origin_repo(make_git_repo: Callable[[str], Path], name: str) -> Path:
     """Create a repo whose ``origin`` remote points at itself, with origin/main set."""
     repo = make_git_repo(name)
-    _git_in(repo, "remote", "add", "origin", str(repo))
-    _git_in(repo, "fetch", "origin", "main")
+    git_in(repo, "remote", "add", "origin", str(repo))
+    git_in(repo, "fetch", "origin", "main")
     return repo
 
 
@@ -3420,13 +3407,13 @@ def _make_diverged_repo(
     own changes (*branch_files* / ``branch_files * branch_lines``).
     """
     repo = _make_self_origin_repo(make_git_repo, name)
-    _git_in(repo, "checkout", "-b", branch)
+    git_in(repo, "checkout", "-b", branch)
     _commit_files(repo, "branchwork", files=branch_files, lines=branch_lines)
-    _git_in(repo, "checkout", "main")
+    git_in(repo, "checkout", "main")
     _commit_files(repo, "mainchurn", files=main_files, lines=main_lines)
     # Refresh origin/main so it now points past the branch's fork point.
-    _git_in(repo, "fetch", "origin", "main")
-    _git_in(repo, "checkout", branch)
+    git_in(repo, "fetch", "origin", "main")
+    git_in(repo, "checkout", branch)
     return repo
 
 
@@ -3477,7 +3464,7 @@ class TestComputeBranchDiffScope:
         from cw.worktree import compute_branch_diff_scope
 
         repo = _make_self_origin_repo(make_git_repo, "wt-1487-clean")
-        _git_in(repo, "checkout", "-b", "dev/clean")
+        git_in(repo, "checkout", "-b", "dev/clean")
 
         scope = compute_branch_diff_scope(repo, "main")
 
@@ -3499,7 +3486,7 @@ class TestComputeBranchDiffScope:
         from cw.worktree import compute_branch_diff_scope
 
         repo = _make_self_origin_repo(make_git_repo, "wt-1487-detached")
-        _git_in(repo, "checkout", "--detach")
+        git_in(repo, "checkout", "--detach")
         assert compute_branch_diff_scope(repo, "main") is None
 
     def test_missing_path_returns_none(self, tmp_path: Path) -> None:
@@ -3692,7 +3679,7 @@ class TestReconcileResultScope:
         from cw.worktree import reconcile_result_scope
 
         repo = _make_self_origin_repo(make_git_repo, "wt-1487-empty-branch")
-        _git_in(repo, "checkout", "-b", "dev/empty")
+        git_in(repo, "checkout", "-b", "dev/empty")
         result = _result_with_scope(7, 300)
 
         with caplog.at_level(logging.WARNING, logger="cw.worktree"):

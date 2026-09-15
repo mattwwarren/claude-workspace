@@ -8,19 +8,22 @@ terminal status/disposition. The call-site wiring -- which gate runs first at
 which of the three park-decision sites -- lives in ``dispatch/routing.py``, not
 here; this module owns the gates themselves, not the routing table.
 
-Six gates, in the order ``routing.py`` evaluates them:
+Seven gates, in the order ``routing.py`` evaluates them:
 
   1. ``_should_gate_for_empty_diff`` (#1870) -- the branch has zero commits
      ahead of ``origin/<default_branch>``; nothing exists to review or ship.
   2. ``_should_gate_for_branch_staleness`` (#1823) -- the branch is behind
      ``origin/<default_branch>`` and the intervening main commits overlap it.
-  3. ``_should_gate_for_review_health`` (#1702, extended by #1870) -- the review
+  3. ``_should_gate_for_review_staleness`` (#2123) -- the sentinel reports a
+     ``review`` block whose ``reviewed_sha`` is missing, malformed, or does not
+     match the worktree's live HEAD; the reviewers vouched for a different tree.
+  4. ``_should_gate_for_review_health`` (#1702, extended by #1870) -- the review
      self-reported ``EXIT_FOR_HUMAN_REVIEW``, or no reviewer agent ran at all.
-  4. ``_should_gate_for_scope_hint`` (#1617) -- an operator/queue
+  5. ``_should_gate_for_scope_hint`` (#1617) -- an operator/queue
      ``scope_hint`` of ``"large"``.
-  5. ``_should_force_hold_finalize`` (RFC 0011 A3, #1160) -- a proactive
+  6. ``_should_force_hold_finalize`` (RFC 0011 A3, #1160) -- a proactive
      operator stop before an unattended finalize.
-  6. ``_should_gate_for_signoff`` (RFC 0007 Phase 3, #990) -- an explicit
+  7. ``_should_gate_for_signoff`` (RFC 0007 Phase 3, #990) -- an explicit
      operator signature slot.
 
 Extracted from ``dispatch/routing.py`` by #1823 (it was 1482 lines, ~48% over
@@ -43,13 +46,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 from cw.auto_dev_result import SCOPE_TIER_LARGE
-from cw.branch_ahead import commits_ahead_of_default
+from cw.branch_ahead import commits_ahead_of_default, current_head_sha
 from cw.config import load_effective_config
 from cw.dev_queue import (
     BRANCH_STALENESS_GATE_DISPOSITION,
     EMPTY_DIFF_GATE_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
+    REVIEW_STALENESS_GATE_DISPOSITION,
     SIGNOFF_GATE_DISPOSITION,
     transition_task_status,
 )
@@ -59,6 +63,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
 )
+from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
     from cw.models import (
@@ -124,6 +129,15 @@ _BRANCH_STALENESS_REASON = "branch_behind_main"
 _EMPTY_DIFF_GATE_REASON = "empty_diff_gate"
 
 
+# paused_status written to SESSION_NEEDS_ATTENTION when the #2123 review-
+# staleness gate parks a REVIEW-stage ticket whose sentinel does not carry a
+# review.reviewed_sha matching the worktree's live HEAD. Shares its literal
+# string value with dev_queue.lifecycle.REVIEW_STALENESS_GATE_DISPOSITION
+# (task.disposition) on the _EMPTY_DIFF_GATE_REASON precedent above -- still two
+# constants in two namespaces, do not collapse them.
+_REVIEW_STALENESS_REASON = "review_artifacts_stale"
+
+
 # The single Health.recommendation value that means "the producer does not
 # vouch for this work". Pinned as a constant rather than an inline literal
 # because it is compared against a raw sentinel dict (post-model_dump), where
@@ -174,6 +188,118 @@ def _resolve_review_agents_run(last_result: dict[str, object] | None) -> int | N
     if isinstance(agents_run, bool) or not isinstance(agents_run, int):
         return None
     return agents_run
+
+
+def _reports_review_content(last_result: dict[str, object] | None) -> bool:
+    """True iff *last_result* carries a ``review`` block at all (#2123).
+
+    The scoping half of the staleness gate, split from the sha lookup because
+    the two answer different questions and the gate treats them oppositely.
+    This asks "did a producer report review content here?";
+    :func:`_resolve_review_reviewed_sha` asks "and does that content say which
+    tree it covered?".
+
+    Exactly the distinction :func:`_resolve_review_agents_run` already draws
+    and documents: an absent or non-dict ``review`` block is not a producer
+    that under-reported, it is "a hand-built or partial routing dict that never
+    carried review data at all". Several REVIEW-stage routing paths route on
+    ``status`` alone and legitimately pass ``last_result=None``.
+    """
+    review_val = last_result.get("review") if last_result is not None else None
+    return isinstance(review_val, dict)
+
+
+def _resolve_review_reviewed_sha(last_result: dict[str, object] | None) -> str | None:
+    """Pull ``review.reviewed_sha`` off a raw sentinel dict (#2123).
+
+    Same defensive isinstance-guard shape as its two siblings above. Returns
+    ``None`` for an absent ``review`` block, a missing key, and a non-string
+    value alike -- unlike :func:`_resolve_review_agents_run` there is no schema
+    default worth distinguishing, because the field has no meaningful zero.
+    Callers pair this with :func:`_reports_review_content` to tell "no review
+    block at all" apart from "a review block that did not say which tree it
+    covered"; the gate treats those two oppositely.
+    """
+    review_val = last_result.get("review") if last_result is not None else None
+    if not isinstance(review_val, dict):
+        return None
+    reviewed_sha = review_val.get("reviewed_sha")
+    return reviewed_sha if isinstance(reviewed_sha, str) else None
+
+
+def _should_gate_for_review_staleness(
+    task: TicketTask,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+) -> bool:
+    """True iff *task*'s reported review does not cover its current HEAD (#2123).
+
+    The incident: a REVIEW-stage park released via ``cw dev-queue requeue``
+    re-dispatches and can land back on ``review_pending_approval`` carrying the
+    *earlier* pass's review block. Every field the approval path and the
+    ``auto_approve_clean_review`` recipe check reads clean in that state --
+    because those numbers are true, about a tree that is no longer what would
+    ship. Nothing downstream compared the reviewed sha to the branch tip,
+    because until this ticket the sentinel carried no sha to compare.
+
+    **Scoped to sentinels that report review content, then fails CLOSED within
+    that scope.** A payload with no ``review`` block does not gate -- see
+    :func:`_reports_review_content`; it is the same carve-out
+    ``_resolve_review_agents_run`` already documents, and without it every
+    REVIEW-stage path that routes on ``status`` alone (signoff, force-hold,
+    scope_hint, the stage-pointer walk, all of which legitimately pass
+    ``last_result=None``) would park on this gate.
+
+    Once a ``review`` block IS present, every unresolvable branch gates: a
+    missing ``reviewed_sha``, a non-string one, and an unmeasurable worktree
+    (``current_head_sha`` returns ``None``). That is the deliberate opposite
+    polarity to ``_should_gate_for_branch_staleness``/
+    ``_should_gate_for_empty_diff``, which fail open on their own unmeasurable
+    case: those ask "is there evidence of a problem?", where absent evidence
+    means none was found, while this asks "is there evidence this review is
+    current?", where absent evidence is the problem itself (ARCHITECTURE.md §7
+    -- an integrity gate fails closed when its evidence is missing). So a
+    producer that reports a review but forgets the stamp parks loudly instead
+    of silently bypassing the gate. Tickets in flight whose artifacts predate
+    the field park once for a human look; that cost is accepted and bounded.
+
+    Timing-agnostic by construction: it compares two strings and cannot tell
+    *why* they match. The producers own the capture contract -- every executor
+    stamps the sha AFTER its fix loop converges and its fix claims are verified
+    (docs/headless-contract.md Note A14), so a match means the reviewed tree is
+    the shippable tree. A pre-fix capture would mismatch HEAD on every round
+    that fixed anything, which is why that contract, not this predicate, is
+    where the timing lives.
+
+    Callers MUST scope this to ``task.stage == Stage.REVIEW``, mirroring all
+    six sibling gates: an IMPL-stage sentinel can legitimately carry a review
+    block from an earlier pass, so a stage-agnostic version would park tickets
+    mid-pipeline on a sha that is not meant to match yet.
+
+    **Takes ``clients`` because ``task.worktree_path`` is never stamped on a
+    dispatch-driven row** -- dispatch stamps the worktree on the ``Session``.
+    Reading that field directly handed ``current_head_sha`` a ``None`` and, on
+    a gate that fails closed, parked *every* daemon-dispatched REVIEW ticket
+    carrying a review block. Resolution goes through
+    :func:`cw.worktree.resolve_task_worktree`, the same helper
+    ``dev_queue.lifecycle._local_plan_path`` uses, so the branch-derived
+    fallback cannot drift between the two. An unresolvable worktree gates,
+    exactly as an unmeasurable HEAD does: still no evidence the review is
+    current. Note this is the opposite polarity to the two git-measured gates'
+    unresolvable-client handling, which fail open -- see the paragraph above.
+    """
+    if not _reports_review_content(last_result):
+        return False
+    reviewed_sha = _resolve_review_reviewed_sha(last_result)
+    if reviewed_sha is None:
+        return True
+    worktree_path = resolve_task_worktree(task, clients.get(task.client))
+    if worktree_path is None:
+        return True
+    head_sha = current_head_sha(worktree_path)
+    if head_sha is None:
+        return True
+    return reviewed_sha != head_sha
 
 
 def _should_gate_for_review_health(last_result: dict[str, object] | None) -> bool:
@@ -650,4 +776,49 @@ def _park_empty_diff_gate(task: TicketTask) -> None:
         task,
         QueueItemStatus.BLOCKED_ON_USER,
         disposition=EMPTY_DIFF_GATE_DISPOSITION,
+    )
+
+
+def _park_review_staleness_gate(task: TicketTask) -> None:
+    """Park *task* BLOCKED_ON_USER for review artifacts older than HEAD (#2123).
+
+    Shared by the two REVIEW-scoped park-decision sites that wire this gate
+    (``_route_stage_success`` and ``_route_scope_gated_approval``).
+    Field-for-field mirror of ``_park_branch_staleness_gate`` above, including
+    its emit-before-transition ordering.
+
+    The divergent ``task.disposition`` is the load-bearing part, exactly as it
+    is on the branch-staleness gate: both release paths key off something this
+    check never touches -- ``cw dev-queue approve`` reads
+    ``session.last_result.status`` (still ``review_pending_approval`` here) and
+    the RFC 0009 ``auto_approve_clean_review`` recipe reads that same
+    sentinel's five clean-review fields, every one of which reads clean because
+    they describe the tree the reviewers *did* see. Without a disposition for
+    those two to exclude on, either would release the row and ship a tree
+    nobody reviewed. See ``dev_queue.approval._not_at_approval_gate`` and
+    ``reconcile.gate_recipes._detect_auto_approve_review``.
+
+    ``breadcrumbs`` is hardcoded ``""``, following the same #1729 convention
+    every gate-class park here uses; the recovery is ``cw dev-queue
+    requeue``/``drain``, which re-runs review against the current HEAD.
+    """
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": task.session_id or "",
+            "session_name": "",
+            "client": task.client,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": _REVIEW_STALENESS_REASON,
+            "breadcrumbs": "",
+            "crashed": False,
+            "lane": task.lane,
+        },
+        correlation_id=task.ticket_id,
+    )
+    transition_task_status(
+        task,
+        QueueItemStatus.BLOCKED_ON_USER,
+        disposition=REVIEW_STALENESS_GATE_DISPOSITION,
     )

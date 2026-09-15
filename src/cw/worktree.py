@@ -22,7 +22,7 @@ from cw.exceptions import (
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
-    from cw.models import ClientConfig
+    from cw.models import ClientConfig, TicketTask
 
 _log = logging.getLogger(__name__)
 
@@ -216,6 +216,39 @@ def _checked_out_branch(wt_path: Path) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
+
+
+def resolve_task_worktree(
+    task: TicketTask, client_cfg: ClientConfig | None
+) -> Path | None:
+    """Resolve the on-disk worktree for *task*, or None (#2123).
+
+    ``task.worktree_path`` wins when stamped (USER-origin rows, tests). It is
+    ``None`` for every dispatch-driven row -- dispatch stamps ``worktree_path``
+    on the Session, never the TicketTask (see ``queue_peek.py``) -- so any
+    consumer that reads only that field sees ``None`` on the dominant
+    production path. Fall back to the branch-derived worktree
+    :func:`worktree_path_for` computes for the feature branch, using the same
+    read-only primitives ``create_worktree`` consults to decide reuse, and
+    trust it only when the checked-out branch matches: a stale or foreign
+    checkout must not lend its state to this ticket.
+
+    Lives here rather than in either consumer because both
+    ``dev_queue.lifecycle._local_plan_path`` and
+    ``dispatch.review_gates._should_gate_for_review_staleness`` need it, and
+    neither package may import the other. Returning the worktree *directory*
+    (not a file under it) is what lets the two consumers ask different
+    questions of the same resolution.
+    """
+    if task.worktree_path is not None:
+        return task.worktree_path
+    if client_cfg is None:
+        return None
+    branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
+    wt_path = worktree_path_for(client_cfg, branch)
+    if not wt_path.exists() or _checked_out_branch(wt_path) != branch:
+        return None
+    return wt_path
 
 
 def _has_commits_beyond_base(wt_path: Path, default_branch: str) -> bool:

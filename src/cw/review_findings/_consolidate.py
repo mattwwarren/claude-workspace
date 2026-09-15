@@ -299,6 +299,16 @@ def consolidate_verdict(
         agents_run=len(documents),
         rejected_count=rejected_count,
         rejected_count_by_severity=rejected_by_severity,
+        # #2123: the same one-computation-two-consumers shape #2000 established
+        # for rejected_count -- the sha this function already stamps on the
+        # ReviewVerdict below now also reaches the nested Review that becomes
+        # AUTO_DEV_RESULT.review. This single line is also the complete Codex
+        # fold-in: codex's fix loop re-invokes consolidate_verdict fresh on
+        # every re-review cycle with a post-fix-commit capture, and
+        # _finalize_review's model_copy never overrides reviewed_sha, so the
+        # terminal Review already carries the post-fix-loop value by
+        # construction.
+        reviewed_sha=reviewed_sha,
     )
     must_fix = [
         af.finding
