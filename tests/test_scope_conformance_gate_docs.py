@@ -6,6 +6,9 @@ from the pre-existing non-blocking growth note, and the plan command must
 require the ``## Files Modified`` heading the parser anchors on.
 """
 
+from __future__ import annotations
+
+import re
 from pathlib import Path
 
 from tests.conftest import _appendix, _cmd
@@ -30,6 +33,46 @@ def _doc(relative: str) -> str:
 _GATE2_START = "2. **File set is within the plan's enumeration**"
 _GATE2_END = "3. **Test command exit code is 0:**"
 _RESOLVER_SUBSECTION = "### Guard-script path resolution and staleness marker (#2141)"
+
+# `| `<script>.py` | <N> | `<doc>.md` ... |` — the version table's data rows.
+_TABLE_ROW = re.compile(
+    r"^\|\s*`(?P<script>[\w.]+\.py)`\s*\|\s*(?P<version>\d+)\s*\|\s*`(?P<doc>[\w.-]+\.md)`",
+    re.MULTILINE,
+)
+# The per-site single declaration Cluster B mandates; fences are indented at
+# some sites (gate 2 lives inside a numbered list), so leading space is allowed.
+_MIN_VERSION_DECL = re.compile(r"^[ \t]*MIN_VERSION=(\d+)\b", re.MULTILINE)
+
+
+# NOTE: file-local by the same convention as ``_agent``/``_doc`` above — a near
+# copy lives in tests/test_auto_dev_finalize_semantic_resolve.py, which needs it
+# for the executable fence test. Not hoisted to conftest.py: #2141's approved
+# ``## Files Modified`` enumeration does not include conftest.py.
+def _bash_fences(content: str) -> list[str]:
+    """Return the body of every ```bash fenced block in *content* (#2141)."""
+    fences: list[str] = []
+    lines = content.splitlines()
+    index = 0
+    while index < len(lines):
+        if lines[index].strip().startswith("```bash"):
+            body: list[str] = []
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                body.append(lines[index])
+                index += 1
+            fences.append("\n".join(body))
+        index += 1
+    return fences
+
+
+def _table_minimums() -> dict[str, tuple[int, str]]:
+    """Map each guard script to its ``(minimum version, call-site doc)`` row."""
+    rows = {
+        match["script"]: (int(match["version"]), match["doc"])
+        for match in _TABLE_ROW.finditer(_resolver_table_section())
+    }
+    assert len(rows) == 4, f"expected 4 table rows, parsed {sorted(rows)}"
+    return rows
 
 
 def _gate2_section() -> str:
@@ -274,6 +317,75 @@ def test_resolver_table_lists_all_four_scripts_with_minimum_version() -> None:
     ):
         assert script in section
     assert "cw-script-version" in section
+
+
+def test_every_call_site_declares_min_version_matching_the_table() -> None:
+    """The version table is the single source; no site repeats the literal (#2141).
+
+    Every call site previously hard-coded its minimum twice — once in the
+    ``-lt`` comparison and once in the ``need >= N`` message — so a table bump
+    could land without the sites, or vice versa, with nothing failing. Each
+    site now declares ``MIN_VERSION=<N>`` once and uses the variable in both
+    places; this test is the CI coupling that makes a one-sided bump red.
+    """
+    for script, (version, doc) in _table_minimums().items():
+        fences = [fence for fence in _bash_fences(_cmd(doc)) if f"/{script}" in fence]
+        assert fences, f"no bash fence invoking {script} in {doc}"
+        for fence in fences:
+            assert _MIN_VERSION_DECL.findall(fence) == [str(version)], (
+                f"{doc}: fence for {script} must declare MIN_VERSION={version} "
+                f"exactly once, to match the version table"
+            )
+            assert '-lt "$MIN_VERSION"' in fence, (
+                f"{doc}: fence for {script} must compare against $MIN_VERSION, "
+                f"not a repeated literal"
+            )
+            assert "need >= $MIN_VERSION" in fence, (
+                f"{doc}: fence for {script} must interpolate $MIN_VERSION into "
+                f"the STALE message, not repeat the literal"
+            )
+            assert f"-lt {version}" not in fence
+            assert f"need >= {version}" not in fence
+
+
+def test_every_call_site_hard_stops_inside_the_bash_fence() -> None:
+    """A stale marker must make the invocation unreachable *in the shell* (#2141).
+
+    The prose bullet after each fence directs ``EXIT blocked``/STOP, which is
+    the documented idiom for an agent-level exit that cannot live in shell. But
+    a worker skimming only the fence saw a bare ``echo`` and could fall
+    through — the highest-consequence case being Step 2.5 gate 2, where a
+    skipped stop bypasses the approved file-set gate entirely.
+    """
+    docs = {doc for _, doc in _table_minimums().values()}
+    docs.add("auto-dev-impl.md")  # carries the canonical template fence too
+    for doc in sorted(docs):
+        for fence in _bash_fences(_cmd(doc)):
+            if "cw-script-version" not in fence:
+                continue
+            assert "exit 3" in fence, (
+                f"{doc}: a stale-marker fence must hard-stop with `exit 3`, "
+                f"not merely echo STALE"
+            )
+            assert "HARD STOP" in fence, (
+                f"{doc}: the stale branch must carry a HARD STOP comment "
+                f"naming the blocker disposition"
+            )
+            stale_index = fence.index("STALE:")
+            assert fence.index("exit 3", stale_index) > stale_index, (
+                f"{doc}: `exit 3` must follow the STALE echo"
+            )
+
+
+def test_canonical_template_shows_the_hard_stop_shape() -> None:
+    """The template every site copies carries the guard and the placeholders."""
+    section = _resolver_table_section()
+    template = next(fence for fence in _bash_fences(section) if "<script>.py" in fence)
+    assert "MIN_VERSION=<N>" in template
+    assert '-lt "$MIN_VERSION"' in template
+    assert "need >= $MIN_VERSION" in template
+    assert "<blocker.reason>" in template
+    assert "exit 3" in template
 
 
 def test_plan_spec_marker_not_bumped() -> None:

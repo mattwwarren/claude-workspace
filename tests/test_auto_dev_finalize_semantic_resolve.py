@@ -23,11 +23,21 @@ What is pinned here:
 
 from __future__ import annotations
 
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
 from tests.conftest import _appendix, _cmd
 
 _SECTION_HEADING = "Semantic auto-resolve attempt (operator direction, #1850)"
 _TEMPLATE_HEADING = "**Sentinel template — `merge_conflict_post_push` blocker:**"
+
+# Sentinel standing in for the real resolver invocation, so the executable
+# fence test can observe *whether* the fence reached it without running it.
+_INVOKED = "INVOKED"
 
 
 def _finalize() -> str:
@@ -39,6 +49,105 @@ def _semantic_resolve_section() -> str:
     start = content.index(_SECTION_HEADING)
     end = content.index(_TEMPLATE_HEADING, start)
     return content[start:end]
+
+
+# NOTE: file-local by this repo's established convention for `_doc`/`_agent`
+# style readers — a near copy lives in tests/test_scope_conformance_gate_docs.py.
+# Not hoisted to conftest.py: #2141's approved ``## Files Modified`` enumeration
+# does not include conftest.py.
+def _bash_fences(content: str) -> list[str]:
+    """Return the body of every ```bash fenced block in *content* (#2141)."""
+    fences: list[str] = []
+    lines = content.splitlines()
+    index = 0
+    while index < len(lines):
+        if lines[index].strip().startswith("```bash"):
+            body: list[str] = []
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                body.append(lines[index])
+                index += 1
+            fences.append("\n".join(body))
+        index += 1
+    return fences
+
+
+def _stale_guard_fence() -> str:
+    """The Step 4c.5 resolver fence — the canonical stale-guard shape (#2141)."""
+    # Anchor on the resolver probe, not a bare script mention: the sibling
+    # commit fence names the script too, in its `Auto-Resolved-By` trailer.
+    fences = [
+        fence
+        for fence in _bash_fences(_semantic_resolve_section())
+        if "for candidate in .claude/scripts/classify_merge_conflict.py" in fence
+    ]
+    assert len(fences) == 1, f"expected exactly one resolver fence, got {len(fences)}"
+    return fences[0]
+
+
+def _run_stale_guard(
+    tmp_path: Path, script_body: str
+) -> subprocess.CompletedProcess[str]:
+    """Execute the doc's own fence against a fixture script (#2141).
+
+    The real ``uv run python`` invocation is swapped for an ``echo`` sentinel so
+    the assertion is about *reachability*, not about the resolver's behaviour.
+    ``$RESOLVE_OUTPUT`` is echoed afterwards because the fence captures the
+    invocation into a command substitution.
+    """
+    repo = tmp_path / "repo"
+    scripts = repo / ".claude" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "classify_merge_conflict.py").write_text(script_body, encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    fence = _stale_guard_fence().replace("uv run python", f"echo {_INVOKED}")
+    return subprocess.run(
+        ["bash", "-c", f'{fence}\necho "$RESOLVE_OUTPUT"\n'],
+        cwd=repo,
+        env={
+            "HOME": str(home),
+            "PATH": os.environ.get("PATH", ""),
+            "CW_SESSION": "fence-test",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_stale_guard_fence_reaches_the_resolver_on_a_current_marker(
+    tmp_path: Path,
+) -> None:
+    """A marker at the table minimum is the happy path: the fence invokes."""
+    result = _run_stale_guard(tmp_path, "# cw-script-version: 1\n")
+    assert result.returncode == 0, result.stderr
+    assert _INVOKED in result.stdout
+    assert "STALE:" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("label", "script_body"),
+    [
+        ("below_minimum", "# cw-script-version: 0\n"),
+        ("no_marker", "import sys\n"),
+    ],
+)
+def test_stale_guard_fence_hard_stops_without_invoking(
+    tmp_path: Path, label: str, script_body: str
+) -> None:
+    """Executable proof that a stale hit cannot reach the resolver (#2141).
+
+    The sibling text assertions pin that the prose *says* HEADLESS BLOCK; this
+    one runs the fence the worker actually copies and proves the shell itself
+    stops. A fence that only echoes ``STALE:`` and falls through would exit 0
+    here — which is exactly the review finding this closes.
+    """
+    result = _run_stale_guard(tmp_path, script_body)
+    assert result.returncode != 0, f"{label}: fence fell through with exit 0"
+    assert _INVOKED not in result.stdout, f"{label}: resolver was reached anyway"
+    assert "STALE:" in result.stdout
 
 
 def test_semantic_resolve_section_inserted_before_blocker_template() -> None:
