@@ -496,7 +496,13 @@ class Review(BaseModel):
     # this", never "it matched". The consuming gate (disposition
     # `review_artifacts_stale`) fails CLOSED on that default, so a future
     # executor that forgets the stamp parks rather than silently bypassing the
-    # gate. Additive and purely advisory, no `schema_version` bump.
+    # gate.
+    #
+    # Additive for schema versioning — no `schema_version` bump, because an
+    # older consumer that ignores the field behaves exactly as before. NOT
+    # advisory for behavior: it is the load-bearing input to that fail-closed
+    # gate, and omitting it parks the ticket. "Optional to emit" and
+    # "inconsequential when absent" are different claims; only the first holds.
     reviewed_sha: str | None = None
 
 
