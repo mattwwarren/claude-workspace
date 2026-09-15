@@ -19,8 +19,9 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw.config import load_state, save_state
-from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import read_events
+from cw.events import record_event as _real_record_event
 from cw.exceptions import CwError, HookContextConflictError
 from cw.models import (
     ClientConfig,
@@ -32,6 +33,7 @@ from cw.models import (
     QueueItemStatus,
     SessionPurpose,
     SessionStatus,
+    Stage,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import fix_dispatch, reconcile
@@ -301,6 +303,492 @@ def test_act_on_pending_fix_dispatches_clears_and_escalates_on_hard_failure(
     assert attention[0].payload["crashed"] is False
 
 
+def test_act_on_pending_fix_dispatches_drops_stale_handoff_when_row_reverted_to_pending(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+) -> None:
+    """A row re-parked to PENDING under an unconsumed handoff must not spawn (#2142).
+
+    The observed race: some other non-sentinel RUNNING->PENDING revert
+    (crash/phantom/stall/salvage sweep) fires on a row carrying a
+    ``pending_fix_dispatch``. Dispatching anyway spawns a FIX session that
+    ``dispatch_fix_agent`` never correlates to the row (it passes no ``task=``
+    kwarg), producing a roster-ACTIVE orphan that inflates the session-based
+    client ceiling while the row itself stays PENDING.
+    """
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is None
+    assert task.fix_dispatch_session_id is None
+    # No bogus transition: the row was already PENDING and stays there, so
+    # claim.py's ordinary reclaim can pick it up now that the latch is gone.
+    assert task.status == QueueItemStatus.PENDING
+
+    errored = read_events(event_types=[OrchestratorEventType.STAGE_ERRORED])
+    assert len(errored) == 1
+    assert errored[0].correlation_id == _TICKET
+    assert errored[0].payload["session_id"] == "review-sess"
+    assert errored[0].payload["ticket_id"] == _TICKET
+    assert errored[0].payload["stage"] == "s3_fix_loop"
+    assert errored[0].payload["error_kind"] == "fix_dispatch_stale_row"
+
+    attention = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    assert len(attention) == 1
+    assert attention[0].correlation_id == _TICKET
+    assert attention[0].payload["session_id"] == "review-sess"
+    assert attention[0].payload["client"] == _CLIENT
+    assert attention[0].payload["paused_status"] == "fix_dispatch_stale_row"
+    assert attention[0].payload["crashed"] is False
+    assert "pending" in attention[0].payload["breadcrumbs"]
+
+
+def test_act_on_pending_fix_dispatches_drops_stale_handoff_when_row_blocked_on_user(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+) -> None:
+    """The guard is ``!= RUNNING``, not ``== PENDING`` (#2142).
+
+    A row parked BLOCKED_ON_USER under an unconsumed handoff is the same
+    orphan-spawn hazard: nothing about the fix agent's spawn path checks the
+    row's status, so any non-RUNNING status must drop the handoff.
+    """
+    _seed_task(status=QueueItemStatus.BLOCKED_ON_USER, pending_fix_dispatch=_pending())
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is None
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+    errored = read_events(event_types=[OrchestratorEventType.STAGE_ERRORED])
+    assert len(errored) == 1
+    assert errored[0].payload["error_kind"] == "fix_dispatch_stale_row"
+
+    attention = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    assert len(attention) == 1
+    assert attention[0].payload["paused_status"] == "fix_dispatch_stale_row"
+    assert "blocked_on_user" in attention[0].payload["breadcrumbs"]
+
+
+def test_stale_handoff_survives_when_its_audit_event_cannot_be_persisted(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed audit emission must not leave the handoff durably dropped (#2142).
+
+    Round-3 binding contract: emission now happens per candidate, unlocked.
+    A failure is logged and that candidate is dropped from this tick — it does
+    NOT raise out of ``_act_on_pending_fix_dispatches`` (round 1's emit-under-
+    the-lock design had to let it propagate, since nothing else in the shared
+    transaction could be reasoned about; the unlocked per-candidate design no
+    longer needs that). The handoff survives on disk; the next reconcile tick
+    re-detects it and retries the page.
+    """
+
+    def _explode(*_args: Any, **_kwargs: Any) -> None:
+        msg = "events file unwritable"
+        raise OSError(msg)
+
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+    monkeypatch.setattr(fix_dispatch, "record_event", _explode)
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is not None
+    assert task.pending_fix_dispatch.label == f"fix-{_TICKET}"
+    assert task.status == QueueItemStatus.PENDING
+    # No audit event was actually persisted -- record_event exploded on the
+    # first call of the pair.
+    assert read_events(event_types=[OrchestratorEventType.STAGE_ERRORED]) == []
+
+
+def test_stale_handoff_events_emit_without_holding_dev_queue_lock(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase-2 audit events fire only after ``dev_queue_lock()`` releases.
+
+    (#2142 round 3.)
+
+    Verified with a real, non-blocking ``flock`` probe against the exact lock
+    file ``fix_dispatch.py`` itself acquires — not a timing heuristic. If the
+    probe's own ``LOCK_EX | LOCK_NB`` acquisition fails, the module's lock was
+    still held while ``record_event`` ran.
+    """
+    import fcntl
+
+    from cw.config import dev_queue_lock as dev_queue_lock_file
+
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+
+    lock_was_free: list[bool] = []
+
+    def _probing_record_event(*args: Any, **kwargs: Any) -> Any:
+        lock_path = dev_queue_lock_file()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        probe_fd = lock_path.open("w")
+        try:
+            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock_was_free.append(False)
+        else:
+            lock_was_free.append(True)
+            fcntl.flock(probe_fd, fcntl.LOCK_UN)
+        finally:
+            probe_fd.close()
+        return _real_record_event(*args, **kwargs)
+
+    monkeypatch.setattr(fix_dispatch, "record_event", _probing_record_event)
+
+    fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    # Two record_event calls (STAGE_ERRORED + SESSION_NEEDS_ATTENTION), both
+    # probed while the module's dev_queue_lock() was free.
+    assert lock_was_free == [True, True]
+
+
+def test_stale_handoff_not_cleared_when_row_reclaimed_before_revalidation(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row reclaimed back to RUNNING between phase 1 and phase 2 wins (#2142 round 3).
+
+    Simulates a fresh REVIEW dispatch claiming the row while phase 2's event
+    emission is in flight (unlocked). Phase 2's re-validation must see the
+    live RUNNING status and skip the clear — silently, no exception — even
+    though the event pair already fired describing the moment-ago condition.
+    """
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+
+    real_emit = fix_dispatch._emit_fix_dispatch_operator_signal
+
+    def _emit_then_reclaim(**kwargs: Any) -> None:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            task = fix_dispatch._find_task(store, _TICKET, _CLIENT)
+            assert task is not None
+            task.status = QueueItemStatus.RUNNING
+            save_dev_queue(store)
+        real_emit(**kwargs)
+
+    monkeypatch.setattr(
+        fix_dispatch, "_emit_fix_dispatch_operator_signal", _emit_then_reclaim
+    )
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is not None
+    assert task.status == QueueItemStatus.RUNNING
+
+    # The event pair still fired -- it described a real condition at the
+    # moment phase 1 ran, and is not clawed back after the fact.
+    errored = read_events(event_types=[OrchestratorEventType.STAGE_ERRORED])
+    assert len(errored) == 1
+
+
+def test_stale_handoff_not_cleared_when_rearmed_with_a_new_handoff(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handoff replaced by a fresh one between phase 1 and phase 2 wins.
+
+    (#2142 round 3.)
+
+    Same race as the RUNNING case, but the row stays non-RUNNING while a new
+    REVIEW round records a *different* handoff (a new ``requested_at``/
+    ``cycle``) before phase 2 re-validates. The old snapshot's identity no
+    longer matches, so the new handoff must survive uncleared.
+    """
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+
+    real_emit = fix_dispatch._emit_fix_dispatch_operator_signal
+
+    def _emit_then_rearm(**kwargs: Any) -> None:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            task = fix_dispatch._find_task(store, _TICKET, _CLIENT)
+            assert task is not None
+            task.pending_fix_dispatch = _pending(
+                cycle=2,
+                requested_by_session_id="new-review-sess",
+                requested_at=datetime(2026, 8, 27, tzinfo=UTC),
+            )
+            save_dev_queue(store)
+        real_emit(**kwargs)
+
+    monkeypatch.setattr(
+        fix_dispatch, "_emit_fix_dispatch_operator_signal", _emit_then_rearm
+    )
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is not None
+    assert task.pending_fix_dispatch.cycle == 2
+    assert task.pending_fix_dispatch.requested_by_session_id == "new-review-sess"
+
+
+def test_stale_handoff_phase_two_tolerates_row_removed_before_revalidation(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row cancelled between phase 1 and phase 2 is skipped, not crashed on.
+
+    Same family as ``test_act_phases_tolerate_a_row_removed_mid_tick``, but
+    for the specific window this round-3 rework introduces: between phase 1's
+    snapshot and phase 2's re-acquired lock.
+    """
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+
+    real_emit = fix_dispatch._emit_fix_dispatch_operator_signal
+
+    def _emit_then_cancel(**kwargs: Any) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        real_emit(**kwargs)
+
+    monkeypatch.setattr(
+        fix_dispatch, "_emit_fix_dispatch_operator_signal", _emit_then_cancel
+    )
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    assert load_dev_queue().tasks == []
+    errored = read_events(event_types=[OrchestratorEventType.STAGE_ERRORED])
+    assert len(errored) == 1
+
+
+def test_act_on_pending_fix_dispatches_drops_job_mutated_during_stale_handoff_window(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job built alongside a stale candidate is re-checked before dispatch.
+
+    (#2142 round 5.)
+
+    ``_build_dispatch_jobs`` snapshots ``jobs`` and ``stale`` together under one
+    lock, then releases it. ``_drop_stale_handoffs`` then spends real
+    wall-clock time unlocked emitting the stale candidate's audit events —
+    during that window, a *different* row (already built into a job this same
+    tick) can be reverted RUNNING->PENDING by some other non-sentinel sweep.
+    Simulates that exact interleaving from inside the stale candidate's own
+    emit hook and asserts the mutated row's job is dropped from this tick's
+    dispatch while an untouched job in the same tick still spawns.
+    """
+    mutated_ticket = _TICKET
+    stale_ticket = "2018"
+    untouched_ticket = "2019"
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id=mutated_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.RUNNING,
+                    pending_fix_dispatch=_pending(label=f"fix-{mutated_ticket}"),
+                ),
+                _make_ticket_task(
+                    ticket_id=stale_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.PENDING,
+                    pending_fix_dispatch=_pending(label=f"fix-{stale_ticket}"),
+                ),
+                _make_ticket_task(
+                    ticket_id=untouched_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.RUNNING,
+                    pending_fix_dispatch=_pending(label=f"fix-{untouched_ticket}"),
+                ),
+            ]
+        )
+    )
+
+    real_emit = fix_dispatch._emit_fix_dispatch_operator_signal
+
+    def _emit_then_revert_other_row(**kwargs: Any) -> None:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            task = fix_dispatch._find_task(store, mutated_ticket, _CLIENT)
+            assert task is not None
+            task.status = QueueItemStatus.PENDING
+            save_dev_queue(store)
+        real_emit(**kwargs)
+
+    monkeypatch.setattr(
+        fix_dispatch, "_emit_fix_dispatch_operator_signal", _emit_then_revert_other_row
+    )
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [
+            fix_dispatch._FixDispatchCandidate(
+                ticket_id=mutated_ticket, client=_CLIENT
+            ),
+            fix_dispatch._FixDispatchCandidate(ticket_id=stale_ticket, client=_CLIENT),
+            fix_dispatch._FixDispatchCandidate(
+                ticket_id=untouched_ticket, client=_CLIENT
+            ),
+        ],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == [untouched_ticket]
+    dispatched_tickets = {call["ticket_id"] for call in stub_dispatch.calls}
+    assert dispatched_tickets == {untouched_ticket}
+
+    mutated_task = fix_dispatch._find_task(load_dev_queue(), mutated_ticket, _CLIENT)
+    assert mutated_task is not None
+    # Dropped from dispatch only — the handoff itself is left in place for the
+    # next tick's _build_dispatch_jobs to re-detect under the row's new
+    # (non-RUNNING) status and route through the ordinary stale-handling path.
+    assert mutated_task.pending_fix_dispatch is not None
+    assert mutated_task.status == QueueItemStatus.PENDING
+
+
+def test_act_on_pending_fix_dispatches_drops_job_stage_changed_mid_window(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job whose row stays RUNNING but changes stage is re-checked before dispatch.
+
+    (#2142 round 6.)
+
+    Round 5's ``_revalidate_dispatch_jobs`` only re-checked RUNNING + no
+    ``fix_dispatch_session_id`` — a row that leaves and re-enters RUNNING at a
+    *different* stage during the unlocked stale-handoff window (reverted, then
+    re-claimed for a later stage) still passed that check, so the fix agent
+    built for the old stage would still spawn against it. Simulates that
+    interleaving from inside the stale candidate's own emit hook and asserts
+    the stage-mutated row's job is dropped from this tick's dispatch while an
+    untouched job in the same tick still spawns.
+    """
+    mutated_ticket = _TICKET
+    stale_ticket = "2018"
+    untouched_ticket = "2019"
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id=mutated_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.RUNNING,
+                    stage=Stage.REVIEW,
+                    pending_fix_dispatch=_pending(label=f"fix-{mutated_ticket}"),
+                ),
+                _make_ticket_task(
+                    ticket_id=stale_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.PENDING,
+                    pending_fix_dispatch=_pending(label=f"fix-{stale_ticket}"),
+                ),
+                _make_ticket_task(
+                    ticket_id=untouched_ticket,
+                    client=_CLIENT,
+                    status=QueueItemStatus.RUNNING,
+                    stage=Stage.REVIEW,
+                    pending_fix_dispatch=_pending(label=f"fix-{untouched_ticket}"),
+                ),
+            ]
+        )
+    )
+
+    real_emit = fix_dispatch._emit_fix_dispatch_operator_signal
+
+    def _emit_then_advance_other_row_stage(**kwargs: Any) -> None:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            task = fix_dispatch._find_task(store, mutated_ticket, _CLIENT)
+            assert task is not None
+            # Status stays RUNNING — only the stage moves, e.g. reverted and
+            # re-claimed for finalize while this tick's job was already built.
+            task.stage = Stage.FINALIZE
+            save_dev_queue(store)
+        real_emit(**kwargs)
+
+    monkeypatch.setattr(
+        fix_dispatch,
+        "_emit_fix_dispatch_operator_signal",
+        _emit_then_advance_other_row_stage,
+    )
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [
+            fix_dispatch._FixDispatchCandidate(
+                ticket_id=mutated_ticket, client=_CLIENT
+            ),
+            fix_dispatch._FixDispatchCandidate(ticket_id=stale_ticket, client=_CLIENT),
+            fix_dispatch._FixDispatchCandidate(
+                ticket_id=untouched_ticket, client=_CLIENT
+            ),
+        ],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == [untouched_ticket]
+    dispatched_tickets = {call["ticket_id"] for call in stub_dispatch.calls}
+    assert dispatched_tickets == {untouched_ticket}
+
+    mutated_task = fix_dispatch._find_task(load_dev_queue(), mutated_ticket, _CLIENT)
+    assert mutated_task is not None
+    # Dropped from dispatch only — the handoff itself is left in place for the
+    # next tick's _build_dispatch_jobs to re-detect under the row's new stage.
+    assert mutated_task.pending_fix_dispatch is not None
+    assert mutated_task.status == QueueItemStatus.RUNNING
+    assert mutated_task.stage == Stage.FINALIZE
+
+
 def test_act_on_pending_fix_dispatches_skips_unresolvable_client(
     tmp_config_dir: Path,
     stub_dispatch: _DispatchRecorder,
@@ -355,6 +843,7 @@ def test_stamp_helpers_tolerate_a_row_removed_after_dispatch(
         ticket_id=_TICKET,
         client=_CLIENT,
         lane="default",
+        stage=Stage.REVIEW,
     )
 
     fix_dispatch._stamp_dispatch_success(job, "fix-sess")
