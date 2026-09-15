@@ -1038,10 +1038,25 @@ printf '%s' "$SENTINEL_JSON" | cw result validate -
   "ambiguities": [],
   "blocker": null,
   "prior_pr_warnings": [],
-  "next_actions": []
+  "next_actions": [],
+  "plan_draft_fingerprint": null
 }
 AUTO_DEV_RESULT>>>
 ```
+
+**`plan_draft_fingerprint` in the chained path (#2102).** The chained monolith
+emits this single final sentinel for the whole run, so it is also the plan
+stage's only emission — the `null` above is the value for a run that reached
+Stage 5 with no draft in hand. Whenever a draft *is* in hand (the Stage 1
+completion sentinel and every plan-stage park exit — `plan_pending_approval`,
+`ambiguities_pending_resolution`, `premises_pending_verification`, and the
+round-cap / stub / `blocked` hard-exits), compute the value per the
+*Plan-draft fingerprint rule* in `.claude/commands/auto-dev-plan.md` and emit it
+here; emit `null` explicitly, never omit the key, when no draft exists. Cite
+that rule; do not restate the stripping or hashing steps here. A chained round
+that parks at Stage 1 without this field hands the next `cw dev-queue approve` an
+approval bound to nothing — the #2102 bug reproducing itself on the path the
+standalone template already closes.
 
 ### `plan_source` Values (closed)
 

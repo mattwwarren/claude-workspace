@@ -227,7 +227,9 @@ The single definition of the plan-draft content fingerprint (#2102). Every produ
 
 **Computation.** Take the current text of `.cw/plan-draft.md`, **strip** its leading bookkeeping lines — the `<!-- plan-stage-scan-round: N -->` round-counter line, the `<!-- plan-stage-last-evaluated: ... -->` fingerprint line, and every `<!-- plan-stage-settled: ... -->` marker line — and hash what remains with **SHA-256**, rendered as full lowercase hex (`sha256sum`-style, as the `plan-stage-last-evaluated` tracker-state fingerprint is already computed). The stripped lines are bookkeeping about the draft, not the draft: a round-counter increment or a newly-appended settlement marker must never read as a changed plan, or every resumed round would invalidate its own approval.
 
-**Where it is computed.** Fresh, on demand, every time a site needs it — never persisted as a fourth bookkeeping line in `.cw/plan-draft.md` (the three-line grammar above is closed, #2154). It travels only in the sentinel's `plan_draft_fingerprint` field and in the tracker comment that quotes it.
+**Where it is computed.** Fresh, on demand, every time a site needs it — never persisted as a fourth bookkeeping line in `.cw/plan-draft.md` (the three-line grammar above is closed, #2154).
+
+**How it travels.** One channel, end to end: the sentinel's `plan_draft_fingerprint` field → `Session.last_result` → the dev-queue row's `TicketTask.plan_approved_fingerprint` (stamped by `cw dev-queue approve`) → `queue_metadata.plan_approved_fingerprint` in the next worker's `.claude/cw-context.json`, which is what Checkpoint 1 compares against. Nothing reads the fingerprint back out of any comment: the marker scope was cut (#2194), so a value shown to the operator in a park comment is display, never evidence.
 
 **When there is no draft.** No draft in hand means no fingerprint: emit `null` explicitly. `null` is absent evidence, never a wildcard that matches anything.
 
