@@ -190,7 +190,9 @@ def _record_approve_scope_routing_decision(
     )
 
 
-def _stamp_plan_approval(task: TicketTask, from_stage: str, session: Session) -> None:
+def _stamp_plan_approval(
+    task: TicketTask, from_stage: str, session: Session
+) -> str | None:
     """Record the tracker-neutral plan-approval fact (schema v35/v36).
 
     Stamped on BOTH the #968 same-stage re-park and the direct advance, since
@@ -210,13 +212,20 @@ def _stamp_plan_approval(task: TicketTask, from_stage: str, session: Session) ->
     approval that never happened, and a timestamp without a fingerprint is the
     unbound approval this field exists to eliminate. A sentinel that omits the
     key (pre-#2102 producer) stamps None — recorded absence, not a wildcard.
+
+    Returns what THIS call stamped, which is what the caller reports back under
+    ``plan_approved_fingerprint``: None on every non-PLAN path, where reading
+    the field off the row instead would report whatever some *earlier* plan
+    approval left there as though this approval had bound it.
     """
-    if from_stage == Stage.PLAN.value:
-        task.plan_approved_at = datetime.now(UTC)
-        fingerprint = (session.last_result or {}).get(PLAN_DRAFT_FINGERPRINT_KEY)
-        task.plan_approved_fingerprint = (
-            fingerprint if isinstance(fingerprint, str) else None
-        )
+    if from_stage != Stage.PLAN.value:
+        return None
+    task.plan_approved_at = datetime.now(UTC)
+    fingerprint = (session.last_result or {}).get(PLAN_DRAFT_FINGERPRINT_KEY)
+    task.plan_approved_fingerprint = (
+        fingerprint if isinstance(fingerprint, str) else None
+    )
+    return task.plan_approved_fingerprint
 
 
 def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
@@ -358,7 +367,10 @@ def _approve_ticket_locked(
             "awaiting_signoff": False,
             "plan_requeued": False,
             "finalize_held": False,
-            PLAN_APPROVED_FINGERPRINT_KEY: task.plan_approved_fingerprint,
+            # Never the row's stored value: clearing a signoff gate stamps no
+            # plan approval, so reporting one would credit this call with a
+            # binding an earlier PLAN approval made.
+            PLAN_APPROVED_FINGERPRINT_KEY: None,
         }
 
     state = load_state()
@@ -429,7 +441,7 @@ def _approve_ticket_locked(
         plan_requeued = True
     else:
         _advance_task_pointer(task, stages)
-    _stamp_plan_approval(task, from_stage, session)
+    stamped_fingerprint = _stamp_plan_approval(task, from_stage, session)
     to_stage = task.stage.value
 
     # #1617 (D4): _approve_ticket_locked is a gate-release site, excluded from
@@ -459,5 +471,5 @@ def _approve_ticket_locked(
         "awaiting_signoff": awaiting_signoff,
         "plan_requeued": plan_requeued,
         "finalize_held": finalize_held,
-        PLAN_APPROVED_FINGERPRINT_KEY: task.plan_approved_fingerprint,
+        PLAN_APPROVED_FINGERPRINT_KEY: stamped_fingerprint,
     }

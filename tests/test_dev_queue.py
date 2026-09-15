@@ -11726,6 +11726,54 @@ class TestPlanApprovedFingerprintStamp:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
         assert t.plan_approved_fingerprint is None
 
+    def test_review_approval_returns_none_not_the_rows_stored_fingerprint(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """The returned key reports what THIS call stamped. A REVIEW approve
+        stamps nothing, so echoing the row's older plan fingerprint would report
+        an approval this call never gave."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-fp6")
+        task.plan_approved_fingerprint = "e" * 64
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-fp6",
+            last_result={"status": "review_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_approved_fingerprint"] is None
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_fingerprint == "e" * 64
+
+    def test_signoff_clear_returns_none_not_the_rows_stored_fingerprint(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Same rule on the signoff arm, which never reaches the plan-stamp
+        branch at all -- and the stored value stays untouched."""
+        from cw.dev_queue import approve_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        task.plan_approved_fingerprint = "e" * 64
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_approved_fingerprint"] is None
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_fingerprint == "e" * 64
+
     def test_approve_reads_fingerprint_persisted_by_the_result_door(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
