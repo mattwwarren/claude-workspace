@@ -4,6 +4,14 @@ Pins the prose wiring that makes the Step 2.5 gate real: the impl command must
 invoke the script, the collapse tables must distinguish the blocking drift exit
 from the pre-existing non-blocking growth note, and the plan command must
 require the ``## Files Modified`` heading the parser anchors on.
+
+Since #2141 the file also *executes* the guard-script fences the docs tell a
+worker to copy, because a text assertion cannot tell an ``exit 3`` that runs
+from one that merely appears in the prose. Two runners, by anchor shape:
+``_run_site_fence`` for the three ``$GUARD_ROOT`` sites, and
+``_run_gate2_fence`` for Step 2.5 gate 2, which derives its own ``$TMPWT``,
+``$FORK_POINT`` and ``$SESSION_WT`` and therefore needs real git worktrees and
+a shell carrying none of the setup fence's state.
 """
 
 from __future__ import annotations
