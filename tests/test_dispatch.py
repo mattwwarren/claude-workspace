@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
@@ -117,9 +118,18 @@ def _stub_review_head_sha(monkeypatch: pytest.MonkeyPatch, sha: str) -> None:
     parks on — preempting whichever gate the test is actually about. Stubs the
     git probe at its consumption point in ``cw.dispatch.review_gates``, exactly
     as ``TestBranchStalenessGate._set_staleness`` does for its own probe.
+
+    ``resolve_task_worktree`` is stubbed alongside it because the gate fails
+    closed on an unresolvable worktree *before* it ever reaches the probe, and
+    these tasks have no worktree to resolve — stubbing only the probe would
+    still park them on this gate. The resolution step's own behavior is covered
+    against real git worktrees in ``TestReviewStalenessWorktreeResolution``.
     """
     from cw.dispatch import review_gates as rg_mod
 
+    monkeypatch.setattr(
+        rg_mod, "resolve_task_worktree", lambda _t, _c: Path("/stub-worktree")
+    )
     monkeypatch.setattr(rg_mod, "current_head_sha", lambda _p: sha)
 
 
@@ -12116,19 +12126,30 @@ class TestReviewStalenessGate:
     ``tests/test_branch_ahead.py``; these tests pin the *routing* behavior, so
     they stub ``current_head_sha`` at its consumption point in
     ``cw.dispatch.review_gates``, mirroring ``TestBranchStalenessGate`` above.
+
+    Every task here stamps ``worktree_path`` so the stub is actually reached:
+    the *resolution* layer that finds an unstamped row's worktree is covered
+    separately, against real git worktrees, in
+    ``TestReviewStalenessWorktreeResolution`` below. A stub that ignores its
+    path argument cannot see a resolution bug -- which is how #2123's round-1
+    regression got through -- so the two layers are tested apart on purpose.
     """
 
     _HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     _OTHER = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
     def _make_running_task(
-        self, ticket_id: str, stage: Stage = Stage.REVIEW
+        self,
+        ticket_id: str,
+        stage: Stage = Stage.REVIEW,
+        worktree_path: Path | None = None,
     ) -> TicketTask:
         task = _make_ticket_task(
             ticket_id=ticket_id,
             client="test-client",
             status=QueueItemStatus.RUNNING,
             stage=stage,
+            worktree_path=worktree_path,
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
         return task
@@ -12174,7 +12195,7 @@ class TestReviewStalenessGate:
         task = self._make_running_task("RSG-P1")
 
         assert (
-            _should_gate_for_review_staleness(task, {"review": {"agents_run": 1}})
+            _should_gate_for_review_staleness(task, {"review": {"agents_run": 1}}, {})
             is True
         )
 
@@ -12202,10 +12223,10 @@ class TestReviewStalenessGate:
         task = self._make_running_task("RSG-P2")
 
         assert (
-            _should_gate_for_review_staleness(task, {"status": "stage_complete"})
+            _should_gate_for_review_staleness(task, {"status": "stage_complete"}, {})
             is False
         )
-        assert _should_gate_for_review_staleness(task, None) is False
+        assert _should_gate_for_review_staleness(task, None, {}) is False
 
     def test_resolve_reviewed_sha_handles_a_malformed_review_block(self) -> None:
         """The resolver's own contract, independent of the gate's scoping.
@@ -12231,7 +12252,9 @@ class TestReviewStalenessGate:
         task = self._make_running_task("RSG-P3")
 
         assert (
-            _should_gate_for_review_staleness(task, {"review": {"reviewed_sha": 123}})
+            _should_gate_for_review_staleness(
+                task, {"review": {"reviewed_sha": 123}}, {}
+            )
             is True
         )
 
@@ -12248,11 +12271,11 @@ class TestReviewStalenessGate:
         from cw.dispatch.review_gates import _should_gate_for_review_staleness
 
         self._set_head(monkeypatch)
-        task = self._make_running_task("RSG-P4")
+        task = self._make_running_task("RSG-P4", worktree_path=tmp_dispatch_dirs)
 
         assert (
             _should_gate_for_review_staleness(
-                task, {"review": {"reviewed_sha": self._OTHER}}
+                task, {"review": {"reviewed_sha": self._OTHER}}, {}
             )
             is True
         )
@@ -12264,11 +12287,11 @@ class TestReviewStalenessGate:
         from cw.dispatch.review_gates import _should_gate_for_review_staleness
 
         self._set_head(monkeypatch)
-        task = self._make_running_task("RSG-P5")
+        task = self._make_running_task("RSG-P5", worktree_path=tmp_dispatch_dirs)
 
         assert (
             _should_gate_for_review_staleness(
-                task, {"review": {"reviewed_sha": self._HEAD}}
+                task, {"review": {"reviewed_sha": self._HEAD}}, {}
             )
             is False
         )
@@ -12286,11 +12309,13 @@ class TestReviewStalenessGate:
         from cw.dispatch.review_gates import _should_gate_for_review_staleness
 
         self._set_head(monkeypatch)
-        task = self._make_running_task("RSG-P6")
+        task = self._make_running_task("RSG-P6", worktree_path=tmp_dispatch_dirs)
 
         assert (
             _should_gate_for_review_staleness(
-                task, {"review": {"reviewed_sha": self._HEAD, "fix_cycles_used": 0}}
+                task,
+                {"review": {"reviewed_sha": self._HEAD, "fix_cycles_used": 0}},
+                {},
             )
             is False
         )
@@ -12309,11 +12334,11 @@ class TestReviewStalenessGate:
         from cw.dispatch.review_gates import _should_gate_for_review_staleness
 
         self._set_head(monkeypatch, sha=None)
-        task = self._make_running_task("RSG-P7")
+        task = self._make_running_task("RSG-P7", worktree_path=tmp_dispatch_dirs)
 
         assert (
             _should_gate_for_review_staleness(
-                task, {"review": {"reviewed_sha": self._HEAD}}
+                task, {"review": {"reviewed_sha": self._HEAD}}, {}
             )
             is True
         )
@@ -12339,7 +12364,7 @@ class TestReviewStalenessGate:
             "cw.dispatch.review_gates", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
 
-        task = self._make_running_task("RSG-1")
+        task = self._make_running_task("RSG-1", worktree_path=tmp_dispatch_dirs)
         task.session_id = "sess-rsg-1"
         last_result: dict[str, object] = {
             "status": "review_pending_approval",
@@ -12376,7 +12401,7 @@ class TestReviewStalenessGate:
         self._set_upstream_gates_clear(monkeypatch)
         self._set_head(monkeypatch)
 
-        task = self._make_running_task("RSG-2")
+        task = self._make_running_task("RSG-2", worktree_path=tmp_dispatch_dirs)
         last_result: dict[str, object] = {
             "status": "review_pending_approval",
             "scope": {"tier": "large"},
@@ -12400,7 +12425,7 @@ class TestReviewStalenessGate:
         self._set_upstream_gates_clear(monkeypatch)
         self._set_head(monkeypatch)
 
-        task = self._make_running_task("RSG-3")
+        task = self._make_running_task("RSG-3", worktree_path=tmp_dispatch_dirs)
         last_result: dict[str, object] = {
             "status": "stage_complete",
             "review": {"agents_run": 2, "reviewed_sha": self._OTHER},
@@ -12428,7 +12453,7 @@ class TestReviewStalenessGate:
         self._set_upstream_gates_clear(monkeypatch)
         self._set_head(monkeypatch)
 
-        task = self._make_running_task("RSG-4")
+        task = self._make_running_task("RSG-4", worktree_path=tmp_dispatch_dirs)
         last_result: dict[str, object] = {
             "status": "stage_complete",
             "health": {"recommendation": "EXIT_FOR_HUMAN_REVIEW"},
@@ -12459,7 +12484,7 @@ class TestReviewStalenessGate:
         )
         self._set_head(monkeypatch)
 
-        task = self._make_running_task("RSG-5")
+        task = self._make_running_task("RSG-5", worktree_path=tmp_dispatch_dirs)
         last_result: dict[str, object] = {
             "status": "review_pending_approval",
             "scope": {"tier": "small"},
@@ -12480,7 +12505,7 @@ class TestReviewStalenessGate:
         self._set_upstream_gates_clear(monkeypatch)
         self._set_head(monkeypatch)
 
-        task = self._make_running_task("RSG-6")
+        task = self._make_running_task("RSG-6", worktree_path=tmp_dispatch_dirs)
         last_result: dict[str, object] = {
             "status": "review_pending_approval",
             "scope": {"tier": "small"},
@@ -12507,7 +12532,9 @@ class TestReviewStalenessGate:
         self._set_upstream_gates_clear(monkeypatch)
         self._set_head(monkeypatch)
 
-        task = self._make_running_task("RSG-7", stage=Stage.IMPL)
+        task = self._make_running_task(
+            "RSG-7", stage=Stage.IMPL, worktree_path=tmp_dispatch_dirs
+        )
         apply_staged_decision(
             task,
             "stage_complete",
@@ -12517,6 +12544,275 @@ class TestReviewStalenessGate:
 
         assert task.disposition != "review_artifacts_stale"
         assert task.stage == Stage.REVIEW  # advanced IMPL->REVIEW unattended
+
+
+# ---------------------------------------------------------------------------
+# TestReviewStalenessWorktreeResolution (#2123 round 2)
+# ---------------------------------------------------------------------------
+
+
+def _git_in_repo(repo: Path, *args: str) -> str:
+    """Run git in *repo* with a ``GIT_*``-stripped env, returning stdout.
+
+    Mirrors ``tests/test_branch_ahead.py``'s helper of the same shape; the
+    strip matters because pytest may itself be running inside a git hook.
+    """
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=clean_env,
+    )
+    return result.stdout.strip()
+
+
+class TestReviewStalenessWorktreeResolution:
+    """GitHub #2123 round 2: the gate resolves an unstamped worktree.
+
+    ``TicketTask.worktree_path`` is ``None`` on every dispatch-driven row --
+    dispatch stamps the worktree on the ``Session``, never on the
+    ``TicketTask`` -- so reading it directly made ``current_head_sha(None)``
+    return ``None`` and the gate fail CLOSED on the dominant production path.
+
+    These tests deliberately use a **real** git worktree rather than stubbing
+    ``current_head_sha``: the predicate tests in ``TestReviewStalenessGate``
+    stub a probe that ignores its path argument, which is precisely why they
+    could not see this defect.
+    """
+
+    def _seed(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path, ticket_id: str
+    ) -> tuple[ClientConfig, Path]:
+        """Real repo + real worktree at the conventional feature-branch path.
+
+        ``worktree_base`` is set explicitly so ``worktree_path_for`` is exact
+        and the hash-fallback base never applies.
+        """
+        from cw.worktree import worktree_path_for
+
+        repo = make_git_repo(f"rsw-{ticket_id}")
+        client_cfg = ClientConfig(
+            name="test-client",
+            workspace_path=repo,
+            worktree_base=tmp_path / f"wt-{ticket_id}",
+        )
+        branch = f"{client_cfg.feature_branch_prefix}/{ticket_id}"
+        wt_path = worktree_path_for(client_cfg, branch)
+        _git_in_repo(repo, "worktree", "add", "-b", branch, str(wt_path))
+        return client_cfg, wt_path
+
+    def _make_task(self, ticket_id: str) -> TicketTask:
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.REVIEW,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def test_unstamped_worktree_with_fresh_sha_does_not_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """The production shape: ``worktree_path=None``, sha equal to real HEAD.
+
+        Before the fallback this parked every daemon-dispatched REVIEW row.
+        """
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        client_cfg, wt_path = self._seed(make_git_repo, tmp_path, "RSW-1")
+        head = _git_in_repo(wt_path, "rev-parse", "HEAD")
+        task = self._make_task("RSW-1")
+
+        assert task.worktree_path is None
+        assert (
+            _should_gate_for_review_staleness(
+                task,
+                {"review": {"agents_run": 2, "reviewed_sha": head}},
+                {"test-client": client_cfg},
+            )
+            is False
+        )
+
+    def test_unstamped_worktree_with_older_sha_gates(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """The gate still fires on a genuinely stale review, post-resolution."""
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        client_cfg, wt_path = self._seed(make_git_repo, tmp_path, "RSW-2")
+        older = _git_in_repo(wt_path, "rev-parse", "HEAD")
+        (wt_path / "work.txt").write_text("fix\n", encoding="utf-8")
+        _git_in_repo(wt_path, "add", "-A")
+        _git_in_repo(wt_path, "commit", "-m", "post-review fix")
+        assert _git_in_repo(wt_path, "rev-parse", "HEAD") != older
+
+        task = self._make_task("RSW-2")
+
+        assert (
+            _should_gate_for_review_staleness(
+                task,
+                {"review": {"agents_run": 2, "reviewed_sha": older}},
+                {"test-client": client_cfg},
+            )
+            is True
+        )
+
+    def test_unresolvable_worktree_gates(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Fail closed when neither the stamp nor the conventional path resolves.
+
+        Both sub-cases: an unknown client (no ``ClientConfig`` to derive the
+        branch from) and a known client whose conventional worktree does not
+        exist on disk.
+        """
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        task = self._make_task("RSW-3")
+        last_result: dict[str, object] = {
+            "review": {"agents_run": 2, "reviewed_sha": "a" * 40}
+        }
+
+        assert _should_gate_for_review_staleness(task, last_result, {}) is True
+
+        absent = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            worktree_base=tmp_path / "no-such-base",
+        )
+        assert (
+            _should_gate_for_review_staleness(
+                task, last_result, {"test-client": absent}
+            )
+            is True
+        )
+
+    def test_foreign_branch_at_the_conventional_path_gates(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """A worktree checked out on someone else's branch is not this ticket's.
+
+        Same trust rule ``_local_plan_path`` already applied: a stale or
+        foreign checkout must not vouch for this ticket. Fails closed.
+        """
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        client_cfg, wt_path = self._seed(make_git_repo, tmp_path, "RSW-4")
+        head = _git_in_repo(wt_path, "rev-parse", "HEAD")
+        _git_in_repo(wt_path, "checkout", "-b", "dev/someone-else")
+        task = self._make_task("RSW-4")
+
+        assert (
+            _should_gate_for_review_staleness(
+                task,
+                {"review": {"agents_run": 2, "reviewed_sha": head}},
+                {"test-client": client_cfg},
+            )
+            is True
+        )
+
+    def test_head_probe_receives_the_resolved_path(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The probe must be handed the resolved worktree, never ``None``.
+
+        The assertion the old stub could not make: it ignored its argument, so
+        a ``None`` path read identically to a correct one.
+        """
+        from cw.dispatch import review_gates as rg_mod
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        client_cfg, wt_path = self._seed(make_git_repo, tmp_path, "RSW-5")
+        seen: list[Path | None] = []
+
+        def _spy(path: Path | None) -> str:
+            seen.append(path)
+            return "a" * 40
+
+        monkeypatch.setattr(rg_mod, "current_head_sha", _spy)
+        task = self._make_task("RSW-5")
+
+        assert (
+            _should_gate_for_review_staleness(
+                task,
+                {"review": {"agents_run": 2, "reviewed_sha": "a" * 40}},
+                {"test-client": client_cfg},
+            )
+            is False
+        )
+        assert seen == [wt_path]
+
+    def test_stamped_worktree_path_still_wins(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """An explicitly stamped ``worktree_path`` short-circuits the fallback.
+
+        USER-origin rows and tests do stamp it; the conventional-branch lookup
+        must not override a caller that already knows the answer.
+        """
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        _client_cfg, wt_path = self._seed(make_git_repo, tmp_path, "RSW-6")
+        head = _git_in_repo(wt_path, "rev-parse", "HEAD")
+        task = self._make_task("RSW-6")
+        task.worktree_path = wt_path
+
+        assert (
+            _should_gate_for_review_staleness(
+                task,
+                {"review": {"agents_run": 2, "reviewed_sha": head}},
+                # Deliberately empty: the stamp alone must resolve it.
+                {},
+            )
+            is False
+        )
+
+
+def test_resolve_task_worktree_shares_the_local_plan_path_resolution(
+    tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    """``_local_plan_path`` and the staleness gate resolve identically (#2123).
+
+    The class this round closes is "two copies of the worktree-resolution
+    rule". Pinning the shared helper against ``_local_plan_path``'s own output
+    is what keeps a future edit to one from silently diverging from the other.
+    """
+    from cw.dev_queue.lifecycle import _local_plan_path
+    from cw.worktree import resolve_task_worktree, worktree_path_for
+
+    repo = make_git_repo("rsw-shared")
+    client_cfg = ClientConfig(
+        name="test-client", workspace_path=repo, worktree_base=tmp_path / "wt-shared"
+    )
+    branch = f"{client_cfg.feature_branch_prefix}/RSW-SHARED"
+    wt_path = worktree_path_for(client_cfg, branch)
+    _git_in_repo(repo, "worktree", "add", "-b", branch, str(wt_path))
+    task = _make_ticket_task(ticket_id="RSW-SHARED", client="test-client")
+
+    resolved = resolve_task_worktree(task, client_cfg)
+
+    assert resolved == wt_path
+    assert _local_plan_path(task, client_cfg) == wt_path / ".cw" / "plan.md"
+    assert resolve_task_worktree(task, None) is None
 
 
 # ---------------------------------------------------------------------------

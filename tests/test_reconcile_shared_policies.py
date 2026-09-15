@@ -2231,6 +2231,12 @@ class TestApplySentinelToTaskLateRescue:
         # sha its reviewers ran against; the task carries no real worktree
         # here, so the measurement is stubbed to agree with it.
         payload["review"] = {**payload["review"], "reviewed_sha": "signoff-head"}
+        # The gate fails closed on an unresolvable worktree before it reaches
+        # the probe, so the resolution is stubbed alongside the measurement.
+        monkeypatch.setattr(
+            "cw.dispatch.review_gates.resolve_task_worktree",
+            lambda _t, _c: Path("/stub-worktree"),
+        )
         monkeypatch.setattr(
             "cw.dispatch.review_gates.current_head_sha", lambda _p: "signoff-head"
         )
