@@ -135,7 +135,9 @@ done
 if [ -n "$RESOLVED" ]; then
   FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" \
     | sed -E 's/.*cw-script-version:[[:space:]]*([^[:space:]]*).*/\1/')
-  if [[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+  # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+  # (which errors, evaluates false, and would fall through to the invocation).
+  if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
     echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
     # HARD STOP: EXIT blocked with <blocker.reason> (see this site's bullet
     # below); never run the script, never fall through to any other branch.
@@ -171,9 +173,13 @@ raw token after `cw-script-version:` from the **first** marker line only —
 `1.5` into two lines and makes `[ "$FOUND_VERSION" -lt ... ]` error out, whereupon
 the condition evaluates false and the script runs anyway. A missing marker, an
 empty marker, and a non-integer (`abc`, `1.5`, `-1`, `2x`) must all take the
-hard stop; only a clean `^[0-9]+$` at or above `MIN_VERSION` reaches the
-invocation. The regex test comes **first** in the condition so the numeric
-comparison only ever sees an integer.
+hard stop; only a clean **1-6 digit** integer at or above `MIN_VERSION` reaches
+the invocation. The digit count is bounded, not open-ended, because an
+oversized value (`99999999999999999999`) is the same fail-open one width up:
+it passes an unbounded integer test, then overflows `[ -lt ]` with `integer
+expression expected`, and the condition again evaluates false. The regex test
+comes **first** in the condition so the numeric comparison only ever sees an
+in-range integer.
 
 **Existence is not enough.** `ln -sf` means an installed copy keeps pointing at
 whatever commit's content it was linked against, so a found script can be
@@ -273,7 +279,9 @@ Stage 2 agent spawn:
   if [ -n "$RESOLVED" ]; then
     FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" \
       | sed -E 's/.*cw-script-version:[[:space:]]*([^[:space:]]*).*/\1/')
-    if [[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+    # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+    # (which errors, evaluates false, and would fall through to the invocation).
+    if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
       echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
       # HARD STOP: EXIT blocked with impl_failed (see bullet below); never run
       # the script, and never take the absent-from-both-locations skip path.

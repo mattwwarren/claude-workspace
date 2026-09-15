@@ -93,7 +93,9 @@ done
 if [ -n "$RESOLVED" ]; then
   FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" \
     | sed -E 's/.*cw-script-version:[[:space:]]*([^[:space:]]*).*/\1/')
-  if [[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+  # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+  # (which errors, evaluates false, and would fall through to the invocation).
+  if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
     echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
     # HARD STOP: EXIT blocked with impl_failed (see bullet below); never run
     # the script, and never fail open to the absent-from-both-locations
