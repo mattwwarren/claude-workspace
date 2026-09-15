@@ -284,6 +284,29 @@ class TestDetect:
             == []
         )
 
+    def test_detect_auto_approve_review_excludes_review_staleness_park(self) -> None:
+        """#2123: a review-staleness park is never auto-approved.
+
+        The load-bearing regression test for the incident. The recipe's
+        five-field clean-review predicate reads only ``session.last_result``,
+        which this gate never mutates — a stale-artifact row satisfies every
+        one of those fields (that is precisely the hole: the numbers are clean
+        because they describe a *different* tree) and would be auto-approved
+        unless it is excluded on ``task.disposition``.
+        """
+        from cw.dev_queue import REVIEW_STALENESS_GATE_DISPOSITION
+
+        task = _make_task(disposition=REVIEW_STALENESS_GATE_DISPOSITION)
+        session = _make_session(last_result=_clean_result())
+        state = CwState(sessions=[session])
+
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
+
     def test_wrong_last_result_status_yields_none(self) -> None:
         task = _make_task()
         session = _make_session(
@@ -2408,12 +2431,8 @@ class TestDetectAdoptPlanTrackerAware:
         wt = tmp_path / "wt"
         (wt / ".cw").mkdir(parents=True)
         (wt / ".cw" / "plan.md").write_text(plan_body(), encoding="utf-8")
-        monkeypatch.setattr(
-            "cw.dev_queue.lifecycle.worktree_path_for", lambda _c, _b: wt
-        )
-        monkeypatch.setattr(
-            "cw.dev_queue.lifecycle._checked_out_branch", lambda _wt: "dev/GEN-1"
-        )
+        monkeypatch.setattr("cw.worktree.worktree_path_for", lambda _c, _b: wt)
+        monkeypatch.setattr("cw.worktree._checked_out_branch", lambda _wt: "dev/GEN-1")
         task = _make_task(stage=Stage.PLAN, worktree_path=None)
         state = CwState(sessions=[_make_session(last_result=_plan_result())])
 
@@ -2433,7 +2452,7 @@ class TestDetectAdoptPlanTrackerAware:
             _fetch_must_not_run,
         )
         monkeypatch.setattr(
-            "cw.dev_queue.lifecycle.worktree_path_for",
+            "cw.worktree.worktree_path_for",
             lambda _c, _b: tmp_path / "missing",
         )
         task = _make_task(stage=Stage.PLAN, worktree_path=None)

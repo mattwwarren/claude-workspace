@@ -24,6 +24,7 @@ from cw.config import get_client
 from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
 from cw.dev_queue.lifecycle import (
     BRANCH_STALENESS_GATE_DISPOSITION,
+    REVIEW_STALENESS_GATE_DISPOSITION,
     _advance_task_pointer,
     _clear_signoff_gate,
     _plan_is_reviewed,
@@ -255,6 +256,17 @@ def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
     # origin/<default_branch>. The gate must fail closed until the branch is
     # rebased; recovery is `cw dev-queue requeue`/`drain`, not `approve`.
     if task.disposition == BRANCH_STALENESS_GATE_DISPOSITION:
+        return True
+
+    # #2123: chained immediately after #1823's override, on identical
+    # reasoning. A review-staleness park likewise leaves the sentinel reading
+    # "review_pending_approval" and diverges only task.disposition, so without
+    # this the row reads as "at the approval gate" and `approve` would release
+    # a tree that no reviewer ran against. That is the exact incident: a
+    # review-stage park released via `requeue` can return to this status with
+    # stale artifacts. Recovery is `cw dev-queue requeue`/`drain` (which
+    # re-runs review), not `approve`.
+    if task.disposition == REVIEW_STALENESS_GATE_DISPOSITION:
         return True
 
     not_at_status_gate = (

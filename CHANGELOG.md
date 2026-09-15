@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Adds the `review_artifacts_stale` dispatch gate, a seventh REVIEW-scoped gate (#2123):** a ticket whose sentinel reports a review block that does not cover the worktree's live HEAD now parks `BLOCKED_ON_USER/review_artifacts_stale` instead of advancing. `Review.reviewed_sha` is threaded from all three executors (Codex and Claude-native via `consolidate_verdict`, OpenCode from its own fix-loop tail) to the sentinel, and the gate compares it against the branch's live HEAD, failing closed on a missing/non-string sha or an unmeasurable worktree so a producer that forgets the stamp parks rather than bypassing the gate.
+
 ### Fixed
 
 - **`dispatch_fix_agent`'s HEAD verification now resolves the branch's remote ref via its configured upstream (`@{u}`) instead of guessing `origin/<branch>` (#2145):** the guessed name silently diverges from reality whenever a branch was pushed under one name and later checked out locally under another, so the HEAD-landed-correctly check could compare against the wrong SHA. The new `_resolve_remote_ref` helper prefers the checked-out branch's upstream, falling back to `origin/<branch>` only once confirmed to actually resolve; an unresolvable ref now raises a `CwError` naming both the attempted upstream and the `origin/<branch>` fallback instead of dispatching against unverified branch state.

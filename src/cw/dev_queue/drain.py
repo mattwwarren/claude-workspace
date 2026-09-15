@@ -24,6 +24,7 @@ from cw.dev_queue.lifecycle import (
     HOLD_DISPOSITIONS,
     REVIEW_HEALTH_GATE_DISPOSITION,
     REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
+    REVIEW_STALENESS_GATE_DISPOSITION,
 )
 from cw.dev_queue.requeue import requeue_ticket
 from cw.dev_queue.storage import load_dev_queue
@@ -72,12 +73,21 @@ class DrainOutcome(TypedDict):
 # a mechanically-rejected MUST_FIX park says "review dropped a finding before
 # adjudicating it", which clears by re-running review -- exactly what drain
 # does. Also not an operator stop, so batch-releasing it overrides nobody.
+# #2123 joins on those same terms, and the contrast with
+# BRANCH_STALENESS_GATE_DISPOSITION -- still deliberately absent from this set
+# -- is the load-bearing part. A stale *branch* needs an operator rebase before
+# a re-run means anything, so batch-releasing it would spin the same stale tree
+# back through the pipeline. Stale review *artifacts* need only a fresh review
+# against the current HEAD, which is precisely what a drain-triggered requeue
+# produces; and if that re-run is itself still stale, the gate re-fires rather
+# than advancing.
 DRAIN_DISPOSITIONS: frozenset[str] = (
     HOLD_DISPOSITIONS - frozenset({FINALIZE_GATE_HELD_DISPOSITION})
 ) | frozenset(
     {
         REVIEW_HEALTH_GATE_DISPOSITION,
         REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
+        REVIEW_STALENESS_GATE_DISPOSITION,
     }
 )
 

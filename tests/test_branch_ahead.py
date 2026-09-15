@@ -15,9 +15,9 @@ worktree git state cannot be read.
 
 from __future__ import annotations
 
-import os
-import subprocess
 from typing import TYPE_CHECKING
+
+from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,24 +29,11 @@ _BRANCH = "dev/1870"
 _FILE = "work.txt"
 
 
-def _git_in(repo: Path, *args: str) -> str:
-    """Run git in *repo* with a GIT_*-stripped env, returning stripped stdout."""
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=clean_env,
-    )
-    return result.stdout.strip()
-
-
 def _write_commit(repo: Path, name: str, body: str, message: str) -> None:
     """Write *body* to *name* under *repo* and commit it."""
     (repo / name).write_text(body, encoding="utf-8")
-    _git_in(repo, "add", "-A")
-    _git_in(repo, "commit", "-m", message)
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", message)
 
 
 def _seed_repo(make_git_repo: Callable[..., Path], name: str) -> Path:
@@ -57,10 +44,10 @@ def _seed_repo(make_git_repo: Callable[..., Path], name: str) -> Path:
     want an ahead branch commit onto it afterwards.
     """
     repo = make_git_repo(name)
-    _git_in(repo, "remote", "add", "origin", str(repo))
+    git_in(repo, "remote", "add", "origin", str(repo))
     _write_commit(repo, _FILE, "base\n", "seed")
-    _git_in(repo, "fetch", "origin", "main")
-    _git_in(repo, "checkout", "-b", _BRANCH)
+    git_in(repo, "fetch", "origin", "main")
+    git_in(repo, "checkout", "-b", _BRANCH)
     return repo
 
 
@@ -138,3 +125,83 @@ class TestCommitsAheadOfDefault:
         monkeypatch.setattr(ba_mod, "_run_git", garbage)
 
         assert ba_mod.commits_ahead_of_default(repo, "main") is None
+
+
+class TestCurrentHeadSha:
+    """#2123: the worktree's own HEAD sha, for the review-staleness gate.
+
+    Same fail-open-on-measurement-failure contract as
+    ``commits_ahead_of_default`` above — every unresolvable state returns
+    ``None``, never a partial or guessed sha. The *consumer* of this helper
+    (``dispatch.review_gates._should_gate_for_review_staleness``) is the piece
+    that treats ``None`` as fail-CLOSED; the measurement itself stays
+    three-valued and opinion-free, matching its sibling.
+    """
+
+    def test_returns_the_real_head_sha(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """The measured value is exactly what ``git rev-parse HEAD`` reports."""
+        from cw.branch_ahead import current_head_sha
+
+        repo = _seed_repo(make_git_repo, "chs-real")
+        _write_commit(repo, _FILE, "work\n", "branch work")
+
+        assert current_head_sha(repo) == git_in(repo, "rev-parse", "HEAD")
+
+    def test_missing_worktree_path_is_unmeasurable(self, tmp_path: Path) -> None:
+        """None and a non-existent path resolve to None, never to a sha."""
+        from cw.branch_ahead import current_head_sha
+
+        assert current_head_sha(None) is None
+        assert current_head_sha(tmp_path / "nope") is None
+
+    def test_non_git_directory_is_unmeasurable(self, tmp_path: Path) -> None:
+        """A real directory that is not a git repo → non-zero exit → None."""
+        from cw.branch_ahead import current_head_sha
+
+        plain = tmp_path / "not-a-repo"
+        plain.mkdir()
+
+        assert current_head_sha(plain) is None
+
+    def test_git_failure_is_unmeasurable(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing git binary (OSError) is swallowed into None, never raised."""
+        from cw import branch_ahead as ba_mod
+
+        repo = _seed_repo(make_git_repo, "chs-oserror")
+
+        def boom(*args: str, cwd: object, check: bool = True) -> None:
+            msg = "git not found"
+            raise OSError(msg)
+
+        monkeypatch.setattr(ba_mod, "_run_git", boom)
+
+        assert ba_mod.current_head_sha(repo) is None
+
+    def test_empty_stdout_is_unmeasurable(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A zero-exit git that printed nothing yields None, never ``""``.
+
+        An empty string would compare unequal to every real sentinel sha and
+        read as a *mismatch* at the gate rather than as "unmeasurable" — the
+        two park for the same reason today, but conflating them would hide
+        which one actually happened.
+        """
+        import subprocess as sp
+
+        from cw import branch_ahead as ba_mod
+
+        repo = _seed_repo(make_git_repo, "chs-empty")
+
+        def blank(
+            *args: str, cwd: object, check: bool = True
+        ) -> sp.CompletedProcess[str]:
+            return sp.CompletedProcess(args=list(args), returncode=0, stdout="\n")
+
+        monkeypatch.setattr(ba_mod, "_run_git", blank)
+
+        assert ba_mod.current_head_sha(repo) is None

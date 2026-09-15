@@ -4747,6 +4747,40 @@ class TestReviewRejectedCount:
         assert review.rejected_count == 0
         assert review.rejected_count_by_severity == {}
 
+
+class TestReviewReviewedSha:
+    """#2123 — Review.reviewed_sha, the sha the review actually ran against.
+
+    Advisory optional field on the #2000/#2098 precedent: ``None`` means "the
+    producer did not report this", never "it matched". The dispatch-side gate
+    (``review_artifacts_stale``) treats the omitted case as fail-closed, so
+    the default must stay distinguishable from a real value here.
+    """
+
+    def test_reviewed_sha_defaults_to_none_when_omitted(self) -> None:
+        review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
+        assert review.reviewed_sha is None
+
+    def test_reviewed_sha_round_trips_a_concrete_sha(self) -> None:
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        review = Review(
+            must_fix_initial=0, should_fix=0, fix_cycles_used=0, reviewed_sha=sha
+        )
+        dumped = review.model_dump()
+        assert dumped["reviewed_sha"] == sha
+        assert Review.model_validate(dumped).reviewed_sha == sha
+
+    def test_reviewed_sha_parses_from_a_raw_sentinel_payload(self) -> None:
+        review = Review.model_validate(
+            {
+                "must_fix_initial": 1,
+                "should_fix": 0,
+                "fix_cycles_used": 1,
+                "reviewed_sha": "deadbeef",
+            }
+        )
+        assert review.reviewed_sha == "deadbeef"
+
     def test_pre_2000_payload_without_rejected_count_parses_unchanged(self) -> None:
         # Backward compatibility, proven rather than asserted in prose: the
         # shipped-payload helper's "review" dict omits both new fields, exactly

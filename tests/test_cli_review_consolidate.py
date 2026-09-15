@@ -404,6 +404,10 @@ class TestReviewConsolidateCommand:
             # artifact. Identical values by construction, not by convention.
             "rejected_count",
             "rejected_count_by_severity",
+            # #2123: mirrored from the top-level `reviewed_sha` for the same
+            # reason — dispatch's review-staleness gate reads the terminal
+            # sentinel, not this artifact, so the sha has to survive into it.
+            "reviewed_sha",
         }
 
     def test_empty_documents_all_failed_yields_zero_agents_run(
