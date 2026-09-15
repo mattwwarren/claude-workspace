@@ -750,7 +750,8 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     consumed and cleared by the next dispatch spawn (dispatch/claim.py) after
     it has been written into the worker's ``queue_metadata``.
 
-    Also clears ``plan_approved_at`` when *target_stage* is ``Stage.PLAN``
+    Also clears ``plan_approved_at`` and its v36 companion
+    ``plan_approved_fingerprint`` when *target_stage* is ``Stage.PLAN``
     (GitHub #2102) -- a regress into the plan stage means re-plan, and the
     approval the operator gave the previous plan must not carry over.
 
@@ -794,6 +795,7 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     # approved draft re-parked for ambiguities still carries its approval.
     if target_stage == Stage.PLAN:
         task.plan_approved_at = None
+        task.plan_approved_fingerprint = None
     # unproductive=False (GitHub #1750): the shared chokepoint for every
     # regress (operator `--regress` via requeue.py, routing.py's Rule 5a
     # FINALIZE self-heal). A deliberate backward move is a pipeline-stage

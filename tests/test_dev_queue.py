@@ -3926,7 +3926,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -3970,7 +3970,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -4005,7 +4005,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -4048,7 +4048,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 0
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
         """Existing false-park-recovery backoff state survives a second
@@ -4090,7 +4090,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["gate_recipe_failed_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v12_gate_recipe_failed_at_preserved_idempotently(self) -> None:
         """Existing gate_recipe_failed_at timestamp survives a second
@@ -4128,7 +4128,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalate_merge_block_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v14_escalate_merge_block_fired_at_preserved_idempotently(self) -> None:
         """Existing escalate_merge_block_fired_at survives a second migration."""
@@ -4165,7 +4165,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["request_reviewer_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v16_request_reviewer_fired_at_preserved_idempotently(self) -> None:
         """Existing request_reviewer_fired_at survives a second migration."""
@@ -4202,7 +4202,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["auto_fix_ci_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v17_auto_fix_ci_fired_at_preserved_idempotently(self) -> None:
         """Existing auto_fix_ci_fired_at survives a second migration."""
@@ -4239,7 +4239,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["address_review_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v18_address_review_fired_at_preserved_idempotently(self) -> None:
         """Existing address_review_fired_at survives a second migration."""
@@ -4276,7 +4276,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["last_blocked_result"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v19_last_blocked_result_preserved_idempotently(self) -> None:
         """Existing last_blocked_result survives a second migration."""
@@ -4317,7 +4317,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["cross_repo_override"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v20_cross_repo_override_preserved_idempotently(self) -> None:
         """Existing cross_repo_override survives a second migration."""
@@ -4355,7 +4355,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage_high_water"] == "impl"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_migrate_dev_queue_fills_stage_high_water_default_when_stage_also_missing(
         self,
@@ -4377,7 +4377,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage"] == DEFAULT_STAGE.value == "plan"
         assert migrated["tasks"][0]["stage_high_water"] == DEFAULT_STAGE.value == "plan"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v21_stage_high_water_preserved_idempotently(self) -> None:
         """Existing stage_high_water survives a second migration pass unchanged,
@@ -4417,7 +4417,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["blocked_reason"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_migrate_dev_queue_fills_hold_finalize_default(self) -> None:
         """migrate_dev_queue fills hold_finalize=None on tasks missing the key
@@ -4435,7 +4435,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["hold_finalize"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v23_hold_finalize_preserved_idempotently(self) -> None:
         """An existing hold_finalize value survives a second migration pass."""
@@ -4473,7 +4473,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["attention_digest_buffered_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v24_attention_digest_buffered_at_preserved_idempotently(
         self,
@@ -4515,7 +4515,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["salvage_no_sentinel_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v25_salvage_no_sentinel_at_preserved_idempotently(self) -> None:
         """An existing salvage_no_sentinel_at value survives a second
@@ -4554,7 +4554,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["regressed_into_stage"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v27_regressed_into_stage_preserved_idempotently(self) -> None:
         """An already-stamped regressed_into_stage survives a second migration
@@ -4593,7 +4593,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finalize_regress_branch_head"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v28_finalize_regress_branch_head_preserved_idempotently(self) -> None:
         """An already-stamped finalize_regress_branch_head survives a second
@@ -4630,7 +4630,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pending_operator_comment"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v29_pending_operator_comment_preserved_idempotently(self) -> None:
         """An already-raised pending_operator_comment survives a second
@@ -4689,7 +4689,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finding_dispositions"] == {}
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v31_finding_dispositions_preserved_idempotently(self) -> None:
         """An already-populated ledger survives a second migration pass — the
@@ -4734,7 +4734,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["ever_spawned"] is True
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v33_ever_spawned_preserved_idempotently(self) -> None:
         """An explicit ever_spawned=False survives a second migration pass --
@@ -4770,7 +4770,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pending_fix_dispatch"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_migrate_dev_queue_fills_fix_dispatch_session_id_default(self) -> None:
         """migrate_dev_queue fills fix_dispatch_session_id=None (v34, #2017)."""
@@ -4846,7 +4846,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stale_gate_detected_at"] is None
         assert migrated["tasks"][0]["blocked_on_pr"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v31_migration_fills_both_v30_and_v31_fields_in_one_pass(self) -> None:
         """A single pre-v30 row gains BOTH #1713's and #1838's fields.
@@ -4871,7 +4871,7 @@ class TestMigrateDevQueue:
         assert migrated["tasks"][0]["stale_gate_detected_at"] is None
         assert migrated["tasks"][0]["blocked_on_pr"] is None
         assert migrated["tasks"][0]["finding_dispositions"] == {}
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_v32_migration_fills_both_v31_and_v32_fields_in_one_pass(self) -> None:
         """A single pre-v31 row gains BOTH #1838's and #1750's fields.
@@ -4897,14 +4897,14 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finding_dispositions"] == {}
         assert migrated["tasks"][0]["unproductive_attempts"] == 0
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_migrate_dev_queue_fills_watched_prs_default(self) -> None:
         """migrate_dev_queue fills watched_prs=[] on a store missing the key (v15)."""
         raw: dict[str, object] = {"schema_version": 14, "tasks": []}
         migrated = migrate_dev_queue(raw)
         assert migrated["watched_prs"] == []
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_migrate_dev_queue_preserves_existing_watched_prs(self) -> None:
         """An existing watched_prs list survives migration untouched (idempotent)."""
@@ -10868,8 +10868,10 @@ class TestStageRegress:
 
         task = _make_stage_task(stage=Stage.IMPL)
         task.plan_approved_at = datetime(2026, 9, 4, tzinfo=UTC)
+        task.plan_approved_fingerprint = "f" * 64
         _stage_regress(task, Stage.PLAN)
         assert task.plan_approved_at is None
+        assert task.plan_approved_fingerprint is None
 
     def test_regress_into_non_plan_stage_keeps_plan_approved_at(self) -> None:
         """Rule 5a's FINALIZE->IMPL self-heal does not touch the plan and
@@ -10879,8 +10881,10 @@ class TestStageRegress:
         task = _make_stage_task(stage=Stage.FINALIZE)
         stamped = datetime(2026, 9, 4, tzinfo=UTC)
         task.plan_approved_at = stamped
+        task.plan_approved_fingerprint = "f" * 64
         _stage_regress(task, Stage.IMPL)
         assert task.plan_approved_at == stamped
+        assert task.plan_approved_fingerprint == "f" * 64
 
     def test_sets_pending_operator_comment(self) -> None:
         """#1730: the shared stamp point also raises the pending-send-back marker."""
@@ -11353,7 +11357,7 @@ class TestUnproductiveAttempts:
         assert task.unproductive_attempts == 0
 
     def test_schema_version_bumped_to_32(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 35
+        assert DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_migrate_fills_unproductive_attempts_default(self) -> None:
         """migrate_dev_queue fills unproductive_attempts=0 on legacy rows (v32)."""
@@ -11561,19 +11565,28 @@ def _assert_fetch_not_called(_ticket_id: str, **_kwargs: object) -> str | None:
 
 
 def _seed_plan_pending(
-    tmp_config_dir: Path, tmp_path: Path, *, session_id: str
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    *,
+    session_id: str,
+    last_result_extra: dict[str, object] | None = None,
 ) -> None:
     """Persist a PLAN-stage BLOCKED_ON_USER row + its plan_pending_approval
-    session under the 'genhealth' client."""
+    session under the 'genhealth' client.
+
+    ``last_result_extra`` merges additional sentinel keys into the seeded
+    session's ``last_result`` — used by the #2102 fingerprint tests, which need
+    a ``plan_draft_fingerprint`` alongside the gate status.
+    """
     from cw.config import save_state
     from cw.models import CwState
 
     _write_client_yaml(tmp_config_dir, tmp_path)
     task = _make_blocked_task(stage=Stage.PLAN, session_id=session_id)
     save_dev_queue(DevQueueStore(tasks=[task]))
-    session = _make_session(
-        session_id=session_id, last_result={"status": "plan_pending_approval"}
-    )
+    last_result: dict[str, object] = {"status": "plan_pending_approval"}
+    last_result.update(last_result_extra or {})
+    session = _make_session(session_id=session_id, last_result=last_result)
     save_state(CwState(sessions=[session]))
 
 
@@ -11596,7 +11609,7 @@ class TestPlanApprovedAtStamp:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["plan_approved_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 35
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_migrate_preserves_plan_approved_at_idempotently(self) -> None:
         """A recorded approval survives a second migration pass."""
@@ -11685,6 +11698,243 @@ class TestPlanApprovedAtStamp:
 
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
         assert t.plan_approved_at is None
+
+
+class TestPlanApprovedFingerprintStamp:
+    """`plan_approved_at` alone is a durable no-op check: it says an approval
+    happened, never which draft it was given for. Schema v36 binds it to the
+    approved draft's content fingerprint (#2102)."""
+
+    def test_migrate_fills_plan_approved_fingerprint_default(self) -> None:
+        """migrate_dev_queue fills plan_approved_fingerprint=None (v36)."""
+        raw: dict[str, object] = {
+            "schema_version": 35,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-36",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["plan_approved_fingerprint"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 36
+
+    def test_migrate_preserves_plan_approved_fingerprint_idempotently(self) -> None:
+        """A recorded fingerprint survives a second migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 36,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-36",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "plan_approved_fingerprint": "a" * 64,
+                }
+            ],
+        }
+        twice = migrate_dev_queue(migrate_dev_queue(raw))
+        assert twice["tasks"][0]["plan_approved_fingerprint"] == "a" * 64
+
+    def test_model_default_is_none_and_round_trips(self) -> None:
+        task = _make_blocked_task(stage=Stage.PLAN)
+        assert task.plan_approved_fingerprint is None
+        task.plan_approved_fingerprint = "b" * 64
+        restored = TicketTask.model_validate_json(task.model_dump_json())
+        assert restored.plan_approved_fingerprint == "b" * 64
+
+    def test_approve_stamps_plan_approved_fingerprint_from_last_result(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The sentinel's plan_draft_fingerprint is what the row records — it
+        names the exact draft the operator saw."""
+        from cw.dev_queue import approve_ticket
+
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        _seed_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            session_id="sess-fp1",
+            last_result_extra={"plan_draft_fingerprint": "c" * 64},
+        )
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_approved_fingerprint"] == "c" * 64
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_fingerprint == "c" * 64
+
+    def test_approve_stamps_null_fingerprint_when_sentinel_omits_it(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A legacy producer that emits no fingerprint stamps None — the row
+        records the absence rather than inventing a value."""
+        from cw.dev_queue import approve_ticket
+
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        _seed_plan_pending(tmp_config_dir, tmp_path, session_id="sess-fp2")
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_approved_fingerprint"] is None
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_at is not None
+        assert t.plan_approved_fingerprint is None
+
+    def test_approve_review_stage_never_stamps_fingerprint(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Mirrors the plan_approved_at REVIEW-stage-no-stamp rule: a review
+        approve is not a plan approval, whatever the sentinel carries."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-fp3")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-fp3",
+            last_result={
+                "status": "review_pending_approval",
+                "plan_draft_fingerprint": "d" * 64,
+            },
+        )
+        save_state(CwState(sessions=[session]))
+
+        approve_ticket("GEN-500", "genhealth")
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_fingerprint is None
+
+    def test_review_approval_returns_none_not_the_rows_stored_fingerprint(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """The returned key reports what THIS call stamped. A REVIEW approve
+        stamps nothing, so echoing the row's older plan fingerprint would report
+        an approval this call never gave."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-fp6")
+        task.plan_approved_fingerprint = "e" * 64
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-fp6",
+            last_result={"status": "review_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_approved_fingerprint"] is None
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_fingerprint == "e" * 64
+
+    def test_signoff_clear_returns_none_not_the_rows_stored_fingerprint(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Same rule on the signoff arm, which never reaches the plan-stamp
+        branch at all -- and the stored value stays untouched."""
+        from cw.dev_queue import approve_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        task.plan_approved_fingerprint = "e" * 64
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_approved_fingerprint"] is None
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_fingerprint == "e" * 64
+
+    def test_approve_reads_fingerprint_persisted_by_the_result_door(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end over the real persistence path: the sentinel lands on the
+        session through `emit_result_on` — the same `AutoDevResult.model_dump`
+        the Stop hook and executor use — so a serialization change that dropped
+        the field fails here, where a hand-injected dict would still pass."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState, LastResultSource
+        from cw.result import emit_result_on
+        from tests.test_auto_dev_result import _plan_pending_payload
+
+        fingerprint = "f" * 64
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[_make_blocked_task(stage=Stage.PLAN, session_id="sess-fp5")]
+            )
+        )
+
+        payload = _plan_pending_payload()
+        payload["schema_version"] = 8
+        payload["ticket_id"] = "GEN-500"
+        payload["plan_draft_fingerprint"] = fingerprint
+        session = _make_session(session_id="sess-fp5", last_result=None)
+        outcome = emit_result_on(
+            session, payload, source=LastResultSource.STOP_HOOK_HARVEST
+        )
+        assert not outcome.refused
+        save_state(CwState(sessions=[session]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_approved_fingerprint"] == fingerprint
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_fingerprint == fingerprint
+
+    def test_same_stage_requeue_preserves_plan_approved_fingerprint(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The #968 same-stage re-park keeps the fingerprint alongside the
+        timestamp — an approved draft re-parked for ambiguities is still the
+        same approved draft."""
+        from cw.dev_queue import approve_ticket
+
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        _seed_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            session_id="sess-fp4",
+            last_result_extra={"plan_draft_fingerprint": "e" * 64},
+        )
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_requeued"] is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.plan_approved_fingerprint == "e" * 64
 
 
 class TestPlanIsReviewedTrackerAware:

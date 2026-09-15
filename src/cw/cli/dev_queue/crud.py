@@ -204,7 +204,7 @@ def dev_queue_move(ticket_id: str, client: str, to_lane: str) -> None:
 
 
 def _post_plan_approved_marker(
-    ticket_id: str, resolved: str, result: dict[str, str | bool]
+    ticket_id: str, resolved: str, result: dict[str, str | bool | None]
 ) -> bool:
     """Post (or dedup-skip) the plan-approved marker for ``--post-marker``.
 

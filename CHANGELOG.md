@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Plan approval is now bound to the exact draft fingerprint that was approved (#2102):** a resumed Large-scope plan's approval evidence previously matched against whatever draft was live at check time, so an operator's approval of one draft revision could be read as covering a later, unreviewed one. `cw.models` now defines the two fingerprint wire keys (`plan_draft_fingerprint`, `plan_approved_fingerprint`) once, threaded through the sentinel, session, dev-queue, and worker context so approval evidence is bound to the specific draft it was given for; `plan_approved_fingerprint` is reported only when the call actually stamped it.
 - **Adds the `review_artifacts_stale` dispatch gate, a seventh REVIEW-scoped gate (#2123):** a ticket whose sentinel reports a review block that does not cover the worktree's live HEAD now parks `BLOCKED_ON_USER/review_artifacts_stale` instead of advancing. `Review.reviewed_sha` is threaded from all three executors (Codex and Claude-native via `consolidate_verdict`, OpenCode from its own fix-loop tail) to the sentinel, and the gate compares it against the branch's live HEAD, failing closed on a missing/non-string sha or an unmeasurable worktree so a producer that forgets the stamp parks rather than bypassing the gate.
 
 ### Fixed
