@@ -17,6 +17,7 @@ from cw.reconcile._shared import (
     _PAUSED_STATUS_KEY,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     _apply_sentinel_to_task,
+    _resolve_routed_sentinel,
 )
 
 if TYPE_CHECKING:
@@ -34,10 +35,20 @@ def _apply_idle_routed_mutations(
 ) -> tuple[list[ReapCandidate], bool]:
     """Apply ROUTE_EMITTED_SENTINEL mutations for alive-idle workers (#1031).
 
-    Mirrors ``phantom._apply_phantom_routed_mutations``: routes the emitted
-    advance sentinel through the shared staged-advance authority
-    (``_apply_sentinel_to_task`` -> ``apply_staged_decision``), then marks the
+    Shares ``phantom._apply_phantom_routed_mutations``'s routing shape: both
+    route the emitted advance sentinel through the shared staged-advance
+    authority (``_apply_sentinel_to_task`` -> ``apply_staged_decision``) via the
+    shared ``_resolve_routed_sentinel`` guard (GitHub #1762), then mark the
     session COMPLETED/NORMAL -- but only when the route was accepted.
+
+    Not a byte-for-byte mirror, despite the older wording here: unlike phantom's
+    post-#1762 ``reconstruct_staged_sentinel`` producer, every candidate
+    ``_detect_idle_candidate_for_session`` builds carries a paired non-``None``
+    ``salvage_csid`` (both halves come out of the same
+    ``_parse_any_sentinel_from_transcript`` tuple). The csid half of the old
+    duplicated guard was therefore inert here; it is dropped rather than
+    preserved, because only phantom's genuinely ``None``-tolerant case ever
+    depended on it.
 
     GitHub #1031 (extends #1019's phantom-path guard): when
     ``_apply_sentinel_to_task`` reports ``routed=False`` (a stage-mismatch
@@ -56,13 +67,14 @@ def _apply_idle_routed_mutations(
     accepted: list[ReapCandidate] = []
     state_mutated = False
     for candidate in routed_sentinel_candidates:
-        if candidate.routed_sentinel is None or candidate.salvage_csid is None:
+        routed_sentinel = _resolve_routed_sentinel(candidate)
+        if routed_sentinel is None:
             continue
         session = session_by_id[candidate.session_id]
         routed = True
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, session, candidate.routed_sentinel, now=now
+                candidate.ticket_id, session, routed_sentinel, now=now
             )
             routed = outcome.routed
         if not routed:
@@ -80,8 +92,12 @@ def _apply_idle_routed_mutations(
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
-        session.last_result = candidate.routed_sentinel.model_dump(mode="json")
-        session.claude_session_id = candidate.salvage_csid
+        session.last_result = routed_sentinel.model_dump(mode="json")
+        # #1762: guarded for the same reason as phantom's copy -- the shared
+        # guard no longer proves salvage_csid is non-None, and blanking the id
+        # the transcript lookups key off would be a silent regression.
+        if candidate.salvage_csid is not None:
+            session.claude_session_id = candidate.salvage_csid
         accepted.append(candidate)
         state_mutated = True
     return accepted, state_mutated

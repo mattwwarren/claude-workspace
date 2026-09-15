@@ -4182,6 +4182,7 @@ def test_detect_phantom_already_refused_terminal_result_falls_through(
 
 
 def _non_headless_terminal_phantom_fixture(
+    tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -4206,6 +4207,10 @@ def _non_headless_terminal_phantom_fixture(
         ticket_id, last_result=last_result, worktree=worktree
     )
     sess.name = f"client-a/auto-dev/{ticket_id}"
+    # The staged authority resolves the sentinel's stage_reached against the
+    # client's declared pipeline; without one every sentinel is unresolvable and
+    # refused, which is not the condition under test.
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
     # A second, genuinely-live session keeps the daemon roster non-empty so the
     # transient-outage guard does not abort the sweep.
     alive = _mk_session("alive", surface_ref="live-ref")
@@ -4256,7 +4261,11 @@ def test_reconcile_terminal_phantom_completes_under_auto_policy(
     payload = _shipped_salvage_payload()
     payload["ticket_id"] = "ph-1762-auto"
     now = _non_headless_terminal_phantom_fixture(
-        tmp_path, monkeypatch, ticket_id="ph-1762-auto", last_result=payload
+        tmp_config_dir,
+        tmp_path,
+        monkeypatch,
+        ticket_id="ph-1762-auto",
+        last_result=payload,
     )
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
@@ -4290,7 +4299,11 @@ def test_reconcile_terminal_phantom_completes_under_signal_only(
     payload = _shipped_salvage_payload()
     payload["ticket_id"] = "ph-1762-signal"
     now = _non_headless_terminal_phantom_fixture(
-        tmp_path, monkeypatch, ticket_id="ph-1762-signal", last_result=payload
+        tmp_config_dir,
+        tmp_path,
+        monkeypatch,
+        ticket_id="ph-1762-signal",
+        last_result=payload,
     )
 
     with freezegun.freeze_time(now):
@@ -4317,6 +4330,7 @@ def test_reconcile_unparseable_terminal_phantom_falls_through_to_crash(
     pipeline and the row reverts for another attempt under ``reap_policy: auto``.
     """
     now = _non_headless_terminal_phantom_fixture(
+        tmp_config_dir,
         tmp_path,
         monkeypatch,
         ticket_id="ph-1762-junk",

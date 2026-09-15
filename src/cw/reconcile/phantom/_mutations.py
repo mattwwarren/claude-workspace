@@ -36,6 +36,7 @@ from cw.reconcile._shared import (
     _apply_salvaged_completion,
     _apply_sentinel_to_task,
     _queue_status_for_salvaged,
+    _resolve_routed_sentinel,
 )
 
 if TYPE_CHECKING:
@@ -238,13 +239,14 @@ def _apply_phantom_routed_mutations(
     """
     accepted: list[ReapCandidate] = []
     for candidate in routed_candidates:
-        if candidate.routed_sentinel is None or candidate.salvage_csid is None:
-            continue  # Invariant: ROUTE_EMITTED_SENTINEL has routed_sentinel + csid
+        routed_sentinel = _resolve_routed_sentinel(candidate)
+        if routed_sentinel is None:
+            continue
         session = session_by_id[candidate.session_id]
         routed = True
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, session, candidate.routed_sentinel, now=now
+                candidate.ticket_id, session, routed_sentinel, now=now
             )
             routed = outcome.routed
         if not routed:
@@ -286,8 +288,13 @@ def _apply_phantom_routed_mutations(
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
         session.reap_reason = ReapReason.PHANTOM_SURFACE
-        session.last_result = candidate.routed_sentinel.model_dump(mode="json")
-        session.claude_session_id = candidate.salvage_csid
+        session.last_result = routed_sentinel.model_dump(mode="json")
+        # #1762: only overwrite when the candidate actually carries a csid. The
+        # staged-last_result producer passes session.claude_session_id straight
+        # back (a no-op), but a future None-csid producer must not blank the id
+        # the transcript lookups key off.
+        if candidate.salvage_csid is not None:
+            session.claude_session_id = candidate.salvage_csid
         phantom_names.append(session.name)
         accepted.append(candidate)
     return accepted

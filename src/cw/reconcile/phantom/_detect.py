@@ -25,6 +25,7 @@ from cw.reconcile._shared import (
     _transcript_age_seconds,
     ticket_id_for_session,
 )
+from cw.result import reconstruct_staged_sentinel
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -175,19 +176,53 @@ def _detect_phantom_candidates(
     for session in state.sessions:
         if session.id not in phantom_set:
             continue
-        # Issue #536: a session that already pushed a terminal result via
-        # ``cw result emit`` (last_result carries a "status") is authoritative —
-        # never re-salvage or re-crash over it. Mirrors idle.py:151. Left ACTIVE
-        # with no inline completion path (R11(a), accepted non-blocking risk for
-        # Phase 1): consume_completed_sessions is event-driven off
-        # SESSION_COMPLETED, which a crashed session never emits, so this is a
-        # genuine gap in automated recovery, not a covered case — operator
-        # resolution is required until a compensating signal exists.
-        if _has_terminal_sentinel(session):
-            continue
         ticket_id = ticket_id_for_session(session.name)
         task = _task_by_ticket.get(ticket_id) if ticket_id else None
         lane = task.lane if task else DEFAULT_LANE
+        # #1149: a session already marked refused (an earlier-stage replay /
+        # unresolvable position stamped by _apply_phantom_routed_mutations on a
+        # prior tick) must not be re-offered to any router. Hoisted above the
+        # staged-sentinel branch by #1762: the refusal stamp is merged INTO
+        # last_result, so it stays terminal-shaped and would otherwise be
+        # reconstructed and re-refused on every tick, forever. Unlike idle.py,
+        # phantom.py's detect phase has no `last_result is None` precondition,
+        # so the apply-phase stamp alone would be inert here.
+        already_refused = isinstance(session.last_result, dict) and (
+            session.last_result.get(_PAUSED_STATUS_KEY)
+            == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+            or session.last_result.get(_SENTINEL_ADVANCE_REFUSED_KEY) is True
+        )
+        # Issue #536 as narrowed by #1762: a session that already pushed a
+        # terminal result (last_result carries a "status") is authoritative and
+        # must never be re-salvaged or re-crashed *over* -- but #536 enforced
+        # that with a bare `continue`, which also denied it any completion path.
+        # session.status is flipped to COMPLETED only by the Stop hook, which a
+        # crashed daemon never reaches, so the owning row stayed RUNNING on
+        # every tick forever, reap_policy never even consulted. Route the staged
+        # result through the same shared authority the #716 stage-advance path
+        # uses instead. A last_result that reconstructs into neither arm of the
+        # AutoDevResult/BlockedResult union carries nothing to route, so it
+        # falls through to the salvage/advance/crash pipeline below rather than
+        # being ignored forever.
+        if _has_terminal_sentinel(session) and not already_refused:
+            staged = reconstruct_staged_sentinel(session.last_result)
+            if staged is not None:
+                candidates.append(
+                    ReapCandidate(
+                        session_id=session.id,
+                        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+                        ticket_id=ticket_id,
+                        routed_sentinel=staged,
+                        # May legitimately be None: unlike the transcript-parsing
+                        # producers, this one reads session state, so there is no
+                        # csid to derive. _routed_sentinel_missing tolerates it.
+                        salvage_csid=session.claude_session_id,
+                        lane=lane,
+                        client=session.client,
+                        worktree_path=session.worktree_path,
+                    )
+                )
+                continue
         # Try sentinel salvage before declaring crashed (DAEMON only).
         salvage = (
             _shared.salvage_terminal_result(session)
@@ -212,17 +247,6 @@ def _detect_phantom_candidates(
         # Non-terminal advance sentinel (stage_complete): the worker finished a
         # stage and exited. Route it to advance the stage instead of reverting it
         # as a crash (DAEMON only; USER sessions have no staged task). See #716.
-        # #1149: skip a session already marked refused (an earlier-stage replay /
-        # unresolvable position stamped by _apply_phantom_routed_mutations on a
-        # prior tick) so the same doomed candidate is not re-offered forever;
-        # it falls through to the ordinary CRASH_COMPLETE construction below.
-        # Unlike idle.py, phantom.py's detect phase has no `last_result is None`
-        # precondition, so the apply-phase stamp alone would be inert here.
-        already_refused = isinstance(session.last_result, dict) and (
-            session.last_result.get(_PAUSED_STATUS_KEY)
-            == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
-            or session.last_result.get(_SENTINEL_ADVANCE_REFUSED_KEY) is True
-        )
         # #1449: stamped True on the CRASH_COMPLETE fall-through below when the
         # veto declined *because the cap was reached* (as opposed to the
         # transcript being genuinely stale). Reset per-iteration.

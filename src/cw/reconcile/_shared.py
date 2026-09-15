@@ -48,7 +48,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import read_events, record_event
-from cw.exceptions import USAGE_LIMIT_RE, EmitValidationError
+from cw.exceptions import USAGE_LIMIT_RE
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
     AGENT_SPAWN_STAMP_KEY,
@@ -74,9 +74,9 @@ from cw.models import (
 from cw.reconcile import _deps
 from cw.result import (
     EmitOutcome,
-    _validate_harvest_payload,
     emit_result_on,
     has_terminal_result,
+    reconstruct_staged_sentinel,
 )
 from cw.unavailability import FAMILY_PROVIDER_OVERLOAD, classify_provider_unavailability
 from cw.worktree import (
@@ -463,6 +463,32 @@ class ReapCandidate:
     provider_overload_detected: bool = False
 
 
+def _resolve_routed_sentinel(
+    candidate: ReapCandidate,
+) -> AutoDevResult | BlockedResult | None:
+    """Return the sentinel *candidate* should be routed with, or None to skip it.
+
+    Shared by ``phantom._mutations._apply_phantom_routed_mutations`` and
+    ``idle._mutations._apply_idle_routed_mutations`` (GitHub #1762): both iterate
+    a ROUTE_EMITTED_SENTINEL-only candidate list and used to duplicate this guard
+    byte-for-byte, each additionally requiring ``salvage_csid``.
+
+    ``salvage_csid`` is NOT required, and dropping it is what lets phantom's
+    post-#1762 ``reconstruct_staged_sentinel`` producer -- which reads
+    ``session.last_result`` and so has no transcript to derive a csid from --
+    be routed instead of silently dropped. Safe because
+    ``_apply_sentinel_to_task`` keys its task lookup off ``session.id`` alone,
+    and its ``BlockedResult`` arm resolves liveness through
+    ``_locate_session_transcript``'s three-tier fallback, landing on the
+    pre-#1406 FAILED default whenever the csid is unresolvable.
+
+    Returns the sentinel rather than a bare bool so callers bind a narrowed
+    local, keeping ``mypy --strict`` able to see it is non-``None`` past the
+    guard without either of them re-asserting the field.
+    """
+    return candidate.routed_sentinel
+
+
 def _apply_correction_signal_fields(
     payload: dict[str, object], candidate: ReapCandidate
 ) -> None:
@@ -551,13 +577,14 @@ def _validate_existing_result_for_routing(
     Promoted here from ``cw.reconcile.concierge`` (#1470) so stalled.py's
     COMPLETE_FOREIGN_RESULT detect-phase guard can reuse it without a
     cross-module private import; concierge.py's own call site now delegates here.
+
+    #1762 moved the body itself down to ``cw.result.reconstruct_staged_sentinel``
+    -- the phantom sweep and the Stop hook need the same reconstruction, and
+    ``cw.result`` owns the union it validates against. This name survives as the
+    reconcile-side vocabulary for the *foreign-shape* reading (see above), not as
+    a second implementation.
     """
-    if existing_result is None:
-        return None
-    try:
-        return _validate_harvest_payload(existing_result)
-    except EmitValidationError:
-        return None
+    return reconstruct_staged_sentinel(existing_result)
 
 
 def _foreign_result_target_queue_status(
