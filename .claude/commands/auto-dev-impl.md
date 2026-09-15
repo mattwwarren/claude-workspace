@@ -381,17 +381,24 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
 
 2. **File set is within the plan's enumeration** (mechanical, not prose — #1779):
    ```bash
-   git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > /tmp/touched_files-$CW_SESSION
-   MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+   # Self-contained: shell state does not persist between fenced Bash calls, and
+   # the ambient cwd may be $TMPWT. Every variable used below is derived here.
+   : "${CW_SESSION:?CW_SESSION must be set}"
    TMPWT="/tmp/gate-wt-$CW_SESSION"
-   # Derived here, not in an earlier fence: shell state does not persist between
-   # fenced Bash calls, and the ambient cwd may be $TMPWT. Keyed on the branch.
+   if [ ! -d "$TMPWT" ]; then
+     echo "IMPL_FAILED: Step 2.5 gate 2: gate worktree $TMPWT missing (run Gate setup first)"
+     exit 3
+   fi
+   FORK_POINT=$(git -C "$TMPWT" merge-base origin/main origin/<branch-name>) || {
+     echo "IMPL_FAILED: Step 2.5 gate 2: merge-base failed"; exit 3; }
+   MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+   git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > "/tmp/touched_files-$CW_SESSION"
+   # The session worktree is the one checked out on the branch (not the detached $TMPWT).
    SESSION_WT=$(git -C "$TMPWT" worktree list --porcelain \
      | awk -v b="branch refs/heads/<branch-name>" '/^worktree /{w=substr($0,10)} $0==b{print w; exit}')
    if [ -z "$SESSION_WT" ] || [ "$SESSION_WT" = "$TMPWT" ]; then
      echo "IMPL_FAILED: Step 2.5 gate 2: cannot locate cw session worktree for <branch-name>"
-     # HARD STOP: EXIT blocked with impl_failed (see bullet below).
-     exit 3
+     exit 3  # HARD STOP: EXIT blocked with impl_failed (see bullets below).
    fi
    RESOLVED=""
    for candidate in "$SESSION_WT/.claude/scripts/check_plan_scope_conformance.py" "$HOME/.claude/scripts/check_plan_scope_conformance.py"; do
@@ -400,22 +407,22 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    if [ -n "$RESOLVED" ]; then
      FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" \
        | sed -E 's/.*cw-script-version:[[:space:]]*([^[:space:]]*).*/\1/')
-     if [[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+     # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+     # (which errors, evaluates false, and would fall through to the invocation).
+     if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
        echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
-       # HARD STOP: EXIT blocked with impl_failed (see bullet below); never run
-       # the script, and never take the absent-from-both-locations skip path.
-       # This is the approved file-set gate — falling through past it ships
-       # unreviewed scope drift, so the stop lives in the shell, not only prose.
+       # HARD STOP: EXIT blocked with impl_failed; never run the script, and never
+       # take the absent-from-both-locations skip path. This is the approved
+       # file-set gate, so the stop lives in the shell, not only in prose.
        exit 3
-     else
-       if [ ! -f "$SESSION_WT/.cw/plan.md" ]; then
-         echo "IMPL_FAILED: Step 2.5 gate 2: $SESSION_WT/.cw/plan.md not found"
-         exit 3
-       fi
-       SCOPE_CONFORMANCE_OUTPUT=$(uv run python "$RESOLVED" \
-         --plan "$SESSION_WT/.cw/plan.md" --touched-files /tmp/touched_files-$CW_SESSION)
-       SCOPE_CONFORMANCE_EXIT=$?
      fi
+     if [ ! -f "$SESSION_WT/.cw/plan.md" ]; then
+       echo "IMPL_FAILED: Step 2.5 gate 2: $SESSION_WT/.cw/plan.md not found"
+       exit 3
+     fi
+     SCOPE_CONFORMANCE_OUTPUT=$(uv run python "$RESOLVED" \
+       --plan "$SESSION_WT/.cw/plan.md" --touched-files "/tmp/touched_files-$CW_SESSION")
+     SCOPE_CONFORMANCE_EXIT=$?
    fi
    ```
    Resolution follows "Guard-script path resolution and staleness marker (#2141)" above for the marker gate, but this call site anchors differently: instead of `$GUARD_ROOT` (a `git rev-parse --show-toplevel` / `cw-context.json` derivation from the ambient cwd), it uses `$SESSION_WT`, derived **inside this fence** from `git -C "$TMPWT" worktree list --porcelain` keyed on `refs/heads/<branch-name>`. The fence carries no `$GUARD_ROOT`, no `rev-parse`, and no `$PWD` fallback, for two reasons that both have to hold at once: shell variables do not persist between fenced Bash calls, so an anchor captured in the Gate-setup fence may simply be unset here; and by this point the ambient cwd may already be `$TMPWT`, so any ambient re-derivation resolves to the detached gate worktree — the exact bug this gate had. Deriving from the branch is correct either way, whether or not the fences share a shell.
@@ -429,6 +436,8 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    **Candidate found but its marker is missing or below minimum:** do NOT run it, and do NOT take the skip-and-continue path above — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — check_plan_scope_conformance.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP.
 
    **Session worktree not locatable** (or, once a current script has resolved, `$SESSION_WT/.cw/plan.md` is missing): EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — cannot locate cw session worktree for <branch-name>"`, and STOP.
+
+   **Gate worktree missing / merge-base failed:** EXIT `blocked` with `blocker.reason: "impl_failed"` and STOP.
 
    The script compares the delivered file set against the plan's `## Files Modified` enumeration and allows `max(SCOPE_DRIFT_ABS_FLOOR, round(plan_files * (SCOPE_DRIFT_RATIO - 1)))` unplanned files (v1: floor 5, ratio 1.5; per-repo override via `[tool.cw.scope_conformance]` in `pyproject.toml`). It prints a JSON verdict — `triggered`, `extra_files`, `allowed_extra`, `plan_file_count`, `delivered_file_count` — to stdout, captured above in `$SCOPE_CONFORMANCE_OUTPUT`.
 
