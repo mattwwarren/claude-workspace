@@ -171,10 +171,12 @@ the **cw session worktree** even when a gate's data extraction is `-C "$TMPWT"`.
 raw token after `cw-script-version:` from the **first** marker line only —
 `grep -m1` then `sed`, never a `grep -oE '[0-9]+'` digit-run scan, which turns
 `1.5` into two lines and makes `[ "$FOUND_VERSION" -lt ... ]` error out, whereupon
-the condition evaluates false and the script runs anyway. A missing marker, an
-empty marker, and a non-integer (`abc`, `1.5`, `-1`, `2x`) must all take the
-hard stop; only a clean **1-6 digit** integer at or above `MIN_VERSION` reaches
-the invocation. The digit count is bounded, not open-ended, because an
+the condition evaluates false and the script runs anyway. A marker token is
+valid only if it matches `^[0-9]{1,6}$` — anchored at both ends and bounded to
+**1-6 digits**; anything else is stale. A missing marker, an empty marker, and
+a non-integer (`abc`, `1.5`, `-1`, `2x`) therefore all take the hard stop, and
+only a value matching that regex at or above `MIN_VERSION` reaches the
+invocation. The digit count is bounded, not open-ended, because an
 oversized value (`99999999999999999999`) is the same fail-open one width up:
 it passes an unbounded integer test, then overflows `[ -lt ]` with `integer
 expression expected`, and the condition again evaluates false. The regex test

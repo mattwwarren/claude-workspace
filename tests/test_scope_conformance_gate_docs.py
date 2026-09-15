@@ -71,6 +71,8 @@ def _doc(relative: str) -> str:
 _GATE2_START = "2. **File set is within the plan's enumeration**"
 _GATE2_END = "3. **Test command exit code is 0:**"
 _RESOLVER_SUBSECTION = "### Guard-script path resolution and staleness marker (#2141)"
+_MARKER_RULE_START = "**Marker parsing is strict"
+_MARKER_RULE_END = "**Existence is not enough.**"
 
 # `| `<script>.py` | <N> | `<doc>.md` ... |` — the version table's data rows.
 _TABLE_ROW = re.compile(
@@ -80,6 +82,11 @@ _TABLE_ROW = re.compile(
 # The per-site single declaration Cluster B mandates; fences are indented at
 # some sites (gate 2 lives inside a numbered list), so leading space is allowed.
 _MIN_VERSION_DECL = re.compile(r"^[ \t]*MIN_VERSION=(\d+)\b", re.MULTILINE)
+
+# The one marker-token regex the docs may state, in prose or in a fence.
+_BOUNDED_MARKER_REGEX = "^[0-9]{1,6}$"
+# Any anchored digit regex, however bounded — used to prove there is only one.
+_ANCHORED_DIGIT_REGEX = re.compile(r"\^\[0-9\][^\s]*\$")
 
 
 def _table_minimums() -> dict[str, tuple[int, str]]:
@@ -106,6 +113,20 @@ def _resolver_table_section() -> str:
     start = content.index(_RESOLVER_SUBSECTION)
     end = content.index("\n### ", start + len(_RESOLVER_SUBSECTION))
     return content[start:end]
+
+
+def _marker_rule_prose() -> str:
+    """The canonical marker-parsing rule, fence excluded (#2141 round 7).
+
+    Deliberately narrower than ``_resolver_table_section``: that span also
+    contains the template *fence*, so a substring assertion on it is satisfied
+    by the fence alone and says nothing about whether the rule a worker reads
+    states the same thing the snippet a worker copies does.
+    """
+    section = _resolver_table_section()
+    start = section.index(_MARKER_RULE_START)
+    end = section.index(_MARKER_RULE_END, start)
+    return section[start:end]
 
 
 def test_impl_step2_5_gate2_invokes_scope_conformance_script() -> None:
@@ -397,19 +418,48 @@ def test_gate2_fence_defines_tmpwt_and_fork_point_before_using_them() -> None:
 
 
 def test_canonical_rule_bounds_the_marker_digit_count() -> None:
-    """The prose must state the bound, not just the fences (#2141 round 5).
+    """The rule must state the bound as the regex the fences use (#2141 round 7).
 
     An unbounded ``^[0-9]+$`` accepts a 20-digit marker, which overflows
     ``[ -lt ]``; the comparison errors, evaluates false, and the invocation
     runs anyway — the same fail-open shape as the round-2 ``1.5`` finding.
+    Round 5 pinned only the English ("1-6 digit"), which no fence contains, so
+    the prose rule and the fences were not actually pinned to one thing; the
+    rule now spells the literal regex and this asserts on that.
     """
-    section = _resolver_table_section()
-    assert "1-6 digit" in section, (
+    rule = _marker_rule_prose()
+    assert "1-6 digit" in rule, (
         "the canonical marker-parsing rule must state the 1-6 digit bound"
     )
-    assert "^[0-9]+$" not in section, (
+    assert _BOUNDED_MARKER_REGEX in rule, (
+        "the canonical rule must state the exact bounded regex, not only its "
+        "English gloss — the fences are what a worker copies"
+    )
+    assert "^[0-9]+$" not in _resolver_table_section(), (
         "the canonical rule must not still advertise the unbounded regex"
     )
+
+
+def test_every_marker_regex_in_the_impl_doc_is_the_bounded_one() -> None:
+    """One regex, at every occurrence in auto-dev-impl.md (#2141 round 7).
+
+    ``test_no_site_fence_uses_the_fail_open_or_cwd_relative_shapes`` proves the
+    bounded form is *present* in each marker fence; a looser second regex
+    sitting alongside it — in another fence, or in the prose rule — is
+    invisible to a presence check. This scans every anchored digit regex in the
+    doc and requires them identical.
+    """
+    content = _cmd("auto-dev-impl.md")
+    stated = set(_ANCHORED_DIGIT_REGEX.findall(content))
+    assert stated == {_BOUNDED_MARKER_REGEX}, (
+        f"auto-dev-impl.md states more than one marker regex: {sorted(stated)}"
+    )
+    marker_fences = [
+        fence for fence in _bash_fences(content) if "cw-script-version" in fence
+    ]
+    assert marker_fences, "no cw-script-version fence in auto-dev-impl.md"
+    for fence in marker_fences:
+        assert _BOUNDED_MARKER_REGEX in fence
 
 
 def test_resolver_table_lists_all_four_scripts_with_minimum_version() -> None:
