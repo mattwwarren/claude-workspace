@@ -684,6 +684,18 @@ open enum; consumers MUST tolerate unknown values. Known values:
   deadline stops suppressing a signal, it never dispositions anything
   (ADR-0014). `breadcrumbs` carries stale minutes, stage, elapsed seconds, how
   long the spawn has been unresolved, and the deadline it blew.
+- `"dangling_tool_use"` — the same liveness-sweep distress path, for the
+  case where the session's quietness IS explained by an unresolved,
+  non-subagent tool_use at the transcript tail (e.g. `Bash`) with no
+  matching `tool_result` — most commonly an interactive permission prompt
+  no headless session can answer (#1482). `Agent`/`Task` tool_use is
+  explicitly excluded (#1969: `PostToolUse:Agent` fires at launch-return,
+  not completion, so a transcript-pairing check would false-fire against a
+  still-outstanding subagent spawn — that case is
+  `fix_loop_await_deadline_exceeded`'s domain instead). Signal-only exactly
+  as its siblings are — nothing is disposed (ADR-0014). `breadcrumbs`
+  carries stale minutes, stage, elapsed seconds, the unresolved tool's
+  name, and a truncated, secret-redacted command snippet when available.
 - `"silently_idle"` — *historical (ADR-0014)*: the idle watchdog's park.
   No longer produced; may exist on old rows/logs.
 - `"needs_salvage"` — *historical (ADR-0014)*: the git-state salvage LOW

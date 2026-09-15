@@ -74,6 +74,12 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"ghp_[A-Za-z0-9]{36}"),
     re.compile(r"Bearer\s+[A-Za-z0-9._-]+"),
     re.compile(r"(?<=[=:])[A-Za-z0-9_-]{32,}"),
+    # Closes a gap the generic rule above misses (#1482): its lookbehind
+    # requires no space between "="/":" and the secret run, and has no
+    # length-floor exemption for a literal "Authorization"/"token" marker,
+    # so "Authorization: <token>" (colon-space, no "Bearer") and a short
+    # "token=<value>" both pass through unredacted.
+    re.compile(r"(?i)\b(?:Authorization|token)\s*[:=]\s*\S+"),
 )
 
 

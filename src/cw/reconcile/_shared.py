@@ -49,6 +49,7 @@ from cw.dev_queue import (
 )
 from cw.events import read_events, record_event
 from cw.exceptions import USAGE_LIMIT_RE, EmitValidationError
+from cw.executor_diagnostics import redact
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
     AGENT_SPAWN_STAMP_KEY,
@@ -148,6 +149,14 @@ _SESSION_UNRESPONSIVE_REASON = "session_unresponsive"
 # is waiting for and can name what failed". Signal-only like its sibling: no
 # disposition, no queue mutation, no worktree touch (ADR-0014).
 _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON = "fix_loop_await_deadline_exceeded"
+# Paused-status written to SESSION_NEEDS_ATTENTION events by the same liveness
+# distress path when the quietness IS explained by an unresolved, non-subagent
+# tool_use at the transcript tail (e.g. Bash) with no matching tool_result --
+# most commonly an interactive permission prompt no headless session can
+# answer (GitHub #1482; forensic incident: a permission prompt dangled 82
+# minutes with only the generic session_unresponsive signal to go on).
+# Signal-only exactly as its siblings are, per ADR-0014: nothing is disposed.
+_DANGLING_TOOL_USE_REASON = "dangling_tool_use"
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 # Paused-status written to SESSION_NEEDS_ATTENTION events when an
 # `external`-counterparty session (reviewing a teammate's PR) reaches the
@@ -729,6 +738,22 @@ _TRANSIENT_PARSE_FAILURES: frozenset[str] = frozenset(
 _TERMINAL_NO_RETRY_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
 
 
+# Cap (characters) on the command snippet _bash_command_snippet carries into
+# a dangling_tool_use distress breadcrumb (#1482). Small and fixed -- the
+# breadcrumb is an operator hint, not a full replay of the command.
+_TOOL_USE_COMMAND_SNIPPET_MAX_CHARS = 80
+
+# Tool names _detect_dangling_tool_use must never report on (#1969): that
+# domain belongs exclusively to _unresolved_subagent_spawn_age_seconds /
+# agent_spawn_stamp, because PostToolUse:Agent fires at launch-return, not
+# subagent completion -- a transcript-pairing check would false-fire distress
+# against a still-outstanding subagent spawn. Mirrors spawn.py's
+# _AGENT_TOOL_MATCHER (`^(Agent|Task)$`); duplicated rather than imported
+# because cw.spawn already imports from cw.reconcile (circular), and this is
+# a 2-name set well under PYTHON-PATTERNS.md's <5-line DRY threshold.
+_SUBAGENT_SPAWNING_TOOL_NAMES: frozenset[str] = frozenset({"Agent", "Task"})
+
+
 class UsageLimitDetection(NamedTuple):
     """Outcome of scanning a session transcript for a usage-limit message (#1345).
 
@@ -861,6 +886,116 @@ def _iter_notification_records(path: Path) -> Iterator[str]:
                         yield content
     except OSError:
         return
+
+
+class DanglingToolUseEvidence(NamedTuple):
+    """An unresolved, non-subagent tool_use found at a transcript's tail (#1482).
+
+    ``tool_name`` is the tool_use block's ``name`` (e.g. ``"Bash"``).
+    ``command_snippet`` is a redacted, length-capped rendering of
+    ``input.command`` when present, or ``None`` for a tool_use with no such
+    field (e.g. ``Write``). Produced only by :func:`_detect_dangling_tool_use`,
+    which never reports on :data:`_SUBAGENT_SPAWNING_TOOL_NAMES`.
+    """
+
+    tool_name: str
+    command_snippet: str | None
+
+
+def _bash_command_snippet(block: dict[str, object]) -> str | None:
+    """Extract, redact, and truncate a tool_use block's ``input.command``.
+
+    Returns ``None`` when the block carries no string ``input.command`` (e.g.
+    a non-Bash tool like ``Write``). Redacts secret-shaped substrings via
+    :func:`cw.executor_diagnostics.redact` before truncating -- the raw
+    command text flows into the operator-local ``session.needs_attention``
+    event/SSE surface (GitHub #1482).
+    """
+    tool_input = block.get("input")
+    if not isinstance(tool_input, dict):
+        return None
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        return None
+    redacted = redact(command)
+    if len(redacted) <= _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS:
+        return redacted
+    return redacted[:_TOOL_USE_COMMAND_SNIPPET_MAX_CHARS] + "…"
+
+
+def _apply_tool_use_block(
+    pending: dict[str, tuple[str, dict[str, object]]], block: dict[str, object]
+) -> None:
+    """Track or resolve one ``tool_use``/``tool_result`` content block.
+
+    Mutates *pending* in place: a non-subagent ``tool_use`` with a string id
+    is added (or overwritten, refreshing its file-order position); a
+    ``tool_result`` pops its matching ``tool_use_id``. Any other block shape
+    is ignored. Extracted from :func:`_detect_dangling_tool_use` to keep that
+    function's branch count under the PLR0912 ceiling.
+    """
+    block_type = block.get("type")
+    if block_type == "tool_use":
+        tool_id = block.get("id")
+        name = block.get("name")
+        if (
+            isinstance(tool_id, str)
+            and isinstance(name, str)
+            and name not in _SUBAGENT_SPAWNING_TOOL_NAMES
+        ):
+            pending[tool_id] = (name, block)
+    elif block_type == "tool_result":
+        tool_use_id = block.get("tool_use_id")
+        if isinstance(tool_use_id, str):
+            pending.pop(tool_use_id, None)
+
+
+def _detect_dangling_tool_use(session: Session) -> DanglingToolUseEvidence | None:
+    """Scan the session's transcript for an unresolved, non-subagent tool_use.
+
+    Uses :func:`_locate_session_transcript` for precise per-session lookup.
+    Tracks ``tool_use`` blocks by id in file order, popping an id when a
+    matching ``tool_result`` block is later seen; returns evidence for the
+    last entry still pending, or ``None`` when everything resolved (or the
+    transcript is missing/unreadable).
+
+    ``Agent``/``Task`` tool_use is deliberately excluded (see
+    :data:`_SUBAGENT_SPAWNING_TOOL_NAMES`, GitHub #1969) -- that domain
+    belongs exclusively to :func:`_unresolved_subagent_spawn_age_seconds` /
+    ``agent_spawn_stamp``. Never raises; fails open to ``None`` on any read
+    error, mirroring :func:`_detect_usage_limit` / :func:`_detect_provider_overload`.
+    """
+    transcript = _locate_session_transcript(session)
+    if transcript is None:
+        return None
+    pending: dict[str, tuple[str, dict[str, object]]] = {}
+    try:
+        with transcript.open() as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if isinstance(block, dict):
+                        _apply_tool_use_block(pending, block)
+    except OSError:
+        return None
+    if not pending:
+        return None
+    last_name, last_block = next(reversed(pending.values()))
+    return DanglingToolUseEvidence(
+        tool_name=last_name,
+        command_snippet=_bash_command_snippet(last_block),
+    )
 
 
 def _detect_provider_overload(session: Session) -> bool:
