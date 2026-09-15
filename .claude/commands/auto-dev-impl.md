@@ -400,7 +400,9 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    FORK_POINT=$(git -C "$TMPWT" merge-base origin/main origin/<branch-name>) || {
      echo "IMPL_FAILED: Step 2.5 gate 2: merge-base failed"; exit 3; }
    MIN_VERSION=1  # per the script version table in auto-dev-impl.md
-   git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > "/tmp/touched_files-$CW_SESSION"
+   TOUCHED=$(git -C "$TMPWT" diff --name-only "$FORK_POINT") || {
+     echo "IMPL_FAILED: Step 2.5 gate 2: git diff --name-only failed"; exit 3; }
+   printf '%s\n' "$TOUCHED" | sort > "/tmp/touched_files-$CW_SESSION"
    # The session worktree is the one checked out on the branch (not the detached $TMPWT).
    SESSION_WT=$(git -C "$TMPWT" worktree list --porcelain \
      | awk -v b="branch refs/heads/<branch-name>" '/^worktree /{w=substr($0,10)} $0==b{print w; exit}')
@@ -445,7 +447,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
 
    **Session worktree not locatable** (or, once a current script has resolved, `$SESSION_WT/.cw/plan.md` is missing): EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — cannot locate cw session worktree for <branch-name>"`, and STOP.
 
-   **Gate worktree missing / merge-base failed:** EXIT `blocked` with `blocker.reason: "impl_failed"` and STOP.
+   **Gate worktree missing / merge-base failed / touched-file diff failed:** EXIT `blocked` with `blocker.reason: "impl_failed"` and STOP. The `git diff --name-only` extraction is in this class deliberately: its status is captured into `$TOUCHED` rather than piped into `sort`, because a pipeline reports only its *last* command's status — a failed diff would leave `sort` at 0, write an empty touched-file list, and let the file-set gate pass against zero delivered files. An empty list is never evidence of conformance; it is evidence the extraction did not run.
 
    The script compares the delivered file set against the plan's `## Files Modified` enumeration and allows `max(SCOPE_DRIFT_ABS_FLOOR, round(plan_files * (SCOPE_DRIFT_RATIO - 1)))` unplanned files (v1: floor 5, ratio 1.5; per-repo override via `[tool.cw.scope_conformance]` in `pyproject.toml`). It prints a JSON verdict — `triggered`, `extra_files`, `allowed_extra`, `plan_file_count`, `delivered_file_count` — to stdout, captured above in `$SCOPE_CONFORMANCE_OUTPUT`.
 

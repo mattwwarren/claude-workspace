@@ -748,6 +748,31 @@ def _gate2_session(tmp_path: Path) -> str:
     return "t" + hashlib.sha256(str(tmp_path).encode()).hexdigest()[:16]
 
 
+def _write_failing_git_diff_stub(bin_dir: Path) -> None:
+    """Plant a ``git`` that fails only on ``diff``, ahead of the real one (#2141).
+
+    Gate 2's touched-file extraction is the one command in the fence whose
+    failure was invisible: piped straight into ``sort``, its status was
+    discarded. Every other subcommand the fence runs (``merge-base``,
+    ``worktree list``) must still behave, so the stub delegates.
+    """
+    real_git = shutil.which("git")
+    assert real_git, "git must be on PATH to shadow it"
+    stub = bin_dir / "git"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        '  if [ "$arg" = "diff" ]; then\n'
+        '    echo "fatal: stubbed git diff failure" >&2\n'
+        "    exit 128\n"
+        "  fi\n"
+        "done\n"
+        f'exec {real_git} "$@"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+
 def _run_gate2_fence(
     tmp_path: Path,
     *,
@@ -756,6 +781,7 @@ def _run_gate2_fence(
     plan: bool = True,
     session_worktree: bool = True,
     gate_worktree: bool = True,
+    break_git_diff: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Execute gate 2's own fence against real worktrees (#2141 round 4/5).
 
@@ -820,6 +846,8 @@ def _run_gate2_fence(
         _git(repo, "worktree", "add", "--detach", str(tmpwt), _GATE2_BRANCH)
 
     bin_dir = write_guard_stub_bin(tmp_path)
+    if break_git_diff:
+        _write_failing_git_diff_stub(bin_dir)
     body = (
         substitute_fence_placeholders(_gate2_fence(), {"branch-name": _GATE2_BRANCH})
         + '\necho "${SCOPE_CONFORMANCE_OUTPUT-}"'
@@ -907,6 +935,28 @@ def test_gate2_fence_hard_stops_when_the_gate_worktree_is_missing(
     assert _INVOKED not in result.stdout
     assert "gate worktree" in result.stdout
     assert "missing" in result.stdout
+
+
+def test_gate2_fence_hard_stops_when_the_touched_file_diff_fails(
+    tmp_path: Path,
+) -> None:
+    """A failed ``git diff`` must not hand the gate an empty file set (#2141 round 7).
+
+    The extraction piped ``git diff --name-only`` straight into ``sort``.
+    Without ``pipefail`` a pipeline's status is its *last* command's, so a
+    failing diff still left ``sort`` at 0 and wrote an empty touched-files
+    list — whereupon the scope-conformance script saw zero delivered files and
+    the approved file-set gate passed vacuously. Same class as the merge-base
+    failure this fence already hard-stops on.
+    """
+    result = _run_gate2_fence(
+        tmp_path, session_copy=GUARD_MARKER_CURRENT, break_git_diff=True
+    )
+    assert result.returncode == 3, result.stdout
+    assert _INVOKED not in result.stdout, (
+        "the scope-conformance gate ran against an empty file set"
+    )
+    assert "git diff --name-only failed" in result.stdout
 
 
 def test_gate2_fence_hard_stops_when_the_session_worktree_is_absent(
