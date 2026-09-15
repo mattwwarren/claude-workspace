@@ -346,6 +346,69 @@ class TestSynthesizeCodexReviewResult:
         assert verdict is not None
         assert verdict.blocking is False
 
+    def test_planned_files_threaded_from_worktree_plan_md(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # #2112: consolidate_verdict must receive the worktree's .cw/plan.md
+        # manifest so in_plan_scope is actually stamped, not permanently None.
+        worktree = make_git_repo("wt-synth-plan-scope")
+        (worktree / ".cw").mkdir()
+        (worktree / ".cw" / "plan.md").write_text(
+            "## Files Modified\n- src/cw/other.py\n"
+        )
+        # Tree evidence outside the diff and outside the manifest, so the
+        # MUST_FIX finding below survives validation via the #1632
+        # tree-evidence relaxation (worktree= is already threaded into
+        # consolidate_verdict inside _synthesis.py).
+        (worktree / "docs.md").write_text("x")
+        doc = _make_reviewer_doc(
+            _make_finding(
+                severity="MUST_FIX",
+                file="docs.md",
+                line_start=None,
+                line_end=None,
+                summary="scope creep",
+            )
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-plan",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert verdict is not None
+        assert verdict.accepted[0].in_plan_scope is False
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert "(outside planned file set)" in result.blocker.details
+
+    def test_no_plan_md_leaves_in_plan_scope_none(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # Regression guard: no .cw/plan.md in the worktree -> planned_files
+        # stays None and in_plan_scope is never stamped (pre-#2112 behavior).
+        worktree = make_git_repo("wt-synth-no-plan")
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-no-plan",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert verdict is not None
+        assert verdict.accepted[0].in_plan_scope is None
+        assert result.status == "blocked"
+
     @pytest.mark.parametrize(
         "kind", ["zero_documents", "must_fix", "mechanically_rejected", "partial"]
     )
