@@ -97,10 +97,17 @@ def test_orientation_cites_per_stage_dispatch_mechanism() -> None:
 
 
 def test_guard_resolves_repo_local_then_global_script_path() -> None:
-    """Repo-local first, then the copy install-skills.sh ships (#2141)."""
+    """Repo-local first, then the copy install-skills.sh ships (#2141).
+
+    The repo-local candidate is asserted in its ``$GUARD_ROOT``-anchored
+    spelling, not as a bare substring: a cwd-relative probe would satisfy the
+    looser assertion while silently missing the repo-local copy whenever the
+    cwd is not the worktree root (review round 2).
+    """
     section = _guard_section()
-    assert ".claude/scripts/check_impl_guard_staleness.py" in section
+    assert '"$GUARD_ROOT/.claude/scripts/check_impl_guard_staleness.py"' in section
     assert '"$HOME/.claude/scripts/check_impl_guard_staleness.py"' in section
+    assert "for candidate in .claude/scripts/" not in section
 
 
 def test_guard_absent_from_both_locations_skips_non_blocking() -> None:

@@ -44,10 +44,17 @@ def _marker_windows(section: str, span: int = 200) -> list[str]:
 
 
 def test_pre_mutation_guard_resolves_repo_local_then_global_path() -> None:
-    """Repo-local first, then the globally installed copy (#2096 ships it)."""
+    """Repo-local first, then the globally installed copy (#2096 ships it).
+
+    The repo-local candidate is asserted in its ``$GUARD_ROOT``-anchored
+    spelling, not as a bare substring: a cwd-relative probe would satisfy the
+    looser assertion while silently missing the repo-local copy whenever the
+    cwd is not the worktree root (review round 2).
+    """
     section = _pre_mutation_guard_section()
-    assert ".claude/scripts/check_not_main_checkout.py" in section
+    assert '"$GUARD_ROOT/.claude/scripts/check_not_main_checkout.py"' in section
     assert '"$HOME/.claude/scripts/check_not_main_checkout.py"' in section
+    assert "for candidate in .claude/scripts/" not in section
 
 
 def test_pre_mutation_guard_absent_message_unchanged() -> None:
