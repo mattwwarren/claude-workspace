@@ -123,13 +123,19 @@ and the guard silently no-ops. Probe repo-local first, then the installed copy:
 
 ```bash
 MIN_VERSION=<N>  # per the script version table in auto-dev-impl.md
+# Absolute anchor for the repo-local candidate — never a bare relative probe.
+GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
 RESOLVED=""
-for candidate in .claude/scripts/<script>.py "$HOME/.claude/scripts/<script>.py"; do
+for candidate in "$GUARD_ROOT/.claude/scripts/<script>.py" "$HOME/.claude/scripts/<script>.py"; do
   if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
 done
 if [ -n "$RESOLVED" ]; then
-  FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" | grep -oE '[0-9]+')
-  if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+  FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" \
+    | sed -E 's/.*cw-script-version:[[:space:]]*([^[:space:]]*).*/\1/')
+  if [[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
     echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
     # HARD STOP: EXIT blocked with <blocker.reason> (see this site's bullet
     # below); never run the script, never fall through to any other branch.
@@ -146,6 +152,28 @@ the single source of truth. `exit 3` is the fence's own hard stop: it makes the
 invocation unreachable *in the shell*, so a worker reading only the fence cannot
 fall through. The `exit 3` is not itself the disposition — the bullet after each
 fence still names the `blocker.reason` and the sentinel to emit.
+
+**The repo-local candidate is anchored to an absolute root, computed once at
+the top of the fence.** `worktree_path` from `.claude/cw-context.json` is
+authoritative when present; otherwise `git rev-parse --show-toplevel` (itself
+cwd-independent — it walks up), with `$PWD` as the last resort outside a repo.
+A bare relative `.claude/scripts/<script>.py` probe is wrong at every site: the
+cwd is not guaranteed to be the worktree root, and when it isn't, the repo-local
+copy is silently missed and the lookup falls through to the global copy or to
+the "absent" branch — a resolution failure that looks exactly like a correct
+resolution. Do not substitute `$TMPWT` here: Step 2.5's gate worktree is a
+detached checkout of the pushed branch, and these guard scripts resolve against
+the **cw session worktree** even when a gate's data extraction is `-C "$TMPWT"`.
+
+**Marker parsing is strict, and anything unparseable is stale.** Extract the
+raw token after `cw-script-version:` from the **first** marker line only —
+`grep -m1` then `sed`, never a `grep -oE '[0-9]+'` digit-run scan, which turns
+`1.5` into two lines and makes `[ "$FOUND_VERSION" -lt ... ]` error out, whereupon
+the condition evaluates false and the script runs anyway. A missing marker, an
+empty marker, and a non-integer (`abc`, `1.5`, `-1`, `2x`) must all take the
+hard stop; only a clean `^[0-9]+$` at or above `MIN_VERSION` reaches the
+invocation. The regex test comes **first** in the condition so the numeric
+comparison only ever sees an integer.
 
 **Existence is not enough.** `ln -sf` means an installed copy keeps pointing at
 whatever commit's content it was linked against, so a found script can be
@@ -234,13 +262,18 @@ Stage 2 agent spawn:
   marker (#2141)" above, then run it:
   ```bash
   MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+  GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+  CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+    "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+  [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
   RESOLVED=""
-  for candidate in .claude/scripts/check_not_main_checkout.py "$HOME/.claude/scripts/check_not_main_checkout.py"; do
+  for candidate in "$GUARD_ROOT/.claude/scripts/check_not_main_checkout.py" "$HOME/.claude/scripts/check_not_main_checkout.py"; do
     if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
   done
   if [ -n "$RESOLVED" ]; then
-    FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" | grep -oE '[0-9]+')
-    if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+    FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" \
+      | sed -E 's/.*cw-script-version:[[:space:]]*([^[:space:]]*).*/\1/')
+    if [[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
       echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
       # HARD STOP: EXIT blocked with impl_failed (see bullet below); never run
       # the script, and never take the absent-from-both-locations skip path.
@@ -350,13 +383,19 @@ All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktr
    ```bash
    git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > /tmp/touched_files-$CW_SESSION
    MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+   # Anchored to the cw session worktree, NOT $TMPWT — see the note below.
+   GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+   CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+     "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+   [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
    RESOLVED=""
-   for candidate in .claude/scripts/check_plan_scope_conformance.py "$HOME/.claude/scripts/check_plan_scope_conformance.py"; do
+   for candidate in "$GUARD_ROOT/.claude/scripts/check_plan_scope_conformance.py" "$HOME/.claude/scripts/check_plan_scope_conformance.py"; do
      if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
    done
    if [ -n "$RESOLVED" ]; then
-     FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" | grep -oE '[0-9]+')
-     if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+     FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" \
+       | sed -E 's/.*cw-script-version:[[:space:]]*([^[:space:]]*).*/\1/')
+     if [[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
        echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
        # HARD STOP: EXIT blocked with impl_failed (see bullet below); never run
        # the script, and never take the absent-from-both-locations skip path.
@@ -370,9 +409,9 @@ All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktr
      fi
    fi
    ```
-   Resolution follows "Guard-script path resolution and staleness marker (#2141)" above; the probe runs from the **cw session worktree**, so its repo-local candidate is that worktree's `.claude/scripts/`, not `$TMPWT`'s.
+   Resolution follows "Guard-script path resolution and staleness marker (#2141)" above. The repo-local candidate is anchored to `$GUARD_ROOT` — an **absolute** root computed inside the fence (`worktree_path` from `.claude/cw-context.json`, else `git rev-parse --show-toplevel`), never a bare relative `.claude/scripts/...` probe and never the operator's cwd. `$GUARD_ROOT` resolves to the **cw session worktree**, deliberately not `$TMPWT`: the surrounding gate runs inside `$TMPWT`, but the script and its `.claude/scripts/` copy belong to the session worktree, so substituting `$TMPWT` here would probe a detached checkout that may carry a different (or no) copy of the script.
 
-   Note the script itself runs from the **cw session worktree**, not `$TMPWT`: `.cw/plan.md` is session state that was never committed to the branch, so it does not exist inside the detached gate worktree. Only the file-set extraction is `-C "$TMPWT"`.
+   Note the script itself also runs from the **cw session worktree**, not `$TMPWT`: `.cw/plan.md` is session state that was never committed to the branch, so it does not exist inside the detached gate worktree. Only the file-set extraction is `-C "$TMPWT"`.
 
    **Script absent from both locations** (no repo-local copy, no global install): log `"check_plan_scope_conformance: script absent, skipped"` in `friction_highlights` and continue to gate 3 — non-blocking. This is the honest label for a condition that previously fell through to the appendix's generic exit-2 "parse error" branch by accident (a missing file also exits 2). It is NOT the tooling-failure disposition (`impl_scope_conformance_unparsed` / `impl_failed`), which stays unchanged and applies only to a script that actually ran.
 

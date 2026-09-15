@@ -313,13 +313,18 @@ gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
 
    ```bash
    MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+   GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+   CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+     "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+   [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
    RESOLVED=""
-   for candidate in .claude/scripts/classify_merge_conflict.py "$HOME/.claude/scripts/classify_merge_conflict.py"; do
+   for candidate in "$GUARD_ROOT/.claude/scripts/classify_merge_conflict.py" "$HOME/.claude/scripts/classify_merge_conflict.py"; do
      if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
    done
    if [ -n "$RESOLVED" ]; then
-     FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" | grep -oE '[0-9]+')
-     if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+     FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" \
+       | sed -E 's/.*cw-script-version:[[:space:]]*([^[:space:]]*).*/\1/')
+     if [[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
        echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
        # HARD STOP: EXIT blocked with agent_block (see bullet below); never run
        # the resolver, and never fold this into merge_conflict_post_push.
@@ -332,7 +337,7 @@ gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
    fi
    ```
 
-   (Resolved repo-local-then-global and marker-verified by the same pattern as this pipeline's other guard scripts — see `auto-dev-impl.md`'s "Guard-script path resolution and staleness marker" subsection for the shared snippet and the version table.)
+   (Resolved repo-local-then-global and marker-verified by the same pattern as this pipeline's other guard scripts — see `auto-dev-impl.md`'s "Guard-script path resolution and staleness marker" subsection for the shared snippet and the version table. The repo-local candidate is anchored to the absolute `$GUARD_ROOT` computed in the fence, not to the cwd.)
 
    The script resolves only three enumerated safe shapes (`one_sided_insert`, `import_union`, and a path-gated `doc_append`), atomically across every conflicted file, and writes nothing at all if any block is unsafe.
 
