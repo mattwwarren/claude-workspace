@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.conftest import _cmd
+from tests.conftest import GUARD_MARKER_CURRENT, _cmd
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "check_not_main_checkout.py"
@@ -109,4 +109,4 @@ def test_pre_mutation_guard_stale_marker_pins_blocker_disposition() -> None:
 def test_check_not_main_checkout_declares_cw_script_version_header() -> None:
     """Line 2 (index 1), directly under the shebang, above the docstring."""
     lines = _SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert lines[1] == "# cw-script-version: 1"
+    assert lines[1] == GUARD_MARKER_CURRENT.rstrip("\n")

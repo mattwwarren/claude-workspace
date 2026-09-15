@@ -191,6 +191,40 @@ GUARD_FENCE_INVOKED = "INVOKED"
 # what a caller asserting "the stub received this absolute --plan path" reads.
 _GUARD_STUB_BODY = f'#!/bin/sh\nprintf "%s %s\\n" "{GUARD_FENCE_INVOKED}" "$*"\n'
 
+# The one ``cw-script-version`` marker value that may reach a guard-script
+# invocation: a clean integer at the version table's minimum.
+GUARD_MARKER_CURRENT = "# cw-script-version: 1\n"
+
+# The below-minimum marker, named separately because the precedence tests plant
+# it as "the *other* candidate is stale" scenery rather than as a parametrized
+# case of GUARD_MARKER_BAD_CASES below.
+GUARD_MARKER_STALE = "# cw-script-version: 0\n"
+
+# Every marker state that must NOT reach an invocation, as (id, file body)
+# pairs. Hoisted here (#2141 round 6) as the union of the two private lists
+# ``test_scope_conformance_gate_docs.py`` and
+# ``test_auto_dev_finalize_semantic_resolve.py`` had each grown: the shorter
+# list was missing ``malformed_negative``/``malformed_suffix``, so a fence whose
+# marker check regressed on those was red in one module and green in the other.
+#
+# Anything that is not ``^[0-9]{1,6}$`` is stale by construction. A
+# `grep -oE '[0-9]+'` extraction turned `1.5` into two lines, which made
+# `[ ... -lt ... ]` error out and the condition evaluate false, so the script ran
+# anyway (#2141 round 2). ``malformed_oversized`` is the same failure one width
+# up (#2141 round 5): an unbounded ``^[0-9]+$`` accepts a 20-digit value, which
+# overflows ``[ -lt ]`` ("integer expression expected"), evaluates false, and
+# falls through to the invocation — so the digit count itself has to be bounded.
+GUARD_MARKER_BAD_CASES: tuple[tuple[str, str], ...] = (
+    ("below_minimum", GUARD_MARKER_STALE),
+    ("no_marker", "import sys\n"),
+    ("malformed_float", "# cw-script-version: 1.5\n"),
+    ("malformed_alpha", "# cw-script-version: abc\n"),
+    ("malformed_negative", "# cw-script-version: -1\n"),
+    ("malformed_suffix", "# cw-script-version: 2x\n"),
+    ("malformed_empty", "# cw-script-version:\n"),
+    ("malformed_oversized", "# cw-script-version: 99999999999999999999\n"),
+)
+
 
 def write_guard_stub_bin(tmp_path: Path) -> Path:
     """Create a ``PATH`` directory of sentinel interpreters for a fence (#2141).
@@ -226,6 +260,27 @@ def _placement(location: str, body: str) -> dict[str, str | None]:
     if location == "repo_local":
         return {"repo_local": body, "global_copy": None}
     return {"repo_local": None, "global_copy": body}
+
+
+# The ``run_guard_fence`` fixture root each candidate location is planted under.
+_GUARD_CANDIDATE_ROOTS = {
+    "repo_local": "repo",
+    "global_only": "home",
+    "worktree_override": "context-worktree",
+}
+
+
+def guard_candidate_path(tmp_path: Path, location: str, script: str) -> str:
+    """The absolute path a correct resolver must land on for *location* (#2141).
+
+    Companion to ``_placement``: a caller that plants a body at one candidate
+    asserts the stub echoed *this* path, which is what separates "the fence
+    reached a script" from "the fence reached the right script". Without it a
+    resolver that always picked the global copy passed the repo-local case.
+    """
+    return str(
+        tmp_path / _GUARD_CANDIDATE_ROOTS[location] / ".claude" / "scripts" / script
+    )
 
 
 def substitute_fence_placeholders(fence: str, placeholders: Mapping[str, str]) -> str:

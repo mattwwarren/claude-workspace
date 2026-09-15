@@ -14,7 +14,7 @@ import sys
 import types
 from pathlib import Path
 
-from tests.conftest import _plan_text
+from tests.conftest import GUARD_MARKER_CURRENT, _plan_text
 
 # ---------------------------------------------------------------------------
 # Script loader
@@ -748,4 +748,4 @@ def test_check_plan_scope_conformance_declares_cw_script_version_header() -> Non
     preceding the first statement does not disturb ``__doc__`` binding.
     """
     lines = _SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert lines[1] == "# cw-script-version: 1"
+    assert lines[1] == GUARD_MARKER_CURRENT.rstrip("\n")

@@ -28,11 +28,15 @@ import pytest
 
 from tests.conftest import (
     GUARD_FENCE_INVOKED,
+    GUARD_MARKER_BAD_CASES,
+    GUARD_MARKER_CURRENT,
+    GUARD_MARKER_STALE,
     _appendix,
     _bash_fences,
     _clean_git_env,
     _cmd,
     _placement,
+    guard_candidate_path,
     run_guard_fence,
     substitute_fence_placeholders,
     write_guard_stub_bin,
@@ -547,29 +551,6 @@ _GUARD_SCRIPTS = [
     "classify_merge_conflict.py",
 ]
 
-# The one marker value that may reach the invocation: a clean integer at the
-# table minimum.
-_CURRENT_MARKER = "# cw-script-version: 1\n"
-
-# Every marker state that must NOT reach it. Anything that is not
-# ``^[0-9]{1,6}$`` is stale by construction — a `grep -oE '[0-9]+'` extraction
-# turned `1.5` into two lines, which made `[ ... -lt ... ]` error out and the
-# condition evaluate false, so the script ran anyway (#2141 review round 2).
-# ``oversized`` is the same failure one width up (#2141 review round 5): an
-# unbounded ``^[0-9]+$`` accepts a 20-digit value, which then overflows
-# ``[ -lt ]`` ("integer expression expected"), evaluates false, and falls
-# through to the invocation — so the digit count itself has to be bounded.
-_STALE_MARKERS: list[tuple[str, str]] = [
-    ("below_minimum", "# cw-script-version: 0\n"),
-    ("no_marker", "import sys\n"),
-    ("malformed_float", "# cw-script-version: 1.5\n"),
-    ("malformed_alpha", "# cw-script-version: abc\n"),
-    ("malformed_negative", "# cw-script-version: -1\n"),
-    ("malformed_suffix", "# cw-script-version: 2x\n"),
-    ("malformed_empty", "# cw-script-version:\n"),
-    ("malformed_oversized", "# cw-script-version: 99999999999999999999\n"),
-]
-
 # Where the resolved copy lives. ``global_only`` is the branch that motivated
 # this ticket at all (a client repo with no local ``.claude/scripts/``), and it
 # is also the branch an anchoring bug hides in: a cwd-relative repo-local probe
@@ -580,7 +561,7 @@ _LOCATIONS = ["repo_local", "global_only"]
 
 @pytest.mark.parametrize("script", _GUARD_SCRIPTS)
 @pytest.mark.parametrize("location", _LOCATIONS)
-@pytest.mark.parametrize(("label", "script_body"), _STALE_MARKERS)
+@pytest.mark.parametrize(("label", "script_body"), GUARD_MARKER_BAD_CASES)
 def test_every_site_fence_hard_stops_without_invoking(
     tmp_path: Path, script: str, location: str, label: str, script_body: str
 ) -> None:
@@ -614,9 +595,18 @@ def test_every_site_fence_reaches_the_script_on_a_current_marker(
     bare relative ``.claude/scripts/`` would reach the global copy here for the
     wrong reason, and would miss the repo-local copy in the sibling case below.
     """
-    result = _run_site_fence(tmp_path, script, **_placement(location, _CURRENT_MARKER))
+    result = _run_site_fence(
+        tmp_path, script, **_placement(location, GUARD_MARKER_CURRENT)
+    )
     assert result.returncode == 0, f"{script}/{location}: {result.stderr}"
     assert _INVOKED in result.stdout
+    # Not just *that* an invocation happened: the stub echoes its argument
+    # vector, so the resolved path is observable and must be the one candidate
+    # this case planted. Without it a resolver hard-coded to `$HOME` passed the
+    # repo-local case (#2141 round 6).
+    assert guard_candidate_path(tmp_path, location, script) in result.stdout, (
+        f"{script}/{location}: resolved a different copy: {result.stdout!r}"
+    )
     assert "STALE:" not in result.stdout
 
 
@@ -633,18 +623,25 @@ def test_every_site_fence_prefers_the_repo_local_copy(
     current_local = _run_site_fence(
         tmp_path / "a",
         script,
-        repo_local=_CURRENT_MARKER,
-        global_copy="# cw-script-version: 0\n",
+        repo_local=GUARD_MARKER_CURRENT,
+        global_copy=GUARD_MARKER_STALE,
     )
     assert current_local.returncode == 0, f"{script}: {current_local.stderr}"
     assert _INVOKED in current_local.stdout
+    # Precedence is only pinned by the path: "invoked, no STALE" is equally true
+    # of a resolver that reached the *global* copy and never saw the stale
+    # marker on it (#2141 round 6).
+    assert (
+        guard_candidate_path(tmp_path / "a", "repo_local", script)
+        in current_local.stdout
+    ), f"{script}: the global copy won over the repo-local one"
     assert "STALE:" not in current_local.stdout
 
     stale_local = _run_site_fence(
         tmp_path / "b",
         script,
-        repo_local="# cw-script-version: 0\n",
-        global_copy=_CURRENT_MARKER,
+        repo_local=GUARD_MARKER_STALE,
+        global_copy=GUARD_MARKER_CURRENT,
     )
     assert stale_local.returncode != 0, f"{script}: stale repo-local copy was rescued"
     assert _INVOKED not in stale_local.stdout
@@ -664,11 +661,16 @@ def test_every_site_fence_honors_cw_context_worktree_path(
     only the `worktree_path`-anchored directory does, so a resolver that
     ignored the override would report the script absent instead of invoking it.
     """
-    result = _run_site_fence(tmp_path, script, worktree_path_override=_CURRENT_MARKER)
+    result = _run_site_fence(
+        tmp_path, script, worktree_path_override=GUARD_MARKER_CURRENT
+    )
     assert result.returncode == 0, f"{script}: {result.stderr}"
     assert _INVOKED in result.stdout, (
         f"{script}: context-provided worktree_path was not honored"
     )
+    assert (
+        guard_candidate_path(tmp_path, "worktree_override", script) in result.stdout
+    ), f"{script}: resolved outside the context-provided worktree_path"
     assert "STALE:" not in result.stdout
 
 
@@ -708,6 +710,17 @@ def _gate2_placement(location: str, body: str) -> _Gate2Placement:
     if location == "session_worktree":
         return {"session_copy": body, "global_copy": None}
     return {"session_copy": None, "global_copy": body}
+
+
+def _gate2_candidate_path(tmp_path: Path, location: str) -> str:
+    """The absolute script path gate 2 must resolve to for *location* (#2141).
+
+    Gate 2's companion to ``conftest.guard_candidate_path``; separate because
+    its session-worktree candidate is anchored by ``git worktree list`` rather
+    than by the ``run_guard_fence`` fixture layout.
+    """
+    root = tmp_path / ("session-wt" if location == "session_worktree" else "home")
+    return str(root.resolve() / ".claude" / "scripts" / _GATE2_SCRIPT)
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -841,7 +854,7 @@ def test_gate2_fence_resolves_the_session_worktree_from_the_gate_worktree(
     """The round-4 contract, executed: cwd is the detached gate worktree, no
     anchor is inherited, and the fence still finds the session worktree's script
     and passes it the session worktree's absolute ``.cw/plan.md`` (#2141)."""
-    result = _run_gate2_fence(tmp_path, session_copy=_CURRENT_MARKER)
+    result = _run_gate2_fence(tmp_path, session_copy=GUARD_MARKER_CURRENT)
     assert result.returncode == 0, result.stderr
     assert _INVOKED in result.stdout
     session_wt = (tmp_path / "session-wt").resolve()
@@ -863,7 +876,7 @@ def test_gate2_fence_derives_tmpwt_and_fork_point_itself(tmp_path: Path) -> None
     ``origin/main``, so an empty (or errored) diff means the merge-base never
     ran.
     """
-    result = _run_gate2_fence(tmp_path, session_copy=_CURRENT_MARKER)
+    result = _run_gate2_fence(tmp_path, session_copy=GUARD_MARKER_CURRENT)
     assert result.returncode == 0, result.stderr
     assert _INVOKED in result.stdout
     session_wt = (tmp_path / "session-wt").resolve()
@@ -883,7 +896,7 @@ def test_gate2_fence_hard_stops_when_the_gate_worktree_is_missing(
     looking like it ran, so the fence checks the directory up front.
     """
     result = _run_gate2_fence(
-        tmp_path, session_copy=_CURRENT_MARKER, gate_worktree=False
+        tmp_path, session_copy=GUARD_MARKER_CURRENT, gate_worktree=False
     )
     assert result.returncode == 3, result.stdout
     assert _INVOKED not in result.stdout
@@ -897,7 +910,7 @@ def test_gate2_fence_hard_stops_when_the_session_worktree_is_absent(
     """No worktree on the branch → exit 3, not a fall-through to the gate
     worktree or to ``$HOME`` (#2141 round 4)."""
     result = _run_gate2_fence(
-        tmp_path, session_worktree=False, global_copy=_CURRENT_MARKER
+        tmp_path, session_worktree=False, global_copy=GUARD_MARKER_CURRENT
     )
     assert result.returncode == 3, result.stdout
     assert _INVOKED not in result.stdout
@@ -909,14 +922,14 @@ def test_gate2_fence_hard_stops_when_the_plan_file_is_missing(
 ) -> None:
     """A resolved current script with no ``.cw/plan.md`` must not be invoked
     with a path that does not exist (#2141 round 4)."""
-    result = _run_gate2_fence(tmp_path, session_copy=_CURRENT_MARKER, plan=False)
+    result = _run_gate2_fence(tmp_path, session_copy=GUARD_MARKER_CURRENT, plan=False)
     assert result.returncode == 3, result.stdout
     assert _INVOKED not in result.stdout
     assert "plan.md not found" in result.stdout
 
 
 @pytest.mark.parametrize("location", _GATE2_LOCATIONS)
-@pytest.mark.parametrize(("label", "script_body"), _STALE_MARKERS)
+@pytest.mark.parametrize(("label", "script_body"), GUARD_MARKER_BAD_CASES)
 def test_gate2_fence_hard_stops_without_invoking(
     tmp_path: Path, location: str, label: str, script_body: str
 ) -> None:
@@ -932,9 +945,14 @@ def test_gate2_fence_reaches_the_script_on_a_current_marker(
     tmp_path: Path, location: str
 ) -> None:
     """Companion to the stale cases: the guard must not block the happy path."""
-    result = _run_gate2_fence(tmp_path, **_gate2_placement(location, _CURRENT_MARKER))
+    result = _run_gate2_fence(
+        tmp_path, **_gate2_placement(location, GUARD_MARKER_CURRENT)
+    )
     assert result.returncode == 0, result.stderr
     assert _INVOKED in result.stdout
+    assert _gate2_candidate_path(tmp_path, location) in result.stdout, (
+        f"{location}: resolved a different copy: {result.stdout!r}"
+    )
     assert "STALE:" not in result.stdout
 
 
@@ -943,17 +961,21 @@ def test_gate2_fence_prefers_the_session_worktree_copy(tmp_path: Path) -> None:
     the marker gate (#2141)."""
     current_local = _run_gate2_fence(
         tmp_path / "a",
-        session_copy=_CURRENT_MARKER,
-        global_copy="# cw-script-version: 0\n",
+        session_copy=GUARD_MARKER_CURRENT,
+        global_copy=GUARD_MARKER_STALE,
     )
     assert current_local.returncode == 0, current_local.stderr
     assert _INVOKED in current_local.stdout
+    assert (
+        _gate2_candidate_path(tmp_path / "a", "session_worktree")
+        in current_local.stdout
+    ), "the global copy won over the session-worktree one"
     assert "STALE:" not in current_local.stdout
 
     stale_local = _run_gate2_fence(
         tmp_path / "b",
-        session_copy="# cw-script-version: 0\n",
-        global_copy=_CURRENT_MARKER,
+        session_copy=GUARD_MARKER_STALE,
+        global_copy=GUARD_MARKER_CURRENT,
     )
     assert stale_local.returncode != 0, "a stale session-worktree copy was rescued"
     assert _INVOKED not in stale_local.stdout

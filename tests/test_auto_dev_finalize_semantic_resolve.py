@@ -31,10 +31,13 @@ import pytest
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
 from tests.conftest import (
     GUARD_FENCE_INVOKED,
+    GUARD_MARKER_BAD_CASES,
+    GUARD_MARKER_CURRENT,
     _appendix,
     _bash_fences,
     _cmd,
     _placement,
+    guard_candidate_path,
     run_guard_fence,
 )
 
@@ -46,10 +49,6 @@ _SCRIPT = "classify_merge_conflict.py"
 # Sentinel standing in for the real resolver invocation, so the executable
 # fence test can observe *whether* the fence reached it without running it.
 _INVOKED = GUARD_FENCE_INVOKED
-
-# The one marker value that may reach the invocation (the version table's
-# minimum for this script).
-_CURRENT_MARKER = "# cw-script-version: 1\n"
 
 
 def _finalize() -> str:
@@ -107,27 +106,20 @@ def test_stale_guard_fence_reaches_the_resolver_on_a_current_marker(
     no local ``.claude/scripts/`` relying on the ``install-skills.sh`` symlink
     (#2096) — and it never ran before this round's parametrization.
     """
-    result = _run_stale_guard(tmp_path, **_placement(location, _CURRENT_MARKER))
+    result = _run_stale_guard(tmp_path, **_placement(location, GUARD_MARKER_CURRENT))
     assert result.returncode == 0, f"{location}: {result.stderr}"
     assert _INVOKED in result.stdout
+    # The stub echoes its argument vector, so *which* copy was resolved is
+    # observable — "an invocation happened" alone would also pass for a
+    # resolver that ignored the repo-local copy (#2141 round 6).
+    assert guard_candidate_path(tmp_path, location, _SCRIPT) in result.stdout, (
+        f"{location}: resolved a different copy: {result.stdout!r}"
+    )
     assert "STALE:" not in result.stdout
 
 
 @pytest.mark.parametrize("location", ["repo_local", "global_only"])
-@pytest.mark.parametrize(
-    ("label", "script_body"),
-    [
-        ("below_minimum", "# cw-script-version: 0\n"),
-        ("no_marker", "import sys\n"),
-        ("malformed_float", "# cw-script-version: 1.5\n"),
-        ("malformed_alpha", "# cw-script-version: abc\n"),
-        ("malformed_empty", "# cw-script-version:\n"),
-        # An unbounded `^[0-9]+$` accepts this, and `[ -lt ]` then errors with
-        # "integer expression expected", evaluates false, and runs the resolver
-        # anyway — the round-2 fail-open one width up (#2141 round 5).
-        ("malformed_oversized", "# cw-script-version: 99999999999999999999\n"),
-    ],
-)
+@pytest.mark.parametrize(("label", "script_body"), GUARD_MARKER_BAD_CASES)
 def test_stale_guard_fence_hard_stops_without_invoking(
     tmp_path: Path, location: str, label: str, script_body: str
 ) -> None:

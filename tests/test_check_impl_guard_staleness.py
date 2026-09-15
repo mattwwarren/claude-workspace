@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from tests.conftest import GUARD_MARKER_CURRENT
+
 SCRIPT = (
     Path(__file__).resolve().parents[1]
     / ".claude"
@@ -274,4 +276,4 @@ def test_newest_comment_at_is_null_when_no_timestamps(tmp_path: Path) -> None:
 def test_check_impl_guard_staleness_declares_cw_script_version_header() -> None:
     """Line 2 (index 1) carries the marker the #2141 resolvers grep for."""
     lines = SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert lines[1] == "# cw-script-version: 1"
+    assert lines[1] == GUARD_MARKER_CURRENT.rstrip("\n")
