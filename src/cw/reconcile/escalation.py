@@ -38,6 +38,7 @@ from cw.dev_queue import (
     BRANCH_STALENESS_GATE_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
     REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
+    REVIEW_STALENESS_GATE_DISPOSITION,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -111,6 +112,12 @@ ESCALATION_PARK_MINUTES = 45
 # concierge would auto-requeue a genuinely stale branch instead of an operator
 # rebasing it.
 #
+# GitHub #2123 joins as a SEVENTH union term on that same reasoning: a
+# review-staleness park is an unresolved, non-operator-initiated quality signal
+# -- nobody chose to stop this ticket, the review simply does not cover the
+# tree that would ship -- so its escalation clock starts immediately. Also kept
+# out of _REAP_ELIGIBLE_DISPOSITIONS_BASE (see concierge.py).
+#
 # GitHub #1646 joins as a SIXTH union term, and here the split is load-bearing
 # in BOTH directions. The unresolved-subagent-spawn reroute carves a subset out
 # of the phantom_surface population that _REAP_ELIGIBLE_DISPOSITIONS_BASE
@@ -126,6 +133,7 @@ _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
         BRANCH_STALENESS_GATE_DISPOSITION,
         REVIEW_HEALTH_GATE_DISPOSITION,
         REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
+        REVIEW_STALENESS_GATE_DISPOSITION,
         _UNRESOLVED_SUBAGENT_SPAWN_REASON,
     }
 )

@@ -484,6 +484,20 @@ class Review(BaseModel):
     # round it down to omission.
     rejected_count: int | None = None
     rejected_count_by_severity: dict[str, int] | None = None
+    # #2123: the sha the review actually ran against — the same quantity as
+    # `ReviewVerdict.reviewed_sha` (`review_findings/_models.py`), threaded
+    # here so dispatch, which sees only the terminal AUTO_DEV_RESULT sentinel,
+    # can compare it against the worktree's live HEAD before releasing the
+    # REVIEW->FINALIZE checkpoint. Captured after any fix cycle converges and
+    # its fix claims are verified (docs/headless-contract.md Note A14), so a
+    # matching value means the reviewed tree IS the shippable tree.
+    #
+    # Defaults to `None` on the #2098 precedent: "the producer did not report
+    # this", never "it matched". The consuming gate (disposition
+    # `review_artifacts_stale`) fails CLOSED on that default, so a future
+    # executor that forgets the stamp parks rather than silently bypassing the
+    # gate. Additive and purely advisory, no `schema_version` bump.
+    reviewed_sha: str | None = None
 
 
 class AgentHealthEntry(BaseModel):

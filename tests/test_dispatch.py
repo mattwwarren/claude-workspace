@@ -109,6 +109,20 @@ if TYPE_CHECKING:
     from tests.conftest import CapturedEvent
 
 
+def _stub_review_head_sha(monkeypatch: pytest.MonkeyPatch, sha: str) -> None:
+    """Make the #2123 staleness gate measure *sha* as the worktree's HEAD.
+
+    Tests whose tasks carry no real worktree would otherwise hit
+    ``current_head_sha() -> None``, which that gate treats as fail-closed and
+    parks on — preempting whichever gate the test is actually about. Stubs the
+    git probe at its consumption point in ``cw.dispatch.review_gates``, exactly
+    as ``TestBranchStalenessGate._set_staleness`` does for its own probe.
+    """
+    from cw.dispatch import review_gates as rg_mod
+
+    monkeypatch.setattr(rg_mod, "current_head_sha", lambda _p: sha)
+
+
 # ---------------------------------------------------------------------------
 # Package-split import guard (#1310)
 # ---------------------------------------------------------------------------
@@ -11720,6 +11734,7 @@ class TestApplyStagedDecision:
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """#1702 end-to-end: a real degraded reviewer document, run through the
         UNMODIFIED codex producer, parks at the routing layer.
@@ -11760,6 +11775,13 @@ class TestApplyStagedDecision:
         assert result.status == "stage_complete"
         assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
 
+        # #2123: the real producer now stamps review.reviewed_sha from the
+        # reviewed_sha passed above, so match the measured HEAD to it — the
+        # staleness gate runs ahead of review-health and would otherwise
+        # preempt the park this test pins.
+        assert result.review.reviewed_sha == "sha"
+        _stub_review_head_sha(monkeypatch, "sha")
+
         task = self._make_running_task("RHG-E2E-1", stage=Stage.REVIEW)
         assert task.signoff is None
         apply_staged_decision(
@@ -11775,6 +11797,7 @@ class TestApplyStagedDecision:
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """#1856 AC3 end-to-end: a Test-Reviewer-only ``status="degraded"``
         document — the read-only-sandbox tax (Test Reviewer cannot start
@@ -11803,6 +11826,10 @@ class TestApplyStagedDecision:
             fix_loop_enabled=False,
         )
         assert result.health.recommendation == "PROCEED"
+        # #2123: match the measured HEAD to the sha the producer stamped, so
+        # the advance this test asserts is not preempted by the staleness gate.
+        assert result.review.reviewed_sha == "sha"
+        _stub_review_head_sha(monkeypatch, "sha")
 
         task = self._make_running_task("RHG-E2E-2", stage=Stage.REVIEW)
         apply_staged_decision(
@@ -12151,10 +12178,24 @@ class TestReviewStalenessGate:
             is True
         )
 
-    def test_absent_review_block_gates(
+    def test_absent_review_block_does_not_gate(
         self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Fail closed: no ``review`` block at all is no evidence either."""
+        """The scoping carve-out: no ``review`` block at all does NOT gate.
+
+        Deliberately the one place this gate does not fail closed, and the
+        reasoning is inherited verbatim from ``_resolve_review_agents_run``: an
+        absent ``review`` block is not a producer that under-reported, it is a
+        hand-built or partial routing dict that never carried review data.
+        Several REVIEW-stage paths (signoff, force-hold, scope_hint, the
+        stage-pointer walk) route on ``status`` alone and pass
+        ``last_result=None``; gating those would park the pipeline on a field
+        they were never meant to carry.
+
+        The fail-closed guarantee is unaffected for its actual target: once a
+        producer reports a ``review`` block, an absent sha parks (see the test
+        directly above).
+        """
         from cw.dispatch.review_gates import _should_gate_for_review_staleness
 
         self._set_head(monkeypatch)
@@ -12162,9 +12203,9 @@ class TestReviewStalenessGate:
 
         assert (
             _should_gate_for_review_staleness(task, {"status": "stage_complete"})
-            is True
+            is False
         )
-        assert _should_gate_for_review_staleness(task, None) is True
+        assert _should_gate_for_review_staleness(task, None) is False
 
     def test_non_string_reviewed_sha_gates(
         self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
@@ -12748,12 +12789,15 @@ class TestEmptyDiffGate:
 
         self._set_ahead(monkeypatch, ahead=7)
         self._set_staleness(monkeypatch, stale=False)
+        # #2123: a current reviewed_sha, so the advance this test asserts is
+        # not preempted by the staleness gate.
+        _stub_review_head_sha(monkeypatch, "edg-head")
 
         task = self._make_running_task("EDG-R5", stage=Stage.REVIEW)
         last_result: dict[str, object] = {
             "status": "review_pending_approval",
             "scope": {"tier": "small"},
-            "review": {"agents_run": 2},
+            "review": {"agents_run": 2, "reviewed_sha": "edg-head"},
         }
         apply_staged_decision(
             task, "review_pending_approval", last_result, self._clients(tmp_path)
@@ -12866,16 +12910,21 @@ class TestReviewHealthAgentsRunGate:
         self,
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """End-to-end at Rule 1: the incident's exact sentinel shape."""
         from cw.dispatch import apply_staged_decision
 
+        # #2123: a current reviewed_sha, so the staleness gate (which runs
+        # ahead of review-health) stays silent and this test keeps pinning the
+        # gate it is named for.
+        _stub_review_head_sha(monkeypatch, "rha-head")
         task = self._make_running_task("RHA-1")
         last_result: dict[str, object] = {
             "status": "review_pending_approval",
             "scope": {"tier": "small"},
             "health": {"recommendation": "PROCEED"},
-            "review": {"agents_run": 0},
+            "review": {"agents_run": 0, "reviewed_sha": "rha-head"},
         }
         apply_staged_decision(
             task, "review_pending_approval", last_result, self._clients(tmp_path)

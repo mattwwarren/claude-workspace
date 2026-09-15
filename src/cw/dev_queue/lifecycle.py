@@ -171,6 +171,33 @@ BRANCH_STALENESS_GATE_DISPOSITION = "branch_behind_main"
 # pipeline and defeat the gate outright.
 EMPTY_DIFF_GATE_DISPOSITION = "empty_diff_gate"
 
+# Disposition stamped when dispatch's REVIEW-stage routing refuses to advance a
+# ticket whose sentinel does not carry a review.reviewed_sha matching the
+# worktree's live HEAD (#2123) -- the reviewers vouched for a tree that is not
+# the tree that would ship. Missing, non-string, and unmeasurable all land
+# here too: this gate fails CLOSED, unlike its two git-measured siblings above,
+# because "is this review current?" has no safe answer without evidence.
+#
+# The hole it closes: a review-stage park released via `requeue` re-dispatches
+# and can land back on `review_pending_approval` with no reviewer having run
+# against the current HEAD. Every field the auto-approve recipe checks reads
+# clean in that state, because those numbers describe the *earlier* tree.
+#
+# Shares its literal string value with dispatch.review_gates.
+# _REVIEW_STALENESS_REASON (a SESSION_NEEDS_ATTENTION paused_status) on the same
+# precedent as EMPTY_DIFF_GATE_DISPOSITION above -- still two constants in two
+# namespaces, do not collapse them.
+#
+# Same set-membership treatment as the four dispositions above: deliberately
+# NOT a HOLD_DISPOSITIONS member, since stale review artifacts clear by
+# re-running review rather than by an operator saying "proceed anyway", and
+# membership would silently make the row eligible for concierge's false-park
+# auto-requeue recipe (same _REAP_ELIGIBLE_DISPOSITIONS_BASE lineage) and
+# defeat the gate. It DOES join DRAIN_DISPOSITIONS, unlike
+# BRANCH_STALENESS_GATE_DISPOSITION -- see the note in drain.py for why the two
+# staleness gates diverge there.
+REVIEW_STALENESS_GATE_DISPOSITION = "review_artifacts_stale"
+
 # Disposition stamped when a session reported the ``stale_dispatch`` sentinel
 # itself -- an agent ran, discovered this ticket already has an open, unmerged
 # PR from an earlier dispatch, and refused rather than re-implementing on top
