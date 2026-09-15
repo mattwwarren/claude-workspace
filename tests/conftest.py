@@ -194,6 +194,7 @@ def run_guard_fence(
     *,
     repo_local: str | None = None,
     global_copy: str | None = None,
+    worktree_path_override: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute a guard-script resolver *fence* against fixture copies (#2141).
 
@@ -206,6 +207,14 @@ def run_guard_fence(
     ``<repo>/.claude/scripts/<script>`` and ``$HOME/.claude/scripts/<script>``;
     ``None`` leaves that location empty, so a caller can exercise the
     repo-local, global-only, both, and absent branches from one helper.
+
+    *worktree_path_override*, when given, is the script body planted at a
+    directory **other than** ``<repo>``, with a ``<repo>/.claude/cw-context.json``
+    written to point ``worktree_path`` at it — exercising the resolver's
+    context-provided-anchor branch, which no ``repo_local``/``global_copy``
+    fixture reaches (both of those only ever probe paths derived from
+    ``git rev-parse --show-toplevel`` or ``$HOME``, never a `cw-context.json`
+    override to a third location).
 
     The fence is run from a **nested subdirectory** of the repo, not its root:
     the resolver must anchor its repo-local candidate to an absolute root
@@ -237,6 +246,17 @@ def run_guard_fence(
         global_scripts = home / ".claude" / "scripts"
         global_scripts.mkdir(parents=True, exist_ok=True)
         (global_scripts / script).write_text(global_copy, encoding="utf-8")
+
+    if worktree_path_override is not None:
+        override_root = tmp_path / "context-worktree"
+        override_scripts = override_root / ".claude" / "scripts"
+        override_scripts.mkdir(parents=True, exist_ok=True)
+        (override_scripts / script).write_text(worktree_path_override, encoding="utf-8")
+        context_dir = repo / ".claude"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / "cw-context.json").write_text(
+            json.dumps({"worktree_path": str(override_root)}), encoding="utf-8"
+        )
 
     nested = repo / "nested" / "deep"
     nested.mkdir(parents=True, exist_ok=True)

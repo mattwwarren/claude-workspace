@@ -90,6 +90,22 @@ def test_pre_mutation_guard_headless_blocks_on_stale_marker() -> None:
     )
 
 
+def test_pre_mutation_guard_stale_marker_pins_blocker_disposition() -> None:
+    """Not just the words "HEADLESS BLOCK" — the actual disposition an agent
+    must emit, mirroring gate 2's equivalent pin (#2141 review round 2)."""
+    section = _pre_mutation_guard_section()
+    windows = _marker_windows(section, span=400)
+    blocking = [window for window in windows if "HEADLESS BLOCK" in window]
+    assert blocking
+    disposition = "\n".join(blocking)
+    assert 'blocker.reason: "impl_failed"' in disposition
+    assert (
+        "HEADLESS BLOCK: check_not_main_checkout.py at <resolved-path>" in disposition
+    )
+    assert "missing/stale cw-script-version marker (need >= 1)" in disposition
+    assert "STOP" in section
+
+
 def test_check_not_main_checkout_declares_cw_script_version_header() -> None:
     """Line 2 (index 1), directly under the shebang, above the docstring."""
     lines = _SCRIPT.read_text(encoding="utf-8").splitlines()

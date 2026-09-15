@@ -438,6 +438,7 @@ def _run_site_fence(
     *,
     repo_local: str | None = None,
     global_copy: str | None = None,
+    worktree_path_override: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute a site's own fence via the shared runner (#2141)."""
     return run_guard_fence(
@@ -446,6 +447,7 @@ def _run_site_fence(
         script,
         repo_local=repo_local,
         global_copy=global_copy,
+        worktree_path_override=worktree_path_override,
     )
 
 
@@ -559,6 +561,27 @@ def test_every_site_fence_prefers_the_repo_local_copy(
     assert stale_local.returncode != 0, f"{script}: stale repo-local copy was rescued"
     assert _INVOKED not in stale_local.stdout
     assert "STALE:" in stale_local.stdout
+
+
+@pytest.mark.parametrize("script", _GUARD_SCRIPTS)
+def test_every_site_fence_honors_cw_context_worktree_path(
+    tmp_path: Path, script: str
+) -> None:
+    """A context-provided `worktree_path` must win over `git rev-parse` (#2141).
+
+    Every other case above only exercises the `git rev-parse --show-toplevel`
+    fallback (repo root or `$HOME`) — none plants a `.claude/cw-context.json`
+    pointing somewhere else, so the resolver's actual override branch had no
+    executable coverage. Here neither the repo nor `$HOME` carries a copy;
+    only the `worktree_path`-anchored directory does, so a resolver that
+    ignored the override would report the script absent instead of invoking it.
+    """
+    result = _run_site_fence(tmp_path, script, worktree_path_override=_CURRENT_MARKER)
+    assert result.returncode == 0, f"{script}: {result.stderr}"
+    assert _INVOKED in result.stdout, (
+        f"{script}: context-provided worktree_path was not honored"
+    )
+    assert "STALE:" not in result.stdout
 
 
 @pytest.mark.parametrize("script", _GUARD_SCRIPTS)
