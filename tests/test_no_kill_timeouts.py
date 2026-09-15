@@ -329,15 +329,14 @@ def test_distress_fires_for_stale_synchronous_tool_use_with_no_agent_spawn_stamp
     _run_liveness(state)
 
     assert sess.liveness_bucket is LivenessBucket.STALE_45M
-    events = _distress_events()
-    assert len(events) == 1
-    assert events[0]["session_id"] == sess.id
-
     # #1482: a dangling synchronous Bash call is now named in the distress
-    # signal rather than folded into the generic session_unresponsive reason.
-    all_events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
-    payloads = [dict(e.payload) for e in all_events]
+    # signal rather than folded into the generic session_unresponsive reason,
+    # so this no longer shows up under _distress_events()'s
+    # _SESSION_UNRESPONSIVE_REASON filter -- check the raw event instead.
+    events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    payloads = [dict(e.payload) for e in events]
     assert len(payloads) == 1
+    assert payloads[0]["session_id"] == sess.id
     assert payloads[0]["paused_status"] == _DANGLING_TOOL_USE_REASON
     assert "Bash" in str(payloads[0]["breadcrumbs"])
 
@@ -420,7 +419,7 @@ def test_distress_stays_generic_when_transcript_shows_no_tool_use(
     assert payloads[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
 
 
-def test_distress_prefers_fix_loop_deadline_over_dangling_tool_use_when_agent_spawn_overdue(
+def test_distress_prefers_fix_loop_deadline_over_dangling_tool_use_overdue(
     tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
 ) -> None:
     """A transcript tail with a dangling Agent tool_use AND an overdue

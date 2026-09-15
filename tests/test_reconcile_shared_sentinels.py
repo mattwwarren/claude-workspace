@@ -484,7 +484,9 @@ def test_detect_dangling_tool_use_returns_evidence_for_unresolved_bash_call(
     _stamp_after_start(transcript, started_at)
 
     evidence = _detect_dangling_tool_use(sess)
-    assert evidence == DanglingToolUseEvidence(tool_name="Bash", command_snippet=command)
+    assert evidence == DanglingToolUseEvidence(
+        tool_name="Bash", command_snippet=command
+    )
 
 
 def test_detect_dangling_tool_use_returns_none_when_resolved(
@@ -547,7 +549,9 @@ def test_detect_dangling_tool_use_returns_latest_unresolved_among_multiple_pairs
     _stamp_after_start(transcript, started_at)
 
     evidence = _detect_dangling_tool_use(sess)
-    assert evidence == DanglingToolUseEvidence(tool_name="Bash", command_snippet="pytest")
+    assert evidence == DanglingToolUseEvidence(
+        tool_name="Bash", command_snippet="pytest"
+    )
 
 
 def test_detect_dangling_tool_use_truncates_long_command(
@@ -581,7 +585,9 @@ def test_detect_dangling_tool_use_truncates_long_command(
     assert evidence.command_snippet is not None
     assert len(evidence.command_snippet) == _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS + 1
     assert evidence.command_snippet.endswith("…")
-    assert evidence.command_snippet.startswith("x" * _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS)
+    assert evidence.command_snippet.startswith(
+        "x" * _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS
+    )
 
 
 def test_detect_dangling_tool_use_returns_none_for_missing_transcript(
@@ -704,8 +710,8 @@ def test_dangling_tool_use_detector_importable_from_reconcile_package() -> None:
     test_awaiting_subagent_and_window_constant_removed_from_reconcile's style
     but as a positive-presence check."""
     from cw.reconcile import (
-        DanglingToolUseEvidence,
         _DANGLING_TOOL_USE_REASON,
+        DanglingToolUseEvidence,
         _detect_dangling_tool_use,
     )
 
