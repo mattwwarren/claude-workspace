@@ -5894,6 +5894,44 @@ class TestApproveTicket:
         assert t.stage == Stage.REVIEW
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
 
+    def test_approve_fails_closed_on_review_staleness_park(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2123: a review-staleness park cannot be released by ``approve``.
+
+        Identical reasoning to the branch-staleness override above: the gate
+        diverges only ``task.disposition``, leaving the sentinel reading
+        ``review_pending_approval``. Without the explicit check the row would
+        read as "at the approval gate" and ship a tree no reviewer saw --
+        which is the incident #2123 exists to close, since ``requeue`` on a
+        review-stage park is exactly how that row got here.
+        """
+        from cw.config import save_state
+        from cw.dev_queue import REVIEW_STALENESS_GATE_DISPOSITION, approve_ticket
+        from cw.exceptions import ApproveGateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess0010",
+            disposition=REVIEW_STALENESS_GATE_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess0010",
+            last_result={"status": "review_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        with pytest.raises(ApproveGateError, match="not at an approval gate"):
+            approve_ticket("GEN-500", "genhealth")
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.REVIEW
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
     def test_approve_missing_session_raises(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
@@ -8864,6 +8902,60 @@ class TestDrainHeldTickets:
         t = next(t for t in store.tasks if t.ticket_id == "GEN-503")
         assert t.status == QueueItemStatus.PENDING
         assert t.stage == Stage.REVIEW
+
+    def test_drain_includes_review_staleness_gate(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2123: a review-staleness park IS batch-releasable.
+
+        Joins on the same terms as #1702/#1714 above, and deliberately NOT on
+        ``BRANCH_STALENESS_GATE_DISPOSITION``'s (a documented non-member): a
+        stale *branch* needs an operator rebase before a re-run means anything,
+        whereas stale review *artifacts* clear by re-running review -- exactly
+        what drain does. A re-run that is itself still stale re-fires the gate.
+        """
+        from cw.dev_queue import (
+            REVIEW_STALENESS_GATE_DISPOSITION,
+            drain_held_tickets,
+            select_held_tickets,
+        )
+
+        assert REVIEW_STALENESS_GATE_DISPOSITION == "review_artifacts_stale"
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        parked = _make_blocked_task(
+            ticket_id="GEN-504",
+            stage=Stage.REVIEW,
+            session_id="sess-stale-1",
+            disposition=REVIEW_STALENESS_GATE_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[parked]))
+
+        assert [t.ticket_id for t in select_held_tickets("genhealth")] == ["GEN-504"]
+        outcomes = drain_held_tickets("genhealth")
+
+        assert [o["status"] for o in outcomes] == ["requeued"]
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-504")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
+
+    def test_review_staleness_gate_disposition_membership(self) -> None:
+        """#2123: in DRAIN_DISPOSITIONS, out of HOLD_DISPOSITIONS.
+
+        HOLD_DISPOSITIONS membership would also make it eligible for
+        concierge's false-park auto-requeue (same
+        ``_REAP_ELIGIBLE_DISPOSITIONS_BASE`` lineage), which would spin a stale
+        review straight back through the pipeline without a human seeing the
+        signal and defeat the gate outright.
+        """
+        from cw.dev_queue import (
+            DRAIN_DISPOSITIONS,
+            HOLD_DISPOSITIONS,
+            REVIEW_STALENESS_GATE_DISPOSITION,
+        )
+
+        assert REVIEW_STALENESS_GATE_DISPOSITION not in HOLD_DISPOSITIONS
+        assert REVIEW_STALENESS_GATE_DISPOSITION in DRAIN_DISPOSITIONS
 
     def test_no_outer_lock_held_during_batch(
         self, tmp_config_dir: Path, tmp_path: Path

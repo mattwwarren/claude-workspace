@@ -12069,6 +12069,401 @@ class TestBranchStalenessGate:
         assert _should_gate_for_branch_staleness(task, {}) is False
 
 
+class TestReviewStalenessGate:
+    """GitHub #2123: the seventh REVIEW-scoped gate.
+
+    A ticket whose sentinel does not carry a ``review.reviewed_sha`` matching
+    the worktree's current HEAD parks ``BLOCKED_ON_USER``/
+    ``review_artifacts_stale`` instead of advancing or parking under its
+    ordinary sentinel status. This closes the hole where a review-stage park
+    released via ``requeue`` lands back on ``review_pending_approval`` with no
+    reviewer having run against the tree that would actually ship.
+
+    Unlike its two git-measured siblings, this gate fails **closed** on every
+    unresolvable branch — missing sha, non-string sha, unmeasurable HEAD — per
+    the operator's binding round-1 resolution: an integrity gate with no
+    evidence must not advance, or a future executor that forgets the stamp
+    silently bypasses it.
+
+    The HEAD measurement itself is covered against real repos in
+    ``tests/test_branch_ahead.py``; these tests pin the *routing* behavior, so
+    they stub ``current_head_sha`` at its consumption point in
+    ``cw.dispatch.review_gates``, mirroring ``TestBranchStalenessGate`` above.
+    """
+
+    _HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    _OTHER = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    def _make_running_task(
+        self, ticket_id: str, stage: Stage = Stage.REVIEW
+    ) -> TicketTask:
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=stage,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _clients(self, tmp_path: Path) -> dict[str, ClientConfig]:
+        return {
+            "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
+        }
+
+    def _set_head(
+        self, monkeypatch: pytest.MonkeyPatch, sha: str | None = _HEAD
+    ) -> None:
+        """Stub the HEAD probe at its consumption point.
+
+        ``review_gates`` imports ``current_head_sha`` at module top, so the
+        binding that must be patched is the one in ``cw.dispatch.review_gates``
+        -- not the defining module.
+        """
+        from cw.dispatch import review_gates as rg_mod
+
+        monkeypatch.setattr(rg_mod, "current_head_sha", lambda _p: sha)
+
+    def _set_upstream_gates_clear(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Silence the two git-measured gates that run ahead of this one."""
+        from cw.dispatch import review_gates as rg_mod
+
+        monkeypatch.setattr(
+            rg_mod, "has_overlapping_branch_staleness", lambda _p, _b: False
+        )
+        monkeypatch.setattr(rg_mod, "commits_ahead_of_default", lambda _p, _b: 1)
+
+    def test_missing_reviewed_sha_gates(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail closed: a review block with no ``reviewed_sha`` key parks.
+
+        The operator's fourth named case. A producer that never learned to
+        stamp the field must not slip past the gate by omission.
+        """
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        self._set_head(monkeypatch)
+        task = self._make_running_task("RSG-P1")
+
+        assert (
+            _should_gate_for_review_staleness(task, {"review": {"agents_run": 1}})
+            is True
+        )
+
+    def test_absent_review_block_gates(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail closed: no ``review`` block at all is no evidence either."""
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        self._set_head(monkeypatch)
+        task = self._make_running_task("RSG-P2")
+
+        assert (
+            _should_gate_for_review_staleness(task, {"status": "stage_complete"})
+            is True
+        )
+        assert _should_gate_for_review_staleness(task, None) is True
+
+    def test_non_string_reviewed_sha_gates(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail closed: a non-string sha is malformed evidence, not evidence."""
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        self._set_head(monkeypatch)
+        task = self._make_running_task("RSG-P3")
+
+        assert (
+            _should_gate_for_review_staleness(task, {"review": {"reviewed_sha": 123}})
+            is True
+        )
+
+    def test_fix_commits_without_verification_gates(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Operator's second named case: fix commits landed, verification did not.
+
+        Per the ADOPT(b) capture contract every executor follows, a fix loop
+        that pushed commits without completing its verification step leaves the
+        *pre-fix* sha stamped. HEAD has since moved, so the two disagree and
+        the row parks -- exactly the intended fail-closed outcome.
+        """
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        self._set_head(monkeypatch)
+        task = self._make_running_task("RSG-P4")
+
+        assert (
+            _should_gate_for_review_staleness(
+                task, {"review": {"reviewed_sha": self._OTHER}}
+            )
+            is True
+        )
+
+    def test_fix_cycle_plus_verification_does_not_gate(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Operator's first named case: fix loop ran and verified, sha matches."""
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        self._set_head(monkeypatch)
+        task = self._make_running_task("RSG-P5")
+
+        assert (
+            _should_gate_for_review_staleness(
+                task, {"review": {"reviewed_sha": self._HEAD}}
+            )
+            is False
+        )
+
+    def test_no_fix_cycle_does_not_gate(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Operator's third named case: no fix cycle ran, so HEAD never moved.
+
+        Predicate-identical to the case above by construction -- the gate
+        compares two shas and cannot tell *why* they match. Kept as its own
+        named test so the suite visibly enumerates all four operator-named
+        scenarios rather than leaving one of them implied.
+        """
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        self._set_head(monkeypatch)
+        task = self._make_running_task("RSG-P6")
+
+        assert (
+            _should_gate_for_review_staleness(
+                task, {"review": {"reviewed_sha": self._HEAD, "fix_cycles_used": 0}}
+            )
+            is False
+        )
+
+    def test_unmeasurable_head_gates(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail closed on an unmeasurable worktree.
+
+        The deliberate opposite polarity to ``_should_gate_for_empty_diff`` and
+        ``_should_gate_for_branch_staleness``, which fail *open* on the same
+        condition: those ask "is there evidence of a problem?", this one asks
+        "is there evidence the review is current?" -- and no measurement is no
+        evidence.
+        """
+        from cw.dispatch.review_gates import _should_gate_for_review_staleness
+
+        self._set_head(monkeypatch, sha=None)
+        task = self._make_running_task("RSG-P7")
+
+        assert (
+            _should_gate_for_review_staleness(
+                task, {"review": {"reviewed_sha": self._HEAD}}
+            )
+            is True
+        )
+
+    def test_route_scope_gated_approval_parks(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Rule 1 wiring: a stale review_pending_approval row parks, not advances.
+
+        This is the incident shape -- ``approve`` would otherwise release a row
+        whose sentinel reads clean but whose reviewers never saw HEAD.
+        """
+        from cw.dev_queue import REVIEW_STALENESS_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        self._set_upstream_gates_clear(monkeypatch)
+        self._set_head(monkeypatch)
+        attention = capture_events(
+            "cw.dispatch.review_gates", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+
+        task = self._make_running_task("RSG-1")
+        task.session_id = "sess-rsg-1"
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+            "review": {"agents_run": 2, "reviewed_sha": self._OTHER},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == REVIEW_STALENESS_GATE_DISPOSITION
+        assert task.disposition == "review_artifacts_stale"
+        assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
+
+        assert len(attention) == 1
+        _event_type, payload, correlation_id = attention[0]
+        assert payload["paused_status"] == "review_artifacts_stale"
+        assert payload["ticket_id"] == "RSG-1"
+        assert correlation_id == "RSG-1"
+
+    def test_route_scope_gated_approval_large_tier_parks_before_tier_check(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gate runs ahead of tier resolution, so it wins the disposition.
+
+        A large-tier row would otherwise park under the verbatim
+        ``review_pending_approval`` disposition -- which ``cw dev-queue
+        approve`` releases.
+        """
+        from cw.dev_queue import REVIEW_STALENESS_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        self._set_upstream_gates_clear(monkeypatch)
+        self._set_head(monkeypatch)
+
+        task = self._make_running_task("RSG-2")
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "large"},
+            "review": {"agents_run": 2, "reviewed_sha": self._OTHER},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == REVIEW_STALENESS_GATE_DISPOSITION
+        assert task.disposition != "review_pending_approval"
+
+    def test_route_stage_success_parks(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rule 3 wiring: the stage-success arm gates too."""
+        from cw.dev_queue import REVIEW_STALENESS_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        self._set_upstream_gates_clear(monkeypatch)
+        self._set_head(monkeypatch)
+
+        task = self._make_running_task("RSG-3")
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "review": {"agents_run": 2, "reviewed_sha": self._OTHER},
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == REVIEW_STALENESS_GATE_DISPOSITION
+        assert task.stage == Stage.REVIEW
+
+    def test_fires_ahead_of_review_health(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ordering: staleness outranks review-health at the same site.
+
+        A stale tree undermines the health recommendation itself -- the review
+        that produced it reviewed something other than what would ship -- so
+        the operator sees the staleness cause, not the downstream one.
+        """
+        from cw.dev_queue import REVIEW_STALENESS_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        self._set_upstream_gates_clear(monkeypatch)
+        self._set_head(monkeypatch)
+
+        task = self._make_running_task("RSG-4")
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "health": {"recommendation": "EXIT_FOR_HUMAN_REVIEW"},
+            "review": {"agents_run": 2, "reviewed_sha": self._OTHER},
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.disposition == REVIEW_STALENESS_GATE_DISPOSITION
+        assert task.disposition != "review_health_gate"
+
+    def test_fires_after_branch_staleness(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ordering: branch-staleness still outranks this gate.
+
+        Both are true here. The branch-staleness disposition must win, because
+        its recovery (rebase) subsumes this one's (re-review).
+        """
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+        from cw.dispatch import review_gates as rg_mod
+
+        self._set_upstream_gates_clear(monkeypatch)
+        monkeypatch.setattr(
+            rg_mod, "has_overlapping_branch_staleness", lambda _p, _b: True
+        )
+        self._set_head(monkeypatch)
+
+        task = self._make_running_task("RSG-5")
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+            "review": {"agents_run": 2, "reviewed_sha": self._OTHER},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.disposition == BRANCH_STALENESS_GATE_DISPOSITION
+
+    def test_matching_sha_advances_unattended(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The negative case: a current review resumes ordinary routing."""
+        from cw.dispatch import apply_staged_decision
+
+        self._set_upstream_gates_clear(monkeypatch)
+        self._set_head(monkeypatch)
+
+        task = self._make_running_task("RSG-6")
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+            "review": {"agents_run": 2, "reviewed_sha": self._HEAD},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.disposition != "review_artifacts_stale"
+        assert task.stage == Stage.FINALIZE  # small tier advanced unattended
+
+    def test_impl_stage_is_not_gated(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REVIEW-scoped, mirroring all six sibling gates.
+
+        An IMPL sentinel legitimately carries no ``reviewed_sha`` at all --
+        gating there would park every ticket in the pipeline before review had
+        a chance to run.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        self._set_upstream_gates_clear(monkeypatch)
+        self._set_head(monkeypatch)
+
+        task = self._make_running_task("RSG-7", stage=Stage.IMPL)
+        apply_staged_decision(
+            task,
+            "stage_complete",
+            {"status": "stage_complete"},
+            self._clients(tmp_path),
+        )
+
+        assert task.disposition != "review_artifacts_stale"
+        assert task.stage == Stage.REVIEW  # advanced IMPL->REVIEW unattended
+
+
 # ---------------------------------------------------------------------------
 # TestEmptyDiffGate (#1870)
 # ---------------------------------------------------------------------------

@@ -284,6 +284,29 @@ class TestDetect:
             == []
         )
 
+    def test_detect_auto_approve_review_excludes_review_staleness_park(self) -> None:
+        """#2123: a review-staleness park is never auto-approved.
+
+        The load-bearing regression test for the incident. The recipe's
+        five-field clean-review predicate reads only ``session.last_result``,
+        which this gate never mutates — a stale-artifact row satisfies every
+        one of those fields (that is precisely the hole: the numbers are clean
+        because they describe a *different* tree) and would be auto-approved
+        unless it is excluded on ``task.disposition``.
+        """
+        from cw.dev_queue import REVIEW_STALENESS_GATE_DISPOSITION
+
+        task = _make_task(disposition=REVIEW_STALENESS_GATE_DISPOSITION)
+        session = _make_session(last_result=_clean_result())
+        state = CwState(sessions=[session])
+
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
+
     def test_wrong_last_result_status_yields_none(self) -> None:
         task = _make_task()
         session = _make_session(
