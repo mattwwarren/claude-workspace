@@ -1,12 +1,13 @@
 """Guard tests: bounded wait-and-recheck for behind-only origin sync (#1434).
 
 Pure-markdown assertions over the auto-dev-intake pipeline instruction file's
-"Pre-flight: Origin Sync Check" section. This repo has an established
-convention (see ``tests/test_auto_dev_finalize_early_push.py`` and its own
-list of prior consumers) of a small **private per-file** ``_cmd()``-style
-helper that reads ``.claude/commands/*.md`` prose and asserts
-substrings/regions, rather than a shared ``conftest.py`` fixture. This file
-is the 6th consumer of that same pattern.
+"Pre-flight: Origin Sync Check" section. The repo convention for reading
+``.claude/commands/*.md`` prose in doc-guard tests is the shared
+``tests/conftest.py`` ``_cmd(name)`` helper (#1787). This module is the one
+deliberate exception: its local ``_cmd()`` is zero-arg with the filename
+hardcoded to ``auto-dev-intake.md``, a signature the shared helper does not
+offer, so it was excluded from that consolidation rather than changed at its
+call sites. Do not read this file as licence to add new per-file copies.
 
 Root cause pinned here: `/auto-dev-intake`'s Step P3 (headless) exited the
 `blocked` sentinel unconditionally and immediately on any divergence between
