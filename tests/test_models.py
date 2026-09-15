@@ -1073,7 +1073,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 35
+        assert DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()

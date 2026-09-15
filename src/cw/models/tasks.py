@@ -153,7 +153,15 @@ from cw.review_finding_dispositions import FindingDisposition
 #      mirroring the `<!-- auto-dev-plan-approved -->` GitHub comment it
 #      stands in for, which is never revoked — #2102 tracks binding both to
 #      the draft that was actually approved.
-DEV_QUEUE_SCHEMA_VERSION = 35
+# v36: added TicketTask.plan_approved_fingerprint (GitHub #2102) — the SHA-256
+#      content fingerprint of the draft the v35 approval was actually given
+#      for. Without it `plan_approved_at` is a durable no-op check: it proves
+#      an approval happened, never which text the operator read, so a resumed
+#      draft edited after approval auto-skips Checkpoint 1's Large-scope
+#      carve-out unchallenged. Stamped and cleared at exactly the seams v35
+#      already uses (_stamp_plan_approval / _stage_regress into Stage.PLAN), so
+#      the pair can never diverge into "approved, but for nothing".
+DEV_QUEUE_SCHEMA_VERSION = 36
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -389,6 +397,22 @@ class TicketTask(BaseModel):
     # _stage_regress into Stage.PLAN (a re-plan revokes it, #2102); otherwise
     # durable, like the GitHub marker comment it stands in for.
     plan_approved_at: datetime | None = None
+    # The fingerprint of the draft plan_approved_at above was given for (v36,
+    # #2102) — read from the approving session's sentinel
+    # (AutoDevResult.plan_draft_fingerprint) and threaded to the next worker via
+    # spawn.py's queue_metadata, where Checkpoint 1 compares it against the
+    # draft it is about to auto-skip. A mismatch means the text changed after
+    # the operator approved it, so the approval does not transfer and the round
+    # re-parks.
+    #
+    # Sibling of hook_context_conflict_session_id / finalize_regress_branch_head
+    # in role: a value stamped at an existing field's own seam purely to carry
+    # comparison data forward. Its seams are therefore plan_approved_at's,
+    # exactly — same stamp site, same single clear site — never its own. None
+    # means "no fingerprint bound": either a pre-#2102 producer emitted no
+    # fingerprint, or no draft existed at approval time. Checkpoint 1 treats
+    # that as absent evidence, not as a wildcard match.
+    plan_approved_fingerprint: str | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.
     # Kept only so persisted dev-queue rows that carry the field keep loading.

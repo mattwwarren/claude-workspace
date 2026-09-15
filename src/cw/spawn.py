@@ -78,7 +78,13 @@ _log = logging.getLogger(__name__)
 #     Linear-tracked ticket — whose tracker the GitHub-only `--post-marker`
 #     comment never reaches — stops re-parking at plan_pending_approval on
 #     every re-dispatch.)
-CW_CONTEXT_SCHEMA_VERSION = 7
+# v8: added `queue_metadata.plan_approved_fingerprint` (dev-queue schema v36 —
+#     GitHub #2102 — the SHA-256 fingerprint of the draft the v7 approval was
+#     given for, as a hex string or null. Checkpoint 1 compares it against the
+#     draft it is about to auto-skip; without it, v7's timestamp proves only
+#     that some approval happened, so a draft edited after approval resumed
+#     straight past the Large-scope carve-out.)
+CW_CONTEXT_SCHEMA_VERSION = 8
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -530,6 +536,10 @@ def _write_hook_context(
                         if task.plan_approved_at is not None
                         else None
                     ),
+                    # v8 (#2102): the draft the approval above was bound to.
+                    # Checkpoint 1 requires it to equal the resumed draft's own
+                    # fingerprint before the approval counts as evidence.
+                    "plan_approved_fingerprint": task.plan_approved_fingerprint,
                 },
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,
