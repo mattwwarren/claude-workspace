@@ -12,6 +12,11 @@ from one that merely appears in the prose. Two runners, by anchor shape:
 ``_run_gate2_fence`` for Step 2.5 gate 2, which derives its own ``$TMPWT``,
 ``$FORK_POINT`` and ``$SESSION_WT`` and therefore needs real git worktrees and
 a shell carrying none of the setup fence's state.
+
+The marker fixtures both runners are driven with — ``GUARD_MARKER_CURRENT`` and
+the ``GUARD_MARKER_BAD_CASES`` table — live in ``tests/conftest.py`` and are
+shared with ``test_auto_dev_finalize_semantic_resolve.py``: a new stale-marker
+case belongs in that table, not in a local list here (#2141 round 6).
 """
 
 from __future__ import annotations
