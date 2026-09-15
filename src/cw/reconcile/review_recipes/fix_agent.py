@@ -29,7 +29,14 @@ from cw.models import (
     SessionPurpose,
 )
 from cw.session_retention import find_session_by_id
-from cw.worktree import _git_dir, _run_git, create_worktree, worktree_path_for
+from cw.worktree import (
+    _git_dir,
+    _resolve_remote_ref,
+    _run_git,
+    _upstream_ref,
+    create_worktree,
+    worktree_path_for,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -102,9 +109,10 @@ def dispatch_fix_agent(
     the only mutating steps. A precondition failure therefore leaves the
     worktree untouched and needs no compensating restore.
 
-    The HEAD verification confirms HEAD landed on the expected
-    ``origin/<branch>`` commit (replacing an agent eyeballing ``git log
-    --oneline -1``); the merge of ``origin/<default_branch>`` puts the fix on
+    The HEAD verification confirms HEAD landed on the branch's resolved
+    remote ref (upstream-first, ``origin/<branch>`` as fallback -- #2145)
+    (replacing an agent eyeballing ``git log --oneline -1``); the merge of
+    ``origin/<default_branch>`` puts the fix on
     top of any sibling PR that merged mid-pipeline -- without it a later push
     would silently ship a branch missing main's commits (CI passes because it
     runs branch-HEAD, not the branch-merged-with-main state). On conflict the
@@ -159,14 +167,25 @@ def dispatch_fix_agent(
     _refuse_if_worktree_references_live_session(client, branch)
     worktree = create_worktree(client, branch, allow_dirty_reuse=True)
 
-    expected_sha = _run_git(
-        "rev-parse", f"origin/{branch}", cwd=_git_dir(client)
-    ).stdout.strip()
+    resolved_ref = _resolve_remote_ref(branch, worktree)
+    if resolved_ref is None:
+        upstream = _upstream_ref(worktree)
+        msg = (
+            f"dispatch_fix_agent: cannot determine remote ref for {branch} "
+            f"-- configured upstream is {upstream!r} and it does not "
+            f"resolve, and origin/{branch} does not exist either."
+            if upstream is not None
+            else f"dispatch_fix_agent: cannot determine remote ref for "
+            f"{branch} -- no upstream configured, and origin/{branch} "
+            "does not exist either."
+        )
+        raise CwError(msg)
+    expected_sha = _run_git("rev-parse", resolved_ref, cwd=worktree).stdout.strip()
     actual_sha = _run_git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
     if actual_sha != expected_sha:
         msg = (
             f"dispatch_fix_agent: worktree HEAD ({actual_sha}) does not "
-            f"match origin/{branch} ({expected_sha}) after create_worktree "
+            f"match {resolved_ref} ({expected_sha}) after create_worktree "
             "-- refusing to dispatch the fix agent against unexpected "
             "branch state."
         )
