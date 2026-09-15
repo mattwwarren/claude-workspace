@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _appendix, _cmd
+from tests.conftest import _appendix, _bash_fences, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 # Sentinel replacing the real guard-script invocation, so the executable fence
@@ -50,27 +50,6 @@ _TABLE_ROW = re.compile(
 # The per-site single declaration Cluster B mandates; fences are indented at
 # some sites (gate 2 lives inside a numbered list), so leading space is allowed.
 _MIN_VERSION_DECL = re.compile(r"^[ \t]*MIN_VERSION=(\d+)\b", re.MULTILINE)
-
-
-# NOTE: file-local by the same convention as ``_agent``/``_doc`` above — a near
-# copy lives in tests/test_auto_dev_finalize_semantic_resolve.py, which needs it
-# for the executable fence test. Not hoisted to conftest.py: #2141's approved
-# ``## Files Modified`` enumeration does not include conftest.py.
-def _bash_fences(content: str) -> list[str]:
-    """Return the body of every ```bash fenced block in *content* (#2141)."""
-    fences: list[str] = []
-    lines = content.splitlines()
-    index = 0
-    while index < len(lines):
-        if lines[index].strip().startswith("```bash"):
-            body: list[str] = []
-            index += 1
-            while index < len(lines) and not lines[index].strip().startswith("```"):
-                body.append(lines[index])
-                index += 1
-            fences.append("\n".join(body))
-        index += 1
-    return fences
 
 
 def _table_minimums() -> dict[str, tuple[int, str]]:

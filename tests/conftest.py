@@ -154,6 +154,33 @@ def _appendix(stage: str) -> str:
     )
 
 
+def _bash_fences(content: str) -> list[str]:
+    """Return the body of every ```bash fenced block in *content* (#2141).
+
+    Sibling of ``_cmd``/``_appendix`` above, and hoisted for the same reason
+    (#1787's precedent): the guard-script doc tests in
+    ``test_scope_conformance_gate_docs.py`` and
+    ``test_auto_dev_finalize_semantic_resolve.py`` each carried a
+    byte-identical private copy, so a fix to the (deliberately crude,
+    no-markdown-parser) fence scanner could land in one and not the other.
+    A new doc-guard test that needs to execute or inspect a fenced snippet
+    should import this rather than adding a third copy.
+    """
+    fences: list[str] = []
+    lines = content.splitlines()
+    index = 0
+    while index < len(lines):
+        if lines[index].strip().startswith("```bash"):
+            body: list[str] = []
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                body.append(lines[index])
+                index += 1
+            fences.append("\n".join(body))
+        index += 1
+    return fences
+
+
 def _stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
     """Write an executable ``gh`` stub into a fresh bin dir and return it (#1799).
 

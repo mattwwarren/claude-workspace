@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
-from tests.conftest import _appendix, _cmd
+from tests.conftest import _appendix, _bash_fences, _cmd
 
 _SECTION_HEADING = "Semantic auto-resolve attempt (operator direction, #1850)"
 _TEMPLATE_HEADING = "**Sentinel template — `merge_conflict_post_push` blocker:**"
@@ -49,27 +49,6 @@ def _semantic_resolve_section() -> str:
     start = content.index(_SECTION_HEADING)
     end = content.index(_TEMPLATE_HEADING, start)
     return content[start:end]
-
-
-# NOTE: file-local by this repo's established convention for `_doc`/`_agent`
-# style readers — a near copy lives in tests/test_scope_conformance_gate_docs.py.
-# Not hoisted to conftest.py: #2141's approved ``## Files Modified`` enumeration
-# does not include conftest.py.
-def _bash_fences(content: str) -> list[str]:
-    """Return the body of every ```bash fenced block in *content* (#2141)."""
-    fences: list[str] = []
-    lines = content.splitlines()
-    index = 0
-    while index < len(lines):
-        if lines[index].strip().startswith("```bash"):
-            body: list[str] = []
-            index += 1
-            while index < len(lines) and not lines[index].strip().startswith("```"):
-                body.append(lines[index])
-                index += 1
-            fences.append("\n".join(body))
-        index += 1
-    return fences
 
 
 def _stale_guard_fence() -> str:
