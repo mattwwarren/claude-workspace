@@ -59,6 +59,7 @@ from cw.models import (
     TERMINAL_QUEUE_STATUSES,
     ClientConfig,
     CompletionReason,
+    DevQueueStore,
     LastResultSource,
     OrchestratorConfig,
     OrchestratorEventType,
@@ -1134,6 +1135,74 @@ class SentinelRouteOutcome(NamedTuple):
     task_already_terminal: bool = False
 
 
+class _TaskLookupResult(NamedTuple):
+    """Result of scanning ``store.tasks`` for a same-ticket/session match.
+
+    Round-3 (#1692): excluded (non-``OCCUPIED_LANE_STATUSES``) matches are
+    aggregated across the *entire* scan rather than last-seen-wins -- a
+    terminal excluded row and a non-terminal (e.g. ``PENDING``) excluded row
+    sharing the same ticket_id/session_id can both exist, and which one a
+    naive last-seen implementation reports depends on scan order alone.
+    ``seen_terminal_excluded``/``seen_nonterminal_excluded`` let the caller
+    make the live/redispatch-eligible interpretation win whenever both are
+    present, regardless of order.
+    """
+
+    target: TicketTask | None
+    target_status: QueueItemStatus | None
+    matched_excluded: bool
+    seen_terminal_excluded: bool
+    seen_nonterminal_excluded: bool
+    terminal_excluded_status: QueueItemStatus | None
+    terminal_excluded_client: str | None
+
+
+def _lookup_matching_task(
+    store: DevQueueStore, ticket_id: str, cw_session_id: str
+) -> _TaskLookupResult:
+    """Scan *store* for the task matching *ticket_id*/*cw_session_id*.
+
+    Returns on the first occupied-status match (the ordinary live-completion
+    case); otherwise keeps scanning to the end so a later occupied row is not
+    missed behind an earlier excluded-status row (post-review amendment A2),
+    aggregating every excluded match encountered along the way. See
+    ``_TaskLookupResult`` for why the excluded-match fields are aggregated
+    rather than last-seen.
+    """
+    target: TicketTask | None = None
+    target_status: QueueItemStatus | None = None
+    matched_excluded = False
+    seen_terminal_excluded = False
+    seen_nonterminal_excluded = False
+    terminal_excluded_status: QueueItemStatus | None = None
+    terminal_excluded_client: str | None = None
+    for task in store.tasks:
+        if task.ticket_id == ticket_id and task.session_id == cw_session_id:
+            if task.status in OCCUPIED_LANE_STATUSES:
+                target = task
+                target_status = task.status
+                break
+            matched_excluded = True
+            if task.status in _GENUINELY_TERMINAL_QUEUE_STATUSES:
+                if not seen_terminal_excluded:
+                    # First terminal match seen -- used for the
+                    # SENTINEL_RACE_MISS payload.
+                    terminal_excluded_status = task.status
+                    terminal_excluded_client = task.client
+                seen_terminal_excluded = True
+            else:
+                seen_nonterminal_excluded = True
+    return _TaskLookupResult(
+        target=target,
+        target_status=target_status,
+        matched_excluded=matched_excluded,
+        seen_terminal_excluded=seen_terminal_excluded,
+        seen_nonterminal_excluded=seen_nonterminal_excluded,
+        terminal_excluded_status=terminal_excluded_status,
+        terminal_excluded_client=terminal_excluded_client,
+    )
+
+
 def _apply_sentinel_to_task(
     ticket_id: str,
     session: Session,
@@ -1173,28 +1242,15 @@ def _apply_sentinel_to_task(
     cw_session_id = session.id
     with dev_queue_lock():
         store = load_dev_queue()
-        target: TicketTask | None = None
-        target_status: QueueItemStatus | None = None
-        # #1189: track whether a same-ticket/session task was seen at all
-        # (regardless of status) that did not win the occupied match --
-        # distinguishes "raced to terminal by a concurrent caller" (R3a) from
-        # "no such task anywhere" (R3b). Keep scanning past an excluded-status
-        # match in case a later row has the occupied match (post-review
-        # amendment A2).
-        matched_excluded = False
-        excluded_status: QueueItemStatus | None = None
-        excluded_client: str | None = None
-        for task in store.tasks:
-            if task.ticket_id == ticket_id and task.session_id == cw_session_id:
-                if task.status in OCCUPIED_LANE_STATUSES:
-                    target = task
-                    target_status = task.status
-                    break
-                matched_excluded = True
-                excluded_status = task.status
-                excluded_client = task.client
+        # #1189: distinguishes "raced to terminal by a concurrent caller"
+        # (R3a) from "no such task anywhere" (R3b). See _TaskLookupResult /
+        # _lookup_matching_task for the round-3 (#1692) excluded-match
+        # aggregation this depends on.
+        lookup = _lookup_matching_task(store, ticket_id, cw_session_id)
+        target = lookup.target
+        target_status = lookup.target_status
         if target is None:
-            if matched_excluded:
+            if lookup.matched_excluded:
                 # #1189: surface the race so an operator can tell "raced to
                 # terminal by a concurrent caller" apart from "no such task
                 # ever existed" -- both silently returned routed=True before
@@ -1210,9 +1266,11 @@ def _apply_sentinel_to_task(
             # terminal excluded row -- the same condition as
             # task_already_terminal below. A non-terminal excluded row (e.g.
             # PENDING) is redispatch-eligible, not a race, so it emits
-            # nothing.
-            already_terminal = matched_excluded and (
-                excluded_status in _GENUINELY_TERMINAL_QUEUE_STATUSES
+            # nothing. Round-3: any non-terminal excluded match seen anywhere
+            # in the scan vetoes the terminal classification, even if a
+            # terminal match was also seen.
+            already_terminal = (
+                lookup.seen_terminal_excluded and not lookup.seen_nonterminal_excluded
             )
             if already_terminal:
                 # #1692: durable trace alongside the log line -- record_event
@@ -1225,15 +1283,15 @@ def _apply_sentinel_to_task(
                     OrchestratorEventType.SENTINEL_RACE_MISS,
                     {
                         "ticket_id": ticket_id,
-                        "client": excluded_client,
+                        "client": lookup.terminal_excluded_client,
                         "session_id": cw_session_id,
-                        "excluded_status": excluded_status,
+                        "excluded_status": lookup.terminal_excluded_status,
                     },
                     correlation_id=ticket_id,
                 )
             return SentinelRouteOutcome(
                 rescued=False,
-                routed=not matched_excluded,
+                routed=not lookup.matched_excluded,
                 landed_terminal=False,
                 task_already_terminal=already_terminal,
             )

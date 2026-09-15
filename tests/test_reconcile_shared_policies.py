@@ -2729,6 +2729,108 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             rescued=False, routed=True, landed_terminal=False
         )
 
+    @pytest.mark.parametrize("terminal_first", [True, False])
+    def test_duplicate_excluded_rows_mixed_terminal_never_already_terminal(
+        self, tmp_config_dir: Path, terminal_first: bool
+    ) -> None:
+        """Round-3 (#1692): a terminal + non-terminal excluded duplicate row
+        must classify as NOT already-terminal, regardless of scan order.
+
+        Before the round-3 fix, ``excluded_status``/``excluded_client`` were
+        overwritten on every excluded match (last-seen-wins), so whichever row
+        happened to be scanned last decided the outcome. Both orderings here
+        must yield the identical result: the live/redispatch-eligible
+        (PENDING) row vetoes the terminal classification either way.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1692-r3-mixed", "sess-1692-r3-mixed"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
+        terminal_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.FAILED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="abandoned",
+        )
+        pending_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.PENDING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        rows = (
+            [terminal_row, pending_row]
+            if terminal_first
+            else [pending_row, terminal_row]
+        )
+        save_dev_queue(DevQueueStore(tasks=rows))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+        assert outcome == SentinelRouteOutcome(
+            rescued=False,
+            routed=False,
+            landed_terminal=False,
+            task_already_terminal=False,
+        )
+        events = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SENTINEL_RACE_MISS
+        ]
+        assert events == []
+
+    def test_duplicate_excluded_rows_all_terminal_still_already_terminal(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Round-3 (#1692): duplicate ALL-terminal excluded rows still
+        classify as already-terminal and emit exactly one race-miss event.
+
+        Companion to the mixed-terminal test above -- pins that aggregating
+        across duplicate rows didn't accidentally make the terminal case
+        harder to satisfy when every excluded match is genuinely terminal.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1692-r3-all-terminal", "sess-1692-r3-all-terminal"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
+        failed_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.FAILED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="abandoned",
+        )
+        cancelled_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.CANCELLED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="cancelled",
+        )
+        save_dev_queue(DevQueueStore(tasks=[failed_row, cancelled_row]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+        assert outcome == SentinelRouteOutcome(
+            rescued=False,
+            routed=False,
+            landed_terminal=False,
+            task_already_terminal=True,
+        )
+        events = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SENTINEL_RACE_MISS
+        ]
+        assert len(events) == 1
+        assert events[0].payload["excluded_status"] == QueueItemStatus.FAILED
+
 
 class TestRouteBlockedResultCatchAllLivenessGuard:
     """GitHub #1406: the catch-all FAILED/abandoned landing must not fire while
