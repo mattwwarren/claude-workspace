@@ -443,6 +443,12 @@ def test_build_stage_prompt_review_is_self_contained(tmp_path: Path) -> None:
     assert "reviewed_sha" in prompt
     assert "rev-parse HEAD" in prompt
     assert "captured once, after any fix-cycle commits land" in prompt
+    # Capturing the sha is only half the contract: an instruction that captures
+    # REVIEWED_SHA but never says where it goes leaves the sentinel field unset,
+    # which the dispatch-side gate reads as "never stamped" and fails closed on.
+    # This pins the assignment itself, not just the mention of the field name.
+    assert "Set review.reviewed_sha to REVIEWED_SHA (step 4)" in prompt
+    assert "the post-fix-loop branch tip" in prompt
 
 
 def test_review_sentinel_template_carries_reviewed_sha() -> None:
