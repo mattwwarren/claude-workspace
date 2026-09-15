@@ -1439,7 +1439,17 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
         # Settle the row back to a claimable state (simulating the IMPL
         # session finishing) and tick again -- the row is no longer at
-        # Stage.PLAN, so the bypass check must not run a second time.
+        # Stage.PLAN, so the bypass check must not run a second time. Both
+        # the task (dev_queue.json) and its session (state.json) must be
+        # settled: the client's cap=1 slot budget is session-based
+        # (running_count), so leaving the first session ACTIVE would starve
+        # the second tick of a slot for a reason unrelated to what this test
+        # is pinning.
+        state = load_state()
+        for sess in state.sessions:
+            if sess.client == "test-client":
+                sess.status = SessionStatus.COMPLETED
+        save_state(state)
         store = load_dev_queue()
         for t in store.tasks:
             if t.ticket_id == "GEN-BYPASS":

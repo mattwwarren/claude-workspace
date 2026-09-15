@@ -633,9 +633,12 @@ def _emit_stage_change(
     Single shared chokepoint for every stage-pointer mutation (RFC 0008 W1,
     closes #978): called from ``_advance_task_pointer`` (advance),
     ``_stage_regress`` (regress), ``_apply_requeue_stage``'s forward/
-    same-stage tail (advance), and ``_stamp_salvage_stage`` (advance, #1629).
-    Guarded on ``old_stage != new_stage`` so a same-stage requeue stays
-    silent. ``direction`` is the closed enum ``"advance" | "regress"``.
+    same-stage tail (advance), ``_stamp_salvage_stage`` (advance, #1629), and
+    ``_spawn_claimed_task``'s auto-bypass (advance, #1286) -- the last of
+    these is called on the stored row found under ``dev_queue_lock()`` inside
+    that function, not on a caller-held ``task`` reference. Guarded on
+    ``old_stage != new_stage`` so a same-stage requeue stays silent.
+    ``direction`` is the closed enum ``"advance" | "regress"``.
     """
     if old_stage == new_stage:
         return

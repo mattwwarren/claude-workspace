@@ -14,12 +14,17 @@ from typing import TYPE_CHECKING
 
 from cw.dev_queue import (
     STALE_DISPATCH_GATE_DISPOSITION,
+    _impl_bypass_plan_available,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
     transition_task_status,
 )
-from cw.dev_queue.lifecycle import _PRE_DISPATCH_STALE_PR_REASON
+from cw.dev_queue.lifecycle import (
+    _PRE_DISPATCH_STALE_PR_REASON,
+    _emit_stage_change,
+    _raise_stage_high_water,
+)
 from cw.events import record_event
 from cw.exceptions import (
     HookContextConflictError,
@@ -1033,6 +1038,67 @@ def _spawn_claimed_task(
         # normally catches this itself, but a mocked or buggy
         # implementation could still return the same path.
         check_not_main_checkout(worktree_path, client)
+
+        if task.stage == Stage.PLAN:
+            bypass = _impl_bypass_plan_available(
+                task, client, allow_tracker_fallback=False
+            )
+            if bypass.available:
+                # #1286: mutate the STORED row under dev_queue_lock(), mirroring
+                # _stamp_spawn_success's load->find->mutate->save shape (below,
+                # this file) plus _apply_requeue_stage's old_stage/
+                # _raise_stage_high_water/_emit_stage_change trio (requeue.py).
+                # A bare in-memory `task.stage = Stage.IMPL` here would never
+                # reach dev_queue.json -- the next dispatch tick would re-read
+                # stage=PLAN and re-run this whole check from scratch.
+                stored_task = None
+                with dev_queue_lock():
+                    store = load_dev_queue()
+                    for candidate in store.tasks:
+                        if (
+                            candidate.ticket_id == task.ticket_id
+                            and candidate.client == client.name
+                            and candidate.status == QueueItemStatus.RUNNING
+                        ):
+                            stored_task = candidate
+                            break
+                    if stored_task is not None:
+                        old_stage = stored_task.stage
+                        stored_task.stage = Stage.IMPL
+                        _raise_stage_high_water(
+                            stored_task, client.pipeline.stages, Stage.IMPL
+                        )
+                        _emit_stage_change(
+                            stored_task, old_stage, Stage.IMPL, "advance"
+                        )
+                        save_dev_queue(store)
+                if stored_task is not None:
+                    # Mirror onto the in-memory task so this tick's
+                    # executor.spawn(stage=task.stage, ...) below builds the
+                    # IMPL prompt, not PLAN.
+                    task.stage = stored_task.stage
+                    _log.info(
+                        "dispatch: %r has an approved, signed-off plan already"
+                        " on disk (%s) -- bypassing Stage 1 and spawning at"
+                        " IMPL directly (#1286)",
+                        task.ticket_id,
+                        worktree_path / ".cw" / "plan.md",
+                    )
+                else:
+                    # Race guard: _claim_next_pending persisted this row as
+                    # RUNNING (still at Stage.PLAN) just before this function
+                    # ran, so it should always be found here. If it is missing
+                    # or no longer RUNNING (reaped/requeued/removed between
+                    # claim and spawn), do NOT advance and do NOT spawn with a
+                    # mutated stage -- leave task.stage untouched so this tick
+                    # spawns /auto-dev-plan as normal.
+                    _log.warning(
+                        "dispatch: %r's approved-plan auto-bypass found no"
+                        " matching RUNNING row in the dev queue (client=%s)"
+                        " -- leaving stage at PLAN (#1286)",
+                        task.ticket_id,
+                        client.name,
+                    )
 
         # Function-level import breaks the gating<->claim import cycle:
         # cw.dispatch.gating imports this module at top level, so claim.py
