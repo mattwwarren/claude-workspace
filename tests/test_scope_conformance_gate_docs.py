@@ -262,9 +262,9 @@ def test_gate2_resolves_repo_local_then_global_script_path() -> None:
     ``~/.claude/scripts/`` since #2096; a client repo without a local
     ``.claude/scripts/`` previously made the gate silently no-op.
     """
-    content = _cmd("auto-dev-impl.md")
-    assert ".claude/scripts/check_plan_scope_conformance.py" in content
-    assert '"$HOME/.claude/scripts/check_plan_scope_conformance.py"' in content
+    section = _gate2_section()
+    assert '"$GUARD_ROOT/.claude/scripts/check_plan_scope_conformance.py"' in section
+    assert '"$HOME/.claude/scripts/check_plan_scope_conformance.py"' in section
 
 
 def test_gate2_absent_from_both_locations_skips_non_blocking() -> None:
@@ -296,6 +296,33 @@ def test_gate2_greps_cw_script_version_marker_and_headless_blocks_on_stale() -> 
     assert stale_lines
     assert all("HEADLESS BLOCK" not in line for line in absent_lines)
     assert all("script absent, skipped" not in line for line in stale_lines)
+
+    # The disposition itself, not merely the words "HEADLESS BLOCK": the stale
+    # branch must name the blocker reason and the details template an agent
+    # emits, or the prose stops short of telling a worker what to do.
+    blocking = "\n".join(stale_lines)
+    assert 'blocker.reason: "impl_failed"' in blocking
+    assert "Step 2.5 gate 2: HEADLESS BLOCK" in blocking
+    assert "check_plan_scope_conformance.py at <resolved-path>" in blocking
+    assert "missing/stale cw-script-version marker (need >= 1)" in blocking
+    assert "STOP" in blocking
+
+
+def test_gate2_anchors_the_repo_local_candidate_absolutely() -> None:
+    """Gate 2's probe must not depend on the cwd (#2141 review round 2).
+
+    ``auto-dev-impl.md`` names ``worktree_path`` as the authoritative anchor,
+    but gate 2 probed a bare relative ``.claude/scripts/...``. The prose must
+    now describe the enforced anchor, and must say explicitly why the anchor is
+    the cw session worktree rather than ``$TMPWT`` — the gate around it does run
+    inside ``$TMPWT``, so silence there reads as a contradiction.
+    """
+    section = _gate2_section()
+    assert "for candidate in .claude/scripts/" not in section
+    assert "GUARD_ROOT=$(git rev-parse --show-toplevel" in section
+    assert "cw-context.json" in section
+    assert "worktree_path" in section
+    assert "not `$TMPWT`" in section or "NOT $TMPWT" in section
 
 
 def test_resolver_table_lists_all_four_scripts_with_minimum_version() -> None:
@@ -559,6 +586,47 @@ def test_canonical_template_shows_the_hard_stop_shape() -> None:
     assert "need >= $MIN_VERSION" in template
     assert "<blocker.reason>" in template
     assert "exit 3" in template
+    assert '"$GUARD_ROOT/.claude/scripts/<script>.py"' in template
+    assert '[[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]]' in template
+
+
+def test_no_site_fence_uses_the_fail_open_or_cwd_relative_shapes() -> None:
+    """Both round-2 findings, pinned as absences across every fence (#2141).
+
+    ``grep -oE '[0-9]+'`` scans for digit runs, so a ``1.5`` marker yields two
+    lines and the ``-lt`` comparison errors out — the condition evaluates false
+    and the script runs. A bare relative ``.claude/scripts/`` probe misses the
+    repo-local copy whenever the cwd is not the worktree root. Neither shape may
+    survive at any site, including the canonical template.
+    """
+    docs = {doc for _, doc in _table_minimums().values()}
+    docs.add("auto-dev-impl.md")
+    docs.add("auto-dev-impl-appendix.md")
+    for doc in sorted(docs):
+        for fence in _bash_fences(_cmd(doc)):
+            if "cw-script-version" not in fence:
+                continue
+            assert "grep -oE" not in fence, (
+                f"{doc}: a digit-run scan accepts `1.5` and then fails open"
+            )
+            assert '[ -z "$FOUND_VERSION" ]' not in fence, (
+                f"{doc}: an emptiness test alone lets a malformed marker through"
+            )
+            assert '[[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]]' in fence, (
+                f"{doc}: the marker must be rejected unless it is a clean integer"
+            )
+            assert "for candidate in .claude/scripts/" not in fence, (
+                f"{doc}: the repo-local candidate must be absolutely anchored"
+            )
+            assert '"$GUARD_ROOT/.claude/scripts/' in fence, (
+                f"{doc}: the repo-local candidate must anchor to $GUARD_ROOT"
+            )
+            assert "GUARD_ROOT=$(git rev-parse --show-toplevel" in fence, (
+                f"{doc}: $GUARD_ROOT must be computed inside the fence, once"
+            )
+            assert fence.count("GUARD_ROOT=$(git rev-parse") == 1, (
+                f"{doc}: $GUARD_ROOT is computed once per fence, not per candidate"
+            )
 
 
 def test_plan_spec_marker_not_bumped() -> None:
