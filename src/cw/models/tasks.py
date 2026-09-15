@@ -641,6 +641,19 @@ class TicketTask(BaseModel):
     # task was never blocked, or blocked with no blocker reason (e.g.
     # scope_exceeded/forbidden_area, which carry no blocker field at all).
     blocked_reason: str | None = None
+    # GitHub #1762 — per-tick operator advisory for a row that is NOT parked.
+    # `blocked_reason` is stamped only on terminal transitions, so it can never
+    # carry a signal about an ordinary RUNNING row; this field is the non-
+    # terminal counterpart, rendered in the same `cw dev-queue tasks` REASON
+    # column when `blocked_reason` is unset (blocked_reason always wins).
+    # Written by cw.reconcile._shared._stamp_session_id_mismatch_advisories,
+    # which overwrites it every tick and clears it the moment the condition
+    # lifts — a live re-derivation, not a latch, so no history is kept. Cleared
+    # unconditionally by transition_task_status alongside the durable-escalation
+    # latches. Deliberately NOT accompanied by a DEV_QUEUE_SCHEMA_VERSION bump:
+    # a migration would backfill exactly the `None` the model default already
+    # supplies, so existing state files load unchanged either way.
+    advisory_note: str | None = None
     # GitHub #1198 — operator escape hatch for the cross-repo dispatch guard.
     # When True, the address_review / auto_fix_ci recipes log a WARNING and
     # dispatch anyway even though the row's client resolves to a different repo

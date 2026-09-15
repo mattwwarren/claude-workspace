@@ -31,10 +31,14 @@ from cw.models import (
     Session,
     TicketTask,
 )
-from cw.native_daemon import _is_native_surface_ref, get_native_daemon_client
+from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
     _csid_from_transcript,
     _transcript_age_seconds,
+)
+from cw.reconcile._shared import (
+    resolve_session_for_task,
+    session_daemon_liveness,
 )
 
 from ._group import (
@@ -102,14 +106,9 @@ def _blocked_on_user_exit_code(task: TicketTask) -> int:
     proposal (the owning session has ``reap_proposed_at`` set, #542), else
     ``_WAIT_EXIT_BLOCKED``.
     """
-    if task.session_id is not None:
-        state = load_state()
-        session = next(
-            (s for s in state.sessions if s.id == task.session_id),
-            None,
-        )
-        if session is not None and session.reap_proposed_at is not None:
-            return _WAIT_EXIT_ATTENTION
+    session = resolve_session_for_task(task, load_state())
+    if session is not None and session.reap_proposed_at is not None:
+        return _WAIT_EXIT_ATTENTION
     return _WAIT_EXIT_BLOCKED
 
 
@@ -273,22 +272,18 @@ def _check_stale_attention(
     is_stale = (
         transcript_age is not None and transcript_age > _WAIT_STALE_ATTENTION_SECONDS
     )
-    in_roster = False
-    surface_ref = session.surface_ref
-    if surface_ref is not None and _is_native_surface_ref(surface_ref):
-        daemon = get_native_daemon_client()
-        in_roster = surface_ref in daemon.list_live_session_short_ids()
-
-    # BlockedResult → keep polling (partial write guard), so exclude from ATTENTION.
-    no_sentinel_at_all = sentinel is None
-    is_attention = (
-        is_stale
-        and no_sentinel_at_all
-        and surface_ref is not None
-        and _is_native_surface_ref(surface_ref)
-        and not in_roster
+    # BlockedResult → keep polling (partial write guard), so exclude from
+    # ATTENTION. Checked before the roster query (both are cheap local reads)
+    # so a polling wait loop does not shell out to the daemon every 5s on a
+    # session that is plainly still working.
+    if not is_stale or sentinel is not None:
+        return
+    # #1762: one shared definition of "is this session's surface still live",
+    # rather than a second hand-rolled surface_ref/roster comparison.
+    liveness = session_daemon_liveness(
+        session, get_native_daemon_client().list_live_session_short_ids()
     )
-    if is_attention:
+    if liveness.native_surface and not liveness.in_roster:
         _handle_attention(
             task,
             session,

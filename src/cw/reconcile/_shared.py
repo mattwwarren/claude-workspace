@@ -71,6 +71,7 @@ from cw.models import (
     TicketTask,
     extract_unresolved_spawn_count,
 )
+from cw.native_daemon import _is_native_surface_ref
 from cw.reconcile import _deps
 from cw.result import (
     EmitOutcome,
@@ -147,6 +148,13 @@ _SESSION_UNRESPONSIVE_REASON = "session_unresponsive"
 # disposition, no queue mutation, no worktree touch (ADR-0014).
 _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON = "fix_loop_await_deadline_exceeded"
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
+# TicketTask.advisory_note written by _stamp_session_id_mismatch_advisories
+# (#1762) when a RUNNING row's session_id no longer resolves to a live session.
+# The leading "?" is part of the token, matching `cw dev-queue tasks`'s existing
+# unregistered-blocker-reason convention (#2097): the flag is a *prefix* so it
+# survives the REASON column's 20-char truncation. _reason_cell renders the
+# value verbatim and does not add the marker itself.
+_SESSION_ID_MISMATCH_ADVISORY_NOTE = "?session_mismatch"
 # Paused-status written to SESSION_NEEDS_ATTENTION events when an
 # `external`-counterparty session (reviewing a teammate's PR) reaches the
 # confirmed-idle threshold. Escalated rather than reaped/parked. RFC 0011 B1
@@ -1781,6 +1789,125 @@ def _apply_queue_mutations(
         if changed:
             save_dev_queue(store)
     return mutated
+
+
+class SessionLivenessForTask(NamedTuple):
+    """A dev-queue row's owning cw ``Session`` plus that session's daemon liveness.
+
+    ``native_surface`` distinguishes "this surface_ref is a daemon short id, and
+    the roster genuinely does not list it" from "this surface_ref belongs to some
+    other surface kind, so roster membership says nothing" -- the check
+    ``cw dev-queue wait``'s ATTENTION predicate has always made and the reason
+    ``in_roster`` alone is not a sufficient liveness answer.
+    """
+
+    session: Session
+    surface_ref: str | None
+    native_surface: bool
+    in_roster: bool
+
+
+def resolve_session_for_task(task: TicketTask, state: CwState) -> Session | None:
+    """Resolve *task*'s owning cw ``Session`` in *state* (hops 1-2 of the chain).
+
+    ``TicketTask.session_id`` is cw's own ``Session.id`` -- NOT the daemon
+    roster's short id (that is ``Session.surface_ref``) and NOT a transcript
+    filename (that is ``Session.claude_session_id``). See the session-id
+    namespaces section in ARCHITECTURE.md. Returns ``None`` when *task* has no
+    session_id or it resolves to no session in *state*.
+    """
+    if task.session_id is None:
+        return None
+    return next((s for s in state.sessions if s.id == task.session_id), None)
+
+
+def session_daemon_liveness(
+    session: Session, live_short_ids: set[str]
+) -> SessionLivenessForTask:
+    """Resolve *session*'s liveness against the daemon roster (hop 3 of the chain).
+
+    Split from :func:`resolve_session_for_task` so a caller that already holds
+    the ``Session`` (``cw dev-queue wait``'s ``_check_stale_attention``) does not
+    re-resolve it, and a caller that only wants the lookup
+    (``_blocked_on_user_exit_code``) does not pay for a roster query.
+
+    *live_short_ids* is passed in rather than fetched here: ``reconcile`` already
+    queries ``claude agents --json`` exactly once per tick, and a helper that
+    re-queried per session would turn one subprocess into one per row.
+    """
+    surface_ref = session.surface_ref
+    native_surface = surface_ref is not None and _is_native_surface_ref(surface_ref)
+    return SessionLivenessForTask(
+        session=session,
+        surface_ref=surface_ref,
+        native_surface=native_surface,
+        in_roster=native_surface and surface_ref in live_short_ids,
+    )
+
+
+def resolve_session_liveness_for_task(
+    task: TicketTask, state: CwState, live_short_ids: set[str]
+) -> SessionLivenessForTask | None:
+    """Resolve *task*'s owning session AND its liveness against the daemon roster.
+
+    The full three-hop chain ``cw dev-queue wait`` already gets right (GitHub
+    #1738/#1774/#1762): ``task.session_id`` -> a ``Session`` in *state* by
+    ``.id`` -> that session's ``surface_ref`` -> the live daemon roster. Extracted
+    here so a second consumer never re-derives it from a bare roster or
+    transcript-filename comparison, which is what produced the "session_id
+    mismatch" reports on #1738/#1774 (three namespaces compared as if they were
+    one). Returns ``None`` when the task resolves to no session.
+    """
+    session = resolve_session_for_task(task, state)
+    if session is None:
+        return None
+    return session_daemon_liveness(session, live_short_ids)
+
+
+def _stamp_session_id_mismatch_advisories(
+    state: CwState, live_short_ids: set[str]
+) -> None:
+    """Flag RUNNING rows whose session_id no longer resolves to a live session.
+
+    GitHub #1762: makes the namespace-confusion signal operator-visible in
+    ``cw dev-queue tasks``'s REASON column via ``TicketTask.advisory_note``,
+    instead of leaving an operator to compare a row's session_id against a
+    roster short id by hand and conclude, wrongly, that cw itself lost track.
+
+    A row is flagged when its session_id resolves to nothing, or resolves to a
+    session whose native daemon surface has fallen out of the roster while the
+    row is still RUNNING. A resolvable, roster-live row is never flagged, and an
+    existing note is cleared the moment the condition lifts -- this is a live
+    re-derivation each tick, not a latch, so no history is kept.
+
+    Writes under ``dev_queue_lock`` through the same load/save path
+    :func:`_apply_queue_mutations` above uses.
+    """
+    with dev_queue_lock():
+        store = load_dev_queue()
+        changed = False
+        for task in store.tasks:
+            if task.status is not QueueItemStatus.RUNNING or task.session_id is None:
+                continue
+            liveness = resolve_session_liveness_for_task(task, state, live_short_ids)
+            is_mismatch = liveness is None or (
+                liveness.native_surface and not liveness.in_roster
+            )
+            new_note = _SESSION_ID_MISMATCH_ADVISORY_NOTE if is_mismatch else None
+            if task.advisory_note == new_note:
+                continue
+            _log.warning(
+                "session_id_mismatch_advisory_%s: ticket=%s task_session_id=%s "
+                "surface_ref=%s",
+                "set" if new_note else "cleared",
+                task.ticket_id,
+                task.session_id,
+                liveness.surface_ref if liveness else None,
+            )
+            task.advisory_note = new_note
+            changed = True
+        if changed:
+            save_dev_queue(store)
 
 
 def _has_terminal_sentinel(session: Session) -> bool:

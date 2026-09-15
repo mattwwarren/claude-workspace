@@ -10367,6 +10367,34 @@ class TestTransitionTaskStatus:
                 f"expected None after transition to {status}"
             )
 
+    def test_clears_advisory_note_unconditionally(self) -> None:
+        """Any transition clears advisory_note (#1762).
+
+        Same unconditional-clear contract as the escalation/stale-gate latches
+        above, including a same-status re-assert: the note describes the row's
+        current session binding, which a transition has just changed.
+        """
+        for status in QueueItemStatus:
+            task = TicketTask(
+                ticket_id="T-adv",
+                client="genhealth",
+                status=QueueItemStatus.RUNNING,
+                advisory_note="?session_mismatch",
+            )
+            transition_task_status(task, status)
+            assert task.advisory_note is None, (
+                f"expected None after transition to {status}"
+            )
+
+        same_status = TicketTask(
+            ticket_id="T-adv-same",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            advisory_note="?session_mismatch",
+        )
+        transition_task_status(same_status, QueueItemStatus.RUNNING)
+        assert same_status.advisory_note is None
+
     def test_requeue_clears_disposition(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:

@@ -1038,3 +1038,151 @@ class TestFixDispatchRunsPostLock:
         reconcile()
 
         fix_dispatch_mock.assert_called_once()
+
+
+# --- GitHub #1762: session-id-namespace advisory sweep ------------------------
+
+
+def _advisory_sweep(state: CwState, live: set[str]) -> dict[str, str | None]:
+    """Run the advisory sweep and return {ticket_id: advisory_note}."""
+    from cw.reconcile._shared import _stamp_session_id_mismatch_advisories
+
+    _stamp_session_id_mismatch_advisories(state, live)
+    return {t.ticket_id: t.advisory_note for t in load_dev_queue().tasks}
+
+
+def test_stamp_advisory_flags_unresolvable_session_id(tmp_config_dir: Path) -> None:
+    """#1762: a RUNNING row whose session_id resolves to nothing is flagged.
+
+    This is the shape operators reported on #1738/#1774 — a row pointing at an
+    id that matches no session, mistaken for cw "losing" the worker when it is
+    really three different id namespaces being compared as one.
+    """
+    from cw.reconcile._shared import _SESSION_ID_MISMATCH_ADVISORY_NOTE
+
+    state = CwState(sessions=[_mk_session("live-1", surface_ref="aaaaaaaa")])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="T-ghost",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="a2fe4bd5",
+                )
+            ]
+        )
+    )
+
+    notes = _advisory_sweep(state, {"aaaaaaaa"})
+    assert notes["T-ghost"] == _SESSION_ID_MISMATCH_ADVISORY_NOTE
+
+
+def test_stamp_advisory_leaves_a_live_running_row_alone(tmp_config_dir: Path) -> None:
+    """#1762: a resolvable, roster-live RUNNING row is never flagged."""
+    sess = _mk_session("live-2", surface_ref="bbbbbbbb")
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="T-live",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sess.id,
+                )
+            ]
+        )
+    )
+
+    notes = _advisory_sweep(state, {"bbbbbbbb"})
+    assert notes["T-live"] is None
+
+
+def test_stamp_advisory_flags_a_roster_absent_running_row(
+    tmp_config_dir: Path,
+) -> None:
+    """#1762: a resolvable session that fell out of the roster is flagged too."""
+    from cw.reconcile._shared import _SESSION_ID_MISMATCH_ADVISORY_NOTE
+
+    sess = _mk_session("gone-1", surface_ref="cccccccc")
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="T-gone",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sess.id,
+                )
+            ]
+        )
+    )
+
+    notes = _advisory_sweep(state, {"dddddddd"})
+    assert notes["T-gone"] == _SESSION_ID_MISMATCH_ADVISORY_NOTE
+
+
+def test_stamp_advisory_clears_a_stale_note_when_the_row_recovers(
+    tmp_config_dir: Path,
+) -> None:
+    """#1762: the note is re-derived every tick, not latched.
+
+    A row whose session comes back into the roster must lose the advisory on the
+    very next sweep — otherwise the REASON column would accumulate stale flags
+    an operator has no way to dismiss.
+    """
+    sess = _mk_session("flap-1", surface_ref="eeeeeeee")
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="T-flap",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sess.id,
+                )
+            ]
+        )
+    )
+
+    assert _advisory_sweep(state, set())["T-flap"] is not None
+    assert _advisory_sweep(state, {"eeeeeeee"})["T-flap"] is None
+
+
+def test_stamp_advisory_ignores_non_running_and_sessionless_rows(
+    tmp_config_dir: Path,
+) -> None:
+    """#1762: only RUNNING rows that claim a session are in scope.
+
+    A parked row's REASON column belongs to ``blocked_reason``, and a row with
+    no session_id has no binding to be mismatched.
+    """
+    state = CwState(sessions=[])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="T-parked",
+                    client="client-a",
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    session_id="a2fe4bd5",
+                ),
+                TicketTask(
+                    ticket_id="T-pending",
+                    client="client-a",
+                    status=QueueItemStatus.PENDING,
+                ),
+            ]
+        )
+    )
+
+    notes = _advisory_sweep(state, set())
+    assert notes == {"T-parked": None, "T-pending": None}
