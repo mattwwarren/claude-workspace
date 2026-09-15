@@ -200,6 +200,23 @@ GUARD_MARKER_CURRENT = "# cw-script-version: 1\n"
 # case of GUARD_MARKER_BAD_CASES below.
 GUARD_MARKER_STALE = "# cw-script-version: 0\n"
 
+# A current marker on line 3, under a shebang and a docstring. The real guard
+# scripts carry theirs on line 2, but the rule is "within the first 5 lines",
+# and a parse anchored to one exact line number would be a different contract
+# than the one the docs state (#2141 round 8).
+GUARD_MARKER_CURRENT_LINE_3 = (
+    '#!/usr/bin/env python3\n"""Guard script."""\n# cw-script-version: 1\n'
+)
+
+# Every marker state that MUST reach the invocation, as (id, file body) pairs.
+# Companion to GUARD_MARKER_BAD_CASES: a parse tightened enough to reject
+# ``marker_outside_header`` below can just as easily reject a legitimate header,
+# and a bad-cases-only matrix cannot tell the two apart.
+GUARD_MARKER_GOOD_CASES: tuple[tuple[str, str], ...] = (
+    ("marker_first_line", GUARD_MARKER_CURRENT),
+    ("marker_third_line", GUARD_MARKER_CURRENT_LINE_3),
+)
+
 # Every marker state that must NOT reach an invocation, as (id, file body)
 # pairs. Hoisted here (#2141 round 6) as the union of the two private lists
 # ``test_scope_conformance_gate_docs.py`` and
@@ -223,6 +240,14 @@ GUARD_MARKER_BAD_CASES: tuple[tuple[str, str], ...] = (
     ("malformed_suffix", "# cw-script-version: 2x\n"),
     ("malformed_empty", "# cw-script-version:\n"),
     ("malformed_oversized", "# cw-script-version: 99999999999999999999\n"),
+    (
+        "marker_outside_header",
+        # A script whose header carries no marker, but whose body mentions one
+        # further down — in a docstring, a help string, or a comment about the
+        # convention. ``grep -m1`` matched it anywhere in the file, so a genuinely
+        # unmarked script passed on an incidental later mention (#2141 round 8).
+        "#!/usr/bin/env python3\n" + "# filler\n" * 8 + "# cw-script-version: 5\n",
+    ),
 )
 
 

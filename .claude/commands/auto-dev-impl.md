@@ -133,8 +133,9 @@ for candidate in "$GUARD_ROOT/.claude/scripts/<script>.py" "$HOME/.claude/script
   if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
 done
 if [ -n "$RESOLVED" ]; then
-  FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" \
-    | sed -E 's/.*cw-script-version:[[:space:]]*([^[:space:]]*).*/\1/')
+  FOUND_VERSION=$(head -n 5 "$RESOLVED" \
+    | sed -nE 's/^#[[:space:]]*cw-script-version:[[:space:]]*([^[:space:]]*)[[:space:]]*$/\1/p' \
+    | head -n 1)
   # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
   # (which errors, evaluates false, and would fall through to the invocation).
   if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
@@ -167,11 +168,19 @@ resolution. Do not substitute `$TMPWT` here: Step 2.5's gate worktree is a
 detached checkout of the pushed branch, and these guard scripts resolve against
 the **cw session worktree** even when a gate's data extraction is `-C "$TMPWT"`.
 
-**Marker parsing is strict, and anything unparseable is stale.** Extract the
-raw token after `cw-script-version:` from the **first** marker line only —
-`grep -m1` then `sed`, never a `grep -oE '[0-9]+'` digit-run scan, which turns
-`1.5` into two lines and makes `[ "$FOUND_VERSION" -lt ... ]` error out, whereupon
-the condition evaluates false and the script runs anyway. A marker token is
+**Marker parsing is strict, and anything unparseable is stale.** The marker
+counts only as a full `# cw-script-version: N` comment line — `#`, optional
+spaces, the key, the value, nothing else on the line — and only within the
+**first 5 lines** of the file. Extract it with `head -n 5` piped into an anchored
+`sed -nE`, taking the first match. Never `grep -m1 'cw-script-version:'`, which
+matches the literal anywhere in the file, so a script whose header carries no
+marker passes on a later mention in a docstring, a help string, or a comment
+about this very convention — exactly the unmarked stale copy the gate exists to
+reject. A marker outside the header, or one sharing its line with anything
+else, is *missing*, and the site hard-stops. Never a `grep -oE '[0-9]+'`
+digit-run scan either, which turns `1.5` into two lines and makes
+`[ "$FOUND_VERSION" -lt ... ]` error out, whereupon the condition evaluates
+false and the script runs anyway. A marker token is
 valid only if it matches `^[0-9]{1,6}$` — anchored at both ends and bounded to
 **1-6 digits**; anything else is stale. A missing marker, an empty marker, and
 a non-integer (`abc`, `1.5`, `-1`, `2x`) therefore all take the hard stop, and
@@ -279,8 +288,9 @@ Stage 2 agent spawn:
     if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
   done
   if [ -n "$RESOLVED" ]; then
-    FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" \
-      | sed -E 's/.*cw-script-version:[[:space:]]*([^[:space:]]*).*/\1/')
+    FOUND_VERSION=$(head -n 5 "$RESOLVED" \
+      | sed -nE 's/^#[[:space:]]*cw-script-version:[[:space:]]*([^[:space:]]*)[[:space:]]*$/\1/p' \
+      | head -n 1)
     # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
     # (which errors, evaluates false, and would fall through to the invocation).
     if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
@@ -417,8 +427,9 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
      if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
    done
    if [ -n "$RESOLVED" ]; then
-     FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" \
-       | sed -E 's/.*cw-script-version:[[:space:]]*([^[:space:]]*).*/\1/')
+     FOUND_VERSION=$(head -n 5 "$RESOLVED" \
+       | sed -nE 's/^#[[:space:]]*cw-script-version:[[:space:]]*([^[:space:]]*)[[:space:]]*$/\1/p' \
+       | head -n 1)
      # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
      # (which errors, evaluates false, and would fall through to the invocation).
      if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
