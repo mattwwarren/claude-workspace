@@ -435,6 +435,319 @@ def test_detect_usage_limit_returns_false_when_no_transcript(
 
 
 # ---------------------------------------------------------------------------
+# #1482: dangling (unresolved, non-subagent) tool_use detection
+# ---------------------------------------------------------------------------
+
+
+def _tool_use_record(
+    tool_id: str, name: str, *, input_: dict[str, object] | None = None
+) -> dict[str, object]:
+    """One assistant tool_use record for _write_transcript_records (#1482)."""
+    block: dict[str, object] = {"type": "tool_use", "id": tool_id, "name": name}
+    if input_ is not None:
+        block["input"] = input_
+    return {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [block]},
+    }
+
+
+def _tool_result_record(tool_use_id: str) -> dict[str, object]:
+    """One user tool_result record for _write_transcript_records (#1482)."""
+    return {
+        "type": "user",
+        "message": {"content": [{"type": "tool_result", "tool_use_id": tool_use_id}]},
+    }
+
+
+def test_detect_dangling_tool_use_returns_evidence_for_unresolved_bash_call(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unresolved Bash tool_use at the transcript tail returns its evidence
+    (#1482)."""
+    from cw.reconcile._shared import DanglingToolUseEvidence, _detect_dangling_tool_use
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-dangling-bash"
+    sess = _mk_headless_daemon_session("dangling-bash", worktree, started_at)
+
+    command = "prep_pr_finalize.py verify --require-automerge"
+    transcript = _write_transcript_records(
+        home, worktree, [_tool_use_record("tu1", "Bash", input_={"command": command})]
+    )
+    _stamp_after_start(transcript, started_at)
+
+    evidence = _detect_dangling_tool_use(sess)
+    assert evidence == DanglingToolUseEvidence(tool_name="Bash", command_snippet=command)
+
+
+def test_detect_dangling_tool_use_returns_none_when_resolved(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resolved tool_use/tool_result pair returns None (#1482)."""
+    from cw.reconcile._shared import _detect_dangling_tool_use
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-dangling-resolved"
+    sess = _mk_headless_daemon_session("dangling-resolved", worktree, started_at)
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _tool_use_record("tu1", "Bash", input_={"command": "ls"}),
+            _tool_result_record("tu1"),
+        ],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_dangling_tool_use(sess) is None
+
+
+def test_detect_dangling_tool_use_returns_latest_unresolved_among_multiple_pairs(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Several resolved pairs plus one trailing unresolved call returns the
+    trailing one, not an earlier resolved one (#1482)."""
+    from cw.reconcile._shared import DanglingToolUseEvidence, _detect_dangling_tool_use
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-dangling-multi"
+    sess = _mk_headless_daemon_session("dangling-multi", worktree, started_at)
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _tool_use_record("tu1", "Read", input_={"file_path": "/a"}),
+            _tool_result_record("tu1"),
+            _tool_use_record("tu2", "Write", input_={"file_path": "/b"}),
+            _tool_result_record("tu2"),
+            _tool_use_record("tu3", "Bash", input_={"command": "pytest"}),
+        ],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    evidence = _detect_dangling_tool_use(sess)
+    assert evidence == DanglingToolUseEvidence(tool_name="Bash", command_snippet="pytest")
+
+
+def test_detect_dangling_tool_use_truncates_long_command(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command longer than the snippet cap is truncated with a trailing
+    ellipsis (#1482)."""
+    from cw.reconcile._shared import (
+        _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS,
+        _detect_dangling_tool_use,
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-dangling-long"
+    sess = _mk_headless_daemon_session("dangling-long", worktree, started_at)
+
+    command = "x" * (_TOOL_USE_COMMAND_SNIPPET_MAX_CHARS + 50)
+    transcript = _write_transcript_records(
+        home, worktree, [_tool_use_record("tu1", "Bash", input_={"command": command})]
+    )
+    _stamp_after_start(transcript, started_at)
+
+    evidence = _detect_dangling_tool_use(sess)
+    assert evidence is not None
+    assert evidence.command_snippet is not None
+    assert len(evidence.command_snippet) == _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS + 1
+    assert evidence.command_snippet.endswith("…")
+    assert evidence.command_snippet.startswith("x" * _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS)
+
+
+def test_detect_dangling_tool_use_returns_none_for_missing_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No locatable transcript → None (fail-open, mirrors _detect_usage_limit)
+    (#1482)."""
+    from cw.reconcile._shared import _detect_dangling_tool_use
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-dangling-notrans"
+    sess = _mk_headless_daemon_session("dangling-notrans", worktree, started_at)
+
+    assert _detect_dangling_tool_use(sess) is None
+
+
+def test_detect_dangling_tool_use_returns_none_on_malformed_json_lines(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed JSONL lines are skipped without raising; a correct resolved
+    pair around them still returns None (#1482)."""
+    from cw.reconcile._shared import _detect_dangling_tool_use
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-dangling-malformed"
+    sess = _mk_headless_daemon_session("dangling-malformed", worktree, started_at)
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _tool_use_record("tu1", "Bash", input_={"command": "ls"}),
+            _tool_result_record("tu1"),
+        ],
+    )
+    with transcript.open("a") as handle:
+        handle.write("{not valid json\n")
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_dangling_tool_use(sess) is None
+
+
+def test_detect_dangling_tool_use_ignores_agent_and_task_tool_names(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1969 regression pin: a dangling Agent tool_use AND a dangling Task
+    tool_use are both excluded -- that domain belongs exclusively to
+    _unresolved_subagent_spawn_age_seconds/agent_spawn_stamp, since
+    PostToolUse:Agent fires at launch-return rather than subagent completion,
+    which would false-fire this detector against a still-outstanding
+    subagent spawn (#1482)."""
+    from cw.reconcile._shared import _detect_dangling_tool_use
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-dangling-agent"
+    sess = _mk_headless_daemon_session("dangling-agent", worktree, started_at)
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _tool_use_record("tu1", "Agent"),
+            _tool_use_record("tu2", "Task"),
+        ],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_dangling_tool_use(sess) is None
+
+
+def test_detect_dangling_tool_use_handles_tool_without_command_input(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-Bash tool with no input.command still returns evidence, with
+    command_snippet=None (#1482)."""
+    from cw.reconcile._shared import DanglingToolUseEvidence, _detect_dangling_tool_use
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-dangling-nocommand"
+    sess = _mk_headless_daemon_session("dangling-nocommand", worktree, started_at)
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [_tool_use_record("tu1", "Write", input_={"file_path": "/a", "content": "x"})],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_dangling_tool_use(sess) == DanglingToolUseEvidence(
+        tool_name="Write", command_snippet=None
+    )
+
+
+def test_dangling_tool_use_detector_importable_from_reconcile_package() -> None:
+    """Pins the re-export surface (#1482), mirrors
+    test_awaiting_subagent_and_window_constant_removed_from_reconcile's style
+    but as a positive-presence check."""
+    from cw.reconcile import (
+        DanglingToolUseEvidence,
+        _DANGLING_TOOL_USE_REASON,
+        _detect_dangling_tool_use,
+    )
+
+    assert _DANGLING_TOOL_USE_REASON == "dangling_tool_use"
+    assert callable(_detect_dangling_tool_use)
+    assert DanglingToolUseEvidence is not None
+
+
+def test_bash_command_snippet_redacts_secret_shaped_substrings(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command containing a token=/Authorization:/ghp_-shaped substring has
+    the secret replaced with executor_diagnostics.redact()'s placeholder
+    before truncation (#1482 R2 pre-flight resolution, operator comment
+    2026-09-05T12:42:16Z)."""
+    from cw.reconcile._shared import _detect_dangling_tool_use
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-dangling-secret"
+    sess = _mk_headless_daemon_session("dangling-secret", worktree, started_at)
+
+    secret = "c" * 40
+    command = f"curl -H 'Authorization: {secret}' https://example.com"
+    transcript = _write_transcript_records(
+        home, worktree, [_tool_use_record("tu1", "Bash", input_={"command": command})]
+    )
+    _stamp_after_start(transcript, started_at)
+
+    evidence = _detect_dangling_tool_use(sess)
+    assert evidence is not None
+    assert evidence.command_snippet is not None
+    assert secret not in evidence.command_snippet
+    assert "<redacted>" in evidence.command_snippet
+
+
+# ---------------------------------------------------------------------------
 # #1345: usage-limit recency bound — matched_at / transcript_tail_at tracking
 # ---------------------------------------------------------------------------
 

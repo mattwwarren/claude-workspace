@@ -14,6 +14,7 @@ Pins the three surfaces the removal changed outside the sweep packages:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import UTC, datetime, timedelta
@@ -23,13 +24,18 @@ import pytest
 
 from cw.events import read_events
 from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
     CwState,
     LivenessBucket,
     OrchestratorConfig,
     OrchestratorEventType,
 )
 from cw.reconcile import _deps
-from cw.reconcile._shared import _SESSION_UNRESPONSIVE_REASON
+from cw.reconcile._shared import (
+    _DANGLING_TOOL_USE_REASON,
+    _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON,
+    _SESSION_UNRESPONSIVE_REASON,
+)
 from cw.reconcile.liveness import record_session_liveness_changes
 from tests._reconcile_helpers import (
     _mk_headless_daemon_session,
@@ -326,6 +332,156 @@ def test_distress_fires_for_stale_synchronous_tool_use_with_no_agent_spawn_stamp
     events = _distress_events()
     assert len(events) == 1
     assert events[0]["session_id"] == sess.id
+
+    # #1482: a dangling synchronous Bash call is now named in the distress
+    # signal rather than folded into the generic session_unresponsive reason.
+    all_events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    payloads = [dict(e.payload) for e in all_events]
+    assert len(payloads) == 1
+    assert payloads[0]["paused_status"] == _DANGLING_TOOL_USE_REASON
+    assert "Bash" in str(payloads[0]["breadcrumbs"])
+
+
+def _write_spawn_stamp(worktree: Path, *, stamped_at: datetime) -> None:
+    """Write an ``agent_spawn_stamp`` into *worktree*'s cw-context.json.
+
+    Mirrors ``tests/test_reconcile_liveness.py``'s ``_write_spawn_stamp`` --
+    the same on-disk payload ``cw agent-spawn-pre`` produces, written
+    directly so the stamp age is controllable relative to the frozen ``_NOW``
+    (#1482).
+    """
+    (worktree / ".claude").mkdir(parents=True, exist_ok=True)
+    payload = {
+        "agent_spawn_stamp": {
+            "unresolved_count": 1,
+            "last_stamped_at": stamped_at.isoformat(),
+        }
+    }
+    (worktree / HOOK_CONTEXT_RELATIVE_PATH).write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def test_distress_breadcrumb_names_bash_command_for_dangling_permission_prompt(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    """The ticket-incident shape (#1482): a dangling Bash permission prompt
+    names both the tool and the command in the distress breadcrumb."""
+    worktree = tmp_path / "wt"
+    sess = _mk_headless_daemon_session("T-1", worktree, _STARTED_AT)
+    command = "prep_pr_finalize.py verify --require-automerge"
+    record: dict[str, object] = {
+        "type": "assistant",
+        "timestamp": (_NOW - timedelta(minutes=46)).isoformat(),
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tu1",
+                    "name": "Bash",
+                    "input": {"command": command},
+                }
+            ],
+        },
+    }
+    transcript = _write_transcript_records(home, worktree, [record])
+    stale_ts = (_NOW - timedelta(minutes=46)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state)
+
+    events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    payloads = [dict(e.payload) for e in events]
+    assert len(payloads) == 1
+    assert payloads[0]["paused_status"] == _DANGLING_TOOL_USE_REASON
+    breadcrumbs = str(payloads[0]["breadcrumbs"])
+    assert "Bash" in breadcrumbs
+    assert command in breadcrumbs
+
+
+def test_distress_stays_generic_when_transcript_shows_no_tool_use(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    """Non-regression pin (#1482): an ordinary idle transcript with no
+    tool_use at all keeps the generic session_unresponsive reason -- CI-wait
+    / resolved-async-wait transcripts are not reclassified as
+    dangling_tool_use."""
+    sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
+    _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state)
+
+    events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    payloads = [dict(e.payload) for e in events]
+    assert len(payloads) == 1
+    assert payloads[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
+
+
+def test_distress_prefers_fix_loop_deadline_over_dangling_tool_use_when_agent_spawn_overdue(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    """A transcript tail with a dangling Agent tool_use AND an overdue
+    agent_spawn_stamp must still fire fix_loop_await_deadline_exceeded, not
+    dangling_tool_use -- the two are mutually exclusive by construction
+    (dangling_tool_use is only computed when spawn_age is None) (#1482)."""
+    worktree = tmp_path / "wt"
+    sess = _mk_headless_daemon_session("T-1", worktree, _STARTED_AT)
+    record: dict[str, object] = {
+        "type": "assistant",
+        "timestamp": (_NOW - timedelta(minutes=46)).isoformat(),
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "tu-agent", "name": "Agent"}],
+        },
+    }
+    transcript = _write_transcript_records(home, worktree, [record])
+    stale_ts = (_NOW - timedelta(minutes=46)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    _write_spawn_stamp(worktree, stamped_at=_NOW - timedelta(minutes=55))
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state)
+
+    assert sess.liveness_bucket is LivenessBucket.STALE_45M
+    events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    payloads = [dict(e.payload) for e in events]
+    assert len(payloads) == 1
+    assert payloads[0]["paused_status"] == _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON
+
+
+def test_distress_stays_generic_for_dangling_agent_tool_use_with_no_spawn_stamp_at_all(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    """A dangling Agent tool_use with NO agent_spawn_stamp evidence at all
+    stays on the generic session_unresponsive reason -- Agent/Task-named
+    tool_use is out of this detector's scope by design (#1969):
+    PostToolUse:Agent fires at launch-return, not subagent completion, so
+    treating a dangling Agent tool_use as evidence would false-fire against a
+    still-outstanding subagent spawn that agent_spawn_stamp is the correct
+    signal for (#1482)."""
+    worktree = tmp_path / "wt"
+    sess = _mk_headless_daemon_session("T-1", worktree, _STARTED_AT)
+    record: dict[str, object] = {
+        "type": "assistant",
+        "timestamp": (_NOW - timedelta(minutes=46)).isoformat(),
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "tu-agent", "name": "Agent"}],
+        },
+    }
+    transcript = _write_transcript_records(home, worktree, [record])
+    stale_ts = (_NOW - timedelta(minutes=46)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state)
+
+    assert sess.liveness_bucket is LivenessBucket.STALE_45M
+    events = _distress_events()
+    assert len(events) == 1
 
 
 def test_no_distress_below_top_bucket(
