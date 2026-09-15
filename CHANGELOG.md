@@ -13,6 +13,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The CodexExecutor review path no longer destroys degraded-reviewer rationale or leaves `agent_health_summary` empty (#2094):** every reviewer's parsed document is now persisted to the diagnostics bundle on every run (`ok`/`degraded`/`failed`), not just on failure, so a degraded reviewer's stated reason survives the scratch-dir cleanup. `synthesize_codex_review_result`'s clean stage_complete path now populates `AutoDevResult.friction_highlights` (one line per non-`"ok"` document plus a diagnostics pointer) and `Health.agent_health_summary` (one entry per document), so a `review_health_gate` park is no longer forensically empty.
 - **`dispatch_fix_agent`'s HEAD verification now resolves the branch's remote ref via its configured upstream (`@{u}`) instead of guessing `origin/<branch>` (#2145):** the guessed name silently diverges from reality whenever a branch was pushed under one name and later checked out locally under another, so the HEAD-landed-correctly check could compare against the wrong SHA. The new `_resolve_remote_ref` helper prefers the checked-out branch's upstream, falling back to `origin/<branch>` only once confirmed to actually resolve; an unresolvable ref now raises a `CwError` naming both the attempted upstream and the `origin/<branch>` fallback instead of dispatching against unverified branch state.
 
 ## [1.46.0] - 2026-09-14

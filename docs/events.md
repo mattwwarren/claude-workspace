@@ -792,14 +792,20 @@ open enum; consumers MUST tolerate unknown values. Known values:
   Deliberately REVIEW-scoped: `local_runner.synthesize_git_result` hardcodes
   the same recommendation on its IMPL success path as an honest "I am not a
   reviewer" default (#1580), which is not a degraded-review signal and must
-  keep auto-advancing. `breadcrumbs` empty. Operator recovery is to re-run
-  review — `cw dev-queue requeue` (or `cw dev-queue drain`, which selects this
+  keep auto-advancing. `breadcrumbs` empty — the per-reviewer rationale
+  instead reaches the operator via the sentinel's `friction_highlights` and
+  `health.agent_health_summary` (#2094), plus the on-disk diagnostics bundle
+  each reviewer document is persisted to on every run
+  (`src/cw/codex_review/_roles.py`). Operator recovery is to re-run review —
+  `cw dev-queue requeue` (or `cw dev-queue drain`, which selects this
   disposition); `cw dev-queue approve` deliberately fails closed here, because
   there is nothing shippable to authorize until review is re-run. See #1702.
-  As of #1856, a Test-Reviewer-only `status="degraded"` document — the
-  read-only-sandbox tax (Test Reviewer can never start pytest under codex
-  review's read-only sandbox) — no longer triggers this park; see
-  `_derive_health` in `src/cw/codex_review/_verdict.py`.
+  As of #1856 (widened by #2174), a `status="degraded"` document from one of
+  the three read-only-sandbox-exempt roles (Test Reviewer, Code Quality
+  Reviewer, SysAdmin Reviewer) — the read-only-sandbox tax (none of these
+  roles can complete their rubric under codex review's read-only sandbox) —
+  no longer triggers this park; see `_derive_health` in
+  `src/cw/codex_review/_verdict/_health.py`.
 - `"codex_must_fix_mechanically_rejected"` — Rule 5: a `blocked` sentinel whose
   `blocker.reason` is `codex_must_fix_mechanically_rejected`. Review produced a
   MUST_FIX finding, but `review_findings`' validation dropped it before
