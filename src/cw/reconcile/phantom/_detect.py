@@ -204,6 +204,14 @@ def _detect_phantom_candidates(
         # AutoDevResult/BlockedResult union carries nothing to route, so it
         # falls through to the salvage/advance/crash pipeline below rather than
         # being ignored forever.
+        #
+        # Deliberately NOT DAEMON-gated, unlike the salvage and stage-advance
+        # branches below: this is constructive completion off the session's own
+        # recorded evidence, and it carries no origin-specific hazard --
+        # ticket_id_for_session only resolves for auto-dev/<id> names, so a USER
+        # session produces a ticket-less candidate and _apply_phantom_routed_
+        # mutations never touches the queue for it. Gating would only mean
+        # marking a session that demonstrably emitted `shipped` as CRASHED.
         if _has_terminal_sentinel(session) and not already_refused:
             staged = reconstruct_staged_sentinel(session.last_result)
             if staged is not None:
@@ -215,7 +223,7 @@ def _detect_phantom_candidates(
                         routed_sentinel=staged,
                         # May legitimately be None: unlike the transcript-parsing
                         # producers, this one reads session state, so there is no
-                        # csid to derive. _routed_sentinel_missing tolerates it.
+                        # csid to derive. _resolve_routed_sentinel tolerates it.
                         salvage_csid=session.claude_session_id,
                         lane=lane,
                         client=session.client,

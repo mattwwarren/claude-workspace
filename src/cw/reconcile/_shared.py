@@ -1864,8 +1864,26 @@ def resolve_session_liveness_for_task(
     return session_daemon_liveness(session, live_short_ids)
 
 
+def _session_id_advisory_mismatch(
+    liveness: SessionLivenessForTask | None, spawn_cutoff: datetime
+) -> bool:
+    """True when *liveness* is the advisory-worthy shape (#1762).
+
+    Either the row's session_id resolved to nothing at all, or it resolved to a
+    session whose native daemon surface is absent from the roster. A session
+    still inside its spawn-grace window is never flagged: it may simply not have
+    registered with the daemon yet, the same allowance :func:`compute_drift`
+    makes before calling a surface phantom.
+    """
+    if liveness is None:
+        return True
+    if liveness.session.started_at > spawn_cutoff:
+        return False
+    return liveness.native_surface and not liveness.in_roster
+
+
 def _stamp_session_id_mismatch_advisories(
-    state: CwState, live_short_ids: set[str]
+    state: CwState, live_short_ids: set[str], *, now: datetime | None = None
 ) -> None:
     """Flag RUNNING rows whose session_id no longer resolves to a live session.
 
@@ -1874,15 +1892,15 @@ def _stamp_session_id_mismatch_advisories(
     instead of leaving an operator to compare a row's session_id against a
     roster short id by hand and conclude, wrongly, that cw itself lost track.
 
-    A row is flagged when its session_id resolves to nothing, or resolves to a
-    session whose native daemon surface has fallen out of the roster while the
-    row is still RUNNING. A resolvable, roster-live row is never flagged, and an
-    existing note is cleared the moment the condition lifts -- this is a live
-    re-derivation each tick, not a latch, so no history is kept.
+    A resolvable, roster-live row is never flagged, nor is one still inside its
+    spawn-grace window, and an existing note is cleared the moment the condition
+    lifts -- this is a live re-derivation each tick, not a latch, so no history
+    is kept. See :func:`_session_id_advisory_mismatch` for the predicate.
 
     Writes under ``dev_queue_lock`` through the same load/save path
     :func:`_apply_queue_mutations` above uses.
     """
+    spawn_cutoff = (now or datetime.now(UTC)) - timedelta(seconds=SPAWN_GRACE_SECONDS)
     with dev_queue_lock():
         store = load_dev_queue()
         changed = False
@@ -1890,9 +1908,7 @@ def _stamp_session_id_mismatch_advisories(
             if task.status is not QueueItemStatus.RUNNING or task.session_id is None:
                 continue
             liveness = resolve_session_liveness_for_task(task, state, live_short_ids)
-            is_mismatch = liveness is None or (
-                liveness.native_surface and not liveness.in_roster
-            )
+            is_mismatch = _session_id_advisory_mismatch(liveness, spawn_cutoff)
             new_note = _SESSION_ID_MISMATCH_ADVISORY_NOTE if is_mismatch else None
             if task.advisory_note == new_note:
                 continue

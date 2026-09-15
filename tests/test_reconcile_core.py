@@ -1043,11 +1043,13 @@ class TestFixDispatchRunsPostLock:
 # --- GitHub #1762: session-id-namespace advisory sweep ------------------------
 
 
-def _advisory_sweep(state: CwState, live: set[str]) -> dict[str, str | None]:
+def _advisory_sweep(
+    state: CwState, live: set[str], *, now: datetime | None = None
+) -> dict[str, str | None]:
     """Run the advisory sweep and return {ticket_id: advisory_note}."""
     from cw.reconcile._shared import _stamp_session_id_mismatch_advisories
 
-    _stamp_session_id_mismatch_advisories(state, live)
+    _stamp_session_id_mismatch_advisories(state, live, now=now)
     return {t.ticket_id: t.advisory_note for t in load_dev_queue().tasks}
 
 
@@ -1186,3 +1188,38 @@ def test_stamp_advisory_ignores_non_running_and_sessionless_rows(
 
     notes = _advisory_sweep(state, set())
     assert notes == {"T-parked": None, "T-pending": None}
+
+
+def test_stamp_advisory_respects_the_spawn_grace_window(tmp_config_dir: Path) -> None:
+    """#1762: a session too young to have registered is not flagged.
+
+    Same allowance ``compute_drift`` makes before calling a surface phantom —
+    without it every freshly dispatched row would flash ``?session_mismatch``
+    in the REASON column for the first SPAWN_GRACE_SECONDS of its life.
+    """
+    from cw.reconcile import SPAWN_GRACE_SECONDS
+
+    now = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
+    sess = _mk_session(
+        "fresh-1", surface_ref="ffffffff", started_at=now - timedelta(seconds=5)
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="T-fresh",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sess.id,
+                )
+            ]
+        )
+    )
+
+    # Inside the grace window: absent from the roster, but not yet a mismatch.
+    assert _advisory_sweep(state, set(), now=now)["T-fresh"] is None
+    # Past it: the same absence now is.
+    later = now + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+    assert _advisory_sweep(state, set(), now=later)["T-fresh"] is not None

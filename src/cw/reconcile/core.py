@@ -380,7 +380,7 @@ def _reconcile_locked(
     # #1762: re-derive the operator advisory for RUNNING rows whose session_id
     # no longer resolves to a live session. Signal-only -- writes
     # TicketTask.advisory_note and nothing else; never dispositions a row.
-    _stamp_session_id_mismatch_advisories(state, native_live)
+    _stamp_session_id_mismatch_advisories(state, native_live, now=now)
 
     # Emitted-sentinel router (#578): routes sessions whose transcript already
     # carries a sentinel that signal_stop never routed. Evidence-only —
