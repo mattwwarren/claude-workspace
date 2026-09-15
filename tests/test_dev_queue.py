@@ -8321,7 +8321,10 @@ class TestRequeueTicket:
         consulted at all -- the whole point of the flag on dispatch's hot
         per-claim path."""
         from cw.config import get_client
-        from cw.dev_queue.requeue import _ImplBypassPlanCheck, _impl_bypass_plan_available
+        from cw.dev_queue.requeue import (
+            _impl_bypass_plan_available,
+            _ImplBypassPlanCheck,
+        )
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         wt_path = tmp_path / "reused-worktree"
@@ -8351,7 +8354,9 @@ class TestRequeueTicket:
             task, client_cfg, allow_tracker_fallback=False
         )
 
-        assert result == _ImplBypassPlanCheck(False, tracker_checked=False, tracker=None)
+        assert result == _ImplBypassPlanCheck(
+            False, tracker_checked=False, tracker=None
+        )
 
     def test_impl_bypass_plan_available_default_still_falls_back_to_tracker(
         self,

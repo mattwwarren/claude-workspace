@@ -1402,9 +1402,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-BYPASS"
-        worktree = create_worktree(
-            sample_client_config, branch, allow_dirty_reuse=True
-        )
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
         cw_dir = worktree / ".cw"
         cw_dir.mkdir(parents=True, exist_ok=True)
         (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
@@ -1461,9 +1459,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         assert spawned_2 == 1
         assert daemon.spawn_calls[1][1] == "/auto-dev-impl GEN-BYPASS --headless"
 
-        bypass_events_after = [
-            p for _, p, cid in stage_changed if cid == "GEN-BYPASS"
-        ]
+        bypass_events_after = [p for _, p, cid in stage_changed if cid == "GEN-BYPASS"]
         assert len(bypass_events_after) == 1
 
     def test_plan_stage_claim_no_bypass_when_no_plan_md(
@@ -1515,14 +1511,10 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-UNSIGNED"
-        worktree = create_worktree(
-            sample_client_config, branch, allow_dirty_reuse=True
-        )
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
         cw_dir = worktree / ".cw"
         cw_dir.mkdir(parents=True, exist_ok=True)
-        (cw_dir / "plan.md").write_text(
-            plan_body(soundness=False), encoding="utf-8"
-        )
+        (cw_dir / "plan.md").write_text(plan_body(soundness=False), encoding="utf-8")
         add_ticket(TicketTask(ticket_id="GEN-UNSIGNED", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -1549,9 +1541,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-EVT"
-        worktree = create_worktree(
-            sample_client_config, branch, allow_dirty_reuse=True
-        )
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
         cw_dir = worktree / ".cw"
         cw_dir.mkdir(parents=True, exist_ok=True)
         (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")

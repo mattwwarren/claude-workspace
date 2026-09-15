@@ -948,6 +948,84 @@ def _stamp_spawn_success(
         save_dev_queue(store)
 
 
+def _apply_plan_bypass_if_available(
+    task: TicketTask, client: ClientConfig, worktree_path: Path
+) -> None:
+    """Advance a PLAN-stage task straight to IMPL if a plan is already there.
+
+    GitHub #1286: closes the gap where every automatic re-entry at
+    ``Stage.PLAN`` re-ran a full Stage 1 planning pass from scratch even when
+    a valid, signed-off ``.cw/plan.md`` was already sitting in the ticket's
+    reused worktree. ``allow_tracker_fallback=False`` keeps this hot
+    per-claim-path check network-free -- Stage 1 is about to run and post the
+    plan anyway if the local check misses.
+
+    Extracted from :func:`_spawn_claimed_task` to keep that function inside
+    the PLR branch/statement budget, mirroring :func:`_codex_capability_gate`
+    and :func:`_stamp_spawn_success`'s extractions for the same reason. Sole
+    caller; ``task.stage`` must already be ``Stage.PLAN`` on entry.
+
+    Mutates the STORED row under :func:`dev_queue_lock`, mirroring
+    :func:`_stamp_spawn_success`'s load->find->mutate->save shape plus
+    :func:`~cw.dev_queue.requeue._apply_requeue_stage`'s
+    old_stage/``_raise_stage_high_water``/``_emit_stage_change`` trio -- a
+    bare in-memory ``task.stage = Stage.IMPL`` would never reach
+    ``dev_queue.json``, so the next dispatch tick would re-read stage=PLAN
+    and re-run this whole check from scratch. Only mirrored onto the
+    caller-held ``task`` (so this tick's ``executor.spawn(stage=task.stage,
+    ...)`` builds the IMPL prompt, not PLAN) once the stored row is found and
+    persisted.
+    """
+    bypass = _impl_bypass_plan_available(task, client, allow_tracker_fallback=False)
+    if not bypass.available:
+        return
+
+    stored_task = None
+    with dev_queue_lock():
+        store = load_dev_queue()
+        for candidate in store.tasks:
+            if (
+                candidate.ticket_id == task.ticket_id
+                and candidate.client == client.name
+                and candidate.status == QueueItemStatus.RUNNING
+            ):
+                stored_task = candidate
+                break
+        if stored_task is not None:
+            old_stage = stored_task.stage
+            stored_task.stage = Stage.IMPL
+            _raise_stage_high_water(stored_task, client.pipeline.stages, Stage.IMPL)
+            _emit_stage_change(stored_task, old_stage, Stage.IMPL, "advance")
+            save_dev_queue(store)
+
+    if stored_task is not None:
+        # Mirror onto the in-memory task so this tick's
+        # executor.spawn(stage=task.stage, ...) below builds the IMPL
+        # prompt, not PLAN.
+        task.stage = stored_task.stage
+        _log.info(
+            "dispatch: %r has an approved, signed-off plan already"
+            " on disk (%s) -- bypassing Stage 1 and spawning at"
+            " IMPL directly (#1286)",
+            task.ticket_id,
+            worktree_path / ".cw" / "plan.md",
+        )
+    else:
+        # Race guard: _claim_next_pending persisted this row as RUNNING
+        # (still at Stage.PLAN) just before this function ran, so it should
+        # always be found here. If it is missing or no longer RUNNING
+        # (reaped/requeued/removed between claim and spawn), do NOT advance
+        # and do NOT spawn with a mutated stage -- leave task.stage untouched
+        # so this tick spawns /auto-dev-plan as normal.
+        _log.warning(
+            "dispatch: %r's approved-plan auto-bypass found no"
+            " matching RUNNING row in the dev queue (client=%s)"
+            " -- leaving stage at PLAN (#1286)",
+            task.ticket_id,
+            client.name,
+        )
+
+
 def _spawn_claimed_task(
     task: TicketTask,
     client: ClientConfig,
@@ -1040,65 +1118,7 @@ def _spawn_claimed_task(
         check_not_main_checkout(worktree_path, client)
 
         if task.stage == Stage.PLAN:
-            bypass = _impl_bypass_plan_available(
-                task, client, allow_tracker_fallback=False
-            )
-            if bypass.available:
-                # #1286: mutate the STORED row under dev_queue_lock(), mirroring
-                # _stamp_spawn_success's load->find->mutate->save shape (below,
-                # this file) plus _apply_requeue_stage's old_stage/
-                # _raise_stage_high_water/_emit_stage_change trio (requeue.py).
-                # A bare in-memory `task.stage = Stage.IMPL` here would never
-                # reach dev_queue.json -- the next dispatch tick would re-read
-                # stage=PLAN and re-run this whole check from scratch.
-                stored_task = None
-                with dev_queue_lock():
-                    store = load_dev_queue()
-                    for candidate in store.tasks:
-                        if (
-                            candidate.ticket_id == task.ticket_id
-                            and candidate.client == client.name
-                            and candidate.status == QueueItemStatus.RUNNING
-                        ):
-                            stored_task = candidate
-                            break
-                    if stored_task is not None:
-                        old_stage = stored_task.stage
-                        stored_task.stage = Stage.IMPL
-                        _raise_stage_high_water(
-                            stored_task, client.pipeline.stages, Stage.IMPL
-                        )
-                        _emit_stage_change(
-                            stored_task, old_stage, Stage.IMPL, "advance"
-                        )
-                        save_dev_queue(store)
-                if stored_task is not None:
-                    # Mirror onto the in-memory task so this tick's
-                    # executor.spawn(stage=task.stage, ...) below builds the
-                    # IMPL prompt, not PLAN.
-                    task.stage = stored_task.stage
-                    _log.info(
-                        "dispatch: %r has an approved, signed-off plan already"
-                        " on disk (%s) -- bypassing Stage 1 and spawning at"
-                        " IMPL directly (#1286)",
-                        task.ticket_id,
-                        worktree_path / ".cw" / "plan.md",
-                    )
-                else:
-                    # Race guard: _claim_next_pending persisted this row as
-                    # RUNNING (still at Stage.PLAN) just before this function
-                    # ran, so it should always be found here. If it is missing
-                    # or no longer RUNNING (reaped/requeued/removed between
-                    # claim and spawn), do NOT advance and do NOT spawn with a
-                    # mutated stage -- leave task.stage untouched so this tick
-                    # spawns /auto-dev-plan as normal.
-                    _log.warning(
-                        "dispatch: %r's approved-plan auto-bypass found no"
-                        " matching RUNNING row in the dev queue (client=%s)"
-                        " -- leaving stage at PLAN (#1286)",
-                        task.ticket_id,
-                        client.name,
-                    )
+            _apply_plan_bypass_if_available(task, client, worktree_path)
 
         # Function-level import breaks the gating<->claim import cycle:
         # cw.dispatch.gating imports this module at top level, so claim.py
