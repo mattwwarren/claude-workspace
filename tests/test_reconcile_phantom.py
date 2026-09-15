@@ -60,6 +60,7 @@ from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
     _auto_config,
+    _blocked_result_payload,
     _client_with_lane,
     _inflate_scope,
     _make_stale_base_repo,
@@ -1013,16 +1014,18 @@ def test_detect_phantom_candidates_crash_complete(
     assert _state_queue_snapshot() == snap
 
 
-def test_detect_phantom_candidates_skips_emitted_terminal_result(
+def test_detect_phantom_candidates_crashes_unreconstructable_terminal_result(
     tmp_config_dir: Path,
 ) -> None:
-    """#536: a phantom with a terminal last_result is left for the operator.
+    """#536 as narrowed by #1762: an unreconstructable terminal result still crashes.
 
-    An emit-then-crash session (``cw result emit`` already persisted a terminal
-    result, then the surface died) is never re-salvaged or re-crashed over its
-    authoritative emit-time result — the gate ``continue``s past it. A sibling
-    phantom with no emitted result still yields CRASH_COMPLETE, so the gate
-    does not over-fire.
+    ``{"status": "shipped"}`` satisfies ``_has_terminal_sentinel``'s bare
+    key-presence check but validates against neither arm of the
+    AutoDevResult/BlockedResult union, so there is nothing to route
+    constructively. #536 originally ``continue``d past it, leaving the row
+    RUNNING forever; it now falls through to the ordinary CRASH_COMPLETE
+    pipeline, which ``reap_policy`` still governs. A sibling phantom with no
+    emitted result crashes exactly as before.
     """
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
@@ -1041,12 +1044,10 @@ def test_detect_phantom_candidates_skips_emitted_terminal_result(
         now=started_at,
     )
 
-    # The emitted-terminal session is skipped entirely (no candidate of any kind).
-    assert all(c.session_id != gated.id for c in candidates)
-    # The sibling without an emitted result still crashes.
-    ungated_candidates = [c for c in candidates if c.session_id == ungated.id]
-    assert len(ungated_candidates) == 1
-    assert ungated_candidates[0].proposed_action == ProposedAction.CRASH_COMPLETE
+    assert {c.session_id: c.proposed_action for c in candidates} == {
+        gated.id: ProposedAction.CRASH_COMPLETE,
+        ungated.id: ProposedAction.CRASH_COMPLETE,
+    }
     # Purity: detection makes zero writes.
     assert _state_queue_snapshot() == snap
 
@@ -4049,3 +4050,324 @@ def test_salvaged_completion_with_no_evidence_is_unproductive(
 
     t = next(t for t in load_dev_queue().tasks if t.ticket_id == "ph-1750-empty")
     assert t.unproductive_attempts == 1
+
+
+# --- GitHub #1762: staged-terminal-sentinel phantom gap -----------------------
+#
+# Issue #536 left ``_detect_phantom_candidates`` with an unconditional
+# ``if _has_terminal_sentinel(session): continue`` -- a phantom whose
+# ``session.last_result`` already carried a terminal-*shaped* dict produced NO
+# candidate of any kind, on every tick, forever. ``session.status`` is flipped
+# to COMPLETED only by the Stop hook (cli/stop_hook.py), which a crashed daemon
+# never reaches, so the owning dev-queue row stayed RUNNING with no automated
+# recovery path regardless of ``reap_policy``.
+#
+# #1470's stalled-sweep COMPLETE_FOREIGN_RESULT already rescues the *headless,
+# validatable* subset of that population, so the gap that actually survives is
+# the complement: a terminal-shaped payload no validator accepts, and any
+# session ``_is_headless`` returns False for. #1762 closes both by making the
+# phantom sweep independently sufficient rather than dependent on that sweep's
+# narrower reach.
+
+
+def _mk_terminal_result_phantom(
+    sid: str,
+    *,
+    last_result: dict[str, object],
+    worktree: Path | None = None,
+) -> Session:
+    """Phantom DAEMON session (never Stop-hooked) carrying *last_result*."""
+    sess = _mk_phantom_daemon_session(
+        sid,
+        datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        surface_ref="gone-ref",
+        worktree_path=worktree,
+    )
+    sess.last_result = last_result
+    return sess
+
+
+def test_detect_phantom_routes_staged_terminal_result(
+    tmp_config_dir: Path,
+) -> None:
+    """#1762: a reconstructable terminal ``last_result`` becomes a routed candidate.
+
+    Pre-#1762 the ``_has_terminal_sentinel`` gate produced no candidate at all,
+    so ``reap_policy`` was never consulted and the row never moved.
+    """
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "ph-1762-detect"
+    sess = _mk_terminal_result_phantom("ph-1762-detect", last_result=payload)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        now=datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC),
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+    routed = candidates[0].routed_sentinel
+    assert isinstance(routed, AutoDevResult)
+    assert routed.status == "shipped"
+    # Purity: detection makes zero writes.
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_phantom_routes_staged_blocked_result(
+    tmp_config_dir: Path,
+) -> None:
+    """#1762: the parser-synthesized blocked shape routes too, not just AutoDevResult.
+
+    ``BlockedResult`` (``status="blocked"`` with no ``schema_version``) is
+    terminal-shaped for ``_has_terminal_sentinel``, so it hit the same permanent
+    skip. Reconstruction must span the whole discriminated union.
+    """
+    from cw.auto_dev_result import BlockedResult
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    sess = _mk_terminal_result_phantom(
+        "ph-1762-blocked", last_result=_blocked_result_payload()
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        now=datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC),
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+    assert isinstance(candidates[0].routed_sentinel, BlockedResult)
+
+
+def test_detect_phantom_already_refused_terminal_result_falls_through(
+    tmp_config_dir: Path,
+) -> None:
+    """#1762: the #1149 refusal latch still wins over the new routing branch.
+
+    ``_apply_phantom_routed_mutations`` stamps ``sentinel_advance_refused`` into
+    ``last_result`` when the staged authority declines the route. Re-offering the
+    same doomed candidate on the next tick would loop forever, so the latch must
+    be checked ahead of reconstruction and the session must fall through to the
+    ordinary crash pipeline.
+    """
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile._shared import _SENTINEL_ADVANCE_REFUSED_KEY
+
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "ph-1762-refused"
+    payload[_SENTINEL_ADVANCE_REFUSED_KEY] = True
+    sess = _mk_terminal_result_phantom("ph-1762-refused", last_result=payload)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        now=datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC),
+    )
+
+    assert [c.proposed_action for c in candidates] == [ProposedAction.CRASH_COMPLETE]
+
+
+def _non_headless_terminal_phantom_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ticket_id: str,
+    last_result: dict[str, object],
+) -> datetime:
+    """Persist a non-headless phantom carrying *last_result*, plus its RUNNING row.
+
+    Deliberately writes no ``cw-context.json``, so ``_is_headless`` is False and
+    #1470's stalled-sweep COMPLETE_FOREIGN_RESULT never sees the session --
+    isolating the phantom sweep as the only sweep that can recover it.
+    Returns the ``now`` the caller should freeze ``reconcile()`` at.
+    """
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / f"wt-{ticket_id}"
+    worktree.mkdir(parents=True, exist_ok=True)
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    sess = _mk_terminal_result_phantom(
+        ticket_id, last_result=last_result, worktree=worktree
+    )
+    sess.name = f"client-a/auto-dev/{ticket_id}"
+    # A second, genuinely-live session keeps the daemon roster non-empty so the
+    # transient-outage guard does not abort the sweep.
+    alive = _mk_session("alive", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=ticket_id,
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+    )
+    return started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+
+def test_reconcile_terminal_phantom_completes_under_auto_policy(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1762: the ticket's literal reproduction, end to end across several ticks.
+
+    A RUNNING row whose session is absent from the daemon roster under
+    ``reap_policy: auto``, ticked repeatedly. Pre-#1762 the row stayed RUNNING
+    on every tick: the ``_has_terminal_sentinel`` gate bypassed the candidate
+    pipeline and the session is not headless, so #1470's stalled sweep never saw
+    it either.
+    """
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "ph-1762-auto"
+    now = _non_headless_terminal_phantom_fixture(
+        tmp_path, monkeypatch, ticket_id="ph-1762-auto", last_result=payload
+    )
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+
+    for tick in range(3):
+        with freezegun.freeze_time(now + timedelta(seconds=60 * tick)):
+            reconcile()
+
+    reloaded = next(s for s in load_state().sessions if s.id == "ph-1762-auto")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "ph-1762-auto")
+    assert task.status == QueueItemStatus.COMPLETED
+    reverted = read_events(
+        consumer="test-1762-auto",
+        event_types=[OrchestratorEventType.SESSION_PHANTOM_REVERTED],
+    )
+    assert reverted == []
+
+
+def test_reconcile_terminal_phantom_completes_under_signal_only(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1762: the fix is constructive completion, so ``signal_only`` does not gate it.
+
+    ``ROUTE_EMITTED_SENTINEL`` is positive evidence, not a destructive reap --
+    ``_route_phantom_by_policy`` only consults ``reap_policy`` for
+    ``CRASH_COMPLETE``. The default (SIGNAL_ONLY) config must still land the row.
+    """
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "ph-1762-signal"
+    now = _non_headless_terminal_phantom_fixture(
+        tmp_path, monkeypatch, ticket_id="ph-1762-signal", last_result=payload
+    )
+
+    with freezegun.freeze_time(now):
+        reconcile()
+
+    reloaded = next(s for s in load_state().sessions if s.id == "ph-1762-signal")
+    assert reloaded.status == SessionStatus.COMPLETED
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "ph-1762-signal")
+    assert task.status == QueueItemStatus.COMPLETED
+
+
+def test_reconcile_unparseable_terminal_phantom_falls_through_to_crash(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1762: a terminal-*shaped* but unvalidatable last_result no longer stalls.
+
+    ``_has_terminal_sentinel`` is a bare ``"status" in dict`` key check, so a
+    stale or foreign shape satisfied it and was skipped forever -- and #1470's
+    stalled sweep deliberately short-circuits an unroutable foreign result
+    without dispositioning it. With nothing to reconstruct there is nothing to
+    route, so the session must fall through to the ordinary CRASH_COMPLETE
+    pipeline and the row reverts for another attempt under ``reap_policy: auto``.
+    """
+    now = _non_headless_terminal_phantom_fixture(
+        tmp_path,
+        monkeypatch,
+        ticket_id="ph-1762-junk",
+        last_result={"status": "shipped"},
+    )
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+
+    with freezegun.freeze_time(now):
+        reconcile()
+
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "ph-1762-junk")
+    assert task.status == QueueItemStatus.PENDING
+
+
+def test_compute_drift_ignores_ticket_task_session_id(
+    tmp_config_dir: Path,
+) -> None:
+    """#1762: the three-namespace "session_id mismatch" is inert to phantom detection.
+
+    ``TicketTask.session_id`` is cw's own ``Session.id``; the daemon roster
+    reports ``Session.surface_ref``; transcript filenames carry
+    ``Session.claude_session_id``. Reports of a "mismatch" compared values from
+    different namespaces. ``compute_drift``/``_detect_phantom_candidates`` never
+    read ``TicketTask.session_id`` at all, so a row pointing at a session id that
+    resolves to nothing still yields the correct phantom candidate.
+    """
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates, compute_drift
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("ph-1762-ns", started_at, surface_ref="gone-ref")
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="ph-1762-ns",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    # Deliberately NOT sess.id: the shape the ticket reported.
+                    session_id="a2fe4bd5",
+                )
+            ]
+        )
+    )
+
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+    report = compute_drift(state, native_live={"live-ref"}, now=now)
+    assert sess.id in report.phantom_session_ids
+
+    candidates = _detect_phantom_candidates(
+        state, phantom_set=set(report.phantom_session_ids), now=now
+    )
+    assert [c.proposed_action for c in candidates] == [ProposedAction.CRASH_COMPLETE]
