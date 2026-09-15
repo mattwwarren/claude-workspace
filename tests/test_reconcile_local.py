@@ -275,6 +275,63 @@ def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
     assert not any(e.payload.get("session_id") == "harv-refused" for e in events)
 
 
+def test_act_on_local_harvest_candidates_completes_on_task_already_terminal(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """GitHub #2140: when the dev-queue task was already raced to a genuinely
+    terminal status (COMPLETED/FAILED/CANCELLED) by a concurrent caller before
+    this tick's lookup ran, ``_apply_sentinel_to_task`` reports
+    ``routed=False, task_already_terminal=True``. Unlike idle.py/phantom.py,
+    local.py's detect phase has no stamp/guard at all -- prior to this fix a
+    ``not routed`` candidate here would ``continue`` unconditionally and
+    re-synthesize the harvest sentinel (a real git subprocess call) on every
+    subsequent tick forever, the worst-case orphan the ticket's investigation
+    found. The already-terminal case must complete the session through the
+    door instead, exactly like the ordinary path already does."""
+    worktree = _local_git_worktree(
+        make_git_repo, "wt-2140-harvest-terminal", with_commit=True
+    )
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=42)
+    sess = _mk_local_session("2140-harv-terminal", worktree, liveness)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="2140-harv-terminal",
+                    client="client-a",
+                    status=QueueItemStatus.COMPLETED,
+                    session_id="2140-harv-terminal",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    assert len(candidates) == 1
+
+    harvested = _act_on_local_harvest_candidates(
+        state,
+        candidates,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        task_by_ticket=task_by_ticket,
+    )
+
+    assert harvested == ["2140-harv-terminal"]
+    reloaded = next(s for s in load_state().sessions if s.id == "2140-harv-terminal")
+    assert reloaded.status == SessionStatus.COMPLETED
+
+    task_after = next(
+        t for t in load_dev_queue().tasks if t.ticket_id == "2140-harv-terminal"
+    )
+    assert task_after.status == QueueItemStatus.COMPLETED
+
+
 def test_local_harvest_stage_mismatch_does_not_orphan_task_or_complete_session(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
