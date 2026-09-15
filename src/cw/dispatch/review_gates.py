@@ -666,9 +666,18 @@ def _park_review_health_gate(task: TicketTask) -> None:
     module-level comment above ``routing.BREADCRUMB_ELIGIBLE_PAUSED_STATUSES``.
     #1775 reaffirms that choice specifically for a degraded reviewer's stated
     reason: it has no data path into this function's scope (``task`` only,
-    no ``ReviewVerdict`` in hand) and does not need one, because
-    ``render_verdict_comment`` has already posted it to the ticket by the
-    time this park runs -- mirroring how ``routing._park_must_fix_mechanically_
+    no ``ReviewVerdict`` in hand) and does not need one. On the
+    ``block_reason is not None`` branches (MUST_FIX findings,
+    mechanically-rejected, discarded findings), ``render_verdict_comment``
+    has indeed already posted the reviewer's rationale to the ticket by the
+    time this park runs. But the plain stage_complete/degraded-health path
+    this function actually gates -- a clean-but-degraded pass with no
+    MUST_FIX finding -- never calls ``render_verdict_comment`` (#2094
+    forensics trace), so nothing was posted to the ticket on that path; the
+    per-reviewer rationale instead reaches the operator via the sentinel's
+    ``friction_highlights``/``health.agent_health_summary`` and the on-disk
+    diagnostics bundle (see ``docs/events.md``'s ``review_health_gate``
+    entry) -- mirroring how ``routing._park_must_fix_mechanically_
     rejected`` documents its own deliberate divergence from this same
     convention.
     """

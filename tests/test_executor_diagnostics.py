@@ -127,6 +127,8 @@ def test_bounded_excerpt_truncates_with_marker() -> None:
         "sk-" + "a" * 40,
         "ghp_" + "b" * 36,
         "Bearer abc.def-ghi_jkl",
+        "Authorization: " + "c" * 40,
+        "token=shortvalue",
     ],
 )
 def test_redact_strips_known_secret_patterns(secret: str) -> None:

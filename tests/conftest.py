@@ -483,6 +483,39 @@ def _write_idle_transcript(
     return path
 
 
+def _write_stop_hook_transcript(
+    home: Path,
+    worktree: Path,
+    claude_session_id: str,
+    assistant_text: str,
+) -> Path:
+    """Write ``<claude_session_id>.jsonl`` under *worktree*'s project dir.
+
+    Promoted from ``TestSignalStop._write_transcript`` (``tests/test_cli.py``,
+    #1692), whose 19 in-class call sites now import and call this helper
+    directly. Keyed on an exact ``claude_session_id``, matching how the
+    Stop-hook path actually resolves a sentinel: ``_parse_headless_sentinel``
+    -> ``_parse_sentinel_from_transcript(cwd_value, csid)``
+    (``cw.cli.stop_hook``) looks the transcript up by exact
+    ``claude_session_id``, not by a surface_ref-prefix glob -- the mechanism
+    :func:`_write_idle_transcript` above targets instead. Param order/return
+    type follow that sibling's ``(home, worktree, ...) -> Path`` convention.
+    """
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": assistant_text}],
+        },
+    }
+    path = project_dir / f"{claude_session_id}.jsonl"
+    path.write_text(json.dumps(record) + "\n")
+    return path
+
+
 def _make_daemon_session(**overrides: object) -> Session:
     """Canonical non-persisting DAEMON ``Session`` builder (#1308).
 

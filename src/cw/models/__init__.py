@@ -10,7 +10,8 @@ each submodule only imports from those above it (no cycles):
 - ``focus`` — ``FocusEntry`` (the ``cw focus`` session pointer, #1644). Also a
   DAG root: imports nothing else in the package.
 - ``tasks`` — ``TicketTask``, ``DispatchPlan``, ``DevQueueStore``, the shared
-  recipe-key validators, ``DEV_QUEUE_SCHEMA_VERSION``, ``DEFAULT_LANE``.
+  recipe-key validators, ``DEV_QUEUE_SCHEMA_VERSION``, ``DEFAULT_LANE``, and
+  the ``PLAN_*_FINGERPRINT_KEY`` wire-key constants (#2102).
 - ``orchestrator_config`` — lane/pipeline/orchestrator config models and their
   operator-forward defaults.
 - ``session`` — ``LocalLivenessHandle``, ``Session``.
@@ -26,6 +27,7 @@ from __future__ import annotations
 from cw.models.client import DEFAULT_AUTO_PURPOSES, ClientConfig
 from cw.models.enums import (
     OCCUPIED_LANE_STATUSES,
+    TERMINAL_QUEUE_STATUSES,
     TERMINAL_SESSION_STATUSES,
     WORKER_PURPOSES,
     CompletionReason,
@@ -78,6 +80,8 @@ from cw.models.tasks import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
     DEV_QUEUE_SCHEMA_VERSION,
+    PLAN_APPROVED_FINGERPRINT_KEY,
+    PLAN_DRAFT_FINGERPRINT_KEY,
     DevQueueStore,
     DispatchPlan,
     PendingFixDispatch,
@@ -105,6 +109,9 @@ __all__ = [
     "LOCAL_BACKEND",
     "OCCUPIED_LANE_STATUSES",
     "OPENCODE_BACKEND",
+    "PLAN_APPROVED_FINGERPRINT_KEY",
+    "PLAN_DRAFT_FINGERPRINT_KEY",
+    "TERMINAL_QUEUE_STATUSES",
     "TERMINAL_SESSION_STATUSES",
     "WORKER_PURPOSES",
     "_DEFAULT_OPERATOR_EVENT_TYPES",

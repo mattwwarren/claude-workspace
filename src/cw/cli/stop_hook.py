@@ -218,10 +218,19 @@ class _HeadlessResolution(NamedTuple):
     when the bail was caused by a BlockedResult that itself just landed the
     task terminal-FAILED (``SentinelRouteOutcome.landed_terminal``) — the
     signal for ``signal_stop`` to stop the now-leaked DAEMON worker.
+
+    ``task_already_terminal`` (GitHub #1692) mirrors
+    ``SentinelRouteOutcome.task_already_terminal``: True when a same-ticket/
+    session task had already been landed terminal by a concurrent caller
+    before this call's own lookup ran. Unlike a stage-mismatch refusal, this
+    sub-cause is safe to complete the session on — no dispatch path will ever
+    give this session another leg for this ticket — so it is threaded through
+    to ``_build_completed_payload`` rather than causing a bail.
     """
 
     rescued: bool | None
     landed_terminal: bool
+    task_already_terminal: bool = False
 
 
 def _resolve_and_complete_headless_session(
@@ -246,11 +255,19 @@ def _resolve_and_complete_headless_session(
     wall-clock budget anymore),
     or the shared staged-advance authority refused the route on a stage
     mismatch (GitHub #1031, the #986 incident — extends #1019's phantom-path
-    guard to the Stop-hook path) or a #1189 raced-to-terminal lookup miss. A
-    refusal leaves session and task completely untouched so a later reconcile
-    tick or Stop hook can re-observe them — except when the refusal was
-    itself a BlockedResult landing the task terminal-FAILED, signaled via
-    ``landed_terminal=True`` (#1273), which leaves the daemon worker leaked.
+    guard to the Stop-hook path). A stage-mismatch refusal leaves session and
+    task completely untouched so a later reconcile tick or Stop hook can
+    re-observe them — except when the refusal was itself a BlockedResult
+    landing the task terminal-FAILED, signaled via ``landed_terminal=True``
+    (#1273), which leaves the daemon worker leaked.
+
+    GitHub #1692: a #1189 raced-to-terminal lookup miss (``outcome.
+    task_already_terminal``) is NOT a bail — the task row is left untouched
+    (a concurrent caller already landed it terminal), but the session
+    completes normally below, since no dispatch path will ever give this
+    session another leg for this ticket once its task is genuinely terminal.
+    This closes the gap where such a session was previously left orphaned
+    until the wall-clock reaper noticed it.
 
     Returns ``_HeadlessResolution(rescued=<bool>)`` once the session has been
     marked COMPLETED and persisted.
@@ -280,12 +297,14 @@ def _resolve_and_complete_headless_session(
     # PENDING before consume_completed_sessions can process the event — causing
     # no_op and similar terminal outcomes to trigger infinite re-dispatch.
     rescued = False
+    task_already_terminal = False
     if is_headless and parsed_sentinel is not None and isinstance(ticket_id_value, str):
         outcome = _apply_sentinel_to_task(
             ticket_id_value, session, parsed_sentinel, now=now
         )
         rescued = outcome.rescued
-        if not outcome.routed:
+        task_already_terminal = outcome.task_already_terminal
+        if not outcome.routed and not outcome.task_already_terminal:
             return _HeadlessResolution(
                 rescued=None, landed_terminal=outcome.landed_terminal
             )
@@ -309,7 +328,11 @@ def _resolve_and_complete_headless_session(
     # rather than assigning session.last_result directly.
     if parsed_sentinel is not None and not emit_terminal:
         _harvest_last_result_through_door(session.id, parsed_sentinel)
-    return _HeadlessResolution(rescued=rescued, landed_terminal=False)
+    return _HeadlessResolution(
+        rescued=rescued,
+        landed_terminal=False,
+        task_already_terminal=task_already_terminal,
+    )
 
 
 def _handle_user_origin_stop(
@@ -527,10 +550,12 @@ def signal_stop() -> None:
         # Resolves the sentinel, routes it through the #251 staged-advance
         # authority, and (if accepted) marks the session COMPLETED. rescued
         # is None when the caller must bail without further action -- no
-        # sentinel under budget, a #1031 stage-mismatch route refusal, or a
-        # #1189 raced-to-terminal lookup miss. landed_terminal (#1273)
-        # distinguishes the case where the bail was itself a BlockedResult
-        # that landed the task terminal-FAILED, leaking the daemon worker.
+        # sentinel under budget, or a #1031 stage-mismatch route refusal.
+        # landed_terminal (#1273) distinguishes the case where the bail was
+        # itself a BlockedResult that landed the task terminal-FAILED, leaking
+        # the daemon worker. A #1189 raced-to-terminal lookup miss (#1692) is
+        # NOT a bail -- rescued comes back False (not None) and the session
+        # completes normally below, with task_already_terminal marking why.
         resolution = _resolve_and_complete_headless_session(
             state,
             session,
@@ -542,15 +567,15 @@ def signal_stop() -> None:
         )
         rescued = resolution.rescued
         landed_terminal = resolution.landed_terminal
+        task_already_terminal = resolution.task_already_terminal
 
     if rescued is None:
         # #1273: a BlockedResult that itself just landed the task
         # terminal-FAILED leaks the DAEMON worker -- stop it even though the
-        # session is never marked COMPLETED. A stage-mismatch (#986) or
-        # raced-to-terminal (#1189) refusal leaves landed_terminal False, so
-        # a still-legitimate or already-handled worker is left alone. Done
-        # after the lock releases, matching the network-call-outside-lock
-        # convention below.
+        # session is never marked COMPLETED. A stage-mismatch (#986) refusal
+        # leaves landed_terminal False, so a still-legitimate worker is left
+        # alone. Done after the lock releases, matching the
+        # network-call-outside-lock convention below.
         if (
             landed_terminal
             and session.origin is SessionOrigin.DAEMON
@@ -560,7 +585,12 @@ def signal_stop() -> None:
         return
 
     payload = _build_completed_payload(
-        session, context, claude_session_id, hook_payload, rescued=rescued
+        session,
+        context,
+        claude_session_id,
+        hook_payload,
+        rescued=rescued,
+        task_already_terminal=task_already_terminal,
     )
     record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
@@ -581,13 +611,17 @@ def _build_completed_payload(
     hook_payload: dict[str, object],
     *,
     rescued: bool,
+    task_already_terminal: bool = False,
 ) -> dict[str, object]:
     """Build the SESSION_COMPLETED event payload.
 
     When *rescued* is True (a late Stop-hook sentinel salvaged an idle-parked
     task, #918) the payload carries ``rescued``/``rescue_reason``; those keys
     are omitted otherwise so the common path is unchanged (no new event type).
-    Extracted to keep signal_stop under the branch cap.
+    When *task_already_terminal* is True (GitHub #1692: a #1189 raced-to-
+    terminal lookup miss) the payload carries ``task_already_terminal`` so an
+    operator can tell this completion apart from an ordinary one. Extracted
+    to keep signal_stop under the branch cap.
     """
     payload: dict[str, object] = {
         "session_id": session.id,
@@ -601,4 +635,6 @@ def _build_completed_payload(
     if rescued:
         payload["rescued"] = True
         payload["rescue_reason"] = "late_sentinel"
+    if task_already_terminal:
+        payload["task_already_terminal"] = True
     return payload

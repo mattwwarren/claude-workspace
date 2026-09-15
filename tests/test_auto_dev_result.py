@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from cw.auto_dev_result import (
     _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION,
     _PREMISE_GLITCH_PLACEHOLDER_CLAIM,
+    AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION,
     BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS,
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
@@ -3693,6 +3694,60 @@ class TestStaleDispatchStatus:
 
     def test_v7_is_a_supported_schema_version(self) -> None:
         assert 7 in SUPPORTED_SCHEMA_VERSIONS
+
+
+# ---------------------------------------------------------------------------
+# Issue #2102 — plan_draft_fingerprint: the per-draft content hash that binds a
+# plan approval to the draft it was actually given for (schema v8).
+# ---------------------------------------------------------------------------
+
+
+class TestPlanDraftFingerprintField:
+    """The plan stage emits the draft's fingerprint so `cw dev-queue approve`
+    can bind the approval it records to that exact draft (#2102)."""
+
+    def test_current_schema_version_is_8(self) -> None:
+        assert AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION == 8
+        assert 8 in SUPPORTED_SCHEMA_VERSIONS
+
+    def test_v8_payload_carries_plan_draft_fingerprint(self) -> None:
+        payload = _plan_pending_payload()
+        payload["schema_version"] = 8
+        payload["plan_draft_fingerprint"] = "a" * 64
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.plan_draft_fingerprint == "a" * 64
+
+    def test_payload_without_plan_draft_fingerprint_parses_as_none(self) -> None:
+        """Back-compat: a pre-#2102 producer omits the key entirely."""
+        payload = _plan_pending_payload()
+        payload["schema_version"] = 7
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.plan_draft_fingerprint is None
+
+    def test_contract_doc_states_one_current_schema_version(self) -> None:
+        """The v8 bump left §3.3's current-version statement behind at `5`,
+        contradicting §8. Pin both statements to the parser so the next bump
+        cannot silently strand one of them."""
+        from tests.conftest import _REPO_ROOT
+
+        doc = (_REPO_ROOT / "docs" / "headless-contract.md").read_text(encoding="utf-8")
+        current = AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
+        assert f"`schema_version: {current}` is the current contract." in doc
+        field_notes = doc[doc.index("### 3.3 Field Notes") :]
+        start = field_notes.index("| `schema_version` |")
+        row = field_notes[start : field_notes.index("\n", start)]
+        assert f"Currently `{current}`" in row
+
+    def test_producer_doc_bump_heading_names_the_current_version(self) -> None:
+        """`auto-dev.md`'s bump-history heading is the producer-side twin of the
+        §3.3 row above; left at an older version it tells the producer to stamp
+        a version the parser has already moved past."""
+        from tests.conftest import _cmd
+
+        current = AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
+        assert f"**`schema_version: {current}`**" in _cmd("auto-dev.md")
 
 
 # ---------------------------------------------------------------------------

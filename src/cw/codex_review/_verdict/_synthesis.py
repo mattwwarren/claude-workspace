@@ -31,6 +31,7 @@ from cw.codex_review._const import (
 )
 from cw.codex_review._verdict._health import (
     _derive_health,
+    _format_degraded_document_highlights,
     _format_failures_detail,
     _has_transient_failure,
 )
@@ -414,6 +415,9 @@ def synthesize_codex_review_result(
         commits=[],
         review=verdict.review,
         health=_derive_health(documents),
+        friction_highlights=_format_degraded_document_highlights(
+            documents, session_id=session_id
+        ),
         worktree_path=str(worktree),
     )
     return result, verdict

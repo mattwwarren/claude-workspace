@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.exceptions import CwError, DispatchLoopLockedError
-from cw.models import QueueItemStatus
+from cw.models import TERMINAL_QUEUE_STATUSES, QueueItemStatus
 from cw.pr_hydrate import _parse_pr_url, _repo_slug_mismatch
 from cw.reconcile.review_recipes._shared import (
     _ATTENTION_CI_FAILING,
@@ -73,10 +73,11 @@ _PAYLOAD_KEY_FROM_COMPLETED_APPLIED = "from_completed_applied"
 # hatches. Every other QueueItemStatus member (PENDING/RUNNING, or already
 # parked BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF) already owns the ticket,
 # so no action beyond the follow-up tick is needed -- see
-# _redispatch_existing_row.
-_REQUEUE_ELIGIBLE_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    [QueueItemStatus.COMPLETED, QueueItemStatus.CANCELLED, QueueItemStatus.FAILED]
-)
+# _redispatch_existing_row. Review round 2 (#1692): this was an
+# independently-defined literal identical to
+# cw.reconcile._shared._GENUINELY_TERMINAL_QUEUE_STATUSES -- both now alias
+# the single cw.models.TERMINAL_QUEUE_STATUSES definition.
+_REQUEUE_ELIGIBLE_STATUSES: frozenset[QueueItemStatus] = TERMINAL_QUEUE_STATUSES
 
 
 def _detect_auto_fix_ci(

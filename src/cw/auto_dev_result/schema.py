@@ -33,7 +33,7 @@ _log = logging.getLogger("cw.auto_dev_result")
 # Accepted sentinel schema versions. Single source of truth: parse.py derives
 # SUPPORTED_SCHEMA_VERSIONS (its pre-Pydantic gate) from this Literal via
 # get_args, so a version bump edits exactly one place (#1535 drift class).
-SchemaVersion = Literal[1, 2, 3, 4, 5, 6, 7]
+SchemaVersion = Literal[1, 2, 3, 4, 5, 6, 7, 8]
 
 Status = Literal[
     "shipped",
@@ -789,6 +789,14 @@ class AutoDevResult(BaseModel):
     # comment id/URL and the settled item ids. None when resolution_consumed
     # is False or absent. See GitHub issue #1896.
     resolution_evidence: dict[str, Any] | None = None
+    # v8: SHA-256 (full hex) of `.cw/plan-draft.md` with its bookkeeping lines
+    # stripped, per auto-dev-plan.md's *Plan-draft fingerprint rule* (#2102).
+    # Emitted at every plan-stage sentinel that has a draft in hand; null when
+    # no draft exists. `cw dev-queue approve` copies it onto the row as
+    # `plan_approved_fingerprint`, which is what lets the next round's
+    # Checkpoint 1 tell "approved, and the text is unchanged" from "approved,
+    # but this is a different draft now".
+    plan_draft_fingerprint: str | None = None
 
     @field_validator("cost_usd")
     @classmethod

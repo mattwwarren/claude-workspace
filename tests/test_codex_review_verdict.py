@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.auto_dev_result import Review
+from cw.auto_dev_result import AgentHealthEntry, Review
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_BUDGET_EXHAUSTED,
@@ -30,7 +30,10 @@ from cw.codex_review._capability import (
     _CodexFilesystemCapability,
     _CodexFingerprint,
 )
-from cw.codex_review._verdict._health import _READ_ONLY_SANDBOX_EXEMPT_ROLES
+from cw.codex_review._verdict._health import (
+    _READ_ONLY_SANDBOX_EXEMPT_ROLES,
+    _format_degraded_document_highlights,
+)
 from cw.codex_review._verdict._render import _render_rejected_finding_text
 from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
@@ -603,6 +606,69 @@ class TestSynthesizeCodexReviewResultHealth:
         assert verdict is not None
         assert verdict.agents_run[0].detail == "sandbox lacked filesystem access"
 
+    def test_clean_pass_has_empty_friction_highlights_and_high_agent_health(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # #2094: a fully clean review (every document "ok") must add zero new
+        # friction_highlights items and report HIGH confidence per agent.
+        worktree = make_git_repo("wt-synth-2094-clean")
+        doc = _make_reviewer_doc(reviewer_role="Architecture Reviewer")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-2094-clean",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.status == "stage_complete"
+        assert result.friction_highlights == []
+        assert result.health.agent_health_summary == [
+            AgentHealthEntry(agent_id="Architecture Reviewer", confidence="HIGH")
+        ]
+        assert verdict is not None
+
+    @pytest.mark.parametrize(
+        ("status", "confidence"), [("degraded", "MEDIUM"), ("failed", "LOW")]
+    )
+    def test_non_ok_document_populates_friction_highlights_and_agent_health(
+        self,
+        make_git_repo: Callable[[str], Path],
+        status: str,
+        confidence: str,
+    ) -> None:
+        # #2094 gap 2: friction_highlights/agent_health_summary must carry the
+        # per-reviewer rationale that was previously silently dropped.
+        worktree = make_git_repo(f"wt-synth-2094-{status}")
+        doc = _make_reviewer_doc(
+            status=status,
+            detail="could not complete required check",
+            reviewer_role="Architecture Reviewer",
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id=f"s-synth-2094-{status}",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        bundle = diagnostics_bundle_dir(f"s-synth-2094-{status}")
+        assert result.friction_highlights == [
+            f"Architecture Reviewer: {status} — could not complete required check",
+            f"[diagnostics: {bundle}]",
+        ]
+        assert result.health.agent_health_summary == [
+            AgentHealthEntry(agent_id="Architecture Reviewer", confidence=confidence)
+        ]
+        assert verdict is not None
+
 
 class TestReadOnlySandboxDegradedCarveOut:
     """#1856 (Test Reviewer), widened by #2174 to Code Quality Reviewer and
@@ -640,6 +706,42 @@ class TestReadOnlySandboxDegradedCarveOut:
         assert result.health.lowest_agent_confidence == "HIGH"
         assert result.health.any_incomplete_risk is False
         assert result.health.recommendation == "PROCEED"
+        assert verdict is not None
+
+    @pytest.mark.parametrize("reviewer_role", sorted(_READ_ONLY_SANDBOX_EXEMPT_ROLES))
+    def test_exempt_role_degraded_status_not_masked_in_agent_health_or_friction(
+        self, make_git_repo: Callable[[str], Path], reviewer_role: str
+    ) -> None:
+        # #2094 deliberate non-masking decision: excluded from the gate
+        # computation (PROCEED, per the sibling test above) but NOT masked
+        # to HIGH/omitted in agent_health_summary/friction_highlights -- it
+        # still reports its real status/confidence.
+        worktree = make_git_repo(f"wt-2094-exempt-nonmask-{reviewer_role}")
+        doc = _make_reviewer_doc(
+            status="degraded",
+            detail="read-only sandbox tax",
+            reviewer_role=reviewer_role,
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-2094-exempt",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.health.recommendation == "PROCEED"
+        assert result.health.agent_health_summary == [
+            AgentHealthEntry(agent_id=reviewer_role, confidence="MEDIUM")
+        ]
+        bundle = diagnostics_bundle_dir("s-synth-2094-exempt")
+        assert result.friction_highlights == [
+            f"{reviewer_role}: degraded — read-only sandbox tax",
+            f"[diagnostics: {bundle}]",
+        ]
         assert verdict is not None
 
     @pytest.mark.parametrize("reviewer_role", sorted(_READ_ONLY_SANDBOX_EXEMPT_ROLES))
@@ -2309,6 +2411,46 @@ def test_format_failures_detail_includes_diagnostics_path() -> None:
     # pointer is exactly "[diagnostics: <absolute bundle dir>]".
     bundle = diagnostics_bundle_dir("sess-fmt")
     assert detail == f"Code Quality Reviewer (codex_timeout) [diagnostics: {bundle}]"
+
+
+class TestFormatDegradedDocumentHighlights:
+    """#2094: friction_highlights population for degraded/failed documents."""
+
+    def test_all_ok_documents_returns_empty_list(self) -> None:
+        docs = [_make_reviewer_doc(reviewer_role="Role A")]
+        assert _format_degraded_document_highlights(docs, session_id="s-fdh") == []
+
+    def test_non_ok_documents_render_one_line_each_plus_trailing_pointer(
+        self,
+    ) -> None:
+        docs = [
+            _make_reviewer_doc(
+                status="degraded",
+                detail="sandbox lacked filesystem access",
+                reviewer_role="Architecture Reviewer",
+            ),
+            _make_reviewer_doc(
+                status="failed",
+                detail="crashed mid-run",
+                reviewer_role="Performance Reviewer",
+            ),
+        ]
+        highlights = _format_degraded_document_highlights(docs, session_id="s-fdh-2")
+        bundle = diagnostics_bundle_dir("s-fdh-2")
+        assert highlights == [
+            "Architecture Reviewer: degraded — sandbox lacked filesystem access",
+            "Performance Reviewer: failed — crashed mid-run",
+            f"[diagnostics: {bundle}]",
+        ]
+
+    def test_mixed_ok_and_non_ok_documents_only_render_non_ok(self) -> None:
+        docs = [
+            _make_reviewer_doc(reviewer_role="Role A"),
+            _make_reviewer_doc(status="degraded", detail="x", reviewer_role="Role B"),
+        ]
+        highlights = _format_degraded_document_highlights(docs, session_id="s-fdh-3")
+        assert len(highlights) == 2
+        assert highlights[0] == "Role B: degraded — x"
 
 
 # ---------------------------------------------------------------------------

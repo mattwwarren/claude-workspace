@@ -9,14 +9,18 @@ diff.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from cw.auto_dev_result import Health
+from cw.auto_dev_result import AgentHealthEntry, Health
 from cw.codex_review._const import _TRANSIENT_FAILURE_REASONS
 from cw.executor_diagnostics import append_diagnostics_pointer
 
 if TYPE_CHECKING:
-    from cw.review_findings import ReviewerFindingsDocument, ReviewerRunFailure
+    from cw.review_findings import (
+        ReviewerFindingsDocument,
+        ReviewerHealthStatus,
+        ReviewerRunFailure,
+    )
 
 # #1856, widened by #2174: the codex-review sandbox is unconditionally
 # read-only for every reviewer role (`_roles.py::_build_generic_codex_argv`,
@@ -77,6 +81,49 @@ def _format_failures_detail(
     return append_diagnostics_pointer(summary, session_id=session_id)
 
 
+# #2094: the only mapping from a reviewer's self-reported status to the
+# closed AgentHealthEntry.confidence vocabulary. "ok" -> HIGH mirrors
+# _derive_health's own "nothing wrong found" baseline; "degraded" -> MEDIUM
+# and "failed" -> LOW mirror the coarser MEDIUM the aggregate gate already
+# assigns to any non-"ok" document, refined here per-document instead of
+# collapsed to one roster-wide signal.
+_STATUS_TO_CONFIDENCE: dict[ReviewerHealthStatus, Literal["HIGH", "MEDIUM", "LOW"]] = {
+    "ok": "HIGH",
+    "degraded": "MEDIUM",
+    "failed": "LOW",
+}
+
+
+def _format_degraded_document_highlights(
+    documents: list[ReviewerFindingsDocument], *, session_id: str
+) -> list[str]:
+    """Render every non-``"ok"`` *documents* entry as a friction highlight.
+
+    One ``f"{role}: {status} — {detail}"`` line per non-``"ok"`` document,
+    plus a trailing bare diagnostics-pointer entry (#2094) so an operator's
+    next click lands on the per-role documents :func:`_persist_codex_role_document`
+    just wrote. Mirrors ``codex_fix_loop._with_snapshot_pointer``'s
+    list-append-one-pointer-item shape combined with
+    :func:`_format_failures_detail`'s ``append_diagnostics_pointer`` call.
+
+    Empty-case contract: when every document's ``status == "ok"``, this
+    returns ``[]`` — no per-document entries and no trailing pointer, so a
+    fully clean pass adds zero new ``friction_highlights`` items. A
+    read-only-sandbox-exempt role's structurally-forced ``"degraded"``
+    document is deliberately NOT excluded here (unlike the aggregate gate in
+    :func:`_derive_health`) — it still reports its real status/detail rather
+    than being masked, per #2094's non-masking decision.
+    """
+    highlights = [
+        f"{doc.reviewer_role}: {doc.status} — {doc.detail}"
+        for doc in documents
+        if doc.status != "ok"
+    ]
+    if not highlights:
+        return []
+    return [*highlights, append_diagnostics_pointer("", session_id=session_id)]
+
+
 def _derive_health(documents: list[ReviewerFindingsDocument]) -> Health:
     """Derive the clean-review ``Health`` signal from reviewer document status.
 
@@ -110,7 +157,21 @@ def _derive_health(documents: list[ReviewerFindingsDocument]) -> Health:
     document from one of these roles is not covered by the exclusion and
     still downgrades health, as does a ``"degraded"`` document from any
     other role.
+
+    ``agent_health_summary`` (#2094) carries one :class:`AgentHealthEntry`
+    per *document*, unconditionally — the read-only-sandbox exemption above
+    only excludes a document from the aggregate gate computation, it does
+    not mask that document's real status/confidence here; masking it would
+    silently reintroduce the "which reviewer and why" blindness this ticket
+    closes for the one class of degradation that happens on every ticket.
     """
+    agent_health_summary = [
+        AgentHealthEntry(
+            agent_id=doc.reviewer_role,
+            confidence=_STATUS_TO_CONFIDENCE[doc.status],
+        )
+        for doc in documents
+    ]
     if any(
         doc.status != "ok" and not _is_environment_muted_degradation(doc)
         for doc in documents
@@ -119,9 +180,11 @@ def _derive_health(documents: list[ReviewerFindingsDocument]) -> Health:
             lowest_agent_confidence="MEDIUM",
             any_incomplete_risk=True,
             recommendation="EXIT_FOR_HUMAN_REVIEW",
+            agent_health_summary=agent_health_summary,
         )
     return Health(
         lowest_agent_confidence="HIGH",
         any_incomplete_risk=False,
         recommendation="PROCEED",
+        agent_health_summary=agent_health_summary,
     )

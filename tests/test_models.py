@@ -14,6 +14,7 @@ from cw.models import (
     DEFAULT_AUTO_PURPOSES,
     DEFAULT_LANE,
     DEV_QUEUE_SCHEMA_VERSION,
+    TERMINAL_QUEUE_STATUSES,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -1073,7 +1074,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 35
+        assert DEV_QUEUE_SCHEMA_VERSION == 36
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -1232,6 +1233,38 @@ class TestOperatorSignoffGates:
     def test_ticket_task_carries_signoff_operator(self) -> None:
         task = TicketTask(ticket_id="GEN-1", client="acme", signoff="operator")
         assert task.signoff == "operator"
+
+
+class TestTerminalQueueStatuses:
+    """GitHub #1692 review round 2 MUST_FIX: cw.reconcile._shared and
+    cw.reconcile.review_recipes.auto_fix_ci each independently defined the
+    identical {COMPLETED, FAILED, CANCELLED} frozenset literal. Both now
+    alias this single cw.models constant -- these tests prove the shared
+    identity, not just equal values, so the two modules cannot silently
+    re-fork the definition later.
+    """
+
+    def test_terminal_queue_statuses_contents(self) -> None:
+        assert (
+            frozenset(
+                [
+                    QueueItemStatus.COMPLETED,
+                    QueueItemStatus.FAILED,
+                    QueueItemStatus.CANCELLED,
+                ]
+            )
+            == TERMINAL_QUEUE_STATUSES
+        )
+
+    def test_reconcile_shared_aliases_canonical_constant(self) -> None:
+        from cw.reconcile import _shared
+
+        assert _shared._GENUINELY_TERMINAL_QUEUE_STATUSES is TERMINAL_QUEUE_STATUSES
+
+    def test_auto_fix_ci_aliases_canonical_constant(self) -> None:
+        from cw.reconcile.review_recipes import auto_fix_ci
+
+        assert auto_fix_ci._REQUEUE_ELIGIBLE_STATUSES is TERMINAL_QUEUE_STATUSES
 
     def test_lane_config_signoff_defaults_none(self) -> None:
         from cw.models import LaneConfig
@@ -1976,7 +2009,8 @@ class TestPackageExportCompleteness:
     #1730's ``HOOK_CONTEXT_RELATIVE_PATH`` = 50, plus #1646's three
     ``AGENT_SPAWN_*`` stamp keys = 53, plus #1646's own review-fix-loop
     addition of ``extract_unresolved_spawn_count`` = 54, plus #2100's
-    ``occupies_lane_slot`` = 55) — hardcoded here, NOT
+    ``occupies_lane_slot`` = 55, plus #2102's two ``PLAN_*_FINGERPRINT_KEY``
+    wire keys = 57) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2023,6 +2057,8 @@ class TestPackageExportCompleteness:
             "OrchestratorConfig",
             "OrchestratorEvent",
             "OrchestratorEventType",
+            "PLAN_APPROVED_FINGERPRINT_KEY",
+            "PLAN_DRAFT_FINGERPRINT_KEY",
             "PendingFixDispatch",
             "PrState",
             "QueueItemStatus",
@@ -2036,6 +2072,7 @@ class TestPackageExportCompleteness:
             "Stage",
             "StageExecutorConfig",
             "StagePipelineConfig",
+            "TERMINAL_QUEUE_STATUSES",
             "TERMINAL_SESSION_STATUSES",
             "TicketTask",
             "WORKER_PURPOSES",
