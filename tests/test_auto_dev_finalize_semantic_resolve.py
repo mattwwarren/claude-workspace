@@ -34,6 +34,7 @@ from tests.conftest import (
     _appendix,
     _bash_fences,
     _cmd,
+    _placement,
     run_guard_fence,
 )
 
@@ -49,13 +50,6 @@ _INVOKED = GUARD_FENCE_INVOKED
 # The one marker value that may reach the invocation (the version table's
 # minimum for this script).
 _CURRENT_MARKER = "# cw-script-version: 1\n"
-
-
-def _placement(location: str, body: str) -> dict[str, str | None]:
-    """Plant *body* at the repo-local or the global candidate location."""
-    if location == "repo_local":
-        return {"repo_local": body, "global_copy": None}
-    return {"repo_local": None, "global_copy": body}
 
 
 def _finalize() -> str:
@@ -128,6 +122,10 @@ def test_stale_guard_fence_reaches_the_resolver_on_a_current_marker(
         ("malformed_float", "# cw-script-version: 1.5\n"),
         ("malformed_alpha", "# cw-script-version: abc\n"),
         ("malformed_empty", "# cw-script-version:\n"),
+        # An unbounded `^[0-9]+$` accepts this, and `[ -lt ]` then errors with
+        # "integer expression expected", evaluates false, and runs the resolver
+        # anyway — the round-2 fail-open one width up (#2141 round 5).
+        ("malformed_oversized", "# cw-script-version: 99999999999999999999\n"),
     ],
 )
 def test_stale_guard_fence_hard_stops_without_invoking(
@@ -153,15 +151,36 @@ def test_stale_guard_fence_skips_when_absent_from_both_locations(
 ) -> None:
     """Absence is a separate branch: no invocation, and no shell hard stop.
 
-    Step 4c.5's absent disposition still escalates — prose-level — to the
-    unchanged ``merge_conflict_post_push`` sentinel; what the fence must not do
-    is invoke ``uv run python`` against a nonexistent path or fire the
-    marker-stale stop.
+    "Not invoked" alone is not the contract (#2141 round 5). Unlike this
+    pipeline's other guard sites, absence here is *not* "continue
+    non-blocking": the required fallback is the documented
+    ``merge_conflict_post_push`` escalation, so this pins both halves — the
+    fence leaves ``$RESOLVE_OUTPUT`` unset (nothing downstream can mistake a
+    nonexistent resolver for a refusal verdict), and the section's absent
+    bullet still routes to that sentinel via ``git merge --abort``.
     """
     result = _run_stale_guard(tmp_path)
     assert result.returncode == 0, result.stderr
     assert _INVOKED not in result.stdout
     assert "STALE:" not in result.stdout
+    # The runner echoes `${VERDICT-}${RESOLVE_OUTPUT-}${SCOPE_CONFORMANCE_OUTPUT-}`
+    # after the fence, so a populated capture variable would show up here.
+    assert result.stdout.strip() == "", (
+        f"the absent branch must capture no resolver output: {result.stdout!r}"
+    )
+
+    bullets = [
+        line
+        for line in _semantic_resolve_section().splitlines()
+        if "Absent from both locations" in line
+    ]
+    assert len(bullets) == 1, f"expected one absent-disposition bullet, got {bullets}"
+    absent = bullets[0]
+    assert "classify_merge_conflict: script absent, skipped" in absent
+    assert "git merge --abort" in absent
+    assert "merge_conflict_post_push" in absent, (
+        "the absent branch must name the escalation sentinel it falls through to"
+    )
 
 
 def test_semantic_resolve_section_inserted_before_blocker_template() -> None:

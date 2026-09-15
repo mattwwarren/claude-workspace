@@ -213,6 +213,21 @@ def write_guard_stub_bin(tmp_path: Path) -> Path:
     return bin_dir
 
 
+def _placement(location: str, body: str) -> dict[str, str | None]:
+    """Plant *body* at the repo-local or the global candidate location (#2141).
+
+    The ``**kwargs`` pair a ``run_guard_fence`` caller passes to exercise one
+    branch of the resolver's candidate list. Hoisted here next to
+    ``write_guard_stub_bin`` (round 5): ``test_scope_conformance_gate_docs.py``
+    and ``test_auto_dev_finalize_semantic_resolve.py`` each carried a
+    byte-identical private copy, so a change to the runner's keyword names
+    could land in one and not the other.
+    """
+    if location == "repo_local":
+        return {"repo_local": body, "global_copy": None}
+    return {"repo_local": None, "global_copy": body}
+
+
 def substitute_fence_placeholders(fence: str, placeholders: Mapping[str, str]) -> str:
     """Replace ``<name>`` doc placeholders in *fence*, and nothing else (#2141).
 

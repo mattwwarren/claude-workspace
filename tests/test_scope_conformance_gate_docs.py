@@ -24,6 +24,7 @@ from tests.conftest import (
     _bash_fences,
     _clean_git_env,
     _cmd,
+    _placement,
     run_guard_fence,
     substitute_fence_placeholders,
     write_guard_stub_bin,
@@ -355,6 +356,45 @@ def test_gate2_fence_derives_the_session_worktree_in_its_own_fence() -> None:
         )
 
 
+def test_gate2_fence_defines_tmpwt_and_fork_point_before_using_them() -> None:
+    """Gate 2's fence must define its own setup variables (#2141 round 5).
+
+    Round 4 replaced the fence from ``MIN_VERSION=`` down and left the
+    pre-existing ``git -C "$TMPWT" diff --name-only "$FORK_POINT"`` line above
+    it, so the block read ``$TMPWT`` before assigning it and read
+    ``$FORK_POINT``, which it never assigned at all. The ordering is the whole
+    self-containment claim, so it is pinned textually here rather than left to
+    the executable test alone.
+    """
+    fence = _gate2_fence()
+    for name in ("TMPWT", "FORK_POINT"):
+        assignment = f"{name}="
+        use = f'"${name}"'
+        assert assignment in fence, (
+            f"gate 2's fence never assigns ${name}: it depends on the setup "
+            f"fence's shell state, which does not persist"
+        )
+        assert fence.index(assignment) < fence.index(use), (
+            f"gate 2's fence reads ${name} before assigning it"
+        )
+
+
+def test_canonical_rule_bounds_the_marker_digit_count() -> None:
+    """The prose must state the bound, not just the fences (#2141 round 5).
+
+    An unbounded ``^[0-9]+$`` accepts a 20-digit marker, which overflows
+    ``[ -lt ]``; the comparison errors, evaluates false, and the invocation
+    runs anyway — the same fail-open shape as the round-2 ``1.5`` finding.
+    """
+    section = _resolver_table_section()
+    assert "1-6 digit" in section, (
+        "the canonical marker-parsing rule must state the 1-6 digit bound"
+    )
+    assert "^[0-9]+$" not in section, (
+        "the canonical rule must not still advertise the unbounded regex"
+    )
+
+
 def test_resolver_table_lists_all_four_scripts_with_minimum_version() -> None:
     """One shared table in auto-dev-impl.md covers all four guard scripts."""
     section = _resolver_table_section()
@@ -504,9 +544,13 @@ _GUARD_SCRIPTS = [
 _CURRENT_MARKER = "# cw-script-version: 1\n"
 
 # Every marker state that must NOT reach it. Anything that is not
-# ``^[0-9]+$`` is stale by construction — a `grep -oE '[0-9]+'` extraction
+# ``^[0-9]{1,6}$`` is stale by construction — a `grep -oE '[0-9]+'` extraction
 # turned `1.5` into two lines, which made `[ ... -lt ... ]` error out and the
 # condition evaluate false, so the script ran anyway (#2141 review round 2).
+# ``oversized`` is the same failure one width up (#2141 review round 5): an
+# unbounded ``^[0-9]+$`` accepts a 20-digit value, which then overflows
+# ``[ -lt ]`` ("integer expression expected"), evaluates false, and falls
+# through to the invocation — so the digit count itself has to be bounded.
 _STALE_MARKERS: list[tuple[str, str]] = [
     ("below_minimum", "# cw-script-version: 0\n"),
     ("no_marker", "import sys\n"),
@@ -515,6 +559,7 @@ _STALE_MARKERS: list[tuple[str, str]] = [
     ("malformed_negative", "# cw-script-version: -1\n"),
     ("malformed_suffix", "# cw-script-version: 2x\n"),
     ("malformed_empty", "# cw-script-version:\n"),
+    ("malformed_oversized", "# cw-script-version: 99999999999999999999\n"),
 ]
 
 # Where the resolved copy lives. ``global_only`` is the branch that motivated
@@ -523,12 +568,6 @@ _STALE_MARKERS: list[tuple[str, str]] = [
 # silently misses and falls through to the global copy, so a repo-local-only
 # fixture cannot tell a correct resolver from a broken one.
 _LOCATIONS = ["repo_local", "global_only"]
-
-
-def _placement(location: str, body: str) -> dict[str, str | None]:
-    if location == "repo_local":
-        return {"repo_local": body, "global_copy": None}
-    return {"repo_local": None, "global_copy": body}
 
 
 @pytest.mark.parametrize("script", _GUARD_SCRIPTS)
@@ -644,6 +683,11 @@ def test_every_site_fence_skips_when_absent_from_both_locations(
 _GATE2_BRANCH = "dev/gate2-fixture"
 _GATE2_LOCATIONS = ["session_worktree", "global_only"]
 
+# Committed on the branch one commit past ``main``, so the fence's own
+# ``FORK_POINT`` derivation shows up as real content in
+# ``/tmp/touched_files-$CW_SESSION`` (#2141 round 5).
+_PROBE_FILE = "scope_probe.txt"
+
 
 class _Gate2Placement(TypedDict):
     """Where gate 2's resolver should find its candidate, as ``**kwargs``."""
@@ -685,8 +729,9 @@ def _run_gate2_fence(
     global_copy: str | None = None,
     plan: bool = True,
     session_worktree: bool = True,
+    gate_worktree: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """Execute gate 2's own fence against real worktrees (#2141 round 4).
+    """Execute gate 2's own fence against real worktrees (#2141 round 4/5).
 
     Deliberately not the shared ``run_guard_fence``: gate 2's resolver reads
     ``git -C "$TMPWT" worktree list``, so only a fixture with an actual detached
@@ -695,10 +740,20 @@ def _run_gate2_fence(
 
     The fence runs as its own ``bash -c`` invocation with **cwd = the detached
     ``$TMPWT``** — the shell a headless worker would give it if it executed each
-    fenced block separately — and the environment exports ``SESSION_ROOT`` and
-    ``GUARD_ROOT`` pointing at that detached checkout. Both are poison: a fence
-    that consults either, or that falls back to the ambient cwd, resolves to the
+    fenced block separately — and with ``TMPWT`` and ``FORK_POINT`` **unset**
+    (#2141 round 5). Those two are the setup fence's variables, and the gate-2
+    block must derive both itself; a fixture that exported them could not tell a
+    self-contained fence from one silently reading another fence's shell state.
+    ``SESSION_ROOT`` and ``GUARD_ROOT`` are still exported, pointing at the
+    detached checkout: they are round 4's poison decoys, and a fence that
+    consults either — or that falls back to the ambient cwd — resolves to the
     gate worktree and fails these tests instead of silently skipping the gate.
+
+    The repo carries a real ``origin`` remote (itself), so ``origin/main`` and
+    ``origin/<branch>`` exist for the fence's own ``merge-base``, and the branch
+    carries one commit past ``main`` touching ``_PROBE_FILE`` — which is what
+    makes an in-fence ``FORK_POINT`` observable in the touched-files scratch
+    output echoed after the fence.
     """
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
@@ -706,7 +761,13 @@ def _run_gate2_fence(
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "cw test")
     _git(repo, "commit", "--allow-empty", "-m", "initial")
-    _git(repo, "branch", _GATE2_BRANCH)
+    _git(repo, "checkout", "-b", _GATE2_BRANCH)
+    (repo / _PROBE_FILE).write_text("delivered\n", encoding="utf-8")
+    _git(repo, "add", _PROBE_FILE)
+    _git(repo, "commit", "-m", "probe")
+    _git(repo, "checkout", "main")
+    _git(repo, "remote", "add", "origin", str(repo))
+    _git(repo, "fetch", "origin")
 
     session_wt = tmp_path / "session-wt"
     if session_worktree:
@@ -729,23 +790,25 @@ def _run_gate2_fence(
 
     session = _gate2_session(tmp_path)
     tmpwt = Path(f"/tmp/gate-wt-{session}")
-    _git(repo, "worktree", "add", "--detach", str(tmpwt), _GATE2_BRANCH)
+    if gate_worktree:
+        _git(repo, "worktree", "add", "--detach", str(tmpwt), _GATE2_BRANCH)
 
     bin_dir = write_guard_stub_bin(tmp_path)
     body = (
         substitute_fence_placeholders(_gate2_fence(), {"branch-name": _GATE2_BRANCH})
-        + '\necho "${SCOPE_CONFORMANCE_OUTPUT-}"\n'
+        + '\necho "${SCOPE_CONFORMANCE_OUTPUT-}"'
+        + f'\ncat "/tmp/touched_files-{session}" 2>/dev/null\n'
     )
     try:
         return subprocess.run(
             ["bash", "-c", body],
-            cwd=tmpwt,
+            # A missing gate worktree cannot also be the cwd; the repo root
+            # stands in, and is itself a decoy the fence must not resolve to.
+            cwd=tmpwt if gate_worktree else repo,
             env={
                 "HOME": str(home),
                 "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
                 "CW_SESSION": session,
-                "TMPWT": str(tmpwt),
-                "FORK_POINT": "HEAD",
                 "SESSION_ROOT": str(tmpwt),
                 "GUARD_ROOT": str(tmpwt),
             },
@@ -776,6 +839,48 @@ def test_gate2_fence_resolves_the_session_worktree_from_the_gate_worktree(
     session_wt = (tmp_path / "session-wt").resolve()
     assert str(session_wt / ".claude" / "scripts" / _GATE2_SCRIPT) in result.stdout
     assert f"--plan {session_wt / '.cw' / 'plan.md'}" in result.stdout
+
+
+def test_gate2_fence_derives_tmpwt_and_fork_point_itself(tmp_path: Path) -> None:
+    """The round-5 contract, executed (#2141).
+
+    The fence runs in a shell where ``TMPWT`` and ``FORK_POINT`` are unset —
+    only ``CW_SESSION`` and ``HOME`` carry over — because shell state does not
+    persist between fenced ``Bash`` calls. Round 4 left both of them read on the
+    fence's first line and defined (``TMPWT``) or never defined (``FORK_POINT``)
+    below it, so the "self-contained" block still depended on the setup fence.
+
+    ``_PROBE_FILE`` in the touched-files scratch output is the proof that
+    ``FORK_POINT`` was computed here: it is the one file the branch adds past
+    ``origin/main``, so an empty (or errored) diff means the merge-base never
+    ran.
+    """
+    result = _run_gate2_fence(tmp_path, session_copy=_CURRENT_MARKER)
+    assert result.returncode == 0, result.stderr
+    assert _INVOKED in result.stdout
+    session_wt = (tmp_path / "session-wt").resolve()
+    assert str(session_wt / ".claude" / "scripts" / _GATE2_SCRIPT) in result.stdout
+    assert f"--plan {session_wt / '.cw' / 'plan.md'}" in result.stdout
+    assert _PROBE_FILE in result.stdout, (
+        "the touched-files diff is empty: FORK_POINT was not derived in-fence"
+    )
+
+
+def test_gate2_fence_hard_stops_when_the_gate_worktree_is_missing(
+    tmp_path: Path,
+) -> None:
+    """No ``$TMPWT`` on disk → exit 3, never a silent skip (#2141 round 5).
+
+    Every ``git -C "$TMPWT"`` below would fail one at a time and leave the gate
+    looking like it ran, so the fence checks the directory up front.
+    """
+    result = _run_gate2_fence(
+        tmp_path, session_copy=_CURRENT_MARKER, gate_worktree=False
+    )
+    assert result.returncode == 3, result.stdout
+    assert _INVOKED not in result.stdout
+    assert "gate worktree" in result.stdout
+    assert "missing" in result.stdout
 
 
 def test_gate2_fence_hard_stops_when_the_session_worktree_is_absent(
@@ -865,7 +970,7 @@ def test_canonical_template_shows_the_hard_stop_shape() -> None:
     assert "<blocker.reason>" in template
     assert "exit 3" in template
     assert '"$GUARD_ROOT/.claude/scripts/<script>.py"' in template
-    assert '[[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]]' in template
+    assert '[[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]]' in template
 
 
 def test_no_site_fence_uses_the_fail_open_or_cwd_relative_shapes() -> None:
@@ -890,8 +995,10 @@ def test_no_site_fence_uses_the_fail_open_or_cwd_relative_shapes() -> None:
             assert '[ -z "$FOUND_VERSION" ]' not in fence, (
                 f"{doc}: an emptiness test alone lets a malformed marker through"
             )
-            assert '[[ ! "$FOUND_VERSION" =~ ^[0-9]+$ ]]' in fence, (
-                f"{doc}: the marker must be rejected unless it is a clean integer"
+            assert '[[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]]' in fence, (
+                f"{doc}: the marker must be rejected unless it is a clean "
+                f"1-6 digit integer — an unbounded `+` accepts a value that "
+                f"then overflows `[ -lt ]` and falls open"
             )
             assert "for candidate in .claude/scripts/" not in fence, (
                 f"{doc}: the repo-local candidate must be absolutely anchored"
