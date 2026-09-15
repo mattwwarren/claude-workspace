@@ -95,7 +95,7 @@ def _resolve_loaded_version() -> str:
 _LOADED_VERSION: str = _resolve_loaded_version()
 
 
-def _event_session_id_disagrees_with_task(
+def _should_skip_session_completed_event(
     task: TicketTask,
     ticket_id: str,
     event_session_id: object,
@@ -192,8 +192,8 @@ def _apply_events_to_store(
             # would shadow BLOCKED_ON_USER, which downstream operators need.
             if task.status != QueueItemStatus.RUNNING:
                 continue
-            # Disambiguate stale events -- see _event_session_id_disagrees_with_task.
-            if _event_session_id_disagrees_with_task(task, ticket_id, event_session_id):
+            # Disambiguate stale events -- see _should_skip_session_completed_event.
+            if _should_skip_session_completed_event(task, ticket_id, event_session_id):
                 continue
             state = load_state()
             session = next(
