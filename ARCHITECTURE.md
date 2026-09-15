@@ -82,8 +82,21 @@ session to `COMPLETED`; a timed-out session with no merged PR reverts to
 open: a `gh` error or absent `gh` never blocks the disposition and never adds
 the tag.
 
-See `docs/adr/0006-reaping-is-gated-by-an-authority.md` and
-`docs/adr/0009-branch-absence-is-diagnostic-not-completion.md`.
+**ADR-0014 — timers never destroy work.** No code path may compare elapsed
+time or transcript age against a threshold and, on exceedance, mutate
+session status, the dev queue, the daemon roster, or a worktree. Thresholds
+may only debounce or delay *signals* and *re-checks*. A destructive act
+requires evidence (roster absence, a recorded terminal result, a dead PID) or
+an explicit operator command, and remains subject to ADR-0006's `reap_policy`
+gate. New health heuristics land as signals (events, notifications,
+advisories) first; promoting one to an automatic disposition requires a new
+ADR superseding this one. This is the constraint a plan reaches for when
+asked to fix a hang — "if it has been quiet for N minutes, do X to the
+session" — and it is forbidden as written.
+
+See `docs/adr/0006-reaping-is-gated-by-an-authority.md`,
+`docs/adr/0009-branch-absence-is-diagnostic-not-completion.md`, and
+`docs/adr/0014-timers-never-destroy-work.md`.
 
 ## §4 Dispatch & Admission
 
@@ -160,8 +173,15 @@ in `CLAUDE.md`'s "Module Size" section (`CLAUDE.md:80-101`): keep modules
 under ~1000 lines, treating that as a ceiling rather than a target, and split
 an oversized module into a package with an `__init__.py` that re-exports the
 public surface (`cw.cli` and `cw.reconcile` follow this shape) rather than
-letting individual functions or a single file grow unbounded. That section
-owns the full prose; this document does not duplicate it.
+letting individual functions or a single file grow unbounded. The same
+section carries the carve-out that a reviewer must apply with the ceiling:
+**cohesion beats raw count** — do not split a cohesive module just to clear
+the number (its own example is `reconcile/_shared.py`, which is large but is
+shared infrastructure for a single concern), and conversely a smaller module
+mixing unrelated concerns is still a smell. A module-size finding against a
+cohesive shared-infrastructure module is a false positive, not a §7/§8
+violation (#1486). That section owns the full prose; this document does not
+duplicate it.
 
 ## §7 Principles
 
@@ -190,7 +210,9 @@ cites one of these.
    tasks. — Source: `docs/headless-contract.md`
 6. Module-size / package-split convention: modules stay under ~1000 lines;
    exceeding it means splitting into a package with an `__init__.py` that
-   re-exports the public surface. — Source: `CLAUDE.md`
+   re-exports the public surface — except that a cohesive module serving a
+   single concern (e.g. `reconcile/_shared.py`) is not split just to clear
+   the number. — Source: `CLAUDE.md`
 7. cw never grants a GitHub review approval; there is no escape hatch
    without a superseding ADR. — Source:
    `docs/adr/0012-cw-never-grants-github-review-approvals.md`
@@ -219,6 +241,11 @@ cites one of these.
     diagnostic-only inference, not isolation boundaries. — Source: GitHub
     #2146 (pr-channel proxy repo filtering); see `_resolve_effective_repo`/
     `relay_upstream` in `src/cw/_events_channel_base.py`.
+13. Timers never destroy work: no elapsed-time or transcript-age comparison
+    may mutate session status, dev-queue state, the daemon roster, or a
+    worktree; time-based heuristics land as signals only, and a destructive
+    act needs evidence or an operator command. — Source:
+    `docs/adr/0014-timers-never-destroy-work.md`
 
 ## §8 Anti-patterns
 
@@ -250,7 +277,9 @@ principle, grounded in the same source document.
 6. A source module silently growing past ~1000 lines with no package
    split — accreting unrelated concerns into one file instead of
    extracting helpers or splitting into a package with a re-exporting
-   `__init__.py`. — Source: `CLAUDE.md`
+   `__init__.py`. (Flagging a cohesive single-concern module such as
+   `reconcile/_shared.py` purely on line count is the inverse error, not
+   this anti-pattern.) — Source: `CLAUDE.md`
 7. `gh pr review --approve` / GraphQL `addPullRequestReview(APPROVE)` /
    REST approve call anywhere in `src/` — reintroducing an
    approval-granting path via a flag, override, or "just this once"
@@ -276,6 +305,12 @@ principle, grounded in the same source document.
     silent bypass. Equally: N independent conditionals where one shared
     seam belongs, which regresses on the N+1th call site. — Source:
     `.claude/skills/harden-ticket/SKILL.md`
+13. A quiet-for-N-minutes disposition — any new sweep, watchdog, deadline,
+    or "resume and emit a sentinel on timeout" path that kills a process,
+    stamps `TIMED_OUT`, reverts RUNNING→PENDING, parks `BLOCKED_ON_USER`,
+    stops a daemon surface, or removes a worktree because a clock ran out
+    rather than because evidence arrived. — Source:
+    `docs/adr/0014-timers-never-destroy-work.md`
 
 ## Reference Table
 
@@ -294,6 +329,7 @@ new one.
 | [0008](docs/adr/0008-tracker-resolution-is-a-typed-seam.md) | Tracker resolution is a declared descriptor, not bespoke code | Proposed |
 | [0010](docs/adr/0010-live-dashboard-extends-orchestrate-watch.md) | The live work dashboard extends `cw orchestrate watch`, not a new surface *(deprecated — see `cw board`)* | Accepted |
 | [0013](docs/adr/0013-agent-delegated-ticket-work.md) | Provider-portable ticket work is agent work; cw keeps one GitHub-only programmatic client | Accepted |
+| [0015](docs/adr/0015-voided-finding-suppression-is-content-anchored.md) | Voided-finding suppression is content-anchored, never positional | Accepted |
 
 **Footnote:** `docs/adr/README.md`'s index table lists ADR-0005 as
 "Proposed", but ADR-0005's own file has `**Status:** Accepted — implemented
