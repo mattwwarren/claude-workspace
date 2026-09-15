@@ -22,6 +22,7 @@ case belongs in that table, not in a local list here (#2141 round 6).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -35,6 +36,7 @@ from tests.conftest import (
     GUARD_FENCE_INVOKED,
     GUARD_MARKER_BAD_CASES,
     GUARD_MARKER_CURRENT,
+    GUARD_MARKER_GOOD_CASES,
     GUARD_MARKER_STALE,
     _appendix,
     _bash_fences,
@@ -85,6 +87,11 @@ _MIN_VERSION_DECL = re.compile(r"^[ \t]*MIN_VERSION=(\d+)\b", re.MULTILINE)
 
 # The one marker-token regex the docs may state, in prose or in a fence.
 _BOUNDED_MARKER_REGEX = "^[0-9]{1,6}$"
+
+# How many lines of a script count as its header, and the header-anchored sed
+# every marker fence must extract with (#2141 round 8).
+_HEADER_LINES = "head -n 5"
+_HEADER_ANCHORED_SED = "sed -nE 's/^#[[:space:]]*cw-script-version:"
 # Any anchored digit regex, however bounded — used to prove there is only one.
 _ANCHORED_DIGIT_REGEX = re.compile(r"\^\[0-9\][^\s]*\$")
 
@@ -381,6 +388,14 @@ def test_gate2_fence_derives_the_session_worktree_in_its_own_fence() -> None:
     """
     fence = _gate2_fence()
     assert 'git -C "$TMPWT" worktree list' in fence
+    # Round 8: derived in-fence, but no longer from the branch name alone — the
+    # ticket-keyed probe comes first and the branch lookup is its fallback.
+    assert "cw-context.json" in fence
+    assert ".ticket_id" in fence
+    assert "<ticket-id>" in fence
+    assert fence.index("cw-context.json") < fence.index("branch refs/heads/"), (
+        "the branch-keyed lookup must be the fallback, not the primary"
+    )
     for forbidden in (
         "SESSION_ROOT",
         "GUARD_ROOT",
@@ -437,6 +452,62 @@ def test_canonical_rule_bounds_the_marker_digit_count() -> None:
     )
     assert "^[0-9]+$" not in _resolver_table_section(), (
         "the canonical rule must not still advertise the unbounded regex"
+    )
+
+
+def _marker_fence_docs() -> list[str]:
+    """Every doc carrying a ``cw-script-version`` fence (#2141 round 8)."""
+    docs = {doc for _, doc in _table_minimums().values()}
+    docs.add("auto-dev-impl.md")  # carries the canonical template fence too
+    docs.add("auto-dev-impl-appendix.md")
+    return sorted(docs)
+
+
+def test_every_marker_fence_anchors_the_parse_to_the_script_header() -> None:
+    """The marker must be a header comment line, not a mention anywhere (#2141 round 8).
+
+    ``grep -m1 'cw-script-version:'`` matched the literal wherever it appeared —
+    a docstring, a help string, a comment *about* the convention — so a script
+    whose header carried no marker at all passed on an incidental later mention,
+    which is precisely the stale copy the gate exists to reject. A behaviour
+    change to the shared shape has to land at every copy at once, so this scans
+    all of them rather than one exemplar.
+    """
+    fences = 0
+    for doc in _marker_fence_docs():
+        for fence in _bash_fences(_cmd(doc)):
+            if "cw-script-version" not in fence:
+                continue
+            fences += 1
+            assert "grep -m1" not in fence, (
+                f"{doc}: `grep -m1` matches the marker anywhere in the file, so "
+                f"an unmarked header passes on a later mention"
+            )
+            assert _HEADER_LINES in fence, (
+                f"{doc}: the marker parse must be bounded to the script header"
+            )
+            assert _HEADER_ANCHORED_SED in fence, (
+                f"{doc}: the marker must be extracted from a full `# "
+                f"cw-script-version: N` comment line, anchored at both ends"
+            )
+    assert fences == 5, f"expected 5 marker fences across the docs, found {fences}"
+
+
+def test_canonical_rule_anchors_the_marker_to_the_script_header() -> None:
+    """The prose rule must state the header anchoring, not only the fence.
+
+    Same shape as ``test_canonical_rule_bounds_the_marker_digit_count``: the
+    fences are what a worker copies, but the rule is what a worker reasons from,
+    and round 7 already showed the two drifting apart silently.
+    """
+    rule = _marker_rule_prose()
+    assert "first 5 lines" in rule
+    assert "# cw-script-version: N" in rule
+    assert _HEADER_LINES in rule
+    # Named as a prohibition, the way `grep -oE` already is — an unanchored
+    # extraction is the round-8 finding, so the rule has to say not to.
+    assert "Never `grep -m1" in rule, (
+        "the canonical rule must forbid the unanchored extraction by name"
     )
 
 
@@ -640,8 +711,9 @@ def test_every_site_fence_hard_stops_without_invoking(
 
 @pytest.mark.parametrize("script", _GUARD_SCRIPTS)
 @pytest.mark.parametrize("location", _LOCATIONS)
+@pytest.mark.parametrize(("label", "script_body"), GUARD_MARKER_GOOD_CASES)
 def test_every_site_fence_reaches_the_script_on_a_current_marker(
-    tmp_path: Path, script: str, location: str
+    tmp_path: Path, script: str, location: str, label: str, script_body: str
 ) -> None:
     """Companion to the stale cases: the guard must not block the happy path.
 
@@ -649,18 +721,21 @@ def test_every_site_fence_reaches_the_script_on_a_current_marker(
     executes the fence from a nested subdirectory, so a resolver that probed a
     bare relative ``.claude/scripts/`` would reach the global copy here for the
     wrong reason, and would miss the repo-local copy in the sibling case below.
+
+    Parametrized over marker *placement* as well since round 8: anchoring the
+    parse to the header is what rejects ``marker_outside_header``, and a matrix
+    with only a line-1 marker cannot tell a header-anchored parse from one
+    pinned to a single hard-coded line number.
     """
-    result = _run_site_fence(
-        tmp_path, script, **_placement(location, GUARD_MARKER_CURRENT)
-    )
-    assert result.returncode == 0, f"{script}/{location}: {result.stderr}"
+    result = _run_site_fence(tmp_path, script, **_placement(location, script_body))
+    assert result.returncode == 0, f"{script}/{location}/{label}: {result.stderr}"
     assert _INVOKED in result.stdout
     # Not just *that* an invocation happened: the stub echoes its argument
     # vector, so the resolved path is observable and must be the one candidate
     # this case planted. Without it a resolver hard-coded to `$HOME` passed the
     # repo-local case (#2141 round 6).
     assert guard_candidate_path(tmp_path, location, script) in result.stdout, (
-        f"{script}/{location}: resolved a different copy: {result.stdout!r}"
+        f"{script}/{location}/{label}: resolved a different copy: {result.stdout!r}"
     )
     assert "STALE:" not in result.stdout
 
@@ -748,6 +823,16 @@ def test_every_site_fence_skips_when_absent_from_both_locations(
 _GATE2_BRANCH = "dev/gate2-fixture"
 _GATE2_LOCATIONS = ["session_worktree", "global_only"]
 
+# The ticket id the gate-2 fence's `<ticket-id>` placeholder is filled with, and
+# the value planted in the session worktree's `.claude/cw-context.json` for the
+# cases that exercise the context-keyed lookup (#2141 round 8).
+_GATE2_TICKET = "2141"
+
+# A local branch name deliberately unlike `<branch-name>`, standing in for a
+# session worktree checked out on something other than the remote feature
+# branch — the shape the branch-keyed lookup alone cannot find.
+_GATE2_LOCAL_BRANCH = "agent-9f1c2e"
+
 # Committed on the branch one commit past ``main``, so the fence's own
 # ``FORK_POINT`` derivation shows up as real content in
 # ``/tmp/touched_files-$CW_SESSION`` (#2141 round 5).
@@ -823,6 +908,49 @@ def _write_failing_git_diff_stub(bin_dir: Path) -> None:
     stub.chmod(0o755)
 
 
+def _add_gate2_session_worktree(
+    repo: Path,
+    session_wt: Path,
+    *,
+    session_branch: str,
+    session_copy: str | None,
+    context_ticket: str | None,
+    plan: bool,
+) -> None:
+    """Provision the session worktree gate 2 must resolve to (#2141 round 8).
+
+    Split out of ``_run_gate2_fence`` when round 8's two extra knobs pushed it
+    past the statement ceiling; the four fixture shapes it plants (branch name,
+    context file, script copy, plan file) are one concern.
+    """
+    if session_branch == _GATE2_BRANCH:
+        _git(repo, "worktree", "add", str(session_wt), _GATE2_BRANCH)
+    else:
+        _git(
+            repo,
+            "worktree",
+            "add",
+            "-b",
+            session_branch,
+            str(session_wt),
+            _GATE2_BRANCH,
+        )
+    if context_ticket is not None:
+        context_dir = session_wt / ".claude"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / "cw-context.json").write_text(
+            json.dumps({"ticket_id": context_ticket}), encoding="utf-8"
+        )
+    if session_copy is not None:
+        scripts = session_wt / ".claude" / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        (scripts / _GATE2_SCRIPT).write_text(session_copy, encoding="utf-8")
+    if plan:
+        cw_dir = session_wt / ".cw"
+        cw_dir.mkdir(parents=True, exist_ok=True)
+        (cw_dir / "plan.md").write_text("## Files Modified\n", encoding="utf-8")
+
+
 def _run_gate2_fence(
     tmp_path: Path,
     *,
@@ -832,6 +960,8 @@ def _run_gate2_fence(
     session_worktree: bool = True,
     gate_worktree: bool = True,
     break_git_diff: bool = False,
+    session_branch: str = _GATE2_BRANCH,
+    context_ticket: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute gate 2's own fence against real worktrees (#2141 round 4/5).
 
@@ -850,6 +980,14 @@ def _run_gate2_fence(
     detached checkout: they are round 4's poison decoys, and a fence that
     consults either — or that falls back to the ambient cwd — resolves to the
     gate worktree and fails these tests instead of silently skipping the gate.
+
+    *session_branch* is the local branch the session worktree is checked out on,
+    defaulting to ``<branch-name>`` itself; any other value leaves no worktree on
+    ``refs/heads/<branch-name>``, so only the ``cw-context.json`` lookup can
+    resolve it. *context_ticket*, when given, plants that ticket id in the
+    session worktree's ``.claude/cw-context.json``. Both default to the
+    round-4/5 shape, so every pre-existing case still exercises the branch-keyed
+    fallback rather than the new primary path (#2141 round 8).
 
     The repo carries a real ``origin`` remote (itself), so ``origin/main`` and
     ``origin/<branch>`` exist for the fence's own ``merge-base``, and the branch
@@ -871,17 +1009,15 @@ def _run_gate2_fence(
     _git(repo, "remote", "add", "origin", str(repo))
     _git(repo, "fetch", "origin")
 
-    session_wt = tmp_path / "session-wt"
     if session_worktree:
-        _git(repo, "worktree", "add", str(session_wt), _GATE2_BRANCH)
-        if session_copy is not None:
-            scripts = session_wt / ".claude" / "scripts"
-            scripts.mkdir(parents=True, exist_ok=True)
-            (scripts / _GATE2_SCRIPT).write_text(session_copy, encoding="utf-8")
-        if plan:
-            cw_dir = session_wt / ".cw"
-            cw_dir.mkdir(parents=True, exist_ok=True)
-            (cw_dir / "plan.md").write_text("## Files Modified\n", encoding="utf-8")
+        _add_gate2_session_worktree(
+            repo,
+            tmp_path / "session-wt",
+            session_branch=session_branch,
+            session_copy=session_copy,
+            context_ticket=context_ticket,
+            plan=plan,
+        )
 
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -899,7 +1035,10 @@ def _run_gate2_fence(
     if break_git_diff:
         _write_failing_git_diff_stub(bin_dir)
     body = (
-        substitute_fence_placeholders(_gate2_fence(), {"branch-name": _GATE2_BRANCH})
+        substitute_fence_placeholders(
+            _gate2_fence(),
+            {"branch-name": _GATE2_BRANCH, "ticket-id": _GATE2_TICKET},
+        )
         + '\necho "${SCOPE_CONFORMANCE_OUTPUT-}"'
         + f'\ncat "/tmp/touched_files-{session}" 2>/dev/null\n'
     )
@@ -1046,17 +1185,16 @@ def test_gate2_fence_hard_stops_without_invoking(
 
 
 @pytest.mark.parametrize("location", _GATE2_LOCATIONS)
+@pytest.mark.parametrize(("label", "script_body"), GUARD_MARKER_GOOD_CASES)
 def test_gate2_fence_reaches_the_script_on_a_current_marker(
-    tmp_path: Path, location: str
+    tmp_path: Path, location: str, label: str, script_body: str
 ) -> None:
     """Companion to the stale cases: the guard must not block the happy path."""
-    result = _run_gate2_fence(
-        tmp_path, **_gate2_placement(location, GUARD_MARKER_CURRENT)
-    )
+    result = _run_gate2_fence(tmp_path, **_gate2_placement(location, script_body))
     assert result.returncode == 0, result.stderr
     assert _INVOKED in result.stdout
     assert _gate2_candidate_path(tmp_path, location) in result.stdout, (
-        f"{location}: resolved a different copy: {result.stdout!r}"
+        f"{location}/{label}: resolved a different copy: {result.stdout!r}"
     )
     assert "STALE:" not in result.stdout
 
@@ -1093,6 +1231,84 @@ def test_gate2_fence_skips_when_absent_from_both_locations(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr
     assert _INVOKED not in result.stdout
     assert "STALE:" not in result.stdout
+
+
+def test_gate2_fence_resolves_a_session_worktree_on_another_branch(
+    tmp_path: Path,
+) -> None:
+    """The branch name is not the only handle on the session worktree (#2141 round 8).
+
+    ``isolation: "worktree"`` provisions the session on an auto-generated
+    ``agent-<hash>`` branch, and ``auto-dev-impl.md`` says so in its own branch-
+    discipline bullet — yet gate 2 looked the worktree up solely by
+    ``branch refs/heads/<branch-name>``. Nothing is checked out on that ref here,
+    so a branch-only lookup finds nothing and the gate falsely hard-stops on a
+    correct implementation. ``.claude/cw-context.json``'s ``ticket_id`` is the
+    handle that survives the rename.
+    """
+    result = _run_gate2_fence(
+        tmp_path,
+        session_copy=GUARD_MARKER_CURRENT,
+        session_branch=_GATE2_LOCAL_BRANCH,
+        context_ticket=_GATE2_TICKET,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _INVOKED in result.stdout
+    session_wt = (tmp_path / "session-wt").resolve()
+    assert str(session_wt / ".claude" / "scripts" / _GATE2_SCRIPT) in result.stdout
+    assert f"--plan {session_wt / '.cw' / 'plan.md'}" in result.stdout
+
+
+def test_gate2_fence_falls_back_to_the_branch_keyed_lookup(tmp_path: Path) -> None:
+    """No ``cw-context.json`` → the pre-round-8 branch lookup still resolves it.
+
+    The context file is gitignored, so a worktree provisioned outside cw (or one
+    whose context file was cleaned up) carries none. Round 8 adds a primary
+    lookup; it must not remove the one that worked.
+    """
+    result = _run_gate2_fence(tmp_path, session_copy=GUARD_MARKER_CURRENT)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _INVOKED in result.stdout
+    session_wt = (tmp_path / "session-wt").resolve()
+    assert str(session_wt / ".claude" / "scripts" / _GATE2_SCRIPT) in result.stdout
+
+
+def test_gate2_fence_hard_stops_when_neither_lookup_resolves(tmp_path: Path) -> None:
+    """Both handles missing → exit 3, not a fall-through to ``$TMPWT``.
+
+    The session worktree is on a foreign branch *and* carries no context file,
+    so neither the ticket-keyed probe nor the branch-keyed fallback can name it.
+    Adding a second lookup must not soften the hard stop when both come up empty.
+    """
+    result = _run_gate2_fence(
+        tmp_path,
+        session_copy=GUARD_MARKER_CURRENT,
+        session_branch=_GATE2_LOCAL_BRANCH,
+    )
+    assert result.returncode == 3, result.stdout
+    assert _INVOKED not in result.stdout
+    assert "cannot locate cw session worktree" in result.stdout
+
+
+def test_gate2_fence_ignores_a_context_file_for_another_ticket(
+    tmp_path: Path,
+) -> None:
+    """The ticket-keyed probe must match on the id, not merely on the file.
+
+    A sibling session's worktree also carries a ``cw-context.json``; accepting
+    the first one found would resolve this gate against another ticket's
+    checkout — worse than not resolving at all, because it would then run the
+    file-set gate against the wrong plan.
+    """
+    result = _run_gate2_fence(
+        tmp_path,
+        session_copy=GUARD_MARKER_CURRENT,
+        session_branch=_GATE2_LOCAL_BRANCH,
+        context_ticket="9999",
+    )
+    assert result.returncode == 3, result.stdout
+    assert _INVOKED not in result.stdout
+    assert "cannot locate cw session worktree" in result.stdout
 
 
 def test_canonical_template_shows_the_hard_stop_shape() -> None:

@@ -415,9 +415,22 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    TOUCHED=$(git -C "$TMPWT" diff --name-only "$FORK_POINT") || {
      echo "IMPL_FAILED: Step 2.5 gate 2: git diff --name-only failed"; exit 3; }
    printf '%s\n' "$TOUCHED" | sort > "/tmp/touched_files-$CW_SESSION"
-   # The session worktree is the one checked out on the branch (not the detached $TMPWT).
-   SESSION_WT=$(git -C "$TMPWT" worktree list --porcelain \
-     | awk -v b="branch refs/heads/<branch-name>" '/^worktree /{w=substr($0,10)} $0==b{print w; exit}')
+   # The session worktree (not the detached $TMPWT). Primary: the worktree whose
+   # cw-context.json names this ticket — the handle that survives a session
+   # branch named anything other than <branch-name>.
+   SESSION_WT=""
+   while IFS= read -r wt; do
+     [ "$wt" = "$TMPWT" ] && continue
+     if [ -f "$wt/.claude/cw-context.json" ] && \
+        [ "$(jq -r '.ticket_id // empty' "$wt/.claude/cw-context.json" 2>/dev/null)" = "<ticket-id>" ]; then
+       SESSION_WT="$wt"; break
+     fi
+   done < <(git -C "$TMPWT" worktree list --porcelain | sed -n 's/^worktree //p')
+   # Fallback: the branch-keyed lookup, for a worktree carrying no context file.
+   if [ -z "$SESSION_WT" ]; then
+     SESSION_WT=$(git -C "$TMPWT" worktree list --porcelain \
+       | awk -v b="branch refs/heads/<branch-name>" '/^worktree /{w=substr($0,10)} $0==b{print w; exit}')
+   fi
    if [ -z "$SESSION_WT" ] || [ "$SESSION_WT" = "$TMPWT" ]; then
      echo "IMPL_FAILED: Step 2.5 gate 2: cannot locate cw session worktree for <branch-name>"
      exit 3  # HARD STOP: EXIT blocked with impl_failed (see bullets below).
@@ -448,7 +461,9 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
      SCOPE_CONFORMANCE_EXIT=$?
    fi
    ```
-   Resolution follows "Guard-script path resolution and staleness marker (#2141)" above for the marker gate, but this call site anchors differently: instead of `$GUARD_ROOT` (a `git rev-parse --show-toplevel` / `cw-context.json` derivation from the ambient cwd), it uses `$SESSION_WT`, derived **inside this fence** from `git -C "$TMPWT" worktree list --porcelain` keyed on `refs/heads/<branch-name>`. The fence carries no `$GUARD_ROOT`, no `rev-parse`, and no `$PWD` fallback, for two reasons that both have to hold at once: shell variables do not persist between fenced Bash calls, so an anchor captured in the Gate-setup fence may simply be unset here; and by this point the ambient cwd may already be `$TMPWT`, so any ambient re-derivation resolves to the detached gate worktree — the exact bug this gate had. Deriving from the branch is correct either way, whether or not the fences share a shell.
+   Resolution follows "Guard-script path resolution and staleness marker (#2141)" above for the marker gate, but this call site anchors differently: instead of `$GUARD_ROOT` (a `git rev-parse --show-toplevel` / `cw-context.json` derivation from the ambient cwd), it uses `$SESSION_WT`, derived **inside this fence** from `git -C "$TMPWT" worktree list --porcelain`. The fence carries no `$GUARD_ROOT`, no `rev-parse`, and no `$PWD` fallback, for two reasons that both have to hold at once: shell variables do not persist between fenced Bash calls, so an anchor captured in the Gate-setup fence may simply be unset here; and by this point the ambient cwd may already be `$TMPWT`, so any ambient re-derivation resolves to the detached gate worktree — the exact bug this gate had. Deriving from the worktree list is correct either way, whether or not the fences share a shell.
+
+   **The lookup is two-step, and the branch name is only the fallback.** The primary key is `ticket_id` in each candidate worktree's `.claude/cw-context.json` (written by `spawn_create_impl`, `src/cw/spawn.py`) — the one handle that does not depend on what the local branch is called. Keying on `branch refs/heads/<branch-name>` alone was wrong: the impl stage's own branch-discipline bullet says `isolation: "worktree"` provisions the session on an auto-generated `agent-<hash>` branch, and a detached session worktree has no `branch` line at all, so a correct implementation delivered from either shape found nothing and the gate hard-stopped on it. The branch-keyed `awk` stays as the fallback for a worktree carrying no context file (it is gitignored, so a worktree provisioned outside cw has none). `$TMPWT` is skipped explicitly in the primary loop, and the pre-existing empty-or-equals-`$TMPWT` hard stop still applies when neither step resolves — a second lookup must not soften it, and a context file naming a *different* ticket must not satisfy it.
 
    `$SESSION_WT` is the **cw session worktree**, deliberately not `$TMPWT`: the script and its `.claude/scripts/` copy belong to the session worktree, so probing `$TMPWT` would read a detached checkout that may carry a different (or no) copy of the script. The candidate is always an **absolute** path, never a bare relative `.claude/scripts/...` probe and never the operator's cwd.
 
