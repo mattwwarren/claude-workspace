@@ -10,9 +10,9 @@ parks a healthy ticket for an operator.
 
 from __future__ import annotations
 
-import os
-import subprocess
 from typing import TYPE_CHECKING
+
+from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -25,33 +25,20 @@ _SHARED_FILE = "shared.txt"
 _BRANCH_ONLY_FILE = "branch_only.txt"
 
 
-def _git_in(repo: Path, *args: str) -> str:
-    """Run git in *repo* with a GIT_*-stripped env, returning stripped stdout."""
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=clean_env,
-    )
-    return result.stdout.strip()
-
-
 def _write_commit(repo: Path, name: str, body: str, message: str) -> None:
     """Write *body* to *name* under *repo* and commit it."""
     (repo / name).write_text(body, encoding="utf-8")
-    _git_in(repo, "add", "-A")
-    _git_in(repo, "commit", "-m", message)
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", message)
 
 
 def _seed_repo(make_git_repo: Callable[..., Path], name: str) -> Path:
     """Self-origin repo carrying both fixture files on ``main``/``origin/main``."""
     repo = make_git_repo(name)
-    _git_in(repo, "remote", "add", "origin", str(repo))
+    git_in(repo, "remote", "add", "origin", str(repo))
     _write_commit(repo, _SHARED_FILE, "base\n", "seed shared")
     _write_commit(repo, _BRANCH_ONLY_FILE, "base\n", "seed branch-only")
-    _git_in(repo, "fetch", "origin", "main")
+    git_in(repo, "fetch", "origin", "main")
     return repo
 
 
@@ -67,13 +54,13 @@ def _make_stale_branch_repo(
     requires.
     """
     repo = _seed_repo(make_git_repo, name)
-    _git_in(repo, "checkout", "-b", _BRANCH)
+    git_in(repo, "checkout", "-b", _BRANCH)
     _write_commit(repo, branch_touches, "branch work\n", "branch work")
-    _git_in(repo, "checkout", "main")
+    git_in(repo, "checkout", "main")
     _write_commit(repo, _SHARED_FILE, "main churn\n", "main churn")
     # Refresh origin/main so it now points past the branch's fork point.
-    _git_in(repo, "fetch", "origin", "main")
-    _git_in(repo, "checkout", _BRANCH)
+    git_in(repo, "fetch", "origin", "main")
+    git_in(repo, "checkout", _BRANCH)
     return repo
 
 
@@ -109,7 +96,7 @@ class TestHasOverlappingBranchStaleness:
         from cw.dispatch.branch_freshness import has_overlapping_branch_staleness
 
         repo = _seed_repo(make_git_repo, "bf-fresh")
-        _git_in(repo, "checkout", "-b", _BRANCH)
+        git_in(repo, "checkout", "-b", _BRANCH)
         _write_commit(repo, _SHARED_FILE, "branch work\n", "branch work")
 
         assert has_overlapping_branch_staleness(repo, "main") is False

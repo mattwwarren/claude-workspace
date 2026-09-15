@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import os
 import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
@@ -101,7 +100,12 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from tests.conftest import _make_daemon_session, _make_tick_summary, _make_ticket_task
+from tests.conftest import (
+    _make_daemon_session,
+    _make_tick_summary,
+    _make_ticket_task,
+    git_in,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -12551,23 +12555,6 @@ class TestReviewStalenessGate:
 # ---------------------------------------------------------------------------
 
 
-def _git_in_repo(repo: Path, *args: str) -> str:
-    """Run git in *repo* with a ``GIT_*``-stripped env, returning stdout.
-
-    Mirrors ``tests/test_branch_ahead.py``'s helper of the same shape; the
-    strip matters because pytest may itself be running inside a git hook.
-    """
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=clean_env,
-    )
-    return result.stdout.strip()
-
-
 class TestReviewStalenessWorktreeResolution:
     """GitHub #2123 round 2: the gate resolves an unstamped worktree.
 
@@ -12600,7 +12587,7 @@ class TestReviewStalenessWorktreeResolution:
         )
         branch = f"{client_cfg.feature_branch_prefix}/{ticket_id}"
         wt_path = worktree_path_for(client_cfg, branch)
-        _git_in_repo(repo, "worktree", "add", "-b", branch, str(wt_path))
+        git_in(repo, "worktree", "add", "-b", branch, str(wt_path))
         return client_cfg, wt_path
 
     def _make_task(self, ticket_id: str) -> TicketTask:
@@ -12626,7 +12613,7 @@ class TestReviewStalenessWorktreeResolution:
         from cw.dispatch.review_gates import _should_gate_for_review_staleness
 
         client_cfg, wt_path = self._seed(make_git_repo, tmp_path, "RSW-1")
-        head = _git_in_repo(wt_path, "rev-parse", "HEAD")
+        head = git_in(wt_path, "rev-parse", "HEAD")
         task = self._make_task("RSW-1")
 
         assert task.worktree_path is None
@@ -12649,11 +12636,11 @@ class TestReviewStalenessWorktreeResolution:
         from cw.dispatch.review_gates import _should_gate_for_review_staleness
 
         client_cfg, wt_path = self._seed(make_git_repo, tmp_path, "RSW-2")
-        older = _git_in_repo(wt_path, "rev-parse", "HEAD")
+        older = git_in(wt_path, "rev-parse", "HEAD")
         (wt_path / "work.txt").write_text("fix\n", encoding="utf-8")
-        _git_in_repo(wt_path, "add", "-A")
-        _git_in_repo(wt_path, "commit", "-m", "post-review fix")
-        assert _git_in_repo(wt_path, "rev-parse", "HEAD") != older
+        git_in(wt_path, "add", "-A")
+        git_in(wt_path, "commit", "-m", "post-review fix")
+        assert git_in(wt_path, "rev-parse", "HEAD") != older
 
         task = self._make_task("RSW-2")
 
@@ -12710,8 +12697,8 @@ class TestReviewStalenessWorktreeResolution:
         from cw.dispatch.review_gates import _should_gate_for_review_staleness
 
         client_cfg, wt_path = self._seed(make_git_repo, tmp_path, "RSW-4")
-        head = _git_in_repo(wt_path, "rev-parse", "HEAD")
-        _git_in_repo(wt_path, "checkout", "-b", "dev/someone-else")
+        head = git_in(wt_path, "rev-parse", "HEAD")
+        git_in(wt_path, "checkout", "-b", "dev/someone-else")
         task = self._make_task("RSW-4")
 
         assert (
@@ -12772,7 +12759,7 @@ class TestReviewStalenessWorktreeResolution:
         from cw.dispatch.review_gates import _should_gate_for_review_staleness
 
         _client_cfg, wt_path = self._seed(make_git_repo, tmp_path, "RSW-6")
-        head = _git_in_repo(wt_path, "rev-parse", "HEAD")
+        head = git_in(wt_path, "rev-parse", "HEAD")
         task = self._make_task("RSW-6")
         task.worktree_path = wt_path
 
@@ -12805,7 +12792,7 @@ def test_resolve_task_worktree_shares_the_local_plan_path_resolution(
     )
     branch = f"{client_cfg.feature_branch_prefix}/RSW-SHARED"
     wt_path = worktree_path_for(client_cfg, branch)
-    _git_in_repo(repo, "worktree", "add", "-b", branch, str(wt_path))
+    git_in(repo, "worktree", "add", "-b", branch, str(wt_path))
     task = _make_ticket_task(ticket_id="RSW-SHARED", client="test-client")
 
     resolved = resolve_task_worktree(task, client_cfg)

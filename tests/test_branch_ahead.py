@@ -15,9 +15,9 @@ worktree git state cannot be read.
 
 from __future__ import annotations
 
-import os
-import subprocess
 from typing import TYPE_CHECKING
+
+from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,24 +29,11 @@ _BRANCH = "dev/1870"
 _FILE = "work.txt"
 
 
-def _git_in(repo: Path, *args: str) -> str:
-    """Run git in *repo* with a GIT_*-stripped env, returning stripped stdout."""
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=clean_env,
-    )
-    return result.stdout.strip()
-
-
 def _write_commit(repo: Path, name: str, body: str, message: str) -> None:
     """Write *body* to *name* under *repo* and commit it."""
     (repo / name).write_text(body, encoding="utf-8")
-    _git_in(repo, "add", "-A")
-    _git_in(repo, "commit", "-m", message)
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", message)
 
 
 def _seed_repo(make_git_repo: Callable[..., Path], name: str) -> Path:
@@ -57,10 +44,10 @@ def _seed_repo(make_git_repo: Callable[..., Path], name: str) -> Path:
     want an ahead branch commit onto it afterwards.
     """
     repo = make_git_repo(name)
-    _git_in(repo, "remote", "add", "origin", str(repo))
+    git_in(repo, "remote", "add", "origin", str(repo))
     _write_commit(repo, _FILE, "base\n", "seed")
-    _git_in(repo, "fetch", "origin", "main")
-    _git_in(repo, "checkout", "-b", _BRANCH)
+    git_in(repo, "fetch", "origin", "main")
+    git_in(repo, "checkout", "-b", _BRANCH)
     return repo
 
 
@@ -160,7 +147,7 @@ class TestCurrentHeadSha:
         repo = _seed_repo(make_git_repo, "chs-real")
         _write_commit(repo, _FILE, "work\n", "branch work")
 
-        assert current_head_sha(repo) == _git_in(repo, "rev-parse", "HEAD")
+        assert current_head_sha(repo) == git_in(repo, "rev-parse", "HEAD")
 
     def test_missing_worktree_path_is_unmeasurable(self, tmp_path: Path) -> None:
         """None and a non-existent path resolve to None, never to a sha."""
