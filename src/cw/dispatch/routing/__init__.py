@@ -577,7 +577,7 @@ def _route_scope_gated_approval(
         _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
         return
     if task.stage == Stage.REVIEW and _should_gate_for_review_staleness(
-        task, last_result
+        task, last_result, clients
     ):
         # Why between the two: branch-staleness is about the tree itself being
         # out of date, which a rebase fixes; this is about the *review* being
@@ -713,7 +713,7 @@ def _route_stage_success(
         # what would actually ship, so it is answered first (#1823).
         _park_branch_staleness_gate(task)
     elif task.stage == Stage.REVIEW and _should_gate_for_review_staleness(
-        task, last_result
+        task, last_result, clients
     ):
         # Why here: the gates below all reason about a review verdict -- is it
         # vouched for, is it big enough to need approval. This one asks whether

@@ -63,6 +63,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
 )
+from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
     from cw.models import (
@@ -227,7 +228,9 @@ def _resolve_review_reviewed_sha(last_result: dict[str, object] | None) -> str |
 
 
 def _should_gate_for_review_staleness(
-    task: TicketTask, last_result: dict[str, object] | None
+    task: TicketTask,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
 ) -> bool:
     """True iff *task*'s reported review does not cover its current HEAD (#2123).
 
@@ -272,13 +275,28 @@ def _should_gate_for_review_staleness(
     six sibling gates: an IMPL-stage sentinel can legitimately carry a review
     block from an earlier pass, so a stage-agnostic version would park tickets
     mid-pipeline on a sha that is not meant to match yet.
+
+    **Takes ``clients`` because ``task.worktree_path`` is never stamped on a
+    dispatch-driven row** -- dispatch stamps the worktree on the ``Session``.
+    Reading that field directly handed ``current_head_sha`` a ``None`` and, on
+    a gate that fails closed, parked *every* daemon-dispatched REVIEW ticket
+    carrying a review block. Resolution goes through
+    :func:`cw.worktree.resolve_task_worktree`, the same helper
+    ``dev_queue.lifecycle._local_plan_path`` uses, so the branch-derived
+    fallback cannot drift between the two. An unresolvable worktree gates,
+    exactly as an unmeasurable HEAD does: still no evidence the review is
+    current. Note this is the opposite polarity to the two git-measured gates'
+    unresolvable-client handling, which fail open -- see the paragraph above.
     """
     if not _reports_review_content(last_result):
         return False
     reviewed_sha = _resolve_review_reviewed_sha(last_result)
     if reviewed_sha is None:
         return True
-    head_sha = current_head_sha(task.worktree_path)
+    worktree_path = resolve_task_worktree(task, clients.get(task.client))
+    if worktree_path is None:
+        return True
+    head_sha = current_head_sha(worktree_path)
     if head_sha is None:
         return True
     return reviewed_sha != head_sha
