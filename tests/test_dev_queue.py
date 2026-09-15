@@ -8306,6 +8306,134 @@ class TestRequeueTicket:
         )
         assert result_finalize["to_stage"] == "finalize"
 
+    # -- #1286: allow_tracker_fallback -- lets the automatic dispatch-time
+    # caller (claim.py) skip the network-bound tracker fallback while leaving
+    # the manual CLI's default behavior byte-identical. -------------------
+
+    def test_impl_bypass_plan_available_no_tracker_fallback_skips_network_on_local_miss(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No worktree/plan.md locally, allow_tracker_fallback=False -> the
+        tracker (resolve_tracker + fetch_approved_plan_comment) is never
+        consulted at all -- the whole point of the flag on dispatch's hot
+        per-claim path."""
+        from cw.config import get_client
+        from cw.dev_queue.requeue import _ImplBypassPlanCheck, _impl_bypass_plan_available
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        wt_path = tmp_path / "reused-worktree"
+        wt_path.mkdir()
+        branch = "dev/GEN-500"
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: wt_path,
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue._checked_out_branch",
+            lambda _wt_path: branch,
+        )
+
+        def _fail_if_called(*_args: object, **_kwargs: object) -> str | None:
+            msg = "resolve_tracker/fetch_approved_plan_comment must not be called"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.requeue.resolve_tracker", _fail_if_called)
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.fetch_approved_plan_comment", _fail_if_called
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-9a")
+        client_cfg = get_client("genhealth")
+
+        result = _impl_bypass_plan_available(
+            task, client_cfg, allow_tracker_fallback=False
+        )
+
+        assert result == _ImplBypassPlanCheck(False, tracker_checked=False, tracker=None)
+
+    def test_impl_bypass_plan_available_default_still_falls_back_to_tracker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No allow_tracker_fallback arg at all -> default (True) preserves the
+        existing manual-CLI behavior: the tracker fallback still runs and can
+        recover an approved plan comment."""
+        from cw.config import get_client
+        from cw.dev_queue.requeue import _impl_bypass_plan_available
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        wt_path = tmp_path / "reused-worktree"
+        wt_path.mkdir()
+        branch = "dev/GEN-500"
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: wt_path,
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue._checked_out_branch",
+            lambda _wt_path: branch,
+        )
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-9b")
+        client_cfg = get_client("genhealth")
+
+        result = _impl_bypass_plan_available(task, client_cfg)
+
+        assert result.available is True
+        assert result.tracker_checked is True
+
+    def test_impl_bypass_plan_available_local_hit_ignores_fallback_flag(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A valid signed-off .cw/plan.md is present -> the local-hit fast path
+        returns True and never consults the tracker, regardless of
+        allow_tracker_fallback -- the flag only affects the fallback, not the
+        local-hit short-circuit."""
+        from cw.config import get_client
+        from cw.dev_queue.requeue import _impl_bypass_plan_available
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        wt_path = tmp_path / "reused-worktree"
+        cw_dir = wt_path / ".cw"
+        cw_dir.mkdir(parents=True)
+        (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
+        branch = "dev/GEN-500"
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: wt_path,
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue._checked_out_branch",
+            lambda _wt_path: branch,
+        )
+
+        def _fail_if_called(_ticket_id: str, **_kwargs: object) -> str | None:
+            msg = "fetch_approved_plan_comment must not be called on the local-hit path"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.fetch_approved_plan_comment", _fail_if_called
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-9c")
+        client_cfg = get_client("genhealth")
+
+        result = _impl_bypass_plan_available(
+            task, client_cfg, allow_tracker_fallback=False
+        )
+
+        assert result.available is True
+
 
 # ---------------------------------------------------------------------------
 # TestRequeueReviewDeliveryDegrade — #1730 degrade-loudly, never raise
