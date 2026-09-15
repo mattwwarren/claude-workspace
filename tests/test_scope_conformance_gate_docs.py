@@ -8,11 +8,19 @@ require the ``## Files Modified`` heading the parser anchors on.
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from tests.conftest import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
+
+# Sentinel replacing the real guard-script invocation, so the executable fence
+# tests observe *whether* a fence reached it rather than running the script.
+_INVOKED = "INVOKED"
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENTS = _REPO_ROOT / ".claude" / "agents"
@@ -397,6 +405,113 @@ def test_every_call_site_hard_stops_inside_the_bash_fence() -> None:
             assert fence.index("exit 3", stale_index) > stale_index, (
                 f"{doc}: `exit 3` must follow the STALE echo"
             )
+
+
+def _site_fence(script: str) -> str:
+    """The single bash fence that probes and invokes *script* (#2141)."""
+    doc = _table_minimums()[script][1]
+    fences = [
+        fence
+        for fence in _bash_fences(_cmd(doc))
+        if f"for candidate in .claude/scripts/{script}" in fence
+    ]
+    assert len(fences) == 1, (
+        f"{doc}: expected one fence for {script}, got {len(fences)}"
+    )
+    return fences[0]
+
+
+def _run_site_fence(
+    tmp_path: Path, script: str, script_body: str
+) -> subprocess.CompletedProcess[str]:
+    """Execute a site's own fence against a fixture guard script (#2141).
+
+    Both invocation spellings in these docs (``uv run python "$RESOLVED"`` and
+    the bare ``python "$RESOLVED"`` the stdlib-only pre-mutation guard uses) are
+    swapped for an ``echo`` sentinel, and the per-site capture variables are
+    echoed afterwards because three of the four fences assign the invocation
+    into a command substitution rather than letting it print.
+    """
+    repo = tmp_path / "repo"
+    scripts = repo / ".claude" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / script).write_text(script_body, encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    fence = (
+        _site_fence(script)
+        .replace("uv run python", f"echo {_INVOKED}")
+        .replace('python "$RESOLVED"', f'echo {_INVOKED} "$RESOLVED"')
+    )
+    captures = '"${VERDICT-}${RESOLVE_OUTPUT-}${SCOPE_CONFORMANCE_OUTPUT-}"'
+    body = f"{fence}\necho {captures}\n"
+    # Scoped to this tmp_path so the gate-2 fence's hard-coded
+    # `/tmp/touched_files-$CW_SESSION` scratch write cannot collide with a
+    # concurrent run; the path is literal in the doc, so it is cleaned up here
+    # rather than redirected.
+    session = tmp_path.name
+    try:
+        return subprocess.run(
+            ["bash", "-c", body],
+            cwd=repo,
+            env={
+                "HOME": str(home),
+                "PATH": os.environ.get("PATH", ""),
+                "CW_SESSION": session,
+                "TMPWT": str(repo),
+                "FORK_POINT": "HEAD",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        Path(f"/tmp/touched_files-{session}").unlink(missing_ok=True)
+
+
+_GUARD_SCRIPTS = [
+    "check_not_main_checkout.py",
+    "check_plan_scope_conformance.py",
+    "check_impl_guard_staleness.py",
+    "classify_merge_conflict.py",
+]
+
+
+@pytest.mark.parametrize("script", _GUARD_SCRIPTS)
+@pytest.mark.parametrize(
+    ("label", "script_body"),
+    [
+        ("below_minimum", "# cw-script-version: 0\n"),
+        ("no_marker", "import sys\n"),
+    ],
+)
+def test_every_site_fence_hard_stops_without_invoking(
+    tmp_path: Path, script: str, label: str, script_body: str
+) -> None:
+    """Executable proof, per site, that a stale hit cannot reach the script.
+
+    The operator's adjudication made parametrizing over every fence optional;
+    it is done here because Step 2.5 gate 2 is the highest-consequence site —
+    a fall-through there ships scope the approved file set never covered — and
+    a text assertion cannot distinguish an ``exit 3`` that runs from one that
+    merely appears in the prose (#2141).
+    """
+    result = _run_site_fence(tmp_path, script, script_body)
+    assert result.returncode != 0, f"{script}/{label}: fence fell through with exit 0"
+    assert _INVOKED not in result.stdout, f"{script}/{label}: script was reached anyway"
+    assert "STALE:" in result.stdout
+
+
+@pytest.mark.parametrize("script", _GUARD_SCRIPTS)
+def test_every_site_fence_reaches_the_script_on_a_current_marker(
+    tmp_path: Path, script: str
+) -> None:
+    """Companion to the stale cases: the guard must not block the happy path."""
+    result = _run_site_fence(tmp_path, script, "# cw-script-version: 1\n")
+    assert result.returncode == 0, f"{script}: {result.stderr}"
+    assert _INVOKED in result.stdout
+    assert "STALE:" not in result.stdout
 
 
 def test_canonical_template_shows_the_hard_stop_shape() -> None:
