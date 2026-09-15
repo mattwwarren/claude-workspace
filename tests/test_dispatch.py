@@ -1566,6 +1566,167 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         assert payload["new_stage"] == Stage.IMPL
         assert payload["direction"] == "advance"
 
+    def test_plan_stage_claim_no_bypass_when_deliberately_regressed_into_plan(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1286 Fix B: a deliberate operator regress into PLAN (``cw dev-queue
+        requeue --stage plan --regress``) must not be silently defeated by the
+        auto-bypass.
+
+        ``_stage_regress`` clears ``plan_approved_at``/fingerprint and stamps
+        ``regressed_into_stage=Stage.PLAN`` but does NOT delete the worktree's
+        stale, still-signed-off ``.cw/plan.md``. The bypass must honor the
+        operator's explicit re-plan request over that stale marker: no
+        advance, and the worker spawns ``/auto-dev-plan`` to actually
+        re-verify the plan.
+        """
+        from cw.worktree import create_worktree
+        from tests.conftest import plan_body
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        branch = f"{sample_client_config.feature_branch_prefix}/GEN-REGRESS"
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+        cw_dir = worktree / ".cw"
+        cw_dir.mkdir(parents=True, exist_ok=True)
+        (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-REGRESS",
+                client="test-client",
+                regressed_into_stage=Stage.PLAN,
+            )
+        )
+
+        stage_changed = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        assert daemon.spawn_calls[0][1] == "/auto-dev-plan GEN-REGRESS --headless"
+
+        running = load_dev_queue().running()
+        assert len(running) == 1
+        assert running[0].stage == Stage.PLAN
+
+        bypass_events = [p for _, p, cid in stage_changed if cid == "GEN-REGRESS"]
+        assert bypass_events == []
+
+    def test_plan_stage_claim_no_bypass_when_pipeline_has_no_impl_stage(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1286 Fix C: a pipeline without an IMPL stage must not raise
+        ``ValueError`` out of ``_raise_stage_high_water``'s ``stages.index()``
+        call -- the bypass must simply not attempt the advance.
+        """
+        from cw.worktree import create_worktree
+        from tests.conftest import plan_body
+
+        config_dir = tmp_dispatch_dirs / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  test-client:\n"
+            f"    workspace_path: {sample_client_config.workspace_path}\n"
+            f"    default_branch: {sample_client_config.default_branch}\n"
+            f"    worktree_base: {sample_client_config.worktree_base}\n"
+            "    pipeline:\n"
+            "      stages: [plan, review, finalize]\n"
+        )
+        branch = f"{sample_client_config.feature_branch_prefix}/GEN-NOIMPL"
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+        cw_dir = worktree / ".cw"
+        cw_dir.mkdir(parents=True, exist_ok=True)
+        (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
+        add_ticket(TicketTask(ticket_id="GEN-NOIMPL", client="test-client"))
+
+        stage_changed = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        assert daemon.spawn_calls[0][1] == "/auto-dev-plan GEN-NOIMPL --headless"
+
+        running = load_dev_queue().running()
+        assert len(running) == 1
+        assert running[0].stage == Stage.PLAN
+
+        bypass_events = [p for _, p, cid in stage_changed if cid == "GEN-NOIMPL"]
+        assert bypass_events == []
+
+    def test_plan_stage_bypass_race_guard_when_stored_row_missing(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        capture_events: Callable[..., list[CapturedEvent]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1286 Fix D: the bypass's locked reload racing with a reap/requeue
+        that removed the RUNNING row must not advance or spawn at IMPL.
+
+        Simulates the race by making the bypass's own ``load_dev_queue()``
+        call (the second of the three ``cw.dispatch.claim.load_dev_queue``
+        calls in this tick's happy path: claim, bypass, stamp-success) return
+        a store missing the row, while the claim and stamp-success calls see
+        the real store untouched.
+        """
+        import cw.dispatch.claim as claim_mod
+        from cw.worktree import create_worktree
+        from tests.conftest import plan_body
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        branch = f"{sample_client_config.feature_branch_prefix}/GEN-RACE"
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+        cw_dir = worktree / ".cw"
+        cw_dir.mkdir(parents=True, exist_ok=True)
+        (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
+        add_ticket(TicketTask(ticket_id="GEN-RACE", client="test-client"))
+
+        stage_changed = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        real_load_dev_queue = claim_mod.load_dev_queue
+        call_count = {"n": 0}
+
+        def _fake_load_dev_queue() -> DevQueueStore:
+            call_count["n"] += 1
+            store = real_load_dev_queue()
+            if call_count["n"] == 2:
+                # The bypass's own reload: simulate the row having been
+                # reaped/requeued/removed between claim and this reload.
+                store.tasks = [t for t in store.tasks if t.ticket_id != "GEN-RACE"]
+            return store
+
+        monkeypatch.setattr(claim_mod, "load_dev_queue", _fake_load_dev_queue)
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        assert daemon.spawn_calls[0][1] == "/auto-dev-plan GEN-RACE --headless"
+
+        running = load_dev_queue().running()
+        assert len(running) == 1
+        assert running[0].stage == Stage.PLAN
+
+        bypass_events = [p for _, p, cid in stage_changed if cid == "GEN-RACE"]
+        assert bypass_events == []
+
 
 # ---------------------------------------------------------------------------
 # TestDispatchTickReconcilePhantoms
