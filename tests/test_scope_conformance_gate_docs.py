@@ -348,6 +348,28 @@ def test_every_call_site_declares_min_version_matching_the_table() -> None:
             assert f"need >= {version}" not in fence
 
 
+def test_headless_block_prose_quotes_the_table_minimum() -> None:
+    """The ``blocker.details`` templates carry the table's number too (#2141).
+
+    Each site's HEADLESS BLOCK bullet spells the minimum into the sentinel
+    message an agent emits. That literal cannot be a shell variable — it is
+    prose, not a fence — so it is pinned to the table here instead: a bump that
+    updates the table and the fences but leaves the bullets behind is red.
+    """
+    for script, (version, doc) in _table_minimums().items():
+        bullets = [
+            line
+            for line in _cmd(doc).splitlines()
+            if "HEADLESS BLOCK" in line and script in line
+        ]
+        assert bullets, f"no HEADLESS BLOCK bullet naming {script} in {doc}"
+        for bullet in bullets:
+            assert f"need >= {version}" in bullet, (
+                f"{doc}: the {script} HEADLESS BLOCK bullet must quote the "
+                f"table minimum ({version})"
+            )
+
+
 def test_every_call_site_hard_stops_inside_the_bash_fence() -> None:
     """A stale marker must make the invocation unreachable *in the shell* (#2141).
 

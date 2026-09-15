@@ -312,14 +312,18 @@ gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
 4. **Classify and resolve — one attempt, no loops:**
 
    ```bash
+   MIN_VERSION=1  # per the script version table in auto-dev-impl.md
    RESOLVED=""
    for candidate in .claude/scripts/classify_merge_conflict.py "$HOME/.claude/scripts/classify_merge_conflict.py"; do
      if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
    done
    if [ -n "$RESOLVED" ]; then
      FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" | grep -oE '[0-9]+')
-     if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt 1 ]; then
-       echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= 1)"
+     if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+       echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+       # HARD STOP: EXIT blocked with agent_block (see bullet below); never run
+       # the resolver, and never fold this into merge_conflict_post_push.
+       exit 3
      else
        RESOLVE_OUTPUT=$(uv run python "$RESOLVED" resolve \
          --conflicted-files /tmp/conflicted-files-$CW_SESSION --json)

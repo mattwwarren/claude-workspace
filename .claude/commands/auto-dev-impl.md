@@ -122,18 +122,30 @@ copy still has a usable one — but a repo-relative-only invocation never finds 
 and the guard silently no-ops. Probe repo-local first, then the installed copy:
 
 ```bash
+MIN_VERSION=<N>  # per the script version table in auto-dev-impl.md
 RESOLVED=""
 for candidate in .claude/scripts/<script>.py "$HOME/.claude/scripts/<script>.py"; do
   if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
 done
 if [ -n "$RESOLVED" ]; then
   FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" | grep -oE '[0-9]+')
-  if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt <MIN_VERSION> ]; then
-    echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= <MIN_VERSION>)"
-    # HEADLESS BLOCK — see per-site disposition; never fall through
+  if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+    echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+    # HARD STOP: EXIT blocked with <blocker.reason> (see this site's bullet
+    # below); never run the script, never fall through to any other branch.
+    exit 3
+  else
+    <invoke the script here>
   fi
 fi
 ```
+
+`MIN_VERSION` is declared **once** per site and used in both the comparison and
+the message — never a literal repeated twice — so the version table below stays
+the single source of truth. `exit 3` is the fence's own hard stop: it makes the
+invocation unreachable *in the shell*, so a worker reading only the fence cannot
+fall through. The `exit 3` is not itself the disposition — the bullet after each
+fence still names the `blocker.reason` and the sentinel to emit.
 
 **Existence is not enough.** `ln -sf` means an installed copy keeps pointing at
 whatever commit's content it was linked against, so a found script can be
@@ -221,14 +233,18 @@ Stage 2 agent spawn:
   or `git push`, resolve the script per "Guard-script path resolution and staleness
   marker (#2141)" above, then run it:
   ```bash
+  MIN_VERSION=1  # per the script version table in auto-dev-impl.md
   RESOLVED=""
   for candidate in .claude/scripts/check_not_main_checkout.py "$HOME/.claude/scripts/check_not_main_checkout.py"; do
     if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
   done
   if [ -n "$RESOLVED" ]; then
     FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" | grep -oE '[0-9]+')
-    if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt 1 ]; then
-      echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= 1)"
+    if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+      echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+      # HARD STOP: EXIT blocked with impl_failed (see bullet below); never run
+      # the script, and never take the absent-from-both-locations skip path.
+      exit 3
     else
       python "$RESOLVED"
     fi
@@ -333,14 +349,20 @@ All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktr
 2. **File set is within the plan's enumeration** (mechanical, not prose — #1779):
    ```bash
    git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > /tmp/touched_files-$CW_SESSION
+   MIN_VERSION=1  # per the script version table in auto-dev-impl.md
    RESOLVED=""
    for candidate in .claude/scripts/check_plan_scope_conformance.py "$HOME/.claude/scripts/check_plan_scope_conformance.py"; do
      if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
    done
    if [ -n "$RESOLVED" ]; then
      FOUND_VERSION=$(grep -m1 'cw-script-version:' "$RESOLVED" | grep -oE '[0-9]+')
-     if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt 1 ]; then
-       echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= 1)"
+     if [ -z "$FOUND_VERSION" ] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+       echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+       # HARD STOP: EXIT blocked with impl_failed (see bullet below); never run
+       # the script, and never take the absent-from-both-locations skip path.
+       # This is the approved file-set gate — falling through past it ships
+       # unreviewed scope drift, so the stop lives in the shell, not only prose.
+       exit 3
      else
        SCOPE_CONFORMANCE_OUTPUT=$(uv run python "$RESOLVED" \
          --plan .cw/plan.md --touched-files /tmp/touched_files-$CW_SESSION)
