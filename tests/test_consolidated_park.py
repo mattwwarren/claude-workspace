@@ -201,8 +201,8 @@ def test_step1a_excludes_pipeline_authored_comments_from_plan_detection() -> Non
 def test_checkpoint1_resumed_large_draft_requires_approval_evidence() -> None:
     """A resumed Large draft auto-skips approval only with an approving reply."""
     section = _checkpoint1_section()
-    assert "Large-scope carve-out on the resumed-draft path (#1650)" in section
-    assert "requires approval evidence in the live-fetched comments" in section
+    assert "Large-scope carve-out on the resumed-draft path (#1650, #2102)" in section
+    assert "the AUTO-SKIP additionally requires approval evidence" in section
     assert "must not slip through approval by being resumed" in section
 
 
@@ -235,12 +235,12 @@ def test_checkpoint1_accepts_row_side_plan_approval_evidence() -> None:
     """The Large-scope carve-out names the queue_metadata record as evidence."""
     section = _checkpoint1_section()
     window = _after(
-        section, "requires approval evidence in the live-fetched comments", span=1300
+        section, "the AUTO-SKIP additionally requires approval evidence", span=2400
     )
     assert "`queue_metadata.plan_approved_at`" in window
     assert "`.claude/cw-context.json`" in window
     assert "`cw dev-queue approve`" in window
-    assert "Either source alone is sufficient" in window
+    assert "Either source is sufficient" in window
     assert "Absent both, EXIT `plan_pending_approval` again" in window
 
 

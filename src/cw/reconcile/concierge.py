@@ -110,6 +110,15 @@ from cw.reconcile._shared import (
 # a stale branch does not make it fresh -- the row would spin straight back
 # into the same park (or worse, slip past it) without anyone rebasing. The
 # recovery is an operator rebase followed by an explicit requeue/drain.
+#
+# GitHub #2123: REVIEW_STALENESS_GATE_DISPOSITION ("review_artifacts_stale") is
+# excluded for the same reason, with one deliberate asymmetry worth naming. It
+# IS a DRAIN_DISPOSITIONS member -- an *operator-initiated* drain re-runs review
+# against the current HEAD, which is the correct recovery. Concierge's
+# auto-requeue is not that: it fires unattended, on a heuristic that says "this
+# park looks like a session glitch", and would silently re-dispatch a ticket
+# whose review genuinely did not cover the tree that would ship. Batch-
+# releasable on request, never auto-released.
 from cw.reconcile._shared import (
     _REAP_ELIGIBLE_DISPOSITIONS_BASE as _FALSE_PARK_ELIGIBLE_DISPOSITIONS,
 )

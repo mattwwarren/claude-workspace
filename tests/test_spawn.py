@@ -2627,6 +2627,67 @@ class TestWriteHookContextTaskFields:
             context["queue_metadata"]["plan_approved_at"] == "2026-09-04T12:30:00+00:00"
         )
 
+    def test_plan_approved_fingerprint_threaded_into_queue_metadata(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """The draft fingerprint the approval was bound to (dev-queue v36)
+        reaches the worker verbatim, where Checkpoint 1 compares it against the
+        draft it is about to auto-skip (#2102)."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-plan-fingerprint")
+        task = _make_pending_task()
+        task.plan_approved_fingerprint = "abc123"
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev-plan GEN-2102 --headless",
+            label="auto-dev/GEN-2102",
+            native_daemon=daemon,
+            ticket_id="GEN-2102",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["queue_metadata"]["plan_approved_fingerprint"] == "abc123"
+
+    def test_plan_approved_fingerprint_null_threaded_as_null(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """An unstamped row threads an explicit null, not a missing key — the
+        consumer distinguishes "no approval bound" from "key absent"."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-plan-fingerprint-null")
+        task = _make_pending_task()
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev-plan GEN-2102 --headless",
+            label="auto-dev/GEN-2102",
+            native_daemon=daemon,
+            ticket_id="GEN-2102",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert "plan_approved_fingerprint" in context["queue_metadata"]
+        assert context["queue_metadata"]["plan_approved_fingerprint"] is None
+
     def test_git_failure_sets_origin_sha_null(
         self,
         tmp_config_dir: Path,
@@ -2959,11 +3020,11 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (7 after the
-        queue_metadata.plan_approved_at addition)."""
+        """cw-context.json schema_version is current (8 after the
+        queue_metadata.plan_approved_fingerprint addition)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 7
+        assert CW_CONTEXT_SCHEMA_VERSION == 8
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -2978,7 +3039,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 7
+        assert context["schema_version"] == 8
 
 
 class TestCwContextLaneStamp:

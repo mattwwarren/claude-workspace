@@ -6,8 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Plan approval is now bound to the exact draft fingerprint that was approved (#2102):** a resumed Large-scope plan's approval evidence previously matched against whatever draft was live at check time, so an operator's approval of one draft revision could be read as covering a later, unreviewed one. `cw.models` now defines the two fingerprint wire keys (`plan_draft_fingerprint`, `plan_approved_fingerprint`) once, threaded through the sentinel, session, dev-queue, and worker context so approval evidence is bound to the specific draft it was given for; `plan_approved_fingerprint` is reported only when the call actually stamped it.
+- **Adds the `review_artifacts_stale` dispatch gate, a seventh REVIEW-scoped gate (#2123):** a ticket whose sentinel reports a review block that does not cover the worktree's live HEAD now parks `BLOCKED_ON_USER/review_artifacts_stale` instead of advancing. `Review.reviewed_sha` is threaded from all three executors (Codex and Claude-native via `consolidate_verdict`, OpenCode from its own fix-loop tail) to the sentinel, and the gate compares it against the branch's live HEAD, failing closed on a missing/non-string sha or an unmeasurable worktree so a producer that forgets the stamp parks rather than bypassing the gate.
+
 ### Fixed
 
+- **The CodexExecutor review path no longer destroys degraded-reviewer rationale or leaves `agent_health_summary` empty (#2094):** every reviewer's parsed document is now persisted to the diagnostics bundle on every run (`ok`/`degraded`/`failed`), not just on failure, so a degraded reviewer's stated reason survives the scratch-dir cleanup. `synthesize_codex_review_result`'s clean stage_complete path now populates `AutoDevResult.friction_highlights` (one line per non-`"ok"` document plus a diagnostics pointer) and `Health.agent_health_summary` (one entry per document), so a `review_health_gate` park is no longer forensically empty.
 - **`dispatch_fix_agent`'s HEAD verification now resolves the branch's remote ref via its configured upstream (`@{u}`) instead of guessing `origin/<branch>` (#2145):** the guessed name silently diverges from reality whenever a branch was pushed under one name and later checked out locally under another, so the HEAD-landed-correctly check could compare against the wrong SHA. The new `_resolve_remote_ref` helper prefers the checked-out branch's upstream, falling back to `origin/<branch>` only once confirmed to actually resolve; an unresolvable ref now raises a `CwError` naming both the attempted upstream and the `origin/<branch>` fallback instead of dispatching against unverified branch state.
 
 ## [1.46.0] - 2026-09-14

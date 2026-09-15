@@ -24,6 +24,7 @@ from cw.config import get_client
 from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
 from cw.dev_queue.lifecycle import (
     BRANCH_STALENESS_GATE_DISPOSITION,
+    REVIEW_STALENESS_GATE_DISPOSITION,
     _advance_task_pointer,
     _clear_signoff_gate,
     _plan_is_reviewed,
@@ -32,13 +33,19 @@ from cw.dev_queue.lifecycle import (
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
-from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.models import (
+    PLAN_APPROVED_FINGERPRINT_KEY,
+    PLAN_DRAFT_FINGERPRINT_KEY,
+    OrchestratorEventType,
+    QueueItemStatus,
+    Stage,
+)
 
 if TYPE_CHECKING:
     from cw.models import DevQueueStore, Session, TicketTask
 
 
-def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
+def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | None]:
     """Approve a plan/review approval gate, or clear an operator-signoff gate.
 
     Two distinct gates share this entry point (GitHub #990):
@@ -58,8 +65,11 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
     call re-parked a PLAN-stage ticket at Stage.PLAN/PENDING instead of
     advancing to IMPL, because the plan-of-record was not yet quality-
     reviewed -- see GitHub #968; always present, False on every other path),
-    and finalize_held (RFC 0011 A3, #1160; always False on this entry point,
-    which is the human release path -- see ``_approve_ticket_locked``).
+    finalize_held (RFC 0011 A3, #1160; always False on this entry point,
+    which is the human release path -- see ``_approve_ticket_locked``), and
+    plan_approved_fingerprint (#2102; the draft fingerprint this approval is
+    bound to, read from the approving session's sentinel -- None on every
+    non-PLAN path and whenever the sentinel carried no fingerprint).
 
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
@@ -181,8 +191,10 @@ def _record_approve_scope_routing_decision(
     )
 
 
-def _stamp_plan_approval(task: TicketTask, from_stage: str) -> None:
-    """Record the tracker-neutral plan-approval fact (schema v35).
+def _stamp_plan_approval(
+    task: TicketTask, from_stage: str, session: Session
+) -> str | None:
+    """Record the tracker-neutral plan-approval fact (schema v35/v36).
 
     Stamped on BOTH the #968 same-stage re-park and the direct advance, since
     either means the operator (or an enabled gate recipe) released this row's
@@ -193,9 +205,28 @@ def _stamp_plan_approval(task: TicketTask, from_stage: str) -> None:
     same durable write as the status transition. Extracted from
     ``_approve_ticket_locked`` to keep that function under the PLR0915
     statement ceiling, like its sibling helpers above.
+
+    The v36 companion ``plan_approved_fingerprint`` (#2102) is read from the
+    approving session's sentinel and stamped in the same branch, binding the
+    approval to the draft the operator actually read. Both writes are gated on
+    the PLAN stage together: a fingerprint without a timestamp records an
+    approval that never happened, and a timestamp without a fingerprint is the
+    unbound approval this field exists to eliminate. A sentinel that omits the
+    key (pre-#2102 producer) stamps None — recorded absence, not a wildcard.
+
+    Returns what THIS call stamped, which is what the caller reports back under
+    ``plan_approved_fingerprint``: None on every non-PLAN path, where reading
+    the field off the row instead would report whatever some *earlier* plan
+    approval left there as though this approval had bound it.
     """
-    if from_stage == Stage.PLAN.value:
-        task.plan_approved_at = datetime.now(UTC)
+    if from_stage != Stage.PLAN.value:
+        return None
+    task.plan_approved_at = datetime.now(UTC)
+    fingerprint = (session.last_result or {}).get(PLAN_DRAFT_FINGERPRINT_KEY)
+    task.plan_approved_fingerprint = (
+        fingerprint if isinstance(fingerprint, str) else None
+    )
+    return task.plan_approved_fingerprint
 
 
 def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
@@ -227,6 +258,17 @@ def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
     if task.disposition == BRANCH_STALENESS_GATE_DISPOSITION:
         return True
 
+    # #2123: chained immediately after #1823's override, on identical
+    # reasoning. A review-staleness park likewise leaves the sentinel reading
+    # "review_pending_approval" and diverges only task.disposition, so without
+    # this the row reads as "at the approval gate" and `approve` would release
+    # a tree that no reviewer ran against. That is the exact incident: a
+    # review-stage park released via `requeue` can return to this status with
+    # stale artifacts. Recovery is `cw dev-queue requeue`/`drain` (which
+    # re-runs review), not `approve`.
+    if task.disposition == REVIEW_STALENESS_GATE_DISPOSITION:
+        return True
+
     not_at_status_gate = (
         session.last_result is None
         or session.last_result.get("status") not in SCOPE_GATED_APPROVAL_STATUSES
@@ -242,7 +284,7 @@ def _approve_ticket_locked(
     resolved_task: TicketTask | None = None,
     plan_reviewed: bool | None = None,
     operator_initiated: bool = False,
-) -> dict[str, str | bool]:
+) -> dict[str, str | bool | None]:
     """Lock-free body of :func:`approve_ticket`.
 
     The caller MUST already hold ``dev_queue_lock()`` (``_lock``). Extracted
@@ -337,6 +379,10 @@ def _approve_ticket_locked(
             "awaiting_signoff": False,
             "plan_requeued": False,
             "finalize_held": False,
+            # Never the row's stored value: clearing a signoff gate stamps no
+            # plan approval, so reporting one would credit this call with a
+            # binding an earlier PLAN approval made.
+            PLAN_APPROVED_FINGERPRINT_KEY: None,
         }
 
     state = load_state()
@@ -407,7 +453,7 @@ def _approve_ticket_locked(
         plan_requeued = True
     else:
         _advance_task_pointer(task, stages)
-    _stamp_plan_approval(task, from_stage)
+    stamped_fingerprint = _stamp_plan_approval(task, from_stage, session)
     to_stage = task.stage.value
 
     # #1617 (D4): _approve_ticket_locked is a gate-release site, excluded from
@@ -437,4 +483,5 @@ def _approve_ticket_locked(
         "awaiting_signoff": awaiting_signoff,
         "plan_requeued": plan_requeued,
         "finalize_held": finalize_held,
+        PLAN_APPROVED_FINGERPRINT_KEY: stamped_fingerprint,
     }

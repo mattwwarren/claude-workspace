@@ -80,3 +80,34 @@ def commits_ahead_of_default(
         return int(result.stdout.strip())
     except ValueError:
         return None
+
+
+def current_head_sha(worktree_path: Path | None) -> str | None:
+    """Return *worktree_path*'s current HEAD sha, or ``None`` if unmeasurable (#2123).
+
+    Same fail-open-never-raise contract as ``commits_ahead_of_default`` above,
+    and the same three-valued discipline: every unresolvable state (no
+    worktree, git missing, a non-zero git exit, an empty stdout) resolves to
+    ``None``, never to a partial or guessed sha. Single-arg -- HEAD needs no
+    ``default_branch`` and reads no remote ref, so unlike its sibling this
+    cannot fail on an unfetched ``origin/<default>``.
+
+    The *consumer* supplies the policy, not this function.
+    ``dispatch.review_gates._should_gate_for_review_staleness`` treats ``None``
+    as fail-CLOSED -- the opposite of what ``_should_gate_for_empty_diff`` does
+    with its sibling's ``None`` -- because "is this review current?" has no
+    safe answer without a measurement. Keeping the measurement opinion-free is
+    what lets the two callers disagree.
+    """
+    if worktree_path is None or not worktree_path.exists():
+        return None
+    try:
+        result = _run_git("rev-parse", "HEAD", cwd=worktree_path, check=False)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    # An empty string would compare unequal to every real sentinel sha and read
+    # as a *mismatch* downstream rather than as "unmeasurable". Both park, but
+    # conflating them would hide which one actually happened.
+    return result.stdout.strip() or None

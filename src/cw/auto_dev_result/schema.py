@@ -33,7 +33,7 @@ _log = logging.getLogger("cw.auto_dev_result")
 # Accepted sentinel schema versions. Single source of truth: parse.py derives
 # SUPPORTED_SCHEMA_VERSIONS (its pre-Pydantic gate) from this Literal via
 # get_args, so a version bump edits exactly one place (#1535 drift class).
-SchemaVersion = Literal[1, 2, 3, 4, 5, 6, 7]
+SchemaVersion = Literal[1, 2, 3, 4, 5, 6, 7, 8]
 
 Status = Literal[
     "shipped",
@@ -484,6 +484,26 @@ class Review(BaseModel):
     # round it down to omission.
     rejected_count: int | None = None
     rejected_count_by_severity: dict[str, int] | None = None
+    # #2123: the sha the review actually ran against — the same quantity as
+    # `ReviewVerdict.reviewed_sha` (`review_findings/_models.py`), threaded
+    # here so dispatch, which sees only the terminal AUTO_DEV_RESULT sentinel,
+    # can compare it against the worktree's live HEAD before releasing the
+    # REVIEW->FINALIZE checkpoint. Captured after any fix cycle converges and
+    # its fix claims are verified (docs/headless-contract.md Note A14), so a
+    # matching value means the reviewed tree IS the shippable tree.
+    #
+    # Defaults to `None` on the #2098 precedent: "the producer did not report
+    # this", never "it matched". The consuming gate (disposition
+    # `review_artifacts_stale`) fails CLOSED on that default, so a future
+    # executor that forgets the stamp parks rather than silently bypassing the
+    # gate.
+    #
+    # Additive for schema versioning — no `schema_version` bump, because an
+    # older consumer that ignores the field behaves exactly as before. NOT
+    # advisory for behavior: it is the load-bearing input to that fail-closed
+    # gate, and omitting it parks the ticket. "Optional to emit" and
+    # "inconsequential when absent" are different claims; only the first holds.
+    reviewed_sha: str | None = None
 
 
 class AgentHealthEntry(BaseModel):
@@ -769,6 +789,14 @@ class AutoDevResult(BaseModel):
     # comment id/URL and the settled item ids. None when resolution_consumed
     # is False or absent. See GitHub issue #1896.
     resolution_evidence: dict[str, Any] | None = None
+    # v8: SHA-256 (full hex) of `.cw/plan-draft.md` with its bookkeeping lines
+    # stripped, per auto-dev-plan.md's *Plan-draft fingerprint rule* (#2102).
+    # Emitted at every plan-stage sentinel that has a draft in hand; null when
+    # no draft exists. `cw dev-queue approve` copies it onto the row as
+    # `plan_approved_fingerprint`, which is what lets the next round's
+    # Checkpoint 1 tell "approved, and the text is unchanged" from "approved,
+    # but this is a different draft now".
+    plan_draft_fingerprint: str | None = None
 
     @field_validator("cost_usd")
     @classmethod

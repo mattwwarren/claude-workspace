@@ -65,6 +65,7 @@ from cw.dev_queue import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
     BRANCH_STALENESS_GATE_DISPOSITION,
+    REVIEW_STALENESS_GATE_DISPOSITION,
     _approve_ticket_locked,
     _local_plan_body,
     _marker_version,
@@ -424,8 +425,9 @@ def _detect_auto_approve_review(
     every status transition, including a same-status re-park by a fresh
     review session).
 
-    A row parked by the #1823 branch-staleness gate is excluded outright,
-    however clean its sentinel reads — see the inline note at that guard.
+    A row parked by the #1823 branch-staleness gate or the #2123
+    review-staleness gate is excluded outright, however clean its sentinel
+    reads — see the inline notes at those guards.
     """
     candidates: list[GateRecipeCandidate] = []
     for task in tasks:
@@ -442,6 +444,13 @@ def _detect_auto_approve_review(
         # Excluded on disposition, mirroring dev_queue.approval's own
         # fail-closed override for the manual `approve` path.
         if task.disposition == BRANCH_STALENESS_GATE_DISPOSITION:
+            continue
+        # #2123: the same exclusion, and the load-bearing one for this ticket.
+        # A stale-artifact row satisfies all five clean-review fields BECAUSE
+        # those numbers describe the tree the reviewers actually saw -- a
+        # different tree from the one that would ship. Auto-approving it is
+        # precisely the incident: clean numbers, wrong tree, nobody looking.
+        if task.disposition == REVIEW_STALENESS_GATE_DISPOSITION:
             continue
         if task.session_id is None:
             continue

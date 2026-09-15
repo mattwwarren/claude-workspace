@@ -1185,6 +1185,28 @@ def _clean_git_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
+def git_in(repo: Path, *args: str) -> str:
+    """Run git in *repo* with a ``GIT_*``-stripped env, returning stripped stdout.
+
+    Canonical runner for tests that drive a real ``make_git_repo`` repo through
+    raw git commands. Consolidates four byte-identical private copies
+    (``test_branch_ahead.py``, ``test_dispatch_branch_freshness.py``,
+    ``test_worktree.py``, and ``test_dispatch.py``'s ``_git_in_repo``) — the
+    same "hoist a duplicated private test helper into conftest.py" pattern as
+    ``_cmd`` and ``commit_tracked_file``. The env strip matters because pytest
+    may itself be running inside a git hook, whose ``GIT_DIR``/``GIT_INDEX_FILE``
+    would otherwise redirect the nested invocation away from *repo*.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    return result.stdout.strip()
+
+
 @pytest.fixture
 def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
     """Factory fixture to create git repos in tmp_path.

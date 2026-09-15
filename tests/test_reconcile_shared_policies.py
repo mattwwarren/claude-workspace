@@ -2183,7 +2183,7 @@ class TestApplySentinelToTaskLateRescue:
         assert t.stage == Stage.REVIEW
 
     def test_late_sentinel_re_parks_signoff_ticket_at_review_idempotently(
-        self, tmp_config_dir: Path
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The realistic signoff-rescue case: a task parked AWAITING_OPERATOR_
         SIGNOFF at Stage.REVIEW (the only stage the gate ever fires at) with
@@ -2222,6 +2222,24 @@ class TestApplySentinelToTaskLateRescue:
         # re-park this test exists for. A real REVIEW-stage stage_complete
         # reports the reviewers that ran.
         payload["review"] = {**payload["review"], "agents_run": 2}
+        # #2123: exactly the same shape of fixture correction as #1870's above,
+        # one gate further up. The review-staleness gate outranks signoff too,
+        # and a review block with no reviewed_sha is one of its park
+        # conditions -- so without a sha matching the measured HEAD this row
+        # would park BLOCKED_ON_USER/review_artifacts_stale and stop exercising
+        # the signoff re-park. A real REVIEW-stage stage_complete reports the
+        # sha its reviewers ran against; the task carries no real worktree
+        # here, so the measurement is stubbed to agree with it.
+        payload["review"] = {**payload["review"], "reviewed_sha": "signoff-head"}
+        # The gate fails closed on an unresolvable worktree before it reaches
+        # the probe, so the resolution is stubbed alongside the measurement.
+        monkeypatch.setattr(
+            "cw.dispatch.review_gates.resolve_task_worktree",
+            lambda _t, _c: Path("/stub-worktree"),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.review_gates.current_head_sha", lambda _p: "signoff-head"
+        )
         sentinel = AutoDevResult.model_validate(payload)
 
         rescued = _apply_sentinel_to_task(ticket_id, session, sentinel).rescued

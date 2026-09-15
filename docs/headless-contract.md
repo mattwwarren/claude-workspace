@@ -100,7 +100,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 8,
   "ticket_id": "GEN-1234",
   "status": "shipped",
   "stage_reached": "stage5_post_create",
@@ -122,7 +122,12 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
     "auto_merge": true,
     "base": "main"
   },
-  "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+  "review": {
+    "must_fix_initial": 0,
+    "should_fix": 1,
+    "fix_cycles_used": 0,
+    "agents_run": 2
+  },
   "health": {
     "lowest_agent_confidence": "MEDIUM",
     "any_incomplete_risk": false,
@@ -133,7 +138,8 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
   },
   "friction_highlights": [],
   "blocker": null,
-  "next_actions": ["wait_for_ci"]
+  "next_actions": ["wait_for_ci"],
+  "plan_draft_fingerprint": null
 }
 ```
 
@@ -141,7 +147,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | int | Currently `5` (legacy `1`, `2`, `3`, `4` accepted during the rollout window). Bump rules in §8. |
+| `schema_version` | int | Currently `8` (legacy `1` through `7` accepted during the rollout window), which is what the §3.2 example above shows — this page states one current version and nothing else. A real producer may still stamp a lower one: the §8 rollout exceptions let it keep its pre-existing version while emitting v5-v8 fields, so consumers must accept that shape too. Bump rules and full history in §8. |
 | `ticket_id` | string | Linear ID, or synthetic for free-text invocations. |
 | `status` | string enum | See §4. Closed set; parsers MUST treat unknown values as §6 (5) errors. |
 | `stage_reached` | string enum | Pipeline-stage marker. Closed set: `stage1_pre_flight`, `stage1_plan`, `stage2_impl`, `stage3_review`, `stage4a_merge_gate`, `stage4b_pr_create`, `stage5_post_create`. Pre-flight exits (e.g. already-satisfied tickets) use `stage1_pre_flight`. Producer and parser must keep this list in lockstep — adding a stage is a `schema_version` bump (see §8). |
@@ -165,6 +171,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `review.had_real_commit` | bool \| null | **#1723** — when non-null, true iff at least one fix cycle in the run actually committed a change (OR'd across cycles); distinguishes a fix loop that converged (no MUST_FIX survivors) because a real fix landed from one that converged purely because every cycle's fix invocation was a tolerated no-op. Purely advisory — prose-only consumption in `render_verdict_comment`'s non-blocking headline. Optional field; defaults to `null` on payloads from producers that predate this field, representing an unknown commit outcome. No `schema_version` bump required — see Note (A11, §8). |
 | `review.rejected_count` | int \| null | **#2000** — count of findings the review's mechanical validation rejected (unknown file, invalid line reference, evidence not in diff, ...) before adjudication ever saw them, at **every** severity. Distinct from `must_fix_initial`/`should_fix`, which count only findings that SURVIVED validation: a pass that deleted findings and a pass that genuinely found nothing are otherwise indistinguishable to a consumer reading only this block. Purely advisory — nothing in cw gates on it (the review-health gate deliberately keeps meaning "no reviewer ran / coverage degraded"). Optional field; `null` means the producer did not report it (pre-#2000 payloads, and any payload where `.claude/commands/auto-dev-review.md`'s Freeze rule was not reached) — **not** "zero rejections". A producer that ran `cw review consolidate` and has a real count reports it; `0` means a confirmed zero, never an omission (#2098). No `schema_version` bump required — see Note (A13, §8). |
 | `review.rejected_count_by_severity` | dict[string, int] \| null | **#2000** — the same rejections as `review.rejected_count`, broken down by the severity each finding claimed for itself (e.g. `{"SHOULD_FIX": 2, "NIT": 1}`). Keys are `Severity` values, plus `"unknown"` for a rejected payload whose severity was itself unusable. Purely advisory, same as the row above. Optional field; `null` means the producer did not report it — same not-reported-vs-zero distinction as `review.rejected_count` above (#2098). No `schema_version` bump required — see Note (A13, §8). |
+| `review.reviewed_sha` | string \| null | **#2123** — the commit sha the review was actually run against, captured **after** any fix cycle converges and its fix claims are verified (per-executor timing in Note (A14, §8)). When no fix cycle ran it is simply the reviewed branch tip. Optional field; `null` means the producer did not report it — **not** "it matched". Unlike the advisory rows above, dispatch **gates** on this one: at the REVIEW→FINALIZE checkpoint it is compared against the worktree's live HEAD, and a missing, non-string, or mismatched value re-gates the ticket to `review_pending_approval` under disposition `review_artifacts_stale` rather than advancing. A payload carrying no `review` block at all is out of scope and does not gate. See Note (A14, §8). |
 | `health` | object | See §5. |
 | `friction_highlights` | string[] | Surfaced highlights from agent friction reports. |
 | `blocker` | object \| null | See §4.2. Required non-null when `status = "blocked"`. Exception (#777): `merge_gate_blocked` MAY also carry a non-null blocker to surface the gate reason (e.g. `prior_pipeline_pr_open`); `blocker` must be `null` for every other status. |
@@ -172,6 +179,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `cost_usd` | number \| null | Total USD cost of the run (#124). Optional — producers that don't track cost omit it; consumers treat `null` as "cost unknown". Must be non-negative when present. |
 | `resolution_consumed` | bool | **#1896** — true iff this plan-stage pause round consumed an operator resolution, with provenance in `resolution_evidence` below. Producer: `.claude/commands/auto-dev-plan.md` Step 1c.0's settlement mechanism, on a resumed round that transcribes an operator's reply to a previously-parked ambiguity/premise via its own step 5, AND the round still exits paused through a Step 4c EXIT bullet. Never set by the Pre-branch integrity checks' cap-check (`ambiguity_scan_unconverged`) or stub-check (`deferred_stub_unresolved`) hard-exits, whatever the round settled (#2154) — that ceiling protection is deliberate; see the emission rule in `auto-dev-plan.md`. Scoped to that mechanism only (#2098) — a Step 1b `## Binding Pre-flight Resolutions` merge (an operator comment folded into the plan-agent prompt before generation) is a *different* mechanism and never sets this field; its trace is the plan's own `## Pre-flight Resolution Conformance` section and `friction_highlights`. Consumer: `cw.dispatch.productivity` treats a bare `true` with no `resolution_evidence` as not credited (anti-gaming; widening this field's emission would let any re-dispatch of a ticket carrying a pre-flight comment emit `true` forever, defeating the crashloop ceiling). Defaults to `false` when omitted. |
 | `resolution_evidence` | object \| null | **#1896** — provenance for `resolution_consumed` above: the settlement round's source comment id and the settled item ids. `null` when `resolution_consumed` is `false` or absent. |
+| `plan_draft_fingerprint` | string \| null | **#2102** — SHA-256 (full lowercase hex) of `.cw/plan-draft.md` with its bookkeeping lines stripped, per the *Plan-draft fingerprint rule* in `.claude/commands/auto-dev-plan.md` (the sole definition of the computation). Producer: every plan-stage sentinel emission that has a draft in hand — the Stage 1 completion sentinel and every park exit — emitting `null` explicitly when no draft exists. Consumer: `cw dev-queue approve` copies it onto the dev-queue row as `plan_approved_fingerprint` (schema v36), which `spawn.py` threads to the next worker in `queue_metadata`, where Checkpoint 1's Large-scope carve-out requires it to equal the resumed draft's freshly-computed fingerprint before the recorded approval counts as evidence. `null` is absent evidence, never a wildcard match. Defaults to `null` when omitted (pre-#2102 producers). |
 
 **Note (A8, #1130):** `commits`, `friction_highlights`, and `next_actions` array items must be non-empty, non-whitespace strings; blank items are dropped at the parse boundary. Unlike A6/A7, no placeholder is injected when filtering leaves the array empty — none of these fields is gated behind a status-specific "must be non-empty" invariant (contrast `ambiguities`/`premises`, §4.4), so an empty result here is simply a valid empty list.
 
@@ -481,7 +489,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 
 ## 8. Versioning
 
-`schema_version: 6` is the current contract. Parsers also accept `schema_version: 1`, `2`, `3`, `4`, and `5` during the rollout window.
+`schema_version: 8` is the current contract. Parsers also accept `schema_version: 1` through `7` during the rollout window.
 
 **Version history:**
 
@@ -492,9 +500,9 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 | 3 | Added `stage1_pre_flight` value to `stage_reached` enum (§3.3) and `none` value to `plan_source` enum (§3.3). Used together for pre-flight no_op exits. Parsers also accept this pair under v2 as a one-time rollout exception (the skill emitted them at v2 before the parser caught up — see #103). Also added `github_issue_existing` to `plan_source` (the post-Linear analog of `linear_existing`; treated identically). Accepted under v2 and v3 — same rollout-exception treatment, since the producer emits this value at v2 today (see #190). |
 | 4 | Promoted `ambiguities_pending_resolution` and `premises_pending_verification` from §4.4 interim states (not in closed enum) to canonical `Status` values (§4.1). Added `ambiguities` and `premises` top-level fields with cross-field invariants (non-empty when corresponding status is set, §4.4). Added `user_resolve_ambiguities` and `user_verify_premises` to §4.3 vocabulary. v3-tagged payloads with either new status are rejected as `validation_failed`. Tracked in #191. |
 | 5 | Added the optional `review.agents_run` int (§3.3) — count of reviewer agents that ran, reconciled against the executor-neutral review-verdict contract's `agents_run` list (#1237). Defaults to `0`; v1-v4 payloads that omit it parse unchanged — no schema_version bump was required to introduce it (purely advisory at the time). The review-verdict model group itself (`Finding`, `EscalationMetadata`, `ReviewVerdict`, ...) lives in `cw.review_findings` / the `.claude/review-verdict.json` artifact (#1108), not the sentinel block. (#1194 later graduated `agents_run` to a required-non-zero signal for one opt-in downstream consumer — see Note A9 below; that graduation itself required no further bump.) |
-
 | 6 | Added the `empty_diff_blocked` status (§4.1) — a branch measured with zero commits ahead of `origin/<default_branch>` — and its canonical `empty_diff_no_commits` `blocker.reason` (§4.2, open enum, no bump of its own). Required by the "new value added to a closed enum" rule below. Accepted under **all** supported schema versions (v2-v6) as a rollout exception, same precedent as v4's `ambiguities_pending_resolution`/`premises_pending_verification`: the codex-review executor and the producer skills still stamp their pre-existing `schema_version` today, and bumping every emitter in lockstep is a larger blast radius than the status itself. Tracked in #1870. |
 | 7 | Added the `stale_dispatch` status (§4.1) — this ticket already has an open, unmerged PR from an earlier dispatch — and its canonical `pr_already_open` `blocker.reason` (§4.2, open enum, no bump of its own). Also widened `stage_reached='stage1_pre_flight'`'s allowed-status set (previously `no_op`/`blocked`) to admit it: the Stage 0 intake self-check that detects the condition runs before any planning, so it has no other legal stage to report. Required by the "new value added to a closed enum" rule below. Accepted under **all** supported schema versions (v2-v7) as a rollout exception, same precedent as v6's `empty_diff_blocked`. Tracked in #1862. |
+| 8 | Added the optional `plan_draft_fingerprint` string-or-null (§3.3) — the content fingerprint of the plan draft a plan-stage sentinel was emitted for. Bumped despite being optional, under the "a new optional field consumers cannot ignore without a behavior change" rule below: Checkpoint 1's Large-scope carve-out now routes on its presence and value, so a producer that omits it on a park exit hands the operator's approval to the next round bound to nothing — the failure the field exists to prevent. Pre-v8 payloads that omit it parse unchanged and default to `null`. Tracked in #2102. |
 
 **Note (A6, #953):** Rejecting empty-question ambiguity items and coercing an empty/missing ambiguities array to a labeled placeholder is a parser-side strictness tightening of an existing v4 invariant — **no version bump** (consistent with the #430 `_coerce_empty_pending_array` precedent).
 
@@ -511,6 +519,8 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 **Note (A11, #1723):** Adding the optional `review.had_real_commit` bool-or-null (§3.3) — same shape of change as A9/`agents_run`: a purely advisory field, prose-only consumption (it only changes wording inside `render_verdict_comment`'s non-blocking headline), defaulting `null` so the commit outcome of every pre-#1723 payload remains explicitly unknown while rendering exactly as it always did. **No version bump** required — same precedent as the v5 `agents_run` introduction (§8, version-history row 5).
 
 **Note (A13, #2000):** Adding the optional `review.rejected_count` int and `review.rejected_count_by_severity` dict-of-int (§3.3) — the same shape of change as A9/`agents_run` and A11/`had_real_commit`: purely advisory fields, defaulting to `null` so every pre-#2000 payload parses unchanged and renders exactly as it always did (#2098 corrected the initial default from `0`/`{}` to `null`/`null` — a parser default of `0` is indistinguishable from a producer-confirmed zero, and every real producer omitted these keys until #2098 also landed the `.claude/commands/auto-dev-review.md` Freeze-rule and sentinel-template entries that actually populate them; see that issue). **No version bump** required — this matches the literal "No bump required when" bullet below: "A new purely-advisory optional field is added to `health`, `pr`, `review`, or the top level." Deliberately advisory and not gating: the counts exist so a mechanically-deleted finding is visible to an orchestrator reading only the sentinel, but nothing routes on them (`health.recommendation` is untouched — folding a matcher miss into a signal that means "coverage degraded" would degrade that signal, see #2000's round-1 resolution).
+
+**Note (A14, #2123):** Adding the optional `review.reviewed_sha` string-or-null (§3.3). `review.reviewed_sha` is the sha the review was actually run against — captured after any fix cycle converges and its fix claims are verified (Claude-native: Step 3c `cw review verify-fixes`; Codex: the terminal re-review cycle's own fresh capture; OpenCode: end of the fix-loop step), not before. When no fix cycle ran, it is simply the reviewed branch tip. A session that cannot confirm this value, or whose fix-loop commits outran what was actually re-verified, must not stamp a post-fix value it cannot substantiate — the dispatch-side gate (disposition `review_artifacts_stale`) treats a missing, non-string, or stale `reviewed_sha` identically: re-gate to `review_pending_approval` rather than trust an unconfirmed tree. **No version bump** required, and this one needs its reasoning stated because the field is *not* purely advisory the way A11/A13's are. The "Bump required when… consumers cannot ignore without a behavior change" bullet below is scoped to a field's core-parser/wire-format role, as Note (A9) sets out: every parser still parses a payload with or without this key exactly as before, and every non-cw consumer may ignore it with no behavior change. What changes is one of cw's own REVIEW-stage routing decisions — and it changes in the fail-closed direction, toward an operator look, never toward an unattended advance. Producers in flight whose artifacts predate the field park once for a human; that cost was weighed and accepted on the ticket rather than paid for with a contract-wide bump.
 
 **Bump required when:**
 - Any field is removed or renamed.

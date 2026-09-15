@@ -87,12 +87,14 @@ from cw.dispatch.review_gates import (
     _park_empty_diff_gate,
     _park_finalize_hold,
     _park_review_health_gate,
+    _park_review_staleness_gate,
     _park_scope_hint_gate,
     _park_signoff_gate,
     _should_force_hold_finalize,
     _should_gate_for_branch_staleness,
     _should_gate_for_empty_diff,
     _should_gate_for_review_health,
+    _should_gate_for_review_staleness,
     _should_gate_for_scope_hint,
     _should_gate_for_signoff,
 )
@@ -574,6 +576,19 @@ def _route_scope_gated_approval(
         _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
         _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
         return
+    if task.stage == Stage.REVIEW and _should_gate_for_review_staleness(
+        task, last_result, clients
+    ):
+        # Why between the two: branch-staleness is about the tree itself being
+        # out of date, which a rebase fixes; this is about the *review* being
+        # out of date relative to that tree, which only a re-review fixes. And
+        # why still ahead of review-health: a health recommendation derived
+        # from artifacts that never saw HEAD describes something other than
+        # what would ship, so it cannot be trusted either way (#2123).
+        _park_review_staleness_gate(task)
+        _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
+        _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
+        return
     if task.stage == Stage.REVIEW and _should_gate_for_review_health(last_result):
         _park_review_health_gate(task)
         _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
@@ -697,6 +712,15 @@ def _route_stage_success(
         # overlapping churn makes those answers describe something other than
         # what would actually ship, so it is answered first (#1823).
         _park_branch_staleness_gate(task)
+    elif task.stage == Stage.REVIEW and _should_gate_for_review_staleness(
+        task, last_result, clients
+    ):
+        # Why here: the gates below all reason about a review verdict -- is it
+        # vouched for, is it big enough to need approval. This one asks whether
+        # the verdict describes the tree that would actually ship. If it does
+        # not, every answer below is about the wrong tree (#2123). Chained as
+        # if/elif so a stale row never double-parks through a second branch.
+        _park_review_staleness_gate(task)
     elif task.stage == Stage.REVIEW and _should_gate_for_review_health(last_result):
         # Why here: every gate below is an authorization or scope-workflow
         # question ("may this ship?"); this one is a quality question ("is

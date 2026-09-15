@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from cw.auto_dev_result import (
     _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION,
     _PREMISE_GLITCH_PLACEHOLDER_CLAIM,
+    AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION,
     BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS,
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
@@ -3696,6 +3697,60 @@ class TestStaleDispatchStatus:
 
 
 # ---------------------------------------------------------------------------
+# Issue #2102 — plan_draft_fingerprint: the per-draft content hash that binds a
+# plan approval to the draft it was actually given for (schema v8).
+# ---------------------------------------------------------------------------
+
+
+class TestPlanDraftFingerprintField:
+    """The plan stage emits the draft's fingerprint so `cw dev-queue approve`
+    can bind the approval it records to that exact draft (#2102)."""
+
+    def test_current_schema_version_is_8(self) -> None:
+        assert AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION == 8
+        assert 8 in SUPPORTED_SCHEMA_VERSIONS
+
+    def test_v8_payload_carries_plan_draft_fingerprint(self) -> None:
+        payload = _plan_pending_payload()
+        payload["schema_version"] = 8
+        payload["plan_draft_fingerprint"] = "a" * 64
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.plan_draft_fingerprint == "a" * 64
+
+    def test_payload_without_plan_draft_fingerprint_parses_as_none(self) -> None:
+        """Back-compat: a pre-#2102 producer omits the key entirely."""
+        payload = _plan_pending_payload()
+        payload["schema_version"] = 7
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.plan_draft_fingerprint is None
+
+    def test_contract_doc_states_one_current_schema_version(self) -> None:
+        """The v8 bump left §3.3's current-version statement behind at `5`,
+        contradicting §8. Pin both statements to the parser so the next bump
+        cannot silently strand one of them."""
+        from tests.conftest import _REPO_ROOT
+
+        doc = (_REPO_ROOT / "docs" / "headless-contract.md").read_text(encoding="utf-8")
+        current = AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
+        assert f"`schema_version: {current}` is the current contract." in doc
+        field_notes = doc[doc.index("### 3.3 Field Notes") :]
+        start = field_notes.index("| `schema_version` |")
+        row = field_notes[start : field_notes.index("\n", start)]
+        assert f"Currently `{current}`" in row
+
+    def test_producer_doc_bump_heading_names_the_current_version(self) -> None:
+        """`auto-dev.md`'s bump-history heading is the producer-side twin of the
+        §3.3 row above; left at an older version it tells the producer to stamp
+        a version the parser has already moved past."""
+        from tests.conftest import _cmd
+
+        current = AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
+        assert f"**`schema_version: {current}`**" in _cmd("auto-dev.md")
+
+
+# ---------------------------------------------------------------------------
 # Issue #430 — Case 4: scope_exceeded / forbidden_area emitted at/after
 # stage2_impl carry non-null branch and/or lines_actual. Extend the no_op
 # stray-branch/lines coerce to scope_exceeded and forbidden_area.
@@ -4691,6 +4746,40 @@ class TestReviewRejectedCount:
         )
         assert review.rejected_count == 0
         assert review.rejected_count_by_severity == {}
+
+
+class TestReviewReviewedSha:
+    """#2123 — Review.reviewed_sha, the sha the review actually ran against.
+
+    Advisory optional field on the #2000/#2098 precedent: ``None`` means "the
+    producer did not report this", never "it matched". The dispatch-side gate
+    (``review_artifacts_stale``) treats the omitted case as fail-closed, so
+    the default must stay distinguishable from a real value here.
+    """
+
+    def test_reviewed_sha_defaults_to_none_when_omitted(self) -> None:
+        review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
+        assert review.reviewed_sha is None
+
+    def test_reviewed_sha_round_trips_a_concrete_sha(self) -> None:
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        review = Review(
+            must_fix_initial=0, should_fix=0, fix_cycles_used=0, reviewed_sha=sha
+        )
+        dumped = review.model_dump()
+        assert dumped["reviewed_sha"] == sha
+        assert Review.model_validate(dumped).reviewed_sha == sha
+
+    def test_reviewed_sha_parses_from_a_raw_sentinel_payload(self) -> None:
+        review = Review.model_validate(
+            {
+                "must_fix_initial": 1,
+                "should_fix": 0,
+                "fix_cycles_used": 1,
+                "reviewed_sha": "deadbeef",
+            }
+        )
+        assert review.reviewed_sha == "deadbeef"
 
     def test_pre_2000_payload_without_rejected_count_parses_unchanged(self) -> None:
         # Backward compatibility, proven rather than asserted in prose: the

@@ -12,7 +12,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from cw.models import DEFAULT_LANE, DEFAULT_STAGE, DEV_QUEUE_SCHEMA_VERSION
+from cw.models import (
+    DEFAULT_LANE,
+    DEFAULT_STAGE,
+    DEV_QUEUE_SCHEMA_VERSION,
+    PLAN_APPROVED_FINGERPRINT_KEY,
+)
 
 
 def _fill_task_cost_default(task_raw: dict[str, Any]) -> None:
@@ -231,6 +236,19 @@ def _fill_plan_approved_at_default(task_raw: dict[str, Any]) -> None:
         task_raw["plan_approved_at"] = None
 
 
+def _fill_plan_approved_fingerprint_default(task_raw: dict[str, Any]) -> None:
+    """Fill plan_approved_fingerprint introduced in dev-queue schema v36
+    (GitHub #2102). Idempotent.
+
+    None on every pre-v36 row by construction: no fingerprint was ever
+    recorded, so the approval those rows carry cannot be bound to a draft and
+    Checkpoint 1 re-asks. That is the intended direction — a v35 row's
+    unbound approval is exactly the vulnerability this field closes.
+    """
+    if PLAN_APPROVED_FINGERPRINT_KEY not in task_raw:
+        task_raw[PLAN_APPROVED_FINGERPRINT_KEY] = None
+
+
 def _fill_stale_gate_default(task_raw: dict[str, Any]) -> None:
     """Fill stale_gate_detected_at/blocked_on_pr introduced in dev-queue
     schema v30 (GitHub #1713). Idempotent."""
@@ -334,6 +352,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_unproductive_attempts_default(task_raw)
                 _fill_ever_spawned_default(task_raw)
                 _fill_plan_approved_at_default(task_raw)
+                _fill_plan_approved_fingerprint_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw

@@ -35,7 +35,7 @@ from cw.events import record_event
 from cw.gh import fetch_approved_plan_comment
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.worktree import _checked_out_branch, worktree_path_for
+from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -170,6 +170,33 @@ BRANCH_STALENESS_GATE_DISPOSITION = "branch_behind_main"
 # BASE lineage), which would spin an empty branch straight back through the
 # pipeline and defeat the gate outright.
 EMPTY_DIFF_GATE_DISPOSITION = "empty_diff_gate"
+
+# Disposition stamped when dispatch's REVIEW-stage routing refuses to advance a
+# ticket whose sentinel does not carry a review.reviewed_sha matching the
+# worktree's live HEAD (#2123) -- the reviewers vouched for a tree that is not
+# the tree that would ship. Missing, non-string, and unmeasurable all land
+# here too: this gate fails CLOSED, unlike its two git-measured siblings above,
+# because "is this review current?" has no safe answer without evidence.
+#
+# The hole it closes: a review-stage park released via `requeue` re-dispatches
+# and can land back on `review_pending_approval` with no reviewer having run
+# against the current HEAD. Every field the auto-approve recipe checks reads
+# clean in that state, because those numbers describe the *earlier* tree.
+#
+# Shares its literal string value with dispatch.review_gates.
+# _REVIEW_STALENESS_REASON (a SESSION_NEEDS_ATTENTION paused_status) on the same
+# precedent as EMPTY_DIFF_GATE_DISPOSITION above -- still two constants in two
+# namespaces, do not collapse them.
+#
+# Same set-membership treatment as the four dispositions above: deliberately
+# NOT a HOLD_DISPOSITIONS member, since stale review artifacts clear by
+# re-running review rather than by an operator saying "proceed anyway", and
+# membership would silently make the row eligible for concierge's false-park
+# auto-requeue recipe (same _REAP_ELIGIBLE_DISPOSITIONS_BASE lineage) and
+# defeat the gate. It DOES join DRAIN_DISPOSITIONS, unlike
+# BRANCH_STALENESS_GATE_DISPOSITION -- see the note in drain.py for why the two
+# staleness gates diverge there.
+REVIEW_STALENESS_GATE_DISPOSITION = "review_artifacts_stale"
 
 # Disposition stamped when a session reported the ``stale_dispatch`` sentinel
 # itself -- an agent ran, discovered this ticket already has an open, unmerged
@@ -723,7 +750,8 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     consumed and cleared by the next dispatch spawn (dispatch/claim.py) after
     it has been written into the worker's ``queue_metadata``.
 
-    Also clears ``plan_approved_at`` when *target_stage* is ``Stage.PLAN``
+    Also clears ``plan_approved_at`` and its v36 companion
+    ``plan_approved_fingerprint`` when *target_stage* is ``Stage.PLAN``
     (GitHub #2102) -- a regress into the plan stage means re-plan, and the
     approval the operator gave the previous plan must not carry over.
 
@@ -767,6 +795,7 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     # approved draft re-parked for ambiguities still carries its approval.
     if target_stage == Stage.PLAN:
         task.plan_approved_at = None
+        task.plan_approved_fingerprint = None
     # unproductive=False (GitHub #1750): the shared chokepoint for every
     # regress (operator `--regress` via requeue.py, routing.py's Rule 5a
     # FINALIZE self-heal). A deliberate backward move is a pipeline-stage
@@ -800,23 +829,13 @@ def _tracker_allows_github_fetch(client_cfg: ClientConfig | None) -> bool:
 def _local_plan_path(task: TicketTask, client_cfg: ClientConfig | None) -> Path | None:
     """Resolve the on-disk ``.cw/plan.md`` for *task*, or None.
 
-    ``task.worktree_path`` wins when stamped (USER-origin rows, tests). It is
-    ``None`` for every dispatch-driven row -- dispatch stamps
-    ``worktree_path`` on the Session, never the TicketTask (see
-    ``queue_peek.py``) -- so the pre-#1906-follow-up fallback that read only
-    that field never saw a real worktree. Fall back to the branch-derived
-    worktree :func:`worktree_path_for` computes for the feature branch, the
-    same read-only primitives ``create_worktree`` uses to decide reuse, and
-    trust it only when the checked-out branch matches: a stale or foreign
-    checkout must not lend its plan to this ticket.
+    The stamped-wins-then-branch-derived-fallback rule lives in
+    :func:`cw.worktree.resolve_task_worktree`; #2123 extracted it there after a
+    second consumer (``dispatch.review_gates``) needed the same resolution and
+    a duplicate copy read only the never-stamped ``task.worktree_path``.
     """
-    if task.worktree_path is not None:
-        return task.worktree_path / ".cw" / "plan.md"
-    if client_cfg is None:
-        return None
-    branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
-    wt_path = worktree_path_for(client_cfg, branch)
-    if not wt_path.exists() or _checked_out_branch(wt_path) != branch:
+    wt_path = resolve_task_worktree(task, client_cfg)
+    if wt_path is None:
         return None
     return wt_path / ".cw" / "plan.md"
 

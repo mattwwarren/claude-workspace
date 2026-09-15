@@ -71,6 +71,7 @@ def derive_review_counts(
     agents_run: int = 0,
     rejected_count: int = 0,
     rejected_count_by_severity: dict[str, int] | None = None,
+    reviewed_sha: str | None = None,
 ) -> Review:
     """Aggregate accepted findings into a :class:`Review` count block.
 
@@ -91,6 +92,14 @@ def derive_review_counts(
     model and re-implementing ``_consolidate``'s counting helper. Defaulting
     to ``0``/``None`` (→ ``{}``) keeps every caller that has no rejection
     concept, and every pre-#2000 call site, working unchanged.
+
+    ``reviewed_sha`` (#2123) is a third pass-through of the same kind:
+    ``consolidate_verdict`` already holds it for the outer ``ReviewVerdict``,
+    and this carries it onto the nested :class:`Review` so it reaches the
+    terminal sentinel that dispatch's staleness gate reads. It defaults to
+    ``None`` rather than ``""`` so an omitting call site stays distinguishable
+    from one reporting a sha — the gate treats the two identically today, but
+    collapsing them would make a future producer bug unreadable.
     """
     deferred = sum(
         1
@@ -116,4 +125,5 @@ def derive_review_counts(
         agents_run=agents_run,
         rejected_count=rejected_count,
         rejected_count_by_severity=rejected_count_by_severity or {},
+        reviewed_sha=reviewed_sha,
     )

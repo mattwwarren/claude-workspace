@@ -137,6 +137,19 @@ class TestEligibilityFormula:
         assert BRANCH_STALENESS_GATE_DISPOSITION == "branch_behind_main"
         assert BRANCH_STALENESS_GATE_DISPOSITION in _ELIGIBLE_DISPOSITIONS
 
+    def test_review_staleness_park_is_escalation_eligible(self) -> None:
+        """#2123: the new gate's park pages the operator like its siblings.
+
+        A stale-artifact park is an unresolved, non-operator-initiated quality
+        signal — nobody chose to stop this ticket — so its escalation clock
+        starts immediately, on the same terms as #1702/#1714/#1823.
+        """
+        from cw.dev_queue import REVIEW_STALENESS_GATE_DISPOSITION
+        from cw.reconcile.escalation import _ELIGIBLE_DISPOSITIONS
+
+        assert REVIEW_STALENESS_GATE_DISPOSITION == "review_artifacts_stale"
+        assert REVIEW_STALENESS_GATE_DISPOSITION in _ELIGIBLE_DISPOSITIONS
+
     def test_unresolved_subagent_spawn_park_is_escalation_eligible(self) -> None:
         """#1646: the new phantom reason keeps its predecessor's operator page.
 

@@ -19,8 +19,10 @@ import re
 import shutil
 import time
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from cw.atomic import atomic_write_text
 from cw.codex_review._audit_events import (
     _TURN_COMPLETED,
     _TURN_FAILED,
@@ -36,7 +38,11 @@ from cw.codex_review._const import (
 )
 from cw.codex_review._context import _parse_reviewer_document
 from cw.config import state_dir
-from cw.executor_diagnostics import build_executor_failure, persist_diagnostics_bundle
+from cw.executor_diagnostics import (
+    build_executor_failure,
+    diagnostics_bundle_dir,
+    persist_diagnostics_bundle,
+)
 from cw.openai_strict_schema import to_openai_strict_schema
 from cw.review_findings import (
     ReviewerFindingsDocument,
@@ -300,6 +306,39 @@ def _persist_codex_role_diagnostics(
     )
 
 
+def _persist_codex_role_document(
+    *, session_id: str, role: str, doc: ReviewerFindingsDocument
+) -> None:
+    """Persist *doc* (the full parsed reviewer document) on every success.
+
+    Modeled directly on ``codex_fix_loop._persist_cycle_snapshot``'s shape
+    (atomic write, never-raise, same bundle dir): fires for every status
+    (``ok``/``degraded``/``failed``), not just degraded ones, so a
+    degraded/failed reviewer's stated rationale (#2094) survives
+    ``run_codex_roles``'s unconditional scratch-dir cleanup instead of being
+    thrown away with nothing but the coarse status reaching the sentinel.
+
+    ``<timestamp>`` is a fresh microsecond-precision ``datetime.now(UTC)``
+    stamp taken at write time -- the same disambiguation idiom
+    ``persist_diagnostics_bundle`` already uses for
+    ``<role_slug>-<category>-<timestamp>.json`` (#1330 item 7) -- since no
+    cycle number is available on this call path (``_rereview`` calls
+    ``run_codex_roles``/``_run_codex_role`` with no ``cycle`` argument).
+    """
+    bundle = diagnostics_bundle_dir(session_id)
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+    path = bundle / f"{_slug(role)}-document-{timestamp}.json"
+    try:
+        bundle.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, doc.model_dump_json(indent=2))
+    except OSError:
+        _log.warning(
+            "codex review role %r (session %r) document persist failed",
+            role,
+            session_id,
+        )
+
+
 def _run_codex_role(
     *,
     runner: CodexRunner,
@@ -383,6 +422,7 @@ def _run_codex_role(
         parsed = _parse_reviewer_document(result.output_file_content)
         if parsed is not None:
             doc, rejected = parsed
+            _persist_codex_role_document(session_id=session_id, role=role, doc=doc)
             if (
                 _AUDIT_ARGV_FLAGS[0] in argv
                 and metrics["terminal_event"] not in _TERMINAL_EVENTS
