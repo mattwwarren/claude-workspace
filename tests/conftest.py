@@ -42,7 +42,7 @@ from cw.review_findings import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
 CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
@@ -186,6 +186,45 @@ def _bash_fences(content: str) -> list[str]:
 # than running it (#2141).
 GUARD_FENCE_INVOKED = "INVOKED"
 
+# The stub body planted for every interpreter a guard fence shells out to.
+# `$*` rather than `$@` so the whole argument vector lands on one line, which is
+# what a caller asserting "the stub received this absolute --plan path" reads.
+_GUARD_STUB_BODY = f'#!/bin/sh\nprintf "%s %s\\n" "{GUARD_FENCE_INVOKED}" "$*"\n'
+
+
+def write_guard_stub_bin(tmp_path: Path) -> Path:
+    """Create a ``PATH`` directory of sentinel interpreters for a fence (#2141).
+
+    Replaces the runner's former rewrite of the fence *text* (``uv run python``
+    → ``echo INVOKED``), which silently mutated the very line under test and
+    would have kept passing had the doc's invocation changed shape. The fence
+    now executes exactly as the doc spells it; only the binaries it calls are
+    fixtures. Both spellings in these docs are covered — ``uv run python
+    "$RESOLVED"`` and the bare ``python "$RESOLVED"`` the stdlib-only
+    pre-mutation guard uses — and each stub echoes the sentinel followed by its
+    own argument vector, so a caller can assert on the arguments the doc passes.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("uv", "python"):
+        stub = bin_dir / name
+        stub.write_text(_GUARD_STUB_BODY, encoding="utf-8")
+        stub.chmod(0o755)
+    return bin_dir
+
+
+def substitute_fence_placeholders(fence: str, placeholders: Mapping[str, str]) -> str:
+    """Replace ``<name>`` doc placeholders in *fence*, and nothing else (#2141).
+
+    The docs spell call-site-specific values as angle-bracket placeholders
+    (``<branch-name>``, ``<script>``, ``MIN_VERSION=<N>``). An executable fence
+    test has to fill those in, but it must not otherwise rewrite the fence —
+    every other byte is the artifact under test.
+    """
+    for name, value in placeholders.items():
+        fence = fence.replace(f"<{name}>", value)
+    return fence
+
 
 def run_guard_fence(
     tmp_path: Path,
@@ -195,6 +234,7 @@ def run_guard_fence(
     repo_local: str | None = None,
     global_copy: str | None = None,
     worktree_path_override: str | None = None,
+    placeholders: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute a guard-script resolver *fence* against fixture copies (#2141).
 
@@ -220,12 +260,16 @@ def run_guard_fence(
     the resolver must anchor its repo-local candidate to an absolute root
     (``worktree_path``/``git rev-parse --show-toplevel``) rather than probing a
     bare relative ``.claude/scripts/...``, and a runner that always executed
-    from the root could not tell the two apart. Both invocation spellings in
-    these docs (``uv run python "$RESOLVED"`` and the bare ``python
-    "$RESOLVED"`` the stdlib-only pre-mutation guard uses) are swapped for an
-    ``echo`` sentinel, and the per-site capture variables are echoed afterwards
+    from the root could not tell the two apart. The fence text itself is left
+    alone apart from *placeholders* (see ``substitute_fence_placeholders``): the
+    invocation is neutralised by putting sentinel ``uv``/``python`` stubs first
+    on ``PATH`` instead. The per-site capture variables are echoed afterwards
     because three of the four fences assign the invocation into a command
     substitution rather than letting it print.
+
+    This runner serves the three ``$GUARD_ROOT`` resolver sites. Step 2.5 gate 2
+    derives its anchor from ``git worktree list`` instead and has its own
+    real-worktree runner in ``tests/test_scope_conformance_gate_docs.py``.
     """
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
@@ -261,10 +305,9 @@ def run_guard_fence(
     nested = repo / "nested" / "deep"
     nested.mkdir(parents=True, exist_ok=True)
 
+    bin_dir = write_guard_stub_bin(tmp_path)
     body = (
-        fence.replace("uv run python", f"echo {GUARD_FENCE_INVOKED}").replace(
-            'python "$RESOLVED"', f'echo {GUARD_FENCE_INVOKED} "$RESOLVED"'
-        )
+        substitute_fence_placeholders(fence, placeholders or {})
         + '\necho "${VERDICT-}${RESOLVE_OUTPUT-}${SCOPE_CONFORMANCE_OUTPUT-}"\n'
     )
     # Scoped to this tmp_path so the gate-2 fence's hard-coded
@@ -278,7 +321,7 @@ def run_guard_fence(
             cwd=nested,
             env={
                 "HOME": str(home),
-                "PATH": os.environ.get("PATH", ""),
+                "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
                 "CW_SESSION": session,
                 "TMPWT": str(repo),
                 "FORK_POINT": "HEAD",
