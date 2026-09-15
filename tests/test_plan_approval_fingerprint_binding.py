@@ -47,7 +47,7 @@ def test_checkpoint1_mismatch_reparks_with_both_fingerprints_quoted() -> None:
     both values so the operator can see what changed under the approval."""
     section = _checkpoint1_section()
     assert "mismatch" in section
-    window = _nearby(section, "quoting both fingerprints", span=700)
+    window = _nearby(section, "quote both fingerprints", span=700)
     assert "plan_pending_approval" in window
 
 
