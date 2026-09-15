@@ -771,6 +771,32 @@ def _upstream_ref(wt_path: Path) -> str | None:
     return upstream.stdout.strip() or None
 
 
+def _resolve_remote_ref(branch: str, wt_path: Path) -> str | None:
+    """Resolve the verified remote ref for *branch*, upstream-first (#2145).
+
+    Prefers the checked-out branch's configured upstream (``@{u}``) over the
+    guessed ``origin/<branch>`` name -- the two differ whenever the branch
+    was pushed under one name and later checked out locally under another
+    (#2145). The guess is used only as a fallback, and only once confirmed
+    to actually resolve (:func:`_ref_exists`) -- an invented ref is never
+    returned as-is.
+
+    Deliberately the OPPOSITE priority from :func:`_unpushed_commits_detail`'s
+    ladder, which checks the own-name guess first (#2114) because there a
+    misconfigured ``@{u}`` pointing at the default branch is the failure
+    mode being defended against. Here ``@{u}`` is the trusted, explicitly
+    configured answer and the guess is the fallback -- do not unify these
+    two ladders; they answer different questions.
+    """
+    upstream = _upstream_ref(wt_path)
+    if upstream is not None and _ref_exists(upstream, wt_path):
+        return upstream
+    guess = f"origin/{branch}"
+    if _ref_exists(guess, wt_path):
+        return guess
+    return None
+
+
 def _unpushed_commits_detail(
     client: ClientConfig, branch: str, wt_path: Path
 ) -> str | None:

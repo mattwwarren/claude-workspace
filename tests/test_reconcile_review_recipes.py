@@ -3228,3 +3228,124 @@ def test_dispatch_fix_agent_records_session_spawned_event(
     # Guards the exact regression R24 names: a ClientConfig object here would
     # break event JSON serialization and this package's identity convention.
     assert events[0].payload["client"] == "acme"
+
+
+def _seed_origin_renamed_upstream(
+    client: ClientConfig, local_branch: str, remote_branch: str
+) -> None:
+    """Like ``_seed_origin``, but the pushed branch and the local tracking
+    branch have different names (#2145) -- reproducing a worktree whose
+    checked-out branch was renamed locally after being pushed under another
+    name.
+
+    ``git branch <local_branch> --track origin/<remote_branch>`` is used
+    instead of ``git checkout -b`` because ``git worktree add`` refuses a
+    branch already checked out elsewhere (the main checkout stays on
+    ``main``); a plain ``git branch --track`` only creates the ref and its
+    upstream config without moving HEAD.
+    """
+    repo = client.workspace_path
+    origin = repo.parent / f"{repo.name}-origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(origin)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    _fix_git(repo, "remote", "add", "origin", str(origin))
+    (repo / "shared.txt").write_text("base\n", encoding="utf-8")
+    _fix_git(repo, "add", "shared.txt")
+    _fix_git(repo, "commit", "-m", "base file")
+    _fix_git(repo, "push", "origin", "main")
+
+    _fix_git(repo, "checkout", "-b", remote_branch)
+    (repo / "shared.txt").write_text("branch side\n", encoding="utf-8")
+    _fix_git(repo, "add", "shared.txt")
+    _fix_git(repo, "commit", "-m", "impl commit")
+    _fix_git(repo, "push", "origin", remote_branch)
+
+    _fix_git(repo, "checkout", "main")
+    _fix_git(repo, "branch", "-D", remote_branch)
+    _fix_git(repo, "fetch", "origin")
+    _fix_git(repo, "branch", local_branch, "--track", f"origin/{remote_branch}")
+
+
+def test_dispatch_fix_agent_resolves_differently_named_upstream(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """#2145: local branch name differs from the pushed remote branch name --
+    dispatch_fix_agent resolves via the branch's configured upstream (@{u})
+    instead of guessing origin/<local branch name>, which does not exist."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    local_branch = "dev/2145-local"
+    remote_branch = "dev/2145-remote"
+    _seed_origin_renamed_upstream(client, local_branch, remote_branch)
+    _seed_fix_parent_session(client, "parent-session")
+
+    session_id = dispatch_fix_agent(
+        client=client,
+        branch=local_branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2145",
+        ticket_id="2145",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert session_id == "spawned-session-id"
+    assert len(stub_spawn.calls) == 1
+
+
+def test_dispatch_fix_agent_ref_resolution_failure_names_upstream_in_message(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """#2145: when neither the branch's upstream nor a guessed origin/<branch>
+    resolves, the CwError names what was checked instead of leaking a raw
+    rev-parse failure, and never invents a ref that isn't in the repo."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2145-never-pushed"
+    repo = client.workspace_path
+    origin = repo.parent / f"{repo.name}-origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(origin)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    _fix_git(repo, "remote", "add", "origin", str(origin))
+    (repo / "shared.txt").write_text("base\n", encoding="utf-8")
+    _fix_git(repo, "add", "shared.txt")
+    _fix_git(repo, "commit", "-m", "base file")
+    _fix_git(repo, "push", "origin", "main")
+    # create_worktree starts a brand-new branch from origin/<default_branch>
+    # (the only path reachable here, since neither a local nor a remote ref
+    # for `branch` exists yet) and git's default branch.autoSetupMerge would
+    # otherwise configure @{u} = origin/main for it -- that's a resolvable
+    # upstream, just not the one this test needs absent. Disabling it
+    # reproduces the genuine "nothing resolves" case: a brand-new branch
+    # with no tracking config and no pushed history of its own.
+    _fix_git(repo, "config", "branch.autoSetupMerge", "false")
+
+    with pytest.raises(CwError, match="no upstream configured") as excinfo:
+        dispatch_fix_agent(
+            client=client,
+            branch=branch,
+            prompt=_FIX_PROMPT_TEXT,
+            label="fix-2145",
+            ticket_id="2145",
+            lane="default",
+            parent="parent-session",
+        )
+
+    assert f"origin/{branch}" in str(excinfo.value)
+    assert stub_spawn.calls == []
