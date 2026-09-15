@@ -3838,6 +3838,21 @@ class TestDeriveReviewCounts:
         assert review.rejected_count == 3
         assert review.rejected_count_by_severity == {"SHOULD_FIX": 2, "NIT": 1}
 
+    def test_derive_review_counts_threads_reviewed_sha(self) -> None:
+        # #2123: a pass-through on the same footing as agents_run/rejected_count
+        # -- consolidate_verdict already holds the sha, this carries it onto the
+        # nested Review that becomes AUTO_DEV_RESULT.review.
+        review = derive_review_counts([], reviewed_sha="cafebabe")
+        assert review.reviewed_sha == "cafebabe"
+
+    def test_derive_review_counts_reviewed_sha_defaults_to_none_when_omitted(
+        self,
+    ) -> None:
+        # #2123: every pre-existing no-kwarg call site (e.g. _match.py's) keeps
+        # working unchanged, and omission stays distinguishable from a value.
+        review = derive_review_counts([])
+        assert review.reviewed_sha is None
+
     def test_derive_review_counts_rejected_count_defaults_to_zero_when_omitted(
         self,
     ) -> None:
@@ -4044,6 +4059,16 @@ class TestConsolidateVerdict:
             verdict.review.rejected_count_by_severity
             == verdict.rejected_count_by_severity
         )
+
+    def test_consolidate_verdict_review_reviewed_sha_matches_top_level(self) -> None:
+        # #2123: the sha consolidate_verdict already stamps on the outer
+        # ReviewVerdict now also reaches the nested Review -- identical by
+        # construction, not by convention. Mirrors the #2000 rejected_count
+        # analog directly above.
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha-1234")
+        assert verdict.reviewed_sha == "sha-1234"
+        assert verdict.review.reviewed_sha == verdict.reviewed_sha
 
     def test_rejected_must_fix_keyed_on_category_not_enumerated_reason(self) -> None:
         # #1714 AC#3: the selection is keyed on the finding's SEVERITY, never on

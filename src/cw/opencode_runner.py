@@ -390,7 +390,8 @@ the real ones, recorded before fixing):
   "pr": null,
   "review": {"must_fix_initial": <initial count>,
              "should_fix": <initial count>,
-             "fix_cycles_used": <cycles>, "deferred": 0, "agents_run": 1},
+             "fix_cycles_used": <cycles>, "deferred": 0, "agents_run": 1,
+             "reviewed_sha": "<REVIEWED_SHA from step 4>"},
   "health": {"lowest_agent_confidence": "<HIGH|MEDIUM|LOW>",
              "any_incomplete_risk": false, "shortcuts": [],
              "recommendation": "<PROCEED|EXIT_FOR_HUMAN_REVIEW>",
@@ -516,7 +517,12 @@ def _review_prompt(ticket_id: str) -> str:
         "gates after each cycle; commit and push fixes with `git push origin "
         "HEAD:refs/heads/<branch-name>`. MUST_FIX findings still unresolved "
         'after 2 cycles → emit blocked with blocker.reason "review_blocked" '
-        "and the findings verbatim in blocker.details.\n"
+        "and the findings verbatim in blocker.details. After fixing (or "
+        "confirming no MUST_FIX needed fixing), record "
+        "REVIEWED_SHA=$(git rev-parse HEAD) — captured once, after any "
+        "fix-cycle commits land and immediately before resolving scope tier "
+        "and exit status below. Do not capture this earlier: a value captured "
+        "before the fix loop would not reflect commits the fix loop pushes.\n"
         "5. Resolve scope.tier: the `**Scope tier:**` line in .cw/plan.md if "
         "present, else derive from the diff (small = at most 10 files AND at "
         "most 500 lines AND no forbidden-area touches; large otherwise).\n"
@@ -524,7 +530,9 @@ def _review_prompt(ticket_id: str) -> str:
         "stage_complete; tier large with no unresolved MUST_FIX → "
         "review_pending_approval (a human approves the ship). Set "
         "review.agents_run to 1 — you are the single reviewer; never report "
-        "a review pass that did not happen.\n"
+        "a review pass that did not happen. Set review.reviewed_sha to "
+        "REVIEWED_SHA (step 4) — the post-fix-loop branch tip, or the "
+        "unchanged HEAD when no fix cycle ran.\n"
         + _SENTINEL_RULES
         + _REVIEW_SENTINEL_TEMPLATE
     )

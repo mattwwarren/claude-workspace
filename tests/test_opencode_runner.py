@@ -436,6 +436,31 @@ def test_build_stage_prompt_review_is_self_contained(tmp_path: Path) -> None:
     assert "MUST_FIX" in prompt
     assert "<<<AUTO_DEV_RESULT" in prompt
     assert "AUTO_DEV_RESULT>>>" in prompt
+    # #2123: the executor must stamp the sha it actually reviewed, and must
+    # capture it AFTER the fix loop -- a pre-fix capture would mismatch HEAD on
+    # every round that fixed anything and park the dispatch-side gate on the
+    # mainline path. The timing substring pins that against regression.
+    assert "reviewed_sha" in prompt
+    assert "rev-parse HEAD" in prompt
+    assert "captured once, after any fix-cycle commits land" in prompt
+    # Capturing the sha is only half the contract: an instruction that captures
+    # REVIEWED_SHA but never says where it goes leaves the sentinel field unset,
+    # which the dispatch-side gate reads as "never stamped" and fails closed on.
+    # This pins the assignment itself, not just the mention of the field name.
+    assert "Set review.reviewed_sha to REVIEWED_SHA (step 4)" in prompt
+    assert "the post-fix-loop branch tip" in prompt
+
+
+def test_review_sentinel_template_carries_reviewed_sha() -> None:
+    """#2123: the sentinel template names the field, not just the prompt prose.
+
+    The OpenCode REVIEW result is parsed straight from this template's shape,
+    so a prompt instruction with no corresponding template key is a field the
+    executor has no slot to fill.
+    """
+    from cw.opencode_runner import _REVIEW_SENTINEL_TEMPLATE
+
+    assert "reviewed_sha" in _REVIEW_SENTINEL_TEMPLATE
 
 
 def test_build_stage_prompt_finalize_points_at_worktree_command_file(
