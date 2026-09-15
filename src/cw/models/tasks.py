@@ -262,6 +262,19 @@ class PendingFixDispatch(BaseModel):
     requested_at: datetime
 
 
+# The two wire keys the #2102 plan-approval binding travels under. Each names a
+# Pydantic field on the models below/beside it -- `plan_draft_fingerprint` on
+# `AutoDevResult` (read out of `Session.last_result`, an untyped dict) and
+# `plan_approved_fingerprint` on `TicketTask` (written into the approve result
+# dict and into `spawn.py`'s `queue_metadata`). Both crossings are dict
+# subscripts, which no type checker relates back to the field, so the literals
+# are defined once here and asserted equal to the field names in
+# `tests/test_plan_approval_fingerprint_binding.py`: a rename then fails CI
+# instead of silently severing the transport.
+PLAN_DRAFT_FINGERPRINT_KEY = "plan_draft_fingerprint"
+PLAN_APPROVED_FINGERPRINT_KEY = "plan_approved_fingerprint"
+
+
 class TicketTask(BaseModel):
     """A ticket queued for dispatch to a Claude session."""
 

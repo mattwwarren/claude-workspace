@@ -136,6 +136,21 @@ def test_fingerprint_rule_claims_no_comment_transport() -> None:
     assert "queue_metadata" in section
 
 
+def test_fingerprint_transport_keys_match_their_model_field_names() -> None:
+    """The two transport keys are defined once and must keep naming the fields
+    they carry: a future field rename fails here instead of silently
+    desynchronizing sentinel -> row -> queue_metadata."""
+    from cw.auto_dev_result import AutoDevResult
+    from cw.models import (
+        PLAN_APPROVED_FINGERPRINT_KEY,
+        PLAN_DRAFT_FINGERPRINT_KEY,
+        TicketTask,
+    )
+
+    assert PLAN_DRAFT_FINGERPRINT_KEY in AutoDevResult.model_fields
+    assert PLAN_APPROVED_FINGERPRINT_KEY in TicketTask.model_fields
+
+
 def test_checkpoint1_comparison_cites_named_fingerprint_rule() -> None:
     """Checkpoint 1 cites the same single rule, and binds only the row-side
     evidence pair — the marker comment is not an evidence source."""
