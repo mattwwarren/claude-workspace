@@ -22,8 +22,7 @@ from cw.dev_queue import (
 )
 from cw.dev_queue.lifecycle import (
     _PRE_DISPATCH_STALE_PR_REASON,
-    _emit_stage_change,
-    _raise_stage_high_water,
+    _advance_stage,
 )
 from cw.events import record_event
 from cw.exceptions import (
@@ -975,7 +974,47 @@ def _apply_plan_bypass_if_available(
     caller-held ``task`` (so this tick's ``executor.spawn(stage=task.stage,
     ...)`` builds the IMPL prompt, not PLAN) once the stored row is found and
     persisted.
+
+    Two guards run before the (file-I/O) plan check, cheapest first:
+
+    - #1286 Fix B: ``task.regressed_into_stage == Stage.PLAN`` means an
+      operator explicitly regressed this ticket back to PLAN (``cw dev-queue
+      requeue --stage plan --regress``, via ``_stage_regress``). That call
+      clears the approval markers but does NOT delete the worktree's stale,
+      still-signed-off ``.cw/plan.md`` -- so without this guard the bypass
+      would silently defeat the operator's explicit re-plan request.
+    - #1286 Fix C: the resolved pipeline (lane override, then client
+      default -- mirroring :func:`~cw.executor.resolve_executor_config`'s
+      three-level priority) may not contain ``Stage.IMPL`` at all (pipelines
+      are user-configurable per client/lane). Attempting the advance anyway
+      would raise ``ValueError`` out of ``_raise_stage_high_water``'s
+      ``stages.index()`` call.
     """
+    if task.regressed_into_stage == Stage.PLAN:
+        _log.debug(
+            "dispatch: %r's approved-plan auto-bypass skipped -- task was"
+            " deliberately regressed into PLAN, honoring the operator's"
+            " re-plan request over the (possibly stale) signed-off plan.md"
+            " (#1286)",
+            task.ticket_id,
+        )
+        return
+
+    stages = client.pipeline.stages
+    if task.lane:
+        for lane_cfg in client.effective_lanes:
+            if lane_cfg.name == task.lane and lane_cfg.pipeline is not None:
+                stages = lane_cfg.pipeline.stages
+                break
+    if Stage.IMPL not in stages:
+        _log.debug(
+            "dispatch: %r's approved-plan auto-bypass skipped -- the"
+            " resolved pipeline (lane=%s) has no IMPL stage (#1286)",
+            task.ticket_id,
+            task.lane,
+        )
+        return
+
     bypass = _impl_bypass_plan_available(task, client, allow_tracker_fallback=False)
     if not bypass.available:
         return
@@ -992,10 +1031,7 @@ def _apply_plan_bypass_if_available(
                 stored_task = candidate
                 break
         if stored_task is not None:
-            old_stage = stored_task.stage
-            stored_task.stage = Stage.IMPL
-            _raise_stage_high_water(stored_task, client.pipeline.stages, Stage.IMPL)
-            _emit_stage_change(stored_task, old_stage, Stage.IMPL, "advance")
+            _advance_stage(stored_task, stages, Stage.IMPL)
             save_dev_queue(store)
 
     if stored_task is not None:

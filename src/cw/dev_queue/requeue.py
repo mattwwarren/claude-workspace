@@ -25,9 +25,8 @@ from cw.dev_queue.crud import (
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
-    _emit_stage_change,
+    _advance_stage,
     _plan_body_signoff_ok,
-    _raise_stage_high_water,
     _reset_for_same_stage_requeue,
     _stage_regress,
     transition_task_status,
@@ -287,12 +286,9 @@ def _apply_requeue_stage(
             raise RequeueStageError(msg)
 
     # Forward or same-stage: caller enforces the BLOCKED_ON_USER precondition.
-    old_stage = task.stage
-    task.stage = target_stage
-    _raise_stage_high_water(task, stages, target_stage)
     # Forward stage move → direction="advance"; the same-stage case is naturally
     # guarded silent by _emit_stage_change's old==new check. RFC 0008 W1.
-    _emit_stage_change(task, old_stage, target_stage, "advance")
+    _advance_stage(task, stages, target_stage)
     return False
 
 
