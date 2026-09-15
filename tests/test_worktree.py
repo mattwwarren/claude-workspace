@@ -2587,14 +2587,10 @@ class TestResolveRemoteRef:
             "cw.worktree._run_git",
             self._mock(
                 upstream="origin/dev/renamed-slug",
-                verified_refs=frozenset(
-                    {"origin/dev/renamed-slug", "origin/dev/2145"}
-                ),
+                verified_refs=frozenset({"origin/dev/renamed-slug", "origin/dev/2145"}),
             ),
         )
-        assert (
-            _resolve_remote_ref("dev/2145", wt_path) == "origin/dev/renamed-slug"
-        )
+        assert _resolve_remote_ref("dev/2145", wt_path) == "origin/dev/renamed-slug"
 
     def test_falls_back_to_origin_branch_when_no_upstream_configured(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
