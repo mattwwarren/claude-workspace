@@ -30,6 +30,24 @@ def _checkpoint1_section() -> str:
     return content[start:end]
 
 
+def _fingerprint_rule_section() -> str:
+    content = _plan_doc()
+    start = content.index(f"### {_FINGERPRINT_RULE_NAME}")
+    return content[start : content.index("### Step 1d:", start)]
+
+
+def _chained_sentinel_window(span: int = 3000) -> str:
+    """The chained-monolith `AUTO_DEV_RESULT` example plus the prose under it.
+
+    `auto-dev.md` owns the single final sentinel on the chained `/auto-dev`
+    path, so its template is a second producer contract — not an illustration
+    of the standalone one.
+    """
+    content = _cmd("auto-dev.md")
+    start = content.index("<<<AUTO_DEV_RESULT\n{")
+    return content[start : start + span]
+
+
 def test_checkpoint1_plan_approved_at_requires_fingerprint_match() -> None:
     """The headline #2102 change: a non-null `plan_approved_at` is no longer
     sufficient on its own — it must be accompanied by a matching fingerprint."""
@@ -87,6 +105,35 @@ def test_stage1_completion_producer_instruction_cites_named_fingerprint_rule() -
     assert f"*{_FINGERPRINT_RULE_NAME}*" in window
     assert "every park exit" in window
     assert "null" in window
+
+
+def test_chained_monolith_template_includes_plan_draft_fingerprint_key() -> None:
+    """The chained path emits its own final sentinel from `auto-dev.md`'s
+    template; a key absent there is a key no chained round ever populates,
+    which makes the whole binding a no-op on that path."""
+    window = _chained_sentinel_window()
+    template = window[: window.index("AUTO_DEV_RESULT>>>")]
+    assert '"plan_draft_fingerprint"' in template
+
+
+def test_chained_monolith_template_cites_named_fingerprint_rule() -> None:
+    """Same one-definition discipline as the standalone template: cite the
+    rule by name, never restate the hashing steps beside the example."""
+    window = _chained_sentinel_window()
+    assert f"*{_FINGERPRINT_RULE_NAME}*" in window
+    assert "SHA-256" not in window
+    assert "null" in window
+
+
+def test_fingerprint_rule_claims_no_comment_transport() -> None:
+    """The marker scope was cut (#2194): the only transport is sentinel ->
+    session -> dev-queue row -> `cw-context.json`. A rule still advertising a
+    comment channel points a producer at a path nothing reads."""
+    section = _fingerprint_rule_section()
+    assert "tracker comment" not in section
+    assert "marker comment" not in section
+    assert "plan_approved_fingerprint" in section
+    assert "queue_metadata" in section
 
 
 def test_checkpoint1_comparison_cites_named_fingerprint_rule() -> None:

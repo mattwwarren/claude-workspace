@@ -3726,6 +3726,20 @@ class TestPlanDraftFingerprintField:
         assert isinstance(result, AutoDevResult)
         assert result.plan_draft_fingerprint is None
 
+    def test_contract_doc_states_one_current_schema_version(self) -> None:
+        """The v8 bump left §3.3's current-version statement behind at `5`,
+        contradicting §8. Pin both statements to the parser so the next bump
+        cannot silently strand one of them."""
+        from tests.conftest import _REPO_ROOT
+
+        doc = (_REPO_ROOT / "docs" / "headless-contract.md").read_text(encoding="utf-8")
+        current = AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
+        assert f"`schema_version: {current}` is the current contract." in doc
+        field_notes = doc[doc.index("### 3.3 Field Notes") :]
+        start = field_notes.index("| `schema_version` |")
+        row = field_notes[start : field_notes.index("\n", start)]
+        assert f"Currently `{current}`" in row
+
 
 # ---------------------------------------------------------------------------
 # Issue #430 — Case 4: scope_exceeded / forbidden_area emitted at/after

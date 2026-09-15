@@ -11726,6 +11726,49 @@ class TestPlanApprovedFingerprintStamp:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
         assert t.plan_approved_fingerprint is None
 
+    def test_approve_reads_fingerprint_persisted_by_the_result_door(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end over the real persistence path: the sentinel lands on the
+        session through `emit_result_on` — the same `AutoDevResult.model_dump`
+        the Stop hook and executor use — so a serialization change that dropped
+        the field fails here, where a hand-injected dict would still pass."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState, LastResultSource
+        from cw.result import emit_result_on
+        from tests.test_auto_dev_result import _plan_pending_payload
+
+        fingerprint = "f" * 64
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[_make_blocked_task(stage=Stage.PLAN, session_id="sess-fp5")]
+            )
+        )
+
+        payload = _plan_pending_payload()
+        payload["schema_version"] = 8
+        payload["ticket_id"] = "GEN-500"
+        payload["plan_draft_fingerprint"] = fingerprint
+        session = _make_session(session_id="sess-fp5", last_result=None)
+        outcome = emit_result_on(
+            session, payload, source=LastResultSource.STOP_HOOK_HARVEST
+        )
+        assert not outcome.refused
+        save_state(CwState(sessions=[session]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_approved_fingerprint"] == fingerprint
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_fingerprint == fingerprint
+
     def test_same_stage_requeue_preserves_plan_approved_fingerprint(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
