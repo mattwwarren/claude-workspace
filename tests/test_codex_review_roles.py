@@ -713,12 +713,19 @@ class TestRunCodexRolePersistsDiagnostics:
             ExecutorFailure.model_validate_json(path.read_text()).category == category
         )
 
-    def test_success_does_not_persist_diagnostics(self, tmp_path: Path) -> None:
+    def test_success_persists_document(self, tmp_path: Path) -> None:
+        # #2094: every successful role run (ok/degraded/failed) now persists
+        # the full parsed ReviewerFindingsDocument to the diagnostics bundle
+        # -- this inverts the prior "success does not persist diagnostics"
+        # assertion, which used to hold because only the failure branch wrote
+        # anything to the bundle dir.
         runner = _SequencedRunner([_ok_result()])
         doc, failure, _metrics, _rejected = _run_one_role(runner, tmp_path)
         assert doc is not None
         assert failure is None
-        assert not diagnostics_bundle_dir("sess-diag").exists()
+        path = _bundle_file("sess-diag", "code-quality-reviewer", "document")
+        assert path.exists()
+        assert ReviewerFindingsDocument.model_validate_json(path.read_text()) == doc
 
     def test_secret_shaped_stderr_is_redacted_in_persisted_bundle(
         self, tmp_path: Path
@@ -1064,8 +1071,11 @@ class TestRunCodexRoleFlagRejectionRetry:
         # (d) duration still comes from the single start/end monotonic() pair,
         # i.e. total wall time across BOTH invocations
         assert metrics["duration_seconds"] == pytest.approx(11.5)
-        # (e) the role succeeded, so no diagnostics bundle was written
-        assert not diagnostics_bundle_dir("sess-retry").exists()
+        # (e) the role succeeded, so no *failure* diagnostics bundle was
+        # written -- but #2094 persists the parsed document itself on every
+        # success, retry or not.
+        document_path = _bundle_file("sess-retry", "code-quality-reviewer", "document")
+        assert document_path.exists()
 
     def test_retry_success_does_not_warn_about_missing_terminal_event(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -1207,8 +1217,12 @@ class TestRunCodexRoleSchemaInvalidFindings:
         assert [r.reason for r in rejected] == ["schema_invalid"]
         assert rejected[0].reviewer_role == "Code Quality Reviewer"
         # A partially-rescued document is a SUCCESS, not a failure — no
-        # diagnostics bundle is persisted for it.
-        assert not diagnostics_bundle_dir("sess-2029-partial").exists()
+        # *failure* diagnostics bundle is persisted for it, but #2094
+        # persists the (rescued) parsed document itself.
+        document_path = _bundle_file(
+            "sess-2029-partial", "code-quality-reviewer", "document"
+        )
+        assert document_path.exists()
 
     def test_structural_failure_tallies_the_discarded_findings(
         self, tmp_path: Path
