@@ -727,6 +727,29 @@ class TestRunCodexRolePersistsDiagnostics:
         assert path.exists()
         assert ReviewerFindingsDocument.model_validate_json(path.read_text()) == doc
 
+    def test_document_persist_write_failure_does_not_block_the_role(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # #2094: _persist_codex_role_document never-raises -- an OSError
+        # during the write is logged and swallowed, mirroring
+        # codex_fix_loop._persist_cycle_snapshot's own never-raise contract
+        # (see test_cycle0_snapshot_write_failure_does_not_block_loop in
+        # tests/test_codex_fix_loop.py).
+        def _boom(*_a: object, **_k: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.codex_review._roles.atomic_write_text", _boom)
+        runner = _SequencedRunner([_ok_result()])
+        with caplog.at_level(logging.WARNING):
+            doc, failure, _metrics, _rejected = _run_one_role(runner, tmp_path)
+        assert doc is not None
+        assert failure is None
+        assert any("document persist failed" in r.getMessage() for r in caplog.records)
+
     def test_secret_shaped_stderr_is_redacted_in_persisted_bundle(
         self, tmp_path: Path
     ) -> None:
