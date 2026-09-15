@@ -4385,3 +4385,38 @@ def test_compute_drift_ignores_ticket_task_session_id(
         state, phantom_set=set(report.phantom_session_ids), now=now
     )
     assert [c.proposed_action for c in candidates] == [ProposedAction.CRASH_COMPLETE]
+
+
+def test_apply_phantom_routed_mutations_skips_a_sentinel_less_candidate(
+    tmp_config_dir: Path,
+) -> None:
+    """#1762: the shared guard drops a candidate carrying no routed sentinel.
+
+    Defensive: every ROUTE_EMITTED_SENTINEL producer sets ``routed_sentinel``.
+    The guard exists so a future one that forgets cannot crash the act phase --
+    it must skip the candidate, not complete the session off a ``None``.
+    """
+    from cw.reconcile import ProposedAction
+    from cw.reconcile._shared import ReapCandidate
+    from cw.reconcile.phantom import _apply_phantom_routed_mutations
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("ph-1762-noresult", started_at)
+    candidate = ReapCandidate(
+        session_id=sess.id,
+        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+        ticket_id="ph-1762-noresult",
+        routed_sentinel=None,
+    )
+    phantom_names: list[str] = []
+
+    accepted = _apply_phantom_routed_mutations(
+        {sess.id: sess},
+        [candidate],
+        now=started_at,
+        phantom_names=phantom_names,
+    )
+
+    assert accepted == []
+    assert phantom_names == []
+    assert sess.status is SessionStatus.ACTIVE
