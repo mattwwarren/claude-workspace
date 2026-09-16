@@ -14,6 +14,7 @@ a tautology. A deliberate addition updates this set in the same commit.
 
 from __future__ import annotations
 
+from cw import auto_dev_result
 from cw.auto_dev_result import schema
 
 # The complete re-export surface: every top-level name the flat ``schema.py``
@@ -89,4 +90,34 @@ class TestPackageExportCompleteness:
     def test_every_exported_name_is_bound(self) -> None:
         """A typo'd re-export must fail here, not at a downstream import site."""
         missing = [name for name in EXPECTED_EXPORTS if not hasattr(schema, name)]
+        assert missing == []
+
+
+# ``SchemaVersion`` is deliberately excluded from the outer package's
+# re-export block (``cw/auto_dev_result/__init__.py``) — ``parse.py`` imports
+# it from ``cw.auto_dev_result.schema`` directly. Every other name in
+# ``EXPECTED_EXPORTS`` must still reach the outer ``cw.auto_dev_result``
+# surface, since every ``from cw.auto_dev_result import X`` call site across
+# ``src/`` and ``tests/`` resolves through that outer block, not this inner one.
+EXPECTED_OUTER_SCHEMA_EXPORTS = EXPECTED_EXPORTS - {"SchemaVersion"}
+
+
+class TestOuterPackageExportCompleteness:
+    """Guards that ``cw.auto_dev_result``'s own re-export block stays complete.
+
+    Mirrors ``TestPackageExportCompleteness`` above but targets the outer,
+    pre-existing ``cw/auto_dev_result/__init__.py`` — the surface named
+    explicitly in the operator's binding plan-resolution comment on #2193.
+    """
+
+    def test_outer_all_includes_full_schema_surface(self) -> None:
+        assert set(auto_dev_result.__all__) >= EXPECTED_OUTER_SCHEMA_EXPORTS
+
+    def test_every_outer_exported_schema_name_is_bound(self) -> None:
+        """A typo'd or dropped re-export must fail here, not downstream."""
+        missing = [
+            name
+            for name in EXPECTED_OUTER_SCHEMA_EXPORTS
+            if not hasattr(auto_dev_result, name)
+        ]
         assert missing == []
