@@ -31,8 +31,12 @@ from cw.cli import (
 )
 from cw.cli._sentinels import (
     _PARK_COMMENT_HEADERS,
+    _command_start_offsets,
     _is_leg_boundary,
     _park_comment_posted_in_transcript,
+    _post_body,
+    _skip_heredoc_body,
+    _skip_quoted,
 )
 from cw.cli.sprint import _resolve_version
 from cw.config import (
@@ -4954,6 +4958,77 @@ class TestParseSentinelFromTranscript:
         self._write_transcript(worktree, "uuid-591b", example_sentinel, fake_home)
 
         assert _parse_sentinel_from_transcript(str(worktree), "uuid-591b") is None
+
+
+class TestShellCommandSegmentation:
+    """The pure helpers behind "is this match a real invocation?" (#2135).
+
+    Exercised directly because their whole job is to be wrong about nothing:
+    a missed segment boundary is a missed park, and a spurious one is a false
+    park of a live session's row.
+    """
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("gh issue comment 1 --body x", (0,)),
+            ("a && b", (0, 4)),
+            ("a || b", (0, 4)),
+            ("a; b", (0, 2)),
+            ("a | b", (0, 3)),
+            ("a\nb", (0, 2)),
+            # A separator inside quotes is body text, not a boundary.
+            ('gh issue comment 1 --body "a; b && c"', (0,)),
+            # An escaped separator is literal too.
+            ("a \\; b", (0,)),
+        ],
+        ids=["single", "and", "or", "semi", "pipe", "newline", "quoted", "escaped"],
+    )
+    def test_command_start_offsets(
+        self, command: str, expected: tuple[int, ...]
+    ) -> None:
+        assert _command_start_offsets(command) == expected
+
+    def test_heredoc_body_lines_are_not_command_starts(self) -> None:
+        """Only the line after the terminator opens a new command."""
+        command = "cat <<'EOF' > f.sh\ninner one\ninner two\nEOF\nreal"
+
+        offsets = _command_start_offsets(command)
+
+        assert offsets == (0, len(command) - len("real"))
+
+    def test_an_unterminated_heredoc_swallows_the_rest(self) -> None:
+        """Fail-closed: no terminator means every later line stays data."""
+        command = "cat <<'EOF' > f.sh\ninner\nstill inner"
+
+        assert _command_start_offsets(command) == (0, len(command))
+
+    def test_skip_quoted_handles_an_escaped_inner_quote(self) -> None:
+        command = '"a \\" b" tail'
+
+        assert _skip_quoted(command, 0) == command.index(" tail")
+
+    def test_skip_quoted_on_an_unterminated_quote_consumes_the_rest(self) -> None:
+        command = '"never closed'
+
+        assert _skip_quoted(command, 0) == len(command)
+
+    def test_skip_heredoc_body_stops_at_a_terminator_on_the_last_line(self) -> None:
+        command = "body\nEOF"
+
+        assert _skip_heredoc_body(command, 0, "EOF") == len(command)
+
+    def test_post_body_rejects_an_unresolvable_body_file(self) -> None:
+        """A ``--body-file`` naming a substitution is not evidence."""
+        command = "gh issue comment 42 --body-file $(mktemp)"
+
+        assert _post_body(command, {}, "42") is None
+
+    def test_post_body_returns_the_tail_when_no_body_flag_is_present(self) -> None:
+        """The ``-F`` short flag leaves the argument tail as the candidate."""
+        command = "gh issue comment 42 -F body.md"
+
+        assert _post_body(command, {}, "42") == " -F body.md"
 
 
 class TestParkCommentPostedInTranscript:
