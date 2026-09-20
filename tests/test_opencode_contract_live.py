@@ -31,6 +31,7 @@ from cw.opencode_runner import (
     OPENCODE_LOG_RELATIVE_PATH,
     extract_text_from_jsonl,
 )
+from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -41,16 +42,6 @@ _OPENCODE_LIVE = os.environ.get("INTEGRATION_OPENCODE_LIVE", "").strip() not in 
     "",
     "0",
 )
-
-
-def _git(repo: Path, *args: str) -> None:
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        check=True,
-        env=clean_env,
-    )
 
 
 @pytest.fixture(scope="module")
@@ -69,12 +60,12 @@ def live_worktree(live_base: Path) -> Iterator[Path]:
     """Yield a minimal git repo for a live opencode run."""
     repo = live_base / "repo"
     repo.mkdir(exist_ok=True)
-    _git(repo, "init", "-b", "main")
-    _git(repo, "config", "user.email", "test@test.com")
-    _git(repo, "config", "user.name", "Test")
+    git_in(repo, "init", "-b", "main")
+    git_in(repo, "config", "user.email", "test@test.com")
+    git_in(repo, "config", "user.name", "Test")
     (repo / "README.md").write_text("# test\n", encoding="utf-8")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "init")
+    git_in(repo, "add", ".")
+    git_in(repo, "commit", "-m", "init")
     return repo
 
 
