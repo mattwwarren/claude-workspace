@@ -322,12 +322,57 @@ def _validate_worktree(path: Path) -> None:
 # the PreToolUse entry below.
 _AGENT_TOOL_MATCHER = "^(Agent|Task)$"
 
+# The injected Stop hook command (#2226).
+#
+# `cw signal-stop` is a no-op in any session cw did not spawn -- it reads the
+# hook payload's `cwd`, finds no `.claude/cw-context.json`, and returns. But
+# it pays a full Python interpreter start plus `from cw.cli import main` to
+# reach that conclusion: measured at ~250ms per invocation against ~1.4ms for
+# the shell guard below. On a user-level install (the shape #2226 was filed
+# for) that is ~250ms on every turn of every Claude session on the machine.
+#
+# The guard is a plain POSIX-sh short circuit in front of the same command.
+# It runs `cw signal-stop` unless it can prove no context file is reachable:
+#
+#   1. `[ -z "$CLAUDE_PROJECT_DIR" ]` -- FAIL OPEN. An unset or empty variable
+#      means we cannot tell where we are, so we invoke exactly as before.
+#      Claude Code's hook docs describe `${CLAUDE_PROJECT_DIR}` as the project
+#      root where the session started, available for all hook events including
+#      Stop. That is a docs claim, and ADR-0003 explicitly rejected env vars as
+#      the identity channel because `claude --bg` does not propagate the
+#      caller's environment to the supervisor-owned process (#133) -- hence the
+#      fail-open arm rather than the fail-closed `[ -f ... ] || exit 0` form.
+#   2. the context file under `$CLAUDE_PROJECT_DIR` -- the cw-spawned worktree.
+#   3. the context file relative to the hook process's own cwd -- the second
+#      source, so a variable set to some *other* directory cannot fail closed
+#      and silently drop the completion signal ADR-0003 depends on.
+#
+# Observed under `claude --bg` (Claude Code 2.1.278, 2026-09-20):
+# `CLAUDE_PROJECT_DIR` equals the session start dir, and the Stop hook's own
+# `pwd` is that same dir -- i.e. the directory holding
+# `.claude/settings.local.json`, which is the directory cw writes
+# `cw-context.json` into. Arms 2 and 3 both hold there.
+#
+# Residual, stated plainly: a `CLAUDE_PROJECT_DIR` set to a non-cw directory
+# AND a hook cwd that also lacks the context file would skip a signal cw
+# wanted. The capture above did not produce that combination.
+#
+# Both file tests are built from HOOK_CONTEXT_RELATIVE_PATH, the same constant
+# `_write_hook_context` writes through, so the guard cannot drift from the
+# writer. `json.dumps` escapes the inner quotes when the template is rendered.
+STOP_HOOK_COMMAND = (
+    '[ -z "$CLAUDE_PROJECT_DIR" ] || '
+    f'[ -f "$CLAUDE_PROJECT_DIR/{HOOK_CONTEXT_RELATIVE_PATH.as_posix()}" ] || '
+    f"[ -f {HOOK_CONTEXT_RELATIVE_PATH.as_posix()} ] || exit 0; "
+    "cw signal-stop"
+)
+
 _HOOK_SETTINGS_TEMPLATE = {
     "hooks": {
         "Stop": [
             {
                 "matcher": "",
-                "hooks": [{"type": "command", "command": "cw signal-stop"}],
+                "hooks": [{"type": "command", "command": STOP_HOOK_COMMAND}],
             }
         ],
         # PreToolUse guard (#940 R5): blocks a Bash tool call when the worker's
@@ -386,7 +431,9 @@ def _write_hook_context(
     Two files land under ``<worktree>/.claude/``:
 
     - ``settings.local.json`` — configures a Stop hook that invokes
-      ``cw signal-stop`` after each agent turn.
+      :data:`STOP_HOOK_COMMAND` after each agent turn: a POSIX-sh guard that
+      runs ``cw signal-stop`` unless it can prove no ``cw-context.json`` is
+      reachable from ``$CLAUDE_PROJECT_DIR`` or the hook's own cwd (#2226).
     - ``cw-context.json`` — correlation metadata the hook reads to emit a
       ``SESSION_COMPLETED`` event keyed back to the cw session + dev_queue
       task. Bypasses the env-var injection limitation on ``claude --bg``
