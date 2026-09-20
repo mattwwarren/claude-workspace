@@ -5852,6 +5852,203 @@ class TestDispatchUsageLimitBackoff:
         assert events == []
 
 
+class TestUsageLimitResetThreading:
+    """#1409: a spawn-time reset instant threads spawn -> lanes -> tick -> loop.
+
+    Every case here supplies ``usage_limit_reset_at`` directly (via the fake
+    daemon or as a helper argument) rather than parsing a message, so nothing
+    in this class depends on the host timezone. The parser itself is unit
+    tested in ``tests/test_exceptions.py``.
+    """
+
+    def test_reset_at_threads_from_spawn_to_tick_result(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-RESET1", client="test-client"))
+
+        reset_at = datetime.now(UTC) + timedelta(hours=2)
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_usage_limit = True
+        daemon.usage_limit_reset_at = reset_at
+
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.usage_limit_detected is True
+        assert result.usage_limit_reset_at == reset_at
+
+    def test_reset_at_defaults_to_none_on_tick_result(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-RESET2", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_usage_limit = True
+
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.usage_limit_detected is True
+        assert result.usage_limit_reset_at is None
+
+    def test_reconcile_path_keeps_flat_backoff(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A reconcile-derived detection early-returns with no parsed reset."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-RESET3", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        daemon.usage_limit_reset_at = datetime.now(UTC) + timedelta(hours=2)
+        monkeypatch.setattr("cw.dispatch.tick._reconcile_usage_limited", lambda: True)
+
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.usage_limit_detected is True
+        assert result.usage_limit_reset_at is None
+
+    @pytest.mark.parametrize(
+        ("already_detected", "current", "new", "expected_key"),
+        [
+            pytest.param(False, None, "early", "early", id="first-detection"),
+            pytest.param(True, "early", "late", "late", id="both-parsed-takes-max"),
+            pytest.param(True, "late", "early", "late", id="both-parsed-reversed"),
+            pytest.param(True, "early", None, None, id="new-unparsed-falls-flat"),
+            pytest.param(True, None, "late", None, id="current-unparsed-falls-flat"),
+            pytest.param(True, None, None, None, id="neither-parsed"),
+        ],
+    )
+    def test_combine_usage_limit_reset_at(
+        self,
+        already_detected: bool,
+        current: str | None,
+        new: str | None,
+        expected_key: str | None,
+    ) -> None:
+        from cw.dispatch.tick import _combine_usage_limit_reset_at
+
+        now = datetime.now(UTC)
+        instants = {"early": now + timedelta(hours=1), "late": now + timedelta(hours=4)}
+        expected = None if expected_key is None else instants[expected_key]
+
+        assert (
+            _combine_usage_limit_reset_at(
+                already_detected,
+                None if current is None else instants[current],
+                None if new is None else instants[new],
+            )
+            == expected
+        )
+
+    @pytest.mark.parametrize(
+        ("offset_seconds", "aware", "expect_reset"),
+        [
+            pytest.param(None, True, False, id="no-reset-falls-flat"),
+            pytest.param(1200, True, True, id="future-in-range-wins"),
+            pytest.param(-60, True, False, id="past-falls-flat"),
+            pytest.param(0, True, False, id="equal-to-now-falls-flat"),
+            pytest.param(8 * 24 * 3600, True, False, id="beyond-7d-clamp-falls-flat"),
+            pytest.param(1200, False, False, id="naive-falls-flat"),
+        ],
+    )
+    def test_resolve_usage_limited_until(
+        self, offset_seconds: int | None, aware: bool, expect_reset: bool
+    ) -> None:
+        from cw.dispatch.loop import _resolve_usage_limited_until
+
+        now = datetime.now(UTC)
+        backoff_seconds = 3600
+        reset_at: datetime | None = None
+        if offset_seconds is not None:
+            reset_at = now + timedelta(seconds=offset_seconds)
+            if not aware:
+                reset_at = reset_at.replace(tzinfo=None)
+
+        result = _resolve_usage_limited_until(now, reset_at, backoff_seconds)
+
+        if expect_reset:
+            assert result == reset_at
+        else:
+            assert result == now + timedelta(seconds=backoff_seconds)
+
+    @pytest.mark.parametrize(
+        ("offset_seconds", "expect_reset"),
+        [
+            pytest.param(1200, True, id="parsed-future-reset-used"),
+            pytest.param(None, False, id="unparsed-uses-flat-backoff"),
+            pytest.param(-600, False, id="past-reset-uses-flat-backoff"),
+        ],
+    )
+    def test_loop_persists_resolved_window(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        offset_seconds: int | None,
+        expect_reset: bool,
+    ) -> None:
+        """run_dispatch_loop saves the parsed reset when usable, else the flat."""
+        from freezegun import freeze_time
+
+        import cw.dispatch
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-RESET-LOOP", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        saved: list[object] = []
+        real_save = save_usage_limited_until
+
+        def capturing_save(dt: object) -> None:
+            saved.append(dt)
+            real_save(dt)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("cw.dispatch.loop.save_usage_limited_until", capturing_save)
+        monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
+
+        with freeze_time("2026-07-16 12:00:00"):
+            now = datetime.now(UTC)
+            reset_at = (
+                None
+                if offset_seconds is None
+                else now + timedelta(seconds=offset_seconds)
+            )
+            daemon.usage_limit_reset_at = reset_at
+
+            call_count = 0
+            original_tick = cw.dispatch.loop.dispatch_tick
+
+            def one_shot_tick(*args: object, **kwargs: object) -> DispatchTickResult:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    daemon.raise_usage_limit = True
+                    result = original_tick(*args, **kwargs)  # type: ignore[arg-type]
+                    daemon.raise_usage_limit = False
+                    return result
+                raise KeyboardInterrupt
+
+            monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", one_shot_tick)
+
+            with contextlib.suppress(KeyboardInterrupt):
+                run_dispatch_loop(native_daemon=daemon)
+
+        assert len(saved) == 1
+        expected = reset_at if expect_reset else now + timedelta(seconds=3600)
+        assert saved[0] == expected
+
+
 class TestClaimNextPendingUsageLimitedGate:
     """_claim_next_pending refuses PENDING->RUNNING during an active
     usage-limit backoff, as defense-in-depth alongside dispatch_tick's own

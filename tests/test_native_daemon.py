@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +25,14 @@ from cw.native_daemon import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+# Fixed-offset aware clock the ``_local_now`` seam is pinned to (#1409).
+# Deliberately NOT ``freeze_time``: under freezegun
+# ``datetime.now(UTC).astimezone()`` still resolves the HOST zone, so a
+# freeze-only assertion would name a different UTC instant on a dev box than
+# on a UTC CI runner (the #671/#1727 green-locally/red-in-CI class).
+# 2026-09-20 is a Sunday, so ``resets Mon …`` lands on 2026-09-21.
+_PINNED_LOCAL_NOW = datetime(2026, 9, 20, 10, 0, tzinfo=timezone(timedelta(hours=-4)))
 
 
 class TestIsNativeSurfaceRef:
@@ -198,6 +208,18 @@ class TestRealNativeDaemonClientSpawnGitEnv:
         assert env["PWD"] == str(worktree), (
             f"PWD must be overridden to str(cwd); got {env.get('PWD')!r}"
         )
+
+
+@pytest.fixture
+def pinned_local_now(monkeypatch: pytest.MonkeyPatch) -> datetime:
+    """Pin ``cw.native_daemon._local_now`` to a fixed-offset aware instant.
+
+    ``_usage_limit_error`` must call ``_local_now()`` as a module global for
+    this patch to reach it. Single-file use, so it lives here rather than in
+    ``conftest.py``.
+    """
+    monkeypatch.setattr("cw.native_daemon._local_now", lambda: _PINNED_LOCAL_NOW)
+    return _PINNED_LOCAL_NOW
 
 
 class TestRealNativeDaemonClientSpawn:
@@ -410,6 +432,200 @@ class TestRealNativeDaemonClientSpawn:
             "do it",
         ]
 
+    # --- #1409: the raised UsageLimitError carries the parsed reset instant ---
+    #
+    # The usage-limit strings below derive from INTERACTIVE Claude transcript
+    # wording, not from a captured ``claude --bg`` spawn-time message (plan
+    # decision P1). The ANSI-wrapped variants are synthetic robustness cases,
+    # labelled as such — not observations.
+
+    def test_stderr_usage_limit_carries_parsed_reset_at(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pinned_local_now: datetime,
+    ) -> None:
+        from cw.exceptions import UsageLimitError
+
+        raw = "You've hit your session limit · resets 3:45pm"
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(1, ["claude"], output="", stderr=raw)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+
+        exc_info: pytest.ExceptionInfo[UsageLimitError]
+        with pytest.raises(UsageLimitError) as exc_info:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        assert exc_info.value.reset_at == pinned_local_now.replace(hour=15, minute=45)
+        assert "usage limit" in str(exc_info.value)
+        assert raw in str(exc_info.value)
+
+    def test_stdout_usage_limit_carries_parsed_reset_at(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pinned_local_now: datetime,
+    ) -> None:
+        from cw.exceptions import UsageLimitError
+
+        raw = "You've hit your weekly limit · resets Mon 12:00am"
+        monkeypatch.setattr(
+            subprocess, "run", lambda *_a, **_kw: _FakeCompleted(stdout=raw)
+        )
+        client = RealNativeDaemonClient()
+
+        exc_info: pytest.ExceptionInfo[UsageLimitError]
+        with pytest.raises(UsageLimitError) as exc_info:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        assert exc_info.value.reset_at == (
+            pinned_local_now.replace(hour=0, minute=0) + timedelta(days=1)
+        )
+        # The `{proc.stdout!r}` message embedding is unchanged.
+        assert repr(raw) in str(exc_info.value)
+
+    def test_ansi_wrapped_stderr_still_parses(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pinned_local_now: datetime,
+    ) -> None:
+        """Synthetic robustness case: the stderr branch does not pre-strip ANSI."""
+        from cw.exceptions import UsageLimitError
+
+        raw = "\x1b[31mYou've hit your session limit\x1b[39m · resets \x1b[36m3:45pm"
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(1, ["claude"], output="", stderr=raw)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+
+        exc_info: pytest.ExceptionInfo[UsageLimitError]
+        with pytest.raises(UsageLimitError) as exc_info:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        assert exc_info.value.reset_at == pinned_local_now.replace(hour=15, minute=45)
+
+    def test_ansi_wrapped_stdout_still_parses(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pinned_local_now: datetime,
+    ) -> None:
+        """Synthetic robustness case: same strip applied on the stdout branch."""
+        from cw.exceptions import UsageLimitError
+
+        raw = "\x1b[31mYou've hit your weekly limit\x1b[39m · resets \x1b[36m11pm"
+        monkeypatch.setattr(
+            subprocess, "run", lambda *_a, **_kw: _FakeCompleted(stdout=raw)
+        )
+        client = RealNativeDaemonClient()
+
+        exc_info: pytest.ExceptionInfo[UsageLimitError]
+        with pytest.raises(UsageLimitError) as exc_info:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        assert exc_info.value.reset_at == pinned_local_now.replace(hour=23, minute=0)
+
+    def test_unparseable_usage_limit_text_leaves_reset_at_none(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pinned_local_now: datetime,
+    ) -> None:
+        from cw.exceptions import UsageLimitError
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(
+                1, ["claude"], output="", stderr="You've hit your 5-hour limit"
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+
+        exc_info: pytest.ExceptionInfo[UsageLimitError]
+        with pytest.raises(UsageLimitError) as exc_info:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        assert exc_info.value.reset_at is None
+
+    @pytest.mark.parametrize(
+        ("branch", "raw"),
+        [
+            pytest.param(
+                "stderr",
+                "You've hit your session limit · resets 3:45pm",
+                id="stderr-parsed",
+            ),
+            pytest.param(
+                "stderr", "You've hit your 5-hour limit", id="stderr-unparsed"
+            ),
+            pytest.param(
+                "stdout",
+                "\x1b[36mYou've hit your weekly limit · resets Mon 12:00am",
+                id="stdout-parsed-with-ansi",
+            ),
+            pytest.param(
+                "stdout", "You've hit your 5-hour limit", id="stdout-unparsed"
+            ),
+        ],
+    )
+    def test_raw_spawn_message_logged_exactly_once_at_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        pinned_local_now: datetime,
+        branch: str,
+        raw: str,
+    ) -> None:
+        """P1 binding: one WARNING record per raise, raw text verbatim as ``%r``.
+
+        The record carries the PRE-ANSI-strip subprocess text, so an escape
+        sequence sitting between ``resets`` and the time is visible in the
+        sample. ``%r`` renders ESC as the four characters ``\\x1b``, hence the
+        ``repr(raw) in ...`` assertion rather than a ``"\\x1b" in caplog.text``.
+        """
+        from cw.exceptions import UsageLimitError
+
+        if branch == "stderr":
+
+            def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+                raise subprocess.CalledProcessError(
+                    1, ["claude"], output="", stderr=raw
+                )
+
+            monkeypatch.setattr(subprocess, "run", fake_run)
+        else:
+            monkeypatch.setattr(
+                subprocess, "run", lambda *_a, **_kw: _FakeCompleted(stdout=raw)
+            )
+
+        client = RealNativeDaemonClient()
+        with (
+            caplog.at_level(logging.WARNING, logger="cw.native_daemon"),
+            pytest.raises(UsageLimitError),
+        ):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        records = [
+            r
+            for r in caplog.records
+            if r.name == "cw.native_daemon" and r.levelno == logging.WARNING
+        ]
+        assert len(records) == 1
+        assert repr(raw) in records[0].getMessage()
+
+    def test_local_now_is_timezone_aware(self) -> None:
+        """R1 contract: the host-local clock seam never yields a naive instant."""
+        from cw.native_daemon import _local_now
+
+        assert _local_now().utcoffset() is not None
+
 
 class TestRealNativeDaemonClientRoster:
     """list_live_session_short_ids reads roster.json."""
@@ -514,6 +730,37 @@ class TestFakeNativeDaemonClient:
         assert client.raise_usage_limit is False
         short_id = client.spawn_bg(cwd=tmp_path, prompt="x")
         assert len(short_id) == 8
+
+    def test_usage_limit_reset_at_defaults_to_none(self, tmp_path: Path) -> None:
+        """#1409: the injected reset instant is opt-in."""
+        from cw.exceptions import UsageLimitError
+
+        client = FakeNativeDaemonClient()
+        client.raise_usage_limit = True
+
+        exc_info: pytest.ExceptionInfo[UsageLimitError]
+        with pytest.raises(UsageLimitError) as exc_info:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        assert client.usage_limit_reset_at is None
+        assert exc_info.value.reset_at is None
+        assert str(exc_info.value) == "fake: usage limit"
+
+    def test_usage_limit_reset_at_propagates_to_exception(self, tmp_path: Path) -> None:
+        """#1409: tests inject reset_at directly, no message crafting needed."""
+        from cw.exceptions import UsageLimitError
+
+        reset_at = datetime(2026, 9, 20, 19, 45, tzinfo=timezone(timedelta(0)))
+        client = FakeNativeDaemonClient()
+        client.raise_usage_limit = True
+        client.usage_limit_reset_at = reset_at
+
+        exc_info: pytest.ExceptionInfo[UsageLimitError]
+        with pytest.raises(UsageLimitError) as exc_info:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        assert exc_info.value.reset_at == reset_at
+        assert str(exc_info.value) == "fake: usage limit"
 
 
 def test_get_native_daemon_client_returns_real_instance() -> None:
