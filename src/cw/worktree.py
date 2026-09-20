@@ -64,6 +64,13 @@ _SCOPE_MISMATCH_RATIO_THRESHOLD = 2.0
 # line so create_worktree can name the colliding worktree in a targeted error
 # (#2034) instead of surfacing git's bare stderr.
 _WORKTREE_HELD_BY_RE = re.compile(r"already used by worktree at '([^']+)'")
+# Why: git's stderr when ``fetch origin <branch>`` names a branch the remote
+# does not have. A never-pushed feature branch is an expected state (a PLAN
+# stage provisions the worktree before IMPL ever pushes), so
+# ``fetch_feature_branch`` downgrades exactly this failure to DEBUG (#2213).
+# git localizes its messages: under a non-English locale the marker misses and
+# the failure degrades to the ordinary WARNING -- noise only, never a bug.
+_MISSING_REMOTE_REF_MARKER = "couldn't find remote ref"
 
 
 def slugify_branch(branch: str) -> str:
@@ -940,8 +947,15 @@ def _fetch_default_branch(
     default_branch: str,
     git_dir: Path,
     warned_fetch_fail: set[str] | None = None,
+    *,
+    quiet_missing_ref: bool = False,
 ) -> bool:
-    """Fetch origin/<default_branch>. Returns True on success, False on failure."""
+    """Fetch origin/<default_branch>. Returns True on success, False on failure.
+
+    A branch absent from origin (git's ``couldn't find remote ref``) is logged
+    at DEBUG instead of WARNING when *quiet_missing_ref* is set, and does not
+    touch *warned_fetch_fail*. Every other failure still WARNs.
+    """
     if not git_dir.exists():
         _log.warning(
             "freshness_check_skip: workspace missing for %s (%s)",
@@ -962,9 +976,17 @@ def _fetch_default_branch(
         )
         return False
     if result.returncode != 0:
+        stderr = result.stderr.strip()
+        first_line = stderr.splitlines()[0] if stderr else ""
+        if quiet_missing_ref and _MISSING_REMOTE_REF_MARKER in stderr:
+            _log.debug(
+                "freshness_check_skip: fetch failed for %s (rc=%d): %s",
+                client_name,
+                result.returncode,
+                first_line,
+            )
+            return False
         if warned_fetch_fail is None or client_name not in warned_fetch_fail:
-            stderr = result.stderr.strip()
-            first_line = stderr.splitlines()[0] if stderr else ""
             _log.warning(
                 "freshness_check_skip: fetch failed for %s (rc=%d): %s",
                 client_name,
@@ -987,8 +1009,12 @@ def fetch_feature_branch(client: ClientConfig, branch_name: str) -> bool:
     for reviewer prompts ensures the diff reflects the actual pushed state.
 
     Returns True on success, False on any failure (fetch errors do not raise).
+    A branch that is not on origin is logged at DEBUG, not WARNING: a
+    never-pushed feature branch is an expected state (#2213).
     """
-    return _fetch_default_branch(client.name, branch_name, _git_dir(client))
+    return _fetch_default_branch(
+        client.name, branch_name, _git_dir(client), quiet_missing_ref=True
+    )
 
 
 def _get_behind_count(
