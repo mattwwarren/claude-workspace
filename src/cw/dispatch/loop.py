@@ -58,7 +58,7 @@ from cw.reconcile import (
 from cw.reconcile.codex_boot import reap_orphaned_codex_sessions_at_boot
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from cw.models import (
         ClientConfig,
@@ -267,28 +267,27 @@ TICK_STALE_SECONDS = 90  # 3x default tick_interval_seconds=30
 
 
 def _merge_persisted_usage_limited_until(
-    usage_limited_until: datetime | None,
-) -> datetime | None:
-    """Merge the on-disk usage-limit sidecar into the in-memory window (#1346).
+    usage_limited_until: Mapping[str, datetime],
+) -> dict[str, datetime]:
+    """Merge the on-disk usage-limit sidecar into the in-memory windows (#1346).
 
     Re-read every tick: the pre-loop load in :func:`run_dispatch_loop` only
     protects a fresh restart (#804) -- it is never revisited, so this
-    process's in-memory window silently diverges from what any OTHER
+    process's in-memory windows silently diverge from what any OTHER
     dispatch process (or this same process's own earlier tick) has
-    persisted. Merge rather than overwrite: take the later of {in-memory,
-    on-disk}, treating None as "no window". ``load_usage_limited_until()``
-    returns None for a file that is absent, unreadable, malformed, OR merely
-    expired (dispatch_state.py) -- a bare assignment would let a transient disk-read
-    failure silently reopen the spawn gate mid-backoff. A read must never
-    shorten an active window.
+    persisted. Merge rather than overwrite, and merge PER CLIENT (#1409):
+    take the later of {in-memory, on-disk} for each client name, and keep a
+    client the other side has never heard of. ``load_usage_limited_until()``
+    omits an entry that is malformed or merely expired (dispatch_state.py) --
+    a bare assignment would let a transient disk-read failure silently reopen
+    the spawn gate mid-backoff. A read must never shorten an active window.
     """
-    persisted_usage_limited_until = load_usage_limited_until()
-    if persisted_usage_limited_until is not None and (
-        usage_limited_until is None
-        or persisted_usage_limited_until > usage_limited_until
-    ):
-        return persisted_usage_limited_until
-    return usage_limited_until
+    merged = dict(usage_limited_until)
+    for client, persisted in load_usage_limited_until().items():
+        current = merged.get(client)
+        if current is None or persisted > current:
+            merged[client] = persisted
+    return merged
 
 
 # Hard ceiling on a window derived from a PARSED reset instant (#1409). The
@@ -323,15 +322,74 @@ def _resolve_usage_limited_until(
     return flat
 
 
-def _usage_limit_window_is_active(usage_limited_until: datetime | None) -> bool:
-    """Is the usage-limit backoff window currently active (#1343)?
+# Provenance labels on the USAGE_LIMIT_ARMED payload: was the window taken
+# from a reset instant the spawn-time message named, or from the flat
+# usage_limit_backoff_seconds fallback?
+_SOURCE_PARSED_RESET = "parsed_reset"
+_SOURCE_FLAT_BACKOFF = "flat_backoff"
+
+
+def _arm_usage_limit_windows(
+    usage_limited_until: Mapping[str, datetime],
+    detections: Mapping[str, datetime | None],
+    *,
+    backoff_seconds: int,
+) -> dict[str, datetime]:
+    """Open a back-off window for each client that hit a limit this tick (#1409).
+
+    *detections* maps a client name to the reset instant its spawn-time message
+    named, or None when nothing parsed (and for every reconcile-derived
+    detection, which names no client and so arms the whole known fleet). Each
+    is resolved independently through :func:`_resolve_usage_limited_until`, so
+    one client's parsed reset can never set another client's deadline — the
+    fleet-wide lockout this ticket exists to remove.
+
+    Clients absent from *detections* keep the window they already had. A client
+    present in both is overwritten rather than extended: a detection can only
+    fire when that client's gate was open (``dispatch_tick`` skips a client
+    whose window is still live), so the prior value is by definition lapsed.
+
+    Emits one :attr:`~cw.models.OrchestratorEventType.USAGE_LIMIT_ARMED` per
+    client — the set-side counterpart to ``dispatch.usage_limit_cleared``,
+    which only ever fired on the way out. Without it the only durable record of
+    a multi-hour lockout was a log line.
+    """
+    now = datetime.now(UTC)
+    armed = dict(usage_limited_until)
+    for client, reset_at in detections.items():
+        until = _resolve_usage_limited_until(now, reset_at, backoff_seconds)
+        armed[client] = until
+        source = _SOURCE_PARSED_RESET if until == reset_at else _SOURCE_FLAT_BACKOFF
+        record_event(
+            OrchestratorEventType.USAGE_LIMIT_ARMED,
+            {"client": client, "until": until.isoformat(), "source": source},
+        )
+        _log.warning(
+            "dispatch: usage limit detected for %s; backing off until %s (%s)",
+            client,
+            until,
+            source,
+        )
+    return armed
+
+
+def _usage_limit_window_is_active(usage_limited_until: Mapping[str, datetime]) -> bool:
+    """Is ANY client's usage-limit backoff window currently active (#1343)?
 
     Single source of truth for the "armed and not yet expired" check, shared
     by the loop's pre-loop seed and :func:`_handle_usage_limit_window_transition`
     -- mirrors the wall-clock check :func:`~cw.dispatch.tick.dispatch_tick`
-    itself uses to gate spawning.
+    itself uses to gate spawning, folded over the per-client windows (#1409).
+
+    Deliberately fleet-level even though the windows are now per client: it
+    feeds the ``dispatch.usage_limit_cleared`` transition, which is a single
+    event carrying the whole ``clients_affected`` cohort (#1343 R1). "Cleared"
+    therefore means the LAST client's window lapsed. The per-client set side is
+    audited by :attr:`~cw.models.OrchestratorEventType.USAGE_LIMIT_ARMED`
+    instead.
     """
-    return usage_limited_until is not None and usage_limited_until > datetime.now(UTC)
+    now = datetime.now(UTC)
+    return any(until > now for until in usage_limited_until.values())
 
 
 def _emit_usage_limit_cleared(armed_at: datetime | None, cleared_at: datetime) -> None:
@@ -374,7 +432,7 @@ def _emit_usage_limit_cleared(armed_at: datetime | None, cleared_at: datetime) -
 def _handle_usage_limit_window_transition(
     was_active: bool,
     *,
-    usage_limited_until: datetime | None,
+    usage_limited_until: Mapping[str, datetime],
     armed_at: datetime | None,
 ) -> bool:
     """Detect an armed->cleared usage-limit backoff transition; emit for it (#1343).
@@ -383,15 +441,16 @@ def _handle_usage_limit_window_transition(
     ``was_active`` into the next tick's call. Fires
     :attr:`OrchestratorEventType.USAGE_LIMIT_CLEARED` exactly once -- on the
     tick that observes ``was_active and not now_active`` -- never per-client
-    (a single event carries the full ``clients_affected`` cohort).
-    ``usage_limited_until`` and ``armed_at`` are keyword-only: both are
-    ``datetime | None``, and a positional call site could otherwise swap them
-    silently past mypy. "Active" mirrors the wall-clock check
-    :func:`~cw.dispatch.tick.dispatch_tick` itself uses to gate spawning
-    (``usage_limited_until`` set AND still in the future) --
-    ``usage_limited_until`` is never reset to None on natural expiry (only
-    overwritten by a fresh detection), so "is not None" alone would never
-    observe a transition.
+    (a single event carries the full ``clients_affected`` cohort), so
+    "cleared" means the LAST client's window lapsed even though the windows
+    themselves are per-client since #1409. The set side is audited per client
+    by :attr:`OrchestratorEventType.USAGE_LIMIT_ARMED` instead.
+    ``usage_limited_until`` and ``armed_at`` stay keyword-only: a positional
+    call site could otherwise swap them silently past mypy. "Active" mirrors
+    the wall-clock check :func:`~cw.dispatch.tick.dispatch_tick` itself uses
+    to gate spawning (a client's entry present AND still in the future) --
+    an entry is never removed on natural expiry (only overwritten by a fresh
+    detection), so a presence check alone would never observe a transition.
 
     In-process-local detector state only (#1343 R4): the caller
     (:func:`run_dispatch_loop`) threads ``was_active``/``armed_at`` as plain
@@ -756,7 +815,9 @@ def _run_dispatch_loop_body(
     # Back-off window: loaded from the persisted sidecar so a loop restart after
     # a code merge honours an active backoff rather than re-opening the spawn gate
     # immediately (#804).
-    usage_limited_until: datetime | None = load_usage_limited_until()
+    # Keyed by client name since #1409 -- one client's parsed reset must not
+    # park the rest of the fleet.
+    usage_limited_until: dict[str, datetime] = load_usage_limited_until()
     # #1343: in-process-local usage-limit-window transition detector state --
     # see _handle_usage_limit_window_transition's docstring for the R4
     # single-loop-invariant caveat.
@@ -819,28 +880,22 @@ def _run_dispatch_loop_body(
                 config, stale_watchdog_next_scan_at
             )
 
-            if result.usage_limit_detected and not once:
-                usage_limited_until = _resolve_usage_limited_until(
-                    datetime.now(UTC),
-                    result.usage_limit_reset_at,
-                    config.usage_limit_backoff_seconds,
+            if result.usage_limit_clients and not once:
+                usage_limited_until = _arm_usage_limit_windows(
+                    usage_limited_until,
+                    result.usage_limit_clients,
+                    backoff_seconds=config.usage_limit_backoff_seconds,
                 )
                 save_usage_limited_until(usage_limited_until)
                 # #1343 R2: stamp the arm timestamp on every fresh detection
-                # (this block already only fires when the window was NOT
-                # already active this tick -- see tick.py's early-return at
-                # usage_limit_detected=False while a window is active) so
-                # the eventual cleared-event's detected_at is exact, not
-                # derived from backoff_seconds.
+                # (this block already only fires when the detecting client's
+                # window was NOT already active this tick -- see tick.py,
+                # which skips a client whose window is still live) so the
+                # eventual cleared-event's detected_at is exact, not derived
+                # from backoff_seconds. Fleet-level like the cleared event it
+                # feeds, not per client.
                 usage_limit_window_armed_at = datetime.now(UTC)
                 save_usage_limit_armed_at(usage_limit_window_armed_at)
-                _log.warning(
-                    "dispatch: usage limit detected; backing off until %s (%s)",
-                    usage_limited_until,
-                    "parsed reset"
-                    if usage_limited_until == result.usage_limit_reset_at
-                    else "flat backoff",
-                )
 
             if once:
                 return

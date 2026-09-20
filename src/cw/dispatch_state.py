@@ -25,7 +25,7 @@ from cw.atomic import atomic_write_text
 from cw.config import STATE_DIR, refuse_real_state_write, state_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -189,43 +189,79 @@ def _load_dispatch_state_raw() -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def load_usage_limited_until() -> datetime | None:
-    """Load the persisted usage-limit backoff expiry from DISPATCH_STATE_FILE.
+def _parse_future_instant(value: object, now: datetime) -> datetime | None:
+    """Parse one persisted ISO deadline, or None if it is unusable (#1409).
 
-    Returns None when the file is absent, unreadable, malformed, or the stored
-    timestamp is already in the past (so a stale backoff from a previous loop
-    run never silently re-blocks a fresh loop start).
+    Rejects a non-string, an unparseable string, a NAIVE timestamp (the
+    comparison against an aware "now" would raise, and a sidecar deadline with
+    no offset has no defined meaning), and anything already lapsed.
     """
-    path = DISPATCH_STATE_FILE
-    if not path.exists():
+    if not isinstance(value, str):
         return None
     try:
-        raw = json.loads(path.read_text())
-        ts = raw.get("usage_limited_until")
-        if not isinstance(ts, str):
-            return None
-        dt = datetime.fromisoformat(ts)
-        return dt if dt > datetime.now(UTC) else None
-    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
         return None
+    if parsed.tzinfo is None or parsed <= now:
+        return None
+    return parsed
 
 
-def save_usage_limited_until(dt: datetime | None) -> None:
-    """Persist (or clear) the usage-limit backoff expiry to DISPATCH_STATE_FILE.
+def load_usage_limited_until() -> dict[str, datetime]:
+    """Load the per-client usage-limit back-off windows (#1409).
 
-    Writes ``{"usage_limited_until": "<iso>"}`` when *dt* is set; writes
-    ``{"usage_limited_until": null}`` to clear it.  Read-merge-writes the
-    shared sidecar so the ``availability_probe`` key (RFC 0011 A5) is
-    preserved rather than clobbered (#1157).  Creates STATE_DIR if needed.
-    Silently swallows write errors — a failed persist just means the next loop
-    start won't honour the backoff (acceptable degradation).
+    Returns ``{client_name: expiry}`` carrying only entries still in the
+    future. An absent, unreadable or malformed file yields ``{}``, and an
+    individual entry that is malformed, naive, or already lapsed is simply
+    omitted — so a stale back-off from a previous loop run never silently
+    re-blocks a fresh loop start, and one corrupt entry never discards the
+    others.
+
+    **Migration from the pre-#1409 shape.** This key used to hold a single ISO
+    string that gated the WHOLE fleet. A legacy scalar found on disk is
+    DROPPED rather than fanned out across the currently-known clients: this
+    module deliberately knows nothing about ``clients.yaml``, so fanning out
+    would mean importing the client list here purely to guess which client the
+    old window belonged to. The cost of dropping is bounded to a single tick —
+    the next spawn re-hits the limit and re-arms the window under the name of
+    the client that actually hit it, which is the value the fan-out would only
+    be approximating.
+    """
+    raw = _load_dispatch_state_raw().get("usage_limited_until")
+    if not isinstance(raw, dict):
+        return {}
+    now = datetime.now(UTC)
+    windows: dict[str, datetime] = {}
+    for name, value in raw.items():
+        parsed = _parse_future_instant(value, now)
+        if parsed is not None:
+            windows[str(name)] = parsed
+    return windows
+
+
+def save_usage_limited_until(windows: Mapping[str, datetime]) -> None:
+    """Persist the per-client usage-limit back-off windows (#1409).
+
+    Writes ``{"usage_limited_until": {"<client>": "<iso>", ...}}``; an empty
+    mapping clears every window (the pre-#1409 ``save(None)`` call shape).
+    Read-merge-writes the shared sidecar so the ``availability_probe`` key
+    (RFC 0011 A5) is preserved rather than clobbered (#1157). Creates
+    STATE_DIR if needed. Silently swallows write errors — a failed persist
+    just means the next loop start won't honour the backoff (acceptable
+    degradation).
+
+    The whole mapping is written, not merged per client: the caller
+    (``dispatch.loop``) already holds the merged view of every live window,
+    and a per-key merge here would make an intentional clear impossible.
     """
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
         DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with dispatch_state_lock():
             payload = _load_dispatch_state_raw()
-            payload["usage_limited_until"] = dt.isoformat() if dt is not None else None
+            payload["usage_limited_until"] = {
+                name: dt.isoformat() for name, dt in windows.items()
+            }
             atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
     except OSError:
         logger.warning("dispatch_state: failed to persist usage_limited_until")

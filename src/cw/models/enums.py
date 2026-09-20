@@ -211,6 +211,12 @@ class OrchestratorEventType(StrEnum):
     # docs/events.md for the payload shape and the --once / single-loop-
     # invariant caveats.
     USAGE_LIMIT_CLEARED = "dispatch.usage_limit_cleared"
+    # #1409 -- the set-side counterpart to USAGE_LIMIT_CLEARED: fires once per
+    # client whose usage-limit back-off window is opened, carrying the deadline
+    # and whether it came from a parsed reset or the flat fallback. Without it
+    # a multi-hour per-client lockout left no durable record, only a log line.
+    # See docs/events.md for the payload shape.
+    USAGE_LIMIT_ARMED = "dispatch.usage_limit_armed"
     SESSION_PHANTOM_REVERTED = "session.phantom_reverted"
     SESSION_SALVAGE_SKIPPED = "session.salvage_skipped"
     SESSION_REAP_PROPOSED = "session.reap_proposed"

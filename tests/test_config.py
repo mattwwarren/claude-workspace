@@ -2301,71 +2301,87 @@ class TestDispatchStateLock:
 
 
 class TestUsageLimitedUntilPersistence:
-    """Unit tests for load_usage_limited_until / save_usage_limited_until (#804)."""
+    """Unit tests for load_usage_limited_until / save_usage_limited_until (#804).
+
+    #1409: the key holds a per-client ``{client: expiry}`` mapping (it was a
+    single fleet-wide scalar), so every load returns a ``dict`` — ``{}`` when
+    there is nothing usable — and every save takes a mapping.
+    """
 
     def test_save_and_load_roundtrip(self, tmp_config_dir: Path) -> None:
-        """save then load returns the same datetime (within 1s due to isoformat)."""
+        """save then load returns the same per-client mapping (#1409)."""
         from datetime import UTC, datetime, timedelta
 
         from cw.dispatch_state import load_usage_limited_until, save_usage_limited_until
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until(future)
-        loaded = load_usage_limited_until()
-        assert loaded is not None
-        assert abs((loaded - future).total_seconds()) < 1
+        save_usage_limited_until({"test-client": future})
+        assert load_usage_limited_until() == {"test-client": future}
 
-    def test_load_returns_none_when_file_absent(self, tmp_config_dir: Path) -> None:
+    def test_load_returns_empty_when_file_absent(self, tmp_config_dir: Path) -> None:
         import cw.dispatch_state
         from cw.dispatch_state import load_usage_limited_until
 
         cw.dispatch_state.DISPATCH_STATE_FILE.unlink(missing_ok=True)
-        assert load_usage_limited_until() is None
+        assert load_usage_limited_until() == {}
 
-    def test_load_returns_none_for_expired_timestamp(
+    def test_load_returns_empty_for_expired_timestamp(
         self, tmp_config_dir: Path
     ) -> None:
-        """A persisted timestamp in the past is treated as expired → None."""
+        """A persisted timestamp in the past is treated as expired → {} (#1409)."""
         from datetime import UTC, datetime, timedelta
 
         from cw.dispatch_state import load_usage_limited_until, save_usage_limited_until
 
         past = datetime.now(UTC) - timedelta(hours=1)
-        save_usage_limited_until(past)
-        assert load_usage_limited_until() is None
+        save_usage_limited_until({"test-client": past})
+        assert load_usage_limited_until() == {}
 
-    def test_save_none_clears_backoff(self, tmp_config_dir: Path) -> None:
-        """save_usage_limited_until(None) writes null → load returns None."""
+    def test_save_empty_mapping_clears_backoff(self, tmp_config_dir: Path) -> None:
+        """save_usage_limited_until({}) clears every window → {} (#1409)."""
         from datetime import UTC, datetime, timedelta
 
         from cw.dispatch_state import load_usage_limited_until, save_usage_limited_until
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until(future)
-        save_usage_limited_until(None)
-        assert load_usage_limited_until() is None
+        save_usage_limited_until({"test-client": future})
+        save_usage_limited_until({})
+        assert load_usage_limited_until() == {}
 
-    def test_load_returns_none_on_corrupt_json(self, tmp_config_dir: Path) -> None:
-        """Corrupt JSON in DISPATCH_STATE_FILE → None (silent, no exception)."""
+    def test_load_returns_empty_on_corrupt_json(self, tmp_config_dir: Path) -> None:
+        """Corrupt JSON in DISPATCH_STATE_FILE → {} (silent, no exception)."""
         import cw.dispatch_state
         from cw.dispatch_state import load_usage_limited_until
 
         cw.dispatch_state.DISPATCH_STATE_FILE.write_text("not-json")
-        assert load_usage_limited_until() is None
+        assert load_usage_limited_until() == {}
 
-    def test_load_returns_none_for_naive_timestamp(self, tmp_config_dir: Path) -> None:
-        """Naive (timezone-unaware) ISO timestamp in sidecar → None, no crash (#804)."""
+    def test_load_drops_naive_timestamp_entry(self, tmp_config_dir: Path) -> None:
+        """A naive (timezone-unaware) entry is dropped, no crash (#804, #1409).
+
+        The drop is per entry: a well-formed sibling window in the same
+        mapping still loads.
+        """
         import json
+        from datetime import UTC, datetime, timedelta
 
         import cw.dispatch_state
         from cw.dispatch_state import load_usage_limited_until
 
-        # Write a naive ISO string (no +00:00 suffix) to the sidecar.
+        future = datetime.now(UTC) + timedelta(hours=1)
+        # Write a naive ISO string (no +00:00 suffix) beside a valid entry.
         cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
-            json.dumps({"usage_limited_until": "2099-01-01T00:00:00"})
+            json.dumps(
+                {
+                    "usage_limited_until": {
+                        "naive-client": "2099-01-01T00:00:00",
+                        "test-client": future.isoformat(),
+                    }
+                }
+            )
         )
-        assert load_usage_limited_until() is None
+        assert load_usage_limited_until() == {"test-client": future}
 
     def test_save_warns_and_does_not_raise_on_oserror(
         self,
@@ -2382,7 +2398,7 @@ class TestUsageLimitedUntilPersistence:
         with patch(
             "cw.dispatch_state.atomic_write_text", side_effect=OSError("disk full")
         ):
-            save_usage_limited_until(future)
+            save_usage_limited_until({"test-client": future})
 
     def test_save_usage_limited_until_refuses_real_path_and_does_not_swallow(
         self,
@@ -2407,7 +2423,7 @@ class TestUsageLimitedUntilPersistence:
 
         future = datetime.now(UTC) + timedelta(hours=1)
         with pytest.raises(CwError, match="refusing real-state write"):
-            save_usage_limited_until(future)
+            save_usage_limited_until({"test-client": future})
 
         mock_write.assert_not_called()
 
@@ -2483,11 +2499,9 @@ class TestUsageLimitArmedAt:
         )
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until(future)
+        save_usage_limited_until({"test-client": future})
         save_usage_limit_armed_at(datetime.now(UTC))
-        loaded = load_usage_limited_until()
-        assert loaded is not None
-        assert abs((loaded - future).total_seconds()) < 1
+        assert load_usage_limited_until() == {"test-client": future}
 
     def test_save_usage_limited_until_preserves_usage_limit_armed_at(
         self, tmp_config_dir: Path
@@ -2503,7 +2517,9 @@ class TestUsageLimitArmedAt:
 
         armed_at = datetime.now(UTC)
         save_usage_limit_armed_at(armed_at)
-        save_usage_limited_until(datetime.now(UTC) + timedelta(hours=1))
+        save_usage_limited_until(
+            {"test-client": datetime.now(UTC) + timedelta(hours=1)}
+        )
         loaded = load_usage_limit_armed_at()
         assert loaded is not None
         assert abs((loaded - armed_at).total_seconds()) < 1
@@ -2643,7 +2659,7 @@ class TestAvailabilityProbeCachePersistence:
 
         cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
-            json.dumps({"usage_limited_until": None})
+            json.dumps({"usage_limited_until": {}})
         )
         assert load_availability_probe_cache() is None
 
@@ -2730,15 +2746,13 @@ class TestAvailabilityProbeCachePersistence:
         )
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until(future)
+        save_usage_limited_until({"test-client": future})
         save_availability_probe_cache(
             AvailabilityProbeCache(
                 probed_at=datetime.now(UTC), available=False, latched=True
             )
         )
-        loaded = load_usage_limited_until()
-        assert loaded is not None
-        assert abs((loaded - future).total_seconds()) < 1
+        assert load_usage_limited_until() == {"test-client": future}
 
     def test_save_usage_limited_until_preserves_availability_probe_cache(
         self, tmp_config_dir: Path
@@ -2758,7 +2772,9 @@ class TestAvailabilityProbeCachePersistence:
                 probed_at=datetime.now(UTC), available=False, latched=True
             )
         )
-        save_usage_limited_until(datetime.now(UTC) + timedelta(hours=1))
+        save_usage_limited_until(
+            {"test-client": datetime.now(UTC) + timedelta(hours=1)}
+        )
         loaded = load_availability_probe_cache()
         assert loaded is not None
         assert loaded.available is False
@@ -2800,10 +2816,8 @@ class TestAvailabilityProbeCachePersistence:
         cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         cw.dispatch_state.DISPATCH_STATE_FILE.write_text("not-json")
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until(future)
-        loaded = load_usage_limited_until()
-        assert loaded is not None
-        assert abs((loaded - future).total_seconds()) < 1
+        save_usage_limited_until({"test-client": future})
+        assert load_usage_limited_until() == {"test-client": future}
 
 
 class TestMainDriftLatchesPersistence:
@@ -2835,7 +2849,7 @@ class TestMainDriftLatchesPersistence:
 
         cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
-            json.dumps({"usage_limited_until": None})
+            json.dumps({"usage_limited_until": {}})
         )
         assert load_main_drift_latches() == {}
 
@@ -2992,12 +3006,10 @@ class TestExecutorBlockedMarkerPersistence:
         )
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until(future)
+        save_usage_limited_until({"test-client": future})
         save_executor_blocked_marker(self._marker())
 
-        loaded = load_usage_limited_until()
-        assert loaded is not None
-        assert abs((loaded - future).total_seconds()) < 1
+        assert load_usage_limited_until() == {"test-client": future}
 
     def test_save_executor_blocked_marker_swallows_corrupt_existing_sidecar(
         self, tmp_config_dir: Path
@@ -3098,16 +3110,14 @@ class TestExecutorBlockedMarkerPersistence:
         )
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until(future)
+        save_usage_limited_until({"test-client": future})
         save_executor_blocked_marker(self._marker(client="client-a", ticket_id="1"))
         save_executor_blocked_marker(self._marker(client="client-b", ticket_id="2"))
 
         clear_all_executor_blocked_markers()
 
         assert load_executor_blocked_markers() == {}
-        loaded = load_usage_limited_until()
-        assert loaded is not None
-        assert abs((loaded - future).total_seconds()) < 1
+        assert load_usage_limited_until() == {"test-client": future}
 
     def test_clear_all_executor_blocked_markers_warns_on_oserror(
         self,
@@ -3158,7 +3168,7 @@ class TestExecutorBlockedMarkerPersistence:
 
         cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
-            json.dumps({"usage_limited_until": None})
+            json.dumps({"usage_limited_until": {}})
         )
         assert load_executor_blocked_markers() == {}
 

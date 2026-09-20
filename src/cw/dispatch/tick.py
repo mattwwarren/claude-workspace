@@ -7,7 +7,7 @@ path and the event loop live in separate submodules."""
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -33,7 +33,7 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from cw.dispatch.lanes import _ClientDispatchResult
     from cw.models import (
@@ -74,16 +74,20 @@ class DispatchTickResult:
     :attr:`~cw.reconcile.ReconcileReport.usage_limited`). The caller
     (:func:`run_dispatch_loop`) uses this to set the back-off window.
     ``--once`` mode intentionally does not back off (single tick, no loop state).
-    ``usage_limit_reset_at`` — the instant the limit lifts, when a spawn-time
-    message named one that parsed (#1409). None means "no parsed reset", which
-    :func:`run_dispatch_loop` reads as "use the flat back-off". Always None on
-    the reconcile-derived path, which early-returns above the client loop and
-    carries no reset either way.
+    ``usage_limit_clients`` — the clients that hit a usage limit THIS tick,
+    each mapped to the reset instant its spawn-time message named (#1409).
+    None as a value means "nothing parsed", which :func:`run_dispatch_loop`
+    reads as "use the flat back-off" for that client. Keyed per client, never
+    a single fleet-wide instant: one client's multi-hour parsed reset must not
+    park clients that never hit a limit. On the reconcile-derived path — which
+    early-returns above the client loop and carries no client name at all —
+    every known client is present with a None value, the behavior-preserving
+    reading of the pre-#1409 fleet-wide scalar.
     """
 
     spawned: int
     usage_limit_detected: bool = False
-    usage_limit_reset_at: datetime | None = None
+    usage_limit_clients: Mapping[str, datetime | None] = field(default_factory=dict)
 
 
 def _combine_usage_limit_reset_at(
@@ -91,14 +95,20 @@ def _combine_usage_limit_reset_at(
     current: datetime | None,
     new: datetime | None,
 ) -> datetime | None:
-    """Fold one client's parsed reset into the tick's running value (#1409).
+    """Fold a detection into ONE client's running reset value (#1409).
 
-    The client loop does not break on a usage limit, so a second client can
-    hit one in the same tick. First detection takes *new* as is. On a later
-    detection, an unparsed side (None) on EITHER end collapses the whole tick
-    to None: the flat ``usage_limit_backoff_seconds`` is today's behavior, so a
-    mixed tick is never worse than the status quo. Otherwise take the later of
-    the two, since the fleet is limited until the last of them lifts.
+    *already_detected* is whether this client already has an entry this tick.
+    First detection takes *new* as is. On a later one, an unparsed side (None)
+    on EITHER end collapses that client to None: the flat
+    ``usage_limit_backoff_seconds`` is today's behavior, so a mixed result is
+    never worse than the status quo. Otherwise the later instant wins.
+
+    Scoped to a single client (review round 1). The fold used to run ACROSS
+    clients, on the reasoning that "the fleet is limited until the last of
+    them lifts" — which stopped being true the moment windows became
+    per-client. Today the lane loop breaks on a client's first usage limit, so
+    the repeat-detection arms are a guard against that invariant changing, not
+    a live path.
 
     Reconcile-derived detections never reach here — :func:`dispatch_tick`
     early-returns above the client loop for those.
@@ -108,6 +118,39 @@ def _combine_usage_limit_reset_at(
     if current is None or new is None:
         return None
     return max(current, new)
+
+
+def _apply_usage_limit_gate(
+    clients: dict[str, ClientConfig],
+    usage_limited_until: Mapping[str, datetime],
+    *,
+    config: OrchestratorConfig,
+    state: CwState,
+) -> tuple[dict[str, ClientConfig], bool]:
+    """Drop clients whose back-off window is still open (#1409).
+
+    Returns ``(still_eligible, every_client_was_limited)``. Each skipped
+    client gets its usual ``dispatch.tick`` event with
+    ``skip_reason=USAGE_LIMITED``; the rest dispatch normally in the same
+    tick, which is the whole point of keying the window per client.
+
+    The second element exists to preserve one pre-#1409 behavior exactly: when
+    the window covered the entire fleet the tick returned
+    ``usage_limit_detected=False`` BEFORE the reconcile gate, so a still-open
+    window was never mistaken for a fresh detection and re-armed (which would
+    extend it). The caller reproduces that early return.
+    """
+    now = datetime.now(UTC)
+    limited = {
+        name: client
+        for name, client in clients.items()
+        if (until := usage_limited_until.get(name)) is not None and now < until
+    }
+    if not limited:
+        return clients, False
+    _emit_usage_limit_skip_events(limited, config, state)
+    eligible = {name: client for name, client in clients.items() if name not in limited}
+    return eligible, not eligible
 
 
 def _sweep_expired_diagnostics(config: OrchestratorConfig) -> None:
@@ -423,7 +466,7 @@ def dispatch_tick(
     warned_collision: set[frozenset[str]] | None = None,
     warned_ssh_key: set[str] | None = None,
     warned_disk_pressure: set[str] | None = None,
-    usage_limited_until: datetime | None = None,
+    usage_limited_until: Mapping[str, datetime] | None = None,
     auto_ff: bool = True,
     client_filter: str | None = None,
 ) -> DispatchTickResult:
@@ -468,10 +511,12 @@ def dispatch_tick(
             dispatcher run (#1887). Keyed per-client, not fleet-wide like
             ``warned_ssh_key``: each client's ``worktree_base`` may sit on
             its own mount. Caller owns the set; mutated in-place.
-        usage_limited_until: When set and in the future, all clients are
-            skipped with ``skip_reason=USAGE_LIMITED`` and the function
-            returns immediately. The back-off window is set by the
-            caller (:func:`run_dispatch_loop`) when a
+        usage_limited_until: Per-client back-off deadlines, keyed by client
+            name (#1409). A client with a future deadline is skipped with
+            ``skip_reason=USAGE_LIMITED``; every other client dispatches
+            normally in the same tick. Only when EVERY client is limited does
+            the function return immediately. The windows are set by the caller
+            (:func:`run_dispatch_loop`) when a
             :class:`~cw.exceptions.UsageLimitError` is detected.
             Single-tick (``--once``) mode does not set back-off.
         auto_ff: When True (default), attempt to fast-forward local main
@@ -491,9 +536,14 @@ def dispatch_tick(
     """
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     any_usage_limit_detected = _reconcile_usage_limited()
-    usage_limit_reset_at: datetime | None = None
+    usage_limit_clients: dict[str, datetime | None] = {}
+    windows = usage_limited_until or {}
     _sweep_expired_diagnostics(config)
     clients = load_effective_clients()
+    # Captured before ``client_filter`` narrows the loop: a reconcile-derived
+    # limit is fleet-wide, so it arms every KNOWN client, not just the filtered
+    # one -- matching what the pre-#1409 single scalar did on that path.
+    known_client_names = tuple(clients)
     if client_filter is not None:
         clients = {client_filter: clients[client_filter]}
     state = load_state()
@@ -513,10 +563,13 @@ def dispatch_tick(
         emit=emit,
     )
 
-    # Usage-limit back-off gate: if the window is still active, skip all clients
-    # this tick and emit a dispatch.tick event with skip_reason=USAGE_LIMITED.
-    if usage_limited_until is not None and datetime.now(UTC) < usage_limited_until:
-        _emit_usage_limit_skip_events(clients, config, state)
+    # Usage-limit back-off gate: skip the clients whose own window is still
+    # active (each gets a dispatch.tick event with skip_reason=USAGE_LIMITED)
+    # and let the rest of the fleet dispatch normally (#1409).
+    clients, all_clients_limited = _apply_usage_limit_gate(
+        clients, windows, config=config, state=state
+    )
+    if all_clients_limited:
         return DispatchTickResult(spawned=0, usage_limit_detected=False)
 
     # Same-tick race fix: reconcile reverts rate-limited phantom tasks to PENDING
@@ -526,7 +579,14 @@ def dispatch_tick(
     # usage_limited_until before the next tick fires (#804).
     if any_usage_limit_detected:
         _emit_usage_limit_skip_events(clients, config, state)
-        return DispatchTickResult(spawned=0, usage_limit_detected=True)
+        # Transcript-derived, so it names no client: arm the whole known fleet
+        # on the flat back-off (None == "no parsed reset"), which is what the
+        # pre-#1409 fleet-wide scalar amounted to on this path.
+        return DispatchTickResult(
+            spawned=0,
+            usage_limit_detected=True,
+            usage_limit_clients=dict.fromkeys(known_client_names, None),
+        )
 
     # Tier-1: optionally cap how many clients are eligible per tick.
     # max_parallel_clients=None preserves the original behaviour (all clients).
@@ -672,14 +732,14 @@ def dispatch_tick(
             resolved_native_daemon=resolved_native_daemon,
             parent=parent,
             emit=emit,
-            usage_limited_until=usage_limited_until,
+            usage_limited_until=windows.get(client.name),
             host_capacity=host_capacity,
         )
         spawned += client_result.spawned
         if client_result.usage_limit_detected:
-            usage_limit_reset_at = _combine_usage_limit_reset_at(
-                any_usage_limit_detected,
-                usage_limit_reset_at,
+            usage_limit_clients[client.name] = _combine_usage_limit_reset_at(
+                client.name in usage_limit_clients,
+                usage_limit_clients.get(client.name),
                 client_result.usage_limit_reset_at,
             )
             any_usage_limit_detected = True
@@ -687,5 +747,5 @@ def dispatch_tick(
     return DispatchTickResult(
         spawned=spawned,
         usage_limit_detected=any_usage_limit_detected,
-        usage_limit_reset_at=usage_limit_reset_at,
+        usage_limit_clients=usage_limit_clients,
     )

@@ -597,7 +597,9 @@ lane_circuit_breaker_threshold: 3
 # Fallback window after a usage-limit cutoff, used when the reset time is
 # absent or unparseable. When the spawn-time message names a reset time cw can
 # resolve, dispatch backs off until that instant instead (clamped to 7 days);
-# otherwise it waits this many seconds before retrying. See #1409.
+# otherwise it waits this many seconds before retrying. The window is per
+# client: only the client that hit the limit is held back, and each open
+# window is recorded as a dispatch.usage_limit_armed event. See #1409.
 usage_limit_backoff_seconds: 3600
 
 # Elapsed seconds before reconcile routes an emitted-but-unrouted sentinel

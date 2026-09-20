@@ -108,10 +108,25 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from cw.native_daemon import NativeDaemonClient
     from tests.conftest import CapturedEvent
+
+
+def _captured_windows(kwargs: dict[str, object]) -> Mapping[str, datetime]:
+    """Read the per-client back-off mapping out of a spied dispatch_tick call.
+
+    ``usage_limited_until`` is a ``Mapping[str, datetime]`` since #1409 and the
+    loop always passes one (empty when nothing is limited), so an absent kwarg
+    is a spy-wiring bug rather than a state to assert on -- hence the raise
+    instead of a ``.get`` default that would quietly read as "no windows".
+    """
+    windows = kwargs.get("usage_limited_until")
+    if not isinstance(windows, dict):
+        msg = f"dispatch_tick was called without a window mapping: {windows!r}"
+        raise TypeError(msg)
+    return windows
 
 
 def _stub_review_head_sha(monkeypatch: pytest.MonkeyPatch, sha: str) -> None:
@@ -4811,7 +4826,7 @@ class TestRunDispatchLoopVerbose:
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
             warned_disk_pressure: set[str] | None = None,
-            usage_limited_until: datetime | None = None,
+            usage_limited_until: Mapping[str, datetime] | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
         ) -> DispatchTickResult:
@@ -5166,7 +5181,12 @@ class TestDispatchUsageLimitBackoff:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """When usage_limited_until is in the future, tick skips all clients."""
+        """A client whose own window is in the future is skipped (#1409).
+
+        The single client here IS the whole fleet, so this also pins the
+        every-client-limited early return: ``usage_limit_detected`` stays
+        False rather than being re-armed.
+        """
         from datetime import timedelta
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
@@ -5178,7 +5198,7 @@ class TestDispatchUsageLimitBackoff:
         result = dispatch_tick(
             simple_config,
             native_daemon=daemon,
-            usage_limited_until=future,
+            usage_limited_until={"test-client": future},
         )
 
         assert isinstance(result, DispatchTickResult)
@@ -5199,7 +5219,7 @@ class TestDispatchUsageLimitBackoff:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """After usage_limited_until elapses, spawning resumes normally."""
+        """After a client's window elapses, spawning resumes normally."""
         from datetime import timedelta
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
@@ -5211,7 +5231,7 @@ class TestDispatchUsageLimitBackoff:
         result = dispatch_tick(
             simple_config,
             native_daemon=daemon,
-            usage_limited_until=past,
+            usage_limited_until={"test-client": past},
         )
 
         assert isinstance(result, DispatchTickResult)
@@ -5327,20 +5347,23 @@ class TestDispatchUsageLimitBackoff:
     ) -> None:
         """run_dispatch_loop calls save_usage_limited_until when usage limit is
         detected in multi-tick mode (once=False). Verified by monkeypatching
-        save_usage_limited_until and checking the captured argument (#804)."""
+        save_usage_limited_until and checking the captured argument (#804).
+
+        The saved value is a per-client mapping since #1409, keyed by the
+        client that actually hit the limit."""
         import cw.dispatch
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-PERSIST", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        saved: list[object] = []
+        saved: list[Mapping[str, datetime]] = []
 
         real_save = save_usage_limited_until
 
-        def capturing_save(dt: object) -> None:
-            saved.append(dt)
-            real_save(dt)  # type: ignore[arg-type]
+        def capturing_save(windows: Mapping[str, datetime]) -> None:
+            saved.append(windows)
+            real_save(windows)
 
         monkeypatch.setattr("cw.dispatch.loop.save_usage_limited_until", capturing_save)
 
@@ -5368,9 +5391,8 @@ class TestDispatchUsageLimitBackoff:
             run_dispatch_loop(native_daemon=daemon)
 
         assert len(saved) >= 1
-        saved_dt = saved[0]
-        assert isinstance(saved_dt, datetime)
-        assert saved_dt > datetime.now(UTC)
+        assert set(saved[0]) == {"test-client"}
+        assert saved[0]["test-client"] > datetime.now(UTC)
 
     def test_run_dispatch_loop_loads_persisted_backoff(
         self,
@@ -5392,7 +5414,7 @@ class TestDispatchUsageLimitBackoff:
 
         # Pre-write a backoff window that hasn't expired yet.
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until(future)
+        save_usage_limited_until({"test-client": future})
 
         run_dispatch_loop(once=True, native_daemon=daemon)
 
@@ -5409,8 +5431,8 @@ class TestDispatchUsageLimitBackoff:
         """A second, unrelated process writing usage_limited_until between ticks
         is observed on the very next tick of THIS process's loop (#1346). Without
         a per-tick re-read, this process's in-memory usage_limited_until never
-        diverges from what it loaded at startup (None here), so it would keep
-        spawning through another process's active fleet-wide backoff."""
+        diverges from what it loaded at startup (empty here), so it would keep
+        spawning through another process's active backoff for that client."""
         import cw.dispatch
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
@@ -5420,13 +5442,13 @@ class TestDispatchUsageLimitBackoff:
         future = datetime.now(UTC) + timedelta(hours=1)
 
         call_count = 0
-        captured: list[datetime | None] = []
+        captured: list[Mapping[str, datetime]] = []
         real_tick = cw.dispatch.loop.dispatch_tick
 
         def observing_tick(*args: object, **kwargs: object) -> DispatchTickResult:
             nonlocal call_count
             call_count += 1
-            captured.append(kwargs.get("usage_limited_until"))  # type: ignore[arg-type]
+            captured.append(_captured_windows(kwargs))
             if call_count == 3:
                 raise KeyboardInterrupt
             result = real_tick(*args, **kwargs)  # type: ignore[arg-type]
@@ -5434,7 +5456,7 @@ class TestDispatchUsageLimitBackoff:
                 # Simulate a SECOND, unrelated dispatch process detecting a
                 # usage limit and persisting it -- this process never calls
                 # its own _reconcile_usage_limited/UsageLimitError path.
-                save_usage_limited_until(future)
+                save_usage_limited_until({"test-client": future})
             return result
 
         monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", observing_tick)
@@ -5444,12 +5466,11 @@ class TestDispatchUsageLimitBackoff:
             run_dispatch_loop(native_daemon=daemon)
 
         # Tick 1: no backoff anywhere yet -- spawns normally.
-        assert captured[0] is None
+        assert captured[0] == {}
         assert len(daemon.spawn_calls) == 1
-        # Tick 2: the merge picked up the other process's write -- non-None,
-        # still-future, and no additional spawn occurred.
-        assert captured[1] is not None
-        assert captured[1] > datetime.now(UTC)
+        # Tick 2: the merge picked up the other process's write for this
+        # client -- still-future, and no additional spawn occurred.
+        assert captured[1]["test-client"] > datetime.now(UTC)
         assert len(daemon.spawn_calls) == 1
 
     def test_run_dispatch_loop_corrupt_sidecar_mid_backoff_does_not_shorten_window(
@@ -5461,12 +5482,13 @@ class TestDispatchUsageLimitBackoff:
     ) -> None:
         """A corrupt sidecar read mid-backoff must not reopen the spawn gate.
 
-        load_usage_limited_until() returns None for a file that is absent,
-        unreadable, OR malformed (config.py) -- a bare assignment in the
-        per-tick merge would let a transient disk-read failure silently
-        resurrect spawning during an active window. The merge must be
-        None-safe: only a later PERSISTED value can extend the window,
-        never shorten or clear an active in-memory one (#1346).
+        load_usage_limited_until() returns an EMPTY mapping for a file that is
+        absent, unreadable, OR malformed (dispatch_state.py) -- a bare
+        assignment in the per-tick merge would let a transient disk-read
+        failure silently resurrect spawning during an active window. The merge
+        must be miss-safe per client: only a later PERSISTED value can extend
+        a client's window, never shorten or clear an active in-memory one
+        (#1346; per-client since #1409).
 
         Builds the active in-memory window via the merge itself (not the
         pre-loop startup load) on tick 2, then corrupts the sidecar before
@@ -5483,25 +5505,24 @@ class TestDispatchUsageLimitBackoff:
         future = datetime.now(UTC) + timedelta(hours=1)
 
         call_count = 0
-        captured: list[datetime | None] = []
+        captured: list[Mapping[str, datetime]] = []
         real_tick = cw.dispatch.loop.dispatch_tick
 
         def corrupting_tick(*args: object, **kwargs: object) -> DispatchTickResult:
             nonlocal call_count
             call_count += 1
-            captured.append(kwargs.get("usage_limited_until"))  # type: ignore[arg-type]
+            captured.append(_captured_windows(kwargs))
             if call_count == 4:
                 raise KeyboardInterrupt
             result = real_tick(*args, **kwargs)  # type: ignore[arg-type]
             if call_count == 1:
                 # Simulate another process writing the backoff between
                 # tick 1 and tick 2 (same idiom as the cross-process test).
-                save_usage_limited_until(future)
+                save_usage_limited_until({"test-client": future})
             elif call_count == 2:
                 # Corrupt the sidecar between tick 2 and tick 3 -- mirrors
-                # test_config.py's test_load_returns_none_on_corrupt_json
-                # input, which proves load_usage_limited_until() returns
-                # None on it.
+                # test_config.py's corrupt-json input, which proves
+                # load_usage_limited_until() degrades to an empty mapping.
                 cw.dispatch_state.DISPATCH_STATE_FILE.write_text("not-json")
             return result
 
@@ -5512,16 +5533,14 @@ class TestDispatchUsageLimitBackoff:
             run_dispatch_loop(native_daemon=daemon)
 
         # Tick 1: no window anywhere yet -- spawns normally.
-        assert captured[0] is None
+        assert captured[0] == {}
         assert len(daemon.spawn_calls) == 1
         # Tick 2: merge picked up the other process's write -- suppressed.
-        assert captured[1] is not None
-        assert captured[1] > datetime.now(UTC)
-        # Tick 3: disk read degrades to None (corrupt), but the merge must
-        # NOT shorten/clear the still-active in-memory window built on
-        # tick 2 -- still non-None, still future, still no new spawn.
-        assert captured[2] is not None
-        assert captured[2] > datetime.now(UTC)
+        assert captured[1]["test-client"] > datetime.now(UTC)
+        # Tick 3: disk read degrades to an empty mapping (corrupt), but the
+        # merge must NOT drop the still-active in-memory window built on
+        # tick 2 -- still present, still future, still no new spawn.
+        assert captured[2]["test-client"] > datetime.now(UTC)
         assert len(daemon.spawn_calls) == 1
 
     def test_run_dispatch_loop_expired_disk_window_does_not_resurrect_backoff(
@@ -5532,12 +5551,12 @@ class TestDispatchUsageLimitBackoff:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An already-expired on-disk window must not resurrect a lapsed
-        in-memory backoff (#1346). load_usage_limited_until() already
-        returns None for a past timestamp (config.py contract), so the
-        merge's take-the-max logic must never treat an expired persisted
-        value as eligible to extend anything -- it stays None, and the
-        gate falls through to its own now-vs-usage_limited_until check,
-        which lets tick 2 spawn normally."""
+        in-memory backoff (#1346). load_usage_limited_until() already omits
+        a past timestamp (dispatch_state.py contract), so the merge's
+        take-the-later logic never treats an expired persisted value as
+        eligible to extend anything -- the entry keeps its lapsed value, and
+        the gate falls through to its own now-vs-deadline check, which lets
+        tick 2 spawn normally."""
         from freezegun import freeze_time
 
         import cw.dispatch
@@ -5551,16 +5570,16 @@ class TestDispatchUsageLimitBackoff:
             # Both in-memory (via pre-loop load) and on-disk start with the
             # SAME short-lived window.
             expiring = datetime.now(UTC) + timedelta(seconds=30)
-            save_usage_limited_until(expiring)
+            save_usage_limited_until({"test-client": expiring})
 
             call_count = 0
-            captured: list[datetime | None] = []
+            captured: list[Mapping[str, datetime]] = []
             real_tick = cw.dispatch.loop.dispatch_tick
 
             def advancing_tick(*args: object, **kwargs: object) -> DispatchTickResult:
                 nonlocal call_count
                 call_count += 1
-                captured.append(kwargs.get("usage_limited_until"))  # type: ignore[arg-type]
+                captured.append(_captured_windows(kwargs))
                 if call_count == 3:
                     raise KeyboardInterrupt
                 result = real_tick(*args, **kwargs)  # type: ignore[arg-type]
@@ -5579,7 +5598,7 @@ class TestDispatchUsageLimitBackoff:
         # Tick 1: window still active -- spawning suppressed (proven by the
         # captured kwarg, since spawn_calls can only be inspected after the
         # whole (suppressed) loop run completes below).
-        assert captured[0] == expiring
+        assert captured[0] == {"test-client": expiring}
         # Tick 2: time has passed the window; the expired disk value must
         # not resurrect it -- spawning proceeds normally. Exactly one spawn
         # total confirms tick 1 contributed none and tick 2 contributed one.
@@ -5607,7 +5626,7 @@ class TestDispatchUsageLimitBackoff:
             armed_at = datetime.now(UTC) - timedelta(minutes=5)
             expiring = datetime.now(UTC) + timedelta(seconds=30)
             save_usage_limit_armed_at(armed_at)
-            save_usage_limited_until(expiring)
+            save_usage_limited_until({"test-client": expiring})
 
             call_count = 0
             real_tick = cw.dispatch.loop.dispatch_tick
@@ -5697,7 +5716,7 @@ class TestDispatchUsageLimitBackoff:
             armed_at = datetime.now(UTC) - timedelta(minutes=20)
             expiring = datetime.now(UTC) + timedelta(seconds=30)
             save_usage_limit_armed_at(armed_at)
-            save_usage_limited_until(expiring)
+            save_usage_limited_until({"test-client": expiring})
 
             call_count = 0
             real_tick = cw.dispatch.loop.dispatch_tick
@@ -5767,7 +5786,7 @@ class TestDispatchUsageLimitBackoff:
         daemon = FakeNativeDaemonClient()
 
         future = datetime.now(UTC) + timedelta(seconds=1)
-        save_usage_limited_until(future)
+        save_usage_limited_until({"test-client": future})
         save_usage_limit_armed_at(datetime.now(UTC) - timedelta(minutes=5))
 
         calls: list[object] = []
@@ -5841,7 +5860,7 @@ class TestDispatchUsageLimitBackoff:
         import cw.dispatch.loop
 
         now_active = cw.dispatch.loop._handle_usage_limit_window_transition(
-            False, usage_limited_until=None, armed_at=None
+            False, usage_limited_until={}, armed_at=None
         )
 
         assert now_active is False
@@ -5878,7 +5897,7 @@ class TestUsageLimitResetThreading:
         result = dispatch_tick(simple_config, native_daemon=daemon)
 
         assert result.usage_limit_detected is True
-        assert result.usage_limit_reset_at == reset_at
+        assert result.usage_limit_clients == {"test-client": reset_at}
 
     def test_reset_at_defaults_to_none_on_tick_result(
         self,
@@ -5895,7 +5914,7 @@ class TestUsageLimitResetThreading:
         result = dispatch_tick(simple_config, native_daemon=daemon)
 
         assert result.usage_limit_detected is True
-        assert result.usage_limit_reset_at is None
+        assert result.usage_limit_clients == {"test-client": None}
 
     def test_reconcile_path_keeps_flat_backoff(
         self,
@@ -5904,7 +5923,12 @@ class TestUsageLimitResetThreading:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A reconcile-derived detection early-returns with no parsed reset."""
+        """A reconcile-derived detection early-returns with no parsed reset.
+
+        It names no client, so every KNOWN client is armed on the flat
+        back-off -- see tests/test_dispatch_usage_limit.py for the
+        multi-client version of this.
+        """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-RESET3", client="test-client"))
 
@@ -5915,7 +5939,7 @@ class TestUsageLimitResetThreading:
         result = dispatch_tick(simple_config, native_daemon=daemon)
 
         assert result.usage_limit_detected is True
-        assert result.usage_limit_reset_at is None
+        assert result.usage_limit_clients == {"test-client": None}
 
     @pytest.mark.parametrize(
         ("already_detected", "current", "new", "expected_key"),
@@ -6007,12 +6031,12 @@ class TestUsageLimitResetThreading:
         add_ticket(TicketTask(ticket_id="GEN-UL-RESET-LOOP", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        saved: list[datetime | None] = []
+        saved: list[Mapping[str, datetime]] = []
         real_save = save_usage_limited_until
 
-        def capturing_save(dt: datetime | None) -> None:
-            saved.append(dt)
-            real_save(dt)
+        def capturing_save(windows: Mapping[str, datetime]) -> None:
+            saved.append(windows)
+            real_save(windows)
 
         monkeypatch.setattr("cw.dispatch.loop.save_usage_limited_until", capturing_save)
         monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
@@ -6048,7 +6072,7 @@ class TestUsageLimitResetThreading:
 
         assert len(saved) == 1
         expected = reset_at if expect_reset else now + timedelta(seconds=3600)
-        assert saved[0] == expected
+        assert saved[0] == {"test-client": expected}
 
 
 class TestClaimNextPendingUsageLimitedGate:
@@ -7959,7 +7983,11 @@ class TestLaneOccupantsPayload:
         future = datetime.now(UTC) + timedelta(hours=1)
 
         daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, usage_limited_until=future)
+        dispatch_tick(
+            simple_config,
+            native_daemon=daemon,
+            usage_limited_until={"test-client": future},
+        )
 
         events = read_events(
             consumer="test-occ-usage-limit",
@@ -14717,7 +14745,7 @@ class TestWaveCollisionDetection:
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
             warned_disk_pressure: set[str] | None = None,
-            usage_limited_until: datetime | None = None,
+            usage_limited_until: Mapping[str, datetime] | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
         ) -> DispatchTickResult:
