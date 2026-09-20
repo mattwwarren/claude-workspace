@@ -96,6 +96,48 @@ def test_orientation_cites_per_stage_dispatch_mechanism() -> None:
     assert "src/cw/executor.py" in content
 
 
+def test_guard_resolves_repo_local_then_global_script_path() -> None:
+    """Repo-local first, then the copy install-skills.sh ships (#2141).
+
+    The repo-local candidate is asserted in its ``$GUARD_ROOT``-anchored
+    spelling, not as a bare substring: a cwd-relative probe would satisfy the
+    looser assertion while silently missing the repo-local copy whenever the
+    cwd is not the worktree root (review round 2).
+    """
+    section = _guard_section()
+    assert '"$GUARD_ROOT/.claude/scripts/check_impl_guard_staleness.py"' in section
+    assert '"$HOME/.claude/scripts/check_impl_guard_staleness.py"' in section
+    assert "for candidate in .claude/scripts/" not in section
+
+
+def test_guard_absent_from_both_locations_skips_non_blocking() -> None:
+    """Absent from both locations keeps the fail-open short-circuit (#2141).
+
+    Distinct from the pre-existing exit-2 (``impl_guard_staleness_check_failed``)
+    branch, which is unchanged: a missing file coincidentally exits 2 too, but
+    it is not an unparseable timestamp and must not be labelled as one.
+    """
+    section = _guard_section()
+    assert "check_impl_guard_staleness: script absent, skipped" in section
+    assert "impl_guard_staleness_check_failed" in section
+
+
+def test_guard_greps_cw_script_version_marker_and_headless_blocks_on_stale() -> None:
+    """File-staleness is a hard stop, and is NOT the script's own `stale` field.
+
+    The resolver's marker check (is this copy of the script current?) precedes
+    and is independent of the script's ``stale: true/false`` JSON verdict (are
+    the impl comments newer than HEAD?). The two must not collapse into one
+    concept: no HEADLESS BLOCK line may also carry the fail-open verdict.
+    """
+    section = _guard_section()
+    assert "cw-script-version" in section
+    assert "HEADLESS BLOCK" in section
+    stale_lines = [line for line in section.splitlines() if "HEADLESS BLOCK" in line]
+    assert stale_lines
+    assert all("stale: false" not in line for line in stale_lines)
+
+
 def test_guard_rematerializes_context_json() -> None:
     content = _cmd("auto-dev-impl.md")
     window = _after(content, "**Comments are live, not cached", span=1400)

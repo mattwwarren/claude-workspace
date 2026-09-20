@@ -312,15 +312,40 @@ gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
 4. **Classify and resolve — one attempt, no loops:**
 
    ```bash
-   RESOLVE_OUTPUT=$(uv run python .claude/scripts/classify_merge_conflict.py resolve \
-     --conflicted-files /tmp/conflicted-files-$CW_SESSION --json)
-   RESOLVE_EXIT=$?
+   MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+   GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+   CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+     "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+   [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+   RESOLVED=""
+   for candidate in "$GUARD_ROOT/.claude/scripts/classify_merge_conflict.py" "$HOME/.claude/scripts/classify_merge_conflict.py"; do
+     if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
+   done
+   if [ -n "$RESOLVED" ]; then
+     FOUND_VERSION=$(head -n 5 "$RESOLVED" \
+       | sed -nE 's/^#[[:space:]]*cw-script-version:[[:space:]]*([^[:space:]]*)[[:space:]]*$/\1/p' \
+       | head -n 1)
+     # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+     # (which errors, evaluates false, and would fall through to the invocation).
+     if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+       echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+       # HARD STOP: EXIT blocked with agent_block (see bullet below); never run
+       # the resolver, and never fold this into merge_conflict_post_push.
+       exit 3
+     else
+       RESOLVE_OUTPUT=$(uv run python "$RESOLVED" resolve \
+         --conflicted-files /tmp/conflicted-files-$CW_SESSION --json)
+       RESOLVE_EXIT=$?
+     fi
+   fi
    ```
 
-   (Repo-relative, `uv run python`-invoked — this script ships only to *this* repo's `.claude/scripts/`, never to the global `~/.claude/scripts/`, unlike `prep_pr_finalize.py`/`prep_pr_state.py` below. Same convention as `check_impl_guard_staleness.py`/`check_plan_scope_conformance.py` elsewhere in this pipeline.)
+   (Resolved repo-local-then-global and marker-verified by the same pattern as this pipeline's other guard scripts — see `auto-dev-impl.md`'s "Guard-script path resolution and staleness marker" subsection for the shared snippet and the version table. The repo-local candidate is anchored to the absolute `$GUARD_ROOT` computed in the fence, not to the cwd.)
 
    The script resolves only three enumerated safe shapes (`one_sided_insert`, `import_union`, and a path-gated `doc_append`), atomically across every conflicted file, and writes nothing at all if any block is unsafe.
 
+   - **Absent from both locations** → do NOT invoke `uv run python` against a nonexistent path. Log `"classify_merge_conflict: script absent, skipped"` in `friction_highlights`, `git merge --abort`, and fall through to the unchanged `merge_conflict_post_push` sentinel below — the same terminal outcome as a refusal, honestly labelled instead of surfacing a raw `FileNotFoundError` as `$RESOLVE_OUTPUT`. Unlike this pipeline's other guard sites, absence here is not "continue non-blocking": a conflict nothing classified was always going to escalate to human review.
+   - **Candidate found but its marker is missing or below minimum** → EXIT `blocked` with `blocker.reason: "agent_block"` (this doc's fixed catch-all convention — do not invent a new reason), `blocker.details: "Step 4c.5: HEADLESS BLOCK — classify_merge_conflict.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP. A resolver that cannot be trusted to have classified the conflict at all is a tooling-integrity failure, not a classification outcome; do not fold it in with genuine refusals.
    - **Exit 1 or 2 (refused)** → `git merge --abort`, then fall through to the **existing, unchanged** `merge_conflict_post_push` sentinel below, appending to `blocker.details`: `"; semantic auto-resolve attempted — refused: $RESOLVE_OUTPUT"`.
    - **Exit 0 (resolved)** → stage the reported `resolved_files`, confirm nothing is still unmerged, and commit with a message that records what was auto-synthesized (never `--no-edit` — the default merge message is the only artifact of this event that outlives the pipeline run, since `friction_highlights` does not persist):
 

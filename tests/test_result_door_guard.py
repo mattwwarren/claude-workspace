@@ -46,7 +46,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "stage-mismatch-refused; no 'status' key so has_terminal_result() "
             "stays False"
         ),
-        'session.last_result = candidate.routed_sentinel.model_dump(mode="json")': (
+        'session.last_result = routed_sentinel.model_dump(mode="json")': (
             "idle/_mutations.py (_apply_idle_routed_mutations) — routed-"
             "sentinel advance; a real terminal sentinel routed via "
             "_apply_sentinel_to_task, carries 'status'"
@@ -73,7 +73,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "marker, stage-mismatch-refused (fresh branch: no pre-existing "
             "dict to merge into); no 'status' key"
         ),
-        'session.last_result = candidate.routed_sentinel.model_dump(mode="json")': (
+        'session.last_result = routed_sentinel.model_dump(mode="json")': (
             "phantom/_mutations.py (_apply_phantom_routed_mutations) — "
             "routed-sentinel advance; a real terminal sentinel routed via "
             "_apply_sentinel_to_task, carries 'status'"

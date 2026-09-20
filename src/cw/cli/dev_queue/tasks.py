@@ -41,7 +41,7 @@ def _needs_attn_by_client(tasks: list[TicketTask]) -> dict[str, int]:
     return counts
 
 
-def _reason_cell(blocked_reason: str | None) -> str:
+def _reason_cell(blocked_reason: str | None, advisory_note: str | None) -> str:
     """Render the REASON column, flagging an unregistered reason (#2097).
 
     A ``?`` **prefix** rather than a suffix so the flag survives the column's
@@ -49,12 +49,21 @@ def _reason_cell(blocked_reason: str | None) -> str:
     operator is most likely to mistake for a documented routing code. Advisory
     only: ``blocker.reason`` stays an open enum and the value is still shown
     verbatim (see ``cw.auto_dev_result.is_known_blocker_reason``).
+
+    ``blocked_reason`` always wins (#1762). It is stamped only on terminal
+    transitions, so it and ``advisory_note`` -- which describes a *non*-terminal
+    RUNNING row -- should never be set at once; if a stale note survives anyway,
+    the row's actual park reason is the more important of the two. The note is
+    rendered verbatim: its own ``?`` marker is baked into the stored token, not
+    added here.
     """
-    if not blocked_reason:
-        return "—"
-    if is_known_blocker_reason(blocked_reason):
-        return blocked_reason[:20]
-    return f"?{blocked_reason}"[:20]
+    if blocked_reason:
+        if is_known_blocker_reason(blocked_reason):
+            return blocked_reason[:20]
+        return f"?{blocked_reason}"[:20]
+    if advisory_note:
+        return advisory_note[:20]
+    return "—"
 
 
 def _print_tasks_human(tasks: list[TicketTask]) -> None:
@@ -94,7 +103,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
             (t.computed_scope_tier or "—")[:20],
             t.stage.value[:10],
             (t.disposition or "—")[:20],
-            _reason_cell(t.blocked_reason),
+            _reason_cell(t.blocked_reason, t.advisory_note),
             (t.pr_url or "—")[:10],
             attention[:18],
             ("yes" if t.stale_gate_detected_at else "—")[:10],
@@ -124,10 +133,13 @@ def dev_queue_tasks(
 
     Programmatic inspection view. For the human aggregate summary use dev-queue status.
 
-    REASON is the row's blocker reason. A leading ``?`` marks a reason that is
-    not in cw's known-reason registry and does not declare itself freeform with
-    an ``x_`` prefix (#2097) — the value is still shown verbatim, the flag just
-    says cw does not recognise it as a documented routing code.
+    REASON is the row's blocker reason, or — on a row that is not parked — its
+    advisory note (#1762), e.g. ``?session_mismatch`` for a RUNNING row whose
+    session_id no longer resolves to a live session. A leading ``?`` marks a
+    blocker reason that is not in cw's known-reason registry and does not
+    declare itself freeform with an ``x_`` prefix (#2097) — the value is still
+    shown verbatim, the flag just says cw does not recognise it as a documented
+    routing code.
     """
     queue = load_dev_queue()
     tasks: list[TicketTask] = queue.tasks

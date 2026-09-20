@@ -2,7 +2,7 @@
 
 **Non-blocking** — no MUST_FIX findings. Single-pass review (fix loop disabled for this lane).
 
-**DEGRADED COVERAGE** — 2 roles ran degraded: Code Quality Reviewer: degraded — Static review found no actionable quality issues. Ruff lint and format checks could not be independently rerun because the ruff executable is unavailable in this environment., SysAdmin Reviewer: degraded — No actionable SysAdmin concerns found. Checked scope, call sites, debug artifacts, secrets, configuration duplication, infrastructure patterns, Ruff, formatting, mypy, and 149 targeted tests. Degraded because repository-wide CI gates, coverage, integration tests, and diff-cover were not run. Scope Assessment: intended scope is threading planned_files into Codex verdict synthesis; actual scope is the two-file implementation/test change plus generated review metadata; verdict Focused; out-of-scope files None..
+**DEGRADED COVERAGE** — 2 roles ran degraded: Code Quality Reviewer: degraded — Inspected the changed source, tests, dependency usage, duplication, naming, and configured Ruff thresholds. Repository gates could not be executed because the runtime lacks the project dependencies and the workspace is read-only., SysAdmin Reviewer: degraded — Inspected the supplied six-file diff for scope, configuration duplication, infrastructure risks, debug artifacts, secrets, and import-path issues; no actionable findings. Full CI, coverage, and dependency-backed checks could not run because this environment lacks the project dependencies and is read-only. Scope Assessment: intended statusline hydration marker; actual scope matches the six planned files; verdict Focused; out-of-scope files None..
 
 _Reviewed with repo filesystem access (capable)._
 

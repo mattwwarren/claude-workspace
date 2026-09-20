@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# cw-script-version: 1
 """Gate script: compare a delivered diff's file set against the plan's (#1779).
 
 Usage (from `/auto-dev` Stage 2.5, gate check 2):

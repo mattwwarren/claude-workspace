@@ -14,12 +14,16 @@ from typing import TYPE_CHECKING
 
 from cw.dev_queue import (
     STALE_DISPATCH_GATE_DISPOSITION,
+    _impl_bypass_plan_available,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
     transition_task_status,
 )
-from cw.dev_queue.lifecycle import _PRE_DISPATCH_STALE_PR_REASON
+from cw.dev_queue.lifecycle import (
+    _PRE_DISPATCH_STALE_PR_REASON,
+    _advance_stage,
+)
 from cw.events import record_event
 from cw.exceptions import (
     HookContextConflictError,
@@ -32,6 +36,7 @@ from cw.executor import (
     codex_capability_diagnosis,
     resolve_executor,
     resolve_executor_config,
+    resolve_pipeline_stages,
 )
 from cw.models import (
     CODEX_BACKEND,
@@ -943,6 +948,125 @@ def _stamp_spawn_success(
         save_dev_queue(store)
 
 
+def _apply_plan_bypass_if_available(
+    task: TicketTask, client: ClientConfig, worktree_path: Path
+) -> None:
+    """Advance a PLAN-stage task straight to IMPL if a plan is already there.
+
+    GitHub #1286: closes the gap where every automatic re-entry at
+    ``Stage.PLAN`` re-ran a full Stage 1 planning pass from scratch even when
+    a valid, signed-off ``.cw/plan.md`` was already sitting in the ticket's
+    reused worktree. ``allow_tracker_fallback=False`` keeps this hot
+    per-claim-path check network-free -- Stage 1 is about to run and post the
+    plan anyway if the local check misses.
+
+    Extracted from :func:`_spawn_claimed_task` to keep that function inside
+    the PLR branch/statement budget, mirroring :func:`_codex_capability_gate`
+    and :func:`_stamp_spawn_success`'s extractions for the same reason. Sole
+    caller; ``task.stage`` must already be ``Stage.PLAN`` on entry.
+
+    Mutates the STORED row under :func:`dev_queue_lock`, mirroring
+    :func:`_stamp_spawn_success`'s load->find->mutate->save shape (with one
+    addition: the find also matches on ``created_at`` so a duplicate RUNNING
+    row for the same ticket and client is never advanced by mistake) plus
+    :func:`~cw.dev_queue.requeue._apply_requeue_stage`'s
+    old_stage/``_raise_stage_high_water``/``_emit_stage_change`` trio -- a
+    bare in-memory ``task.stage = Stage.IMPL`` would never reach
+    ``dev_queue.json``, so the next dispatch tick would re-read stage=PLAN
+    and re-run this whole check from scratch. Only mirrored onto the
+    caller-held ``task`` (so this tick's ``executor.spawn(stage=task.stage,
+    ...)`` builds the IMPL prompt, not PLAN) once the stored row is found and
+    persisted.
+
+    Two guards run before the (file-I/O) plan check, cheapest first:
+
+    - #1286 Fix B: ``task.regressed_into_stage == Stage.PLAN`` means an
+      operator explicitly regressed this ticket back to PLAN (``cw dev-queue
+      requeue --stage plan --regress``, via ``_stage_regress``). That call
+      clears the approval markers but does NOT delete the worktree's stale,
+      still-signed-off ``.cw/plan.md`` -- so without this guard the bypass
+      would silently defeat the operator's explicit re-plan request.
+    - #1286 Fix C: the pipeline resolved by
+      :func:`~cw.executor.resolve_pipeline_stages` (lane override, then
+      client default) may not contain ``Stage.IMPL`` at all (pipelines are
+      user-configurable per client/lane). Attempting the advance anyway
+      would raise ``ValueError`` out of ``_raise_stage_high_water``'s
+      ``stages.index()`` call.
+    """
+    if task.regressed_into_stage == Stage.PLAN:
+        _log.debug(
+            "dispatch: %r's approved-plan auto-bypass skipped -- task was"
+            " deliberately regressed into PLAN, honoring the operator's"
+            " re-plan request over the (possibly stale) signed-off plan.md"
+            " (#1286)",
+            task.ticket_id,
+        )
+        return
+
+    stages = resolve_pipeline_stages(task, client)
+    if Stage.IMPL not in stages:
+        _log.debug(
+            "dispatch: %r's approved-plan auto-bypass skipped -- the"
+            " resolved pipeline (lane=%s) has no IMPL stage (#1286)",
+            task.ticket_id,
+            task.lane,
+        )
+        return
+
+    bypass = _impl_bypass_plan_available(task, client, allow_tracker_fallback=False)
+    if not bypass.available:
+        return
+
+    stored_task = None
+    with dev_queue_lock():
+        store = load_dev_queue()
+        for candidate in store.tasks:
+            # created_at disambiguates duplicate RUNNING rows for one
+            # (ticket_id, client) -- reachable via add-after-terminal plus
+            # ``requeue --from-completed`` (see ``_find_ticket``'s own
+            # newest-created_at tie-break). session_id is not stamped yet
+            # (this runs before executor.spawn / _stamp_spawn_success), so it
+            # cannot serve here; created_at is never reassigned.
+            if (
+                candidate.ticket_id == task.ticket_id
+                and candidate.client == client.name
+                and candidate.status == QueueItemStatus.RUNNING
+                and candidate.created_at == task.created_at
+            ):
+                stored_task = candidate
+                break
+        if stored_task is not None:
+            _advance_stage(stored_task, stages, Stage.IMPL)
+            save_dev_queue(store)
+
+    if stored_task is not None:
+        # Mirror onto the in-memory task so this tick's
+        # executor.spawn(stage=task.stage, ...) below builds the IMPL
+        # prompt, not PLAN.
+        task.stage = stored_task.stage
+        _log.info(
+            "dispatch: %r has an approved, signed-off plan already"
+            " on disk (%s) -- bypassing Stage 1 and spawning at"
+            " IMPL directly (#1286)",
+            task.ticket_id,
+            worktree_path / ".cw" / "plan.md",
+        )
+    else:
+        # Race guard: _claim_next_pending persisted this row as RUNNING
+        # (still at Stage.PLAN) just before this function ran, so it should
+        # always be found here. If it is missing or no longer RUNNING
+        # (reaped/requeued/removed between claim and spawn), do NOT advance
+        # and do NOT spawn with a mutated stage -- leave task.stage untouched
+        # so this tick spawns /auto-dev-plan as normal.
+        _log.warning(
+            "dispatch: %r's approved-plan auto-bypass found no"
+            " matching RUNNING row in the dev queue (client=%s)"
+            " -- leaving stage at PLAN (#1286)",
+            task.ticket_id,
+            client.name,
+        )
+
+
 def _spawn_claimed_task(
     task: TicketTask,
     client: ClientConfig,
@@ -1033,6 +1157,9 @@ def _spawn_claimed_task(
         # normally catches this itself, but a mocked or buggy
         # implementation could still return the same path.
         check_not_main_checkout(worktree_path, client)
+
+        if task.stage == Stage.PLAN:
+            _apply_plan_bypass_if_available(task, client, worktree_path)
 
         # Function-level import breaks the gating<->claim import cycle:
         # cw.dispatch.gating imports this module at top level, so claim.py

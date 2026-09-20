@@ -1,7 +1,7 @@
 """The ``cw statusline render`` work-summary segment (#1644).
 
 Renders one short line describing what a session is working on — e.g.
-``client-a/impl 2▶ 1⧗ !1`` or ``client-a/impl PAUSED 0▶ 1⧗`` — from the local
+``client-a/impl 2▶ 1⧗ !1 ?2`` or ``client-a/impl PAUSED 0▶ 1⧗`` — from the local
 JSON stores only. No ``gh``, no ``git``, no network, no subprocess (R1): the
 inputs are ``focus.json``, ``dev_queue.json``, ``concurrency_overrides.json``,
 and ``clients.yaml`` (a plain local ``yaml.safe_load`` via ``cw.config``, the
@@ -14,6 +14,13 @@ Resolution is a strict three-step ladder with no fourth fallback (R2):
 2. Otherwise, the client whose workspace/repo/worktree tree contains *cwd*,
    aggregated across all its lanes.
 3. Otherwise, the empty string.
+
+The trailing ``!N`` counts hydrated PRs that need attention; ``?N`` (#1672)
+counts PRs the ``cw.pr_hydrate`` pass has not yet observed (``pr_url`` set,
+``pr_state`` None), so the lag window reads as "unknown" rather than as
+"nothing needs you". Both are suppressed at zero. Not covered: a non-None but
+stale ``pr_state`` still renders as of its last hydration, and a hydration that
+keeps failing leaves ``?`` on until a pass succeeds.
 
 A focus entry naming a client or lane that ``clients.yaml`` no longer declares
 falls through to step 2 — config drift is a designed-in eventuality under R6's
@@ -35,6 +42,7 @@ from cw.config import (
 from cw.dev_queue import load_dev_queue, task_attention_state
 from cw.focus import get_focus
 from cw.models import ClientConfig, QueueItemStatus, TicketTask
+from cw.pr_hydrate import _is_candidate
 from cw.worktree import effective_worktree_bases
 
 # R5 pins the bare word, deliberately distinct from the bracketed
@@ -43,6 +51,9 @@ _PAUSED_MARKER = "PAUSED"
 _RUNNING_GLYPH = "▶"
 _PENDING_GLYPH = "⧗"
 _ATTENTION_GLYPH = "!"
+# #1672: not-yet-hydrated PR, deliberately distinct from '!' so silence never
+# reads as health. ASCII like '!'.
+_UNKNOWN_GLYPH = "?"
 
 
 def _client_roots(client: ClientConfig) -> set[Path]:
@@ -103,20 +114,39 @@ def _lane_is_paused(client: str, lane: str) -> bool:
     return override is not None and bool(override.paused)
 
 
-def _format_segment(label: str, tasks: list[TicketTask], *, paused: bool) -> str:
-    """Render ``<label>[ PAUSED] <n>▶ <n>⧗[ !<n>]`` for *tasks*.
+def _awaiting_hydration(task: TicketTask) -> bool:
+    """True when a PR exists but ``cw.pr_hydrate`` has not yet observed it (#1672).
 
-    The ``!N`` suffix is suppressed at zero (R5), so a healthy lane stays terse.
+    Reuses ``_is_candidate`` for the PR-URL gate rather than testing
+    ``pr_state is None`` alone: a task with no ``pr_url`` (freshly added or
+    RUNNING — ``pr_url`` is stamped only on terminal-disposition transitions)
+    has nothing to hydrate, so ``!0`` is truthful for it and a ``?`` there would
+    be a permanent false alarm. With ``pr_state`` None, ``_is_candidate``
+    reduces to ``bool(task.pr_url)``; reusing it means the marker follows the
+    hydrator should it ever narrow what it fetches. A pure predicate — no I/O.
+    """
+    return task.pr_state is None and _is_candidate(task)
+
+
+def _format_segment(label: str, tasks: list[TicketTask], *, paused: bool) -> str:
+    """Render ``<label>[ PAUSED] <n>▶ <n>⧗[ !<n>][ ?<n>]`` for *tasks*.
+
+    Both suffixes are suppressed at zero (R5), so a healthy lane stays terse.
+    ``!N`` counts hydrated PRs needing attention; ``?N`` counts PRs not yet
+    hydrated (#1672). The two are mutually exclusive per task: ``!`` needs a
+    non-None ``pr_state``, ``?`` needs None.
     """
     running = sum(1 for t in tasks if t.status == QueueItemStatus.RUNNING)
     pending = sum(1 for t in tasks if t.status == QueueItemStatus.PENDING)
     attention = sum(1 for t in tasks if task_attention_state(t) is not None)
+    unknown = sum(1 for t in tasks if _awaiting_hydration(t))
     paused_part = f" {_PAUSED_MARKER}" if paused else ""
     attention_part = f" {_ATTENTION_GLYPH}{attention}" if attention else ""
+    unknown_part = f" {_UNKNOWN_GLYPH}{unknown}" if unknown else ""
     return (
         f"{label}{paused_part}"
         f" {running}{_RUNNING_GLYPH} {pending}{_PENDING_GLYPH}"
-        f"{attention_part}"
+        f"{attention_part}{unknown_part}"
     )
 
 

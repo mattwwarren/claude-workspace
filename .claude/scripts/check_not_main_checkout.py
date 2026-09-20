@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# cw-script-version: 1
 """Guard script: abort if the current git repo is the operator's main checkout.
 
 Usage (from within an impl agent's working directory):
