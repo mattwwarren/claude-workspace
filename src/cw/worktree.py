@@ -71,6 +71,8 @@ _WORKTREE_HELD_BY_RE = re.compile(r"already used by worktree at '([^']+)'")
 # git localizes its messages: under a non-English locale the marker misses and
 # the failure degrades to the ordinary WARNING -- noise only, never a bug.
 _MISSING_REMOTE_REF_MARKER = "couldn't find remote ref"
+# Abbreviated-SHA width for fast-forward log lines.
+_SHA_LOG_CHARS = 12
 
 
 def slugify_branch(branch: str) -> str:
@@ -629,6 +631,97 @@ def _init_submodules(git_cwd: Path, wt_path: Path) -> None:
         )
 
 
+def _ff_reused_worktree(
+    client: ClientConfig, branch: str, wt_path: Path, target: str
+) -> None:
+    """Fast-forward *wt_path* to *target* with ``merge --ff-only``, never raising.
+
+    ``--ff-only`` cannot destroy work: it refuses (rc != 0, worktree untouched)
+    when local uncommitted changes overlap files the merge must update, and
+    carries non-overlapping local modifications through. A refusal is logged
+    and the worktree is left exactly as it was. Submodules are synced after a
+    successful fast-forward only, since the merge can move their pointers.
+    """
+    old_sha = _run_git("rev-parse", "HEAD", cwd=wt_path, check=False).stdout.strip()
+    merge = _run_git("merge", "--ff-only", target, cwd=wt_path, check=False)
+    if merge.returncode != 0:
+        _log.warning(
+            "create_worktree: fast-forward of %s refused (client=%s, path=%s): %s",
+            branch,
+            client.name,
+            wt_path,
+            _first_line(merge.stderr),
+        )
+        return
+    new_sha = _run_git("rev-parse", "HEAD", cwd=wt_path, check=False).stdout.strip()
+    _log.info(
+        "create_worktree: fast-forwarded reused worktree %s "
+        "(client=%s, path=%s) %s -> %s",
+        branch,
+        client.name,
+        wt_path,
+        old_sha[:_SHA_LOG_CHARS],
+        new_sha[:_SHA_LOG_CHARS],
+    )
+    _init_submodules(_git_dir(client), wt_path)
+
+
+def _refresh_reused_worktree(client: ClientConfig, branch: str, wt_path: Path) -> None:
+    """Best-effort fetch, then fast-forward a *behind* reused worktree (#2213).
+
+    Closes the asymmetry between the first-time path (which fetches) and the
+    reuse path (which used to return the worktree untouched): a per-ticket
+    worktree reused across pipeline stages could sit on a stale HEAD while
+    ``origin/<branch>`` had moved on.
+
+    Never raises and never resets. The fetch result is ignored on purpose --
+    the fast-forward is a strict-ancestor operation, so even when the fetch
+    fails (offline) a worktree behind an already-known, fresher tracking ref
+    (advanced by some other fetch of the shared repo) is still brought up.
+
+    The target is the branch's own ``refs/remotes/origin/<branch>``, NOT
+    :func:`_resolve_remote_ref`: that ladder is upstream-first, and a
+    misconfigured ``@{u}`` of ``origin/<default>`` (the #2114 failure mode)
+    would fast-forward a feature branch onto main.
+
+    - target ref absent (branch never pushed), or HEAD equal/ahead: no-op --
+      unpushed local commits are kept;
+    - diverged: WARNING, worktree untouched;
+    - behind: ``merge --ff-only`` (see :func:`_ff_reused_worktree`).
+
+    Known limitation: interactive ``cw start`` reaches this (via
+    ``session._resolve_start_worktree``) before it checks for an active
+    session, so a live session occupying the same clean, fully-pushed worktree
+    can have its HEAD and files fast-forwarded under it. No work is lost --
+    the unsaved-work guard and ``--ff-only`` bound it to a strict fast-forward
+    the branch needed anyway.
+    """
+    try:
+        fetch_feature_branch(client, branch)
+        target = f"refs/remotes/origin/{branch}"
+        if not _ref_exists(target, wt_path):
+            return
+        relation = _ff_relation("HEAD", target, wt_path)
+        if relation == "diverged":
+            _log.warning(
+                "create_worktree: reused worktree diverged from origin/%s; "
+                "leaving untouched (client=%s, path=%s)",
+                branch,
+                client.name,
+                wt_path,
+            )
+        elif relation == "behind":
+            _ff_reused_worktree(client, branch, wt_path, target)
+    except OSError as exc:
+        _log.warning(
+            "create_worktree: refresh of reused worktree failed "
+            "(client=%s, path=%s): %s",
+            client.name,
+            wt_path,
+            exc,
+        )
+
+
 def create_worktree(
     client: ClientConfig,
     branch: str,
@@ -642,6 +735,13 @@ def create_worktree(
     already a worktree on *branch*. A pre-existing directory checked out on a
     *different* branch (or not a worktree at all) is treated as stale and
     raises :exc:`StaleWorktreeError` rather than being reused (see below).
+
+    On reuse, after the guards pass, the worktree is best-effort refreshed
+    (#2213): ``origin/<branch>`` is fetched and a strictly *behind* worktree is
+    fast-forwarded to it. This is never a reset and never raises -- equal,
+    ahead and diverged worktrees are left untouched, and a fetch or
+    fast-forward failure only logs a warning. See
+    :func:`_refresh_reused_worktree`.
 
     When no existing worktree is reused, the branch itself is resolved via a
     three-way check (#2032): a local ``refs/heads/<branch>`` is used as-is; if
@@ -688,6 +788,7 @@ def create_worktree(
                 f"Commit or push the work, then re-dispatch."
             )
             raise StaleWorktreeError(msg)
+        _refresh_reused_worktree(client, branch, wt_path)
         return wt_path
 
     wt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -950,6 +1051,12 @@ def worktree_has_unsaved_work(
     return unsaved_work_reason(client, branch, wt_path=wt_path) is not None
 
 
+def _first_line(text: str) -> str:
+    """Return the first line of *text* ('' when empty) for one-line log fields."""
+    lines = text.strip().splitlines()
+    return lines[0] if lines else ""
+
+
 def _fetch_default_branch(
     client_name: str,
     default_branch: str,
@@ -985,7 +1092,7 @@ def _fetch_default_branch(
         return False
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        first_line = stderr.splitlines()[0] if stderr else ""
+        first_line = _first_line(stderr)
         if quiet_missing_ref and _MISSING_REMOTE_REF_MARKER in stderr:
             _log.debug(
                 "freshness_check_skip: fetch failed for %s (rc=%d): %s",
