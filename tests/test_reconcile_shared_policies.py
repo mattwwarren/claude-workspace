@@ -1586,6 +1586,135 @@ class TestRouteEmittedSentinel:
         assert task_after.stage == Stage.FINALIZE
         assert task_after.status == QueueItemStatus.BLOCKED_ON_USER
 
+    def test_idle_routed_mutations_completes_on_task_already_terminal(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """GitHub #2140: when the dev-queue task was already raced to a
+        genuinely terminal status (COMPLETED/FAILED/CANCELLED) by a concurrent
+        caller before this tick's lookup ran, ``_apply_sentinel_to_task``
+        reports ``routed=False, task_already_terminal=True`` -- the session
+        must be completed through the RFC 0012 door (``emit_result_on``)
+        instead of stamping the stage-mismatch refusal marker over a race
+        that was already resolved elsewhere (which would silently orphan the
+        session forever, per the ticket's investigation finding)."""
+        from cw.models import LastResultSource
+        from cw.reconcile import ProposedAction, ReapCandidate
+        from cw.reconcile.idle import _apply_idle_routed_mutations
+
+        worktree = tmp_path / "wt-2140-idle-terminal"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = started_at + timedelta(seconds=400)
+
+        sess = _mk_headless_daemon_session("2140-idle-terminal", worktree, started_at)
+        sess.last_result = None  # sentinel NOT yet consumed
+        state = CwState(sessions=[sess])
+        save_state(state)
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        task = TicketTask(
+            ticket_id="2140-idle-terminal",
+            client="client-a",
+            status=QueueItemStatus.COMPLETED,
+            session_id="2140-idle-terminal",
+            stage=Stage.FINALIZE,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        payload = _stage_complete_payload()
+        payload["ticket_id"] = "2140-idle-terminal"
+        routed_sentinel = AutoDevResult.model_validate(payload)
+        candidate = ReapCandidate(
+            session_id="2140-idle-terminal",
+            proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+            ticket_id="2140-idle-terminal",
+            routed_sentinel=routed_sentinel,
+            salvage_csid="csid-2140-idle-terminal",
+        )
+
+        session_by_id = {s.id: s for s in state.sessions}
+        accepted, state_mutated = _apply_idle_routed_mutations(
+            session_by_id, [candidate], now=now
+        )
+
+        assert accepted == [candidate]
+        assert state_mutated is True
+        session = session_by_id["2140-idle-terminal"]
+        assert session.status == SessionStatus.COMPLETED
+        assert session.last_result == routed_sentinel.model_dump(mode="json")
+        assert session.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
+
+        # The already-terminal task row is untouched -- this arm never writes
+        # to the dev queue, only to the session.
+        task_after = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "2140-idle-terminal"
+        )
+        assert task_after.status == QueueItemStatus.COMPLETED
+        assert task_after.session_id == "2140-idle-terminal"
+
+    def test_idle_routed_mutations_terminal_refusal_preserves_existing_result(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """GitHub #2140: a ``task_already_terminal`` race must still respect
+        first-writer-wins -- if another authority already recorded a terminal
+        ``last_result`` on this session, the door refuses and the foreign
+        value/source survive byte-identical. Proves the new arm actually
+        routes through ``emit_result_on`` rather than falling through to the
+        raw ``session.last_result = ...`` assignment (#2206, out of scope),
+        which would clobber the foreign value."""
+        from cw.models import LastResultSource
+        from cw.reconcile import ProposedAction, ReapCandidate
+        from cw.reconcile.idle import _apply_idle_routed_mutations
+
+        worktree = tmp_path / "wt-2140-idle-terminal-refused"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = started_at + timedelta(seconds=400)
+
+        sess = _mk_headless_daemon_session(
+            "2140-idle-terminal-refused", worktree, started_at
+        )
+        foreign = {"status": "shipped", "foreign_authority": True}
+        sess.last_result = foreign
+        sess.last_result_source = LastResultSource.STOP_HOOK_HARVEST
+        state = CwState(sessions=[sess])
+        save_state(state)
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        task = TicketTask(
+            ticket_id="2140-idle-terminal-refused",
+            client="client-a",
+            status=QueueItemStatus.COMPLETED,
+            session_id="2140-idle-terminal-refused",
+            stage=Stage.FINALIZE,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        payload = _stage_complete_payload()
+        payload["ticket_id"] = "2140-idle-terminal-refused"
+        routed_sentinel = AutoDevResult.model_validate(payload)
+        candidate = ReapCandidate(
+            session_id="2140-idle-terminal-refused",
+            proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+            ticket_id="2140-idle-terminal-refused",
+            routed_sentinel=routed_sentinel,
+            salvage_csid="csid-2140-idle-terminal-refused",
+        )
+
+        session_by_id = {s.id: s for s in state.sessions}
+        accepted, state_mutated = _apply_idle_routed_mutations(
+            session_by_id, [candidate], now=now
+        )
+
+        assert accepted == []
+        # emit_result_on() leaves `session` byte-identical on refusal -- no new
+        # state for this tick to persist, unlike the stage-mismatch stamp arm.
+        assert state_mutated is False
+        session = session_by_id["2140-idle-terminal-refused"]
+        assert session.status != SessionStatus.COMPLETED
+        assert session.last_result == foreign
+        assert session.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+
 
 # ---------------------------------------------------------------------------
 # _apply_sentinel_to_task — staged advance tests (GitHub issue #698)

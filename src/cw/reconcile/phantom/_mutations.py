@@ -21,6 +21,7 @@ from cw.dev_queue import (
 )
 from cw.models import (
     CompletionReason,
+    LastResultSource,
     QueueItemStatus,
     ReapReason,
     SessionOrigin,
@@ -37,6 +38,7 @@ from cw.reconcile._shared import (
     _apply_sentinel_to_task,
     _queue_status_for_salvaged,
 )
+from cw.result import emit_result_on
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -235,6 +237,17 @@ def _apply_phantom_routed_mutations(
     session here would strand a live/reapable surface with no owning task.
     Returns only the candidates that were actually routed, so the caller's
     ``_emit_phantom_routed_events`` (SESSION_COMPLETED) fires solely for those.
+
+    GitHub #2140: a ``not routed`` outcome can also mean
+    ``task_already_terminal`` — the dev-queue task was raced to a genuinely
+    terminal status by a concurrent caller before this lookup ran, not a
+    stage-mismatch refusal. Under the default ``ReapPolicy.SIGNAL_ONLY`` that
+    case previously silently orphaned the session (the queue-status signal it
+    would otherwise fall through to only touches ``RUNNING`` tasks, and this
+    task is never ``RUNNING``). It now routes through the door
+    (``emit_result_on``) and completes the session instead of falling into the
+    merge-aware refusal-marker branch below (mirrors the Stop-hook's #1692
+    carve-out).
     """
     accepted: list[ReapCandidate] = []
     for candidate in routed_candidates:
@@ -242,11 +255,36 @@ def _apply_phantom_routed_mutations(
             continue  # Invariant: ROUTE_EMITTED_SENTINEL has routed_sentinel + csid
         session = session_by_id[candidate.session_id]
         routed = True
+        task_already_terminal = False
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
                 candidate.ticket_id, session, candidate.routed_sentinel, now=now
             )
             routed = outcome.routed
+            task_already_terminal = outcome.task_already_terminal
+        if not routed and task_already_terminal:
+            # #2140: another authority already landed this ticket's task
+            # genuinely terminal before this call's own lookup ran. Route the
+            # completion through the door instead of the raw assignment below
+            # (that block is reached only when routed is True) so a foreign
+            # authority's already-door-written result is never clobbered. The
+            # merge-aware refusal-stamp logic below stays skipped entirely for
+            # this case.
+            emit_outcome = emit_result_on(
+                session,
+                candidate.routed_sentinel.model_dump(mode="json"),
+                source=LastResultSource.SALVAGE_TRANSCRIPT,
+            )
+            if emit_outcome.refused:
+                continue
+            session.status = SessionStatus.COMPLETED
+            session.completed_at = now
+            session.completed_reason = CompletionReason.NORMAL
+            session.reap_reason = ReapReason.PHANTOM_SURFACE
+            session.claude_session_id = candidate.salvage_csid
+            phantom_names.append(session.name)
+            accepted.append(candidate)
+            continue
         if not routed:
             # #1149: mirror idle.py's refusal stamp — a stage-mismatch refusal
             # (earlier-stage replay / unresolvable position) leaves the task
