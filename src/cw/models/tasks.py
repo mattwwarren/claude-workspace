@@ -161,7 +161,13 @@ from cw.review_finding_dispositions import FindingDisposition
 #      carve-out unchallenged. Stamped and cleared at exactly the seams v35
 #      already uses (_stamp_plan_approval / _stage_regress into Stage.PLAN), so
 #      the pair can never diverge into "approved, but for nothing".
-DEV_QUEUE_SCHEMA_VERSION = 36
+# v37: advisory_note (#1762) — added TicketTask.advisory_note, the per-tick
+#      operator advisory rendered in `cw dev-queue tasks`'s REASON column for a
+#      non-terminal row (blocked_reason, stamped only on terminal transitions,
+#      cannot describe an ordinary RUNNING row). Written by the reconcile
+#      session-id-mismatch sweep, cleared unconditionally by
+#      transition_task_status. Backfilled to None on every pre-v37 row.
+DEV_QUEUE_SCHEMA_VERSION = 37
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -641,7 +647,8 @@ class TicketTask(BaseModel):
     # task was never blocked, or blocked with no blocker reason (e.g.
     # scope_exceeded/forbidden_area, which carry no blocker field at all).
     blocked_reason: str | None = None
-    # GitHub #1762 — per-tick operator advisory for a row that is NOT parked.
+    # v37: advisory_note (#1762) — per-tick operator advisory for a row that is
+    # NOT parked.
     # `blocked_reason` is stamped only on terminal transitions, so it can never
     # carry a signal about an ordinary RUNNING row; this field is the non-
     # terminal counterpart, rendered in the same `cw dev-queue tasks` REASON
@@ -650,9 +657,7 @@ class TicketTask(BaseModel):
     # which overwrites it every tick and clears it the moment the condition
     # lifts — a live re-derivation, not a latch, so no history is kept. Cleared
     # unconditionally by transition_task_status alongside the durable-escalation
-    # latches. Deliberately NOT accompanied by a DEV_QUEUE_SCHEMA_VERSION bump:
-    # a migration would backfill exactly the `None` the model default already
-    # supplies, so existing state files load unchanged either way.
+    # latches. None on every pre-v37 row (migrate.py backfills it).
     advisory_note: str | None = None
     # GitHub #1198 — operator escape hatch for the cross-repo dispatch guard.
     # When True, the address_review / auto_fix_ci recipes log a WARNING and
