@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -29,6 +30,7 @@ from cw.exceptions import (
     CwError,
     DisclaimerNotAcceptedError,
     UsageLimitError,
+    parse_usage_limit_reset,
 )
 
 _log = logging.getLogger(__name__)
@@ -144,6 +146,52 @@ _ANSI_CSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 # "--bg with bypassPermissions requires accepting the disclaimer first.
 #  Run `claude --dangerously-skip-permissions` once interactively."
 _DISCLAIMER_REJECTION_PATTERN = "requires accepting the disclaimer first"
+
+
+def _local_now() -> datetime:
+    """Return the current instant in the dispatch host's local timezone.
+
+    ``astimezone()`` with no argument resolves the host zone to a FIXED offset,
+    which is what :func:`~cw.exceptions.parse_usage_limit_reset` needs: a bare
+    ``3:45pm`` in a Claude usage-limit message is read in the host's own zone
+    (#1344 R1). On a DST-transition day the fixed offset can put the result up
+    to an hour off, always in the safe (shorter-window) direction.
+
+    Kept as a module-level function rather than inlined so tests have an
+    injectable clock seam — ``_usage_limit_error`` must call it as a module
+    global for a ``monkeypatch.setattr("cw.native_daemon._local_now", ...)``
+    to take effect. ``freeze_time`` is NOT a substitute: under freezegun
+    ``datetime.now(UTC).astimezone()`` still resolves the HOST zone, so a
+    freeze-only test asserts a different UTC instant on a dev box than on a
+    UTC CI runner (the #671/#1727 green-locally/red-in-CI class).
+    """
+    return datetime.now(UTC).astimezone()
+
+
+def _usage_limit_error(message: str, raw_text: str) -> UsageLimitError:
+    """Build the spawn-path :class:`UsageLimitError`, parsing *raw_text* (#1409).
+
+    *raw_text* is the UNMODIFIED subprocess text — ``exc.stderr``/``exc.stdout``
+    on the ``CalledProcessError`` branch, ``proc.stdout`` on the stdout branch.
+    Never the caller's *message*: the stdout branch embeds a ``repr()`` of the
+    output, whose escaped quotes and literal ``\\n`` the parser would have to
+    undo. ANSI CSI sequences are stripped here (the stderr branch does not strip
+    them itself) so both branches parse identically.
+
+    Emits the ONE log line that carries the raw spawn-time message. It is logged
+    here and nowhere else — ``claim.py`` deliberately does not log ``str(exc)``
+    — so there is exactly one record per raise, whether or not a reset parsed.
+    WARNING, not INFO: ``cw.cli._base._configure_logging`` uses ``basicConfig``
+    at WARNING unless ``-v`` is passed, and the dispatch runbook never says to
+    pass it, so an INFO line would be dropped on the first real occurrence —
+    which is the sample this parser needs to be tuned against, the spawn-time
+    wording being unverified.
+    """
+    reset_at = parse_usage_limit_reset(
+        _ANSI_CSI_PATTERN.sub("", raw_text), now=_local_now()
+    )
+    _log.warning("claude --bg usage limit: reset_at=%s raw=%r", reset_at, raw_text)
+    return UsageLimitError(message, reset_at=reset_at)
 
 
 def _spawn_clean_env(cwd: Path) -> dict[str, str]:
@@ -297,7 +345,7 @@ class RealNativeDaemonClient:
             stderr_text = (exc.stderr or exc.stdout or "").strip()
             if USAGE_LIMIT_RE.search(stderr_text):
                 msg = f"claude --bg failed: usage limit active. {stderr_text}"
-                raise UsageLimitError(msg) from exc
+                raise _usage_limit_error(msg, exc.stderr or exc.stdout or "") from exc
             if _DISCLAIMER_REJECTION_PATTERN in stderr_text:
                 msg = (
                     "claude --bg failed: bypassPermissions disclaimer not accepted."
@@ -319,7 +367,7 @@ class RealNativeDaemonClient:
                     "claude --bg succeeded but usage limit detected"
                     f" in output: {proc.stdout!r}"
                 )
-                raise UsageLimitError(msg)
+                raise _usage_limit_error(msg, proc.stdout or "")
             msg = (
                 "claude --bg succeeded but stdout did not contain a "
                 f"recognizable session id: {proc.stdout!r}"
@@ -375,6 +423,7 @@ class FakeNativeDaemonClient:
         self.stop_calls: list[str] = []
         self._live: set[str] = set()
         self.raise_usage_limit: bool = False
+        self.usage_limit_reset_at: datetime | None = None
         self.raise_unregistered: bool = False
 
     def spawn_bg(
@@ -388,7 +437,10 @@ class FakeNativeDaemonClient:
         """Record call, register a deterministic short id, return it.
 
         When ``raise_usage_limit`` is True, raises :class:`UsageLimitError`
-        before incrementing the counter — so no slot is consumed.
+        before incrementing the counter — so no slot is consumed. The raised
+        error carries ``usage_limit_reset_at`` (default None) as its
+        ``reset_at``, so threading tests can inject a reset instant directly
+        instead of crafting a parseable usage-limit message (#1409).
 
         When ``raise_unregistered`` is True, returns the short id without
         adding it to the live set — simulating the intermittent flake where
@@ -397,7 +449,7 @@ class FakeNativeDaemonClient:
         """
         if self.raise_usage_limit:
             msg = "fake: usage limit"
-            raise UsageLimitError(msg)
+            raise UsageLimitError(msg, reset_at=self.usage_limit_reset_at)
         self._counter += 1
         short_id = f"{self._counter:08x}"
         self.spawn_calls.append((cwd, prompt))
