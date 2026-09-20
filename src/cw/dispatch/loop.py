@@ -291,6 +291,38 @@ def _merge_persisted_usage_limited_until(
     return usage_limited_until
 
 
+# Hard ceiling on a window derived from a PARSED reset instant (#1409). The
+# parser is already structurally bounded below 7 days, so this only guards a
+# reset_at set by some other producer (a future raiser, the test fake). It
+# matters because nothing clears the persisted window early:
+# _merge_persisted_usage_limited_until never shortens, and no operator command
+# nulls the sidecar.
+_MAX_PARSED_USAGE_LIMIT_WINDOW = timedelta(days=7)
+
+
+def _resolve_usage_limited_until(
+    now: datetime,
+    reset_at: datetime | None,
+    backoff_seconds: int,
+) -> datetime:
+    """Pick the back-off deadline: the parsed reset, else the flat window (#1409).
+
+    Independent of the parser's own checks on purpose (defense in depth): this
+    *now* is strictly later than the one the parse used, and any future producer
+    of *reset_at* — including ``FakeNativeDaemonClient`` — goes through here too.
+    Falls back to ``now + backoff_seconds`` when *reset_at* is absent, naive
+    (which would raise ``TypeError`` on the comparison and be silently dropped by
+    the sidecar), already passed, exactly *now*, or further out than the clamp.
+    Never returns a zero-length or past window.
+    """
+    flat = now + timedelta(seconds=backoff_seconds)
+    if reset_at is None or reset_at.utcoffset() is None:
+        return flat
+    if now < reset_at <= now + _MAX_PARSED_USAGE_LIMIT_WINDOW:
+        return reset_at
+    return flat
+
+
 def _usage_limit_window_is_active(usage_limited_until: datetime | None) -> bool:
     """Is the usage-limit backoff window currently active (#1343)?
 
@@ -788,8 +820,10 @@ def _run_dispatch_loop_body(
             )
 
             if result.usage_limit_detected and not once:
-                usage_limited_until = datetime.now(UTC) + timedelta(
-                    seconds=config.usage_limit_backoff_seconds
+                usage_limited_until = _resolve_usage_limited_until(
+                    datetime.now(UTC),
+                    result.usage_limit_reset_at,
+                    config.usage_limit_backoff_seconds,
                 )
                 save_usage_limited_until(usage_limited_until)
                 # #1343 R2: stamp the arm timestamp on every fresh detection
@@ -801,8 +835,11 @@ def _run_dispatch_loop_body(
                 usage_limit_window_armed_at = datetime.now(UTC)
                 save_usage_limit_armed_at(usage_limit_window_armed_at)
                 _log.warning(
-                    "dispatch: usage limit detected; backing off until %s",
+                    "dispatch: usage limit detected; backing off until %s (%s)",
                     usage_limited_until,
+                    "parsed reset"
+                    if usage_limited_until == result.usage_limit_reset_at
+                    else "flat backoff",
                 )
 
             if once:

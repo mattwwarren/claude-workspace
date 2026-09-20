@@ -74,10 +74,40 @@ class DispatchTickResult:
     :attr:`~cw.reconcile.ReconcileReport.usage_limited`). The caller
     (:func:`run_dispatch_loop`) uses this to set the back-off window.
     ``--once`` mode intentionally does not back off (single tick, no loop state).
+    ``usage_limit_reset_at`` — the instant the limit lifts, when a spawn-time
+    message named one that parsed (#1409). None means "no parsed reset", which
+    :func:`run_dispatch_loop` reads as "use the flat back-off". Always None on
+    the reconcile-derived path, which early-returns above the client loop and
+    carries no reset either way.
     """
 
     spawned: int
     usage_limit_detected: bool = False
+    usage_limit_reset_at: datetime | None = None
+
+
+def _combine_usage_limit_reset_at(
+    already_detected: bool,
+    current: datetime | None,
+    new: datetime | None,
+) -> datetime | None:
+    """Fold one client's parsed reset into the tick's running value (#1409).
+
+    The client loop does not break on a usage limit, so a second client can
+    hit one in the same tick. First detection takes *new* as is. On a later
+    detection, an unparsed side (None) on EITHER end collapses the whole tick
+    to None: the flat ``usage_limit_backoff_seconds`` is today's behavior, so a
+    mixed tick is never worse than the status quo. Otherwise take the later of
+    the two, since the fleet is limited until the last of them lifts.
+
+    Reconcile-derived detections never reach here — :func:`dispatch_tick`
+    early-returns above the client loop for those.
+    """
+    if not already_detected:
+        return new
+    if current is None or new is None:
+        return None
+    return max(current, new)
 
 
 def _sweep_expired_diagnostics(config: OrchestratorConfig) -> None:
@@ -461,6 +491,7 @@ def dispatch_tick(
     """
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     any_usage_limit_detected = _reconcile_usage_limited()
+    usage_limit_reset_at: datetime | None = None
     _sweep_expired_diagnostics(config)
     clients = load_effective_clients()
     if client_filter is not None:
@@ -646,8 +677,15 @@ def dispatch_tick(
         )
         spawned += client_result.spawned
         if client_result.usage_limit_detected:
+            usage_limit_reset_at = _combine_usage_limit_reset_at(
+                any_usage_limit_detected,
+                usage_limit_reset_at,
+                client_result.usage_limit_reset_at,
+            )
             any_usage_limit_detected = True
 
     return DispatchTickResult(
-        spawned=spawned, usage_limit_detected=any_usage_limit_detected
+        spawned=spawned,
+        usage_limit_detected=any_usage_limit_detected,
+        usage_limit_reset_at=usage_limit_reset_at,
     )

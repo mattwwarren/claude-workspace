@@ -45,6 +45,7 @@ from cw.reconcile import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.dispatch.claim import _SpawnOutcome
     from cw.models import (
         ClientConfig,
         DevQueueStore,
@@ -74,10 +75,14 @@ class _ClientDispatchResult:
 
     ``spawned`` — sessions started for the client this tick.
     ``usage_limit_detected`` — True if any lane hit a usage limit.
+    ``usage_limit_reset_at`` — the parsed reset instant from that usage limit,
+    when the spawn-time message carried a resolvable one (#1409); None
+    otherwise, which the dispatch loop reads as "use the flat back-off".
     """
 
     spawned: int = 0
     usage_limit_detected: bool = False
+    usage_limit_reset_at: datetime | None = None
 
 
 def _pending_in_lane(
@@ -649,7 +654,11 @@ def _dispatch_client_lanes(
     """
     client_spawned = 0
     spawn_error = False
-    usage_limit_detected = False
+    # The usage-limit outcome itself, not a bool: it carries the parsed
+    # reset_at the client result must report (#1409), and `is not None` reads
+    # exactly where the bool did — so this adds no statement or branch to a
+    # function already at the PLR0912/PLR0915 ceiling.
+    limit_outcome: _SpawnOutcome | None = None
     # True when any lane has pending>0 but grant<=0 due to occupied slots
     # (RUNNING + BLOCKED_ON_USER >= max_parallel). Distinguishes the
     # previously misleading skip_reason=no_pending case (#588).
@@ -756,7 +765,7 @@ def _dispatch_client_lanes(
                 emit=emit,
             )
             if outcome.usage_limit_detected:
-                usage_limit_detected = True
+                limit_outcome = outcome
             if outcome.spawn_error:
                 spawn_error = True
                 _record_lane_spawn_error(
@@ -772,7 +781,7 @@ def _dispatch_client_lanes(
                 available_client_slots -= 1
                 _reset_lane_spawn_errors(lane_cfg, client.name)
 
-            if usage_limit_detected or spawn_error:
+            if limit_outcome is not None or spawn_error:
                 break
 
         lane_stats[lane_cfg.name] = {
@@ -783,7 +792,7 @@ def _dispatch_client_lanes(
             "pending": breakdown.pending,
         }
 
-        if usage_limit_detected or spawn_error:
+        if limit_outcome is not None or spawn_error:
             break
 
     if emit is not None:
@@ -794,7 +803,7 @@ def _dispatch_client_lanes(
         )
 
     skip_reason = _resolve_dispatch_skip_reason(
-        usage_limit_detected=usage_limit_detected,
+        usage_limit_detected=limit_outcome is not None,
         cap_full=cap_full,
         spawn_error=spawn_error,
         lane_cap_blocked=lane_cap_blocked,
@@ -821,7 +830,11 @@ def _dispatch_client_lanes(
         },
     )
     return _ClientDispatchResult(
-        spawned=client_spawned, usage_limit_detected=usage_limit_detected
+        spawned=client_spawned,
+        usage_limit_detected=limit_outcome is not None,
+        usage_limit_reset_at=(
+            limit_outcome.usage_limit_reset_at if limit_outcome else None
+        ),
     )
 
 

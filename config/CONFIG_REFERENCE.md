@@ -594,7 +594,10 @@ global_attempt_ceiling: 10
 # pauses the lane (resume via `cw lane resume`). See #875.
 lane_circuit_breaker_threshold: 3
 
-# Seconds to wait after a usage-limit cutoff before retrying.
+# Fallback window after a usage-limit cutoff, used when the reset time is
+# absent or unparseable. When the spawn-time message names a reset time cw can
+# resolve, dispatch backs off until that instant instead (clamped to 7 days);
+# otherwise it waits this many seconds before retrying. See #1409.
 usage_limit_backoff_seconds: 3600
 
 # Elapsed seconds before reconcile routes an emitted-but-unrouted sentinel
