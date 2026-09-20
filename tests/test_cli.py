@@ -54,8 +54,10 @@ from cw.sprint import AppliedBuildout, BuildoutPlan
 from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
+    _bash_command_records,
     _inflate_scope,
     _make_stale_base_repo,
+    _park_body_text,
     _park_post_records,
     _tool_result_record,
     _tool_use_record,
@@ -5302,6 +5304,90 @@ class TestParkCommentPostedInTranscript:
             _tool_result_record("toolu_alt"),
         ]
         path = self._write(tmp_path, records)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
+
+    # -- inert text is never evidence (operator round 4, finding 1) --------
+
+    BODY_PATH = "/job/tmp/park-body-2135.md"
+
+    def _write_then(self, tmp_path: Path, command: str) -> Path:
+        """A successful ``Write`` of :attr:`BODY_PATH`, then *command*."""
+        write_record, write_result = _park_post_records(self.TICKET)[:2]
+        return self._write(
+            tmp_path,
+            [write_record, write_result, *_bash_command_records(command)],
+        )
+
+    def test_heredoc_writing_an_example_post_is_not_evidence(
+        self, tmp_path: Path
+    ) -> None:
+        """A command that only *writes* an example body posted nothing.
+
+        The embedded text carries the header and the provenance marker, so
+        every content test passes — only "is this an invocation?" separates it
+        from a real post.
+        """
+        command = (
+            "cat <<'EOF' > example.sh\n"
+            f'gh issue comment {self.TICKET} --body "{_park_body_text()}"\n'
+            "EOF"
+        )
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
+
+    def test_echo_of_a_post_command_is_not_evidence(self, tmp_path: Path) -> None:
+        """Echoing the command text runs no ``gh`` at all."""
+        command = (
+            f"echo 'gh issue comment {self.TICKET} --body \"{_park_body_text()}\"'"
+        )
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
+
+    def test_real_invocation_later_in_an_and_chain_is_evidence(
+        self, tmp_path: Path
+    ) -> None:
+        """A post is still a post when it is the second link of a ``&&`` chain."""
+        command = (
+            "mkdir -p /job/tmp && timeout 60 gh issue comment "
+            f"{self.TICKET} --body-file {self.BODY_PATH} 2>&1"
+        )
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
+
+    def test_real_body_file_invocation_is_evidence(self, tmp_path: Path) -> None:
+        """The plain, unwrapped ``--body-file`` invocation still parks."""
+        command = f"gh issue comment {self.TICKET} --body-file {self.BODY_PATH}"
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
+
+    def test_quoted_separator_inside_the_body_does_not_split_the_post(
+        self, tmp_path: Path
+    ) -> None:
+        """A ``;`` inside the quoted body is body text, not a shell separator."""
+        body = _park_body_text().replace(
+            "redacted park body", "redacted park body; and more"
+        )
+        command = f'timeout 60 gh issue comment {self.TICKET} --body "{body}" 2>&1'
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
+
+    @pytest.mark.parametrize(
+        "body_arg",
+        ['--body "$(cat /job/tmp/park-body-2135.md)"', "--body `cat body.md`"],
+        ids=["command-substitution", "backtick"],
+    )
+    def test_unresolvable_body_is_not_evidence(
+        self, tmp_path: Path, body_arg: str
+    ) -> None:
+        """A body the transcript cannot resolve is not evidence of its content."""
+        command = f"timeout 60 gh issue comment {self.TICKET} {body_arg}"
+        path = self._write_then(tmp_path, command)
 
         assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
 

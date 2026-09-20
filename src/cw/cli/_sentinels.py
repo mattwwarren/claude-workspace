@@ -132,6 +132,141 @@ _BODY_FILE_RE = re.compile(r"--body-file[=\s]+[\"']?(\S+?)[\"']?(?:\s|$)")
 # whitespace immediately after ``--body``), and it is tried first regardless.
 _INLINE_BODY_RE = re.compile(r"--body[=\s]+[\"']?")
 
+# A ``gh issue comment`` match is only evidence when it *starts* a shell
+# command. These are the tokens allowed to sit between the segment start and
+# the match: environment assignments and the small set of wrapper commands
+# workers actually use (``timeout 60 gh …`` is the shape the checked-in real
+# capture holds), plus their flags and a bare duration argument. Anything else
+# in front -- ``echo``, ``cat``, ``printf`` -- means the match is inert text
+# being written or displayed, not a post (GitHub #2135, operator round 4).
+_WRAPPER_ATOM = (
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*"
+    r"|timeout|env|nohup|command|stdbuf"
+    r"|--?[A-Za-z0-9]\S*"
+    r"|\d+(?:\.\d+)?[smhd]?)"
+)
+_WRAPPER_PREFIX_RE = re.compile(rf"^\s*(?:{_WRAPPER_ATOM}\s+)*$")
+
+# ``<<WORD`` / ``<<-'WORD'`` -- the start of a heredoc whose body is data, not
+# commands. Its lines are masked out of the command-start scan so a heredoc
+# that merely *writes* an example post can never look like one.
+_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+# Constructs whose expansion this transcript does not hold. A body value
+# beginning with one of these is unknowable, and an unresolvable body is not
+# evidence (GitHub #2135, operator round 4, finding 1).
+_UNRESOLVED_BODY_PREFIXES = ("$(", "`", "<<")
+
+
+def _skip_quoted(command: str, start: int) -> int:
+    """Return the index just past the quoted run opening at *start* (#2135).
+
+    An unterminated quote consumes the rest of the command, which is the
+    fail-closed direction: nothing after it can then start a segment.
+    """
+    quote = command[start]
+    index = start + 1
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote == '"':
+            index += 2
+            continue
+        if char == quote:
+            return index + 1
+        index += 1
+    return len(command)
+
+
+def _skip_heredoc_body(command: str, start: int, delimiter: str) -> int:
+    """Return the index just past the heredoc body terminated by *delimiter*.
+
+    An unterminated heredoc consumes the rest of the command (#2135) -- again
+    fail-closed, since the remaining lines are then all treated as data.
+    """
+    index = start
+    while index < len(command):
+        end = command.find("\n", index)
+        line = command[index:] if end < 0 else command[index:end]
+        if line.strip() == delimiter:
+            return len(command) if end < 0 else end + 1
+        if end < 0:
+            break
+        index = end + 1
+    return len(command)
+
+
+def _command_start_offsets(command: str) -> tuple[int, ...]:
+    """Offsets in *command* at which a new shell command can begin (#2135).
+
+    A quote-aware, heredoc-aware split on ``;``, ``&&``, ``||``, ``|`` and
+    newline. Quote-aware so a separator inside a ``--body "…"`` argument does
+    not split the invocation's own body; heredoc-aware so the lines of a
+    ``cat <<'EOF' > script.sh`` body are never offered as command starts.
+    """
+    offsets = [0]
+    pending: list[str] = []
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\":
+            index += 2
+        elif char in "'\"":
+            index = _skip_quoted(command, index)
+        elif char == "<" and (heredoc := _HEREDOC_RE.match(command, index)):
+            pending.append(heredoc.group(2))
+            index = heredoc.end()
+        elif char == "\n":
+            index += 1
+            while pending:
+                index = _skip_heredoc_body(command, index, pending.pop(0))
+            offsets.append(index)
+        elif char in ";&|":
+            while index < len(command) and command[index] in ";&|":
+                index += 1
+            offsets.append(index)
+        else:
+            index += 1
+    return tuple(offsets)
+
+
+def _starts_a_command(command: str, offsets: tuple[int, ...], match_start: int) -> bool:
+    """True iff the match at *match_start* begins a real invocation (#2135).
+
+    Everything between its segment's start and the match must be wrapper
+    tokens (see :data:`_WRAPPER_PREFIX_RE`); leading whitespace is ignored.
+    """
+    segment_start = max(offset for offset in offsets if offset <= match_start)
+    return _WRAPPER_PREFIX_RE.match(command[segment_start:match_start]) is not None
+
+
+def _body_is_unresolved(command: str, value_start: int) -> bool:
+    """True iff the body value at *value_start* opens with a construct whose
+    expansion this transcript does not hold (#2135)."""
+    return command[value_start:].startswith(_UNRESOLVED_BODY_PREFIXES)
+
+
+def _resolve_body(
+    command: str, search_from: int, written: dict[str, str]
+) -> str | None:
+    """Resolve the body argument that follows the invocation at *search_from*.
+
+    ``None`` means "not knowable from this transcript", which the caller
+    treats as no evidence: a ``--body-file`` naming a path no successful
+    ``Write`` in this transcript produced, or either flag whose value opens
+    with an unresolved ``$(``/backtick/``<<``.
+    """
+    body_file = _BODY_FILE_RE.search(command, search_from)
+    if body_file is not None:
+        if _body_is_unresolved(command, body_file.start(1)):
+            return None
+        return written.get(body_file.group(1))
+    inline = _INLINE_BODY_RE.search(command, search_from)
+    if inline is None:
+        return command[search_from:]
+    if _body_is_unresolved(command, inline.end()):
+        return None
+    return command[inline.end() :]
+
 
 class _ToolCall(NamedTuple):
     """A tool_use block that was resolved by a later tool_result (#2135)."""
@@ -321,25 +456,28 @@ def _iter_leg_events(transcript_path: Path) -> Iterator[_LegEvent]:
 
 
 def _post_body(command: str, written: dict[str, str], ticket_id: str) -> str | None:
-    """Resolve the comment body a ``gh issue comment`` command posted.
+    """Resolve the comment body a real ``gh issue comment`` invocation posted.
 
-    Returns ``None`` when *command* is not a post to *ticket_id*, or when it
-    names a ``--body-file`` this transcript holds no successful ``Write`` for
-    (the body is then unknowable, so the caller fails closed). Otherwise
-    returns the written body, or the command text itself for the inline
-    ``--body "<text>"`` form.
+    The match must **start a shell command** inside *command*, not merely
+    appear somewhere in it (GitHub #2135, operator round 4): a Bash call that
+    writes or echoes an example post exits 0 having posted nothing, and its
+    embedded text carries the same header and provenance marker a real post
+    does. ``_starts_a_command`` is the only thing that separates the two.
+
+    Returns ``None`` when *command* contains no such invocation for
+    *ticket_id*, or when the body it names is not knowable from this
+    transcript (see :func:`_resolve_body`). Otherwise returns the ``Write``-ed
+    body, or the inline ``--body "<text>"`` argument.
     """
-    if not re.search(
-        rf"\bgh\s+issue\s+comment\s+#?{re.escape(ticket_id)}(?!\w)", command
-    ):
-        return None
-    body_file = _BODY_FILE_RE.search(command)
-    if body_file is not None:
-        return written.get(body_file.group(1))
-    inline = _INLINE_BODY_RE.search(command)
-    if inline is None:
-        return command
-    return command[inline.end() :]
+    pattern = re.compile(rf"\bgh\s+issue\s+comment\s+#?{re.escape(ticket_id)}(?!\w)")
+    offsets = _command_start_offsets(command)
+    for match in pattern.finditer(command):
+        if not _starts_a_command(command, offsets, match.start()):
+            continue
+        body = _resolve_body(command, match.end(), written)
+        if body is not None:
+            return body
+    return None
 
 
 def _is_park_body(body: str) -> bool:
@@ -375,8 +513,16 @@ def _park_comment_posted_in_transcript(
       behavior change; tracker-agnostic evidence is a follow-up.
     * The evidence is this Claude session's transcript and only its current
       run leg.
+    * The ``gh issue comment`` text must **start a shell command** —
+      ``timeout 60 gh …`` and the second link of an ``&&`` chain qualify;
+      inert text does not. A heredoc that writes an example post, an ``echo``
+      of one, or a commented-out line all carry the same header and marker as
+      a real post while posting nothing, so counting them would falsely park a
+      live session's row (GitHub #2135, operator round 4, finding 1).
     * The join is ``Write`` + a literal ``--body-file <path>``, or the inline
-      ``--body`` form. **Documented false-negative shapes:** a ``--body-file``
+      ``--body`` form, and the body value must be resolvable: one opening with
+      ``$(``, a backtick or ``<<`` is unknowable, and an unresolvable body is
+      not evidence. **Documented false-negative shapes:** a ``--body-file``
       path holding an unexpanded ``$VAR``/``${VAR}``, a body assembled by a
       shell or Python heredoc rather than a ``Write`` tool_use, the ``-F`` /
       ``-b`` short flags, ``--repo`` placed before the issue number, and

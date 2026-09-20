@@ -420,9 +420,7 @@ def _park_post_records(
     Every park-post transcript in the #2135 tests is built through this
     builder so the four-record sequence is never re-inlined per test.
     """
-    body = f"{header}\n\nredacted park body\n"
-    if marker:
-        body = f"{body}\n{AGENT_COMMENT_MARKER}\n"
+    body = _park_body_text(header, marker=marker)
     if not via_write:
         bash_id = f"toolu_bash_inline_{ticket_id}"
         command = f'timeout 60 gh issue comment {ticket_id} --body "{body}" 2>&1'
@@ -441,6 +439,36 @@ def _park_post_records(
         _tool_result_record(write_id, is_error=write_is_error),
         _tool_use_record(bash_id, "Bash", input_={"command": command}),
         _tool_result_record(bash_id, is_error=post_is_error),
+    ]
+
+
+def _park_body_text(
+    header: str = "## Pending Verification Scan", *, marker: bool = True
+) -> str:
+    """The park-comment body ``_park_post_records`` writes (#2135).
+
+    Exposed so a test can embed the same body in a hand-built shell command
+    (a heredoc, an ``echo``, an ``&&`` chain) without re-inlining the header
+    and marker literals.
+    """
+    body = f"{header}\n\nredacted park body\n"
+    if marker:
+        body = f"{body}\n{AGENT_COMMENT_MARKER}\n"
+    return body
+
+
+def _bash_command_records(
+    command: str, *, tool_id: str = "toolu_bash_custom", is_error: bool = False
+) -> list[dict[str, object]]:
+    """One completed ``Bash`` tool call carrying *command* verbatim (#2135).
+
+    The two-record shape (``tool_use`` then its ``tool_result``) is the same
+    one ``_park_post_records`` builds; this helper exists for the
+    invocation-shape tests, which vary only the command string.
+    """
+    return [
+        _tool_use_record(tool_id, "Bash", input_={"command": command}),
+        _tool_result_record(tool_id, is_error=is_error),
     ]
 
 
