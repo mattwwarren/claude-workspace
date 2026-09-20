@@ -31,15 +31,18 @@ from cw.cli import (
 )
 from cw.cli._sentinels import (
     _PARK_COMMENT_HEADERS,
-    _command_start_offsets,
+    _command_segments,
     _is_leg_boundary,
     _park_comment_posted_in_transcript,
-    _post_body,
+    _post_bodies,
+    _resolve_body,
+    _segment_at,
     _skip_heredoc_body,
     _skip_quoted,
 )
 from cw.cli.sprint import _resolve_version
 from cw.config import (
+    clients_file,
     load_clients,
     load_state,
     orchestrator_config_file,
@@ -3451,6 +3454,12 @@ class TestSignalStop:
         orchestrator_config_file().write_text(
             f"park_on_abandoned_exit_enabled: {str(master_switch).lower()}\n"
         )
+        # The gate is fail-closed on an unknown client, so the row's client
+        # must be registered even when the ticket-level map does the arming.
+        clients_file().parent.mkdir(parents=True, exist_ok=True)
+        clients_file().write_text(
+            "clients:\n  test-client:\n    workspace_path: /tmp/ws-2135\n"
+        )
         self._write_headless_context(
             worktree, session_id=session.id, ticket_id=context_ticket_id
         )
@@ -3913,6 +3922,186 @@ class TestSignalStop:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "stopped_without_sentinel"
         assert self._park_event_counts("lane-on") == (1, 1)
+
+    @staticmethod
+    def _count_config_loads(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+        """Count the park gate's two config reads, keeping their behaviour."""
+        from cw.config import load_orchestrator_config
+
+        counts = {"orchestrator": 0, "clients": 0}
+
+        def _orchestrator() -> object:
+            counts["orchestrator"] += 1
+            return load_orchestrator_config()
+
+        def _clients() -> object:
+            counts["clients"] += 1
+            return load_clients()
+
+        monkeypatch.setattr(
+            "cw.reconcile.abandoned_exit.load_orchestrator_config", _orchestrator
+        )
+        monkeypatch.setattr("cw.reconcile.abandoned_exit.load_clients", _clients)
+        return counts
+
+    def test_signal_stop_disabled_path_reads_config_at_most_once(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Round 2, finding 3: dark means no scan and one config resolution."""
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            "dark-cost",
+            _park_post_records(self.SEED_TICKET_ID),
+            master_switch=False,
+            ticket_override=None,
+        )
+        scans = self._count_scans(monkeypatch)
+        loads = self._count_config_loads(monkeypatch)
+
+        self._invoke_stop(worktree)
+
+        assert scans == []
+        assert loads == {"orchestrator": 1, "clients": 0}
+
+    def test_signal_stop_reads_no_config_when_no_running_row_matches(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Round 2, finding 3: the dev-queue row is checked before any config."""
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import QueueItemStatus
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path, monkeypatch, "row-first", _park_post_records(self.SEED_TICKET_ID)
+        )
+        store = load_dev_queue()
+        store.tasks[0].status = QueueItemStatus.BLOCKED_ON_USER
+        save_dev_queue(store)
+        loads = self._count_config_loads(monkeypatch)
+
+        self._invoke_stop(worktree)
+
+        assert loads == {"orchestrator": 0, "clients": 0}
+
+    def test_abandoned_exit_park_armed_checks_the_row_before_the_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No RUNNING row ⇒ ``park_gate_open`` is never consulted."""
+        from unittest.mock import MagicMock
+
+        from cw.cli.stop_hook import _abandoned_exit_park_armed
+
+        def _must_not_run(*_args: object) -> bool:
+            msg = "the park flag must not be resolved without a RUNNING row"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.find_running_task_for_session", lambda *_a: None
+        )
+        monkeypatch.setattr("cw.cli.stop_hook.park_gate_open", _must_not_run)
+        session = MagicMock(spec=Session)
+        session.id = "sess-row-first"
+
+        assert _abandoned_exit_park_armed(session, self.SEED_TICKET_ID) is False
+
+    @pytest.mark.parametrize(
+        "clients_content",
+        [
+            b"clients: {unclosed\n",
+            b"clients: [not, a, mapping]\n",
+            b"clients:\n  '!bad-name':\n    workspace_path: /tmp/ws\n",
+            b"\xff\xfe\x00 not utf-8",
+        ],
+        ids=["invalid-yaml", "non-mapping", "invalid-client-name", "undecodable"],
+    )
+    def test_signal_stop_defers_on_an_unreadable_clients_file(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        clients_content: bytes,
+    ) -> None:
+        """Round 2, finding 2: a broken clients.yaml is never a reason to park.
+
+        The ticket-level override is on, so a gate that fell through on the
+        load error would park this row on the real evidence in the transcript.
+        """
+        from cw.models import QueueItemStatus
+
+        _session, worktree, daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            "bad-clients",
+            _park_post_records(self.SEED_TICKET_ID),
+        )
+        clients_file().write_bytes(clients_content)
+        scans = self._count_scans(monkeypatch)
+
+        with caplog.at_level("WARNING", logger="cw.reconcile.abandoned_exit"):
+            self._invoke_stop(worktree)  # asserts exit_code == 0: nothing raised
+
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert self._park_event_counts("bad-clients") == (0, 0)
+        assert scans == []
+        assert daemon.stop_calls == []
+        warnings = [r for r in caplog.records if r.name.endswith("abandoned_exit")]
+        assert len(warnings) == 1
+        assert "test-client" in warnings[0].getMessage()
+
+    def test_signal_stop_defers_on_an_unreadable_orchestrator_file(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.models import QueueItemStatus
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            "bad-orchestrator",
+            _park_post_records(self.SEED_TICKET_ID),
+        )
+        orchestrator_config_file().write_text("park_on_abandoned_exit_enabled: [\n")
+        scans = self._count_scans(monkeypatch)
+
+        self._invoke_stop(worktree)
+
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert scans == []
+
+    def test_signal_stop_defers_for_a_client_missing_from_clients_yaml(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Round 2, finding 2: an unknown client parks nothing, override or not."""
+        from cw.models import QueueItemStatus
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            "unknown-client",
+            _park_post_records(self.SEED_TICKET_ID),
+        )
+        clients_file().write_text(
+            "clients:\n  someone-else:\n    workspace_path: /tmp/ws-2135\n"
+        )
+        scans = self._count_scans(monkeypatch)
+
+        self._invoke_stop(worktree)
+
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert self._park_event_counts("unknown-client") == (0, 0)
+        assert scans == []
 
     @staticmethod
     def _write_park_lane_yaml(tmp_config_dir: Path, *, enabled: bool) -> None:
@@ -4968,40 +5157,68 @@ class TestShellCommandSegmentation:
     park of a live session's row.
     """
 
+    @staticmethod
+    def _segment_texts(command: str) -> list[str]:
+        return [command[s.start : s.end] for s in _command_segments(command)]
+
     @pytest.mark.parametrize(
         ("command", "expected"),
         [
-            ("gh issue comment 1 --body x", (0,)),
-            ("a && b", (0, 4)),
-            ("a || b", (0, 4)),
-            ("a; b", (0, 2)),
-            ("a | b", (0, 3)),
-            ("a\nb", (0, 2)),
+            ("gh issue comment 1 --body x", ["gh issue comment 1 --body x"]),
+            ("a && b", ["a ", " b"]),
+            ("a || b", ["a ", " b"]),
+            ("a; b", ["a", " b"]),
+            ("a | b", ["a ", " b"]),
+            ("a\nb", ["a", "b"]),
             # A separator inside quotes is body text, not a boundary.
-            ('gh issue comment 1 --body "a; b && c"', (0,)),
+            (
+                'gh issue comment 1 --body "a; b && c"',
+                ['gh issue comment 1 --body "a; b && c"'],
+            ),
             # An escaped separator is literal too.
-            ("a \\; b", (0,)),
+            ("a \\; b", ["a \\; b"]),
+            # ...and so is an escaped newline (a line continuation).
+            ("a \\\n b", ["a \\\n b"]),
         ],
-        ids=["single", "and", "or", "semi", "pipe", "newline", "quoted", "escaped"],
+        ids=[
+            "single",
+            "and",
+            "or",
+            "semi",
+            "pipe",
+            "newline",
+            "quoted",
+            "escaped",
+            "continuation",
+        ],
     )
-    def test_command_start_offsets(
-        self, command: str, expected: tuple[int, ...]
-    ) -> None:
-        assert _command_start_offsets(command) == expected
+    def test_command_segments(self, command: str, expected: list[str]) -> None:
+        """Each span ends *before* the separator that closed it."""
+        assert self._segment_texts(command) == expected
 
-    def test_heredoc_body_lines_are_not_command_starts(self) -> None:
+    def test_heredoc_body_lines_are_not_segments(self) -> None:
         """Only the line after the terminator opens a new command."""
         command = "cat <<'EOF' > f.sh\ninner one\ninner two\nEOF\nreal"
 
-        offsets = _command_start_offsets(command)
-
-        assert offsets == (0, len(command) - len("real"))
+        assert self._segment_texts(command) == ["cat <<'EOF' > f.sh", "real"]
 
     def test_an_unterminated_heredoc_swallows_the_rest(self) -> None:
         """Fail-closed: no terminator means every later line stays data."""
         command = "cat <<'EOF' > f.sh\ninner\nstill inner"
 
-        assert _command_start_offsets(command) == (0, len(command))
+        assert self._segment_texts(command) == ["cat <<'EOF' > f.sh", ""]
+
+    def test_segment_at_is_none_inside_a_heredoc_body_and_on_a_separator(
+        self,
+    ) -> None:
+        command = "cat <<'EOF'\ninner\nEOF\nreal && x"
+        segments = _command_segments(command)
+
+        assert _segment_at(segments, command.index("inner")) is None
+        assert _segment_at(segments, command.index("&&")) is None
+        real = _segment_at(segments, command.index("real"))
+        assert real is not None
+        assert command[real.start : real.end] == "real "
 
     def test_skip_quoted_handles_an_escaped_inner_quote(self) -> None:
         command = '"a \\" b" tail'
@@ -5018,17 +5235,91 @@ class TestShellCommandSegmentation:
 
         assert _skip_heredoc_body(command, 0, "EOF") == len(command)
 
-    def test_post_body_rejects_an_unresolvable_body_file(self) -> None:
+    def test_post_bodies_rejects_an_unresolvable_body_file(self) -> None:
         """A ``--body-file`` naming a substitution is not evidence."""
         command = "gh issue comment 42 --body-file $(mktemp)"
 
-        assert _post_body(command, {}, "42") is None
+        assert list(_post_bodies(command, {}, "42")) == []
 
-    def test_post_body_returns_the_tail_when_no_body_flag_is_present(self) -> None:
-        """The ``-F`` short flag leaves the argument tail as the candidate."""
+    def test_post_bodies_yields_nothing_for_the_short_body_flag(self) -> None:
+        """``-F`` is a documented false negative: no ``--body*`` flag, no body."""
         command = "gh issue comment 42 -F body.md"
 
-        assert _post_body(command, {}, "42") == " -F body.md"
+        assert list(_post_bodies(command, {}, "42")) == []
+
+    def test_post_bodies_yields_each_qualifying_invocation_in_order(self) -> None:
+        """A harmless post earlier in a chain must not hide the park post."""
+        command = (
+            'gh issue comment 42 --body "hello" && '
+            "timeout 60 gh issue comment 42 --body-file /p.md"
+        )
+
+        assert list(_post_bodies(command, {"/p.md": "PARK"}, "42")) == ["hello", "PARK"]
+
+    @pytest.mark.parametrize(
+        ("arguments", "expected"),
+        [
+            (" --body-file /p.md", "PARK"),
+            (" --body-file=/p.md", "PARK"),
+            (' --body-file "/p.md"', "PARK"),
+            (" --body-file /p.md 2>", "PARK"),
+            (" \\\n  --body-file /p.md", "PARK"),
+            (' --body "inline text"', "inline text"),
+            (" --body=inline", "inline"),
+            (" --body 'a; b && c'", "a; b && c"),
+        ],
+        ids=[
+            "body-file",
+            "body-file-equals",
+            "body-file-quoted",
+            "trailing-redirect",
+            "line-continuation",
+            "inline",
+            "inline-equals",
+            "inline-quoted-separators",
+        ],
+    )
+    def test_resolve_body_reads_the_flag_positionally(
+        self, arguments: str, expected: str
+    ) -> None:
+        assert _resolve_body(arguments, {"/p.md": "PARK"}) == expected
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            "",
+            " -F /p.md",
+            " --body-file",
+            " --body-file /never-written.md",
+            " --body-file /p.md --body inline",
+            " --body a --body b",
+            ' --body "unterminated',
+            ' --body "$(cat /p.md)"',
+            " --body `cat /p.md`",
+            " --body-file $(mktemp)",
+            " --body <<EOF",
+            ' --title "note --body-file /p.md"',
+            ' --body "$(other --body-file /p.md)"',
+        ],
+        ids=[
+            "no-flag",
+            "short-flag",
+            "flag-without-value",
+            "unwritten-path",
+            "two-flags-mixed",
+            "two-flags-same",
+            "unbalanced-quote",
+            "command-substitution",
+            "backtick",
+            "unresolved-body-file",
+            "heredoc",
+            "flag-text-inside-another-flags-value",
+            "flag-text-inside-a-substitution",
+        ],
+    )
+    def test_resolve_body_is_none_when_not_knowable(self, arguments: str) -> None:
+        """No flag, several flags, or an unresolvable value: not evidence."""
+        assert _resolve_body(arguments, {"/p.md": "PARK"}) is None
 
 
 class TestParkCommentPostedInTranscript:
@@ -5624,6 +5915,93 @@ class TestParkCommentPostedInTranscript:
     ) -> None:
         """A body the transcript cannot resolve is not evidence of its content."""
         command = f"timeout 60 gh issue comment {self.TICKET} {body_arg}"
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
+
+    # -- the body binds to its own invocation (operator round 5) ------------
+
+    def test_only_the_second_chained_invocation_counts(self, tmp_path: Path) -> None:
+        """A different-ticket first post neither counts nor supplies the body."""
+        command = (
+            "gh issue comment 9999 --body-file /job/tmp/other.md && "
+            f"gh issue comment {self.TICKET} --body-file {self.BODY_PATH}"
+        )
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
+
+    def test_first_invocation_does_not_borrow_the_second_ones_body(
+        self, tmp_path: Path
+    ) -> None:
+        """This ticket's post has no body of its own; the park body is 9999's."""
+        command = (
+            f"gh issue comment {self.TICKET} && "
+            f"gh issue comment 9999 --body-file {self.BODY_PATH}"
+        )
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
+
+    @pytest.mark.parametrize("separator", ["&&", ";", "|", "\n"])
+    def test_a_later_commands_body_file_is_not_bound(
+        self, tmp_path: Path, separator: str
+    ) -> None:
+        """One invocation, then an unrelated command that has a ``--body-file``."""
+        command = (
+            f"gh issue comment {self.TICKET} --title x {separator} "
+            f"other-tool --body-file {self.BODY_PATH}"
+        )
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
+
+    @pytest.mark.parametrize(
+        "quoted_arg",
+        [
+            f'--title "note --body-file {BODY_PATH}"',
+            f'--body "$(other --body-file {BODY_PATH})"',
+        ],
+        ids=["inside-another-flags-value", "inside-a-substitution"],
+    )
+    def test_a_body_flag_embedded_in_a_quoted_argument_is_not_bound(
+        self, tmp_path: Path, quoted_arg: str
+    ) -> None:
+        """Flag text inside one argument is that argument's data, not a flag."""
+        command = f"gh issue comment {self.TICKET} {quoted_arg}"
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
+
+    def test_a_harmless_earlier_post_does_not_hide_the_park_post(
+        self, tmp_path: Path
+    ) -> None:
+        """Both invocations are this ticket's; the second carries the park body."""
+        command = (
+            f'gh issue comment {self.TICKET} --body "working on it" && '
+            f"gh issue comment {self.TICKET} --body-file {self.BODY_PATH}"
+        )
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
+
+    def test_line_continued_invocation_is_evidence(self, tmp_path: Path) -> None:
+        """Workers wrap a long invocation across lines with a trailing ``\\``."""
+        command = (
+            f"timeout 60 gh issue comment {self.TICKET} \\\n"
+            f"  --body-file {self.BODY_PATH} 2>&1"
+        )
+        path = self._write_then(tmp_path, command)
+
+        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
+
+    def test_two_body_flags_on_one_invocation_is_not_evidence(
+        self, tmp_path: Path
+    ) -> None:
+        command = (
+            f"gh issue comment {self.TICKET} --body-file {self.BODY_PATH} "
+            '--body "extra"'
+        )
         path = self._write_then(tmp_path, command)
 
         assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False

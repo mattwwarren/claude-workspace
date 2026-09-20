@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw._util import (
@@ -120,17 +121,13 @@ _PARK_COMMENT_HEADERS: tuple[str, ...] = (
     "## Operator-Actionable Review Findings",
 )
 
-# ``--body-file <path>`` as workers actually write it, with or without
-# surrounding quotes. Deliberately does NOT cover ``-F``/``-b`` short flags:
-# see :func:`_park_comment_posted_in_transcript` for the documented
-# false-negative post shapes.
-_BODY_FILE_RE = re.compile(r"--body-file[=\s]+[\"']?(\S+?)[\"']?(?:\s|$)")
-
-# The inline ``--body "<text>"`` form. Matched only to find where the body
-# starts inside the command, so the header test below can still anchor at a
-# line start. ``--body-file`` cannot match this pattern (it needs ``=`` or
-# whitespace immediately after ``--body``), and it is tried first regardless.
-_INLINE_BODY_RE = re.compile(r"--body[=\s]+[\"']?")
+# The two flags that carry a comment body. Matched positionally against the
+# argv of the one invocation being examined (see :func:`_resolve_body`), never
+# by a regex over the rest of the command string. Deliberately does NOT cover
+# the ``-F``/``-b`` short flags: see :func:`_park_comment_posted_in_transcript`
+# for the documented false-negative post shapes.
+_BODY_FILE_FLAG = "--body-file"
+_BODY_FLAGS = ("--body", _BODY_FILE_FLAG)
 
 # A ``gh issue comment`` match is only evidence when it *starts* a shell
 # command. These are the tokens allowed to sit between the segment start and
@@ -195,15 +192,26 @@ def _skip_heredoc_body(command: str, start: int, delimiter: str) -> int:
     return len(command)
 
 
-def _command_start_offsets(command: str) -> tuple[int, ...]:
-    """Offsets in *command* at which a new shell command can begin (#2135).
+class _Segment(NamedTuple):
+    """One shell command's ``[start, end)`` span inside a command string (#2135)."""
+
+    start: int
+    end: int
+
+
+def _command_segments(command: str) -> tuple[_Segment, ...]:
+    """The shell-command spans of *command*, in order (#2135).
 
     A quote-aware, heredoc-aware split on ``;``, ``&&``, ``||``, ``|`` and
     newline. Quote-aware so a separator inside a ``--body "…"`` argument does
     not split the invocation's own body; heredoc-aware so the lines of a
-    ``cat <<'EOF' > script.sh`` body are never offered as command starts.
+    ``cat <<'EOF' > script.sh`` body are never offered as commands. Each span
+    ends *before* the separator that closed it, so text past a span's end
+    belongs to a different command and can never be read as this one's
+    arguments.
     """
-    offsets = [0]
+    segments: list[_Segment] = []
+    start = 0
     pending: list[str] = []
     index = 0
     while index < len(command):
@@ -216,56 +224,82 @@ def _command_start_offsets(command: str) -> tuple[int, ...]:
             pending.append(heredoc.group(2))
             index = heredoc.end()
         elif char == "\n":
+            segments.append(_Segment(start, index))
             index += 1
             while pending:
                 index = _skip_heredoc_body(command, index, pending.pop(0))
-            offsets.append(index)
+            start = index
         elif char in ";&|":
+            segments.append(_Segment(start, index))
             while index < len(command) and command[index] in ";&|":
                 index += 1
-            offsets.append(index)
+            start = index
         else:
             index += 1
-    return tuple(offsets)
+    segments.append(_Segment(start, len(command)))
+    return tuple(segments)
 
 
-def _starts_a_command(command: str, offsets: tuple[int, ...], match_start: int) -> bool:
+def _segment_at(segments: tuple[_Segment, ...], position: int) -> _Segment | None:
+    """The segment whose span contains *position*, or ``None`` (#2135).
+
+    ``None`` means *position* sits in a skipped heredoc body or on a
+    separator -- text that is data, not a command.
+    """
+    for segment in segments:
+        if segment.start <= position < segment.end:
+            return segment
+    return None
+
+
+def _starts_a_command(command: str, segment: _Segment, match_start: int) -> bool:
     """True iff the match at *match_start* begins a real invocation (#2135).
 
     Everything between its segment's start and the match must be wrapper
     tokens (see :data:`_WRAPPER_PREFIX_RE`); leading whitespace is ignored.
     """
-    segment_start = max(offset for offset in offsets if offset <= match_start)
-    return _WRAPPER_PREFIX_RE.match(command[segment_start:match_start]) is not None
+    return _WRAPPER_PREFIX_RE.match(command[segment.start : match_start]) is not None
 
 
-def _body_is_unresolved(command: str, value_start: int) -> bool:
-    """True iff the body value at *value_start* opens with a construct whose
-    expansion this transcript does not hold (#2135)."""
-    return command[value_start:].startswith(_UNRESOLVED_BODY_PREFIXES)
+def _resolve_body(arguments: str, written: dict[str, str]) -> str | None:
+    """Resolve the comment body named by ONE invocation's own arguments.
 
-
-def _resolve_body(
-    command: str, search_from: int, written: dict[str, str]
-) -> str | None:
-    """Resolve the body argument that follows the invocation at *search_from*.
+    *arguments* is the slice of the invocation's shell segment that follows
+    ``gh issue comment <ticket>`` -- never text past the segment's end, so a
+    ``--body``/``--body-file`` belonging to a later or embedded command cannot
+    be borrowed (GitHub #2135, operator round 5). It is split argv-style
+    (:func:`shlex.split`, honouring quotes) and the flag is read
+    positionally, as ``--flag value`` or ``--flag=value``.
 
     ``None`` means "not knowable from this transcript", which the caller
-    treats as no evidence: a ``--body-file`` naming a path no successful
-    ``Write`` in this transcript produced, or either flag whose value opens
-    with an unresolved ``$(``/backtick/``<<``.
+    treats as no evidence: no body flag in the segment, more than one (gh
+    would take one of them; guessing which is not evidence), unbalanced
+    quoting, a ``--body-file`` naming a path no successful ``Write`` in this
+    transcript produced, a ``--body-file`` flag with no value, or either
+    flag whose value opens with an unresolved ``$(``/backtick/``<<``.
     """
-    body_file = _BODY_FILE_RE.search(command, search_from)
-    if body_file is not None:
-        if _body_is_unresolved(command, body_file.start(1)):
-            return None
-        return written.get(body_file.group(1))
-    inline = _INLINE_BODY_RE.search(command, search_from)
-    if inline is None:
-        return command[search_from:]
-    if _body_is_unresolved(command, inline.end()):
+    try:
+        tokens = shlex.split(arguments.replace("\\\n", " "))
+    except ValueError:
         return None
-    return command[inline.end() :]
+    found: list[tuple[str, str]] = []
+    position = 0
+    while position < len(tokens):
+        flag, has_value, value = tokens[position].partition("=")
+        if flag in _BODY_FLAGS:
+            if not has_value:
+                position += 1
+                if position >= len(tokens):
+                    return None
+                value = tokens[position]
+            found.append((flag, value))
+        position += 1
+    if len(found) != 1:
+        return None
+    flag, value = found[0]
+    if value.startswith(_UNRESOLVED_BODY_PREFIXES):
+        return None
+    return written.get(value) if flag == _BODY_FILE_FLAG else value
 
 
 class _ToolCall(NamedTuple):
@@ -455,8 +489,10 @@ def _iter_leg_events(transcript_path: Path) -> Iterator[_LegEvent]:
                 )
 
 
-def _post_body(command: str, written: dict[str, str], ticket_id: str) -> str | None:
-    """Resolve the comment body a real ``gh issue comment`` invocation posted.
+def _post_bodies(
+    command: str, written: dict[str, str], ticket_id: str
+) -> Iterator[str]:
+    """Yield the comment body of each real ``gh issue comment`` post in *command*.
 
     The match must **start a shell command** inside *command*, not merely
     appear somewhere in it (GitHub #2135, operator round 4): a Bash call that
@@ -464,20 +500,23 @@ def _post_body(command: str, written: dict[str, str], ticket_id: str) -> str | N
     embedded text carries the same header and provenance marker a real post
     does. ``_starts_a_command`` is the only thing that separates the two.
 
-    Returns ``None`` when *command* contains no such invocation for
-    *ticket_id*, or when the body it names is not knowable from this
-    transcript (see :func:`_resolve_body`). Otherwise returns the ``Write``-ed
-    body, or the inline ``--body "<text>"`` argument.
+    The body is then read from **that invocation's own shell segment only**
+    (operator round 5): the segment is sliced out first and its arguments
+    parsed positionally (see :func:`_resolve_body`), so a ``--body`` or
+    ``--body-file`` that belongs to a later or embedded command is never
+    attached to this match. Every qualifying invocation is yielded in
+    order -- a chain may hold a harmless post before the park post -- and an
+    invocation whose body is not knowable from this transcript yields nothing.
     """
     pattern = re.compile(rf"\bgh\s+issue\s+comment\s+#?{re.escape(ticket_id)}(?!\w)")
-    offsets = _command_start_offsets(command)
+    segments = _command_segments(command)
     for match in pattern.finditer(command):
-        if not _starts_a_command(command, offsets, match.start()):
+        segment = _segment_at(segments, match.start())
+        if segment is None or not _starts_a_command(command, segment, match.start()):
             continue
-        body = _resolve_body(command, match.end(), written)
+        body = _resolve_body(command[match.end() : segment.end], written)
         if body is not None:
-            return body
-    return None
+            yield body
 
 
 def _is_park_body(body: str) -> bool:
@@ -485,6 +524,15 @@ def _is_park_body(body: str) -> bool:
     if not is_agent_authored(body):
         return False
     return any(line.startswith(_PARK_COMMENT_HEADERS) for line in body.splitlines())
+
+
+def _posts_park_comment(
+    command: object, written: dict[str, str], ticket_id: str
+) -> bool:
+    """True iff the ``Bash`` *command* holds a real park post to *ticket_id*."""
+    return isinstance(command, str) and any(
+        _is_park_body(body) for body in _post_bodies(command, written, ticket_id)
+    )
 
 
 def _park_comment_posted_in_transcript(
@@ -519,10 +567,15 @@ def _park_comment_posted_in_transcript(
       of one, or a commented-out line all carry the same header and marker as
       a real post while posting nothing, so counting them would falsely park a
       live session's row (GitHub #2135, operator round 4, finding 1).
+    * The body is bound to the **same invocation** that carries it: it is
+      read only from the matched command's own shell segment, split argv-style
+      and taken positionally, so a ``--body-file`` in a later or embedded
+      command is never borrowed (operator round 5).
     * The join is ``Write`` + a literal ``--body-file <path>``, or the inline
       ``--body`` form, and the body value must be resolvable: one opening with
       ``$(``, a backtick or ``<<`` is unknowable, and an unresolvable body is
-      not evidence. **Documented false-negative shapes:** a ``--body-file``
+      not evidence. A segment with no body flag, or with more than one, is not
+      evidence either. **Documented false-negative shapes:** a ``--body-file``
       path holding an unexpanded ``$VAR``/``${VAR}``, a body assembled by a
       shell or Python heredoc rather than a ``Write`` tool_use, the ``-F`` /
       ``-b`` short flags, ``--repo`` placed before the issue number, and
@@ -552,11 +605,9 @@ def _park_comment_posted_in_transcript(
             if isinstance(file_path, str) and isinstance(content, str):
                 written[file_path] = content
         elif event.name == "Bash":
-            command = event.tool_input.get("command")
-            if isinstance(command, str):
-                body = _post_body(command, written, ticket_id)
-                if body is not None and _is_park_body(body):
-                    posted = True
+            posted = posted or _posts_park_comment(
+                event.tool_input.get("command"), written, ticket_id
+            )
     return _ParkPostScan(
         posted=posted, framing_after=framing_after, leg_start=leg_start
     )
