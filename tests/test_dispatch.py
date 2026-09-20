@@ -1943,6 +1943,109 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         bypass_events = [p for _, p, cid in stage_changed if cid == "GEN-RACE"]
         assert bypass_events == []
 
+    @staticmethod
+    def _seed_duplicate_running_rows(
+        sample_client_config: ClientConfig,
+    ) -> tuple[Path, TicketTask, TicketTask]:
+        """Two RUNNING rows for one (ticket_id, client), differing in
+        ``created_at`` and stage; the earlier row (A) sits first in the store.
+
+        Returns ``(worktree, row_a, row_b)`` with a signed-off ``.cw/plan.md``
+        in the ticket's worktree so the bypass predicate passes.
+        """
+        from cw.worktree import create_worktree
+        from tests.conftest import plan_body
+
+        branch = f"{sample_client_config.feature_branch_prefix}/GEN-DUP"
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+        cw_dir = worktree / ".cw"
+        cw_dir.mkdir(parents=True, exist_ok=True)
+        (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
+
+        earlier = datetime(2026, 1, 1, tzinfo=UTC)
+        row_a = TicketTask(
+            ticket_id="GEN-DUP",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.REVIEW,
+            stage_high_water=Stage.REVIEW,
+            created_at=earlier,
+        )
+        row_b = TicketTask(
+            ticket_id="GEN-DUP",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.PLAN,
+            created_at=earlier + timedelta(days=1),
+        )
+        save_dev_queue(DevQueueStore(tasks=[row_a, row_b]))
+        return worktree, row_a, row_b
+
+    def test_plan_stage_bypass_advances_only_the_row_matching_created_at(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1286 round 4: the bypass's locked re-find must disambiguate
+        duplicate RUNNING rows for one (ticket_id, client) by ``created_at``.
+
+        Row A (earlier, REVIEW) precedes row B (later, PLAN) in the store. The
+        bypass is invoked for B; a first-match (ticket_id, client, RUNNING)
+        predicate would advance A -- stamping IMPL and raising the high-water
+        mark on a row doing unrelated work -- and leave B at PLAN.
+        """
+        import cw.dispatch.claim as claim_mod
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        worktree, row_a, row_b = self._seed_duplicate_running_rows(sample_client_config)
+        row_a_before = load_dev_queue().tasks[0].model_dump()
+        stage_changed = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        task = row_b.model_copy()
+        claim_mod._apply_plan_bypass_if_available(task, sample_client_config, worktree)
+
+        assert task.stage == Stage.IMPL
+        stored = {t.created_at: t for t in load_dev_queue().tasks}
+        assert stored[row_a.created_at].model_dump() == row_a_before
+        assert stored[row_b.created_at].stage == Stage.IMPL
+        assert stored[row_b.created_at].stage_high_water == Stage.IMPL
+
+        events = [p for _, p, cid in stage_changed if cid == "GEN-DUP"]
+        assert len(events) == 1
+        assert events[0]["old_stage"] == Stage.PLAN
+        assert events[0]["new_stage"] == Stage.IMPL
+        assert events[0]["direction"] == "advance"
+
+    def test_plan_stage_bypass_no_advance_when_no_row_matches_created_at(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1286 round 4: a RUNNING row for the same (ticket_id, client) whose
+        ``created_at`` differs from the task's is NOT the task's row -- the
+        missing-row guard fires: no advance, no mutation, no event."""
+        import cw.dispatch.claim as claim_mod
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        worktree, _row_a, row_b = self._seed_duplicate_running_rows(
+            sample_client_config
+        )
+        before = [t.model_dump() for t in load_dev_queue().tasks]
+        stage_changed = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        task = row_b.model_copy(update={"created_at": row_b.created_at + timedelta(1)})
+        claim_mod._apply_plan_bypass_if_available(task, sample_client_config, worktree)
+
+        assert task.stage == Stage.PLAN
+        assert [t.model_dump() for t in load_dev_queue().tasks] == before
+        assert [p for _, p, cid in stage_changed if cid == "GEN-DUP"] == []
+
 
 # ---------------------------------------------------------------------------
 # TestDispatchTickReconcilePhantoms
