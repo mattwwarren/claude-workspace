@@ -639,10 +639,14 @@ def _emit_stage_change(
 
     Single shared chokepoint for every stage-pointer mutation (RFC 0008 W1,
     closes #978): called from ``_advance_task_pointer`` (advance),
-    ``_stage_regress`` (regress), ``_apply_requeue_stage``'s forward/
-    same-stage tail (advance), and ``_stamp_salvage_stage`` (advance, #1629).
-    Guarded on ``old_stage != new_stage`` so a same-stage requeue stays
-    silent. ``direction`` is the closed enum ``"advance" | "regress"``.
+    ``_stage_regress`` (regress), ``_stamp_salvage_stage`` (advance, #1629),
+    and -- via the shared :func:`_advance_stage` helper (#1286 Fix A) --
+    ``_apply_requeue_stage``'s forward/same-stage tail and
+    ``_apply_plan_bypass_if_available``'s auto-bypass (both advance). The
+    auto-bypass caller passes the stored row found under
+    ``dev_queue_lock()`` inside that function, not a caller-held ``task``
+    reference. Guarded on ``old_stage != new_stage`` so a same-stage requeue
+    stays silent. ``direction`` is the closed enum ``"advance" | "regress"``.
     """
     if old_stage == new_stage:
         return
@@ -661,6 +665,27 @@ def _emit_stage_change(
         },
         correlation_id=task.ticket_id,
     )
+
+
+def _advance_stage(task: TicketTask, stages: list[Stage], target_stage: Stage) -> Stage:
+    """Advance ``task.stage`` forward, raise high-water, emit the change event.
+
+    Shared tail for every forward stage-pointer mutation (GitHub #1286 Fix
+    A): extracted from :func:`~cw.dev_queue.requeue._apply_requeue_stage`'s
+    forward/same-stage tail, and reused by
+    :func:`~cw.dispatch.claim._apply_plan_bypass_if_available`'s auto-bypass
+    advance -- both previously near-duplicated the same
+    old_stage/mutate/``_raise_stage_high_water``/``_emit_stage_change`` four
+    lines. Operates on a ``task`` the caller has already loaded (and, for the
+    dev-queue-backed callers, holds under :func:`dev_queue_lock` for) --
+    this helper does no locking, loading, or saving of its own; the caller
+    keeps that ownership. Returns the pre-mutation stage.
+    """
+    old_stage = task.stage
+    task.stage = target_stage
+    _raise_stage_high_water(task, stages, target_stage)
+    _emit_stage_change(task, old_stage, target_stage, "advance")
+    return old_stage
 
 
 def _raise_stage_high_water(
