@@ -638,8 +638,8 @@ class TestRealNativeDaemonClientSpawn:
         Reuses ``executor_diagnostics._bounded`` (tail-kept, 4000 chars), the
         same convention ``codex_runner`` logs excerpts under.
         """
-        from cw.executor_diagnostics import _EXCERPT_LIMIT
         from cw.exceptions import UsageLimitError
+        from cw.executor_diagnostics import _EXCERPT_LIMIT
 
         raw = "x" * (_EXCERPT_LIMIT * 3) + "You've hit your session limit"
 
@@ -728,7 +728,9 @@ class TestHostTimezoneDst:
 
         monkeypatch.setenv("TZ", "Not/AZone")
 
-        assert datetime(2026, 7, 15, 12, tzinfo=_host_timezone()).utcoffset() is not None
+        resolved = datetime(2026, 7, 15, 12, tzinfo=_host_timezone())
+
+        assert resolved.utcoffset() is not None
 
     def test_local_now_resolves_through_the_host_zone(
         self, monkeypatch: pytest.MonkeyPatch
