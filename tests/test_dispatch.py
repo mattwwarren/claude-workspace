@@ -6007,12 +6007,12 @@ class TestUsageLimitResetThreading:
         add_ticket(TicketTask(ticket_id="GEN-UL-RESET-LOOP", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        saved: list[object] = []
+        saved: list[datetime | None] = []
         real_save = save_usage_limited_until
 
-        def capturing_save(dt: object) -> None:
+        def capturing_save(dt: datetime | None) -> None:
             saved.append(dt)
-            real_save(dt)  # type: ignore[arg-type]
+            real_save(dt)
 
         monkeypatch.setattr("cw.dispatch.loop.save_usage_limited_until", capturing_save)
         monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
@@ -6027,14 +6027,16 @@ class TestUsageLimitResetThreading:
             daemon.usage_limit_reset_at = reset_at
 
             call_count = 0
-            original_tick = cw.dispatch.loop.dispatch_tick
+            original_tick: Callable[..., DispatchTickResult] = (
+                cw.dispatch.loop.dispatch_tick
+            )
 
             def one_shot_tick(*args: object, **kwargs: object) -> DispatchTickResult:
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:
                     daemon.raise_usage_limit = True
-                    result = original_tick(*args, **kwargs)  # type: ignore[arg-type]
+                    result = original_tick(*args, **kwargs)
                     daemon.raise_usage_limit = False
                     return result
                 raise KeyboardInterrupt
