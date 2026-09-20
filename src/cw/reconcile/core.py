@@ -33,6 +33,7 @@ from cw.reconcile._shared import (
     _claude_agents_json,
     _emit_reap_proposed,
     _looks_like_daemon_outage,
+    _stamp_session_id_mismatch_advisories,
     compute_drift,
     feature_branch_key,
     ticket_id_for_session,
@@ -376,6 +377,10 @@ def _reconcile_locked(
         )
     _backfill_claude_session_ids(state, surface_to_full)
     _verify_supervisor_session_id(state)
+    # #1762: re-derive the operator advisory for RUNNING rows whose session_id
+    # no longer resolves to a live session. Signal-only -- writes
+    # TicketTask.advisory_note and nothing else; never dispositions a row.
+    _stamp_session_id_mismatch_advisories(state, native_live, now=now)
 
     # Emitted-sentinel router (#578): routes sessions whose transcript already
     # carries a sentinel that signal_stop never routed. Evidence-only —

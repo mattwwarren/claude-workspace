@@ -441,6 +441,13 @@ def transition_task_status(
     # gate-stale under ReapPolicy.SIGNAL_ONLY.
     task.stale_gate_detected_at = None
     task.blocked_on_pr = None
+    # GitHub #1762: same unconditional-clear treatment for the non-terminal
+    # operator advisory. The note describes the row's *current* session binding;
+    # a status transition means that binding just changed (or was re-asserted
+    # under a fresh disposition), so a stale note must never survive into the
+    # next episode. _stamp_session_id_mismatch_advisories re-derives it on the
+    # next reconcile tick if the condition still holds.
+    task.advisory_note = None
     if old_status != new_status:
         # Why: emit inline while callers still hold dev_queue_lock. record_event
         # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the

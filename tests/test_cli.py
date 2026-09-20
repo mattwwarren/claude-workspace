@@ -7399,6 +7399,46 @@ class TestDevQueueStatusWithTick:
         fields = re.split(r" {2,}", row.strip())
         assert fields[-2] == "1"
 
+    def test_status_needs_attn_ignores_unhydrated_pr_task(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """NEEDS_ATTN counts hydrated attention only; the statusline's ``?N``
+        marker for un-hydrated PRs (#1672) does not leak into it."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, PrState, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-310",
+                        client="attn-client",
+                        status=QueueItemStatus.RUNNING,
+                        pr_state=PrState(attention_state="ci_failing"),
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-311",
+                        client="attn-client",
+                        status=QueueItemStatus.RUNNING,
+                        pr_state=PrState(attention_state=None),
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-312",
+                        client="attn-client",
+                        status=QueueItemStatus.COMPLETED,
+                        pr_url="https://github.com/acme/widgets/pull/7",
+                        pr_state=None,
+                    ),
+                ]
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        row = next(line for line in result.output.splitlines() if "attn-client" in line)
+        fields = re.split(r" {2,}", row.strip())
+        assert fields[-2] == "1"
+
     def test_status_json_includes_needs_attn(self, tmp_config_dir: Path) -> None:
         """dev-queue status --json exposes needs_attn per client (#929)."""
         import json as _json
@@ -7937,6 +7977,61 @@ class TestDevQueueTasksPrState:
         assert "plan_unreviewable" in human_result.output
         # A registered reason is never flagged (#2097).
         assert "?plan_unreviewable" not in human_result.output
+
+    def test_tasks_human_renders_advisory_note_when_no_blocked_reason(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """REASON falls back to advisory_note on a non-parked row (#1762).
+
+        ``blocked_reason`` is stamped only on terminal transitions, so it can
+        never carry a signal about an ordinary RUNNING row — which is exactly
+        the row an operator needs the session-id-mismatch advisory for.
+        """
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1762",
+                        client="attn-client",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="deadbeef",
+                        advisory_note="?session_mismatch",
+                    )
+                ]
+            )
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert "?session_mismatch" in result.output
+
+    def test_tasks_human_blocked_reason_wins_over_advisory_note(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A parked row renders its blocker reason, never a stale note (#1762)."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1762P",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="blocked",
+                        blocked_reason="plan_unreviewable",
+                        advisory_note="?session_mismatch",
+                    )
+                ]
+            )
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert "plan_unreviewable" in result.output
+        assert "?session_mismatch" not in result.output
 
     def test_tasks_human_flags_an_unregistered_blocked_reason(
         self, tmp_config_dir: Path

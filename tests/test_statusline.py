@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from cw.models import TicketTask
 
 _SESSION = "sess-statusline-1"
+_PR_URL = "https://github.com/acme/widgets/pull/7"
 # Loose wall-clock backstop for gross slowness (e.g. an accidental O(n^2)
 # walk in resolve_client_for_cwd's step-2 walk) — NOT the subprocess/network
 # guarantee. That guarantee now lives in each test's deterministic
@@ -90,6 +91,16 @@ def _write_clients(tmp_path: Path) -> Path:
 def _attention_task(**overrides: object) -> TicketTask:
     """A task whose hydrated PR state carries a non-null attention_state."""
     kwargs: dict[str, object] = {"pr_state": PrState(attention_state="ci_failed")}
+    kwargs.update(overrides)
+    return _make_ticket_task(**kwargs)
+
+
+def _unhydrated_task(**overrides: object) -> TicketTask:
+    """A shipped/parked task with a PR URL that ``cw.pr_hydrate`` has not seen."""
+    kwargs: dict[str, object] = {
+        "pr_url": _PR_URL,
+        "status": QueueItemStatus.COMPLETED,
+    }
     kwargs.update(overrides)
     return _make_ticket_task(**kwargs)
 
@@ -264,12 +275,18 @@ class TestStepOneFocused:
 
         assert render_work_segment(_SESSION, tmp_config_dir) == "client-a/impl 0▶ 0⧗"
 
-    def test_unhydrated_pr_state_renders_no_attention(
-        self, tmp_config_dir: Path
-    ) -> None:
-        """Documented ``!N`` staleness window: ``pr_state`` is None until the
-        async ``cw.pr_hydrate`` pass runs, so a fresh task renders ``!0`` (i.e.
-        no suffix) even if it would count once hydrated. Pinned, not fixed."""
+
+class TestUnhydratedPrMarker:
+    """#1672: ``?N`` separates "PR not hydrated yet" from "nothing needs you".
+
+    ``pr_state`` is None until the async ``cw.pr_hydrate`` pass observes a PR,
+    so a task that has shipped or parked with a ``pr_url`` reads as ``!0`` in the
+    lag window. A distinct ``?N`` suffix keeps that silence from reading as
+    health. Tasks with no ``pr_url`` have nothing to hydrate and never show it.
+    """
+
+    def test_pr_less_task_renders_no_unknown_marker(self, tmp_config_dir: Path) -> None:
+        """False-alarm guard: a fresh task has no PR, so ``!0`` is truthful."""
         _write_clients(tmp_config_dir)
         fresh = _make_ticket_task(
             ticket_id="T-1",
@@ -277,11 +294,207 @@ class TestStepOneFocused:
             lane="impl",
             status=QueueItemStatus.RUNNING,
         )
+        assert fresh.pr_url is None
         assert fresh.pr_state is None
         _seed_queue(fresh)
         set_focus(_SESSION, "client-a", "impl")
 
-        assert render_work_segment(_SESSION, tmp_config_dir) == "client-a/impl 1▶ 0⧗"
+        rendered = render_work_segment(_SESSION, tmp_config_dir)
+
+        assert rendered == "client-a/impl 1▶ 0⧗"
+        assert "?" not in rendered
+
+    def test_pr_url_without_pr_state_renders_unknown_marker(
+        self, tmp_config_dir: Path
+    ) -> None:
+        _write_clients(tmp_config_dir)
+        _seed_queue(
+            _unhydrated_task(ticket_id="T-1", client="client-a", lane="impl"),
+        )
+        set_focus(_SESSION, "client-a", "impl")
+
+        rendered = render_work_segment(_SESSION, tmp_config_dir)
+
+        assert rendered == "client-a/impl 0▶ 0⧗ ?1"
+        assert "!" not in rendered
+
+    def test_empty_string_pr_url_renders_no_unknown_marker(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Pins the truthiness gate: ``""`` is not a PR URL."""
+        _write_clients(tmp_config_dir)
+        _seed_queue(
+            _unhydrated_task(
+                ticket_id="T-1", client="client-a", lane="impl", pr_url=""
+            ),
+        )
+        set_focus(_SESSION, "client-a", "impl")
+
+        assert render_work_segment(_SESSION, tmp_config_dir) == "client-a/impl 0▶ 0⧗"
+
+    @pytest.mark.parametrize("state", ["OPEN", "MERGED", "CLOSED"])
+    def test_hydrated_pr_renders_no_unknown_marker(
+        self, tmp_config_dir: Path, state: str
+    ) -> None:
+        _write_clients(tmp_config_dir)
+        _seed_queue(
+            _unhydrated_task(
+                ticket_id="T-1",
+                client="client-a",
+                lane="impl",
+                pr_state=PrState(state=state, attention_state=None),
+            ),
+        )
+        set_focus(_SESSION, "client-a", "impl")
+
+        assert render_work_segment(_SESSION, tmp_config_dir) == "client-a/impl 0▶ 0⧗"
+
+    def test_hydrated_attention_renders_bang_only(self, tmp_config_dir: Path) -> None:
+        _write_clients(tmp_config_dir)
+        _seed_queue(
+            _attention_task(
+                ticket_id="T-1",
+                client="client-a",
+                lane="impl",
+                pr_url=_PR_URL,
+                status=QueueItemStatus.COMPLETED,
+            ),
+        )
+        set_focus(_SESSION, "client-a", "impl")
+
+        rendered = render_work_segment(_SESSION, tmp_config_dir)
+
+        assert rendered == "client-a/impl 0▶ 0⧗ !1"
+        assert "?" not in rendered
+
+    def test_mixed_counts_render_bang_then_question(self, tmp_config_dir: Path) -> None:
+        """Pins ordering (``!N`` before ``?N``) and single-space spacing."""
+        _write_clients(tmp_config_dir)
+        _seed_queue(
+            _make_ticket_task(
+                ticket_id="T-1",
+                client="client-a",
+                lane="impl",
+                status=QueueItemStatus.RUNNING,
+            ),
+            _make_ticket_task(
+                ticket_id="T-2",
+                client="client-a",
+                lane="impl",
+                status=QueueItemStatus.RUNNING,
+            ),
+            _make_ticket_task(
+                ticket_id="T-3",
+                client="client-a",
+                lane="impl",
+                status=QueueItemStatus.PENDING,
+            ),
+            _attention_task(
+                ticket_id="T-4",
+                client="client-a",
+                lane="impl",
+                pr_url=_PR_URL,
+                status=QueueItemStatus.COMPLETED,
+            ),
+            _unhydrated_task(ticket_id="T-5", client="client-a", lane="impl"),
+            _unhydrated_task(ticket_id="T-6", client="client-a", lane="impl"),
+        )
+        set_focus(_SESSION, "client-a", "impl")
+
+        assert (
+            render_work_segment(_SESSION, tmp_config_dir) == "client-a/impl 2▶ 1⧗ !1 ?2"
+        )
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            QueueItemStatus.COMPLETED,
+            QueueItemStatus.FAILED,
+            QueueItemStatus.BLOCKED_ON_USER,
+            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        ],
+    )
+    def test_unknown_marker_counts_every_terminal_status(
+        self, tmp_config_dir: Path, status: QueueItemStatus
+    ) -> None:
+        """CANCELLED is not parametrized: ``transition_task_status`` clears
+        ``pr_url`` there, so a CANCELLED task with a PR URL is unreachable."""
+        _write_clients(tmp_config_dir)
+        _seed_queue(
+            _unhydrated_task(
+                ticket_id="T-1", client="client-a", lane="impl", status=status
+            ),
+        )
+        set_focus(_SESSION, "client-a", "impl")
+
+        assert render_work_segment(_SESSION, tmp_config_dir).endswith(" ?1")
+
+    def test_client_only_focus_aggregates_unknown_across_lanes(
+        self, tmp_config_dir: Path
+    ) -> None:
+        _write_clients(tmp_config_dir)
+        _seed_queue(
+            _unhydrated_task(ticket_id="T-1", client="client-a", lane="impl"),
+            _unhydrated_task(ticket_id="T-2", client="client-a", lane="debt"),
+            _unhydrated_task(ticket_id="T-3", client="client-b"),
+        )
+        set_focus(_SESSION, "client-a")
+
+        assert render_work_segment(_SESSION, tmp_config_dir) == "client-a 0▶ 0⧗ ?2"
+
+    def test_lane_focus_scopes_unknown_count(self, tmp_config_dir: Path) -> None:
+        _write_clients(tmp_config_dir)
+        _seed_queue(
+            _unhydrated_task(ticket_id="T-1", client="client-a", lane="impl"),
+            _unhydrated_task(ticket_id="T-2", client="client-a", lane="debt"),
+        )
+        set_focus(_SESSION, "client-a", "impl")
+
+        assert render_work_segment(_SESSION, tmp_config_dir) == "client-a/impl 0▶ 0⧗ ?1"
+
+    def test_paused_lane_keeps_marker_order(self, tmp_config_dir: Path) -> None:
+        _write_clients(tmp_config_dir)
+        _seed_queue(
+            _unhydrated_task(ticket_id="T-1", client="client-a", lane="impl"),
+            _make_ticket_task(
+                ticket_id="T-2",
+                client="client-a",
+                lane="impl",
+                status=QueueItemStatus.PENDING,
+            ),
+        )
+        _pause_lane("client-a/impl")
+        set_focus(_SESSION, "client-a", "impl")
+
+        assert (
+            render_work_segment(_SESSION, tmp_config_dir)
+            == "client-a/impl PAUSED 0▶ 1⧗ ?1"
+        )
+
+    def test_unknown_marker_never_hydrates_on_render_path(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R1: the marker reports "not hydrated"; it never hydrates.
+
+        A call list rather than a raising stub: ``render_work_segment`` swallows
+        every ``Exception``, so a raise would degrade to ``""`` and fail on the
+        marker assertion for the wrong reason.
+        """
+        _assert_no_subprocess_calls(monkeypatch)
+        calls: list[str] = []
+
+        def _record(pr_url: str) -> None:
+            calls.append(pr_url)
+
+        monkeypatch.setattr("cw.pr_hydrate.fetch_pr_view", _record)
+        _write_clients(tmp_config_dir)
+        _seed_queue(
+            _unhydrated_task(ticket_id="T-1", client="client-a", lane="impl"),
+        )
+        set_focus(_SESSION, "client-a", "impl")
+
+        assert render_work_segment(_SESSION, tmp_config_dir).endswith(" ?1")
+        assert calls == []
 
 
 class TestStepOneFallsThrough:

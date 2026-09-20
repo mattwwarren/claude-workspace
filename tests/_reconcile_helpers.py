@@ -200,6 +200,24 @@ def _stage_complete_payload() -> dict[str, Any]:
     }
 
 
+def _blocked_result_payload(reason: str = "status_unknown") -> dict[str, Any]:
+    """Minimal valid parser-synthesized ``BlockedResult`` payload.
+
+    The shape ``_validate_harvest_payload`` discriminates onto ``BlockedResult``
+    rather than ``AutoDevResult``: ``status="blocked"`` with **no**
+    ``schema_version`` key (GitHub #1457). Companion to
+    :func:`_make_terminal_payload` for the AutoDevResult side.
+    """
+    return {
+        "status": "blocked",
+        "blocker": {
+            "stage": "stage2_impl",
+            "reason": reason,
+            "details": "synthetic blocked result for tests",
+        },
+    }
+
+
 def _write_salvage_transcript(
     home: Path,
     worktree: Path,
