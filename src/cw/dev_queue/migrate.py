@@ -249,6 +249,18 @@ def _fill_plan_approved_fingerprint_default(task_raw: dict[str, Any]) -> None:
         task_raw[PLAN_APPROVED_FINGERPRINT_KEY] = None
 
 
+def _fill_advisory_note_default(task_raw: dict[str, Any]) -> None:
+    """Fill advisory_note introduced in dev-queue schema v37 (GitHub #1762).
+    Idempotent.
+
+    None on every pre-v37 row: the note is a live per-tick re-derivation
+    (reconcile rewrites or clears it every tick), so there is no historical
+    value to reconstruct.
+    """
+    if "advisory_note" not in task_raw:
+        task_raw["advisory_note"] = None
+
+
 def _fill_stale_gate_default(task_raw: dict[str, Any]) -> None:
     """Fill stale_gate_detected_at/blocked_on_pr introduced in dev-queue
     schema v30 (GitHub #1713). Idempotent."""
@@ -353,6 +365,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_ever_spawned_default(task_raw)
                 _fill_plan_approved_at_default(task_raw)
                 _fill_plan_approved_fingerprint_default(task_raw)
+                _fill_advisory_note_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw

@@ -13,8 +13,6 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
-from pydantic import ValidationError
-
 from cw.auto_dev_result import AutoDevResult
 from cw.cli._base import handle_errors, main
 from cw.cli._hook_io import (
@@ -46,7 +44,7 @@ from cw.reconcile import (
     _apply_sentinel_to_task,
     _has_terminal_sentinel,
 )
-from cw.result import emit_result_locked
+from cw.result import emit_result_locked, reconstruct_staged_sentinel
 from cw.worktree import reconcile_result_scope, resolve_scope_guard_default_branch
 
 if TYPE_CHECKING:
@@ -141,24 +139,33 @@ def _verify_headless_scope(result: AutoDevResult, session: Session) -> AutoDevRe
     )
 
 
-def _reconstruct_emitted_sentinel(session: Session) -> AutoDevResult | None:
+def _reconstruct_emitted_sentinel(
+    session: Session,
+) -> AutoDevResult | BlockedResult | None:
     """Reconstruct the authoritative sentinel from an emitted ``last_result``.
 
     ``_has_terminal_sentinel`` only confirms a ``"status"`` key is present —
-    it does not guarantee the dict matches the ``AutoDevResult`` schema (e.g.
-    a stale/foreign shape). Returns ``None`` on a validation failure so the
-    caller falls back to the transcript parse instead of raising out of the
-    Stop hook, which must never block claude from exiting.
+    it does not guarantee the dict matches the schema (e.g. a stale/foreign
+    shape). Returns ``None`` on a validation failure so the caller falls back
+    to the transcript parse instead of raising out of the Stop hook, which must
+    never block claude from exiting.
+
+    #1762 redirected the body onto the shared
+    ``cw.result.reconstruct_staged_sentinel`` and widened the return type from
+    ``AutoDevResult`` alone to the full discriminated union the door itself
+    validates against: a worker can die holding a parser-synthesized
+    ``BlockedResult``, which the narrower check rejected — sending an
+    already-authoritative emitted result back through a transcript re-parse
+    that #536's emit precedence exists to skip.
     """
-    try:
-        return AutoDevResult.model_validate(session.last_result)
-    except ValidationError:
+    reconstructed = reconstruct_staged_sentinel(session.last_result)
+    if reconstructed is None:
         logger.warning(
-            "session=%s emitted last_result failed AutoDevResult validation, "
+            "session=%s emitted last_result failed sentinel validation, "
             "falling back to transcript parse",
             session.id,
         )
-        return None
+    return reconstructed
 
 
 def _handle_headless_no_sentinel() -> bool:
