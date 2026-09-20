@@ -4,12 +4,30 @@ Both ``signal-stop`` (headless DAEMON backstop) and ``dev-queue wait``
 (sentinel-aware polling) need to detect and parse the AUTO_DEV_RESULT
 sentinel inside a Claude session transcript. The logic lives here so both
 command submodules import the same implementation.
+
+GitHub #2135 adds a sibling reader to the same transcripts:
+:func:`_park_comment_posted_in_transcript` answers "did this session post its
+own park/blocker comment and then stop without emitting a sentinel?". It is a
+separate walk rather than an extension of the sentinel readers above because
+those answer a different question — ``_iter_sentinel_text_blocks``
+deliberately excludes ``tool_use`` blocks, and the reconcile package's
+``_detect_dangling_tool_use`` reports only the *unresolved* tail.
 """
 
 from __future__ import annotations
 
-from cw._util import _iter_sentinel_text_blocks, claude_project_dir
+import json
+import re
+from typing import TYPE_CHECKING, NamedTuple
+
+from cw._util import (
+    _iter_sentinel_text_blocks,
+    _iter_tool_result_text,
+    claude_project_dir,
+)
 from cw.auto_dev_result import (
+    _CLOSE_SENTINEL,
+    _OPEN_SENTINEL,
     AutoDevResult,
     BlockedResult,
     _is_placeholder_sentinel_text,
@@ -17,6 +35,11 @@ from cw.auto_dev_result import (
     is_documented_example,
     parse_stdout,
 )
+from cw.gh import is_agent_authored
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
 
 
 def _parse_sentinel_from_transcript(
@@ -82,3 +105,314 @@ def _sentinel_present_in_transcript(
     full parsed value, but the budget path only cares "did it emit?"
     """
     return _parse_sentinel_from_transcript(cwd, claude_session_id) is not None
+
+
+# The exit-only members of the pipeline fixed-header set documented in
+# ``.claude/commands/auto-dev.md``'s *Comment provenance rule*. A worker that
+# posts one of these has finished the stage and is on its way out, so a Stop
+# with no sentinel after such a post is an abandoned exit (GitHub #2135).
+# ``## Multi-Marker Gate Blocked`` (retired) and the plan-of-record post are
+# excluded on purpose: the former is historical, the latter is not an exit --
+# a session keeps working after posting it.
+_PARK_COMMENT_HEADERS: tuple[str, ...] = (
+    "## Pending Verification Scan",
+    "## Blocking Review Findings",
+    "## Operator-Actionable Review Findings",
+)
+
+# ``--body-file <path>`` as workers actually write it, with or without
+# surrounding quotes. Deliberately does NOT cover ``-F``/``-b`` short flags:
+# see :func:`_park_comment_posted_in_transcript` for the documented
+# false-negative post shapes.
+_BODY_FILE_RE = re.compile(r"--body-file[=\s]+[\"']?(\S+?)[\"']?(?:\s|$)")
+
+# The inline ``--body "<text>"`` form. Matched only to find where the body
+# starts inside the command, so the header test below can still anchor at a
+# line start. ``--body-file`` cannot match this pattern (it needs ``=`` or
+# whitespace immediately after ``--body``), and it is tried first regardless.
+_INLINE_BODY_RE = re.compile(r"--body[=\s]+[\"']?")
+
+
+class _ToolCall(NamedTuple):
+    """A tool_use block that was resolved by a later tool_result (#2135)."""
+
+    name: str
+    tool_input: dict[str, object]
+    is_error: bool
+
+
+class _LegBoundary(NamedTuple):
+    """A user re-entry record, by 0-based JSONL line index (#2135).
+
+    The field is ``line_index`` rather than ``index`` because a ``NamedTuple``
+    may not shadow ``tuple.index``.
+    """
+
+    line_index: int
+
+
+class _SentinelText(NamedTuple):
+    """One text block from the same set ``_iter_sentinel_text_blocks`` yields."""
+
+    text: str
+
+
+class _ParkPostScan(NamedTuple):
+    """Outcome of :func:`_park_comment_posted_in_transcript` (#2135).
+
+    ``posted`` -- a completed, non-error park-header comment post to this
+    ticket exists in the transcript's *current run leg*.
+    ``framing_after`` -- raw AUTO_DEV_RESULT framing text appears in a
+    sentinel-bearing block after that post; the caller must defer on it.
+    ``leg_start`` -- the JSONL line index of the last user re-entry record, or
+    ``None`` when the transcript holds none (the whole file is then the leg).
+    """
+
+    posted: bool
+    framing_after: bool
+    leg_start: int | None
+
+
+_LegEvent = _LegBoundary | _SentinelText | _ToolCall
+
+
+def _is_leg_boundary(record: dict[str, object]) -> bool:
+    """True iff *record* is a user re-entry record — the run-leg boundary.
+
+    Claude Code writes no dedicated "resume" record: a read-only survey of
+    2,456 local cw worker transcripts found every ``system`` subtype in use
+    (``stop_hook_summary``, ``turn_duration``, ``away_summary``,
+    ``scheduled_task_fire``, ``local_command``, ``bridge_status``,
+    ``informational``, ``compact_boundary``) and none of them marks one. A cw
+    re-entry (``resume_session`` passes ``--resume <claude_session_id>``)
+    lands as an ordinary ``user`` record carrying the ``Continue
+    auto-dev-<stage> …`` prompt, exactly like a ``<task-notification>`` or an
+    ``Another Claude session sent a message: …`` injection.
+
+    The discriminator is therefore "a ``user`` record that is not a pure
+    ``tool_result`` carrier": content a ``str``, or a list holding a ``text``
+    block and no ``tool_result`` block. Those 2,456 transcripts' 36,332
+    ``user`` records partition cleanly into 3,820 bare ``str``, 1,041
+    text-block-only, 31,471 tool_result-only and **0 mixed**.
+
+    This deliberately does not try to tell a resume prompt from other injected
+    user text. Over-matching is fail-safe: it only shrinks the evidence
+    window, turning a would-be park into today's defer (GitHub #2135).
+    """
+    if record.get("type") != "user":
+        return False
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return True
+    if not isinstance(content, list):
+        return False
+    has_text = False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_result":
+            return False
+        if block.get("type") == "text":
+            has_text = True
+    return has_text
+
+
+def _iter_message_records(
+    transcript_path: Path,
+) -> Iterator[tuple[int, dict[str, object]]]:
+    """Yield ``(line_index, record)`` for each message-bearing JSONL record.
+
+    Mirrors ``_iter_sentinel_text_blocks``'s tolerance (``cw/_util.py``): a
+    missing file, an ``OSError`` mid-read, a malformed line, a non-dict record
+    or a bookkeeping record with no ``message`` dict is skipped rather than
+    raised — real transcripts interleave ``attachment``,
+    ``file-history-delta``, ``last-prompt``, ``ai-title``, ``agent-name``,
+    ``mode``, ``permission-mode`` and ``atis-latch`` records freely. The line
+    index counts every line, skipped ones included, so it is a stable
+    reference into the file (GitHub #2135).
+    """
+    if not transcript_path.is_file():
+        return
+    try:
+        with transcript_path.open(encoding="utf-8", errors="replace") as handle:
+            for index, line in enumerate(handle):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if not isinstance(record.get("message"), dict):
+                    continue
+                yield index, record
+    except OSError:
+        return
+
+
+def _block_events(
+    block: dict[str, object],
+    *,
+    is_assistant: bool,
+    pending: dict[str, tuple[str, dict[str, object]]],
+) -> Iterator[_SentinelText | _ToolCall]:
+    """Yield the leg events a single content block contributes (#2135).
+
+    A ``tool_use`` block is remembered in *pending* and yields nothing — a
+    call with no result never completed, so it is never evidence. A
+    ``tool_result`` yields its own text **first** and only then the resolved
+    :class:`_ToolCall`, so a post's own result text is never counted as
+    appearing "after" that post. ``bool(block.get("is_error"))`` treats a
+    missing key as non-error, matching the real ``Write`` result shape (real
+    captures split three ways: key omitted, ``false``, ``true``).
+    """
+    block_type = block.get("type")
+    if is_assistant and block_type == "text":
+        text = block.get("text")
+        if isinstance(text, str):
+            yield _SentinelText(text)
+    elif block_type == "tool_use":
+        tool_id = block.get("id")
+        name = block.get("name")
+        tool_input = block.get("input")
+        if (
+            isinstance(tool_id, str)
+            and isinstance(name, str)
+            and isinstance(tool_input, dict)
+        ):
+            pending[tool_id] = (name, tool_input)
+    elif block_type == "tool_result":
+        for text in _iter_tool_result_text(block):
+            yield _SentinelText(text)
+        tool_use_id = block.get("tool_use_id")
+        if isinstance(tool_use_id, str):
+            call = pending.pop(tool_use_id, None)
+            if call is not None:
+                yield _ToolCall(call[0], call[1], bool(block.get("is_error")))
+
+
+def _iter_leg_events(transcript_path: Path) -> Iterator[_LegEvent]:
+    """Walk *transcript_path* once, yielding the three leg-event kinds (#2135).
+
+    Run-leg boundaries, sentinel-bearing text (the exact block set
+    ``_iter_sentinel_text_blocks`` defines: assistant ``text`` blocks and
+    ``tool_result`` content), and completed tool calls, in file order. The
+    pending-call map is cleared at every boundary so a body written before a
+    re-entry can never supply a post made after it.
+    """
+    pending: dict[str, tuple[str, dict[str, object]]] = {}
+    for index, record in _iter_message_records(transcript_path):
+        if _is_leg_boundary(record):
+            pending.clear()
+            yield _LegBoundary(index)
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        is_assistant = record.get("type") == "assistant"
+        for block in content:
+            if isinstance(block, dict):
+                yield from _block_events(
+                    block, is_assistant=is_assistant, pending=pending
+                )
+
+
+def _post_body(command: str, written: dict[str, str], ticket_id: str) -> str | None:
+    """Resolve the comment body a ``gh issue comment`` command posted.
+
+    Returns ``None`` when *command* is not a post to *ticket_id*, or when it
+    names a ``--body-file`` this transcript holds no successful ``Write`` for
+    (the body is then unknowable, so the caller fails closed). Otherwise
+    returns the written body, or the command text itself for the inline
+    ``--body "<text>"`` form.
+    """
+    if not re.search(
+        rf"\bgh\s+issue\s+comment\s+#?{re.escape(ticket_id)}(?!\w)", command
+    ):
+        return None
+    body_file = _BODY_FILE_RE.search(command)
+    if body_file is not None:
+        return written.get(body_file.group(1))
+    inline = _INLINE_BODY_RE.search(command)
+    if inline is None:
+        return command
+    return command[inline.end() :]
+
+
+def _is_park_body(body: str) -> bool:
+    """True iff *body* is an agent-authored post under a park/blocker header."""
+    if not is_agent_authored(body):
+        return False
+    return any(line.startswith(_PARK_COMMENT_HEADERS) for line in body.splitlines())
+
+
+def _park_comment_posted_in_transcript(
+    transcript_path: Path, ticket_id: str
+) -> _ParkPostScan:
+    """Scan a transcript for evidence of an abandoned exit (GitHub #2135).
+
+    The evidence is a completed, non-error ``gh issue comment <ticket_id>``
+    whose body carries both the agent provenance marker and one of
+    :data:`_PARK_COMMENT_HEADERS`, made in the transcript's **current run
+    leg** (after the last user re-entry record; with no such record the whole
+    file is the leg). Combined by the caller with "the sentinel parse returned
+    ``None``", that is a stage which announced its exit and then stopped
+    without emitting a sentinel.
+
+    ``framing_after`` additionally reports any raw ``AUTO_DEV_RESULT`` framing
+    text in a sentinel-bearing block after that post, deliberately with **no**
+    placeholder or documented-example carve-out: a frame the parser skipped or
+    discarded is exactly the case that must defer rather than be stamped with
+    a disposition that would hide the worker's real ``blocker.reason``.
+
+    Limits, all of which yield ``posted=False`` (today's defer, never a false
+    park):
+
+    * GitHub ``gh issue comment`` posts only. Linear-tracked tickets get no
+      behavior change; tracker-agnostic evidence is a follow-up.
+    * The evidence is this Claude session's transcript and only its current
+      run leg.
+    * The join is ``Write`` + a literal ``--body-file <path>``, or the inline
+      ``--body`` form. **Documented false-negative shapes:** a ``--body-file``
+      path holding an unexpanded ``$VAR``/``${VAR}``, a body assembled by a
+      shell or Python heredoc rather than a ``Write`` tool_use, the ``-F`` /
+      ``-b`` short flags, ``--repo`` placed before the issue number, and
+      ``--body-file -``. A producer-side park marker is the follow-up that
+      closes them.
+    """
+    written: dict[str, str] = {}
+    posted = False
+    framing_after = False
+    leg_start: int | None = None
+    for event in _iter_leg_events(transcript_path):
+        if isinstance(event, _LegBoundary):
+            written.clear()
+            posted = False
+            framing_after = False
+            leg_start = event.line_index
+        elif isinstance(event, _SentinelText):
+            if posted and (
+                _OPEN_SENTINEL in event.text or _CLOSE_SENTINEL in event.text
+            ):
+                framing_after = True
+        elif event.is_error:
+            continue
+        elif event.name == "Write":
+            file_path = event.tool_input.get("file_path")
+            content = event.tool_input.get("content")
+            if isinstance(file_path, str) and isinstance(content, str):
+                written[file_path] = content
+        elif event.name == "Bash":
+            command = event.tool_input.get("command")
+            if isinstance(command, str):
+                body = _post_body(command, written, ticket_id)
+                if body is not None and _is_park_body(body):
+                    posted = True
+    return _ParkPostScan(
+        posted=posted, framing_after=framing_after, leg_start=leg_start
+    )
