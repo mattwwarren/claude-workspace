@@ -81,12 +81,43 @@ this ticket already carries branch work. A fresh dispatch never reaches here.
 ```bash
 HEAD_COMMIT_AT=$(git log -1 --format=%cI HEAD)
 REGRESSED_INTO_STAGE=$(jq -r '.queue_metadata.regressed_into_stage // empty' .claude/cw-context.json 2>/dev/null)
-VERDICT=$(uv run python .claude/scripts/check_impl_guard_staleness.py \
-  --head-commit-at "$HEAD_COMMIT_AT" \
-  --comments-file /tmp/impl-comments-$CW_SESSION.json \
-  --regressed-into-stage "$REGRESSED_INTO_STAGE")
+MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+RESOLVED=""
+for candidate in "$GUARD_ROOT/.claude/scripts/check_impl_guard_staleness.py" "$HOME/.claude/scripts/check_impl_guard_staleness.py"; do
+  if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
+done
+if [ -n "$RESOLVED" ]; then
+  FOUND_VERSION=$(head -n 5 "$RESOLVED" \
+    | sed -nE 's/^#[[:space:]]*cw-script-version:[[:space:]]*([^[:space:]]*)[[:space:]]*$/\1/p' \
+    | head -n 1)
+  # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+  # (which errors, evaluates false, and would fall through to the invocation).
+  if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+    echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+    # HARD STOP: EXIT blocked with impl_failed (see bullet below); never run
+    # the script, and never fail open to the absent-from-both-locations
+    # `stale: false` short-circuit.
+    exit 3
+  else
+    VERDICT=$(uv run python "$RESOLVED" \
+      --head-commit-at "$HEAD_COMMIT_AT" \
+      --comments-file /tmp/impl-comments-$CW_SESSION.json \
+      --regressed-into-stage "$REGRESSED_INTO_STAGE")
+  fi
+fi
 ```
 (`/tmp/impl-comments-$CW_SESSION.json` is the freshly live-fetched comments array from the Orientation step in the core doc, written to a temp file before this call.)
+
+Resolution follows "Guard-script path resolution and staleness marker (#2141)" in the core doc. Two dispositions attach to it, and neither is the script's own verdict:
+
+- **Absent from both locations** (no repo-local copy, no global install): log `"check_impl_guard_staleness: script absent, skipped"` in `friction_highlights` and treat as `stale: false` — the unchanged fail-open short-circuit. A missing file coincidentally exits 2 as well, but it is not an unparseable timestamp and must not be filed as one.
+- **Candidate found but its marker is missing or below minimum:** do NOT run it and do NOT fail open — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Pre-Stage Detector Guard: HEADLESS BLOCK — check_impl_guard_staleness.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP.
+
+**This file-staleness check is a distinct, earlier gate from the script's own `stale` output field.** The marker answers "is this copy of the script current?"; the verdict's `stale: true/false` answers "have the impl comments moved past HEAD?". A stale *script* can produce a confidently wrong *verdict*, which is exactly why the marker gate runs first and blocks rather than feeding the verdict downstream. Do not conflate the two.
 
 `REGRESSED_INTO_STAGE` reads `.claude/cw-context.json` → `queue_metadata.regressed_into_stage` (written by `spawn_create_impl` from `TicketTask.regressed_into_stage`, `src/cw/spawn.py`). A non-empty value means THIS impl-stage entry was reached via `_stage_regress` — the operator's `cw dev-queue requeue <T> --regress --stage impl`, or the FINALIZE self-heal regress — an explicit external assertion that the stage is NOT actually complete. It is a **per-arrival** signal (cleared by dispatch the moment this session was spawned, `src/cw/dispatch/claim.py`), deliberately distinct from `TicketTask.regress_attempts` (a cumulative, never-reset-on-advance counter bounding the FINALIZE self-heal cap, which would otherwise misfire on every later IMPL entry after a single regress anywhere in the ticket's history, #1794). A missing/unreadable `queue_metadata` reads as empty, not an error. **Known limitation:** the marker is consumed and cleared at spawn time, so a session that dies before acting on it loses the regress signal; the comment-staleness check above is the backstop, but a bare `--regress` with no accompanying comment would not be caught. #1801 evaluated making the marker survive a no-sentinel death and rejected it (would fragment the shared `_stage_regress` seam and reintroduce the same gap at Orientation's early `blocked` exit) — an accepted, documented limitation, not an oversight.
 
