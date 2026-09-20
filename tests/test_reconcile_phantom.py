@@ -4312,6 +4312,82 @@ def test_detect_phantom_routes_staged_blocked_result(
     assert isinstance(candidates[0].routed_sentinel, BlockedResult)
 
 
+def test_user_origin_phantom_with_terminal_result_completes_without_queue_write(
+    tmp_config_dir: Path,
+) -> None:
+    """#1762: the routing branch is deliberately not DAEMON-gated, and is safe.
+
+    A USER session is named ``client/purpose``; ``ticket_id_for_session`` only
+    resolves ``auto-dev/<id>`` names, so its routed candidate carries no
+    ``ticket_id`` and ``_apply_phantom_routed_mutations`` never reaches
+    ``_apply_sentinel_to_task`` -- the dev queue stays byte-identical even when
+    a RUNNING row shares the payload's ticket. The completion is still recorded
+    with the accurate reason: the session demonstrably emitted a terminal
+    result, so NORMAL rather than the CRASHED the ``CRASH_COMPLETE`` fallback
+    (pinned by ``test_detect_phantom_candidates_user_origin_crash_no_ticket``)
+    would have stamped over it.
+    """
+    from cw.config import dev_queue_file
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile.phantom import _apply_phantom_routed_mutations
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "ph-1762-user"
+    sess = Session(
+        id="phantom-user-terminal",
+        name="client-a/impl",  # no auto-dev/ prefix → no ticket_id
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.USER,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        surface_ref="dead-ref",
+        started_at=started_at,
+        last_result=payload,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="ph-1762-user",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sess.id,
+                )
+            ]
+        )
+    )
+    queue_before = dev_queue_file().read_bytes()
+
+    now = started_at + timedelta(hours=1)
+    candidates = _detect_phantom_candidates(state, phantom_set={sess.id}, now=now)
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+    assert candidates[0].ticket_id is None
+
+    phantom_names: list[str] = []
+    accepted = _apply_phantom_routed_mutations(
+        {sess.id: sess}, candidates, now=now, phantom_names=phantom_names
+    )
+
+    assert accepted == candidates
+    assert sess.status == SessionStatus.COMPLETED
+    assert sess.completed_reason == CompletionReason.NORMAL
+    assert sess.reap_reason == ReapReason.PHANTOM_SURFACE
+    routed = candidates[0].routed_sentinel
+    assert routed is not None
+    assert sess.last_result == routed.model_dump(mode="json")
+    assert phantom_names == [sess.name]
+    # The queue was never touched: the RUNNING row is unchanged.
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "ph-1762-user")
+    assert task.status == QueueItemStatus.RUNNING
+    assert dev_queue_file().read_bytes() == queue_before
+
+
 def test_detect_phantom_already_refused_terminal_result_falls_through(
     tmp_config_dir: Path,
 ) -> None:
