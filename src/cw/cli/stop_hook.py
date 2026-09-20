@@ -13,6 +13,7 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw._util import claude_project_dir
 from cw.auto_dev_result import AutoDevResult
 from cw.cli._base import handle_errors, main
 from cw.cli._hook_io import (
@@ -20,7 +21,10 @@ from cw.cli._hook_io import (
     _read_hook_stdin_json,
     _write_cw_context_locked,
 )
-from cw.cli._sentinels import _parse_sentinel_from_transcript
+from cw.cli._sentinels import (
+    _park_comment_posted_in_transcript,
+    _parse_sentinel_from_transcript,
+)
 from cw.config import (
     load_state,
     save_state,
@@ -43,6 +47,7 @@ from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
     _apply_sentinel_to_task,
     _has_terminal_sentinel,
+    _route_stopped_without_sentinel,
 )
 from cw.result import emit_result_locked, reconstruct_staged_sentinel
 from cw.worktree import reconcile_result_scope, resolve_scope_guard_default_branch
@@ -184,6 +189,44 @@ def _handle_headless_no_sentinel() -> bool:
     return True
 
 
+def _park_if_abandoned(
+    session: Session,
+    cwd_value: str,
+    claude_session_id: object,
+    ticket_id_value: object,
+) -> None:
+    """Park the ticket's row when this Stop looks like an abandoned exit (#2135).
+
+    Called only after the sentinel parse has already returned ``None``. The
+    evidence added here is the session's own transcript: a completed,
+    non-error park/blocker comment post to this ticket inside the current run
+    leg, with **no** raw ``AUTO_DEV_RESULT`` framing text after it. That
+    conjunction is the operator's binding "no sentinel landed" — a truncated,
+    unpaired, placeholder or #1692-discarded frame defers exactly as today.
+
+    The transcript is resolved the same two ways ``_parse_headless_sentinel``
+    resolves it: the hook's ``cwd`` first, then the session's recorded
+    ``worktree_path`` (issue #799, for an EnterWorktree-shifted cwd). A
+    missing Claude session id, a missing ticket id, or no readable transcript
+    in either location means "no evidence" — defer.
+    """
+    if not isinstance(ticket_id_value, str) or not ticket_id_value:
+        return
+    if not isinstance(claude_session_id, str) or not claude_session_id:
+        return
+    search_dirs = [cwd_value]
+    if session.worktree_path is not None:
+        search_dirs.append(str(session.worktree_path))
+    for search_dir in search_dirs:
+        transcript_path = claude_project_dir(search_dir) / f"{claude_session_id}.jsonl"
+        if not transcript_path.is_file():
+            continue
+        scan = _park_comment_posted_in_transcript(transcript_path, ticket_id_value)
+        if scan.posted and not scan.framing_after:
+            _route_stopped_without_sentinel(ticket_id_value, session)
+        return
+
+
 def _harvest_last_result_through_door(
     session_id: str, sentinel: AutoDevResult | BlockedResult
 ) -> None:
@@ -258,8 +301,11 @@ def _resolve_and_complete_headless_session(
 
     Returns a ``_HeadlessResolution`` with ``rescued=None`` when the caller
     must bail without any further action: either no sentinel was found
-    (``_handle_headless_no_sentinel`` defers unconditionally — there is no
-    wall-clock budget anymore),
+    (``_handle_headless_no_sentinel`` defers — there is no wall-clock budget
+    anymore — unconditionally *unless* ``_park_if_abandoned`` finds
+    producer-side evidence of an abandoned exit in the transcript, #2135, in
+    which case the ticket's row is parked BLOCKED_ON_USER while the session
+    itself is still left untouched),
     or the shared staged-advance authority refused the route on a stage
     mismatch (GitHub #1031, the #986 incident — extends #1019's phantom-path
     guard to the Stop-hook path). A stage-mismatch refusal leaves session and
@@ -296,6 +342,7 @@ def _resolve_and_complete_headless_session(
         )
         if parsed_sentinel is None:
             _handle_headless_no_sentinel()
+            _park_if_abandoned(session, cwd_value, claude_session_id, ticket_id_value)
             return _HeadlessResolution(rescued=None, landed_terminal=False)
 
     # Issue #251: directly update the dev-queue task *before* marking the
