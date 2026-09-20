@@ -45,9 +45,12 @@ from cw.models import (
 )
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
+    _DANGLING_TOOL_USE_REASON,
     _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON,
     _LIVE_STATUSES,
     _SESSION_UNRESPONSIVE_REASON,
+    DanglingToolUseEvidence,
+    _detect_dangling_tool_use,
     _has_terminal_sentinel,
     _transcript_age_seconds,
     _unresolved_subagent_spawn_age_seconds,
@@ -112,6 +115,13 @@ class LivenessCandidate:
     # breadcrumb names. Precomputed from config here for the same reason
     # next_renotify_eligible_at is: the act phase takes no config.
     spawn_deadline_minutes: int | None = None
+    # #1482 — the unresolved, non-subagent tool_use evidence explaining this
+    # session's quietness, or None when there is none (or when it doesn't
+    # apply). Computed only when spawn_age is None (mirrors
+    # spawn_deadline_minutes' own gating) -- an outstanding subagent spawn is
+    # #2012's/#1969's domain, never this one's, so the two fields are
+    # mutually exclusive by construction.
+    dangling_tool_use: DanglingToolUseEvidence | None = None
     elapsed_seconds: float = 0.0
     # RFC 0008 W2 re-fire cadence (#1858). Set only when distress is True; the
     # future timestamp both stamped onto Session.liveness_attention_next_eligible_at
@@ -258,6 +268,14 @@ def _detect_liveness_candidates(
             if distress_base
             else None
         )
+        # #1482 — only scanned when no outstanding subagent spawn explains
+        # the quietness (spawn_age is None); an outstanding spawn is #2012's
+        # domain regardless of what else is in the transcript.
+        dangling_tool_use = (
+            _detect_dangling_tool_use(session)
+            if distress_base and spawn_age is None
+            else None
+        )
         deadline_seconds = config.fix_loop_await_deadline_minutes * _SECONDS_PER_MINUTE
         deadline_exceeded = spawn_age is not None and spawn_age >= deadline_seconds
         distress = distress_base and (spawn_age is None or deadline_exceeded)
@@ -291,6 +309,7 @@ def _detect_liveness_candidates(
                 ),
                 elapsed_seconds=(now - session.started_at).total_seconds(),
                 next_renotify_eligible_at=next_renotify_eligible_at,
+                dangling_tool_use=dangling_tool_use,
             )
         )
     return candidates
@@ -299,12 +318,17 @@ def _detect_liveness_candidates(
 def _distress_signal_text(candidate: LivenessCandidate) -> tuple[str, str]:
     """Return the ``(paused_status, breadcrumbs)`` pair for a distress fire.
 
-    Two shapes, discriminated by ``spawn_deadline_minutes`` (#2012):
+    Three shapes:
 
-    * **No outstanding subagent spawn** — the historical
-      ``session_unresponsive`` signal, byte-identical to its pre-#2012 text so
-      existing consumers and operator muscle memory are undisturbed.
-    * **An outstanding spawn past its deadline** —
+    * **An unresolved, non-subagent tool_use at the transcript tail** (#1482)
+      — ``dangling_tool_use``, naming the tool (and, when available, a
+      redacted command snippet) most commonly an orphaned permission prompt
+      no headless session can answer.
+    * **No outstanding subagent spawn and no dangling tool_use** — the
+      historical ``session_unresponsive`` signal, byte-identical to its
+      pre-#2012 text so existing consumers and operator muscle memory are
+      undisturbed.
+    * **An outstanding spawn past its deadline** (#2012) —
       ``fix_loop_await_deadline_exceeded``, naming both how long the spawn has
       been unresolved and the deadline it blew. R3's bar for this deadline was
       that it "knows what it is waiting for and can name what failed"; a
@@ -312,12 +336,24 @@ def _distress_signal_text(candidate: LivenessCandidate) -> tuple[str, str]:
       differs (chase a dispatch that produced no subagent, vs. a session that
       simply went quiet).
 
-    Both are signal-only: the session is left running either way (ADR-0014).
+    The first and third are mutually exclusive by construction --
+    ``dangling_tool_use`` is only computed when ``spawn_age`` (and therefore
+    ``spawn_deadline_minutes``) is ``None`` -- so checking ``dangling_tool_use``
+    first cannot shadow the deadline branch. All three are signal-only: the
+    session is left running either way (ADR-0014).
     """
     common = (
         f"transcript flat {candidate.stale_minutes:.0f}m at stage "
         f"{candidate.stage.value}; elapsed {candidate.elapsed_seconds:.0f}s"
     )
+    if candidate.dangling_tool_use is not None:
+        evidence = candidate.dangling_tool_use
+        snippet = f" ({evidence.command_snippet})" if evidence.command_snippet else ""
+        return (
+            _DANGLING_TOOL_USE_REASON,
+            f"{common}; no sentinel, no pending subagent; unresolved "
+            f"{evidence.tool_name} call{snippet}; session left running",
+        )
     deadline_minutes = candidate.spawn_deadline_minutes
     if deadline_minutes is None:
         return (

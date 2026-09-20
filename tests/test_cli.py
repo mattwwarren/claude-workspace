@@ -53,6 +53,7 @@ from tests.conftest import (
     _make_daemon_session,
     _make_tick_summary,
     _write_project_config_yaml,
+    _write_stop_hook_transcript,
     stub_fetch_plan,
 )
 from tests.test_result import _valid_payload
@@ -1572,27 +1573,6 @@ class TestSignalStop:
         # daemon.stop must NOT have been called.
         assert daemon.stop_calls == []
 
-    def _write_transcript(
-        self,
-        worktree: Path,
-        claude_session_id: str,
-        assistant_text: str,
-        home: Path,
-    ) -> None:
-        encoded = str(worktree).replace("/", "-").replace(".", "-")
-        project_dir = home / ".claude" / "projects" / encoded
-        project_dir.mkdir(parents=True, exist_ok=True)
-        record = {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": assistant_text}],
-            },
-        }
-        (project_dir / f"{claude_session_id}.jsonl").write_text(
-            json.dumps(record) + "\n"
-        )
-
     def _setup_headless_session(
         self,
         tmp_path: Path,
@@ -1662,8 +1642,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-251-no-op"
         fake_home = tmp_path / "fake-home-no-op"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_NO_OP, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_NO_OP
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -1751,8 +1731,8 @@ class TestSignalStop:
         # transcript's no_op outcome instead.
         claude_session_id = "uuid-536-emit"
         fake_home = tmp_path / "fake-home-536-emit"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_NO_OP, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_NO_OP
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -1852,8 +1832,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-536-malformed"
         fake_home = tmp_path / "fake-home-536-malformed"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_NO_OP, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_NO_OP
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -1922,8 +1902,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-316-premises"
         fake_home = tmp_path / "fake-home-316-premises"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_316_PREMISES_PENDING_V2, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_316_PREMISES_PENDING_V2
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -1986,8 +1966,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-316-ambiguities"
         fake_home = tmp_path / "fake-home-316-ambiguities"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_316_AMBIGUITIES_PENDING_V2, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_316_AMBIGUITIES_PENDING_V2
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2051,8 +2031,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-251-vf-under"
         fake_home = tmp_path / "fake-home-vf-under"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2129,8 +2109,8 @@ class TestSignalStop:
         # sessions.py ~:731-737) or the hook is dropped before it's parsed.
         claude_session_id = "sfref-251-vfcap-uuid"
         fake_home = tmp_path / "fake-home-vf-cap"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2202,8 +2182,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-251-blocked-retry"
         fake_home = tmp_path / "fake-home-blocked-retry"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_BLOCKED_RETRY
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2266,8 +2246,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-251-blocked-no-retry"
         fake_home = tmp_path / "fake-home-blocked-no-retry"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_251_BLOCKED_NO_RETRY, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_251_BLOCKED_NO_RETRY
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2340,8 +2320,8 @@ class TestSignalStop:
         # Stale hook from session1: UUID starts with "prev0001", not "next0002".
         stale_claude_id = "prev0001-old-session1-uuid"
         fake_home = tmp_path / "fake-home-285-guard"
-        self._write_transcript(
-            worktree, stale_claude_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, stale_claude_id, _SENTINEL_251_BLOCKED_RETRY
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2480,8 +2460,8 @@ class TestSignalStop:
 
         s1_claude_id = "aabb1100-session1-full-uuid"
         fake_home = tmp_path / "fake-home-285-seq"
-        self._write_transcript(
-            worktree, s1_claude_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, s1_claude_id, _SENTINEL_251_BLOCKED_RETRY
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -2551,7 +2531,9 @@ class TestSignalStop:
 
         # === Attempt 2: session2 ships ===
         s2_claude_id = "ccdd2200-session2-full-uuid"
-        self._write_transcript(worktree, s2_claude_id, _SENTINEL_285_SHIPPED, fake_home)
+        _write_stop_hook_transcript(
+            fake_home, worktree, s2_claude_id, _SENTINEL_285_SHIPPED
+        )
 
         r2 = self._invoke_signal_stop(
             runner,
@@ -2614,7 +2596,9 @@ class TestSignalStop:
 
         claude_session_id = f"uuid-918-{name}"
         fake_home = tmp_path / f"fake-home-918-{name}"
-        self._write_transcript(worktree, claude_session_id, sentinel_text, fake_home)
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, sentinel_text
+        )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
@@ -2853,8 +2837,8 @@ class TestSignalStop:
         # guard short-circuiting on surface_ref=None.
         claude_session_id = "sfref-1031-mismatch-uuid"
         fake_home = tmp_path / "fake-home-1031-mismatch"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
@@ -2892,23 +2876,28 @@ class TestSignalStop:
         assert events == []
         assert daemon.stop_calls == []
 
-    def test_signal_stop_race_already_failed_task_does_not_complete_session(
+    def test_signal_stop_race_already_failed_task_completes_and_emits_race_event(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """GitHub #1189: a task raced to FAILED by a concurrent caller must not
-        be completed by signal_stop (R5 mandatory, the Stop-hook symmetric
-        case).
+        """GitHub #1692: a task raced to FAILED by a concurrent caller must now
+        complete the leaked session (supersedes #1189's opposite assertion).
 
         Mirrors ``test_signal_stop_stage_mismatch_does_not_orphan_task_or_
         complete_session`` structurally, except the dev-queue task is already
         FAILED/abandoned with a matching session_id (instead of advanced to
         REVIEW) by the time signal_stop's own lookup runs, while the Stop-
-        hook's own transcript carries an ordinary successful sentinel. The
-        lookup-miss race (R3(a)) must report routed=False just like a stage
-        mismatch: session and task both left exactly as they were.
+        hook's own transcript carries an ordinary successful sentinel. Unlike
+        the stage-mismatch case -- where a still-advancing worker may
+        legitimately produce a later matching-stage sentinel -- a task raced
+        to a genuinely terminal status under this exact session_id will never
+        be given another leg by any dispatch path, so completing the session
+        here is safe: it stops the leaked DAEMON worker instead of leaving it
+        orphaned until the wall-clock reaper notices. The task row itself
+        stays byte-for-byte unchanged -- this fix only unblocks the session
+        side.
         """
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
@@ -2947,8 +2936,8 @@ class TestSignalStop:
         # short-circuiting on surface_ref=None.
         claude_session_id = "sfref-1189-race-uuid"
         fake_home = tmp_path / "fake-home-1189-race"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
@@ -2970,20 +2959,30 @@ class TestSignalStop:
         assert result.exit_code == 0, result.output
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
-        assert updated.status != SessionStatus.COMPLETED
+        assert updated.status == SessionStatus.COMPLETED
 
+        # Task-side invariants are untouched -- this fix only unblocks the
+        # session side of the race.
         task = next(
             t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
         )
         assert task.status == QueueItemStatus.FAILED
         assert task.disposition == "abandoned"
 
-        events = read_events(
+        completed_events = read_events(
             consumer="test-1189-race",
             event_types=[OrchestratorEventType.SESSION_COMPLETED],
         )
-        assert events == []
-        assert daemon.stop_calls == []
+        assert len(completed_events) == 1
+        assert completed_events[0].payload["task_already_terminal"] is True
+
+        race_miss_events = read_events(
+            consumer="test-1189-race-miss",
+            event_types=[OrchestratorEventType.SENTINEL_RACE_MISS],
+        )
+        assert len(race_miss_events) == 1
+
+        assert daemon.stop_calls == ["sfref-1189-race"]
 
     def test_signal_stop_schema_version_unsupported_marks_failed(
         self,
@@ -3028,11 +3027,11 @@ class TestSignalStop:
         # sessions.py ~:731-737) or the hook is dropped before it's parsed.
         claude_session_id = "sfref-263-schema-uuid"
         fake_home = tmp_path / "fake-home-263-schema-unsupported"
-        self._write_transcript(
+        _write_stop_hook_transcript(
+            fake_home,
             worktree,
             claude_session_id,
             _SENTINEL_263_SCHEMA_VERSION_UNSUPPORTED,
-            fake_home,
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -3158,8 +3157,8 @@ class TestSignalStop:
         # sessions.py ~:731-737) or the hook is dropped before it's parsed.
         claude_session_id = "sfref-catchall-uuid"
         fake_home = tmp_path / "fake-home-catchall"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_918_MALFORMED, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_918_MALFORMED
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -3234,11 +3233,8 @@ class TestSignalStop:
         # Transcript lives under the DISPATCH worktree's project dir.
         claude_session_id = "uuid-799-fallback"
         fake_home = tmp_path / "fake-home-799"
-        self._write_transcript(
-            worktree,
-            claude_session_id,
-            _SENTINEL_285_SHIPPED,
-            fake_home,
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_285_SHIPPED
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
@@ -3324,8 +3320,8 @@ class TestSignalStop:
 
         claude_session_id = "uuid-1149-later"
         fake_home = tmp_path / "fake-home-1149-later"
-        self._write_transcript(
-            worktree, claude_session_id, _SENTINEL_1149_LATER_STAGE_BLOCKED, fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, claude_session_id, _SENTINEL_1149_LATER_STAGE_BLOCKED
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
@@ -3436,27 +3432,6 @@ class TestSentinelPresentInTranscript:
     See GitHub issue #176 Layer 1.
     """
 
-    def _write_transcript(
-        self,
-        worktree: Path,
-        claude_session_id: str,
-        assistant_text: str,
-        home: Path,
-    ) -> None:
-        encoded = str(worktree).replace("/", "-").replace(".", "-")
-        project_dir = home / ".claude" / "projects" / encoded
-        project_dir.mkdir(parents=True, exist_ok=True)
-        record = {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": assistant_text}],
-            },
-        }
-        (project_dir / f"{claude_session_id}.jsonl").write_text(
-            json.dumps(record) + "\n"
-        )
-
     def test_returns_true_when_sentinel_embedded_in_jsonl_assistant_text(
         self,
         tmp_path: Path,
@@ -3483,7 +3458,9 @@ class TestSentinelPresentInTranscript:
             "AUTO_DEV_RESULT>>>\n"
             "```\n"
         )
-        self._write_transcript(worktree, "uuid-with-sentinel", sentinel_text, fake_home)
+        _write_stop_hook_transcript(
+            fake_home, worktree, "uuid-with-sentinel", sentinel_text
+        )
 
         assert _sentinel_present_in_transcript(str(worktree), "uuid-with-sentinel")
 
@@ -3554,8 +3531,8 @@ class TestSentinelPresentInTranscript:
 
         worktree = tmp_path / "wt" / "auto-dev-200"
         worktree.mkdir(parents=True)
-        self._write_transcript(
-            worktree, "uuid-empty", "Plain status update, no sentinel here.", fake_home
+        _write_stop_hook_transcript(
+            fake_home, worktree, "uuid-empty", "Plain status update, no sentinel here."
         )
 
         assert not _sentinel_present_in_transcript(str(worktree), "uuid-empty")
@@ -4065,6 +4042,10 @@ class TestParseSentinelFromTranscript:
         home: Path,
         extra_records: list[dict[str, object]] | None = None,
     ) -> None:
+        # Not the shared _write_stop_hook_transcript: this one can prefix the
+        # final assistant record with arbitrary extra JSONL records (see the
+        # extra_records=[example_record] call below), a genuinely different
+        # shape than that helper's single-record write.
         encoded = str(worktree).replace("/", "-").replace(".", "-")
         project_dir = home / ".claude" / "projects" / encoded
         project_dir.mkdir(parents=True, exist_ok=True)
@@ -5937,33 +5918,26 @@ class TestPeek:
         save_state(state)
         return session
 
+    @staticmethod
     def _write_transcript(
-        self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         session: Session,
         text: str,
     ) -> None:
-        """Place a Claude-shaped transcript holding one assistant text block.
+        """Place a Claude-shaped transcript for *session* and patch Path.home.
 
-        Patches ``Path.home`` so ``claude_project_dir`` resolves under the
-        tmp tree rather than the real ``~/.claude/projects``.
+        Delegates the actual record write to the shared
+        ``_write_stop_hook_transcript`` (same single-assistant-record shape);
+        this wrapper only adds what every caller here needs on top of it --
+        deriving the cwd from *session* and patching ``Path.home`` so
+        ``claude_project_dir`` resolves under the tmp tree.
         """
         fake_home = tmp_path / "fake-home"
         cwd = session.worktree_path or session.workspace_path
-        encoded = str(cwd).replace("/", "-").replace(".", "-")
-        transcript_dir = fake_home / ".claude" / "projects" / encoded
-        transcript_dir.mkdir(parents=True, exist_ok=True)
-        record = {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": text}],
-            },
-        }
-        (transcript_dir / f"{session.claude_session_id}.jsonl").write_text(
-            json.dumps(record) + "\n"
-        )
+        claude_session_id = session.claude_session_id
+        assert claude_session_id is not None
+        _write_stop_hook_transcript(fake_home, cwd, claude_session_id, text)
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
     @staticmethod
@@ -9003,29 +8977,6 @@ class TestDevQueueWaitSentinelAware:
         "AUTO_DEV_RESULT>>>"
     )
 
-    def _write_transcript(
-        self,
-        worktree: Path,
-        claude_session_id: str,
-        assistant_text: str,
-        fake_home: Path,
-    ) -> Path:
-        """Write a transcript JSONL file and return the transcript path."""
-
-        encoded = str(worktree).replace("/", "-").replace(".", "-")
-        project_dir = fake_home / ".claude" / "projects" / encoded
-        project_dir.mkdir(parents=True, exist_ok=True)
-        record = {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": assistant_text}],
-            },
-        }
-        transcript = project_dir / f"{claude_session_id}.jsonl"
-        transcript.write_text(json.dumps(record) + "\n")
-        return transcript
-
     def _seed_running_task(
         self,
         ticket_id: str,
@@ -9088,7 +9039,7 @@ class TestDevQueueWaitSentinelAware:
 
         session_id = "sess535a"
         csid = "uuid-535a-csid-set-1234"
-        self._write_transcript(worktree, csid, self._SHIPPED_SENTINEL, fake_home)
+        _write_stop_hook_transcript(fake_home, worktree, csid, self._SHIPPED_SENTINEL)
         self._seed_running_task("GEN-535", session_id)
 
         session = self._make_running_session(
@@ -9142,7 +9093,7 @@ class TestDevQueueWaitSentinelAware:
         sentinel_text = self._SHIPPED_SENTINEL.replace(
             '"status": "shipped"', '"status": "merge_pending"'
         )
-        self._write_transcript(worktree, csid, sentinel_text, fake_home)
+        _write_stop_hook_transcript(fake_home, worktree, csid, sentinel_text)
         self._seed_running_task("GEN-899", session_id)
 
         session = self._make_running_session(
@@ -9203,7 +9154,7 @@ class TestDevQueueWaitSentinelAware:
                 '"pr": null',
             )
         )
-        self._write_transcript(worktree, csid, sentinel_text, fake_home)
+        _write_stop_hook_transcript(fake_home, worktree, csid, sentinel_text)
         self._seed_running_task("GEN-699", session_id)
 
         # Non-native surface_ref keeps Step 5's roster probe out of play.
@@ -9270,8 +9221,8 @@ class TestDevQueueWaitSentinelAware:
         csid = f"{surface_ref}-longer-uuid-suffix"
 
         # Transcript written AFTER session.started_at so the mtime guard passes.
-        transcript = self._write_transcript(
-            worktree, csid, self._SHIPPED_SENTINEL, fake_home
+        transcript = _write_stop_hook_transcript(
+            fake_home, worktree, csid, self._SHIPPED_SENTINEL
         )
         # Ensure mtime is fresh (after started_at = epoch).
         import os
@@ -9905,7 +9856,7 @@ class TestDevQueueWaitSentinelAware:
 
         session_id = "sess535f"
         csid = "uuid-535f"
-        self._write_transcript(worktree, csid, self._SHIPPED_SENTINEL, fake_home)
+        _write_stop_hook_transcript(fake_home, worktree, csid, self._SHIPPED_SENTINEL)
         self._seed_running_task("GEN-535F", session_id)
 
         session = self._make_running_session(

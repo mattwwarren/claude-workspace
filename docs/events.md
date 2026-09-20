@@ -684,6 +684,18 @@ open enum; consumers MUST tolerate unknown values. Known values:
   deadline stops suppressing a signal, it never dispositions anything
   (ADR-0014). `breadcrumbs` carries stale minutes, stage, elapsed seconds, how
   long the spawn has been unresolved, and the deadline it blew.
+- `"dangling_tool_use"` — the same liveness-sweep distress path, for the
+  case where the session's quietness IS explained by an unresolved,
+  non-subagent tool_use at the transcript tail (e.g. `Bash`) with no
+  matching `tool_result` — most commonly an interactive permission prompt
+  no headless session can answer (#1482). `Agent`/`Task` tool_use is
+  explicitly excluded (#1969: `PostToolUse:Agent` fires at launch-return,
+  not completion, so a transcript-pairing check would false-fire against a
+  still-outstanding subagent spawn — that case is
+  `fix_loop_await_deadline_exceeded`'s domain instead). Signal-only exactly
+  as its siblings are — nothing is disposed (ADR-0014). `breadcrumbs`
+  carries stale minutes, stage, elapsed seconds, the unresolved tool's
+  name, and a truncated, secret-redacted command snippet when available.
 - `"silently_idle"` — *historical (ADR-0014)*: the idle watchdog's park.
   No longer produced; may exist on old rows/logs.
 - `"needs_salvage"` — *historical (ADR-0014)*: the git-state salvage LOW
@@ -792,14 +804,20 @@ open enum; consumers MUST tolerate unknown values. Known values:
   Deliberately REVIEW-scoped: `local_runner.synthesize_git_result` hardcodes
   the same recommendation on its IMPL success path as an honest "I am not a
   reviewer" default (#1580), which is not a degraded-review signal and must
-  keep auto-advancing. `breadcrumbs` empty. Operator recovery is to re-run
-  review — `cw dev-queue requeue` (or `cw dev-queue drain`, which selects this
+  keep auto-advancing. `breadcrumbs` empty — the per-reviewer rationale
+  instead reaches the operator via the sentinel's `friction_highlights` and
+  `health.agent_health_summary` (#2094), plus the on-disk diagnostics bundle
+  each reviewer document is persisted to on every run
+  (`src/cw/codex_review/_roles.py`). Operator recovery is to re-run review —
+  `cw dev-queue requeue` (or `cw dev-queue drain`, which selects this
   disposition); `cw dev-queue approve` deliberately fails closed here, because
   there is nothing shippable to authorize until review is re-run. See #1702.
-  As of #1856, a Test-Reviewer-only `status="degraded"` document — the
-  read-only-sandbox tax (Test Reviewer can never start pytest under codex
-  review's read-only sandbox) — no longer triggers this park; see
-  `_derive_health` in `src/cw/codex_review/_verdict.py`.
+  As of #1856 (widened by #2174), a `status="degraded"` document from one of
+  the three read-only-sandbox-exempt roles (Test Reviewer, Code Quality
+  Reviewer, SysAdmin Reviewer) — the read-only-sandbox tax (none of these
+  roles can complete their rubric under codex review's read-only sandbox) —
+  no longer triggers this park; see `_derive_health` in
+  `src/cw/codex_review/_verdict/_health.py`.
 - `"codex_must_fix_mechanically_rejected"` — Rule 5: a `blocked` sentinel whose
   `blocker.reason` is `codex_must_fix_mechanically_rejected`. Review produced a
   MUST_FIX finding, but `review_findings`' validation dropped it before
@@ -1312,6 +1330,58 @@ gate on `_route_staged_decision`'s `False` return skip `save_dev_queue`
 entirely. The row stays in whatever status it holds (`RUNNING`,
 `BLOCKED_ON_USER`, or `AWAITING_OPERATOR_SIGNOFF`) and remains routable by
 the next legitimate sentinel or operator action.
+
+`correlation_id` is the `ticket_id`.
+
+### `sentinel.race_miss`
+
+**Emitter:** `_apply_sentinel_to_task` (`cw.reconcile._shared`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str | null>",
+  "session_id": "<str>",
+  "excluded_status": "<str | null>"
+}
+```
+**Semantics:** GitHub #1692. `_apply_sentinel_to_task`'s task lookup matches a
+same-ticket/session task, but that task's status is already outside
+`OCCUPIED_LANE_STATUSES` — a concurrent caller (most plausibly a reconcile
+idle/phantom sweep salvaging the same emitted sentinel via
+`ROUTE_EMITTED_SENTINEL`) already landed the task terminal while this call's
+own lookup was blocked on `dev_queue_lock()`. `excluded_status` is the raced
+task's status at the moment of the miss (e.g. `failed`, `completed`). `client`
+is the raced task's `client` field, matching the sibling
+`session.sentinel_liveness_vetoed` payload below.
+
+Round-2 (#1692): this event fires **only** when `excluded_status` is
+genuinely terminal (`COMPLETED`, `FAILED`, or `CANCELLED` — the same
+`_GENUINELY_TERMINAL_QUEUE_STATUSES` set that gates `task_already_terminal`
+on `SentinelRouteOutcome`). A non-terminal excluded match (`PENDING`) is
+redispatch-eligible, not a race, and emits nothing — only the `WARNING` log
+line fires for it.
+
+Sibling to `sentinel.stage_mismatch` above (same emitter family, same
+"a `routed=False` refusal needs a durable trace, not just a log line"
+purpose), but a distinct cause and a distinct caller obligation: a
+stage-mismatch refusal must leave the session untouched (a still-advancing
+worker may legitimately produce a later, matching-stage sentinel), while a
+raced-to-terminal task will never be given another leg by any dispatch path
+under this exact `session_id` — so the Stop-hook call site
+(`cw.cli.stop_hook`) completes the now-leaked session on this cause instead
+of leaving it orphaned until the wall-clock reaper notices. This event is
+therefore a diagnostic trail of *why* the session was auto-healed, not an
+operator page — like `sentinel.stage_mismatch`, deliberately NOT added to
+`_DEFAULT_OPERATOR_EVENT_TYPES`.
+
+The two reconcile-driven callers of `_apply_sentinel_to_task`
+(`cw.reconcile.idle._mutations`, `cw.reconcile.phantom._mutations`) and the
+LOCAL-DAEMON git-harvest reaper (`cw.reconcile.local`) still leave their
+session untouched on this same race (their own existing behavior, unchanged
+by this ticket) — tracked for a follow-up fix in issue #2140. This event
+fires from all four call sites; only the Stop-hook one currently acts on
+`task_already_terminal`.
 
 `correlation_id` is the `ticket_id`.
 

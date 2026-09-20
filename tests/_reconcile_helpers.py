@@ -26,7 +26,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
-from tests.conftest import _make_daemon_session
+from tests.conftest import _make_daemon_session, _write_stop_hook_transcript
 
 
 def _mk_session(
@@ -309,22 +309,16 @@ def _write_idle_transcript_with_text(
     ``_locate_session_transcript``'s surface_ref-prefix glob finds it when the
     session has ``surface_ref="fake-short-id"`` (the default in
     ``_mk_headless_daemon_session``).
+
+    Round-3 (#1692): thin wrapper over ``tests.conftest._write_stop_hook_
+    transcript`` -- both helpers wrote the identical single-assistant-record
+    shape independently. That helper keys its file on an exact
+    ``claude_session_id`` rather than an arbitrary ``filename``, so this
+    strips the ``.jsonl`` suffix back off to recover the same path.
     """
-    encoded = str(worktree).replace("/", "-").replace(".", "-")
-    project_dir = home / ".claude" / "projects" / encoded
-    project_dir.mkdir(parents=True, exist_ok=True)
-    path = project_dir / filename
-    record = json.dumps(
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": assistant_text}],
-            },
-        }
+    return _write_stop_hook_transcript(
+        home, worktree, filename.removesuffix(".jsonl"), assistant_text
     )
-    path.write_text(record + "\n")
-    return path
 
 
 def _write_transcript_records(

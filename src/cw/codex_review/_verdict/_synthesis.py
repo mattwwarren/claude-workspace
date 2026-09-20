@@ -29,13 +29,16 @@ from cw.codex_review._const import (
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
     STAGE3_REVIEW,
 )
+from cw.codex_review._context import _load_ticket_context
 from cw.codex_review._verdict._health import (
     _derive_health,
+    _format_degraded_document_highlights,
     _format_failures_detail,
     _has_transient_failure,
 )
 from cw.codex_review._verdict._render import render_verdict_comment
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
+from cw.plan_files import parse_plan_files_modified
 from cw.review_adjudication import apply_voided_suppression
 from cw.review_finding_dispositions import suppress_adjudicated_findings
 from cw.review_findings import consolidate_verdict
@@ -259,6 +262,17 @@ def synthesize_codex_review_result(
     MUST_FIX among them populates ``verdict.rejected_must_fix`` and takes the
     mechanically-rejected branch below, through #1714's existing gate.
 
+    ``planned_files`` (#2112) is derived here, not accepted as a parameter: the
+    worktree's ``.cw/plan.md`` is loaded via the same
+    :func:`~cw.codex_review._context._load_ticket_context` reader
+    ``_prepare_review_pass`` already uses for prompt assembly, and its
+    ``## Files Modified`` manifest is parsed via
+    :func:`~cw.plan_files.parse_plan_files_modified` and threaded into
+    :func:`consolidate_verdict` so every accepted finding's
+    ``AcceptedFinding.in_plan_scope`` is stamped instead of staying
+    permanently ``None``. ``None`` when ``.cw/plan.md`` is absent — matching
+    the pre-#2112 output byte-for-byte on that path.
+
     ``fix_loop_enabled`` (#1705) is the caller's own already-known fix-loop
     state, threaded only as far as :func:`render_verdict_comment` on the
     blocking branch — it discriminates a fix-loop-disabled single pass from a
@@ -275,6 +289,10 @@ def synthesize_codex_review_result(
             retry_eligible=_has_transient_failure(failures) or None,
         )
         return result, None
+    plan_text, _ticket_text = _load_ticket_context(worktree)
+    planned_files = (
+        parse_plan_files_modified(plan_text) if plan_text is not None else None
+    )
     verdict = _with_agent_spec_status(
         _with_capability(
             consolidate_verdict(
@@ -285,6 +303,7 @@ def synthesize_codex_review_result(
                 failed_reviewers=failures,
                 metrics_by_role=metrics_by_role,
                 pre_validation_rejected=pre_validation_rejected,
+                planned_files=planned_files,
             ),
             capability,
         ),
@@ -414,6 +433,9 @@ def synthesize_codex_review_result(
         commits=[],
         review=verdict.review,
         health=_derive_health(documents),
+        friction_highlights=_format_degraded_document_highlights(
+            documents, session_id=session_id
+        ),
         worktree_path=str(worktree),
     )
     return result, verdict
