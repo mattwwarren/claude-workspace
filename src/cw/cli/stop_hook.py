@@ -49,7 +49,6 @@ from cw.reconcile import (
     _has_terminal_sentinel,
     _route_stopped_without_sentinel,
     find_running_task_for_session,
-    load_armed_park_config,
     park_gate_open,
 )
 from cw.result import emit_result_locked, reconstruct_staged_sentinel
@@ -196,31 +195,29 @@ def _abandoned_exit_park_armed(session: Session, ticket_id: str) -> bool:
     """Whether the #2135 park may fire here, cheapest precondition first.
 
     The Stop hook fires at **every** main-agent turn boundary, so the
-    transcript scan that produces the park's evidence — a full walk whose cost
-    grows with session length — must not run on every turn. The preconditions
-    are therefore ordered by cost:
+    transcript scan that produces the park's evidence -- a full walk whose cost
+    grows with session length -- must not run on every turn, and neither should
+    a config read. The preconditions are therefore ordered by cost:
 
-    1. the master switch (``load_armed_park_config``: one ``orchestrator.yaml``
-       read, no dev-queue or transcript I/O);
-    2. empty ``background_tasks`` — already established, since ``signal_stop``
-       returns before this path otherwise;
-    3. the RUNNING dev-queue row this session owns (one lock-free
+    1. headless DAEMON session and empty ``background_tasks`` -- already
+       established, since ``signal_stop`` returns before this path otherwise;
+    2. the RUNNING dev-queue row this session owns (one lock-free
        ``dev_queue.json`` read). No row, or a row that is not RUNNING, means
        there is nothing to park;
-    4. the per-lane / per-ticket resolution on that row (one ``clients.yaml``
-       read).
+    3. the park flag for that row (:func:`park_gate_open`): the master switch
+       plus the per-lane / per-ticket resolution. Memoized per process and
+       fail-closed -- an unreadable config, an unknown client or an absent lane
+       entry all read as disabled, and none of them raises out of the hook.
 
-    Only when all four hold does the caller scan the transcript. With the
-    master switch off — the shipped default — the cost is a single config read
-    and the hook's behaviour is the pre-#2135 unconditional defer.
+    Only when all three hold does the caller scan the transcript. With the
+    park disabled -- the shipped default -- a sentinel-less Stop costs the row
+    lookup and at most one config resolution, and behaves exactly as the
+    pre-#2135 unconditional defer.
     """
-    config = load_armed_park_config()
-    if config is None:
-        return False
     task = find_running_task_for_session(ticket_id, session.id)
     if task is None:
         return False
-    return park_gate_open(config, task)
+    return park_gate_open(task)
 
 
 def _park_if_abandoned(

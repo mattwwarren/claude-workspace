@@ -7,6 +7,7 @@ tests/test_cli.py.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -15,10 +16,10 @@ from pydantic import ValidationError
 
 from cw.config import (
     clients_file,
+    load_clients,
     load_orchestrator_config,
     orchestrator_config_file,
 )
-from cw.exceptions import ConfigValidationError
 from cw.models import (
     ClientConfig,
     LaneConfig,
@@ -29,7 +30,7 @@ from cw.models import (
 )
 from cw.reconcile.abandoned_exit import (
     PARK_ON_ABANDONED_EXIT_KEY,
-    load_armed_park_config,
+    clear_park_config_cache,
     park_gate_open,
     park_on_abandoned_exit_open,
     resolve_park_on_abandoned_exit_enabled,
@@ -176,8 +177,18 @@ class TestParkOnAbandonedExitOpen:
         )
 
 
-class TestParkConfigLoaders:
-    """Both loads are fail-closed: an unreadable config reads as disabled."""
+_LANE_ON_CLIENTS = {
+    "clients": {
+        "acme": {
+            "workspace_path": "/tmp/ws",
+            "lanes": [{"name": "default", "park_on_abandoned_exit": {KEY: True}}],
+        }
+    }
+}
+
+
+class TestParkGateOpen:
+    """``park_gate_open`` is fail-closed and memoized per process (#2135)."""
 
     @staticmethod
     def _write_orchestrator(text: str) -> None:
@@ -186,58 +197,171 @@ class TestParkConfigLoaders:
         path.write_text(text)
 
     @staticmethod
-    def _write_clients(text: str) -> None:
+    def _write_clients(content: str | bytes) -> None:
         path = clients_file()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content)
 
-    def test_load_armed_park_config_returns_none_when_switch_is_off(self) -> None:
-        self._write_orchestrator("park_on_abandoned_exit_enabled: false\n")
-
-        assert load_armed_park_config() is None
-
-    def test_load_armed_park_config_returns_the_config_when_armed(self) -> None:
+    def _arm(self) -> None:
         self._write_orchestrator("park_on_abandoned_exit_enabled: true\n")
+        self._write_clients(yaml.safe_dump(_LANE_ON_CLIENTS))
 
-        config = load_armed_park_config()
+    @staticmethod
+    def _count_loads(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+        """Count the two config reads the gate makes, keeping their behaviour."""
+        counts = {"orchestrator": 0, "clients": 0}
 
-        assert config is not None
-        assert config.park_on_abandoned_exit_enabled is True
+        def _orchestrator() -> OrchestratorConfig:
+            counts["orchestrator"] += 1
+            return load_orchestrator_config()
 
-    def test_load_armed_park_config_is_none_on_an_invalid_config(self) -> None:
-        self._write_orchestrator("park_on_abandoned_exit_enabled: not-a-bool\n")
+        def _clients() -> dict[str, ClientConfig]:
+            counts["clients"] += 1
+            return load_clients()
 
-        with pytest.raises(ConfigValidationError):
-            load_orchestrator_config()
-        assert load_armed_park_config() is None
-
-    def test_park_gate_open_is_false_on_an_unreadable_clients_file(self) -> None:
-        self._write_clients("clients: [not, a, mapping]\n")
-        config = OrchestratorConfig(park_on_abandoned_exit_enabled=True)
-
-        assert park_gate_open(config, _task()) is False
-
-    def test_park_gate_open_reads_the_lane_map_from_disk(self) -> None:
-        self._write_clients(
-            yaml.safe_dump(
-                {
-                    "clients": {
-                        "acme": {
-                            "workspace_path": "/tmp/ws",
-                            "lanes": [
-                                {
-                                    "name": "default",
-                                    "park_on_abandoned_exit": {KEY: True},
-                                }
-                            ],
-                        }
-                    }
-                }
-            )
+        monkeypatch.setattr(
+            "cw.reconcile.abandoned_exit.load_orchestrator_config", _orchestrator
         )
-        config = OrchestratorConfig(park_on_abandoned_exit_enabled=True)
+        monkeypatch.setattr("cw.reconcile.abandoned_exit.load_clients", _clients)
+        return counts
 
-        assert park_gate_open(config, _task()) is True
+    def test_opens_for_an_armed_lane_read_from_disk(self) -> None:
+        self._arm()
+
+        assert park_gate_open(_task()) is True
+
+    def test_master_switch_off_never_reads_clients_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The shipped default costs exactly one config read."""
+        self._write_orchestrator("park_on_abandoned_exit_enabled: false\n")
+        self._write_clients(yaml.safe_dump(_LANE_ON_CLIENTS))
+        counts = self._count_loads(monkeypatch)
+
+        assert park_gate_open(_task()) is False
+        assert counts == {"orchestrator": 1, "clients": 0}
+
+    def test_resolves_the_config_once_per_client_per_process(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._arm()
+        counts = self._count_loads(monkeypatch)
+
+        results = [park_gate_open(_task()) for _ in range(3)]
+
+        assert results == [True, True, True]
+        assert counts == {"orchestrator": 1, "clients": 1}
+
+    def test_cache_is_keyed_by_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._arm()
+        counts = self._count_loads(monkeypatch)
+        other = _make_ticket_task(
+            ticket_id="GEN-2",
+            client="other",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.IMPL,
+            park_on_abandoned_exit={KEY: True},
+        )
+
+        assert park_gate_open(_task()) is True
+        # "other" is not in clients.yaml: disabled even with a ticket override.
+        assert park_gate_open(other) is False
+        assert counts == {"orchestrator": 2, "clients": 2}
+
+    def test_clear_park_config_cache_forces_a_reload(self) -> None:
+        self._arm()
+        assert park_gate_open(_task()) is True
+
+        self._write_orchestrator("park_on_abandoned_exit_enabled: false\n")
+        assert park_gate_open(_task()) is True  # memoized
+
+        clear_park_config_cache()
+        assert park_gate_open(_task()) is False
+
+    @pytest.mark.parametrize(
+        "clients_content",
+        [
+            "clients: {unclosed\n",
+            "clients: [not, a, mapping]\n",
+            "clients:\n  '!bad-name':\n    workspace_path: /tmp/ws\n",
+            "clients:\n  acme:\n    workspace_path: /tmp/ws\n    lanes: nope\n",
+            b"\xff\xfe\x00 not utf-8",
+        ],
+        ids=[
+            "invalid-yaml",
+            "non-mapping-clients",
+            "invalid-client-name",
+            "pydantic-validation-error",
+            "undecodable-bytes",
+        ],
+    )
+    def test_an_unreadable_clients_file_is_disabled_and_logged_once(
+        self,
+        clients_content: str | bytes,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Any failure reading clients.yaml closes the gate; nothing raises."""
+        self._write_orchestrator("park_on_abandoned_exit_enabled: true\n")
+        self._write_clients(clients_content)
+
+        with caplog.at_level(logging.WARNING, logger="cw.reconcile.abandoned_exit"):
+            first = park_gate_open(_task())
+            second = park_gate_open(_task())
+
+        assert (first, second) == (False, False)
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "acme" in warnings[0].getMessage()
+        assert "config unreadable" in warnings[0].getMessage()
+        assert warnings[0].exc_info is None
+
+    @pytest.mark.parametrize(
+        ("content", "error_name"),
+        [
+            ("park_on_abandoned_exit_enabled: not-a-bool\n", "ConfigValidationError"),
+            ("park_on_abandoned_exit_enabled: [\n", "ParserError"),
+        ],
+        ids=["invalid-schema", "invalid-yaml"],
+    )
+    def test_an_unreadable_orchestrator_file_is_disabled_and_names_the_error(
+        self,
+        content: str,
+        error_name: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        self._write_orchestrator(content)
+        self._write_clients(yaml.safe_dump(_LANE_ON_CLIENTS))
+
+        with caplog.at_level(logging.WARNING, logger="cw.reconcile.abandoned_exit"):
+            assert park_gate_open(_task()) is False
+
+        assert [r.getMessage() for r in caplog.records if error_name in r.getMessage()]
+
+    def test_an_unknown_client_is_disabled_even_with_a_ticket_override(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Absent from clients.yaml ⇒ no park, whatever the row's own map says."""
+        self._write_orchestrator("park_on_abandoned_exit_enabled: true\n")
+        self._write_clients(
+            yaml.safe_dump({"clients": {"elsewhere": {"workspace_path": "/tmp/ws"}}})
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cw.reconcile.abandoned_exit"):
+            opened = park_gate_open(_task(park_on_abandoned_exit={KEY: True}))
+
+        assert opened is False
+        assert "not in clients.yaml" in caplog.text
+
+    def test_an_absent_lane_entry_is_disabled_by_the_floor(self) -> None:
+        self._write_orchestrator("park_on_abandoned_exit_enabled: true\n")
+        self._write_clients(
+            yaml.safe_dump({"clients": {"acme": {"workspace_path": "/tmp/ws"}}})
+        )
+
+        assert park_gate_open(_task()) is False
 
 
 class TestParkOnAbandonedExitKeyValidation:

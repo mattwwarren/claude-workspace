@@ -124,7 +124,6 @@ from cw.reconcile._shared import (
 )
 from cw.reconcile.abandoned_exit import (
     PARK_ON_ABANDONED_EXIT_KEY,
-    load_armed_park_config,
     park_gate_open,
     park_on_abandoned_exit_open,
     resolve_park_on_abandoned_exit_enabled,
@@ -268,7 +267,6 @@ __all__ = [
     "compute_drift",
     "feature_branch_key",
     "find_running_task_for_session",
-    "load_armed_park_config",
     "park_gate_open",
     "park_on_abandoned_exit_open",
     "park_terminal_sibling_tasks",

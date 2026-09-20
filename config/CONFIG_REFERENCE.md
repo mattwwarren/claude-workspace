@@ -1059,7 +1059,9 @@ Independently, the master switch `park_on_abandoned_exit_enabled` (in
 `orchestrator.yaml`, default `false`) is a hard top-level short-circuit: when
 `false` the park never fires regardless of any per-lane or per-ticket setting,
 and the Stop hook performs no transcript scan at all — behaviour is identical
-to the pre-#2135 unconditional defer.
+to the pre-#2135 unconditional defer. The flag is only resolved after the
+Stop hook has found a `RUNNING` dev-queue row for the session, and the resolved
+config is memoized for the life of that (short-lived) process.
 
 ```yaml
 # clients.yaml — arm the park on one lane, leave the other off
@@ -1074,9 +1076,12 @@ clients:
 ```
 
 Unrecognized keys fail loud at config-load time (a typo like
-`park_on_abandonned_exit` raises rather than silently no-opping). Both config
-reads are fail-closed: a `clients.yaml` or `orchestrator.yaml` that cannot be
-read leaves the park disabled, never enabled.
+`park_on_abandonned_exit` raises rather than silently no-opping). Resolution is
+fail-closed end to end: a `clients.yaml` or `orchestrator.yaml` that cannot be
+read or validated, a ticket whose client is absent from `clients.yaml` (even
+with a per-ticket override), and an absent lane entry all leave the park
+disabled, never enabled. A failure is logged once per process at WARNING with
+the client name and the error class, and never raises out of the Stop hook.
 
 ## Review Strategy Config (RFC 0010 Phase 4)
 

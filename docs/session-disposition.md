@@ -462,8 +462,16 @@ signal-stop` can now route that row itself.
 > **Ships dark — default off.** The park is a state-mutating auto-actor, so it
 > is gated by `park_on_abandoned_exit_enabled` in `orchestrator.yaml` (default
 > `false`) plus a per-lane / per-ticket `park_on_abandoned_exit` map whose
-> floor is `false`. With the master switch off, a sentinel-less Stop defers
-> exactly as it did before #2135 and the transcript is not even scanned.
+> floor is `false`. With the park disabled, a sentinel-less Stop defers
+> exactly as it did before #2135 and the transcript is not even scanned. The
+> Stop hook checks its preconditions cheapest-first — headless DAEMON session,
+> empty `background_tasks`, a `RUNNING` dev-queue row for the session — and
+> only then resolves the flag, so a session with no row to park never reads
+> config at all. The resolved config is memoized for the (short-lived) hook
+> process, and every failure resolves to *disabled*: an unreadable or invalid
+> `orchestrator.yaml` / `clients.yaml`, a client absent from `clients.yaml`,
+> and an absent lane entry all defer, log once at WARNING with the client name
+> and error class, and never raise out of the hook.
 > Arming it is an operator action — see
 > [`config/CONFIG_REFERENCE.md`](../config/CONFIG_REFERENCE.md)'s *Abandoned-Exit
 > Park Enablement*.
@@ -510,7 +518,11 @@ detector only recognises GitHub `gh issue comment` posts joined either to a
 prior `Write` of a literal `--body-file <path>` or to an inline `--body`
 argument, and the `gh issue comment` text must **start a shell command** —
 `timeout 60 gh …` and the second link of an `&&` chain qualify; inert text
-does not. A heredoc that writes an example post, an `echo` of one, or a body
+does not. The body is bound to **that invocation**: it is read only from the
+matched command's own shell segment (split at `;`, `&&`, `||`, `|` and
+newline, quote- and heredoc-aware) and parsed argv-style, so a `--body-file`
+belonging to a later or embedded command is never borrowed, and a segment with
+no body flag, or with more than one, is not evidence. A heredoc that writes an example post, an `echo` of one, or a body
 value opening with `$(`, a backtick or `<<` are all rejected: each carries the
 same header and marker a real post does while posting nothing, so counting one
 would falsely park a live session's row. A `--body-file` path holding an

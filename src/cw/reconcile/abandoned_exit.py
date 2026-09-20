@@ -5,6 +5,11 @@ and is driven from ``cw signal-stop``. This module owns only the question
 "may it fire for this row?", kept separate so the Stop hook can answer it
 **before** paying for the transcript scan that produces the evidence.
 
+The answer is fail-closed end to end: any failure to read or interpret the
+orchestrator or client config, an unknown client, and an absent lane entry all
+resolve to "disabled". An automatic row mutation is least safe exactly when the
+config is broken, and the Stop hook must never raise out of ``claude`` exiting.
+
 Shaped on ``cw.reconcile.gate_recipes``' enablement pair
 (``resolve_gate_recipe_enabled`` / ``_recipe_gate_open``) deliberately: a
 default-off master switch in ``orchestrator.yaml`` plus a per-lane map whose
@@ -20,15 +25,18 @@ cycle.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
 
 from cw.config import load_clients, load_orchestrator_config
-from cw.exceptions import ConfigValidationError
+from cw.exceptions import CwError
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
+
+logger = logging.getLogger(__name__)
 
 # The single recognised key of the per-lane / per-ticket
 # ``park_on_abandoned_exit`` maps. A map rather than a bare bool so the two
@@ -43,10 +51,29 @@ PARK_ON_ABANDONED_EXIT_KEY = "park_on_abandoned_exit"
 # mutates a dev-queue row with no human in the loop.
 _DEFAULT_PARK_ON_ABANDONED_EXIT = False
 
-# Everything a config read can raise. A config we cannot read is treated as
-# disabled (fail-closed): the Stop hook's job is to never block claude from
+# Everything a config read can raise: ``CwError`` covers ``ConfigValidationError``
+# and the invalid-client-name error ``load_clients`` raises directly;
+# ``OSError`` an unreadable or unwritable file; ``ValueError`` (pydantic's
+# ``ValidationError`` and ``UnicodeDecodeError`` are both subclasses) malformed
+# content; ``yaml.YAMLError`` invalid YAML. A config we cannot read is treated
+# as disabled (fail-closed): the Stop hook's job is to never block claude from
 # exiting, and "defer" is the safe answer to every unknown here.
-_CONFIG_LOAD_ERRORS = (ConfigValidationError, OSError, yaml.YAMLError)
+_CONFIG_LOAD_ERRORS = (CwError, OSError, ValueError, yaml.YAMLError)
+
+
+class _ParkConfig(NamedTuple):
+    """The two configs the park gate reads, loaded together (#2135)."""
+
+    config: OrchestratorConfig
+    clients: dict[str, ClientConfig]
+
+
+# Memo of the resolved park config, keyed by client name; ``None`` records
+# "disabled" (master switch off, unreadable config, or unknown client). A Stop
+# hook is a short-lived ``cw signal-stop`` process, so a module-level cache
+# cannot go stale in any way that matters -- its job is to guarantee at most
+# one config resolution, and at most one WARNING, per client per process.
+_PARK_CONFIG_CACHE: dict[str, _ParkConfig | None] = {}
 
 
 def resolve_park_on_abandoned_exit_enabled(
@@ -99,29 +126,52 @@ def park_on_abandoned_exit_open(
     )
 
 
-def load_armed_park_config() -> OrchestratorConfig | None:
-    """Return the orchestrator config, or None when the master switch is off.
+def _load_park_config(client: str) -> _ParkConfig | None:
+    """Load the park config for *client*; ``None`` means the park is disabled.
 
-    The cheapest of the Stop hook's preconditions and therefore the first one
-    it runs: one ``orchestrator.yaml`` read, no dev-queue lookup and no
-    transcript scan. A config that cannot be read reads as disabled.
+    ``orchestrator.yaml`` is read first and ``clients.yaml`` only when the
+    master switch is on, so a shipped-default (switch off) install pays for a
+    single config read. Any load failure, and a *client* absent from
+    ``clients.yaml``, is logged once at WARNING -- the client name and the
+    error class only, never a traceback -- and reads as disabled.
     """
     try:
         config = load_orchestrator_config()
-    except _CONFIG_LOAD_ERRORS:
-        return None
-    return config if config.park_on_abandoned_exit_enabled else None
-
-
-def park_gate_open(config: OrchestratorConfig, task: TicketTask) -> bool:
-    """:func:`park_on_abandoned_exit_open` with ``clients.yaml`` loaded here.
-
-    Separate from :func:`load_armed_park_config` so the ``clients.yaml`` read
-    only happens once the master switch is on and a candidate row has been
-    found. A clients.yaml that cannot be read reads as disabled.
-    """
-    try:
+        if not config.park_on_abandoned_exit_enabled:
+            return None
         clients = load_clients()
-    except _CONFIG_LOAD_ERRORS:
+    except _CONFIG_LOAD_ERRORS as exc:
+        logger.warning(
+            "abandoned-exit park disabled for client %s: config unreadable (%s)",
+            client,
+            type(exc).__name__,
+        )
+        return None
+    if client not in clients:
+        logger.warning(
+            "abandoned-exit park disabled for client %s: not in clients.yaml", client
+        )
+        return None
+    return _ParkConfig(config, clients)
+
+
+def park_gate_open(task: TicketTask) -> bool:
+    """Return whether the park may fire for *task*, fail-closed and memoized.
+
+    The single entry point the Stop hook uses. It runs only after the hook's
+    cheaper preconditions (headless DAEMON session, empty ``background_tasks``,
+    a RUNNING dev-queue row) have held, and before the transcript scan. The
+    config is resolved once per client per process (:data:`_PARK_CONFIG_CACHE`);
+    every failure path returns False rather than raising.
+    """
+    if task.client not in _PARK_CONFIG_CACHE:
+        _PARK_CONFIG_CACHE[task.client] = _load_park_config(task.client)
+    park_config = _PARK_CONFIG_CACHE[task.client]
+    if park_config is None:
         return False
-    return park_on_abandoned_exit_open(config, task, clients)
+    return park_on_abandoned_exit_open(park_config.config, task, park_config.clients)
+
+
+def clear_park_config_cache() -> None:
+    """Drop the memoized park config (for tests; a real process is short-lived)."""
+    _PARK_CONFIG_CACHE.clear()
