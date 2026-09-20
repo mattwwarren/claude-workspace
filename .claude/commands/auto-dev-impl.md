@@ -113,6 +113,115 @@ below are binding regardless:
 - Before any commit/push, confirm the cwd resolves under `worktree_path` (or
   `$TMPWT`); if it resolves to `workspace_path`, abort and exit `blocked`.
 
+### Guard-script path resolution and staleness marker (#2141)
+
+**Canonical shape for every `.claude/scripts/*.py` guard-script invocation in this
+pipeline.** `scripts/install-skills.sh` symlinks each of these scripts into
+`~/.claude/scripts/` (#2096), so a client repo with no local `.claude/scripts/`
+copy still has a usable one — but a repo-relative-only invocation never finds it,
+and the guard silently no-ops. Probe repo-local first, then the installed copy:
+
+```bash
+MIN_VERSION=<N>  # per the script version table in auto-dev-impl.md
+# Absolute anchor for the repo-local candidate — never a bare relative probe.
+GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+RESOLVED=""
+for candidate in "$GUARD_ROOT/.claude/scripts/<script>.py" "$HOME/.claude/scripts/<script>.py"; do
+  if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
+done
+if [ -n "$RESOLVED" ]; then
+  FOUND_VERSION=$(head -n 5 "$RESOLVED" \
+    | sed -nE 's/^#[[:space:]]*cw-script-version:[[:space:]]*([^[:space:]]*)[[:space:]]*$/\1/p' \
+    | head -n 1)
+  # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+  # (which errors, evaluates false, and would fall through to the invocation).
+  if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+    echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+    # HARD STOP: EXIT blocked with <blocker.reason> (see this site's bullet
+    # below); never run the script, never fall through to any other branch.
+    exit 3
+  else
+    <invoke the script here>
+  fi
+fi
+```
+
+`MIN_VERSION` is declared **once** per site and used in both the comparison and
+the message — never a literal repeated twice — so the version table below stays
+the single source of truth. `exit 3` is the fence's own hard stop: it makes the
+invocation unreachable *in the shell*, so a worker reading only the fence cannot
+fall through. The `exit 3` is not itself the disposition — the bullet after each
+fence still names the `blocker.reason` and the sentinel to emit.
+
+**The repo-local candidate is anchored to an absolute root, computed once at
+the top of the fence.** `worktree_path` from `.claude/cw-context.json` is
+authoritative when present; otherwise `git rev-parse --show-toplevel` (itself
+cwd-independent — it walks up), with `$PWD` as the last resort outside a repo.
+A bare relative `.claude/scripts/<script>.py` probe is wrong at every site: the
+cwd is not guaranteed to be the worktree root, and when it isn't, the repo-local
+copy is silently missed and the lookup falls through to the global copy or to
+the "absent" branch — a resolution failure that looks exactly like a correct
+resolution. Do not substitute `$TMPWT` here: Step 2.5's gate worktree is a
+detached checkout of the pushed branch, and these guard scripts resolve against
+the **cw session worktree** even when a gate's data extraction is `-C "$TMPWT"`.
+
+**Marker parsing is strict, and anything unparseable is stale.** The marker
+counts only as a full `# cw-script-version: N` comment line — `#`, optional
+spaces, the key, the value, nothing else on the line — and only within the
+**first 5 lines** of the file. Extract it with `head -n 5` piped into an anchored
+`sed -nE`, taking the first match. Never `grep -m1 'cw-script-version:'`, which
+matches the literal anywhere in the file, so a script whose header carries no
+marker passes on a later mention in a docstring, a help string, or a comment
+about this very convention — exactly the unmarked stale copy the gate exists to
+reject. A marker outside the header, or one sharing its line with anything
+else, is *missing*, and the site hard-stops. Never a `grep -oE '[0-9]+'`
+digit-run scan either, which turns `1.5` into two lines and makes
+`[ "$FOUND_VERSION" -lt ... ]` error out, whereupon the condition evaluates
+false and the script runs anyway. A marker token is
+valid only if it matches `^[0-9]{1,6}$` — anchored at both ends and bounded to
+**1-6 digits**; anything else is stale. A missing marker, an empty marker, and
+a non-integer (`abc`, `1.5`, `-1`, `2x`) therefore all take the hard stop, and
+only a value matching that regex at or above `MIN_VERSION` reaches the
+invocation. The digit count is bounded, not open-ended, because an
+oversized value (`99999999999999999999`) is the same fail-open one width up:
+it passes an unbounded integer test, then overflows `[ -lt ]` with `integer
+expression expected`, and the condition again evaluates false. The regex test
+comes **first** in the condition so the numeric comparison only ever sees an
+in-range integer.
+
+**Existence is not enough.** `ln -sf` means an installed copy keeps pointing at
+whatever commit's content it was linked against, so a found script can be
+arbitrarily old. Every resolved candidate — repo-local override included, no
+exemptions — must carry a `# cw-script-version: N` marker at or above the
+minimum below, or the call site **STOPS** with a `HEADLESS BLOCK`. Never fall
+through to the "run it anyway" path, the non-blocking "script absent" path, or
+the agent's own manual confirmation: a stale guard that appears to have run is
+worse than one that visibly did not. Mirrors `/prep-pr` Step 2's `gate-timeout`
+staleness check exactly.
+
+The marker check applies **only to a candidate that was found**. Absent from
+both locations keeps each site's own pre-existing, separately documented
+disposition — it is a different branch, with different message text.
+
+A behaviour change to one of these scripts bumps its `# cw-script-version:`
+number and this table's minimum in the same commit.
+
+| Script | Minimum `cw-script-version` | Call site |
+|---|---|---|
+| `check_not_main_checkout.py` | 1 | `auto-dev-impl.md` Pre-mutation guard |
+| `check_plan_scope_conformance.py` | 1 | `auto-dev-impl.md` Step 2.5 gate 2 |
+| `check_impl_guard_staleness.py` | 1 | `auto-dev-impl-appendix.md` Pre-Stage Detector Guard |
+| `classify_merge_conflict.py` | 1 | `auto-dev-finalize.md` Step 4c.5 |
+
+`auto-dev-finalize.md`'s Step 4c.5 site references this subsection by name
+rather than duplicating the table; the shell snippet itself is repeated
+literally at each call site, because shell state does not persist between
+`Bash` tool calls (same convention as `prep-pr.md`'s `prep_pr_state.py`
+resolver).
+
 ### Pre-Stage Detector Guard
 
 Before starting S2 work, run `detect_current_stage()` (see [Resume Detection](#resume-detection)).
@@ -166,9 +275,33 @@ Stage 2 agent spawn:
 - Instruction to read model/schema definitions before writing code
 - Instruction to use Read/Write tools for file operations, not Bash cp/mv/cat
 - **Pre-mutation guard (hard, not prose) — #766:** Before any `git add`, `git commit`,
-  or `git push`, run:
+  or `git push`, resolve the script per "Guard-script path resolution and staleness
+  marker (#2141)" above, then run it:
   ```bash
-  python .claude/scripts/check_not_main_checkout.py
+  MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+  GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+  CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+    "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+  [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+  RESOLVED=""
+  for candidate in "$GUARD_ROOT/.claude/scripts/check_not_main_checkout.py" "$HOME/.claude/scripts/check_not_main_checkout.py"; do
+    if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
+  done
+  if [ -n "$RESOLVED" ]; then
+    FOUND_VERSION=$(head -n 5 "$RESOLVED" \
+      | sed -nE 's/^#[[:space:]]*cw-script-version:[[:space:]]*([^[:space:]]*)[[:space:]]*$/\1/p' \
+      | head -n 1)
+    # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+    # (which errors, evaluates false, and would fall through to the invocation).
+    if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+      echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+      # HARD STOP: EXIT blocked with impl_failed (see bullet below); never run
+      # the script, and never take the absent-from-both-locations skip path.
+      exit 3
+    else
+      python "$RESOLVED"
+    fi
+  fi
   ```
   The script reads `.claude/cw-context.json` (searching upward from cwd) and exits
   non-zero with a `BLOCKED (#766)` message if the current git repo root matches the
@@ -176,9 +309,13 @@ Stage 2 agent spawn:
   git operation — EXIT `blocked` with `blocker.reason: "impl_failed"`,
   `blocker.details: "check_not_main_checkout exited <N>: <stderr>"`. It is a no-op
   (exit 0) when no dispatch context is found, so interactive runs are unaffected. If the
-  script is absent (pre-#766 checkout), skip the check and log
+  script is absent from **both** locations (pre-#766 checkout, no global install), skip
+  the check and log
   `"check_not_main_checkout: script absent, skipped"` in friction, but do NOT proceed
   past any git op resolving to a path other than `worktree_path`.
+  If a candidate **was** found but its marker is missing or below minimum, do NOT run it
+  and do NOT take the skip path — EXIT `blocked` with `blocker.reason: "impl_failed"`,
+  `blocker.details: "HEADLESS BLOCK: check_not_main_checkout.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP.
 - Instruction: if anything fails or surprises you, report it in friction — do NOT silently skip or suppress
 - **Incremental commits required** (Subagent Reliability Mitigation 3): commit after every logical step — do NOT defer all commits to the end, or an OOM/crash loses all the work. For each file or coherent feature: make changes → `git add <files>` → `git commit -m "..."`. The friction report's `git log --oneline` output (see Completion Artifacts below) MUST show more than one commit for any non-trivial change; a single end-of-run commit is a discipline failure.
 - Instruction to stage and commit changes with a conventional commit message
@@ -247,7 +384,7 @@ trap 'gate_wt_cleanup; exit 143' INT TERM
 git worktree add --detach "$TMPWT" origin/<branch-name> || { echo "IMPL_FAILED: git worktree add exited $?"; exit 1; }
 ```
 
-All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktree with origin-qualified refs — that cwd confusion is the bug this step fixes. FORK_POINT is recomputed from `origin` refs; do not trust the impl agent's reported value.
+All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT run those against the cw session worktree with origin-qualified refs — that cwd confusion is the bug this step fixes. FORK_POINT is recomputed from `origin` refs; do not trust the impl agent's reported value. **Exception:** gate 2's guard-script resolver and its `--plan` argument target the cw session worktree, not `$TMPWT` (the detached checkout has no `.claude/cw-context.json` and no uncommitted `.cw/` state). Gate 2 derives that worktree **inside its own fence** from `git worktree list`, keyed on the branch, because shell variables do not persist between fenced Bash calls.
 
 **Gate checks (all run in `$TMPWT`):**
 
@@ -264,12 +401,81 @@ All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktr
 
 2. **File set is within the plan's enumeration** (mechanical, not prose — #1779):
    ```bash
-   git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > /tmp/touched_files-$CW_SESSION
-   SCOPE_CONFORMANCE_OUTPUT=$(uv run python .claude/scripts/check_plan_scope_conformance.py \
-     --plan .cw/plan.md --touched-files /tmp/touched_files-$CW_SESSION)
-   SCOPE_CONFORMANCE_EXIT=$?
+   # Self-contained: shell state does not persist between fenced Bash calls, and
+   # the ambient cwd may be $TMPWT. Every variable used below is derived here.
+   : "${CW_SESSION:?CW_SESSION must be set}"
+   TMPWT="/tmp/gate-wt-$CW_SESSION"
+   if [ ! -d "$TMPWT" ]; then
+     echo "IMPL_FAILED: Step 2.5 gate 2: gate worktree $TMPWT missing (run Gate setup first)"
+     exit 3
+   fi
+   FORK_POINT=$(git -C "$TMPWT" merge-base origin/main origin/<branch-name>) || {
+     echo "IMPL_FAILED: Step 2.5 gate 2: merge-base failed"; exit 3; }
+   MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+   TOUCHED=$(git -C "$TMPWT" diff --name-only "$FORK_POINT") || {
+     echo "IMPL_FAILED: Step 2.5 gate 2: git diff --name-only failed"; exit 3; }
+   printf '%s\n' "$TOUCHED" | sort > "/tmp/touched_files-$CW_SESSION"
+   # The session worktree (not the detached $TMPWT). Primary: the worktree whose
+   # cw-context.json names this ticket — the handle that survives a session
+   # branch named anything other than <branch-name>.
+   SESSION_WT=""
+   while IFS= read -r wt; do
+     [ "$wt" = "$TMPWT" ] && continue
+     if [ -f "$wt/.claude/cw-context.json" ] && \
+        [ "$(jq -r '.ticket_id // empty' "$wt/.claude/cw-context.json" 2>/dev/null)" = "<ticket-id>" ]; then
+       SESSION_WT="$wt"; break
+     fi
+   done < <(git -C "$TMPWT" worktree list --porcelain | sed -n 's/^worktree //p')
+   # Fallback: the branch-keyed lookup, for a worktree carrying no context file.
+   if [ -z "$SESSION_WT" ]; then
+     SESSION_WT=$(git -C "$TMPWT" worktree list --porcelain \
+       | awk -v b="branch refs/heads/<branch-name>" '/^worktree /{w=substr($0,10)} $0==b{print w; exit}')
+   fi
+   if [ -z "$SESSION_WT" ] || [ "$SESSION_WT" = "$TMPWT" ]; then
+     echo "IMPL_FAILED: Step 2.5 gate 2: cannot locate cw session worktree for <branch-name>"
+     exit 3  # HARD STOP: EXIT blocked with impl_failed (see bullets below).
+   fi
+   RESOLVED=""
+   for candidate in "$SESSION_WT/.claude/scripts/check_plan_scope_conformance.py" "$HOME/.claude/scripts/check_plan_scope_conformance.py"; do
+     if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
+   done
+   if [ -n "$RESOLVED" ]; then
+     FOUND_VERSION=$(head -n 5 "$RESOLVED" \
+       | sed -nE 's/^#[[:space:]]*cw-script-version:[[:space:]]*([^[:space:]]*)[[:space:]]*$/\1/p' \
+       | head -n 1)
+     # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+     # (which errors, evaluates false, and would fall through to the invocation).
+     if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+       echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+       # HARD STOP: EXIT blocked with impl_failed; never run the script, and never
+       # take the absent-from-both-locations skip path. This is the approved
+       # file-set gate, so the stop lives in the shell, not only in prose.
+       exit 3
+     fi
+     if [ ! -f "$SESSION_WT/.cw/plan.md" ]; then
+       echo "IMPL_FAILED: Step 2.5 gate 2: $SESSION_WT/.cw/plan.md not found"
+       exit 3
+     fi
+     SCOPE_CONFORMANCE_OUTPUT=$(uv run python "$RESOLVED" \
+       --plan "$SESSION_WT/.cw/plan.md" --touched-files "/tmp/touched_files-$CW_SESSION")
+     SCOPE_CONFORMANCE_EXIT=$?
+   fi
    ```
-   Note the script itself runs from the **cw session worktree**, not `$TMPWT`: `.cw/plan.md` is session state that was never committed to the branch, so it does not exist inside the detached gate worktree. Only the file-set extraction is `-C "$TMPWT"`.
+   Resolution follows "Guard-script path resolution and staleness marker (#2141)" above for the marker gate, but this call site anchors differently: instead of `$GUARD_ROOT` (a `git rev-parse --show-toplevel` / `cw-context.json` derivation from the ambient cwd), it uses `$SESSION_WT`, derived **inside this fence** from `git -C "$TMPWT" worktree list --porcelain`. The fence carries no `$GUARD_ROOT`, no `rev-parse`, and no `$PWD` fallback, for two reasons that both have to hold at once: shell variables do not persist between fenced Bash calls, so an anchor captured in the Gate-setup fence may simply be unset here; and by this point the ambient cwd may already be `$TMPWT`, so any ambient re-derivation resolves to the detached gate worktree — the exact bug this gate had. Deriving from the worktree list is correct either way, whether or not the fences share a shell.
+
+   **The lookup is two-step, and the branch name is only the fallback.** The primary key is `ticket_id` in each candidate worktree's `.claude/cw-context.json` (written by `spawn_create_impl`, `src/cw/spawn.py`) — the one handle that does not depend on what the local branch is called. Keying on `branch refs/heads/<branch-name>` alone was wrong: the impl stage's own branch-discipline bullet says `isolation: "worktree"` provisions the session on an auto-generated `agent-<hash>` branch, and a detached session worktree has no `branch` line at all, so a correct implementation delivered from either shape found nothing and the gate hard-stopped on it. The branch-keyed `awk` stays as the fallback for a worktree carrying no context file (it is gitignored, so a worktree provisioned outside cw has none). `$TMPWT` is skipped explicitly in the primary loop, and the pre-existing empty-or-equals-`$TMPWT` hard stop still applies when neither step resolves — a second lookup must not soften it, and a context file naming a *different* ticket must not satisfy it.
+
+   `$SESSION_WT` is the **cw session worktree**, deliberately not `$TMPWT`: the script and its `.claude/scripts/` copy belong to the session worktree, so probing `$TMPWT` would read a detached checkout that may carry a different (or no) copy of the script. The candidate is always an **absolute** path, never a bare relative `.claude/scripts/...` probe and never the operator's cwd.
+
+   Note the script itself also runs against the **cw session worktree**, not `$TMPWT`: `.cw/plan.md` is session state that was never committed to the branch, so it does not exist inside the detached gate worktree. The `--plan` argument is anchored to `$SESSION_WT` for the same reason — a bare relative `.cw/plan.md` resolves against whatever the ambient cwd happens to be, and only the file-set extraction is deliberately `-C "$TMPWT"`.
+
+   **Script absent from both locations** (no repo-local copy, no global install): log `"check_plan_scope_conformance: script absent, skipped"` in `friction_highlights` and continue to gate 3 — non-blocking. This is the honest label for a condition that previously fell through to the appendix's generic exit-2 "parse error" branch by accident (a missing file also exits 2). It is NOT the tooling-failure disposition (`impl_scope_conformance_unparsed` / `impl_failed`), which stays unchanged and applies only to a script that actually ran.
+
+   **Candidate found but its marker is missing or below minimum:** do NOT run it, and do NOT take the skip-and-continue path above — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — check_plan_scope_conformance.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP.
+
+   **Session worktree not locatable** (or, once a current script has resolved, `$SESSION_WT/.cw/plan.md` is missing): EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — cannot locate cw session worktree for <branch-name>"`, and STOP.
+
+   **Gate worktree missing / merge-base failed / touched-file diff failed:** EXIT `blocked` with `blocker.reason: "impl_failed"` and STOP. The `git diff --name-only` extraction is in this class deliberately: its status is captured into `$TOUCHED` rather than piped into `sort`, because a pipeline reports only its *last* command's status — a failed diff would leave `sort` at 0, write an empty touched-file list, and let the file-set gate pass against zero delivered files. An empty list is never evidence of conformance; it is evidence the extraction did not run.
 
    The script compares the delivered file set against the plan's `## Files Modified` enumeration and allows `max(SCOPE_DRIFT_ABS_FLOOR, round(plan_files * (SCOPE_DRIFT_RATIO - 1)))` unplanned files (v1: floor 5, ratio 1.5; per-repo override via `[tool.cw.scope_conformance]` in `pyproject.toml`). It prints a JSON verdict — `triggered`, `extra_files`, `allowed_extra`, `plan_file_count`, `delivered_file_count` — to stdout, captured above in `$SCOPE_CONFORMANCE_OUTPUT`.
 
