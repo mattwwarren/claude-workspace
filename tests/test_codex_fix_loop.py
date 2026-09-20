@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,6 +53,7 @@ from tests.conftest import (
     _make_finding,
     _make_reviewer_doc,
     _make_ticket_task,
+    git_in,
 )
 from tests.test_review_adjudication import _make_voided_finding
 
@@ -73,13 +73,6 @@ if TYPE_CHECKING:
 _CONTENT = "def broken():\n    return 1\n"
 
 
-def _git(repo: Path, *args: str) -> None:
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, check=True, env=clean_env
-    )
-
-
 def _worktree(
     make_git_repo: Callable[..., Path],
     name: str,
@@ -92,21 +85,15 @@ def _worktree(
     if manifest is not None:
         for rel_path, text in manifest.items():
             _write(repo / rel_path, text)
-        _git(repo, "add", *manifest.keys())
-        _git(repo, "commit", "-m", "add manifest")
-    _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "add", *manifest.keys())
+        git_in(repo, "commit", "-m", "add manifest")
+    git_in(repo, "checkout", "-b", "feature")
     files = feature_files if feature_files is not None else {"new.py": content}
     for rel_path, text in files.items():
         _write(repo / rel_path, text)
-    _git(repo, "add", *files.keys())
-    _git(repo, "commit", "-m", "add new.py")
+    git_in(repo, "add", *files.keys())
+    git_in(repo, "commit", "-m", "add new.py")
     return repo
-
-
-def _head(repo: Path) -> str:
-    return subprocess.check_output(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
-    ).strip()
 
 
 def _install_pre_commit_hook(repo: Path, script: str) -> None:
@@ -301,7 +288,7 @@ def _renamer(old: str, new: str) -> Callable[[Path, list[str]], CodexRunResult]:
 
     def _rename(worktree: Path, _argv: list[str]) -> CodexRunResult:
         (worktree / new).parent.mkdir(parents=True, exist_ok=True)
-        _git(worktree, "mv", old, new)
+        git_in(worktree, "mv", old, new)
         return CodexRunResult(returncode=0, stdout="", stderr="")
 
     return _rename
@@ -654,13 +641,13 @@ class TestFixInvocation:
             "exit 1\n",
         )
         _write(worktree / "fix.py", "patched = 1\n")
-        _git(worktree, "add", "fix.py")
+        git_in(worktree, "add", "fix.py")
 
         with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop"):
             sha = _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
 
         assert sha is not None
-        assert sha == _head(worktree)
+        assert sha == git_in(worktree, "rev-parse", "HEAD")
         assert any("retrying once" in r.message for r in caplog.records)
         # The hook's own rewrite (new.py) rode along in the retried commit.
         committed_files = subprocess.check_output(
@@ -693,7 +680,7 @@ class TestFixInvocation:
             "exit 1\n",
         )
         _write(worktree / "fix.py", "patched = 1\n")
-        _git(worktree, "add", "fix.py")
+        git_in(worktree, "add", "fix.py")
 
         with pytest.raises(subprocess.CalledProcessError):
             _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
@@ -1271,19 +1258,19 @@ class TestFixLoopReviewParity:
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-sha-advance")
-        orig = _head(worktree)
+        orig = git_in(worktree, "rev-parse", "HEAD")
         runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
         _out, verdict = _run_loop(runner, worktree, session_id="s-sha-advance")
 
         assert verdict is not None
         assert verdict.reviewed_sha != orig
-        assert verdict.reviewed_sha == _head(worktree)
+        assert verdict.reviewed_sha == git_in(worktree, "rev-parse", "HEAD")
 
     def test_reviewed_sha_unchanged_for_noop_cycle(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-sha-noop")
-        orig = _head(worktree)
+        orig = git_in(worktree, "rev-parse", "HEAD")
         runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])  # no-op fix
         _out, verdict = _run_loop(runner, worktree, session_id="s-sha-noop")
 
@@ -1404,7 +1391,7 @@ class TestFixLoopDisabledGate:
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-gate-blocking")
-        head_before = _head(worktree)
+        head_before = git_in(worktree, "rev-parse", "HEAD")
         loop_runner = _FixLoopRunner([_MF_DOC])
         loop_result, loop_verdict = _run_loop(
             loop_runner, worktree, session_id="s-gate", fix_loop_enabled=False
@@ -1443,7 +1430,7 @@ class TestFixLoopDisabledGate:
         assert loop_runner.review_calls == plain_runner.review_calls + 1
         assert loop_result.review.fix_cycles_used == 0
         # No commits landed — the disabled gate never invoked the fix loop.
-        assert _head(worktree) == head_before
+        assert git_in(worktree, "rev-parse", "HEAD") == head_before
 
     def test_disabled_gate_non_blocking_cycle0_unaffected(
         self, make_git_repo: Callable[..., Path]

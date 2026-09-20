@@ -43,6 +43,7 @@ from tests.conftest import (
     _clean_git_env,
     _cmd,
     _placement,
+    git_in,
     guard_candidate_path,
     run_guard_fence,
     substitute_fence_placeholders,
@@ -863,15 +864,6 @@ def _gate2_candidate_path(tmp_path: Path, location: str) -> str:
     return str(root.resolve() / ".claude" / "scripts" / _GATE2_SCRIPT)
 
 
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        check=True,
-        env=_clean_git_env(),
-    )
-
-
 def _gate2_session(tmp_path: Path) -> str:
     """A ``$CW_SESSION`` unique to *tmp_path* (#2141 round 4).
 
@@ -924,9 +916,9 @@ def _add_gate2_session_worktree(
     context file, script copy, plan file) are one concern.
     """
     if session_branch == _GATE2_BRANCH:
-        _git(repo, "worktree", "add", str(session_wt), _GATE2_BRANCH)
+        git_in(repo, "worktree", "add", str(session_wt), _GATE2_BRANCH)
     else:
-        _git(
+        git_in(
             repo,
             "worktree",
             "add",
@@ -997,17 +989,17 @@ def _run_gate2_fence(
     """
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
-    _git(repo, "init", "-b", "main")
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "cw test")
-    _git(repo, "commit", "--allow-empty", "-m", "initial")
-    _git(repo, "checkout", "-b", _GATE2_BRANCH)
+    git_in(repo, "init", "-b", "main")
+    git_in(repo, "config", "user.email", "test@example.com")
+    git_in(repo, "config", "user.name", "cw test")
+    git_in(repo, "commit", "--allow-empty", "-m", "initial")
+    git_in(repo, "checkout", "-b", _GATE2_BRANCH)
     (repo / _PROBE_FILE).write_text("delivered\n", encoding="utf-8")
-    _git(repo, "add", _PROBE_FILE)
-    _git(repo, "commit", "-m", "probe")
-    _git(repo, "checkout", "main")
-    _git(repo, "remote", "add", "origin", str(repo))
-    _git(repo, "fetch", "origin")
+    git_in(repo, "add", _PROBE_FILE)
+    git_in(repo, "commit", "-m", "probe")
+    git_in(repo, "checkout", "main")
+    git_in(repo, "remote", "add", "origin", str(repo))
+    git_in(repo, "fetch", "origin")
 
     if session_worktree:
         _add_gate2_session_worktree(
@@ -1029,7 +1021,7 @@ def _run_gate2_fence(
     session = _gate2_session(tmp_path)
     tmpwt = Path(f"/tmp/gate-wt-{session}")
     if gate_worktree:
-        _git(repo, "worktree", "add", "--detach", str(tmpwt), _GATE2_BRANCH)
+        git_in(repo, "worktree", "add", "--detach", str(tmpwt), _GATE2_BRANCH)
 
     bin_dir = write_guard_stub_bin(tmp_path)
     if break_git_diff:

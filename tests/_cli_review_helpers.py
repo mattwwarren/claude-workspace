@@ -8,11 +8,10 @@ explicitly by the test modules that use each helper.
 
 from __future__ import annotations
 
-import os
 import subprocess
 from typing import TYPE_CHECKING, Any
 
-from tests.conftest import commit_tracked_file
+from tests.conftest import _clean_git_env, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,18 +44,6 @@ def _consolidate_payload(**overrides: object) -> dict[str, Any]:
     return payload
 
 
-def _git(repo: Path, *args: str) -> str:
-    """Run git in *repo* with a GIT_*-free env, returning stdout."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        check=True,
-        text=True,
-        env=env,
-    ).stdout
-
-
 def _branch_repo(
     make_git_repo: Callable[..., Path], name: str
 ) -> tuple[Path, str, str]:
@@ -66,8 +53,16 @@ def _branch_repo(
     the verbatim ``git diff --no-color main...<reviewed_sha>`` output.
     """
     repo = make_git_repo(name)
-    _git(repo, "checkout", "-b", "feature")
+    git_in(repo, "checkout", "-b", "feature")
     commit_tracked_file(repo, "src/thing.py", "x = 1\ny = 2\n")
-    reviewed_sha = _git(repo, "rev-parse", "HEAD").strip()
-    real_diff = _git(repo, "diff", "--no-color", f"main...{reviewed_sha}")
+    reviewed_sha = git_in(repo, "rev-parse", "HEAD")
+    # Unstripped on purpose: real_diff flows verbatim into the diff parser
+    # under test, so the trailing newline must survive (git_in strips it).
+    real_diff = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--no-color", f"main...{reviewed_sha}"],
+        capture_output=True,
+        check=True,
+        text=True,
+        env=_clean_git_env(),
+    ).stdout
     return repo, reviewed_sha, real_diff

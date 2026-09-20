@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _clean_git_env
+from tests.conftest import _clean_git_env, git_in
 
 ROOT = Path(__file__).parent.parent
 SHIP_IT_PATH = ROOT / ".claude" / "commands" / "ship-it.md"
@@ -43,15 +43,6 @@ def _title_tier_script() -> str:
     return content[start + len(FENCE) : end]
 
 
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        check=True,
-        env=_clean_git_env(),
-    )
-
-
 def _run_title_tiers(
     make_git_repo: Callable[..., Path],
     commits: list[str],
@@ -66,10 +57,10 @@ def _run_title_tiers(
     ``origin/main..HEAD`` range the ladder scans.
     """
     repo = make_git_repo("title-tiers")
-    _git(repo, "remote", "add", "origin", str(repo))
-    _git(repo, "fetch", "origin", "main")
+    git_in(repo, "remote", "add", "origin", str(repo))
+    git_in(repo, "fetch", "origin", "main")
     for subject in commits:
-        _git(repo, "commit", "--allow-empty", "-m", subject)
+        git_in(repo, "commit", "--allow-empty", "-m", subject)
 
     script = _title_tier_script() + '\nprintf "TITLE=%s\\n" "$TITLE"\n'
     env = {**_clean_git_env(), "EXPLICIT_TITLE": "", "ARGUMENTS": ""}

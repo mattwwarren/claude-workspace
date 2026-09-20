@@ -5669,6 +5669,7 @@ def _make_git_workspace_for_test(tmp_path: Path, name: str) -> Path:
     repo.mkdir(parents=True, exist_ok=True)
     clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
+    # Not tests.conftest.git_in: closes over a local repo, not (repo, *args)-shaped.
     def _git(*args: str) -> None:
         subprocess.run(
             ["git", "-C", str(repo), *args],
