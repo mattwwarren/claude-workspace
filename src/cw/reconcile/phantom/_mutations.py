@@ -274,7 +274,7 @@ def _apply_phantom_routed_mutations(
             # this case.
             emit_outcome = emit_result_on(
                 session,
-                candidate.routed_sentinel.model_dump(mode="json"),
+                routed_sentinel.model_dump(mode="json"),
                 source=LastResultSource.SALVAGE_TRANSCRIPT,
             )
             if emit_outcome.refused:

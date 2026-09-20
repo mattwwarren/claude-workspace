@@ -109,7 +109,7 @@ def _apply_idle_routed_mutations(
             # authority's already-door-written result is never clobbered.
             emit_outcome = emit_result_on(
                 session,
-                candidate.routed_sentinel.model_dump(mode="json"),
+                routed_sentinel.model_dump(mode="json"),
                 source=LastResultSource.SALVAGE_TRANSCRIPT,
             )
             if emit_outcome.refused:
