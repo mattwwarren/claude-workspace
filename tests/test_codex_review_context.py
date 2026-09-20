@@ -56,12 +56,11 @@ from cw.spawn import _write_hook_context
 from tests._codex_review_helpers import (
     _doc_json,
     _finding_payload,
-    _git,
     _populate_global_agents_dir,
     _task,
     _write,
 )
-from tests.conftest import _make_diff, _make_finding, _make_ticket_task
+from tests.conftest import _make_diff, _make_finding, _make_ticket_task, git_in
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
@@ -1501,10 +1500,10 @@ class TestPrepareReviewPass:
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
         repo = make_git_repo("wt-prepare")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
 
         prepared = _prepare_review_pass(
             _task(),
@@ -1537,10 +1536,10 @@ class TestPrepareReviewPass:
     ) -> Path:
         """A feature-branch repo with one python change and a tracker config."""
         repo = make_git_repo(name)
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
         if tracker is not None:
             _write(
                 repo / ".claude" / "project-config.yaml",
@@ -1695,10 +1694,10 @@ class TestPrepareReviewPass:
         variant on EVERY selected role, and the verdict-bound capability on the
         prepared inputs (#1709)."""
         repo = make_git_repo("wt-prepare-capable")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
 
         prepared = _prepare_review_pass(
             _task(),
@@ -1718,10 +1717,10 @@ class TestPrepareReviewPass:
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
         repo = make_git_repo("wt-prepare-incapable")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
 
         prepared = _prepare_review_pass(
             _task(),
@@ -1748,12 +1747,12 @@ class TestPrepareReviewPass:
             "## Quality Gates\nDISTINCTIVE_QUALITY_GATE_MARKER_TEXT\n"
             "## Module Size\nother\n",
         )
-        _git(repo, "add", "pyproject.toml", "CLAUDE.md")
-        _git(repo, "commit", "-m", "add lint config")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "add", "pyproject.toml", "CLAUDE.md")
+        git_in(repo, "commit", "-m", "add lint config")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
 
         prepared = _prepare_review_pass(
             _task(),
@@ -1773,10 +1772,10 @@ class TestPrepareReviewPass:
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
         repo = make_git_repo("wt-prepare-no-lint-grounding")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
 
         prepared = _prepare_review_pass(
             _task(),
@@ -1796,10 +1795,10 @@ class TestPrepareReviewPass:
         """#1773: every selected role carries a resolved spec status, and a
         repo whose ``.claude/agents/`` copy exists reports ``source="repo"``."""
         repo = make_git_repo("wt-prepare-agent-spec")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
 
         prepared = _prepare_review_pass(
             _task(),
@@ -1835,10 +1834,10 @@ class TestPrepareReviewPass:
         fallback isolated to an empty dir) still produces prompts — it is
         diagnosed, not fatal."""
         repo = make_git_repo("wt-prepare-agent-spec-none")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
 
         prepared = _prepare_review_pass(
             _task(),
@@ -1864,25 +1863,19 @@ class TestPrepareReviewPass:
 class TestDeltaModeReviewPass:
     """`delta_from_sha`/`prior_open_findings` wiring through the whole pass."""
 
-    @staticmethod
-    def _rev(repo: Path) -> str:
-        return subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
-        ).strip()
-
     def _two_commit_repo(
         self, make_git_repo: Callable[[str], Path], name: str
     ) -> tuple[Path, str]:
         """A repo whose first feature commit is python and second is markdown."""
         repo = make_git_repo(name)
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
-        first = self._rev(repo)
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
+        first = git_in(repo, "rev-parse", "HEAD")
         (repo / "notes.md").write_text("# notes\n", encoding="utf-8")
-        _git(repo, "add", "notes.md")
-        _git(repo, "commit", "-m", "add notes.md")
+        git_in(repo, "add", "notes.md")
+        git_in(repo, "commit", "-m", "add notes.md")
         return repo, first
 
     def test_cycle_zero_default_is_unchanged(
@@ -1937,7 +1930,7 @@ class TestDeltaModeReviewPass:
         # (#1837 Performance SHOULD_FIX).
         assert delta.diff is delta.delta_diff
         assert "mod.py" not in delta.diff.files
-        assert delta.reviewed_sha == self._rev(repo)
+        assert delta.reviewed_sha == git_in(repo, "rev-parse", "HEAD")
         # Prompts are built against the delta, not the full PR diff.
         for prompt in delta.prompts_by_role.values():
             assert "def broken():" not in prompt
@@ -2152,10 +2145,10 @@ class TestPrepareReviewPassFindingDispositions:
 
     def _repo(self, make_git_repo: Callable[[str], Path], name: str) -> Path:
         repo = make_git_repo(name)
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
         _write(
             repo / ".claude" / "project-config.yaml",
             "tracking:\n  primary:\n    system: github-issues\n",

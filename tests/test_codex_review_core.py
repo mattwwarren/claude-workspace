@@ -13,12 +13,11 @@ from cw.codex_runner import FakeCodexRunner
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from tests._codex_review_helpers import (
     _finding_payload,
-    _git,
     _ok_result,
     _SequencedRunner,
     _task,
 )
-from tests.conftest import _make_reviewer_doc
+from tests.conftest import _make_reviewer_doc, git_in
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
@@ -68,10 +67,10 @@ class TestPrepareReviewPass:
         # real non-empty (non-blocking) finding survives diff-based validation
         # and is reflected in the consolidated verdict.
         repo = make_git_repo("wt-prepare-run")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
 
         # This throwaway pass also warms the #1709 capability cache, so the
         # real run_review below gets a cache hit and spends no runner slot.
@@ -115,10 +114,10 @@ class TestPrepareReviewPass:
         # prepared.voided_findings -> synthesize_codex_review_result threading;
         # the suppression function itself is unit-tested elsewhere.
         repo = make_git_repo("wt-prepare-voided-run")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
 
         monkeypatch.setattr(
             "cw.codex_review._context.core._load_voided_findings",
@@ -167,10 +166,10 @@ class TestPrepareReviewPass:
         # prepared.finding_dispositions -> synthesize_codex_review_result
         # threading; the suppression function itself is unit-tested elsewhere.
         repo = make_git_repo("wt-prepare-dispositions-run")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
-        _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "add mod.py")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
 
         key = _disposition_key("mod.py", "Bug here")
         assert key is not None
@@ -235,10 +234,10 @@ def test_run_review_threads_metrics_onto_verdict_agents_run(
     make_git_repo: Callable[[str], Path],
 ) -> None:
     repo = make_git_repo("wt-run-review-metrics")
-    _git(repo, "checkout", "-b", "feature")
+    git_in(repo, "checkout", "-b", "feature")
     (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
-    _git(repo, "add", "mod.py")
-    _git(repo, "commit", "-m", "add mod.py")
+    git_in(repo, "add", "mod.py")
+    git_in(repo, "commit", "-m", "add mod.py")
 
     # Warms the #1709 capability cache; run_review below is then a cache hit.
     prepared = _prepare_review_pass(
