@@ -5163,6 +5163,13 @@ class TestParkCommentPostedInTranscript:
             ({"type": "queue-operation", "content": "enqueue"}, False),
             ({"type": "user", "message": {"content": 17}}, False),
             ({"type": "user"}, False),
+            (
+                {
+                    "type": "user",
+                    "message": {"content": ["a bare string block", 17]},
+                },
+                False,
+            ),
         ],
         ids=[
             "str-content",
@@ -5174,6 +5181,7 @@ class TestParkCommentPostedInTranscript:
             "queue-operation",
             "malformed-content",
             "no-message",
+            "non-dict-block-in-list",
         ],
     )
     def test_is_leg_boundary_classifies_every_real_user_record_shape(

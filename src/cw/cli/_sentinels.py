@@ -222,8 +222,8 @@ def _is_leg_boundary(record: dict[str, object]) -> bool:
 
 def _iter_message_records(
     transcript_path: Path,
-) -> Iterator[tuple[int, dict[str, object]]]:
-    """Yield ``(line_index, record)`` for each message-bearing JSONL record.
+) -> Iterator[tuple[int, dict[str, object], dict[str, object]]]:
+    """Yield ``(line_index, record, message)`` for each message-bearing record.
 
     Mirrors ``_iter_sentinel_text_blocks``'s tolerance (``cw/_util.py``): a
     missing file, an ``OSError`` mid-read, a malformed line, a non-dict record
@@ -245,9 +245,10 @@ def _iter_message_records(
                     continue
                 if not isinstance(record, dict):
                     continue
-                if not isinstance(record.get("message"), dict):
+                message = record.get("message")
+                if not isinstance(message, dict):
                     continue
-                yield index, record
+                yield index, record, message
     except OSError:
         return
 
@@ -303,13 +304,10 @@ def _iter_leg_events(transcript_path: Path) -> Iterator[_LegEvent]:
     re-entry can never supply a post made after it.
     """
     pending: dict[str, tuple[str, dict[str, object]]] = {}
-    for index, record in _iter_message_records(transcript_path):
+    for index, record, message in _iter_message_records(transcript_path):
         if _is_leg_boundary(record):
             pending.clear()
             yield _LegBoundary(index)
-            continue
-        message = record.get("message")
-        if not isinstance(message, dict):
             continue
         content = message.get("content")
         if not isinstance(content, list):
