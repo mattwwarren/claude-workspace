@@ -7399,6 +7399,46 @@ class TestDevQueueStatusWithTick:
         fields = re.split(r" {2,}", row.strip())
         assert fields[-2] == "1"
 
+    def test_status_needs_attn_ignores_unhydrated_pr_task(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """NEEDS_ATTN counts hydrated attention only; the statusline's ``?N``
+        marker for un-hydrated PRs (#1672) does not leak into it."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, PrState, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-310",
+                        client="attn-client",
+                        status=QueueItemStatus.RUNNING,
+                        pr_state=PrState(attention_state="ci_failing"),
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-311",
+                        client="attn-client",
+                        status=QueueItemStatus.RUNNING,
+                        pr_state=PrState(attention_state=None),
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-312",
+                        client="attn-client",
+                        status=QueueItemStatus.COMPLETED,
+                        pr_url="https://github.com/acme/widgets/pull/7",
+                        pr_state=None,
+                    ),
+                ]
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        row = next(line for line in result.output.splitlines() if "attn-client" in line)
+        fields = re.split(r" {2,}", row.strip())
+        assert fields[-2] == "1"
+
     def test_status_json_includes_needs_attn(self, tmp_config_dir: Path) -> None:
         """dev-queue status --json exposes needs_attn per client (#929)."""
         import json as _json

@@ -20,8 +20,9 @@ def task_attention_state(task: TicketTask) -> str | None:
     """The task's hydrated PR attention_state, or None if not hydrated/clean.
 
     ``pr_state`` is populated only by the async ``cw.pr_hydrate`` pass, so this
-    reflects *last-hydrated* PR state: a freshly-added task, or one behind a
-    lagging hydration pass, reads as None even if it would need attention once
-    hydrated.
+    reflects *last-hydrated* PR state: a task whose PR exists (``pr_url`` set)
+    but that has not yet been hydrated reads as None even if it would need
+    attention once hydrated. ``cw.statusline`` surfaces that unknown state as a
+    separate ``?N`` count (#1672); ``NEEDS_ATTN`` deliberately does not.
     """
     return task.pr_state.attention_state if task.pr_state is not None else None
