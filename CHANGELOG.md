@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`create_worktree` now fetches and fast-forwards a behind worktree on the reuse path, closing the reuse-path fetch asymmetry (#2213):** the first-time path fetched `origin/<branch>` before resolving the branch, but reuse returned the existing worktree untouched, so a per-ticket worktree reused across pipeline stages could sit on a stale HEAD while `origin/<branch>` had moved on. After the branch-identity and unsaved-work guards pass, reuse now best-effort fetches and runs `git merge --ff-only` to `refs/remotes/origin/<branch>` only when HEAD is a strict ancestor — never a reset, never a raise. Equal, ahead and diverged worktrees are left as they were (diverged logs a WARNING), an `--ff-only` refusal on overlapping local edits logs a WARNING and changes nothing, and submodules are re-synced after a successful fast-forward. A branch that is not on origin yet is now logged at DEBUG instead of WARNING (`fetch_feature_branch`'s `quiet_missing_ref`), which also quiets the first-time path. This closes the asymmetry only and does not claim to fix the byte-identical review verdicts that prompted the ticket. Limitation: interactive `cw start` reaches `create_worktree` before it checks for a live session, so a live session occupying the same clean, fully-pushed worktree can have its HEAD fast-forwarded underneath it.
+
 ## [1.47.0] - 2026-09-20
 
 ### Added
