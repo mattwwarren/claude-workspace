@@ -1586,6 +1586,135 @@ class TestRouteEmittedSentinel:
         assert task_after.stage == Stage.FINALIZE
         assert task_after.status == QueueItemStatus.BLOCKED_ON_USER
 
+    def test_idle_routed_mutations_completes_on_task_already_terminal(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """GitHub #2140: when the dev-queue task was already raced to a
+        genuinely terminal status (COMPLETED/FAILED/CANCELLED) by a concurrent
+        caller before this tick's lookup ran, ``_apply_sentinel_to_task``
+        reports ``routed=False, task_already_terminal=True`` -- the session
+        must be completed through the RFC 0012 door (``emit_result_on``)
+        instead of stamping the stage-mismatch refusal marker over a race
+        that was already resolved elsewhere (which would silently orphan the
+        session forever, per the ticket's investigation finding)."""
+        from cw.models import LastResultSource
+        from cw.reconcile import ProposedAction, ReapCandidate
+        from cw.reconcile.idle import _apply_idle_routed_mutations
+
+        worktree = tmp_path / "wt-2140-idle-terminal"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = started_at + timedelta(seconds=400)
+
+        sess = _mk_headless_daemon_session("2140-idle-terminal", worktree, started_at)
+        sess.last_result = None  # sentinel NOT yet consumed
+        state = CwState(sessions=[sess])
+        save_state(state)
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        task = TicketTask(
+            ticket_id="2140-idle-terminal",
+            client="client-a",
+            status=QueueItemStatus.COMPLETED,
+            session_id="2140-idle-terminal",
+            stage=Stage.FINALIZE,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        payload = _stage_complete_payload()
+        payload["ticket_id"] = "2140-idle-terminal"
+        routed_sentinel = AutoDevResult.model_validate(payload)
+        candidate = ReapCandidate(
+            session_id="2140-idle-terminal",
+            proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+            ticket_id="2140-idle-terminal",
+            routed_sentinel=routed_sentinel,
+            salvage_csid="csid-2140-idle-terminal",
+        )
+
+        session_by_id = {s.id: s for s in state.sessions}
+        accepted, state_mutated = _apply_idle_routed_mutations(
+            session_by_id, [candidate], now=now
+        )
+
+        assert accepted == [candidate]
+        assert state_mutated is True
+        session = session_by_id["2140-idle-terminal"]
+        assert session.status == SessionStatus.COMPLETED
+        assert session.last_result == routed_sentinel.model_dump(mode="json")
+        assert session.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
+
+        # The already-terminal task row is untouched -- this arm never writes
+        # to the dev queue, only to the session.
+        task_after = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "2140-idle-terminal"
+        )
+        assert task_after.status == QueueItemStatus.COMPLETED
+        assert task_after.session_id == "2140-idle-terminal"
+
+    def test_idle_routed_mutations_terminal_refusal_preserves_existing_result(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """GitHub #2140: a ``task_already_terminal`` race must still respect
+        first-writer-wins -- if another authority already recorded a terminal
+        ``last_result`` on this session, the door refuses and the foreign
+        value/source survive byte-identical. Proves the new arm actually
+        routes through ``emit_result_on`` rather than falling through to the
+        raw ``session.last_result = ...`` assignment (#2206, out of scope),
+        which would clobber the foreign value."""
+        from cw.models import LastResultSource
+        from cw.reconcile import ProposedAction, ReapCandidate
+        from cw.reconcile.idle import _apply_idle_routed_mutations
+
+        worktree = tmp_path / "wt-2140-idle-terminal-refused"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = started_at + timedelta(seconds=400)
+
+        sess = _mk_headless_daemon_session(
+            "2140-idle-terminal-refused", worktree, started_at
+        )
+        foreign = {"status": "shipped", "foreign_authority": True}
+        sess.last_result = foreign
+        sess.last_result_source = LastResultSource.STOP_HOOK_HARVEST
+        state = CwState(sessions=[sess])
+        save_state(state)
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        task = TicketTask(
+            ticket_id="2140-idle-terminal-refused",
+            client="client-a",
+            status=QueueItemStatus.COMPLETED,
+            session_id="2140-idle-terminal-refused",
+            stage=Stage.FINALIZE,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        payload = _stage_complete_payload()
+        payload["ticket_id"] = "2140-idle-terminal-refused"
+        routed_sentinel = AutoDevResult.model_validate(payload)
+        candidate = ReapCandidate(
+            session_id="2140-idle-terminal-refused",
+            proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+            ticket_id="2140-idle-terminal-refused",
+            routed_sentinel=routed_sentinel,
+            salvage_csid="csid-2140-idle-terminal-refused",
+        )
+
+        session_by_id = {s.id: s for s in state.sessions}
+        accepted, state_mutated = _apply_idle_routed_mutations(
+            session_by_id, [candidate], now=now
+        )
+
+        assert accepted == []
+        # emit_result_on() leaves `session` byte-identical on refusal -- no new
+        # state for this tick to persist, unlike the stage-mismatch stamp arm.
+        assert state_mutated is False
+        session = session_by_id["2140-idle-terminal-refused"]
+        assert session.status != SessionStatus.COMPLETED
+        assert session.last_result == foreign
+        assert session.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+
 
 # ---------------------------------------------------------------------------
 # _apply_sentinel_to_task — staged advance tests (GitHub issue #698)
@@ -2540,12 +2669,54 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome == SentinelRouteOutcome(
-            rescued=False, routed=False, landed_terminal=False
+            rescued=False,
+            routed=False,
+            landed_terminal=False,
+            task_already_terminal=True,
         )
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
         assert t.completed_at == completed_at
+
+    def test_apply_sentinel_to_task_race_pending_task_not_already_terminal(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A same-ticket/session task raced to PENDING → task_already_terminal=False.
+
+        PENDING is outside ``OCCUPIED_LANE_STATUSES`` but is redispatch-
+        eligible, not terminal (#1692) -- unlike the FAILED/COMPLETED/
+        CANCELLED case above, this must NOT be classified as safe-to-complete.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1692-race-pending", "sess-1692-race-pending"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.PENDING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+        assert outcome == SentinelRouteOutcome(
+            rescued=False,
+            routed=False,
+            landed_terminal=False,
+            task_already_terminal=False,
+        )
+        # Round-2 (#1692): a non-terminal excluded row (PENDING) is
+        # redispatch-eligible, not a race -- it must emit no race-miss event.
+        events = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SENTINEL_RACE_MISS
+        ]
+        assert events == []
 
     def test_apply_sentinel_to_task_race_miss_logs_warning(
         self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
@@ -2581,6 +2752,18 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             "sentinel_race_miss_detected" in rec.message for rec in caplog.records
         )
         assert any(ticket_id in rec.message for rec in caplog.records)
+
+        events = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SENTINEL_RACE_MISS
+        ]
+        assert len(events) == 1
+        assert events[0].payload["ticket_id"] == ticket_id
+        assert events[0].payload["session_id"] == session_id
+        # Round-2 (#1692): client field added, matching the sibling
+        # SESSION_SENTINEL_LIVENESS_VETOED payload.
+        assert events[0].payload["client"] == "staged-client"
 
     def test_apply_sentinel_to_task_unrelated_task_present_still_returns_routed_true(
         self, tmp_config_dir: Path
@@ -2692,6 +2875,108 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         assert outcome == SentinelRouteOutcome(
             rescued=False, routed=True, landed_terminal=False
         )
+
+    @pytest.mark.parametrize("terminal_first", [True, False])
+    def test_duplicate_excluded_rows_mixed_terminal_never_already_terminal(
+        self, tmp_config_dir: Path, terminal_first: bool
+    ) -> None:
+        """Round-3 (#1692): a terminal + non-terminal excluded duplicate row
+        must classify as NOT already-terminal, regardless of scan order.
+
+        Before the round-3 fix, ``excluded_status``/``excluded_client`` were
+        overwritten on every excluded match (last-seen-wins), so whichever row
+        happened to be scanned last decided the outcome. Both orderings here
+        must yield the identical result: the live/redispatch-eligible
+        (PENDING) row vetoes the terminal classification either way.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1692-r3-mixed", "sess-1692-r3-mixed"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
+        terminal_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.FAILED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="abandoned",
+        )
+        pending_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.PENDING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        rows = (
+            [terminal_row, pending_row]
+            if terminal_first
+            else [pending_row, terminal_row]
+        )
+        save_dev_queue(DevQueueStore(tasks=rows))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+        assert outcome == SentinelRouteOutcome(
+            rescued=False,
+            routed=False,
+            landed_terminal=False,
+            task_already_terminal=False,
+        )
+        events = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SENTINEL_RACE_MISS
+        ]
+        assert events == []
+
+    def test_duplicate_excluded_rows_all_terminal_still_already_terminal(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Round-3 (#1692): duplicate ALL-terminal excluded rows still
+        classify as already-terminal and emit exactly one race-miss event.
+
+        Companion to the mixed-terminal test above -- pins that aggregating
+        across duplicate rows didn't accidentally make the terminal case
+        harder to satisfy when every excluded match is genuinely terminal.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1692-r3-all-terminal", "sess-1692-r3-all-terminal"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
+        failed_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.FAILED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="abandoned",
+        )
+        cancelled_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.CANCELLED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="cancelled",
+        )
+        save_dev_queue(DevQueueStore(tasks=[failed_row, cancelled_row]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+        assert outcome == SentinelRouteOutcome(
+            rescued=False,
+            routed=False,
+            landed_terminal=False,
+            task_already_terminal=True,
+        )
+        events = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SENTINEL_RACE_MISS
+        ]
+        assert len(events) == 1
+        assert events[0].payload["excluded_status"] == QueueItemStatus.FAILED
 
 
 class TestRouteBlockedResultCatchAllLivenessGuard:

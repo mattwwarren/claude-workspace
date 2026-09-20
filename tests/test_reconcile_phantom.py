@@ -416,24 +416,29 @@ def test_reconcile_phantom_stage_mismatch_does_not_orphan_task_or_complete_sessi
     assert any(e.payload.get("ticket_id") == "salv-mismatch" for e in mismatch_events)
 
 
-def test_reconcile_phantom_race_already_failed_task_does_not_complete_session(
+def test_reconcile_phantom_race_already_failed_task_completes_session_via_door(
     tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """GitHub #1189: a task raced to FAILED by a concurrent caller must not be
-    completed by the phantom sweep's ROUTE_EMITTED_SENTINEL path.
+    """GitHub #1189/#2140: a task raced to FAILED by a concurrent caller before
+    the phantom sweep's own lookup runs (the R3(a) lookup-miss race) is a
+    ``task_already_terminal`` outcome, not a literal stage mismatch -- since
+    #2140, that completes the now-leaked session through the RFC 0012 door
+    instead of leaving it stranded (#1189's original assertion, superseded by
+    #2140's fix: see the ticket's investigation finding for why leaving it
+    stranded here is itself a silent, default-config orphan under
+    ``ReapPolicy.SIGNAL_ONLY``).
 
     Same shape as ``test_reconcile_phantom_stage_mismatch_does_not_orphan_
     task_or_complete_session`` (a phantom worker's transcript carries a
     stage_complete/stage2_impl advance sentinel), except the dev-queue task
-    has already been landed FAILED/abandoned for this same ticket/session by
-    the time the phantom sweep's own lookup runs (the R3(a) lookup-miss
-    race) -- not a literal stage mismatch. Unlike the stage-mismatch sibling,
-    no SENTINEL_STAGE_MISMATCH event fires: the race-miss return happens
-    inside _apply_sentinel_to_task's lookup loop, before any delegation to
-    dispatch.py's apply_staged_decision/_route_staged_decision, which is the
-    only emitter of that event type.
+    has already been landed FAILED/abandoned for this same ticket/session.
+    Unlike the stage-mismatch sibling, no SENTINEL_STAGE_MISMATCH event
+    fires: the race-miss return happens inside _apply_sentinel_to_task's
+    lookup loop, before any delegation to dispatch.py's
+    apply_staged_decision/_route_staged_decision, which is the only emitter
+    of that event type.
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -477,14 +482,19 @@ def test_reconcile_phantom_race_already_failed_task_does_not_complete_session(
     with freezegun.freeze_time(now):
         reconcile()
 
-    # Task untouched: still FAILED/abandoned, nothing routed.
+    # Task untouched: still FAILED/abandoned -- this arm never writes to the
+    # dev queue, only to the session.
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-race")
     assert task.status == QueueItemStatus.FAILED
     assert task.disposition == "abandoned"
 
-    # Session NOT completed/torn down -- the race-miss must not orphan it.
+    # Session completed through the door instead of stranded (#2140).
+    from cw.models import LastResultSource
+
     reloaded = next(s for s in load_state().sessions if s.id == "salv-race")
-    assert reloaded.status != SessionStatus.COMPLETED
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
+    assert reloaded.reap_reason == ReapReason.PHANTOM_SURFACE
 
     mismatch_events = read_events(
         consumer="test-salv-race-sentinel-stage-mismatch",
@@ -1712,6 +1722,157 @@ def test_phantom_route_emitted_sentinel_refusal_marker_is_not_terminal_sentinel(
     assert _has_terminal_sentinel(reloaded) is False
 
 
+def test_phantom_routed_mutations_completes_on_task_already_terminal(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub #2140: when the dev-queue task was already raced to a genuinely
+    terminal status (COMPLETED/FAILED/CANCELLED) by a concurrent caller before
+    this tick's lookup ran, ``_apply_sentinel_to_task`` reports
+    ``routed=False, task_already_terminal=True`` -- the phantom session must
+    be completed through the RFC 0012 door (``emit_result_on``) instead of
+    stamping the merge-aware refusal marker over an already-resolved race
+    (which would leave a default-config ``SIGNAL_ONLY`` orphan forever, per
+    the ticket's investigation finding)."""
+    from cw.models import LastResultSource
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile.phantom import _apply_phantom_routed_mutations
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-2140-phantom-terminal"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    sess = _mk_phantom_daemon_session(
+        "2140-phantom-terminal",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+    )
+    payload = _stage_complete_payload()
+    payload["ticket_id"] = "2140-phantom-terminal"
+    _write_salvage_transcript(home, worktree, "csid-2140-phantom-terminal", payload)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    task = TicketTask(
+        ticket_id="2140-phantom-terminal",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        session_id="2140-phantom-terminal",
+        stage=Stage.FINALIZE,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    # Detect runs while last_result is still None -- the terminal race is
+    # invisible to detect, only to apply (the ticket's investigation finding).
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        task_by_ticket={"2140-phantom-terminal": task},
+        now=started_at,
+    )
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+
+    session_by_id = {s.id: s for s in state.sessions}
+    phantom_names: list[str] = []
+    accepted = _apply_phantom_routed_mutations(
+        session_by_id, candidates, now=started_at, phantom_names=phantom_names
+    )
+
+    assert accepted == candidates
+    routed_sentinel = candidates[0].routed_sentinel
+    assert routed_sentinel is not None
+    session = session_by_id["2140-phantom-terminal"]
+    assert session.status == SessionStatus.COMPLETED
+    assert session.last_result == routed_sentinel.model_dump(mode="json")
+    assert session.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
+    assert session.reap_reason == ReapReason.PHANTOM_SURFACE
+    assert phantom_names == [session.name]
+
+    task_after = next(
+        t for t in load_dev_queue().tasks if t.ticket_id == "2140-phantom-terminal"
+    )
+    assert task_after.status == QueueItemStatus.COMPLETED
+
+
+def test_phantom_routed_mutations_terminal_refusal_preserves_existing_result(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub #2140: a ``task_already_terminal`` race must still respect
+    first-writer-wins -- if another authority already recorded a terminal
+    ``last_result`` on this phantom session between detect and apply, the
+    door refuses and the foreign value/source survive byte-identical. Proves
+    the new arm actually routes through ``emit_result_on`` rather than
+    falling through to the raw ``session.last_result = ...`` assignment
+    (#2206, out of scope), which would clobber the foreign value."""
+    from cw.models import LastResultSource
+    from cw.reconcile import _detect_phantom_candidates
+    from cw.reconcile.phantom import _apply_phantom_routed_mutations
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-2140-phantom-terminal-refused"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    sess = _mk_phantom_daemon_session(
+        "2140-phantom-terminal-refused",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+    )
+    payload = _stage_complete_payload()
+    payload["ticket_id"] = "2140-phantom-terminal-refused"
+    _write_salvage_transcript(
+        home, worktree, "csid-2140-phantom-terminal-refused", payload
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    task = TicketTask(
+        ticket_id="2140-phantom-terminal-refused",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        session_id="2140-phantom-terminal-refused",
+        stage=Stage.FINALIZE,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    # Detect runs while last_result is still None (same rationale as the
+    # acceptance test above); the foreign value lands afterward, simulating a
+    # concurrent authority racing between this tick's detect and apply phases.
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        task_by_ticket={"2140-phantom-terminal-refused": task},
+        now=started_at,
+    )
+    assert len(candidates) == 1
+
+    foreign = {"status": "shipped", "foreign_authority": True}
+    sess.last_result = foreign
+    sess.last_result_source = LastResultSource.STOP_HOOK_HARVEST
+
+    session_by_id = {s.id: s for s in state.sessions}
+    phantom_names: list[str] = []
+    accepted = _apply_phantom_routed_mutations(
+        session_by_id, candidates, now=started_at, phantom_names=phantom_names
+    )
+
+    assert accepted == []
+    assert phantom_names == []
+    session = session_by_id["2140-phantom-terminal-refused"]
+    assert session.status != SessionStatus.COMPLETED
+    assert session.last_result == foreign
+    assert session.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+
+
 def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -2649,6 +2810,7 @@ def test_sentinel_mismatch_veto_cap_end_to_end_via_detect_and_act(
     )
     from cw.reconcile import (
         ProposedAction,
+        ReapCandidate,
         _act_on_phantom_candidates,
         _detect_phantom_candidates,
     )
@@ -2675,7 +2837,7 @@ def test_sentinel_mismatch_veto_cap_end_to_end_via_detect_and_act(
     save_dev_queue(DevQueueStore(tasks=[task]))
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
 
-    def _tick() -> list[object]:
+    def _tick() -> list[ReapCandidate]:
         cands = _detect_phantom_candidates(
             state, phantom_set={sess.id}, now=now, config=config
         )

@@ -596,3 +596,88 @@ def test_terminal_sentinel_still_suppresses_past_deadline(
     assert len(candidates) == 1
     assert candidates[0].distress is False
     assert _attention_events() == []
+
+
+def test_detect_liveness_candidates_populates_dangling_tool_use_field(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A top-bucket, no-sentinel, no-spawn-stamp session with a dangling Bash
+    call populates LivenessCandidate.dangling_tool_use (#1482)."""
+    from cw.reconcile._shared import DanglingToolUseEvidence
+    from tests._reconcile_helpers import _write_transcript_records
+
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    record: dict[str, object] = {
+        "type": "assistant",
+        "timestamp": (_NOW - timedelta(minutes=60)).isoformat(),
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tu1",
+                    "name": "Bash",
+                    "input": {"command": "pytest tests/"},
+                }
+            ],
+        },
+    }
+    transcript = _write_transcript_records(home, worktree, [record])
+    stale_ts = (_NOW - timedelta(minutes=60)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    state = CwState(sessions=[sess])
+
+    candidates = _detect_liveness_candidates(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].new_bucket == LivenessBucket.STALE_45M
+    assert candidates[0].dangling_tool_use == DanglingToolUseEvidence(
+        tool_name="Bash", command_snippet="pytest tests/"
+    )
+
+
+def test_detect_liveness_candidates_leaves_dangling_tool_use_none_below_top_bucket(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """The field is only computed under distress_base (top bucket) -- no
+    wasted scan / no premature signal below it (#1482)."""
+    from tests._reconcile_helpers import _write_transcript_records
+
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    record: dict[str, object] = {
+        "type": "assistant",
+        "timestamp": (_NOW - timedelta(minutes=32)).isoformat(),
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tu1",
+                    "name": "Bash",
+                    "input": {"command": "pytest tests/"},
+                }
+            ],
+        },
+    }
+    transcript = _write_transcript_records(home, worktree, [record])
+    stale_ts = (_NOW - timedelta(minutes=32)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    state = CwState(sessions=[sess])
+
+    candidates = _detect_liveness_candidates(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].new_bucket == LivenessBucket.STALE_30M
+    assert candidates[0].dangling_tool_use is None

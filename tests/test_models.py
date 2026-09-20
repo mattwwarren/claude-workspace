@@ -14,6 +14,7 @@ from cw.models import (
     DEFAULT_AUTO_PURPOSES,
     DEFAULT_LANE,
     DEV_QUEUE_SCHEMA_VERSION,
+    TERMINAL_QUEUE_STATUSES,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -1233,6 +1234,38 @@ class TestOperatorSignoffGates:
         task = TicketTask(ticket_id="GEN-1", client="acme", signoff="operator")
         assert task.signoff == "operator"
 
+
+class TestTerminalQueueStatuses:
+    """GitHub #1692 review round 2 MUST_FIX: cw.reconcile._shared and
+    cw.reconcile.review_recipes.auto_fix_ci each independently defined the
+    identical {COMPLETED, FAILED, CANCELLED} frozenset literal. Both now
+    alias this single cw.models constant -- these tests prove the shared
+    identity, not just equal values, so the two modules cannot silently
+    re-fork the definition later.
+    """
+
+    def test_terminal_queue_statuses_contents(self) -> None:
+        assert (
+            frozenset(
+                [
+                    QueueItemStatus.COMPLETED,
+                    QueueItemStatus.FAILED,
+                    QueueItemStatus.CANCELLED,
+                ]
+            )
+            == TERMINAL_QUEUE_STATUSES
+        )
+
+    def test_reconcile_shared_aliases_canonical_constant(self) -> None:
+        from cw.reconcile import _shared
+
+        assert _shared._GENUINELY_TERMINAL_QUEUE_STATUSES is TERMINAL_QUEUE_STATUSES
+
+    def test_auto_fix_ci_aliases_canonical_constant(self) -> None:
+        from cw.reconcile.review_recipes import auto_fix_ci
+
+        assert auto_fix_ci._REQUEUE_ELIGIBLE_STATUSES is TERMINAL_QUEUE_STATUSES
+
     def test_lane_config_signoff_defaults_none(self) -> None:
         from cw.models import LaneConfig
 
@@ -2039,6 +2072,7 @@ class TestPackageExportCompleteness:
             "Stage",
             "StageExecutorConfig",
             "StagePipelineConfig",
+            "TERMINAL_QUEUE_STATUSES",
             "TERMINAL_SESSION_STATUSES",
             "TicketTask",
             "WORKER_PURPOSES",

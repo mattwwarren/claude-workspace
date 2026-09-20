@@ -27,6 +27,7 @@ from __future__ import annotations
 from cw.models.client import DEFAULT_AUTO_PURPOSES, ClientConfig
 from cw.models.enums import (
     OCCUPIED_LANE_STATUSES,
+    TERMINAL_QUEUE_STATUSES,
     TERMINAL_SESSION_STATUSES,
     WORKER_PURPOSES,
     CompletionReason,
@@ -110,6 +111,7 @@ __all__ = [
     "OPENCODE_BACKEND",
     "PLAN_APPROVED_FINGERPRINT_KEY",
     "PLAN_DRAFT_FINGERPRINT_KEY",
+    "TERMINAL_QUEUE_STATUSES",
     "TERMINAL_SESSION_STATUSES",
     "WORKER_PURPOSES",
     "_DEFAULT_OPERATOR_EVENT_TYPES",

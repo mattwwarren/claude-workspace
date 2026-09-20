@@ -49,6 +49,7 @@ from cw.dev_queue import (
 )
 from cw.events import read_events, record_event
 from cw.exceptions import USAGE_LIMIT_RE, EmitValidationError
+from cw.executor_diagnostics import redact
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
     AGENT_SPAWN_STAMP_KEY,
@@ -56,8 +57,10 @@ from cw.models import (
     DEFAULT_STAGE,
     HOOK_CONTEXT_RELATIVE_PATH,
     OCCUPIED_LANE_STATUSES,
+    TERMINAL_QUEUE_STATUSES,
     ClientConfig,
     CompletionReason,
+    DevQueueStore,
     LastResultSource,
     OrchestratorConfig,
     OrchestratorEventType,
@@ -146,6 +149,14 @@ _SESSION_UNRESPONSIVE_REASON = "session_unresponsive"
 # is waiting for and can name what failed". Signal-only like its sibling: no
 # disposition, no queue mutation, no worktree touch (ADR-0014).
 _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON = "fix_loop_await_deadline_exceeded"
+# Paused-status written to SESSION_NEEDS_ATTENTION events by the same liveness
+# distress path when the quietness IS explained by an unresolved, non-subagent
+# tool_use at the transcript tail (e.g. Bash) with no matching tool_result --
+# most commonly an interactive permission prompt no headless session can
+# answer (GitHub #1482; forensic incident: a permission prompt dangled 82
+# minutes with only the generic session_unresponsive signal to go on).
+# Signal-only exactly as its siblings are, per ADR-0014: nothing is disposed.
+_DANGLING_TOOL_USE_REASON = "dangling_tool_use"
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 # Paused-status written to SESSION_NEEDS_ATTENTION events when an
 # `external`-counterparty session (reviewing a teammate's PR) reaches the
@@ -727,6 +738,22 @@ _TRANSIENT_PARSE_FAILURES: frozenset[str] = frozenset(
 _TERMINAL_NO_RETRY_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
 
 
+# Cap (characters) on the command snippet _bash_command_snippet carries into
+# a dangling_tool_use distress breadcrumb (#1482). Small and fixed -- the
+# breadcrumb is an operator hint, not a full replay of the command.
+_TOOL_USE_COMMAND_SNIPPET_MAX_CHARS = 80
+
+# Tool names _detect_dangling_tool_use must never report on (#1969): that
+# domain belongs exclusively to _unresolved_subagent_spawn_age_seconds /
+# agent_spawn_stamp, because PostToolUse:Agent fires at launch-return, not
+# subagent completion -- a transcript-pairing check would false-fire distress
+# against a still-outstanding subagent spawn. Mirrors spawn.py's
+# _AGENT_TOOL_MATCHER (`^(Agent|Task)$`); duplicated rather than imported
+# because cw.spawn already imports from cw.reconcile (circular), and this is
+# a 2-name set well under PYTHON-PATTERNS.md's <5-line DRY threshold.
+_SUBAGENT_SPAWNING_TOOL_NAMES: frozenset[str] = frozenset({"Agent", "Task"})
+
+
 class UsageLimitDetection(NamedTuple):
     """Outcome of scanning a session transcript for a usage-limit message (#1345).
 
@@ -859,6 +886,116 @@ def _iter_notification_records(path: Path) -> Iterator[str]:
                         yield content
     except OSError:
         return
+
+
+class DanglingToolUseEvidence(NamedTuple):
+    """An unresolved, non-subagent tool_use found at a transcript's tail (#1482).
+
+    ``tool_name`` is the tool_use block's ``name`` (e.g. ``"Bash"``).
+    ``command_snippet`` is a redacted, length-capped rendering of
+    ``input.command`` when present, or ``None`` for a tool_use with no such
+    field (e.g. ``Write``). Produced only by :func:`_detect_dangling_tool_use`,
+    which never reports on :data:`_SUBAGENT_SPAWNING_TOOL_NAMES`.
+    """
+
+    tool_name: str
+    command_snippet: str | None
+
+
+def _bash_command_snippet(block: dict[str, object]) -> str | None:
+    """Extract, redact, and truncate a tool_use block's ``input.command``.
+
+    Returns ``None`` when the block carries no string ``input.command`` (e.g.
+    a non-Bash tool like ``Write``). Redacts secret-shaped substrings via
+    :func:`cw.executor_diagnostics.redact` before truncating -- the raw
+    command text flows into the operator-local ``session.needs_attention``
+    event/SSE surface (GitHub #1482).
+    """
+    tool_input = block.get("input")
+    if not isinstance(tool_input, dict):
+        return None
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        return None
+    redacted = redact(command)
+    if len(redacted) <= _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS:
+        return redacted
+    return redacted[:_TOOL_USE_COMMAND_SNIPPET_MAX_CHARS] + "…"
+
+
+def _apply_tool_use_block(
+    pending: dict[str, tuple[str, dict[str, object]]], block: dict[str, object]
+) -> None:
+    """Track or resolve one ``tool_use``/``tool_result`` content block.
+
+    Mutates *pending* in place: a non-subagent ``tool_use`` with a string id
+    is added (or overwritten, refreshing its file-order position); a
+    ``tool_result`` pops its matching ``tool_use_id``. Any other block shape
+    is ignored. Extracted from :func:`_detect_dangling_tool_use` to keep that
+    function's branch count under the PLR0912 ceiling.
+    """
+    block_type = block.get("type")
+    if block_type == "tool_use":
+        tool_id = block.get("id")
+        name = block.get("name")
+        if (
+            isinstance(tool_id, str)
+            and isinstance(name, str)
+            and name not in _SUBAGENT_SPAWNING_TOOL_NAMES
+        ):
+            pending[tool_id] = (name, block)
+    elif block_type == "tool_result":
+        tool_use_id = block.get("tool_use_id")
+        if isinstance(tool_use_id, str):
+            pending.pop(tool_use_id, None)
+
+
+def _detect_dangling_tool_use(session: Session) -> DanglingToolUseEvidence | None:
+    """Scan the session's transcript for an unresolved, non-subagent tool_use.
+
+    Uses :func:`_locate_session_transcript` for precise per-session lookup.
+    Tracks ``tool_use`` blocks by id in file order, popping an id when a
+    matching ``tool_result`` block is later seen; returns evidence for the
+    last entry still pending, or ``None`` when everything resolved (or the
+    transcript is missing/unreadable).
+
+    ``Agent``/``Task`` tool_use is deliberately excluded (see
+    :data:`_SUBAGENT_SPAWNING_TOOL_NAMES`, GitHub #1969) -- that domain
+    belongs exclusively to :func:`_unresolved_subagent_spawn_age_seconds` /
+    ``agent_spawn_stamp``. Never raises; fails open to ``None`` on any read
+    error, mirroring :func:`_detect_usage_limit` / :func:`_detect_provider_overload`.
+    """
+    transcript = _locate_session_transcript(session)
+    if transcript is None:
+        return None
+    pending: dict[str, tuple[str, dict[str, object]]] = {}
+    try:
+        with transcript.open() as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if isinstance(block, dict):
+                        _apply_tool_use_block(pending, block)
+    except OSError:
+        return None
+    if not pending:
+        return None
+    last_name, last_block = next(reversed(pending.values()))
+    return DanglingToolUseEvidence(
+        tool_name=last_name,
+        command_snippet=_bash_command_snippet(last_block),
+    )
 
 
 def _detect_provider_overload(session: Session) -> bool:
@@ -1068,6 +1205,16 @@ def classify_sentinel_stage_position(
     return _classify_sentinel_stage_position(task, last_result, clients)
 
 
+# #1692: genuinely terminal QueueItemStatus values -- distinct from
+# "outside OCCUPIED_LANE_STATUSES", which also includes PENDING (redispatch-
+# eligible, not terminal). Used by _apply_sentinel_to_task's lookup-miss
+# branch to classify task_already_terminal precisely. Review round 2 (#1692):
+# this was an independently-defined literal identical to
+# cw.reconcile.review_recipes.auto_fix_ci._REQUEUE_ELIGIBLE_STATUSES --
+# both now alias the single cw.models.TERMINAL_QUEUE_STATUSES definition.
+_GENUINELY_TERMINAL_QUEUE_STATUSES: frozenset[QueueItemStatus] = TERMINAL_QUEUE_STATUSES
+
+
 class SentinelRouteOutcome(NamedTuple):
     """Result of routing a sentinel through ``_apply_sentinel_to_task`` (#1019).
 
@@ -1094,11 +1241,101 @@ class SentinelRouteOutcome(NamedTuple):
     guard re-queues to PENDING, so it reports ``routed=True`` and (derived from
     it) ``landed_terminal=False`` -- exactly the signal that keeps the still-
     advancing worker alive rather than stopping it as leaked.
+
+    ``task_already_terminal`` (GitHub #1692) is True only for the raced-to-
+    terminal lookup-miss branch of cause (c) above: a same-ticket/session task
+    was found but had already been landed in a genuinely terminal status --
+    ``COMPLETED``, ``FAILED``, or ``CANCELLED`` (see ``_GENUINELY_TERMINAL_
+    QUEUE_STATUSES``) -- by a concurrent caller before this call's own lookup
+    ran. A match outside ``OCCUPIED_LANE_STATUSES`` but not in that terminal
+    set (i.e. ``PENDING``) is not terminal -- it is redispatch-eligible, so
+    ``task_already_terminal`` is False for it. ``routed`` is still False in
+    that case too, same as the terminal sub-cause -- both are a
+    ``matched_excluded`` miss, and ``routed`` is ``not matched_excluded``
+    regardless of which excluded status was matched; only a true "no such
+    task anywhere" miss (R3b) reports ``routed=True``. It is mutually
+    exclusive with ``landed_terminal``
+    by construction -- ``landed_terminal`` is set only in the ``target is not
+    None`` arm, ``task_already_terminal`` only in the ``target is None`` arm.
+    Once a task is landed genuinely terminal under this exact session_id, no
+    dispatch path will ever give this session another leg for this ticket, so
+    a caller (``signal_stop``) can safely complete the now-leaked session on
+    this sub-cause -- unlike a stage-mismatch refusal, where a still-advancing
+    worker may legitimately produce a later, matching-stage sentinel.
     """
 
     rescued: bool
     routed: bool
     landed_terminal: bool
+    task_already_terminal: bool = False
+
+
+class _TaskLookupResult(NamedTuple):
+    """Result of scanning ``store.tasks`` for a same-ticket/session match.
+
+    Round-3 (#1692): excluded (non-``OCCUPIED_LANE_STATUSES``) matches are
+    aggregated across the *entire* scan rather than last-seen-wins -- a
+    terminal excluded row and a non-terminal (e.g. ``PENDING``) excluded row
+    sharing the same ticket_id/session_id can both exist, and which one a
+    naive last-seen implementation reports depends on scan order alone.
+    ``seen_terminal_excluded``/``seen_nonterminal_excluded`` let the caller
+    make the live/redispatch-eligible interpretation win whenever both are
+    present, regardless of order.
+    """
+
+    target: TicketTask | None
+    target_status: QueueItemStatus | None
+    matched_excluded: bool
+    seen_terminal_excluded: bool
+    seen_nonterminal_excluded: bool
+    terminal_excluded_status: QueueItemStatus | None
+    terminal_excluded_client: str | None
+
+
+def _lookup_matching_task(
+    store: DevQueueStore, ticket_id: str, cw_session_id: str
+) -> _TaskLookupResult:
+    """Scan *store* for the task matching *ticket_id*/*cw_session_id*.
+
+    Returns on the first occupied-status match (the ordinary live-completion
+    case); otherwise keeps scanning to the end so a later occupied row is not
+    missed behind an earlier excluded-status row (post-review amendment A2),
+    aggregating every excluded match encountered along the way. See
+    ``_TaskLookupResult`` for why the excluded-match fields are aggregated
+    rather than last-seen.
+    """
+    target: TicketTask | None = None
+    target_status: QueueItemStatus | None = None
+    matched_excluded = False
+    seen_terminal_excluded = False
+    seen_nonterminal_excluded = False
+    terminal_excluded_status: QueueItemStatus | None = None
+    terminal_excluded_client: str | None = None
+    for task in store.tasks:
+        if task.ticket_id == ticket_id and task.session_id == cw_session_id:
+            if task.status in OCCUPIED_LANE_STATUSES:
+                target = task
+                target_status = task.status
+                break
+            matched_excluded = True
+            if task.status in _GENUINELY_TERMINAL_QUEUE_STATUSES:
+                if not seen_terminal_excluded:
+                    # First terminal match seen -- used for the
+                    # SENTINEL_RACE_MISS payload.
+                    terminal_excluded_status = task.status
+                    terminal_excluded_client = task.client
+                seen_terminal_excluded = True
+            else:
+                seen_nonterminal_excluded = True
+    return _TaskLookupResult(
+        target=target,
+        target_status=target_status,
+        matched_excluded=matched_excluded,
+        seen_terminal_excluded=seen_terminal_excluded,
+        seen_nonterminal_excluded=seen_nonterminal_excluded,
+        terminal_excluded_status=terminal_excluded_status,
+        terminal_excluded_client=terminal_excluded_client,
+    )
 
 
 def _apply_sentinel_to_task(
@@ -1128,28 +1365,27 @@ def _apply_sentinel_to_task(
     ``now`` is the caller's sweep timestamp, threaded through to that liveness
     comparison so a reconcile tick judges every session against one clock;
     it defaults to wall-clock ``now`` for callers that have none.
+
+    GitHub #1692/#2140: the returned outcome's ``task_already_terminal`` flag
+    is now consumed at all four call sites -- the Stop-hook (``cw.cli.
+    stop_hook``, #1692's original fix) and the three reconcile-driven callers
+    (``cw.reconcile.idle._mutations``, ``cw.reconcile.phantom._mutations``,
+    and the LOCAL-DAEMON git-harvest reaper ``cw.reconcile.local``, #2140) --
+    each completing the now-leaked session on this sub-cause instead of
+    orphaning it.
     """
     cw_session_id = session.id
     with dev_queue_lock():
         store = load_dev_queue()
-        target: TicketTask | None = None
-        target_status: QueueItemStatus | None = None
-        # #1189: track whether a same-ticket/session task was seen at all
-        # (regardless of status) that did not win the occupied match --
-        # distinguishes "raced to terminal by a concurrent caller" (R3a) from
-        # "no such task anywhere" (R3b). Keep scanning past an excluded-status
-        # match in case a later row has the occupied match (post-review
-        # amendment A2).
-        matched_excluded = False
-        for task in store.tasks:
-            if task.ticket_id == ticket_id and task.session_id == cw_session_id:
-                if task.status in OCCUPIED_LANE_STATUSES:
-                    target = task
-                    target_status = task.status
-                    break
-                matched_excluded = True
+        # #1189: distinguishes "raced to terminal by a concurrent caller"
+        # (R3a) from "no such task anywhere" (R3b). See _TaskLookupResult /
+        # _lookup_matching_task for the round-3 (#1692) excluded-match
+        # aggregation this depends on.
+        lookup = _lookup_matching_task(store, ticket_id, cw_session_id)
+        target = lookup.target
+        target_status = lookup.target_status
         if target is None:
-            if matched_excluded:
+            if lookup.matched_excluded:
                 # #1189: surface the race so an operator can tell "raced to
                 # terminal by a concurrent caller" apart from "no such task
                 # ever existed" -- both silently returned routed=True before
@@ -1161,8 +1397,38 @@ def _apply_sentinel_to_task(
                     ticket_id,
                     cw_session_id,
                 )
+            # Round-2 (#1692): SENTINEL_RACE_MISS fires only for a genuinely
+            # terminal excluded row -- the same condition as
+            # task_already_terminal below. A non-terminal excluded row (e.g.
+            # PENDING) is redispatch-eligible, not a race, so it emits
+            # nothing. Round-3: any non-terminal excluded match seen anywhere
+            # in the scan vetoes the terminal classification, even if a
+            # terminal match was also seen.
+            already_terminal = (
+                lookup.seen_terminal_excluded and not lookup.seen_nonterminal_excluded
+            )
+            if already_terminal:
+                # #1692: durable trace alongside the log line -- record_event
+                # nests _inbox_lock inside dev_queue_lock here, the same safe
+                # nesting order this module's SESSION_SENTINEL_LIVENESS_VETOED
+                # call (below) already relies on. No queue/session mutation
+                # precedes this in this branch, so there is nothing for a
+                # failed write to leave half-applied.
+                record_event(
+                    OrchestratorEventType.SENTINEL_RACE_MISS,
+                    {
+                        "ticket_id": ticket_id,
+                        "client": lookup.terminal_excluded_client,
+                        "session_id": cw_session_id,
+                        "excluded_status": lookup.terminal_excluded_status,
+                    },
+                    correlation_id=ticket_id,
+                )
             return SentinelRouteOutcome(
-                rescued=False, routed=not matched_excluded, landed_terminal=False
+                rescued=False,
+                routed=not lookup.matched_excluded,
+                landed_terminal=False,
+                task_already_terminal=already_terminal,
             )
 
         rescued = False
