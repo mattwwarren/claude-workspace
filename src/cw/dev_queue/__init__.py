@@ -82,6 +82,7 @@ from cw.dev_queue.lifecycle import (
 from cw.dev_queue.migrate import migrate_dev_queue
 from cw.dev_queue.requeue import (
     _apply_requeue_stage,
+    _impl_bypass_plan_available,
     requeue_ticket,
     unblock_ticket,
 )
@@ -122,6 +123,7 @@ __all__ = [
     "_extract_pr_url_or_info",
     "_find_ticket",
     "_hold_aware_disposition",
+    "_impl_bypass_plan_available",
     "_local_plan_body",
     "_lock",
     "_marker_version",

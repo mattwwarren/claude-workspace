@@ -25,9 +25,8 @@ from cw.dev_queue.crud import (
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
-    _emit_stage_change,
+    _advance_stage,
     _plan_body_signoff_ok,
-    _raise_stage_high_water,
     _reset_for_same_stage_requeue,
     _stage_regress,
     transition_task_status,
@@ -117,7 +116,10 @@ class _ImplBypassPlanCheck(NamedTuple):
 
 
 def _impl_bypass_plan_available(
-    task: TicketTask, client_cfg: ClientConfig
+    task: TicketTask,
+    client_cfg: ClientConfig,
+    *,
+    allow_tracker_fallback: bool = True,
 ) -> _ImplBypassPlanCheck:
     """Verdict on whether an approved plan is available for a forward bypass
     to IMPL.
@@ -147,6 +149,17 @@ def _impl_bypass_plan_available(
     config -- verified backward-compatible against every existing test, all
     of which resolve ``tracker=None``); skip the call entirely, honestly,
     when the tracker is *positively* known to be non-GitHub.
+
+    ``allow_tracker_fallback`` (GitHub #1286): when False, a local miss
+    returns unavailable immediately, without calling ``resolve_tracker`` or
+    ``fetch_approved_plan_comment`` at all. The manual CLI call site
+    (``cw dev-queue requeue --stage impl``, via :func:`_apply_requeue_stage`)
+    keeps the default ``True`` -- an explicit, one-off operator command can
+    afford a network round trip. The automatic dispatch call site
+    (``cw.dispatch.claim._spawn_claimed_task``) passes ``False``: it runs on
+    every claimed task, every tick, so paying for a tracker fetch on the
+    common "no plan yet" path would tax the hot per-claim loop for no benefit
+    -- Stage 1 is about to run and post the plan anyway.
     """
     branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
     wt_path = _impl_bypass_worktree_path(task, client_cfg)
@@ -158,6 +171,9 @@ def _impl_bypass_plan_available(
             body = None
         if body is not None and _plan_body_signoff_ok(body):
             return _ImplBypassPlanCheck(True, tracker_checked=False, tracker=None)
+
+    if not allow_tracker_fallback:
+        return _ImplBypassPlanCheck(False, tracker_checked=False, tracker=None)
 
     tracker = resolve_tracker(client_cfg.workspace_path)
     if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
@@ -270,12 +286,9 @@ def _apply_requeue_stage(
             raise RequeueStageError(msg)
 
     # Forward or same-stage: caller enforces the BLOCKED_ON_USER precondition.
-    old_stage = task.stage
-    task.stage = target_stage
-    _raise_stage_high_water(task, stages, target_stage)
     # Forward stage move → direction="advance"; the same-stage case is naturally
     # guarded silent by _emit_stage_change's old==new check. RFC 0008 W1.
-    _emit_stage_change(task, old_stage, target_stage, "advance")
+    _advance_stage(task, stages, target_stage)
     return False
 
 
