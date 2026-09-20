@@ -2053,7 +2053,7 @@ class TestRouteStoppedWithoutSentinel:
         self._park()
 
         ordered = [
-            e.event_type
+            e.type
             for e in read_events(
                 consumer="t-2135-order",
                 event_types=[

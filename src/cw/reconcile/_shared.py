@@ -232,6 +232,23 @@ _GH_CHECK_BLOCKED_REASON = "gh_check_blocked"
 # Paused-status written to SESSION_NEEDS_ATTENTION events when the stalled
 # watchdog parks a session after exhausting its wall-clock retry cap (GitHub #756).
 _STALLED_CAP_PARKED_REASON = "stalled_retry_cap_parked"
+# Disposition stamped (and paused_status written to the SESSION_NEEDS_ATTENTION
+# event) when the Stop hook observes an abandoned exit: the session's own
+# transcript records a completed park/blocker comment post to this ticket in
+# its current run leg, the Stop fired with no pending background tasks, and no
+# sentinel -- not even raw framing text -- followed it (GitHub #2135).
+#
+# Evidence-driven, never a timer: it fires on an observed conjunction of facts,
+# and mutates only the dev-queue row (never session status, daemon roster, or
+# worktree), so a late sentinel still rescues the row through #918.
+#
+# Deliberately NOT added to _REAP_ELIGIBLE_DISPOSITIONS_BASE below: that
+# frozenset feeds concierge's false-park requeue, and auto-requeuing this class
+# would silently re-run a stage the operator was just asked to look at.
+#
+# Not _NEEDS_SALVAGE_REASON: that constant is historical (its producer was
+# deleted by ADR-0014) and new detection must not be wired into it.
+_STOPPED_WITHOUT_SENTINEL_REASON = "stopped_without_sentinel"
 # The 6-member reap-eligible disposition base shared verbatim by
 # concierge.py's _FALSE_PARK_ELIGIBLE_DISPOSITIONS (recipe 1: false-park
 # requeue) and escalation.py's _ELIGIBLE_DISPOSITIONS (BLOCKED_ON_USER
@@ -1370,6 +1387,64 @@ def _lookup_matching_task(
         seen_nonterminal_excluded=seen_nonterminal_excluded,
         terminal_excluded_status=terminal_excluded_status,
         terminal_excluded_client=terminal_excluded_client,
+    )
+
+
+def _route_stopped_without_sentinel(ticket_id: str, session: Session) -> None:
+    """Park a headless task BLOCKED_ON_USER after an abandoned exit (GitHub #2135).
+
+    The caller has already established the evidence: the Stop fired with empty
+    ``background_tasks``, no sentinel was parsed, AND the session's transcript
+    records a successful park/blocker comment post to this ticket in its
+    current run leg with no sentinel framing text after it.
+
+    ``session.status`` is never touched -- a late sentinel still routes through
+    the #918 rescue in :func:`_apply_sentinel_to_task`, which re-finds the row
+    by the ``session_id`` this park deliberately leaves set.
+
+    Two events follow, in this order: the ``task.transition``
+    ``transition_task_status`` emits inline while ``dev_queue_lock`` is held,
+    then ``session.needs_attention`` once that lock is released. Only a RUNNING
+    row transitions -- ``AWAITING_OPERATOR_SIGNOFF`` and an already-parked row
+    return before either event, so an operator-armed hold is never clobbered
+    and a repeat Stop is idempotent.
+
+    No ``fire_push_notification``: it backgrounds into a daemon thread
+    (``cw/notify.py``) that a Stop-hook process exiting immediately afterwards
+    would drop. The event bus already delivers ``session.needs_attention``.
+    """
+    with dev_queue_lock():
+        store = load_dev_queue()
+        lookup = _lookup_matching_task(store, ticket_id, session.id)
+        target = lookup.target
+        if target is None or lookup.target_status != QueueItemStatus.RUNNING:
+            return
+        # The park post is positive evidence the stage did its work, so this
+        # RUNNING exit is not charged against unproductive_attempts (#1750).
+        transition_task_status(
+            target,
+            QueueItemStatus.BLOCKED_ON_USER,
+            disposition=_STOPPED_WITHOUT_SENTINEL_REASON,
+            unproductive=False,
+        )
+        save_dev_queue(store)
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "paused_status": _STOPPED_WITHOUT_SENTINEL_REASON,
+            "breadcrumbs": (
+                "Stop hook fired with no sentinel after a park/blocker "
+                "comment was posted"
+            ),
+            "crashed": False,
+            "lane": session.lane,
+        },
+        correlation_id=ticket_id,
     )
 
 
