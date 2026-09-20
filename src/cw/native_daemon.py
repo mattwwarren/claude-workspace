@@ -233,11 +233,34 @@ def _usage_limit_error(message: str, raw_text: str) -> UsageLimitError:
     pass it, so an INFO line would be dropped on the first real occurrence —
     which is the sample this parser needs to be tuned against, the spawn-time
     wording being unverified.
+
+    The logged excerpt is secret-scrubbed and length-bounded before it goes out
+    (review round 1): ``exc.stderr``/``exc.stdout`` are captured subprocess
+    output with no size bound and no guarantee about their contents, and the
+    original binding ("log the raw message") never authorized dumping either
+    one wholesale. Both helpers are the ones ``executor_diagnostics`` already
+    uses for exactly this — :func:`~cw.executor_diagnostics.redact` for secret
+    shapes and :func:`~cw.executor_diagnostics._bounded` for the 4000-char
+    tail-kept cap — rather than a second pair written here. The excerpt is
+    still taken PRE-ANSI-strip, so an escape sequence sitting between
+    ``resets`` and the time stays visible in the sample.
+
+    The two helpers are imported at call time, not module scope: ``cw.config``
+    imports ``cw._config_migrate``, which imports this module, and
+    ``cw.executor_diagnostics`` imports ``cw.config`` — a module-level import
+    closes that loop and breaks ``import cw.config`` outright. Same deferral
+    (and same reason) as ``dev_queue.lifecycle.consume_completed_sessions``.
     """
+    from cw.executor_diagnostics import _bounded, redact
+
     reset_at = parse_usage_limit_reset(
         _ANSI_CSI_PATTERN.sub("", raw_text), now=_local_now()
     )
-    _log.warning("claude --bg usage limit: reset_at=%s raw=%r", reset_at, raw_text)
+    _log.warning(
+        "claude --bg usage limit: reset_at=%s raw=%r",
+        reset_at,
+        _bounded(redact(raw_text)),
+    )
     return UsageLimitError(message, reset_at=reset_at)
 
 

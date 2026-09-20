@@ -626,6 +626,71 @@ class TestRealNativeDaemonClientSpawn:
 
         assert _local_now().utcoffset() is not None
 
+    def test_raw_spawn_message_log_is_bounded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        pinned_local_now: datetime,
+    ) -> None:
+        """Review round 1: `exc.stderr` has no size bound; the log line does.
+
+        Reuses ``executor_diagnostics._bounded`` (tail-kept, 4000 chars), the
+        same convention ``codex_runner`` logs excerpts under.
+        """
+        from cw.executor_diagnostics import _EXCERPT_LIMIT
+        from cw.exceptions import UsageLimitError
+
+        raw = "x" * (_EXCERPT_LIMIT * 3) + "You've hit your session limit"
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(1, ["claude"], output="", stderr=raw)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+
+        with (
+            caplog.at_level(logging.WARNING, logger="cw.native_daemon"),
+            pytest.raises(UsageLimitError),
+        ):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        message = caplog.records[0].getMessage()
+        assert len(message) < len(raw)
+        assert "chars omitted" in message
+        # The tail is what carries the limit phrasing this log exists to sample.
+        assert "You've hit your session limit" in message
+
+    def test_raw_spawn_message_log_is_redacted(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        pinned_local_now: datetime,
+    ) -> None:
+        """Captured subprocess output may carry a token; the log must not."""
+        from cw.exceptions import UsageLimitError
+
+        secret = "ghp_" + "a" * 36
+        raw = f"Authorization: Bearer {secret}\nYou've hit your session limit"
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(1, ["claude"], output="", stderr=raw)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+
+        with (
+            caplog.at_level(logging.WARNING, logger="cw.native_daemon"),
+            pytest.raises(UsageLimitError),
+        ):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        message = caplog.records[0].getMessage()
+        assert secret not in message
+        assert "<redacted>" in message
+        assert "You've hit your session limit" in message
+
 
 class TestHostTimezoneDst:
     """#1409 review round 1: resolve the offset at the RESET's date, not now's.
