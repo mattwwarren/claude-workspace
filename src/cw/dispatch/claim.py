@@ -36,6 +36,7 @@ from cw.executor import (
     codex_capability_diagnosis,
     resolve_executor,
     resolve_executor_config,
+    resolve_pipeline_stages,
 )
 from cw.models import (
     CODEX_BACKEND,
@@ -983,10 +984,10 @@ def _apply_plan_bypass_if_available(
       clears the approval markers but does NOT delete the worktree's stale,
       still-signed-off ``.cw/plan.md`` -- so without this guard the bypass
       would silently defeat the operator's explicit re-plan request.
-    - #1286 Fix C: the resolved pipeline (lane override, then client
-      default -- mirroring :func:`~cw.executor.resolve_executor_config`'s
-      three-level priority) may not contain ``Stage.IMPL`` at all (pipelines
-      are user-configurable per client/lane). Attempting the advance anyway
+    - #1286 Fix C: the pipeline resolved by
+      :func:`~cw.executor.resolve_pipeline_stages` (lane override, then
+      client default) may not contain ``Stage.IMPL`` at all (pipelines are
+      user-configurable per client/lane). Attempting the advance anyway
       would raise ``ValueError`` out of ``_raise_stage_high_water``'s
       ``stages.index()`` call.
     """
@@ -1000,12 +1001,7 @@ def _apply_plan_bypass_if_available(
         )
         return
 
-    stages = client.pipeline.stages
-    if task.lane:
-        for lane_cfg in client.effective_lanes:
-            if lane_cfg.name == task.lane and lane_cfg.pipeline is not None:
-                stages = lane_cfg.pipeline.stages
-                break
+    stages = resolve_pipeline_stages(task, client)
     if Stage.IMPL not in stages:
         _log.debug(
             "dispatch: %r's approved-plan auto-bypass skipped -- the"

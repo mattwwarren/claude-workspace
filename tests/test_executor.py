@@ -497,9 +497,7 @@ def test_lane_pipeline_returns_none_when_no_lane_pipeline_applies(
         workspace_path=tmp_path,
         lanes=[
             LaneConfig(name="no-pipeline"),
-            LaneConfig(
-                name="debt", pipeline=StagePipelineConfig(stages=[Stage.PLAN])
-            ),
+            LaneConfig(name="debt", pipeline=StagePipelineConfig(stages=[Stage.PLAN])),
         ],
     )
 
@@ -548,15 +546,13 @@ def test_resolve_pipeline_stages_lane_without_pipeline_uses_client_default(
 def test_resolve_pipeline_stages_falsy_lane_uses_client_default(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:
-    """``TicketTask.lane`` is ``str`` (default ``"default"``); ``""`` is the falsy case."""
+    """``TicketTask.lane`` is ``str``; ``""`` is its falsy case."""
     client = ClientConfig(
         name="test",
         workspace_path=tmp_path,
         pipeline=StagePipelineConfig(stages=[Stage.PLAN, Stage.IMPL]),
         lanes=[
-            LaneConfig(
-                name="debt", pipeline=StagePipelineConfig(stages=[Stage.REVIEW])
-            )
+            LaneConfig(name="debt", pipeline=StagePipelineConfig(stages=[Stage.REVIEW]))
         ],
     )
     task = TicketTask(ticket_id="T-1", client="test", lane="")
