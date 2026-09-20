@@ -19,10 +19,12 @@ from cw.executor import (
     LocalExecutor,
     OpencodeExecutor,
     StageExecutor,
+    _lane_pipeline,
     _local_preflight,
     _PreflightOK,
     resolve_executor,
     resolve_executor_config,
+    resolve_pipeline_stages,
 )
 from cw.executor_diagnostics import (
     ExecutorFailure,
@@ -424,6 +426,142 @@ def test_resolve_executor_config_falsy_lane_skips_lookup(
     config = resolve_executor_config(Stage.REVIEW, task, client)
 
     assert config.model == "opus"
+
+
+def test_resolve_executor_config_lane_without_stage_does_not_reach_later_lane(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """A matched lane pipeline lacking the stage stops the walk (``break``).
+
+    Pins the byte-identical behavior of the lane walk shared with
+    ``resolve_pipeline_stages``: the first lane whose name matches AND that
+    declares a pipeline is authoritative, so a later lane sharing the name is
+    never consulted for the executor entry.
+    """
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(
+            executors={Stage.PLAN: StageExecutorConfig(model="opus")}
+        ),
+        lanes=[
+            LaneConfig(
+                name="debt",
+                pipeline=StagePipelineConfig(
+                    executors={Stage.IMPL: StageExecutorConfig(model="haiku")}
+                ),
+            ),
+            LaneConfig(
+                name="debt",
+                pipeline=StagePipelineConfig(
+                    executors={Stage.PLAN: StageExecutorConfig(model="sonnet")}
+                ),
+            ),
+        ],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", lane="debt")
+
+    config = resolve_executor_config(Stage.PLAN, task, client)
+
+    assert config.model == "opus"
+
+
+# ---------------------------------------------------------------------------
+# #1286 — lane pipeline walk (_lane_pipeline) + resolve_pipeline_stages
+# ---------------------------------------------------------------------------
+
+
+def test_lane_pipeline_returns_named_lanes_pipeline(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    lane_pipeline = StagePipelineConfig(stages=[Stage.PLAN, Stage.REVIEW])
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        lanes=[
+            LaneConfig(name="other"),
+            LaneConfig(name="debt", pipeline=lane_pipeline),
+        ],
+    )
+
+    assert _lane_pipeline(client, "debt") is lane_pipeline
+
+
+@pytest.mark.parametrize("lane", [None, "", "missing", "no-pipeline"])
+def test_lane_pipeline_returns_none_when_no_lane_pipeline_applies(
+    tmp_config_dir: Path, tmp_path: Path, lane: str | None
+) -> None:
+    """Falsy lane, unknown lane, and a lane with no pipeline all yield ``None``."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        lanes=[
+            LaneConfig(name="no-pipeline"),
+            LaneConfig(
+                name="debt", pipeline=StagePipelineConfig(stages=[Stage.PLAN])
+            ),
+        ],
+    )
+
+    assert _lane_pipeline(client, lane) is None
+
+
+def test_resolve_pipeline_stages_lane_override(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """A lane declaring a pipeline wins over the client default stages."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        lanes=[
+            LaneConfig(
+                name="debt",
+                pipeline=StagePipelineConfig(
+                    stages=[Stage.PLAN, Stage.REVIEW, Stage.FINALIZE]
+                ),
+            )
+        ],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", lane="debt")
+
+    assert resolve_pipeline_stages(task, client) == [
+        Stage.PLAN,
+        Stage.REVIEW,
+        Stage.FINALIZE,
+    ]
+
+
+def test_resolve_pipeline_stages_lane_without_pipeline_uses_client_default(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(stages=[Stage.PLAN, Stage.IMPL]),
+        lanes=[LaneConfig(name="debt")],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", lane="debt")
+
+    assert resolve_pipeline_stages(task, client) == [Stage.PLAN, Stage.IMPL]
+
+
+def test_resolve_pipeline_stages_falsy_lane_uses_client_default(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """``TicketTask.lane`` is ``str`` (default ``"default"``); ``""`` is the falsy case."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(stages=[Stage.PLAN, Stage.IMPL]),
+        lanes=[
+            LaneConfig(
+                name="debt", pipeline=StagePipelineConfig(stages=[Stage.REVIEW])
+            )
+        ],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", lane="")
+
+    assert resolve_pipeline_stages(task, client) == [Stage.PLAN, Stage.IMPL]
 
 
 def test_resolve_executor_returns_claude_native(

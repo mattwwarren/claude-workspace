@@ -1825,6 +1825,64 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         bypass_events = [p for _, p, cid in stage_changed if cid == "GEN-NOIMPL"]
         assert bypass_events == []
 
+    def test_plan_stage_claim_no_bypass_when_lane_pipeline_omits_impl(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1286: the IMPL-in-pipeline guard resolves the LANE's pipeline.
+
+        The client default pipeline contains IMPL; only the task's lane
+        override omits it. A guard that read ``client.pipeline.stages`` (the
+        client default) would attempt the advance and pass this test's
+        no-bypass assertions only by raising -- so a green run proves the
+        lane override (via ``resolve_pipeline_stages``) is what the bypass
+        consulted, and that nothing raised.
+        """
+        from cw.worktree import create_worktree
+        from tests.conftest import plan_body
+
+        config_dir = tmp_dispatch_dirs / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  test-client:\n"
+            f"    workspace_path: {sample_client_config.workspace_path}\n"
+            f"    default_branch: {sample_client_config.default_branch}\n"
+            f"    worktree_base: {sample_client_config.worktree_base}\n"
+            "    lanes:\n"
+            "      - name: debt\n"
+            "        pipeline:\n"
+            "          stages: [plan, review, finalize]\n"
+        )
+        branch = f"{sample_client_config.feature_branch_prefix}/GEN-LANENOIMPL"
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+        cw_dir = worktree / ".cw"
+        cw_dir.mkdir(parents=True, exist_ok=True)
+        (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
+        add_ticket(
+            TicketTask(ticket_id="GEN-LANENOIMPL", client="test-client", lane="debt")
+        )
+
+        stage_changed = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        assert daemon.spawn_calls[0][1] == "/auto-dev-plan GEN-LANENOIMPL --headless"
+
+        running = load_dev_queue().running()
+        assert len(running) == 1
+        assert running[0].stage == Stage.PLAN
+
+        bypass_events = [p for _, p, cid in stage_changed if cid == "GEN-LANENOIMPL"]
+        assert bypass_events == []
+
     def test_plan_stage_bypass_race_guard_when_stored_row_missing(
         self,
         tmp_dispatch_dirs: Path,
