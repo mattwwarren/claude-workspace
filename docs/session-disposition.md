@@ -457,7 +457,18 @@ it. Related: #1630, #1625.
 A headless worker that posts its park/blocker comment to the tracker and then
 stops without emitting an `AUTO_DEV_RESULT` sentinel used to leave its row
 `RUNNING` until the liveness ladder noticed it 45 minutes later. `cw
-signal-stop` now routes that row itself, on three-part evidence:
+signal-stop` can now route that row itself.
+
+> **Ships dark — default off.** The park is a state-mutating auto-actor, so it
+> is gated by `park_on_abandoned_exit_enabled` in `orchestrator.yaml` (default
+> `false`) plus a per-lane / per-ticket `park_on_abandoned_exit` map whose
+> floor is `false`. With the master switch off, a sentinel-less Stop defers
+> exactly as it did before #2135 and the transcript is not even scanned.
+> Arming it is an operator action — see
+> [`config/CONFIG_REFERENCE.md`](../config/CONFIG_REFERENCE.md)'s *Abandoned-Exit
+> Park Enablement*.
+
+Once armed, the park fires on three-part evidence:
 
 1. the Stop fired with **no pending background tasks** (the existing
    `background_tasks` guard in `signal_stop` already establishes this);
@@ -497,7 +508,13 @@ unaffected, every other disposition still pages, and once the row is requeued
 **Coverage limits.** The evidence is derived from the transcript, so the
 detector only recognises GitHub `gh issue comment` posts joined either to a
 prior `Write` of a literal `--body-file <path>` or to an inline `--body`
-argument. A `--body-file` path holding an unexpanded shell variable, a body
+argument, and the `gh issue comment` text must **start a shell command** —
+`timeout 60 gh …` and the second link of an `&&` chain qualify; inert text
+does not. A heredoc that writes an example post, an `echo` of one, or a body
+value opening with `$(`, a backtick or `<<` are all rejected: each carries the
+same header and marker a real post does while posting nothing, so counting one
+would falsely park a live session's row. A `--body-file` path holding an
+unexpanded shell variable, a body
 assembled by a heredoc, the `-F`/`-b` short flags, `--repo` before the issue
 number, and `--body-file -` are **documented false negatives**: each defers
 exactly as before, never producing a false park. Linear-tracked tickets get

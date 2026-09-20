@@ -687,7 +687,8 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `breadcrumbs` carries stale minutes, stage, and elapsed seconds.
   **Suppressed** (#2135) when the session's ticket task is `BLOCKED_ON_USER`
   with `disposition="stopped_without_sentinel"` and that task's `session_id`
-  is this session's — that row already paged via its own
+  is this session's — a state only reachable once an operator has armed
+  `park_on_abandoned_exit_enabled`. That row already paged via its own
   `session.needs_attention`, so a recurring distress fire is noise. The
   suppression is signal-only and evaluated per tick: bucket latching and
   `session.liveness_changed` are unaffected, every other disposition (and a
@@ -754,7 +755,12 @@ open enum; consumers MUST tolerate unknown values. Known values:
   (#2135): the session's own transcript records a completed, non-error
   park/blocker comment post to this ticket in its current run leg, the Stop
   fired with no pending background tasks, and no sentinel — not even raw
-  `AUTO_DEV_RESULT` framing text — followed it. Unlike its signal-only
+  `AUTO_DEV_RESULT` framing text — followed it. **Gated, default off:** the
+  park requires `park_on_abandoned_exit_enabled: true` in `orchestrator.yaml`
+  *and* a `park_on_abandoned_exit` map enabling it on the row's lane (or the
+  ticket). With the switch off this disposition is never emitted and a
+  sentinel-less Stop defers exactly as it did before #2135. Unlike its
+  signal-only
   siblings above, this one **does mutate the task row**: `RUNNING →
   BLOCKED_ON_USER` with `disposition="stopped_without_sentinel"`, no
   `blocked_reason`, and no `unproductive_attempts` charge (the park post is
