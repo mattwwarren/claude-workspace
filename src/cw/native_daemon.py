@@ -23,7 +23,8 @@ import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from cw.exceptions import (
     USAGE_LIMIT_RE,
@@ -33,7 +34,14 @@ from cw.exceptions import (
     parse_usage_limit_reset,
 )
 
+if TYPE_CHECKING:
+    from datetime import tzinfo
+
 _log = logging.getLogger(__name__)
+
+# System timezone database entry, consulted by :func:`_host_timezone` when
+# ``TZ`` is unset or does not name an IANA zone.
+_LOCALTIME_PATH = Path("/etc/localtime")
 
 # Length of the short Claude session id printed by ``claude --bg`` and
 # used as the worker key in roster.json (first 8 hex chars of the UUID).
@@ -148,24 +156,63 @@ _ANSI_CSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 _DISCLAIMER_REJECTION_PATTERN = "requires accepting the disclaimer first"
 
 
+def _host_timezone() -> tzinfo:
+    """Return the dispatch host's timezone WITH its DST rules (#1409).
+
+    ``datetime.now(UTC).astimezone()`` flattens the host zone to the single
+    fixed offset in effect right now. Applying that frozen offset to a wall
+    clock on the far side of a DST transition is wrong by an hour, and for a
+    spring-forward it is wrong in the UNSAFE direction: the reset instant lands
+    an hour LATE, so dispatch stays parked past the moment the limit lifts. A
+    :class:`~zoneinfo.ZoneInfo` keeps the transition table, so
+    ``datetime.replace(hour=…)`` resolves the offset at the candidate's own
+    date (review round 1).
+
+    Resolution order, stdlib only, following ``orchestrator_config.py``'s
+    ``attention_digest_window_tz`` ZoneInfo precedent: the ``TZ`` environment
+    variable when it names an IANA zone, then the ``/etc/localtime`` database
+    entry, then — only if both fail — the flattened fixed offset, which is no
+    worse than the pre-#1409 behavior. ``TZ`` is read here rather than through
+    libc so a test can pin a zone with ``monkeypatch.setenv`` and stay
+    deterministic on any host, with no ``tzset`` fixture.
+    """
+    key = os.environ.get("TZ", "").strip().lstrip(":")
+    if key:
+        try:
+            return ZoneInfo(key)
+        except (ZoneInfoNotFoundError, ValueError):
+            _log.debug("native_daemon: TZ=%r is not an IANA zone key", key)
+    try:
+        with _LOCALTIME_PATH.open("rb") as handle:
+            return ZoneInfo.from_file(handle)
+    except (OSError, ValueError):
+        _log.debug(
+            "native_daemon: %s unreadable; using the flat host offset", _LOCALTIME_PATH
+        )
+    flattened = datetime.now(UTC).astimezone().tzinfo
+    return flattened if flattened is not None else UTC
+
+
 def _local_now() -> datetime:
     """Return the current instant in the dispatch host's local timezone.
 
-    ``astimezone()`` with no argument resolves the host zone to a FIXED offset,
-    which is what :func:`~cw.exceptions.parse_usage_limit_reset` needs: a bare
-    ``3:45pm`` in a Claude usage-limit message is read in the host's own zone
-    (#1344 R1). On a DST-transition day the fixed offset can put the result up
-    to an hour off, always in the safe (shorter-window) direction.
+    A bare ``3:45pm`` in a Claude usage-limit message is read in the host's own
+    zone (#1344 R1), so :func:`~cw.exceptions.parse_usage_limit_reset` resolves
+    the candidate in whatever zone this instant carries — hence
+    :func:`_host_timezone` rather than ``astimezone()``, which would hand the
+    parser a fixed offset and mis-resolve any reset across a DST boundary.
 
     Kept as a module-level function rather than inlined so tests have an
     injectable clock seam — ``_usage_limit_error`` must call it as a module
     global for a ``monkeypatch.setattr("cw.native_daemon._local_now", ...)``
-    to take effect. ``freeze_time`` is NOT a substitute: under freezegun
-    ``datetime.now(UTC).astimezone()`` still resolves the HOST zone, so a
-    freeze-only test asserts a different UTC instant on a dev box than on a
-    UTC CI runner (the #671/#1727 green-locally/red-in-CI class).
+    to take effect. ``freeze_time`` alone is NOT a substitute for pinning the
+    ZONE: freezegun fixes the instant but the host zone still decides the
+    offset, so a freeze-only test asserts a different UTC instant on a dev box
+    than on a UTC CI runner (the #671/#1727 green-locally/red-in-CI class).
+    Tests that need a zone as well as an instant set ``TZ`` (see
+    ``TestHostTimezoneDst``).
     """
-    return datetime.now(UTC).astimezone()
+    return datetime.now(_host_timezone())
 
 
 def _usage_limit_error(message: str, raw_text: str) -> UsageLimitError:

@@ -262,6 +262,42 @@ class TestParseUsageLimitReset:
 
         assert result == expected
 
+    @pytest.mark.parametrize(
+        ("text", "now", "expected"),
+        [
+            pytest.param(
+                "You've hit your weekly limit · resets Sun 10:00am",
+                datetime(2026, 3, 7, 10, 0, tzinfo=_NY),
+                datetime(2026, 3, 8, 14, 0, tzinfo=UTC),
+                id="spring-forward-uses-the-target-date-offset",
+            ),
+            pytest.param(
+                "You've hit your weekly limit · resets Sun 1:30am",
+                datetime(2026, 10, 31, 10, 0, tzinfo=_NY),
+                datetime(2026, 11, 1, 6, 30, tzinfo=UTC),
+                id="fall-back-ambiguous-hour-takes-the-later-instant",
+            ),
+        ],
+    )
+    def test_dst_transition_resolution(
+        self, text: str, now: datetime, expected: datetime
+    ) -> None:
+        """#1409 review round 1: the offset belongs to the RESET's own date.
+
+        Spring forward (2026-03-08): Saturday is EST (-05:00), Sunday is EDT
+        (-04:00), so a Sunday 10:00 reset is 14:00Z — resolving it at
+        Saturday's offset would name 15:00Z, an hour LATE, which keeps
+        dispatch parked past the real reset.
+
+        Fall back (2026-11-01): 01:30 occurs twice. The parser pins
+        ``fold=1``, the SECOND (EST, 06:30Z) occurrence — the conservative
+        direction, since the first (05:30Z) would reopen the spawn gate an
+        hour before the limit lifts and the re-hit costs a real attempt.
+        """
+        from cw.exceptions import parse_usage_limit_reset
+
+        assert parse_usage_limit_reset(text, now=now) == expected
+
     def test_returns_utc_aware_datetime(self) -> None:
         from cw.exceptions import parse_usage_limit_reset
 

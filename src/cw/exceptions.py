@@ -89,7 +89,12 @@ def parse_usage_limit_reset(text: str, *, now: datetime) -> datetime | None:
     spawn path):
 
     - **R1** — a bare wall-clock time is read in *now*'s own timezone and any
-      trailing annotation (``(America/New_York)``, ``ET``) is ignored.
+      trailing annotation (``(America/New_York)``, ``ET``) is ignored. The
+      offset is resolved at the CANDIDATE's date, not at *now*'s, so pass a
+      *now* whose ``tzinfo`` carries the zone's DST rules (a
+      :class:`~zoneinfo.ZoneInfo`, as ``native_daemon._local_now`` supplies) —
+      a fixed-offset *now* silently freezes today's offset onto a reset that
+      may sit on the other side of a transition.
     - **R2** — a time-only form that has already passed yields None; it never
       rolls forward to tomorrow.
     - **R3, deliberately inverted** — a weekday form naming *today* at a time
@@ -144,6 +149,15 @@ def _resolve_reset_candidate(
     if day is not None:
         delta = (_WEEKDAYS.index(day.lower()) - now.weekday()) % _DAYS_PER_WEEK
         candidate += timedelta(days=delta)
+    # fold is applied AFTER the weekday shift because timedelta arithmetic
+    # resets it to 0. fold=1 selects the SECOND pass through an ambiguous wall
+    # clock (the repeated hour on a fall-back day) -- the later instant, so the
+    # spawn gate never reopens before the limit actually lifts. It has no
+    # effect on an unambiguous time. On the other transition a named wall clock
+    # inside the spring-forward gap does not exist at all; fold=1 then resolves
+    # it with the post-transition offset, i.e. the EARLIER of the two readings,
+    # which can only shorten the window (safe, and self-correcting on re-hit).
+    candidate = candidate.replace(fold=1)
     # One check covers both the time-only already-passed case (R2) and the
     # weekday-names-today already-passed case (inverted R3); a positive weekday
     # delta is always in the future, so nothing else can reach here past.

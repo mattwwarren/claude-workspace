@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -625,6 +625,99 @@ class TestRealNativeDaemonClientSpawn:
         from cw.native_daemon import _local_now
 
         assert _local_now().utcoffset() is not None
+
+
+class TestHostTimezoneDst:
+    """#1409 review round 1: resolve the offset at the RESET's date, not now's.
+
+    ``datetime.now(UTC).astimezone()`` flattens the host zone to whatever fixed
+    offset is in effect at this instant. Applying that frozen offset to a wall
+    clock on the far side of a DST transition lands an hour off — and for a
+    spring-forward it lands an hour LATE, which lengthens the back-off window
+    (the unsafe direction: dispatch stays parked past the real reset).
+
+    Every case here sets ``TZ`` explicitly and reads it back through
+    :func:`cw.native_daemon._host_timezone`, which consults the environment
+    variable itself rather than libc. No ``tzset`` and no host-zone dependency:
+    the assertions hold identically on a UTC CI runner and on a dev box in any
+    zone. US DST transitions used: 2026-03-08 (spring forward) and 2026-11-01
+    (fall back); 2026-03-07 and 2026-10-31 are both Saturdays.
+    """
+
+    def test_host_timezone_keeps_dst_rules(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.native_daemon import _host_timezone
+
+        monkeypatch.setenv("TZ", "America/New_York")
+        tz = _host_timezone()
+
+        assert datetime(2026, 1, 15, 12, tzinfo=tz).utcoffset() == timedelta(hours=-5)
+        assert datetime(2026, 7, 15, 12, tzinfo=tz).utcoffset() == timedelta(hours=-4)
+
+    def test_host_timezone_falls_back_for_a_non_iana_tz_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A POSIX-style or bogus ``TZ`` degrades, it never raises."""
+        from cw.native_daemon import _host_timezone
+
+        monkeypatch.setenv("TZ", "Not/AZone")
+
+        assert datetime(2026, 7, 15, 12, tzinfo=_host_timezone()).utcoffset() is not None
+
+    def test_local_now_resolves_through_the_host_zone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from freezegun import freeze_time
+
+        from cw.native_daemon import _local_now
+
+        monkeypatch.setenv("TZ", "America/New_York")
+        with freeze_time("2026-03-07 15:00:00"):
+            now = _local_now()
+
+        assert now.utcoffset() == timedelta(hours=-5)
+        assert (now.hour, now.minute) == (10, 0)
+
+    def test_spring_forward_reset_resolves_at_the_target_date(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Sunday reset read on Saturday uses EDT (-04:00), not Saturday's EST.
+
+        The flattened-offset version of this produced 15:00Z — one hour later
+        than the real reset, so dispatch would stay parked an extra hour.
+        """
+        from freezegun import freeze_time
+
+        from cw.native_daemon import _usage_limit_error
+
+        monkeypatch.setenv("TZ", "America/New_York")
+        raw = "You've hit your weekly limit · resets Sun 10:00am"
+
+        with freeze_time("2026-03-07 15:00:00"):  # 10:00 Saturday, EST
+            err = _usage_limit_error("usage limit", raw)
+
+        assert err.reset_at == datetime(2026, 3, 8, 14, 0, tzinfo=UTC)
+
+    def test_fall_back_ambiguous_hour_takes_the_later_instant(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """01:30 happens twice on 2026-11-01; the second one is the safe pick.
+
+        Picking the first (EDT, 05:30Z) would reopen the spawn gate an hour
+        before the limit actually lifts, and the re-hit costs a real attempt.
+        """
+        from freezegun import freeze_time
+
+        from cw.native_daemon import _usage_limit_error
+
+        monkeypatch.setenv("TZ", "America/New_York")
+        raw = "You've hit your weekly limit · resets Sun 1:30am"
+
+        with freeze_time("2026-10-31 14:00:00"):  # 10:00 Saturday, EDT
+            err = _usage_limit_error("usage limit", raw)
+
+        assert err.reset_at == datetime(2026, 11, 1, 6, 30, tzinfo=UTC)
 
 
 class TestRealNativeDaemonClientRoster:
