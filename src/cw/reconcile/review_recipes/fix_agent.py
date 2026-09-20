@@ -104,10 +104,14 @@ def dispatch_fix_agent(
     ``create_worktree``'s idempotent-reuse branch rather than provisioning
     anything.
 
-    Order is load-bearing (R22): the two pure reads -- the live-session
-    pre-check and the HEAD verification -- both run before ``fetch``/``merge``,
-    the only mutating steps. A precondition failure therefore leaves the
-    worktree untouched and needs no compensating restore.
+    Order is load-bearing (R22): the live-session pre-check is a pure read that
+    runs before anything touches the worktree. ``create_worktree`` may then
+    fast-forward a behind reused worktree to ``origin/<branch>`` (#2213 --
+    never a reset, never a raise), and the HEAD verification runs after it,
+    before ``fetch``/``merge``, the only other mutating steps. A precondition
+    failure therefore leaves the worktree untouched except for that
+    fast-forward, which strictly advances HEAD and needs no compensating
+    restore.
 
     The HEAD verification confirms HEAD landed on the branch's resolved
     remote ref (upstream-first, ``origin/<branch>`` as fallback -- #2145)
