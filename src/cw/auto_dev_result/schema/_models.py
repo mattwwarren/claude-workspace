@@ -22,9 +22,13 @@ from cw.auto_dev_result.schema._validators import (
     _is_blank,
     _reject_empty_string_items,
 )
-from cw.auto_dev_result.schema._vocab import ScopeTier, is_known_blocker_reason
+from cw.auto_dev_result.schema._vocab import (
+    _LOGGER_NAME,
+    ScopeTier,
+    is_known_blocker_reason,
+)
 
-_log = logging.getLogger(__name__)
+_log = logging.getLogger(_LOGGER_NAME)
 
 
 class Scope(BaseModel):

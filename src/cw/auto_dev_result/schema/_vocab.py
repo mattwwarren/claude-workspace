@@ -16,6 +16,12 @@ from typing import Literal
 
 from cw.models import QueueItemStatus
 
+# Pinned logger name for every record the schema package emits. Deliberately a
+# literal, not ``__name__``: the pre-split ``schema.py`` logged under this fixed
+# name, and anything filtering/configuring logging by exact logger name must keep
+# seeing it after the package split (#2193).
+_LOGGER_NAME = "cw.auto_dev_result"
+
 # Accepted sentinel schema versions. Single source of truth: parse.py derives
 # SUPPORTED_SCHEMA_VERSIONS (its pre-Pydantic gate) from this Literal via
 # get_args, so a version bump edits exactly one place (#1535 drift class).

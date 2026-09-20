@@ -14,8 +14,14 @@ a tautology. A deliberate addition updates this set in the same commit.
 
 from __future__ import annotations
 
+import logging
+
+import pytest
+from pydantic import ValidationError
+
 from cw import auto_dev_result
 from cw.auto_dev_result import schema
+from cw.auto_dev_result.schema import AutoDevResult, Blocker
 
 # The complete re-export surface: every top-level name the flat ``schema.py``
 # bound before the split. 48 of these are re-exported one level out by
@@ -121,3 +127,41 @@ class TestOuterPackageExportCompleteness:
             if not hasattr(auto_dev_result, name)
         ]
         assert missing == []
+
+
+# Every record the schema package emits must carry the pre-split logger name
+# ``cw.auto_dev_result`` verbatim. ``caplog.at_level(..., logger=...)`` alone
+# cannot catch a rename — level inheritance and propagation make a
+# ``__name__``-derived child logger (``cw.auto_dev_result.schema._models``) pass
+# the same assertions — so these tests pin ``record.name`` exactly.
+PINNED_LOGGER_NAME = "cw.auto_dev_result"
+
+
+class TestLoggerNamePinned:
+    """Guards that the package split did not rename the emitted logger (#2193)."""
+
+    def test_models_warning_uses_pinned_logger_name(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``Blocker`` lives in ``schema/_models.py``."""
+        with caplog.at_level(logging.WARNING, logger=PINNED_LOGGER_NAME):
+            Blocker(stage="stage2_impl", reason="not_a_registered_reason")
+        records = [r for r in caplog.records if "blocker_reason_unknown" in r.message]
+        assert [r.name for r in records] == [PINNED_LOGGER_NAME]
+
+    def test_result_warning_uses_pinned_logger_name(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``AutoDevResult`` lives in ``schema/_result.py``.
+
+        The near-miss ``stage_reached`` coercion warns from a ``mode="before"``
+        field validator, so the record is emitted even though the deliberately
+        minimal payload then fails validation on its other required fields.
+        """
+        with (
+            caplog.at_level(logging.WARNING, logger=PINNED_LOGGER_NAME),
+            pytest.raises(ValidationError),
+        ):
+            AutoDevResult.model_validate({"stage_reached": "stage4_pr_creation"})
+        records = [r for r in caplog.records if "not canonical" in r.message]
+        assert [r.name for r in records] == [PINNED_LOGGER_NAME]

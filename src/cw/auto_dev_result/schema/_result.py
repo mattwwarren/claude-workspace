@@ -37,6 +37,7 @@ from cw.auto_dev_result.schema._validators import (
     _reject_empty_string_items,
 )
 from cw.auto_dev_result.schema._vocab import (
+    _LOGGER_NAME,
     _MIN_V2_SCHEMA_VERSION,
     _STAGE_NUMBER_FALLBACK,
     _STAGE_REACHED_ALIASES,
@@ -49,7 +50,7 @@ from cw.auto_dev_result.schema._vocab import (
     Status,
 )
 
-_log = logging.getLogger(__name__)
+_log = logging.getLogger(_LOGGER_NAME)
 
 
 _TERMINAL_REJECT_STATUSES: frozenset[Status] = frozenset(
