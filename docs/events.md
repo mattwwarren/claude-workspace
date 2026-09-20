@@ -643,13 +643,16 @@ without task revert).
 
 ### `session.needs_attention`
 
-**Emitter:** `revert_timed_out_tasks`, `revert_completed_silent_tasks`, and
-the liveness sweep's distress check (`record_session_liveness_changes`) in
-`cw.reconcile`; `apply_staged_decision`, `dispatch_tick` (via
-`_record_client_freshness_block`), and the dispatch loop's per-tick staleness
-watchdog (via `_notify_stale_clients_with_pending`) in `cw.dispatch`. (The
-former idle-watchdog / salvage / salvage-skip emitters were removed with the
-process-kill timeouts, ADR-0014.)
+**Emitter:** `revert_timed_out_tasks`, `revert_completed_silent_tasks`, the
+liveness sweep's distress check (`record_session_liveness_changes`), and the
+Stop hook's abandoned-exit park (`_route_stopped_without_sentinel`, invoked
+from `cw signal-stop`, #2135) in `cw.reconcile`; `apply_staged_decision`,
+`dispatch_tick` (via `_record_client_freshness_block`), and the dispatch
+loop's per-tick staleness watchdog (via `_notify_stale_clients_with_pending`)
+in `cw.dispatch`. (The former idle-watchdog / salvage / salvage-skip emitters
+were removed with the process-kill timeouts, ADR-0014.) The liveness sweep's
+distress check is skipped entirely for a row parked with
+`stopped_without_sentinel` — see that value's bullet below.
 **Payload:**
 ```json
 {
@@ -660,9 +663,18 @@ process-kill timeouts, ADR-0014.)
   "claude_session_id": "<str | null>",
   "paused_status": "<str>",
   "breadcrumbs": "<str>",
-  "crashed": false
+  "crashed": false,
+  "lane": "<str | null>"
 }
 ```
+`lane` is the ninth of the canonical nine fields. It is stamped by the
+task-scoped emitters (the phantom sweep's park, the dispatch claim path, the
+Stop hook's abandoned-exit park) and is what `cw event tail --lane` filters
+on — `_event_matches` drops any event whose `payload["lane"]` is not in the
+requested lane names. It is **absent** from the liveness sweep's distress
+payload and from the client-scoped `dispatch_loop_stale` payload, both of
+which carry their own extra fields instead.
+
 **Semantics:** Emitted when a session requires human intervention — the
 orchestrator cannot automatically retry or complete it. `paused_status` is an
 open enum; consumers MUST tolerate unknown values. Known values:
@@ -673,6 +685,13 @@ open enum; consumers MUST tolerate unknown values. Known values:
   tail. Edge-triggered per bucket crossing, fires a push notification, and
   mutates nothing — the session keeps running; the operator decides.
   `breadcrumbs` carries stale minutes, stage, and elapsed seconds.
+  **Suppressed** (#2135) when the session's ticket task is `BLOCKED_ON_USER`
+  with `disposition="stopped_without_sentinel"` and that task's `session_id`
+  is this session's — that row already paged via its own
+  `session.needs_attention`, so a recurring distress fire is noise. The
+  suppression is signal-only and evaluated per tick: bucket latching and
+  `session.liveness_changed` are unaffected, every other disposition (and a
+  session with no task) still pages, and a requeue re-enables it.
 - `"fix_loop_await_deadline_exceeded"` — the same liveness-sweep distress
   path, for the case its sibling above excludes: the session's quietness IS
   explained by an outstanding subagent spawn, but that spawn has been
@@ -731,6 +750,23 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `premises_pending_verification` sentinel status). The task is BLOCKED_ON_USER.
   Operator should inspect the session result (`cw session result <id>`) and
   either resolve the ambiguities and re-dispatch, or close the ticket. See #923.
+- `"stopped_without_sentinel"` — the Stop hook observed an **abandoned exit**
+  (#2135): the session's own transcript records a completed, non-error
+  park/blocker comment post to this ticket in its current run leg, the Stop
+  fired with no pending background tasks, and no sentinel — not even raw
+  `AUTO_DEV_RESULT` framing text — followed it. Unlike its signal-only
+  siblings above, this one **does mutate the task row**: `RUNNING →
+  BLOCKED_ON_USER` with `disposition="stopped_without_sentinel"`, no
+  `blocked_reason`, and no `unproductive_attempts` charge (the park post is
+  positive evidence of progress). That same mutation first emits a
+  `task.transition` from `transition_task_status` (`old_status: "running"` →
+  `new_status: "blocked_on_user"`, `unproductive_charge: false`) while
+  `dev_queue_lock` is held, and then this event once the lock is released.
+  The payload is the canonical nine fields including `lane`. The **session is
+  left ACTIVE** and the worker is not stopped, so a late sentinel still
+  rescues the row (#918); only a `RUNNING` row transitions, so a repeat Stop
+  is idempotent. Evidence-driven, never a timer (ADR-0014). See
+  `docs/session-disposition.md` §6c.
 - `"freshness_gate_blocked"` — A client's consecutive freshness-gate-block
   latch (`ClientConcurrencyOverride.consecutive_freshness_blocks`, RFC 0007
   §W2) reached `freshness_block_attention_threshold`. Client-scoped, not
@@ -855,8 +891,13 @@ open enum; consumers MUST tolerate unknown values. Known values:
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for most emissions (via `fire_push_notification`)
-— **except** `"freshness_gate_blocked"`, `"salvage_skip_escalated"`, and
-`"dispatch_loop_stale"`, which deliberately do not push. This mirrors the existing `gh_check_blocked`
+— **except** `"freshness_gate_blocked"`, `"salvage_skip_escalated"`,
+`"dispatch_loop_stale"`, and `"stopped_without_sentinel"`, which deliberately
+do not push. (`stopped_without_sentinel` is emitted from the short-lived
+`cw signal-stop` hook process, whose backgrounded push thread would be
+dropped when it exits.) The liveness sweep's distress fire — and therefore
+its push — is skipped entirely for a row parked with
+`stopped_without_sentinel`. This mirrors the existing `gh_check_blocked`
 paused_status (verified: its `_emit_phantom_terminal_events` call site,
 `cw.reconcile.phantom._events`, does not call `fire_push_notification`
 either).

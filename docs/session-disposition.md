@@ -262,7 +262,10 @@ section of [`docs/headless-contract.md`](headless-contract.md) for the full
 > liveness veto described in older revisions of this document are gone; a
 > quiet-but-live worker now surfaces via the liveness distress signal
 > (`session.needs_attention` with `paused_status=session_unresponsive`)
-> and is never dispositioned automatically.
+> and is never dispositioned automatically. The Stop-hook abandoned-exit
+> park (#2135, §6c) joins that evidence-driven set: it fires on an observed
+> conjunction of facts in the session's own transcript, never on elapsed
+> time, and mutates only the dev-queue row.
 
 If you need to force reconcile to re-examine state:
 
@@ -322,6 +325,7 @@ where one already existed:
 | phantom-sweep SIGNAL_ONLY reroute (clean crash) | `ReapReason.PHANTOM_SURFACE` |
 | phantom-sweep unresolved-subagent-spawn reroute (#1646) | `_UNRESOLVED_SUBAGENT_SPAWN_REASON` ("unresolved_subagent_spawn") — a clean *or* dirty crash whose worktree still carries an unresolved spawn stamp. Takes precedence over both `PHANTOM_SURFACE` and `dirty_worktree`, and **overrides `reap_policy: auto`**. See §6b |
 | phantom gh-check-blocked route | `_GH_CHECK_BLOCKED_REASON` |
+| Stop-hook abandoned-exit park (#2135) | `_STOPPED_WITHOUT_SENTINEL_REASON` ("stopped_without_sentinel") — the Stop hook saw a completed park/blocker comment post in the session's own transcript and no sentinel. See §6c |
 | salvage LOW-path flag *(historical, ADR-0014)* | `_NEEDS_SALVAGE_REASON` |
 | terminal-sibling park (`tasks.py`) | `ReapReason.TERMINAL_SIBLING` |
 | unknown client / invalid pipeline stage (`dispatch.py`) | `"unknown_client"` / `"invalid_stage_config"` (deliberately excluded from concierge/escalation eligibility — config errors, not recoverable states) |
@@ -445,6 +449,59 @@ work without a human ever looking is the precise outcome this ticket forbids.
 producer was deleted outright by ADR-0014 and the reason is marked *historical*
 in the table above. Nothing sets it. Do not wire new no-sentinel detection into
 it. Related: #1630, #1625.
+
+---
+
+### 6c. Stop-hook abandoned-exit park (#2135)
+
+A headless worker that posts its park/blocker comment to the tracker and then
+stops without emitting an `AUTO_DEV_RESULT` sentinel used to leave its row
+`RUNNING` until the liveness ladder noticed it 45 minutes later. `cw
+signal-stop` now routes that row itself, on three-part evidence:
+
+1. the Stop fired with **no pending background tasks** (the existing
+   `background_tasks` guard in `signal_stop` already establishes this);
+2. **no sentinel** was parsed from the transcript — and, fail-closed, no raw
+   `AUTO_DEV_RESULT` framing text (not even an unpaired open marker, a
+   placeholder, or a #1692-discarded frame) appears after the post; and
+3. the session's **own transcript**, in its **current run leg** (after the
+   last user re-entry record), records a completed, non-error `gh issue
+   comment <ticket>` whose body carries the `<!-- cw-agent-authored -->`
+   marker under one of the exit-only pipeline headers (`## Pending
+   Verification Scan`, `## Blocking Review Findings`, `## Operator-Actionable
+   Review Findings`).
+
+This is **evidence-driven, not a timer** — the same family as ADR-0014's
+"What remains" (roster-absence phantoms, recorded terminal results,
+emitted-sentinel routing). It mutates the dev-queue row only: `RUNNING →
+BLOCKED_ON_USER`, `disposition="stopped_without_sentinel"`, no
+`blocked_reason`, and **no `unproductive_attempts` charge** (the park post is
+positive evidence the stage did its work).
+
+The **session is left ACTIVE** and the daemon worker is not stopped, so a
+late sentinel still routes through the #918 rescue in
+`_apply_sentinel_to_task` — the row keeps its `session_id` precisely so that
+rescue can re-find it. The park is therefore reversible.
+
+Like `gh_check_blocked`, the disposition is in **neither** concierge's
+`_REAP_ELIGIBLE_DISPOSITIONS_BASE` (auto-requeue would re-run a stage the
+operator was just asked to look at) **nor** escalation's eligibility set.
+
+The liveness sweep's `session_unresponsive` distress signal is **suppressed**
+for a row in this state whose `session_id` matches the session being
+classified — it already paged through its own `session.needs_attention`.
+Signal-only and per tick: bucket latching and `session.liveness_changed` are
+unaffected, every other disposition still pages, and once the row is requeued
+(its status leaves `BLOCKED_ON_USER`) the signal applies again.
+
+**Coverage limits.** The evidence is derived from the transcript, so the
+detector only recognises GitHub `gh issue comment` posts joined either to a
+prior `Write` of a literal `--body-file <path>` or to an inline `--body`
+argument. A `--body-file` path holding an unexpanded shell variable, a body
+assembled by a heredoc, the `-F`/`-b` short flags, `--repo` before the issue
+number, and `--body-file -` are **documented false negatives**: each defers
+exactly as before, never producing a false park. Linear-tracked tickets get
+no behavior change.
 
 ---
 
