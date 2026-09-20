@@ -1428,6 +1428,8 @@ class TestRecipeCancelledRowRestore:
 
         clean_subprocess_run = subprocess.run
 
+        # Not tests.conftest.git_in: closes over a local repo and the
+        # pre-patch subprocess.run alias, not (repo, *args)-shaped.
         def _git(*args: str) -> None:
             clean_subprocess_run(
                 ["git", "-C", str(repo), *args], capture_output=True, check=True
