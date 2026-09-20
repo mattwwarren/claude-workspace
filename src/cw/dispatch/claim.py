@@ -966,7 +966,9 @@ def _apply_plan_bypass_if_available(
     caller; ``task.stage`` must already be ``Stage.PLAN`` on entry.
 
     Mutates the STORED row under :func:`dev_queue_lock`, mirroring
-    :func:`_stamp_spawn_success`'s load->find->mutate->save shape plus
+    :func:`_stamp_spawn_success`'s load->find->mutate->save shape (with one
+    addition: the find also matches on ``created_at`` so a duplicate RUNNING
+    row for the same ticket and client is never advanced by mistake) plus
     :func:`~cw.dev_queue.requeue._apply_requeue_stage`'s
     old_stage/``_raise_stage_high_water``/``_emit_stage_change`` trio -- a
     bare in-memory ``task.stage = Stage.IMPL`` would never reach
@@ -1019,10 +1021,17 @@ def _apply_plan_bypass_if_available(
     with dev_queue_lock():
         store = load_dev_queue()
         for candidate in store.tasks:
+            # created_at disambiguates duplicate RUNNING rows for one
+            # (ticket_id, client) -- reachable via add-after-terminal plus
+            # ``requeue --from-completed`` (see ``_find_ticket``'s own
+            # newest-created_at tie-break). session_id is not stamped yet
+            # (this runs before executor.spawn / _stamp_spawn_success), so it
+            # cannot serve here; created_at is never reassigned.
             if (
                 candidate.ticket_id == task.ticket_id
                 and candidate.client == client.name
                 and candidate.status == QueueItemStatus.RUNNING
+                and candidate.created_at == task.created_at
             ):
                 stored_task = candidate
                 break
