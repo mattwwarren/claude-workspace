@@ -732,6 +732,25 @@ class TestHostTimezoneDst:
 
         assert resolved.utcoffset() is not None
 
+    def test_host_timezone_falls_back_to_the_flat_offset_as_a_last_resort(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No usable TZ and no readable tz database still yields a zone.
+
+        The last resort is the pre-#1409 flattened offset — worse for a
+        DST-crossing reset, but never a crash and never a naive instant.
+        """
+        import cw.native_daemon
+
+        monkeypatch.delenv("TZ", raising=False)
+        monkeypatch.setattr(
+            cw.native_daemon, "_LOCALTIME_PATH", tmp_path / "absent-localtime"
+        )
+
+        resolved = datetime(2026, 7, 15, 12, tzinfo=cw.native_daemon._host_timezone())
+
+        assert resolved.utcoffset() is not None
+
     def test_local_now_resolves_through_the_host_zone(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
