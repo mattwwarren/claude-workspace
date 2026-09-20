@@ -82,14 +82,14 @@ from cw.reconcile.review_recipes import (
     _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
 )
 from cw.review_strategy import ReviewStrategy
-from cw.worktree import worktree_path_for
+from cw.worktree import create_worktree, worktree_path_for
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
 # construction: _make_task accepts **kwargs (pr_url / pr_state / session_id /
 # client / lane), _pr_state builds a PrState with sensible OPEN defaults.
 # _client_with_lanes builds a ClientConfig with the given lanes (reused by the
 # resolve-precedence tests below).
-from tests.conftest import _clean_git_env, git_in
+from tests.conftest import _clean_git_env, git_in, push_commit_to_origin
 from tests.test_pr_hydrate import _pr_state, _watched
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 
@@ -2829,6 +2829,45 @@ def test_dispatch_fix_agent_resumes_pushed_branch(
 
     assert len(stub_spawn.calls) == 2
     assert stub_spawn.calls[1]["worktree"] == wt
+
+
+def test_dispatch_fix_agent_fast_forwards_behind_worktree(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """#2213: a reused worktree behind an already-fetched tracking ref is
+    fast-forwarded by ``create_worktree`` instead of tripping the HEAD check."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    old_sha = git_in(worktree, "rev-parse", "HEAD")
+
+    origin = Path(git_in(client.workspace_path, "remote", "get-url", "origin"))
+    new_sha = push_commit_to_origin(origin, branch, tmp_path / "side", "upstream.txt")
+    # Load-bearing: without this fetch the workspace's tracking ref still equals
+    # the worktree's HEAD, ``_resolve_remote_ref`` resolves to that stale ref,
+    # the HEAD-equals-remote check passes today, and this test is vacuous.
+    git_in(client.workspace_path, "fetch", "origin")
+    assert new_sha != old_sha
+    assert git_in(worktree, "rev-parse", "HEAD") == old_sha
+
+    dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert len(stub_spawn.calls) == 1
+    assert git_in(worktree, "rev-parse", "HEAD") == new_sha
 
 
 def test_dispatch_fix_agent_verifies_head_before_merge(

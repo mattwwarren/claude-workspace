@@ -1567,3 +1567,48 @@ def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") 
         check=True,
         env=clean_env,
     )
+
+
+def push_commit_to_origin(
+    origin: Path,
+    branch: str,
+    work_dir: Path,
+    filename: str,
+    content: str = "out-of-band\n",
+) -> str:
+    """Push one new commit to *branch* on the bare *origin* from a side clone.
+
+    Simulates an out-of-band push (another machine, a sibling session, a fix
+    agent's isolation worktree) that advances ``origin/<branch>`` without
+    touching the workspace under test. *branch* must already exist on *origin*.
+
+    The clone at *work_dir* is created only when *work_dir* does not yet exist;
+    a second call in the same test reuses it, re-syncing to the current remote
+    tip first so the new commit lands on top of whatever was pushed since.
+    Writes *content* to *filename* so a test can make upstream set a value that
+    differs from a local commit. Returns the pushed commit's SHA.
+    """
+    if not work_dir.exists():
+        subprocess.run(
+            ["git", "clone", str(origin), str(work_dir)],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_clean_git_env(),
+        )
+    git_in(work_dir, "fetch", "origin")
+    git_in(work_dir, "checkout", "-B", branch, f"origin/{branch}")
+    (work_dir / filename).write_text(content, encoding="utf-8")
+    git_in(work_dir, "add", filename)
+    git_in(
+        work_dir,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=cw test",
+        "commit",
+        "-m",
+        f"out-of-band {filename}",
+    )
+    git_in(work_dir, "push", "origin", branch)
+    return git_in(work_dir, "rev-parse", "HEAD")

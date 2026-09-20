@@ -38,7 +38,7 @@ from cw.worktree import (
     worktree_path_for,
 )
 from tests._reconcile_helpers import _no_op_salvage_payload
-from tests.conftest import git_in
+from tests.conftest import git_in, push_commit_to_origin
 from tests.test_result import _valid_payload
 
 if TYPE_CHECKING:
@@ -361,12 +361,22 @@ class TestCreateWorktree:
                 result.stdout = ""
             return result
 
+        fetch_calls: list[tuple[ClientConfig, str]] = []
+
+        def mock_fetch(client: ClientConfig, branch_name: str) -> bool:
+            fetch_calls.append((client, branch_name))
+            return True
+
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        # ``ws`` does not exist here, so the real fetch would short-circuit on
+        # ``git_dir.exists()``; stub it to prove the reuse path invokes it (#2213).
+        monkeypatch.setattr("cw.worktree.fetch_feature_branch", mock_fetch)
         result = create_worktree(client, "feat/search")
         assert result == wt_path
         # The behavior under test: an on-branch worktree is reused without a
         # `worktree add`. Assert that, not the exact verification command.
         assert not any("add" in call for call in calls)
+        assert fetch_calls == [(client, "feat/search")]
 
     def test_existing_worktree_wrong_branch_raises(
         self,
@@ -1028,6 +1038,313 @@ class TestCreateWorktree:
         monkeypatch.setattr("cw.worktree._register_cw_exclude", mock_register)
         create_worktree(client, "feat/clean-reuse")
         assert len(exclude_calls) == 0
+
+
+_REUSE_BRANCH = "dev/2213"
+
+
+def _seed_reuse(
+    tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> tuple[ClientConfig, Path, Path, Path]:
+    """Real-git fixture for the reuse-refresh tests (#2213).
+
+    Builds a workspace with a bare ``origin`` carrying ``main``, provisions the
+    ``dev/2213`` worktree through ``create_worktree``, commits ``tracked.txt``
+    in it and pushes the branch. Returns ``(client, wt, origin, workspace)``
+    with the worktree clean, fully pushed, and in sync with the workspace's
+    ``refs/remotes/origin/dev/2213``.
+    """
+    workspace = make_git_repo("workspace")
+    origin = tmp_path / "origin.git"
+    origin.mkdir()
+    git_in(origin, "init", "--bare", "-b", "main")
+    git_in(workspace, "remote", "add", "origin", str(origin))
+    git_in(workspace, "push", "origin", "main")
+    git_in(workspace, "fetch", "origin")
+    client = ClientConfig(
+        name="test",
+        workspace_path=workspace,
+        worktree_base=tmp_path / "wt",
+    )
+    wt = create_worktree(client, _REUSE_BRANCH)
+    (wt / "tracked.txt").write_text("v1\n", encoding="utf-8")
+    git_in(wt, "add", "tracked.txt")
+    git_in(wt, "commit", "-m", "add tracked")
+    git_in(wt, "push", "origin", _REUSE_BRANCH)
+    return client, wt, origin, workspace
+
+
+def _cw_worktree_records(
+    caplog: pytest.LogCaptureFixture, min_level: int
+) -> list[logging.LogRecord]:
+    return [
+        r for r in caplog.records if r.name == "cw.worktree" and r.levelno >= min_level
+    ]
+
+
+class TestCreateWorktreeReuseRefresh:
+    """#2213: the reuse path best-effort fetches and fast-forwards a behind
+    worktree, never resetting and never raising."""
+
+    @pytest.mark.parametrize("allow_dirty_reuse", [False, True])
+    def test_behind_worktree_fast_forwarded_on_reuse(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+        allow_dirty_reuse: bool,
+    ) -> None:
+        client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        new_sha = push_commit_to_origin(
+            origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt"
+        )
+        assert new_sha != old_sha
+        # Precondition: both the worktree and the workspace's tracking ref are
+        # stale, so only a fetch plus fast-forward can bring HEAD to new_sha.
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert (
+            git_in(workspace, "rev-parse", f"refs/remotes/origin/{_REUSE_BRANCH}")
+            == old_sha
+        )
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.INFO, logger="cw.worktree"):
+            result = create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=allow_dirty_reuse
+            )
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+        assert git_in(workspace, "rev-parse", f"refs/heads/{_REUSE_BRANCH}") == new_sha
+        assert (wt / "upstream.txt").exists()
+        assert any(
+            r.levelno == logging.INFO and "fast-forwarded" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.INFO)
+        )
+
+    def test_ahead_of_origin_left_alone(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        git_in(wt, "commit", "--allow-empty", "-m", "unpushed local work")
+        local_sha = git_in(wt, "rev-parse", "HEAD")
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.INFO, logger="cw.worktree"):
+            result = create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == local_sha
+        assert _cw_worktree_records(caplog, logging.WARNING) == []
+
+    def test_diverged_left_alone_and_warns(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        git_in(wt, "commit", "--allow-empty", "-m", "local divergent work")
+        local_sha = git_in(wt, "rev-parse", "HEAD")
+        push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "theirs.txt")
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.INFO, logger="cw.worktree"):
+            result = create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == local_sha
+        assert any(
+            "diverged" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.WARNING)
+        )
+
+    def test_dirty_nonoverlapping_behind_fast_forwards_and_keeps_modification(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        (wt / "tracked.txt").write_text("local churn\n", encoding="utf-8")
+        new_sha = push_commit_to_origin(
+            origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt"
+        )
+
+        create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+        assert (wt / "tracked.txt").read_text(encoding="utf-8") == "local churn\n"
+        assert (wt / "upstream.txt").exists()
+
+    def test_dirty_overlapping_behind_refused_without_data_loss(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        (wt / "tracked.txt").write_text("local edit\n", encoding="utf-8")
+        push_commit_to_origin(
+            origin,
+            _REUSE_BRANCH,
+            tmp_path / "side",
+            "tracked.txt",
+            content="upstream edit\n",
+        )
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.INFO, logger="cw.worktree"):
+            result = create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+
+        # Invariant: the local edit is never lost, and reuse never raises.
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert (wt / "tracked.txt").read_text(encoding="utf-8") == "local edit\n"
+        assert any(
+            "refused" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.WARNING)
+        )
+
+    def test_branch_not_on_origin_is_silent(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The quiet marker is git's English message; pin the locale.
+        monkeypatch.setenv("LC_ALL", "C")
+        client, _wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        never_pushed = "dev/never-pushed"
+        wt = create_worktree(client, never_pushed)
+        head = git_in(wt, "rev-parse", "HEAD")
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
+            result = create_worktree(client, never_pushed, allow_dirty_reuse=True)
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == head
+        assert _cw_worktree_records(caplog, logging.WARNING) == []
+
+    def test_no_origin_remote_degrades(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        workspace = make_git_repo("workspace")
+        client = ClientConfig(
+            name="test",
+            workspace_path=workspace,
+            worktree_base=tmp_path / "wt",
+        )
+        wt = create_worktree(client, _REUSE_BRANCH)
+        head = git_in(wt, "rev-parse", "HEAD")
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.INFO, logger="cw.worktree"):
+            result = create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == head
+        assert _cw_worktree_records(caplog, logging.WARNING)
+
+    def test_fetch_failure_still_fast_forwards_to_known_tip(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
+        new_sha = push_commit_to_origin(
+            origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt"
+        )
+        # Another fetch (e.g. dispatch's freshness gate) advances the shared
+        # tracking ref while the worktree's branch stays behind ...
+        git_in(workspace, "fetch", "origin")
+        assert git_in(wt, "rev-parse", "HEAD") != new_sha
+        # ... then origin becomes unreachable, so the fetch inside reuse fails.
+        origin.rename(tmp_path / "origin-gone.git")
+
+        create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+
+    def test_submodule_sync_runs_only_after_fast_forward(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
+        # ``_init_submodules`` keys on the main checkout's ``.gitmodules``.
+        (workspace / ".gitmodules").write_text("", encoding="utf-8")
+        calls: list[tuple[tuple[str, ...], object]] = []
+
+        def spy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append((args, cwd))
+            return _run_git(*args, cwd=cwd, check=check)
+
+        monkeypatch.setattr("cw.worktree._run_git", spy)
+
+        # Equal state: nothing to fast-forward, so no submodule sync.
+        create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+        assert [c for c in calls if "submodule" in c[0]] == []
+
+        push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt")
+        create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+
+        submodule_calls = [c for c in calls if "submodule" in c[0]]
+        assert len(submodule_calls) == 1
+        args, cwd = submodule_calls[0]
+        assert args == ("submodule", "update", "--init", "--recursive")
+        assert cwd == wt
+
+    def test_refresh_swallows_oserror(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A missing git binary (OSError) out of the refresh never escapes
+        ``create_worktree``. Injected at ``fetch_feature_branch`` itself:
+        ``_fetch_default_branch`` already swallows ``FileNotFoundError``
+        internally, so a fetch-level ``_run_git`` fault would never reach the
+        helper's own ``except OSError``."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "feat-oserror"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            stdout = "feat/oserror\n" if "--show-current" in args else ""
+            return MagicMock(returncode=0, stdout=stdout, stderr="")
+
+        def boom(client: ClientConfig, branch_name: str) -> bool:
+            msg = "git vanished"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        monkeypatch.setattr("cw.worktree.fetch_feature_branch", boom)
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            result = create_worktree(client, "feat/oserror", allow_dirty_reuse=True)
+
+        assert result == wt_path
+        assert any(
+            "refresh of reused worktree failed" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.WARNING)
+        )
 
 
 class TestCheckNotMainCheckout:
@@ -2380,6 +2697,71 @@ class TestFetchDefaultBranch:
 
         assert first_count == 1, "Expected WARNING on first call"
         assert second_count == 0, "Expected no WARNING on second call (deduped)"
+
+    @pytest.mark.parametrize(
+        ("stderr", "quiet_missing_ref", "expect_warning"),
+        [
+            pytest.param(
+                "fatal: couldn't find remote ref x",
+                True,
+                False,
+                id="missing-ref-quiet-is-debug",
+            ),
+            pytest.param(
+                "fatal: couldn't find remote ref x",
+                False,
+                True,
+                id="missing-ref-default-still-warns",
+            ),
+            pytest.param(
+                "fatal: 'origin' does not appear to be a git repository",
+                True,
+                True,
+                id="other-failure-quiet-still-warns",
+            ),
+        ],
+    )
+    def test_quiet_missing_ref_logging(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        stderr: str,
+        quiet_missing_ref: bool,
+        expect_warning: bool,
+    ) -> None:
+        """#2213: only a *missing remote ref* is downgraded to DEBUG, and only
+        when the caller opts in; every other fetch failure still WARNs."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            return MagicMock(returncode=128, stdout="", stderr=stderr)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        warned: set[str] = set()
+
+        with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
+            ok = _fetch_default_branch(
+                "test-client",
+                "x",
+                ws,
+                warned_fetch_fail=warned,
+                quiet_missing_ref=quiet_missing_ref,
+            )
+
+        assert ok is False
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert bool(warnings) is expect_warning
+        if expect_warning:
+            assert warned == {"test-client"}
+        else:
+            # Quiet path: DEBUG breadcrumb, dedupe set untouched.
+            assert warned == set()
+            assert any(
+                r.levelno == logging.DEBUG and "freshness_check_skip" in r.getMessage()
+                for r in caplog.records
+            )
 
 
 class TestFetchFeatureBranch:
