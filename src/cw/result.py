@@ -237,6 +237,32 @@ def _validate_harvest_payload(payload: dict[str, Any]) -> AutoDevResult | Blocke
         raise EmitValidationError(msg, errors=_format_errors(exc)) from exc
 
 
+def reconstruct_staged_sentinel(
+    last_result: dict[str, Any] | None,
+) -> AutoDevResult | BlockedResult | None:
+    """Rebuild a staged ``session.last_result`` into its validated sentinel object.
+
+    :func:`has_terminal_result` only confirms a ``"status"`` key is present; it
+    does not prove the dict matches either arm of the discriminated
+    ``AutoDevResult``/``BlockedResult`` union (a stale or foreign shape satisfies
+    it too). Returns ``None`` on any validation failure so callers can fall
+    back rather than raise.
+
+    Single implementation shared by the Stop hook's emit-precedence path
+    (``cw.cli.stop_hook``) and the phantom sweep's staged-sentinel router
+    (``cw.reconcile.phantom``) -- GitHub #1762. Both used to reconstruct
+    ``last_result`` independently, and the Stop hook's copy validated against
+    ``AutoDevResult`` alone, so a session that died holding a parser-synthesized
+    ``BlockedResult`` was unreconstructable there.
+    """
+    if last_result is None:
+        return None
+    try:
+        return _validate_harvest_payload(last_result)
+    except EmitValidationError:
+        return None
+
+
 def emit_result_on(
     session: Session, payload: dict[str, Any], *, source: LastResultSource
 ) -> EmitOutcome:

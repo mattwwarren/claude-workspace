@@ -98,6 +98,43 @@ See `docs/adr/0006-reaping-is-gated-by-an-authority.md`,
 `docs/adr/0009-branch-absence-is-diagnostic-not-completion.md`, and
 `docs/adr/0014-timers-never-destroy-work.md`.
 
+### The three session-id namespaces
+
+A running session is identified by three different ids that all look like short
+opaque strings and are **not** interchangeable. Comparing one against another is
+the source of every "the dev-queue row points at the wrong session" report
+(GitHub #1738, #1774, #1762) — and in each case nothing was actually wrong.
+
+- **`TicketTask.session_id` = `Session.id`** — cw's own internal session id
+  (`uuid4().hex[:8]`), stamped by the dispatch spawn path. It is the
+  authoritative answer to "which cw session owns this dev-queue row," and the
+  key `consume_completed_sessions` matches a `SESSION_COMPLETED` event against.
+- **`Session.surface_ref`** — the short id `claude --bg` returns at spawn and
+  `claude agents --json` reports. This, and only this, is comparable against the
+  daemon roster. Phantom detection (`compute_drift`) works entirely in this
+  namespace.
+- **`Session.claude_session_id`** — the id Claude Code names its transcript
+  file after. Resumed and backfilled independently of the other two, so it can
+  legitimately be absent or change mid-session.
+
+A dev-queue row's `session_id` is therefore never directly comparable to a
+roster entry or a transcript filename. The correct chain is
+`task.session_id → Session (by .id) → Session.surface_ref → daemon roster`,
+which lives in `cw.reconcile._shared`:
+
+- `resolve_session_for_task(task, state)` — the first two hops.
+- `session_daemon_liveness(session, live_short_ids)` — the third. The roster set
+  is passed in; `reconcile()` queries `claude agents --json` once per tick and
+  every consumer shares that result.
+- `resolve_session_liveness_for_task(task, state, live_short_ids)` — both.
+
+Do not re-derive this chain. `cw dev-queue wait` originally carried the only
+correct implementation and had it duplicated three ways internally; #1762
+consolidated it here. `cw dev-queue tasks`'s REASON column is the first
+operator-facing surface of the signal, via `TicketTask.advisory_note` (written
+by `_stamp_session_id_mismatch_advisories`); `cw status` / `cw doctor` can adopt
+the same helpers rather than growing a fourth copy.
+
 ## §4 Dispatch & Admission
 
 Two admission mechanisms gate how many sessions the dispatch loop lets run
