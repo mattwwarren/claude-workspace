@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from tests.conftest import _clean_git_env
+from tests.conftest import _clean_git_env, git_in
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "release-tag.yml"
@@ -74,15 +74,6 @@ def _script(step_id: str) -> str:
     return script
 
 
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        check=True,
-        env=_clean_git_env(),
-    )
-
-
 def _repo_with_remote(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
@@ -102,19 +93,19 @@ def _repo_with_remote(
         f'[project]\nname = "cw"\nversion = "{pyproject_version}"\n',
         encoding="utf-8",
     )
-    _git(repo, "add", "pyproject.toml")
-    _git(repo, "commit", "-m", head_subject)
+    git_in(repo, "add", "pyproject.toml")
+    git_in(repo, "commit", "-m", head_subject)
 
     origin = tmp_path / "origin.git"
     origin.mkdir()
-    _git(origin, "init", "--bare", "-b", "main")
-    _git(repo, "remote", "add", "origin", str(origin))
-    _git(repo, "push", "origin", "main")
+    git_in(origin, "init", "--bare", "-b", "main")
+    git_in(repo, "remote", "add", "origin", str(origin))
+    git_in(repo, "push", "origin", "main")
 
     for tag in remote_tags:
-        _git(repo, "tag", tag)
-        _git(repo, "push", "origin", tag)
-        _git(repo, "tag", "-d", tag)
+        git_in(repo, "tag", tag)
+        git_in(repo, "push", "origin", tag)
+        git_in(repo, "tag", "-d", tag)
 
     return repo
 
@@ -304,7 +295,7 @@ def test_warn_step_only_reads_pyproject_and_remote_tags_not_local_tags(
         pyproject_version="1.24.0",
         remote_tags=["v1.24.0"],
     )
-    _git(repo, "tag", "v2.0.0")
+    git_in(repo, "tag", "v2.0.0")
 
     result, _outputs = _run_step(WARN_STEP_ID, repo)
     assert result.returncode == 0, result.stderr
