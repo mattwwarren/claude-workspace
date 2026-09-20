@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+# ``datetime`` is deliberately imported at RUNTIME above rather than listed here
+# (#1409 review round 1): ``parse_usage_limit_reset`` and
+# ``UsageLimitError.__init__`` both annotate it, and ``from __future__ import
+# annotations`` turns those annotations into strings — so a TYPE_CHECKING-only
+# import makes ``typing.get_type_hints()`` on either one raise NameError.
+# Sibling modules (``native_daemon``, ``dispatch/loop``) import it
+# unconditionally for the same reason.
 if TYPE_CHECKING:
-    from datetime import datetime
     from pathlib import Path
 
     from cw.sprint import AppliedBuildout

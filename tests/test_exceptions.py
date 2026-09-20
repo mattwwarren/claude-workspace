@@ -161,6 +161,26 @@ class TestUsageLimitError:
         assert err.reset_at == reset_at
         assert str(err) == "usage limit active"
 
+    def test_runtime_type_hints_resolve(self) -> None:
+        """#1409 review round 1: `datetime` must import at RUNTIME.
+
+        Under ``from __future__ import annotations`` every annotation is a
+        string, so a TYPE_CHECKING-only ``datetime`` import makes
+        ``typing.get_type_hints()`` raise NameError on anything that mentions
+        it — which breaks every runtime introspector (pydantic, dataclasses,
+        Click type inference, doc tooling) pointed at this module.
+        """
+        from typing import get_type_hints
+
+        from cw.exceptions import UsageLimitError, parse_usage_limit_reset
+
+        parser_hints = get_type_hints(parse_usage_limit_reset)
+        init_hints = get_type_hints(UsageLimitError.__init__)
+
+        assert parser_hints["now"] is datetime
+        assert parser_hints["return"] == datetime | None
+        assert init_hints["reset_at"] == datetime | None
+
 
 class TestParseUsageLimitReset:
     """#1409: pull the reset instant out of a spawn-time usage-limit message.
