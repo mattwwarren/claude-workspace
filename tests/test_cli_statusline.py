@@ -70,6 +70,30 @@ def test_focused_session_renders_the_expected_line(tmp_config_dir: Path) -> None
     assert result.output == "client-a/impl 1▶ 0⧗\n"
 
 
+def test_unhydrated_pr_renders_unknown_marker_via_cli(tmp_config_dir: Path) -> None:
+    """#1672: a PR the hydration pass has not observed renders ``?N``, not silence."""
+    _write_clients(tmp_config_dir)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id="T-1",
+                    client="client-a",
+                    lane="impl",
+                    status=QueueItemStatus.COMPLETED,
+                    pr_url="https://github.com/acme/widgets/pull/7",
+                ),
+            ]
+        )
+    )
+    set_focus(_SESSION, "client-a", "impl")
+
+    result = _render("--session", _SESSION, "--cwd", str(tmp_config_dir))
+
+    assert result.exit_code == 0, result.output
+    assert result.output == "client-a/impl 0▶ 0⧗ ?1\n"
+
+
 def test_step_three_prints_nothing(tmp_config_dir: Path) -> None:
     _write_clients(tmp_config_dir)
 
