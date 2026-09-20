@@ -611,6 +611,24 @@ def _branch_held_error(
     return BranchHeldByWorktreeError(msg, holder_path=holder)
 
 
+def _init_submodules(git_cwd: Path, wt_path: Path) -> None:
+    """Initialize submodules in *wt_path* when the main checkout uses them.
+
+    Best-effort (``check=False``): a submodule failure never fails worktree
+    provisioning. Called after a fresh ``worktree add`` and after a reuse-path
+    fast-forward, which can move submodule pointers (#2213).
+    """
+    if (git_cwd / ".gitmodules").exists():
+        _run_git(
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+            cwd=wt_path,
+            check=False,
+        )
+
+
 def create_worktree(
     client: ClientConfig,
     branch: str,
@@ -706,17 +724,7 @@ def create_worktree(
             raise
         raise _branch_held_error(client, branch, holder) from exc
     _register_cw_exclude(git_cwd)
-
-    # Initialize submodules if the repo uses them
-    if (git_cwd / ".gitmodules").exists():
-        _run_git(
-            "submodule",
-            "update",
-            "--init",
-            "--recursive",
-            cwd=wt_path,
-            check=False,
-        )
+    _init_submodules(git_cwd, wt_path)
 
     return wt_path
 
@@ -1080,6 +1088,47 @@ def is_main_behind_origin(
     return (behind_count > 0, local_sha, origin_sha, behind_count)
 
 
+def _ff_relation(
+    local_ref: str, remote_ref: str, cwd: Path
+) -> Literal["equal", "behind", "ahead", "diverged"]:
+    """Classify *local_ref*'s directional relationship to *remote_ref*.
+
+    Two ``merge-base --is-ancestor`` probes: "behind" means *local_ref* is a
+    strict ancestor of *remote_ref* (fast-forward is safe), "ahead" the
+    reverse. A probe error (e.g. an unresolvable ref, rc 128) reads as
+    "not an ancestor", so any failure classifies as "diverged" and can never
+    trigger a mutation.
+    """
+    # Two merge-base --is-ancestor calls for directional classification.
+    local_behind = _run_git(
+        "merge-base",
+        "--is-ancestor",
+        local_ref,
+        remote_ref,
+        cwd=cwd,
+        check=False,
+    )
+    remote_behind = _run_git(
+        "merge-base",
+        "--is-ancestor",
+        remote_ref,
+        local_ref,
+        cwd=cwd,
+        check=False,
+    )
+    # returncode 0 means the first arg is a reachable ancestor of the second.
+    is_local_ancestor = local_behind.returncode == 0  # local ≤ remote → behind
+    is_remote_ancestor = remote_behind.returncode == 0  # remote ≤ local → ahead
+
+    if is_local_ancestor and is_remote_ancestor:
+        return "equal"
+    if is_local_ancestor:
+        return "behind"
+    if is_remote_ancestor:
+        return "ahead"
+    return "diverged"
+
+
 def check_main_ff_safety(
     client: ClientConfig,
 ) -> Literal["equal", "behind", "ahead", "diverged", "detached"]:
@@ -1106,34 +1155,7 @@ def check_main_ff_safety(
     if sym.returncode != 0:
         return "detached"
 
-    # Two merge-base --is-ancestor calls for directional classification.
-    main_behind = _run_git(
-        "merge-base",
-        "--is-ancestor",
-        default_branch,
-        f"origin/{default_branch}",
-        cwd=git_dir,
-        check=False,
-    )
-    origin_behind = _run_git(
-        "merge-base",
-        "--is-ancestor",
-        f"origin/{default_branch}",
-        default_branch,
-        cwd=git_dir,
-        check=False,
-    )
-    # returncode 0 means the first arg is a reachable ancestor of the second.
-    is_main_ancestor = main_behind.returncode == 0  # main ≤ origin → behind
-    is_origin_ancestor = origin_behind.returncode == 0  # origin ≤ main → ahead
-
-    if is_main_ancestor and is_origin_ancestor:
-        return "equal"
-    if is_main_ancestor:
-        return "behind"
-    if is_origin_ancestor:
-        return "ahead"
-    return "diverged"
+    return _ff_relation(default_branch, f"origin/{default_branch}", git_dir)
 
 
 def get_head_branch(client: ClientConfig) -> str | None:
