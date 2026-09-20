@@ -11,7 +11,6 @@ delegation/exception seams.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import threading
 from pathlib import Path
@@ -55,7 +54,7 @@ from cw.models import (
     TicketTask,
 )
 from tests._codex_review_helpers import _mk_codex_proc
-from tests.conftest import find_completed_session
+from tests.conftest import find_completed_session, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -88,22 +87,15 @@ def _persisted_result() -> AutoDevResult:
     return AutoDevResult.model_validate(result_raw)
 
 
-def _git(repo: Path, *args: str) -> None:
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, check=True, env=clean_env
-    )
-
-
 def _worktree_with_change(
     make_git_repo: Callable[[str], Path], name: str, *, filename: str, content: str
 ) -> Path:
     """Return a repo on a feature branch with *content* committed to *filename*."""
     repo = make_git_repo(name)
-    _git(repo, "checkout", "-b", "feature")
+    git_in(repo, "checkout", "-b", "feature")
     (repo / filename).write_text(content, encoding="utf-8")
-    _git(repo, "add", filename)
-    _git(repo, "commit", "-m", f"add {filename}")
+    git_in(repo, "add", filename)
+    git_in(repo, "commit", "-m", f"add {filename}")
     return repo
 
 
