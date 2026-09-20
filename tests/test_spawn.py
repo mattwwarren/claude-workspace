@@ -25,7 +25,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.spawn import build_disallowed_tools_arg
+from cw.spawn import STOP_HOOK_COMMAND, build_disallowed_tools_arg
 from tests.conftest import _make_ticket_task, _seed_daemon_session
 
 if TYPE_CHECKING:
@@ -927,7 +927,7 @@ class TestHookSettingsTemplate:
 
         stop_entries = hooks["Stop"]
         assert any(
-            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_entries
+            entry["hooks"][0]["command"] == STOP_HOOK_COMMAND for entry in stop_entries
         )
 
         pretooluse_entries = hooks["PreToolUse"]
@@ -953,6 +953,20 @@ class TestHookSettingsTemplate:
 
         commands = [hook["command"] for hook in bash_entries[0]["hooks"]]
         assert commands == ["cw guard-cwd", "cw guard-busy-wait"]
+
+    def test_pretooluse_commands_stay_unguarded_literals(self) -> None:
+        """#2226 guarded the Stop hook ONLY — PreToolUse commands are untouched.
+
+        The three PreToolUse commands still pay an interpreter start per
+        invocation; wrapping them is a separate (unfiled) question. Pinning
+        the bare literals here makes any future guard an explicit decision
+        rather than a copy-paste side effect.
+        """
+        from cw.spawn import _HOOK_SETTINGS_TEMPLATE
+
+        entries = _HOOK_SETTINGS_TEMPLATE["hooks"]["PreToolUse"]
+        commands = [hook["command"] for entry in entries for hook in entry["hooks"]]
+        assert commands == ["cw guard-cwd", "cw guard-busy-wait", "cw agent-spawn-pre"]
 
     def test_hook_settings_template_includes_agent_spawn_pretooluse(self) -> None:
         """#1646: a subagent-tool PreToolUse entry sits alongside the Bash guard."""
@@ -1040,7 +1054,7 @@ class TestHookContextInjection:
         settings = json.loads(settings_path.read_text())
         stop_hooks = settings["hooks"]["Stop"]
         assert any(
-            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_hooks
+            entry["hooks"][0]["command"] == STOP_HOOK_COMMAND for entry in stop_hooks
         )
 
         context = json.loads(context_path.read_text())
@@ -1192,7 +1206,7 @@ class TestWriteHookContext:
         rewritten = json.loads(settings_path.read_text())
         stop_hooks = rewritten["hooks"]["Stop"]
         assert any(
-            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_hooks
+            entry["hooks"][0]["command"] == STOP_HOOK_COMMAND for entry in stop_hooks
         )
         # Prior unrelated content is gone — confirms blind overwrite.
         assert rewritten != prior
@@ -1230,7 +1244,7 @@ class TestWriteHookContext:
         settings = json.loads(settings_path.read_text())
         stop_hooks = settings["hooks"]["Stop"]
         assert any(
-            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_hooks
+            entry["hooks"][0]["command"] == STOP_HOOK_COMMAND for entry in stop_hooks
         )
         # Correlation file should still be written.
         context_path = worktree / ".claude" / "cw-context.json"

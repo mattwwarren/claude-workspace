@@ -53,6 +53,36 @@ def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _seed_user_level_stop_hook(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point user_level_hooks._CLAUDE_HOME at a tmp home carrying a cw Stop hook.
+
+    #2226: the check reads ``~/.claude/settings{,.local}.json`` directly, so a
+    seeded hit needs its own module-level patch on top of the autouse
+    tmp_config_dir isolation.
+    """
+    claude_home = tmp_path / "seeded-claude"
+    claude_home.mkdir(parents=True, exist_ok=True)
+    (claude_home / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "matcher": "",
+                            "hooks": [{"type": "command", "command": "cw signal-stop"}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "cw.doctor.user_level_hooks._CLAUDE_HOME", claude_home, raising=True
+    )
+    return claude_home
+
+
 class TestRunDoctorHealthy:
     """run_doctor returns a healthy report."""
 
@@ -6797,6 +6827,48 @@ class TestCheckInboxSize:
         report = run_doctor()
         names = {c.name for c in report.checks}
         assert "inbox-size" in names
+
+    def test_stop_hook_scope_check_registered_in_run_doctor(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """run_doctor() includes the #2226 user-level Stop-hook scope check.
+
+        The autouse tmp_config_dir fixture points
+        ``user_level_hooks._CLAUDE_HOME`` at an empty tmp dir, so a clean host
+        is the baseline here regardless of the operator's real ~/.claude.
+        """
+        _stub_claude_version_ok(monkeypatch)
+        report = run_doctor()
+        by_name = {c.name: c for c in report.checks}
+        assert "stop-hook-scope" in by_name
+        assert by_name["stop-hook-scope"].ok is True
+        assert by_name["stop-hook-scope"].warn is False
+
+    def test_stop_hook_scope_warn_in_json_report(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A seeded user-level Stop hook surfaces as warn=true, ok=true in JSON."""
+        from cw.doctor import format_report_json
+
+        _stub_claude_version_ok(monkeypatch)
+        _seed_user_level_stop_hook(monkeypatch, tmp_path)
+
+        payload = json.loads(format_report_json(run_doctor()))
+        entry = next(c for c in payload["checks"] if c["name"] == "stop-hook-scope")
+        assert entry["warn"] is True
+        assert entry["ok"] is True
+
+    def test_doctor_json_exits_zero_with_stop_hook_warn(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WARN never fails doctor's exit code — the check is perf hygiene."""
+        _stub_claude_version_ok(monkeypatch)
+        _seed_user_level_stop_hook(monkeypatch, tmp_path)
+
+        result = CliRunner().invoke(main, ["doctor", "--json"])
+
+        assert result.exit_code == 0
+        assert "stop-hook-scope" in result.output
 
     def test_bad_orchestrator_config_degrades_instead_of_raising(
         self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
