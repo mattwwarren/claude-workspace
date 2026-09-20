@@ -13,12 +13,12 @@ import json
 from pathlib import Path
 
 import pytest
+
 from cw.doctor.user_level_hooks import (
     _CHECK_NAME,
     _STOP_HOOK_PATTERN,
     _check_user_level_stop_hook,
 )
-
 from cw.spawn import STOP_HOOK_COMMAND
 
 _BARE_COMMAND = "cw signal-stop"

@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The injected Stop hook is now guarded in the shell, so a session cw did not spawn no longer pays an interpreter start per turn (#2226):** `cw signal-stop` was already a no-op when no `.claude/cw-context.json` was found, but it started Python and imported `cw.cli` to reach that conclusion — measured at ~250 ms per invocation against ~1.4 ms for the guard. The command cw writes into `<worktree>/.claude/settings.local.json` is now a POSIX-sh short circuit in front of the same call: it invokes `cw signal-stop` unless it can prove no context file is reachable from `$CLAUDE_PROJECT_DIR` *or* the hook process's own cwd. It fails open on an unset or empty variable — ADR-0003 rejected env vars as the identity channel because `claude --bg` does not propagate the caller's environment (#133), so a fail-closed guard could silently drop every completion signal. Both file tests are built from the same `HOOK_CONTEXT_RELATIVE_PATH` constant the writer uses. `signal_stop` itself, the three PreToolUse hooks and every ADR-0003 invariant are unchanged, and existing worktrees need no migration (DAEMON spawns self-heal; USER-origin files are never touched).
+
+### Added
+
+- **`cw doctor` gains a `stop-hook-scope` check for a Stop hook installed user-level (#2226):** a `cw signal-stop` hook in `~/.claude/settings.json` or `~/.claude/settings.local.json` applies to every Claude session on the machine rather than just cw's worktrees. No cw install path writes one — `scripts/install-skills.sh` touches only `~/.claude/{commands,skills,agents,scripts}` and `cw init` writes only the `Bash(cw:*)` allowlist entry — so the check is detection only, naming the offending file, the `hooks.Stop` coordinates and the exact line to delete. Advisory severity (WARN), so it never changes `cw doctor`'s exit code; missing, unreadable and malformed settings files degrade to a silent skip with a note.
+
 ## [1.47.0] - 2026-09-20
 
 ### Added

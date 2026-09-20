@@ -108,6 +108,44 @@ For every DAEMON-origin Session created by `cw.spawn.spawn_create_impl`:
   (`consume_completed_sessions`, `/cw-followup`) work unchanged; only the
   capture site changed.
 
+## Amendment (#2226)
+
+The command cw injects is no longer the bare `cw signal-stop`. It is a
+POSIX-sh short circuit that lands the *same* call under the *same*
+invariants:
+
+```
+[ -z "$CLAUDE_PROJECT_DIR" ] || [ -f "$CLAUDE_PROJECT_DIR/.claude/cw-context.json" ] || [ -f .claude/cw-context.json ] || exit 0; cw signal-stop
+```
+
+- **Why.** `signal_stop` is already a no-op when no `cw-context.json` is
+  found, but it pays a Python interpreter start plus `from cw.cli import
+  main` to reach that conclusion — ~250ms, against ~1.5ms for the guard.
+  The short circuit is a transport-level concern only.
+- **Fail-open, deliberately.** The first arm invokes `cw signal-stop`
+  unchanged whenever `CLAUDE_PROJECT_DIR` is unset or empty, and the third
+  arm invokes it whenever the hook's own cwd holds the context file. The
+  "Alternatives considered" entry below — env vars are not a reliable
+  identity channel under `claude --bg` (#133) — is exactly why a
+  fail-closed guard was rejected: it would silently drop every completion
+  signal on an environment that does not carry the variable. The residual
+  is narrow and named: a variable set to a non-cw directory *and* a hook
+  cwd without the context file would skip.
+- **`signal_stop` is unchanged.** The three-layer priority order (Stop hook
+  → wrapper sentinel buffer → reconcile sweep), idempotency, the
+  `background_tasks` deferral, the USER-origin carve-out and the headless
+  backstop all stand as written above. The guard runs *before* the
+  interpreter; it cannot alter what the interpreter then does.
+- **The hook is worktree-scoped and only worktree-scoped.** Installing it in
+  `~/.claude/settings.json` or `~/.claude/settings.local.json` is
+  unsupported: it applies to every Claude session on the machine, cw-managed
+  or not. `cw doctor`'s `stop-hook-scope` check (WARN, never fatal) detects
+  that shape and names the file and the line to remove.
+- **No migration.** DAEMON-origin spawns blind-overwrite
+  `settings.local.json`, so existing cw worktrees self-heal on their next
+  spawn. USER-origin worktrees are never modified and keep the unguarded
+  command, which still works.
+
 ## Alternatives considered
 
 - **Continue parsing the wrapper buffer for daemon sessions.** Rejected.
@@ -132,4 +170,4 @@ For every DAEMON-origin Session created by `cw.spawn.spawn_create_impl`:
 
 ## Referenced by
 
-- #147, #151, #165, #176, #184, #225, ADR-0002
+- #147, #151, #165, #176, #184, #225, #2226, ADR-0002
