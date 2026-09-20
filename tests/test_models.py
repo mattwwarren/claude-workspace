@@ -1074,7 +1074,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 37
+        assert DEV_QUEUE_SCHEMA_VERSION == 38
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -1858,6 +1858,16 @@ class TestConciergeAndEscalationModelSurface:
     def test_orchestrator_config_gate_recipes_enabled_accepts_true(self) -> None:
         cfg = OrchestratorConfig(gate_recipes_enabled=True)
         assert cfg.gate_recipes_enabled is True
+
+    # -- GitHub #2135 abandoned-exit park master switch ----------------------
+
+    def test_orchestrator_config_park_on_abandoned_exit_defaults_false(self) -> None:
+        """The park ships dark: the flip is an operator action (#2135)."""
+        assert OrchestratorConfig().park_on_abandoned_exit_enabled is False
+
+    def test_orchestrator_config_park_on_abandoned_exit_accepts_true(self) -> None:
+        cfg = OrchestratorConfig(park_on_abandoned_exit_enabled=True)
+        assert cfg.park_on_abandoned_exit_enabled is True
 
     # -- GitHub #1437 ssh_key_gate operator escape hatch ---------------------
 

@@ -1390,6 +1390,25 @@ def _lookup_matching_task(
     )
 
 
+def find_running_task_for_session(
+    ticket_id: str, cw_session_id: str
+) -> TicketTask | None:
+    """Return the RUNNING dev-queue row *cw_session_id* owns, if any (#2135).
+
+    A lock-free read (``load_dev_queue`` takes no lock) of the same lookup
+    :func:`_route_stopped_without_sentinel` repeats authoritatively under
+    ``dev_queue_lock`` before it mutates. This is the read-only precondition
+    form: the Stop hook needs the row to resolve the abandoned-exit park's
+    per-lane enablement, and a row that is absent or not RUNNING means there
+    is nothing to park, so the expensive transcript scan can be skipped
+    outright.
+    """
+    lookup = _lookup_matching_task(load_dev_queue(), ticket_id, cw_session_id)
+    if lookup.target is None or lookup.target_status is not QueueItemStatus.RUNNING:
+        return None
+    return lookup.target
+
+
 def _route_stopped_without_sentinel(ticket_id: str, session: Session) -> None:
     """Park a headless task BLOCKED_ON_USER after an abandoned exit (GitHub #2135).
 
