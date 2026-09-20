@@ -35,7 +35,12 @@ from cw.cli._sentinels import (
     _park_comment_posted_in_transcript,
 )
 from cw.cli.sprint import _resolve_version
-from cw.config import load_clients, load_state, save_state
+from cw.config import (
+    load_clients,
+    load_state,
+    orchestrator_config_file,
+    save_state,
+)
 from cw.events import read_events
 from cw.exceptions import CwError, SprintApplyError
 from cw.models import (
@@ -50,6 +55,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.reconcile.abandoned_exit import PARK_ON_ABANDONED_EXIT_KEY
 from cw.sprint import AppliedBuildout, BuildoutPlan
 from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
@@ -3389,12 +3395,21 @@ class TestSignalStop:
         context_ticket_id: str | None = SEED_TICKET_ID,
         transcript_anchor: Path | None = None,
         drop_worktree_path: bool = False,
+        master_switch: bool = True,
+        ticket_override: bool | None = True,
     ) -> tuple[Session, Path, object]:
         """Seed a headless session + RUNNING task + a hand-built transcript.
 
         Returns ``(session, worktree, daemon)``. *records* is written under the
         Claude project dir of *transcript_anchor* (the worktree by default);
         ``None`` writes no transcript at all.
+
+        The #2135 park ships dark, so every case that expects it to fire must
+        arm it: *master_switch* writes ``park_on_abandoned_exit_enabled`` into
+        ``orchestrator.yaml`` and *ticket_override* (None leaves the row's map
+        unset) seeds the row's ticket-level override. Both default to armed so
+        the behavioural tests below read as they did pre-gate; the gating
+        tests flip them.
         """
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
@@ -3409,6 +3424,11 @@ class TestSignalStop:
             stored.worktree_path = None
             save_state(state)
             session = stored
+        park_map = (
+            None
+            if ticket_override is None
+            else {PARK_ON_ABANDONED_EXIT_KEY: ticket_override}
+        )
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -3418,9 +3438,14 @@ class TestSignalStop:
                         status=QueueItemStatus.RUNNING,
                         session_id=session.id,
                         attempts=1,
+                        park_on_abandoned_exit=park_map,
                     )
                 ]
             )
+        )
+        orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+        orchestrator_config_file().write_text(
+            f"park_on_abandoned_exit_enabled: {str(master_switch).lower()}\n"
         )
         self._write_headless_context(
             worktree, session_id=session.id, ticket_id=context_ticket_id
@@ -3762,6 +3787,143 @@ class TestSignalStop:
 
         assert self._reload_task().status == QueueItemStatus.RUNNING
         assert self._park_event_counts("bg-tasks") == (0, 0)
+
+    # -- the default-off gate (operator round 4, findings 2 and 3) ---------
+
+    def _count_scans(self, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        """Count calls to the transcript scan, preserving its real result."""
+        calls: list[int] = []
+        real = _park_comment_posted_in_transcript
+
+        def _counting(transcript_path: Path, ticket_id: str) -> object:
+            calls.append(1)
+            return real(transcript_path, ticket_id)
+
+        monkeypatch.setattr(
+            "cw.cli.stop_hook._park_comment_posted_in_transcript", _counting
+        )
+        return calls
+
+    def test_signal_stop_defers_and_does_not_scan_when_disabled_by_default(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The shipped default is dark: byte-identical to the pre-#2135 defer.
+
+        Same evidence that parks the row two tests up, with the master switch
+        off — the row stays RUNNING, nothing is emitted, and the transcript is
+        never scanned (finding 3: the scan must not run on every turn).
+        """
+        from cw.models import QueueItemStatus
+
+        session, worktree, daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            "dark",
+            _park_post_records(self.SEED_TICKET_ID),
+            master_switch=False,
+            ticket_override=None,
+        )
+        scans = self._count_scans(monkeypatch)
+
+        self._invoke_stop(worktree)
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.ACTIVE
+        task = self._reload_task()
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.disposition is None
+        assert self._park_event_counts("dark") == (0, 0)
+        assert daemon.stop_calls == []
+        assert scans == []
+
+    def test_signal_stop_does_not_scan_when_no_running_row_matches(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Armed, but the cheap row precondition fails — still no scan."""
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import QueueItemStatus
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path, monkeypatch, "no-row", _park_post_records(self.SEED_TICKET_ID)
+        )
+        store = load_dev_queue()
+        store.tasks[0].status = QueueItemStatus.BLOCKED_ON_USER
+        save_dev_queue(store)
+        scans = self._count_scans(monkeypatch)
+
+        self._invoke_stop(worktree)
+
+        assert self._park_event_counts("no-row") == (0, 0)
+        assert scans == []
+
+    def test_signal_stop_does_not_park_when_the_lane_is_disabled(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Master switch on, lane map off ⇒ no park (the per-lane floor)."""
+        from cw.models import QueueItemStatus
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            "lane-off",
+            _park_post_records(self.SEED_TICKET_ID),
+            ticket_override=None,
+        )
+        self._write_park_lane_yaml(tmp_config_dir, enabled=False)
+
+        self._invoke_stop(worktree)
+
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert self._park_event_counts("lane-off") == (0, 0)
+
+    def test_signal_stop_parks_when_the_lane_is_enabled(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Master switch on + lane map on + real evidence ⇒ the row parks."""
+        from cw.models import QueueItemStatus
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            "lane-on",
+            _park_post_records(self.SEED_TICKET_ID),
+            ticket_override=None,
+        )
+        self._write_park_lane_yaml(tmp_config_dir, enabled=True)
+
+        self._invoke_stop(worktree)
+
+        task = self._reload_task()
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "stopped_without_sentinel"
+        assert self._park_event_counts("lane-on") == (1, 1)
+
+    @staticmethod
+    def _write_park_lane_yaml(tmp_config_dir: Path, *, enabled: bool) -> None:
+        """clients.yaml giving test-client's default lane a park map."""
+        path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "clients:\n"
+            "  test-client:\n"
+            "    workspace_path: /tmp/ws-2135\n"
+            "    lanes:\n"
+            "      - name: default\n"
+            "        park_on_abandoned_exit:\n"
+            f"          {PARK_ON_ABANDONED_EXIT_KEY}: {str(enabled).lower()}\n"
+        )
 
 
 class TestHarvestLastResultThroughDoor:

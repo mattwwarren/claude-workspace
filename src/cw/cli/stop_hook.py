@@ -48,6 +48,9 @@ from cw.reconcile import (
     _apply_sentinel_to_task,
     _has_terminal_sentinel,
     _route_stopped_without_sentinel,
+    find_running_task_for_session,
+    load_armed_park_config,
+    park_gate_open,
 )
 from cw.result import emit_result_locked, reconstruct_staged_sentinel
 from cw.worktree import reconcile_result_scope, resolve_scope_guard_default_branch
@@ -189,6 +192,37 @@ def _handle_headless_no_sentinel() -> bool:
     return True
 
 
+def _abandoned_exit_park_armed(session: Session, ticket_id: str) -> bool:
+    """Whether the #2135 park may fire here, cheapest precondition first.
+
+    The Stop hook fires at **every** main-agent turn boundary, so the
+    transcript scan that produces the park's evidence — a full walk whose cost
+    grows with session length — must not run on every turn. The preconditions
+    are therefore ordered by cost:
+
+    1. the master switch (``load_armed_park_config``: one ``orchestrator.yaml``
+       read, no dev-queue or transcript I/O);
+    2. empty ``background_tasks`` — already established, since ``signal_stop``
+       returns before this path otherwise;
+    3. the RUNNING dev-queue row this session owns (one lock-free
+       ``dev_queue.json`` read). No row, or a row that is not RUNNING, means
+       there is nothing to park;
+    4. the per-lane / per-ticket resolution on that row (one ``clients.yaml``
+       read).
+
+    Only when all four hold does the caller scan the transcript. With the
+    master switch off — the shipped default — the cost is a single config read
+    and the hook's behaviour is the pre-#2135 unconditional defer.
+    """
+    config = load_armed_park_config()
+    if config is None:
+        return False
+    task = find_running_task_for_session(ticket_id, session.id)
+    if task is None:
+        return False
+    return park_gate_open(config, task)
+
+
 def _park_if_abandoned(
     session: Session,
     cwd_value: str,
@@ -197,12 +231,18 @@ def _park_if_abandoned(
 ) -> None:
     """Park the ticket's row when this Stop looks like an abandoned exit (#2135).
 
-    Called only after the sentinel parse has already returned ``None``. The
-    evidence added here is the session's own transcript: a completed,
-    non-error park/blocker comment post to this ticket inside the current run
-    leg, with **no** raw ``AUTO_DEV_RESULT`` framing text after it. That
-    conjunction is the operator's binding "no sentinel landed" — a truncated,
-    unpaired, placeholder or #1692-discarded frame defers exactly as today.
+    Called only after the sentinel parse has already returned ``None``, and
+    gated by :func:`_abandoned_exit_park_armed` — the park ships **dark**, so
+    with ``park_on_abandoned_exit_enabled`` false (the default) this returns
+    before any transcript I/O and the caller defers exactly as it did before
+    #2135.
+
+    Once armed, the evidence added here is the session's own transcript: a
+    completed, non-error park/blocker comment post to this ticket inside the
+    current run leg, with **no** raw ``AUTO_DEV_RESULT`` framing text after
+    it. That conjunction is the operator's binding "no sentinel landed" — a
+    truncated, unpaired, placeholder or #1692-discarded frame defers exactly
+    as today.
 
     The transcript is resolved the same two ways ``_parse_headless_sentinel``
     resolves it: the hook's ``cwd`` first, then the session's recorded
@@ -213,6 +253,8 @@ def _park_if_abandoned(
     if not isinstance(ticket_id_value, str) or not ticket_id_value:
         return
     if not isinstance(claude_session_id, str) or not claude_session_id:
+        return
+    if not _abandoned_exit_park_armed(session, ticket_id_value):
         return
     search_dirs = [cwd_value]
     if session.worktree_path is not None:
