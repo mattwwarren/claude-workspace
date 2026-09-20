@@ -67,6 +67,8 @@ from tests._reconcile_helpers import (
     _notification_record,
     _shipped_salvage_payload,
     _stage_complete_payload,
+    _tool_result_record,
+    _tool_use_record,
     _ul_record,
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
@@ -437,27 +439,6 @@ def test_detect_usage_limit_returns_false_when_no_transcript(
 # ---------------------------------------------------------------------------
 # #1482: dangling (unresolved, non-subagent) tool_use detection
 # ---------------------------------------------------------------------------
-
-
-def _tool_use_record(
-    tool_id: str, name: str, *, input_: dict[str, object] | None = None
-) -> dict[str, object]:
-    """One assistant tool_use record for _write_transcript_records (#1482)."""
-    block: dict[str, object] = {"type": "tool_use", "id": tool_id, "name": name}
-    if input_ is not None:
-        block["input"] = input_
-    return {
-        "type": "assistant",
-        "message": {"role": "assistant", "content": [block]},
-    }
-
-
-def _tool_result_record(tool_use_id: str) -> dict[str, object]:
-    """One user tool_result record for _write_transcript_records (#1482)."""
-    return {
-        "type": "user",
-        "message": {"content": [{"type": "tool_result", "tool_use_id": tool_use_id}]},
-    }
 
 
 def test_detect_dangling_tool_use_returns_evidence_for_unresolved_bash_call(

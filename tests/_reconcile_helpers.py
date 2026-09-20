@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import (
     ClientConfig,
     OrchestratorConfig,
@@ -357,6 +358,90 @@ def _ul_record(text: str, timestamp: str | None = None) -> dict[str, object]:
     if timestamp is not None:
         record["timestamp"] = timestamp
     return record
+
+
+def _tool_use_record(
+    tool_id: str, name: str, *, input_: dict[str, object] | None = None
+) -> dict[str, object]:
+    """One assistant tool_use record for _write_transcript_records (#1482)."""
+    block: dict[str, object] = {"type": "tool_use", "id": tool_id, "name": name}
+    if input_ is not None:
+        block["input"] = input_
+    return {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [block]},
+    }
+
+
+def _tool_result_record(
+    tool_use_id: str, *, is_error: bool | None = None
+) -> dict[str, object]:
+    """One user tool_result record for _write_transcript_records (#1482, #2135).
+
+    ``is_error`` (#2135) is emitted explicitly: ``None`` (the default) and
+    ``False`` both write ``"is_error": false``, matching a real Bash success
+    record; ``True`` writes ``true``. The third real shape -- the key omitted
+    entirely, as a real ``Write`` result does -- is deliberately NOT produced
+    here; it is covered by the checked-in real capture in
+    ``tests/fixtures/claude_transcripts/``, so the helper's default stays
+    aligned with one real shape while the fixture guards the other.
+    """
+    return {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "is_error": bool(is_error),
+                }
+            ]
+        },
+    }
+
+
+def _park_post_records(
+    ticket_id: str,
+    header: str = "## Pending Verification Scan",
+    *,
+    marker: bool = True,
+    write_is_error: bool = False,
+    post_is_error: bool = False,
+    via_write: bool = True,
+) -> list[dict[str, object]]:
+    """Build the canonical worker park-post record sequence (#2135).
+
+    Mirrors the shape a headless worker actually leaves in its transcript when
+    it parks: a ``Write`` of the comment body to a temp file, that Write's
+    result, a ``Bash`` ``gh issue comment <ticket> --body-file <same path>``,
+    and that Bash call's result. ``via_write=False`` builds the two-record
+    inline form instead (the body sits in the ``--body`` argument itself).
+
+    Every park-post transcript in the #2135 tests is built through this
+    builder so the four-record sequence is never re-inlined per test.
+    """
+    body = f"{header}\n\nredacted park body\n"
+    if marker:
+        body = f"{body}\n{AGENT_COMMENT_MARKER}\n"
+    if not via_write:
+        bash_id = f"toolu_bash_inline_{ticket_id}"
+        command = f'timeout 60 gh issue comment {ticket_id} --body "{body}" 2>&1'
+        return [
+            _tool_use_record(bash_id, "Bash", input_={"command": command}),
+            _tool_result_record(bash_id, is_error=post_is_error),
+        ]
+    write_id = f"toolu_write_{ticket_id}"
+    bash_id = f"toolu_bash_{ticket_id}"
+    body_path = f"/job/tmp/park-body-{ticket_id}.md"
+    command = f"timeout 60 gh issue comment {ticket_id} --body-file {body_path} 2>&1"
+    return [
+        _tool_use_record(
+            write_id, "Write", input_={"file_path": body_path, "content": body}
+        ),
+        _tool_result_record(write_id, is_error=write_is_error),
+        _tool_use_record(bash_id, "Bash", input_={"command": command}),
+        _tool_result_record(bash_id, is_error=post_is_error),
+    ]
 
 
 # Verbatim capture, dev-1751 impl worker, session
