@@ -154,3 +154,64 @@ def test_plan_md_resolution_fields_preserved_verbatim() -> None:
     for field in RESOLUTION_FIELDS:
         assert f'"{field}"' in section
     assert "resolution_evidence`" in section
+
+
+# ---------------------------------------------------------------------------
+# #2135 AC3: every EXIT in auto-dev-plan.md names a registered status/reason,
+# and the code-side park-header set cannot drift from the prompt-side rule.
+# ---------------------------------------------------------------------------
+
+PLAN_EXIT_STATUSES = frozenset(
+    {
+        "ambiguities_pending_resolution",
+        "blocked",
+        "forbidden_area",
+        "no_op",
+        "plan_pending_approval",
+        "premises_pending_verification",
+        "scope_exceeded",
+    }
+)
+
+
+def test_plan_doc_every_exit_names_a_status_and_registered_reason() -> None:
+    """A new EXIT bullet, or an unregistered reason, must fail loud (#2135).
+
+    The #2135 repro was a plan-stage park that left no sentinel at all. The
+    producer-side prose already names an explicit status at every EXIT; what
+    was missing is anything pinning that invariant, so an added EXIT could
+    silently introduce a status or blocker reason cw does not know.
+    """
+    import re
+    import typing
+
+    from cw.auto_dev_result import KNOWN_BLOCKER_REASONS, Status
+
+    plan_doc = _cmd("auto-dev-plan.md")
+    statuses = set(re.findall(r"EXIT\s+`([a-z_]+)`", plan_doc))
+    assert statuses == PLAN_EXIT_STATUSES
+    known_statuses = set(typing.get_args(Status))
+    assert statuses <= known_statuses
+
+    reasons = set(re.findall(r'blocker\.reason: "([a-z_]+)"', plan_doc))
+    assert reasons
+    assert reasons <= set(KNOWN_BLOCKER_REASONS)
+
+    blocked_exits = len(re.findall(r"EXIT\s+`blocked`", plan_doc))
+    reasoned_blocked_exits = len(
+        re.findall(r"EXIT\s+`blocked`\s+with\s+`blocker\.reason: ", plan_doc)
+    )
+    assert blocked_exits == reasoned_blocked_exits
+
+
+def test_park_comment_header_set_matches_provenance_rule() -> None:
+    """The code-side park-header set lives in the provenance rule's home (#2135)."""
+    from cw.cli._sentinels import _PARK_COMMENT_HEADERS
+
+    provenance = _section(
+        _cmd("auto-dev.md"),
+        "## Comment provenance rule",
+        "## Tool-Use Denial Exit",
+    )
+    for header in _PARK_COMMENT_HEADERS:
+        assert header in provenance, header
