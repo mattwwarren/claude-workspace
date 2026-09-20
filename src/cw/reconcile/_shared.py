@@ -48,7 +48,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import read_events, record_event
-from cw.exceptions import USAGE_LIMIT_RE, EmitValidationError
+from cw.exceptions import USAGE_LIMIT_RE
 from cw.executor_diagnostics import redact
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
