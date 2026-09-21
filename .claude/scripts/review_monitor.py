@@ -817,7 +817,7 @@ def cmd_register(
     thread_details: list[dict[str, Any]] | None = None,
     slack_channel: str | None = None,
     slack_ts: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     """Register or update a PR for monitoring.
 
     For updates: merges new threads (no duplicates), updates SHA.
@@ -826,13 +826,18 @@ def cmd_register(
 
     *repo_path* is normalized to the canonical clone — a PR registered against
     an ephemeral agent worktree would break once that worktree is cleaned up.
+
+    Returns ``{"registered": True, "key": ..., "sha": ..., "updated": bool}``
+    once the state is saved; ``updated`` is True when the PR was already
+    monitored (a re-anchor). A state write failure raises ``OSError``.
     """
     threads = _normalize_thread_ids(threads)
     repo_path = _canonical_repo_path(repo, repo_path)
     state = load_state(repo)
     key = f"{repo}#{pr_number}"
+    updated = key in state.monitored
 
-    if key in state.monitored:
+    if updated:
         pr = state.monitored[key]
         # An older registration may still point at a stale worktree — heal it.
         pr.repo_path = repo_path
@@ -880,6 +885,7 @@ def cmd_register(
         state.monitored[key] = pr
 
     save_state(state, repo)
+    return {"registered": True, "key": key, "sha": sha, "updated": updated}
 
 
 def cmd_ack_delta(pr_number: int, repo: str, sha: str) -> dict[str, Any]:
@@ -906,27 +912,35 @@ def cmd_ack_delta(pr_number: int, repo: str, sha: str) -> dict[str, Any]:
     return {"pr_number": pr_number, "delta_base_sha": sha, "acked": True}
 
 
-def cmd_drop(pr_number: int, repo: str) -> None:
-    """Remove a PR from monitoring. No-op if not found."""
+def cmd_drop(pr_number: int, repo: str) -> dict[str, Any]:
+    """Remove a PR from monitoring. No-op if not found.
+
+    Returns ``{"dropped": bool, "key": ...}``; ``dropped`` is False (not an
+    error) when the PR was not monitored.
+    """
     state = load_state(repo)
     key = f"{repo}#{pr_number}"
-    if key in state.monitored:
+    dropped = key in state.monitored
+    if dropped:
         del state.monitored[key]
         save_state(state, repo)
+    return {"dropped": dropped, "key": key}
 
 
-def cmd_complete(pr_number: int, repo: str, reason: str) -> None:
+def cmd_complete(pr_number: int, repo: str, reason: str) -> dict[str, Any]:
     """Mark a PR as complete and move it out of active monitoring.
 
-    No-op if not found.
+    No-op if not found. Returns ``{"completed": bool, "key": ..., "reason": ...}``;
+    ``completed`` is False (not an error) when the PR was not monitored.
     """
     state = load_state(repo)
     key = f"{repo}#{pr_number}"
     if key not in state.monitored:
         logger.info("cmd_complete: %r not found in monitored, ignoring", key)
-        return
+        return {"completed": False, "key": key, "reason": reason}
     state.complete_pr(key, reason)
     save_state(state, repo)
+    return {"completed": True, "key": key, "reason": reason}
 
 
 def _nudge_activity_check(pr_number: int, repo: str) -> dict[str, Any] | None:
@@ -3021,27 +3035,53 @@ def _dispatch_discovery(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2))
 
 
+def _emit_mutation_result(label: str, run: Callable[[], dict[str, Any]]) -> None:
+    """Run a state-mutating command and print its one-line JSON result.
+
+    A state read/write failure (``OSError``) becomes an ``Error:`` line on
+    stderr and exit 1 — never a silent success — so the caller learns from the
+    command itself whether the mutation landed.
+    """
+    try:
+        result = run()
+    except OSError as exc:
+        print(f"Error: {label} failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(result))
+
+
 def _dispatch_mutation(args: argparse.Namespace) -> None:
     """Dispatch register/drop/complete/nudge-ok/record-nudge/set-status/
     confirm-thread commands."""
+    label = f"{args.command} {args.repo}#{args.pr_number}"
     if args.command == "register":
         td = json.loads(args.thread_details) if args.thread_details else None
-        cmd_register(
-            pr_number=args.pr_number,
-            role=args.role,
-            repo=args.repo,
-            repo_path=args.repo_path,
-            sha=args.sha,
-            review_id=args.review_id,
-            threads=args.threads,
-            thread_details=td,
-            slack_channel=args.slack_channel,
-            slack_ts=args.slack_ts,
+        _emit_mutation_result(
+            label,
+            lambda: cmd_register(
+                pr_number=args.pr_number,
+                role=args.role,
+                repo=args.repo,
+                repo_path=args.repo_path,
+                sha=args.sha,
+                review_id=args.review_id,
+                threads=args.threads,
+                thread_details=td,
+                slack_channel=args.slack_channel,
+                slack_ts=args.slack_ts,
+            ),
         )
     elif args.command == "drop":
-        cmd_drop(pr_number=args.pr_number, repo=args.repo)
+        _emit_mutation_result(
+            label, lambda: cmd_drop(pr_number=args.pr_number, repo=args.repo)
+        )
     elif args.command == "complete":
-        cmd_complete(pr_number=args.pr_number, repo=args.repo, reason=args.reason)
+        _emit_mutation_result(
+            label,
+            lambda: cmd_complete(
+                pr_number=args.pr_number, repo=args.repo, reason=args.reason
+            ),
+        )
     elif args.command == "nudge-ok":
         print(
             json.dumps(cmd_nudge_ok(pr_number=args.pr_number, repo=args.repo), indent=2)
