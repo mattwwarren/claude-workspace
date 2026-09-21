@@ -123,7 +123,6 @@ from cw.reconcile._shared import (
     ticket_id_for_session,
 )
 from cw.reconcile.abandoned_exit import (
-    PARK_ON_ABANDONED_EXIT_KEY,
     park_gate_open,
     park_on_abandoned_exit_open,
     resolve_park_on_abandoned_exit_enabled,
@@ -188,7 +187,6 @@ __all__ = [
     "AUTO_DEV_LABEL_PREFIX",
     "DEFAULT_CONCIERGE_RECOVERIES",
     "ESCALATION_PARK_MINUTES",
-    "PARK_ON_ABANDONED_EXIT_KEY",
     "RECIPE_CANCELLED_ROW_RESTORE",
     "RECIPE_FALSE_PARK_REQUEUE",
     "RECIPE_PARK_MARKER_POISON_CLEAR",

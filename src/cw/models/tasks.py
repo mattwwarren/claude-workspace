@@ -235,16 +235,16 @@ def _validate_park_on_abandoned_exit_keys(value: dict[str, bool]) -> dict[str, b
     """Fail loud on an unrecognized abandoned-exit-park key (GitHub #2135).
 
     Shared by the ``park_on_abandoned_exit`` field validators on both
-    :class:`TicketTask` and :class:`LaneConfig`. Local literal, not an import
-    of cw.reconcile.abandoned_exit's ``PARK_ON_ABANDONED_EXIT_KEY`` — models.py
-    sits below cw.reconcile in the import graph, so importing it here would be
-    circular (same reason as _validate_gate_recipe_keys above). The map holds
-    exactly one recognised key; it is a map rather than a bare bool so the
-    per-lane / per-ticket tiers keep the same shape as their gate_recipes and
-    review_recipes siblings, and so a second park policy can join it without a
-    schema change.
+    :class:`TicketTask` and :class:`LaneConfig`, and keyed off
+    :data:`PARK_ON_ABANDONED_EXIT_KEY` below — the key's single definition,
+    which ``cw.reconcile.abandoned_exit`` imports from here (models sits below
+    reconcile in the import graph, so the dependency only runs this way). The
+    map holds exactly one recognised key; it is a map rather than a bare bool
+    so the per-lane / per-ticket tiers keep the same shape as their
+    gate_recipes and review_recipes siblings, and so a second park policy can
+    join it without a schema change.
     """
-    recognized = {"park_on_abandoned_exit"}
+    recognized = {PARK_ON_ABANDONED_EXIT_KEY}
     unknown = sorted(set(value) - recognized)
     if unknown:
         msg = (
@@ -309,6 +309,15 @@ class PendingFixDispatch(BaseModel):
 # instead of silently severing the transport.
 PLAN_DRAFT_FINGERPRINT_KEY = "plan_draft_fingerprint"
 PLAN_APPROVED_FINGERPRINT_KEY = "plan_approved_fingerprint"
+
+# The single recognised key of the per-lane / per-ticket
+# ``park_on_abandoned_exit`` maps (#2135). Defined HERE, not in
+# ``cw.reconcile.abandoned_exit`` where the resolver that reads it lives:
+# models sits below reconcile in the import graph, so reconcile can import
+# this and not the other way round. It was briefly defined in both places,
+# which is one rename away from a lane map that validates at config-load time
+# and then silently resolves to the default-off floor at Stop time.
+PARK_ON_ABANDONED_EXIT_KEY = "park_on_abandoned_exit"
 
 
 class TicketTask(BaseModel):
@@ -585,7 +594,7 @@ class TicketTask(BaseModel):
     # 3-tier precedence: the key present here wins over
     # LaneConfig.park_on_abandoned_exit and the hardcoded default-off. None (or
     # the key absent from the map) defers to the lane map, then the default.
-    # Recognised key: "park_on_abandoned_exit".
+    # Recognised key: PARK_ON_ABANDONED_EXIT_KEY.
     park_on_abandoned_exit: dict[str, bool] | None = None
     # RFC 0008 capstone (#1015) — durable escalation latch. Stamped by
     # cw.reconcile.escalation.run_escalation_sweep when this task first enters

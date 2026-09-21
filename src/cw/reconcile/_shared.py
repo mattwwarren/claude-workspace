@@ -233,10 +233,11 @@ _GH_CHECK_BLOCKED_REASON = "gh_check_blocked"
 # watchdog parks a session after exhausting its wall-clock retry cap (GitHub #756).
 _STALLED_CAP_PARKED_REASON = "stalled_retry_cap_parked"
 # Disposition stamped (and paused_status written to the SESSION_NEEDS_ATTENTION
-# event) when the Stop hook observes an abandoned exit: the session's own
-# transcript records a completed park/blocker comment post to this ticket in
-# its current run leg, the Stop fired with no pending background tasks, and no
-# sentinel -- not even raw framing text -- followed it (GitHub #2135).
+# event) when the Stop hook observes an abandoned exit: the worker recorded a
+# ``park_comment_marker`` for this session, ticket and row stage via ``cw
+# signal-park`` after posting its park comment, the Stop fired with no pending
+# background tasks and no sentinel, and no sentinel framing text -- not even a
+# truncated frame -- appears in the transcript after the marker (GitHub #2135).
 #
 # Evidence-driven, never a timer: it fires on an observed conjunction of facts,
 # and mutates only the dev-queue row (never session status, daemon roster, or
@@ -1390,6 +1391,42 @@ def _lookup_matching_task(
     )
 
 
+# Everything ``load_dev_queue`` can raise for a dev_queue.json an operator
+# (or a torn write) can actually leave on disk, verified against the real
+# loader: ``OSError`` for an unreadable file; ``ValueError`` for a malformed
+# one (``json.JSONDecodeError``, pydantic's ``ValidationError`` and
+# ``UnicodeDecodeError`` are all subclasses); ``AttributeError`` for a payload
+# whose top level is not an object, which reaches ``raw.get`` in
+# ``migrate_dev_queue``. A queue we cannot read is treated as "no row"
+# (fail-closed): the Stop hook must never raise out of claude exiting, and
+# "defer" is the safe answer to every unknown here.
+_DEV_QUEUE_LOAD_ERRORS = (OSError, ValueError, AttributeError)
+
+
+def _load_dev_queue_or_none(purpose: str, ticket_id: str) -> DevQueueStore | None:
+    """Load the dev queue, or ``None`` with one WARNING (#2135).
+
+    The ``load_plan`` idiom (``dev_queue/storage.py``), applied at the two
+    abandoned-exit park call sites only -- ``load_dev_queue`` itself keeps
+    raising, because everywhere else a corrupt queue SHOULD be loud.
+
+    *purpose* names the caller in the log so an operator can tell the cheap
+    precondition read apart from the park's authoritative reload. The class
+    name alone is logged, never a traceback: this fires on a hook that runs at
+    every turn boundary.
+    """
+    try:
+        return load_dev_queue()
+    except _DEV_QUEUE_LOAD_ERRORS as exc:
+        _log.warning(
+            "%s skipped for ticket %s: dev queue unreadable (%s)",
+            purpose,
+            ticket_id,
+            type(exc).__name__,
+        )
+        return None
+
+
 def find_running_task_for_session(
     ticket_id: str, cw_session_id: str
 ) -> TicketTask | None:
@@ -1400,10 +1437,16 @@ def find_running_task_for_session(
     ``dev_queue_lock`` before it mutates. This is the read-only precondition
     form: the Stop hook needs the row to resolve the abandoned-exit park's
     per-lane enablement, and a row that is absent or not RUNNING means there
-    is nothing to park, so the expensive transcript scan can be skipped
+    is nothing to park, so the marker read and transcript guard are skipped
     outright.
+
+    An unreadable queue is "no row, defer" rather than an exception out of the
+    Stop hook -- see :func:`_load_dev_queue_or_none`.
     """
-    lookup = _lookup_matching_task(load_dev_queue(), ticket_id, cw_session_id)
+    store = _load_dev_queue_or_none("find_running_task_for_session", ticket_id)
+    if store is None:
+        return None
+    lookup = _lookup_matching_task(store, ticket_id, cw_session_id)
     if lookup.target is None or lookup.target_status is not QueueItemStatus.RUNNING:
         return None
     return lookup.target
@@ -1413,9 +1456,9 @@ def _route_stopped_without_sentinel(ticket_id: str, session: Session) -> None:
     """Park a headless task BLOCKED_ON_USER after an abandoned exit (GitHub #2135).
 
     The caller has already established the evidence: the Stop fired with empty
-    ``background_tasks``, no sentinel was parsed, AND the session's transcript
-    records a successful park/blocker comment post to this ticket in its
-    current run leg with no sentinel framing text after it.
+    ``background_tasks``, no sentinel was parsed, AND the worker recorded a
+    ``park_comment_marker`` covering this session, ticket and row stage, with
+    no sentinel framing text in the transcript after it.
 
     ``session.status`` is never touched -- a late sentinel still routes through
     the #918 rescue in :func:`_apply_sentinel_to_task`, which re-finds the row
@@ -1433,7 +1476,9 @@ def _route_stopped_without_sentinel(ticket_id: str, session: Session) -> None:
     would drop. The event bus already delivers ``session.needs_attention``.
     """
     with dev_queue_lock():
-        store = load_dev_queue()
+        store = _load_dev_queue_or_none("_route_stopped_without_sentinel", ticket_id)
+        if store is None:
+            return
         lookup = _lookup_matching_task(store, ticket_id, session.id)
         target = lookup.target
         if target is None or lookup.target_status != QueueItemStatus.RUNNING:
@@ -1457,8 +1502,8 @@ def _route_stopped_without_sentinel(ticket_id: str, session: Session) -> None:
             "claude_session_id": session.claude_session_id,
             "paused_status": _STOPPED_WITHOUT_SENTINEL_REASON,
             "breadcrumbs": (
-                "Stop hook fired with no sentinel after a park/blocker "
-                "comment was posted"
+                "Stop hook fired with no sentinel after the worker recorded "
+                "its park comment"
             ),
             "crashed": False,
             "lane": session.lane,

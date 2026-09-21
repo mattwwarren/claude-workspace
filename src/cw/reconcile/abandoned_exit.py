@@ -3,12 +3,13 @@
 The park itself lives in :func:`cw.reconcile._shared._route_stopped_without_sentinel`
 and is driven from ``cw signal-stop``. This module owns only the question
 "may it fire for this row?", kept separate so the Stop hook can answer it
-**before** paying for the transcript scan that produces the evidence.
+**before** reading the worker's recorded park marker or the transcript.
 
 The answer is fail-closed end to end: any failure to read or interpret the
-orchestrator or client config, an unknown client, and an absent lane entry all
-resolve to "disabled". An automatic row mutation is least safe exactly when the
-config is broken, and the Stop hook must never raise out of ``claude`` exiting.
+orchestrator or client config, an unknown client, a lane the client never
+declared, and an absent lane entry all resolve to "disabled". An automatic row
+mutation is least safe exactly when the config is broken, and the Stop hook
+must never raise out of ``claude`` exiting.
 
 Shaped on ``cw.reconcile.gate_recipes``' enablement pair
 (``resolve_gate_recipe_enabled`` / ``_recipe_gate_open``) deliberately: a
@@ -32,19 +33,12 @@ import yaml
 
 from cw.config import load_clients, load_orchestrator_config
 from cw.exceptions import CwError
+from cw.models import PARK_ON_ABANDONED_EXIT_KEY
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
 
 logger = logging.getLogger(__name__)
-
-# The single recognised key of the per-lane / per-ticket
-# ``park_on_abandoned_exit`` maps. A map rather than a bare bool so the two
-# override tiers keep the shape their ``gate_recipes`` / ``review_recipes``
-# siblings use; ``cw.models.tasks._validate_park_on_abandoned_exit_keys``
-# holds the same literal (models sits below reconcile, so it cannot import
-# this one) and rejects anything else at config-load time.
-PARK_ON_ABANDONED_EXIT_KEY = "park_on_abandoned_exit"
 
 # Tier-3 hardcoded floor for the per-lane resolver. NOT a config field — it is
 # what the ticket and lane tiers fall through to. False because the park
@@ -68,12 +62,24 @@ class _ParkConfig(NamedTuple):
     clients: dict[str, ClientConfig]
 
 
-# Memo of the resolved park config, keyed by client name; ``None`` records
-# "disabled" (master switch off, unreadable config, or unknown client). A Stop
-# hook is a short-lived ``cw signal-stop`` process, so a module-level cache
-# cannot go stale in any way that matters -- its job is to guarantee at most
-# one config resolution, and at most one WARNING, per client per process.
-_PARK_CONFIG_CACHE: dict[str, _ParkConfig | None] = {}
+# Memo of the resolved park config, keyed by ``(client, lane)``; ``None``
+# records "disabled" (master switch off, unreadable config, unknown client, or
+# a lane the client never declared). A Stop hook is a short-lived ``cw
+# signal-stop`` process, so a module-level cache cannot go stale in any way
+# that matters -- its job is to guarantee at most one config resolution, and at
+# most one WARNING, per (client, lane) per process. The lane joins the key
+# because the undeclared-lane WARNING names it: keying on the client alone
+# would report only the first lane a process saw.
+_PARK_CONFIG_CACHE: dict[tuple[str, str], _ParkConfig | None] = {}
+
+
+def _lane_declared(client_cfg: ClientConfig, lane: str) -> bool:
+    """Whether *lane* is one the client declares in ``clients.yaml``.
+
+    ``lane_names`` synthesizes the implicit ``default`` lane for a client that
+    declares none, so a shipped-default install is not gated out by this.
+    """
+    return lane in client_cfg.lane_names
 
 
 def resolve_park_on_abandoned_exit_enabled(
@@ -82,31 +88,39 @@ def resolve_park_on_abandoned_exit_enabled(
 ) -> bool:
     """Return whether the abandoned-exit park is enabled for *task*.
 
-    3-tier precedence, highest first (mirrors ``resolve_gate_recipe_enabled``):
+    A declared-lane gate runs AHEAD of all three tiers: an unknown client, or a
+    lane the client's ``clients.yaml`` never declares, returns the off floor
+    immediately. Without that gate the ticket tier -- which is read first --
+    returned True for a row riding a lane nobody had armed, the one path by
+    which an operator who configured nothing could still get an automatic row
+    mutation.
+
+    Then 3-tier precedence, highest first (mirrors
+    ``resolve_gate_recipe_enabled``):
 
     1. ``task.park_on_abandoned_exit`` — the ticket-level override, when it
        carries :data:`PARK_ON_ABANDONED_EXIT_KEY`.
     2. ``LaneConfig.park_on_abandoned_exit`` on the task's lane.
     3. :data:`_DEFAULT_PARK_ON_ABANDONED_EXIT` — the hardcoded default-off.
 
-    Robust to a missing client (absent from *clients*) or a missing lane
-    (absent from the client's ``effective_lanes``): either falls straight
-    through to the default with no exception.
+    A lane declared but carrying no park map still falls through the tiers to
+    the default with no exception.
     """
+    client_cfg = clients.get(task.client)
+    if client_cfg is None or not _lane_declared(client_cfg, task.lane):
+        return _DEFAULT_PARK_ON_ABANDONED_EXIT
     if (
         task.park_on_abandoned_exit is not None
         and PARK_ON_ABANDONED_EXIT_KEY in task.park_on_abandoned_exit
     ):
         return task.park_on_abandoned_exit[PARK_ON_ABANDONED_EXIT_KEY]
-    client_cfg = clients.get(task.client)
-    if client_cfg is not None:
-        for lane_cfg in client_cfg.effective_lanes:
-            if (
-                lane_cfg.name == task.lane
-                and lane_cfg.park_on_abandoned_exit is not None
-                and PARK_ON_ABANDONED_EXIT_KEY in lane_cfg.park_on_abandoned_exit
-            ):
-                return lane_cfg.park_on_abandoned_exit[PARK_ON_ABANDONED_EXIT_KEY]
+    for lane_cfg in client_cfg.effective_lanes:
+        if (
+            lane_cfg.name == task.lane
+            and lane_cfg.park_on_abandoned_exit is not None
+            and PARK_ON_ABANDONED_EXIT_KEY in lane_cfg.park_on_abandoned_exit
+        ):
+            return lane_cfg.park_on_abandoned_exit[PARK_ON_ABANDONED_EXIT_KEY]
     return _DEFAULT_PARK_ON_ABANDONED_EXIT
 
 
@@ -126,14 +140,15 @@ def park_on_abandoned_exit_open(
     )
 
 
-def _load_park_config(client: str) -> _ParkConfig | None:
-    """Load the park config for *client*; ``None`` means the park is disabled.
+def _load_park_config(client: str, lane: str) -> _ParkConfig | None:
+    """Load the park config for *client*/*lane*; ``None`` means disabled.
 
     ``orchestrator.yaml`` is read first and ``clients.yaml`` only when the
     master switch is on, so a shipped-default (switch off) install pays for a
-    single config read. Any load failure, and a *client* absent from
-    ``clients.yaml``, is logged once at WARNING -- the client name and the
-    error class only, never a traceback -- and reads as disabled.
+    single config read. Any load failure, a *client* absent from
+    ``clients.yaml``, and a *lane* that client never declares are each logged
+    once at WARNING -- the names and the error class only, never a traceback --
+    and read as disabled.
     """
     try:
         config = load_orchestrator_config()
@@ -147,9 +162,18 @@ def _load_park_config(client: str) -> _ParkConfig | None:
             type(exc).__name__,
         )
         return None
-    if client not in clients:
+    client_cfg = clients.get(client)
+    if client_cfg is None:
         logger.warning(
             "abandoned-exit park disabled for client %s: not in clients.yaml", client
+        )
+        return None
+    if not _lane_declared(client_cfg, lane):
+        logger.warning(
+            "abandoned-exit park disabled for client %s: lane %s not declared"
+            " in clients.yaml",
+            client,
+            lane,
         )
         return None
     return _ParkConfig(config, clients)
@@ -160,13 +184,15 @@ def park_gate_open(task: TicketTask) -> bool:
 
     The single entry point the Stop hook uses. It runs only after the hook's
     cheaper preconditions (headless DAEMON session, empty ``background_tasks``,
-    a RUNNING dev-queue row) have held, and before the transcript scan. The
-    config is resolved once per client per process (:data:`_PARK_CONFIG_CACHE`);
-    every failure path returns False rather than raising.
+    a RUNNING dev-queue row) have held, and before the marker read and the
+    transcript guard. The config is resolved once per (client, lane) per
+    process (:data:`_PARK_CONFIG_CACHE`); every failure path returns False
+    rather than raising.
     """
-    if task.client not in _PARK_CONFIG_CACHE:
-        _PARK_CONFIG_CACHE[task.client] = _load_park_config(task.client)
-    park_config = _PARK_CONFIG_CACHE[task.client]
+    cache_key = (task.client, task.lane)
+    if cache_key not in _PARK_CONFIG_CACHE:
+        _PARK_CONFIG_CACHE[cache_key] = _load_park_config(task.client, task.lane)
+    park_config = _PARK_CONFIG_CACHE[cache_key]
     if park_config is None:
         return False
     return park_on_abandoned_exit_open(park_config.config, task, park_config.clients)
