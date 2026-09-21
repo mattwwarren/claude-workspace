@@ -147,7 +147,12 @@ baked in at injection time:
   guard's job is only to make cw's *own* injected hook cheap for sessions
   that are not cw-managed; `cw doctor`'s `stop-hook-scope` check (WARN, never
   fatal) is what detects a user-level copy and names the file and the line
-  to remove.
+  to remove. Every doctor check that reads a user-level settings file does so
+  through one defensive reader (`cw.doctor._shared._read_settings`), so a
+  file that is unreadable, not UTF-8, malformed or not a JSON object is a
+  WARN naming the file and the failure class — never an exception out of
+  `run_doctor`, which would hide the finding on precisely the broken install
+  the check exists to diagnose.
 - **No migration.** DAEMON-origin spawns blind-overwrite
   `settings.local.json`, so existing cw worktrees self-heal on their next
   spawn. USER-origin worktrees are never modified and keep the unguarded
