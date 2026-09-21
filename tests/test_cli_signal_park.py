@@ -252,12 +252,25 @@ class TestSignalParkFailsOpen:
         )
         assert not _context_path(bare).exists()
 
-    def test_context_without_a_string_session_id(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            pytest.param("session_id", 42, id="session-id-not-a-string"),
+            pytest.param("ticket_id", None, id="ticket-id-absent"),
+            pytest.param("session_id", "", id="session-id-empty"),
+            pytest.param("ticket_id", "", id="ticket-id-empty"),
+        ],
+    )
+    def test_context_without_usable_ids(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        key: str,
+        value: object,
     ) -> None:
         worktree = _seeded_worktree(tmp_path)
         context = _read_context(worktree)
-        context["session_id"] = 42
+        context[key] = value
         _context_path(worktree).write_text(json.dumps(context), encoding="utf-8")
         before = _context_path(worktree).read_bytes()
 

@@ -58,9 +58,12 @@ def _record_park_marker(cwd_value: str) -> ParkCommentMarker | str:
         return _NO_CONTEXT
     session_id = context.get("session_id")
     ticket_id = context.get("ticket_id")
-    if not isinstance(session_id, str) or not isinstance(ticket_id, str):
-        return _NO_IDS
-    if not session_id or not ticket_id:
+    if (
+        not isinstance(session_id, str)
+        or not isinstance(ticket_id, str)
+        or not session_id
+        or not ticket_id
+    ):
         return _NO_IDS
     task = find_running_task_for_session(ticket_id, session_id)
     if task is None:
