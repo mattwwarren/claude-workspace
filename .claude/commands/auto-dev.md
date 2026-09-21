@@ -328,8 +328,10 @@ Exactly two things carry operator authority: an **unmarked comment written by a 
 a `<!-- auto-dev-preflight-resolutions -->` comment — the `/harden-ticket` resolutions
 channel, agent-drafted but posted under the operator's standing authorization and
 deliberately binding (Step 1b), whose binding semantics this rule does not touch. The
-`<!-- auto-dev-plan-approved -->` marker records an operator running
-`cw dev-queue approve --post-marker`, so cw posts it with the agent marker suppressed.
+`<!-- auto-dev-plan-approved: <sha> -->` marker (or its unbound bare form) records an
+operator running `cw dev-queue approve --post-marker`, so cw posts it with the agent marker
+suppressed. The marker is an audit-only record — never plan-approval evidence, a settlement
+answer, or an adjudication input — and no stage reads its fingerprint back.
 
 **Scope note — the plan-of-record post.** It is agent-authored for *authority* purposes
 (never approval evidence, a settlement answer, or an adjudication input), but it remains the

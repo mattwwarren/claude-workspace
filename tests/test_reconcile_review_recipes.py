@@ -89,7 +89,7 @@ from cw.worktree import worktree_path_for
 # client / lane), _pr_state builds a PrState with sensible OPEN defaults.
 # _client_with_lanes builds a ClientConfig with the given lanes (reused by the
 # resolve-precedence tests below).
-from tests.conftest import _clean_git_env
+from tests.conftest import _clean_git_env, git_in
 from tests.test_pr_hydrate import _pr_state, _watched
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 
@@ -2643,28 +2643,6 @@ class TestAttentionConstantsTypedAsPrAttentionState:
 # --- fix_agent recipe (#2017) ----------------------------------------------
 
 
-def _git_stdout(repo: Path, *args: str) -> str:
-    """Stripped stdout of a read-only git command in *repo*."""
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_clean_git_env(),
-    ).stdout.strip()
-
-
-def _fix_git(repo: Path, *args: str) -> None:
-    """Run a git command in *repo*, failing loudly on a non-zero exit."""
-    subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_clean_git_env(),
-    )
-
-
 def _make_fix_client(
     make_git_repo: Callable[..., Path], tmp_path: Path, name: str = "acme"
 ) -> ClientConfig:
@@ -2704,31 +2682,31 @@ def _seed_origin(client: ClientConfig, branch: str) -> None:
         check=True,
         env=_clean_git_env(),
     )
-    _fix_git(repo, "remote", "add", "origin", str(origin))
+    git_in(repo, "remote", "add", "origin", str(origin))
     (repo / "shared.txt").write_text("base\n", encoding="utf-8")
-    _fix_git(repo, "add", "shared.txt")
-    _fix_git(repo, "commit", "-m", "base file")
-    _fix_git(repo, "push", "origin", "main")
+    git_in(repo, "add", "shared.txt")
+    git_in(repo, "commit", "-m", "base file")
+    git_in(repo, "push", "origin", "main")
 
-    _fix_git(repo, "checkout", "-b", branch)
+    git_in(repo, "checkout", "-b", branch)
     (repo / "shared.txt").write_text("branch side\n", encoding="utf-8")
-    _fix_git(repo, "add", "shared.txt")
-    _fix_git(repo, "commit", "-m", "impl commit")
-    _fix_git(repo, "push", "origin", branch)
+    git_in(repo, "add", "shared.txt")
+    git_in(repo, "commit", "-m", "impl commit")
+    git_in(repo, "push", "origin", branch)
 
-    _fix_git(repo, "checkout", "main")
-    _fix_git(repo, "branch", "-D", branch)
-    _fix_git(repo, "fetch", "origin")
+    git_in(repo, "checkout", "main")
+    git_in(repo, "branch", "-D", branch)
+    git_in(repo, "fetch", "origin")
 
 
 def _advance_origin_main(client: ClientConfig, relpath: str, content: str) -> None:
     """Land one more commit on origin/main after ``_seed_origin``."""
     repo = client.workspace_path
     (repo / relpath).write_text(content, encoding="utf-8")
-    _fix_git(repo, "add", relpath)
-    _fix_git(repo, "commit", "-m", f"main advances {relpath}")
-    _fix_git(repo, "push", "origin", "main")
-    _fix_git(repo, "fetch", "origin")
+    git_in(repo, "add", relpath)
+    git_in(repo, "commit", "-m", f"main advances {relpath}")
+    git_in(repo, "push", "origin", "main")
+    git_in(repo, "fetch", "origin")
 
 
 _FIX_PROMPT_TEXT = "fix the MUST_FIX items\n"
@@ -2867,7 +2845,7 @@ def test_dispatch_fix_agent_verifies_head_before_merge(
     _seed_origin(client, branch)
 
     stale = tmp_path / "stale-wt"
-    _fix_git(client.workspace_path, "worktree", "add", "--detach", str(stale), "main")
+    git_in(client.workspace_path, "worktree", "add", "--detach", str(stale), "main")
     monkeypatch.setattr(
         fix_agent_mod, "create_worktree", lambda *_args, **_kwargs: stale
     )
@@ -3060,9 +3038,9 @@ def test_dispatch_fix_agent_refuses_live_worktree_before_mutating(
     _seed_origin(client, branch)
     _advance_origin_main(client, "sibling.txt", "merged sibling\n")
     worktree = _seed_live_session_context(client, branch)
-    head_before = _git_stdout(worktree, "rev-parse", "HEAD")
-    log_before = _git_stdout(worktree, "log", "--oneline")
-    status_before = _git_stdout(worktree, "status", "--porcelain")
+    head_before = git_in(worktree, "rev-parse", "HEAD")
+    log_before = git_in(worktree, "log", "--oneline")
+    status_before = git_in(worktree, "status", "--porcelain")
 
     with pytest.raises(HookContextConflictError, match="live1234"):
         dispatch_fix_agent(
@@ -3075,9 +3053,9 @@ def test_dispatch_fix_agent_refuses_live_worktree_before_mutating(
             parent="live1234",
         )
 
-    assert _git_stdout(worktree, "rev-parse", "HEAD") == head_before
-    assert _git_stdout(worktree, "log", "--oneline") == log_before
-    assert _git_stdout(worktree, "status", "--porcelain") == status_before
+    assert git_in(worktree, "rev-parse", "HEAD") == head_before
+    assert git_in(worktree, "log", "--oneline") == log_before
+    assert git_in(worktree, "status", "--porcelain") == status_before
     assert not (worktree / "sibling.txt").exists()
 
 
@@ -3253,22 +3231,22 @@ def _seed_origin_renamed_upstream(
         check=True,
         env=_clean_git_env(),
     )
-    _fix_git(repo, "remote", "add", "origin", str(origin))
+    git_in(repo, "remote", "add", "origin", str(origin))
     (repo / "shared.txt").write_text("base\n", encoding="utf-8")
-    _fix_git(repo, "add", "shared.txt")
-    _fix_git(repo, "commit", "-m", "base file")
-    _fix_git(repo, "push", "origin", "main")
+    git_in(repo, "add", "shared.txt")
+    git_in(repo, "commit", "-m", "base file")
+    git_in(repo, "push", "origin", "main")
 
-    _fix_git(repo, "checkout", "-b", remote_branch)
+    git_in(repo, "checkout", "-b", remote_branch)
     (repo / "shared.txt").write_text("branch side\n", encoding="utf-8")
-    _fix_git(repo, "add", "shared.txt")
-    _fix_git(repo, "commit", "-m", "impl commit")
-    _fix_git(repo, "push", "origin", remote_branch)
+    git_in(repo, "add", "shared.txt")
+    git_in(repo, "commit", "-m", "impl commit")
+    git_in(repo, "push", "origin", remote_branch)
 
-    _fix_git(repo, "checkout", "main")
-    _fix_git(repo, "branch", "-D", remote_branch)
-    _fix_git(repo, "fetch", "origin")
-    _fix_git(repo, "branch", local_branch, "--track", f"origin/{remote_branch}")
+    git_in(repo, "checkout", "main")
+    git_in(repo, "branch", "-D", remote_branch)
+    git_in(repo, "fetch", "origin")
+    git_in(repo, "branch", local_branch, "--track", f"origin/{remote_branch}")
 
 
 def test_dispatch_fix_agent_resolves_differently_named_upstream(
@@ -3322,11 +3300,11 @@ def test_dispatch_fix_agent_ref_resolution_failure_names_upstream_in_message(
         check=True,
         env=_clean_git_env(),
     )
-    _fix_git(repo, "remote", "add", "origin", str(origin))
+    git_in(repo, "remote", "add", "origin", str(origin))
     (repo / "shared.txt").write_text("base\n", encoding="utf-8")
-    _fix_git(repo, "add", "shared.txt")
-    _fix_git(repo, "commit", "-m", "base file")
-    _fix_git(repo, "push", "origin", "main")
+    git_in(repo, "add", "shared.txt")
+    git_in(repo, "commit", "-m", "base file")
+    git_in(repo, "push", "origin", "main")
     # create_worktree starts a brand-new branch from origin/<default_branch>
     # (the only path reachable here, since neither a local nor a remote ref
     # for `branch` exists yet) and git's default branch.autoSetupMerge would
@@ -3334,7 +3312,7 @@ def test_dispatch_fix_agent_ref_resolution_failure_names_upstream_in_message(
     # upstream, just not the one this test needs absent. Disabling it
     # reproduces the genuine "nothing resolves" case: a brand-new branch
     # with no tracking config and no pushed history of its own.
-    _fix_git(repo, "config", "branch.autoSetupMerge", "false")
+    git_in(repo, "config", "branch.autoSetupMerge", "false")
 
     with pytest.raises(CwError, match="no upstream configured") as excinfo:
         dispatch_fix_agent(

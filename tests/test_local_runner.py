@@ -39,7 +39,7 @@ from cw.local_runner import (
     read_process_start_time_ns,
     synthesize_git_result,
 )
-from tests.conftest import commit_tracked_file
+from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1433,14 +1433,6 @@ def test_synthesize_git_result_threads_plan_source(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 
 
-def _git_run(repo: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=True,
-        capture_output=True,
-    )
-
-
 def test_git_facts_counts_files_and_lines_via_shared_parser(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
@@ -1449,13 +1441,13 @@ def test_git_facts_counts_files_and_lines_via_shared_parser(
     from cw.local_runner import _git_facts
 
     worktree = make_git_repo("wt-1487-facts")
-    _git_run(worktree, "remote", "add", "origin", str(worktree))
-    _git_run(worktree, "fetch", "origin", "main")
-    _git_run(worktree, "checkout", "-b", "dev/1487-facts")
+    git_in(worktree, "remote", "add", "origin", str(worktree))
+    git_in(worktree, "fetch", "origin", "main")
+    git_in(worktree, "checkout", "-b", "dev/1487-facts")
     for i in range(2):
         (worktree / f"f{i}.txt").write_text("a\nb\nc\n", encoding="utf-8")
-    _git_run(worktree, "add", "-A")
-    _git_run(worktree, "commit", "-m", "two files")
+    git_in(worktree, "add", "-A")
+    git_in(worktree, "commit", "-m", "two files")
 
     facts = _git_facts(worktree, "main")
 
@@ -1473,12 +1465,12 @@ def test_git_facts_and_compute_branch_diff_scope_agree(
     from cw.worktree import compute_branch_diff_scope
 
     worktree = make_git_repo("wt-1487-agree")
-    _git_run(worktree, "remote", "add", "origin", str(worktree))
-    _git_run(worktree, "fetch", "origin", "main")
-    _git_run(worktree, "checkout", "-b", "dev/1487-agree")
+    git_in(worktree, "remote", "add", "origin", str(worktree))
+    git_in(worktree, "fetch", "origin", "main")
+    git_in(worktree, "checkout", "-b", "dev/1487-agree")
     (worktree / "only.txt").write_text("x\ny\n", encoding="utf-8")
-    _git_run(worktree, "add", "-A")
-    _git_run(worktree, "commit", "-m", "one file")
+    git_in(worktree, "add", "-A")
+    git_in(worktree, "commit", "-m", "one file")
 
     facts = _git_facts(worktree, "main")
     measured = compute_branch_diff_scope(worktree, "main")

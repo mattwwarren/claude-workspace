@@ -38,7 +38,7 @@ from cw.worktree import (
     worktree_path_for,
 )
 from tests._reconcile_helpers import _no_op_salvage_payload
-from tests.conftest import _clean_git_env, git_in
+from tests.conftest import git_in
 from tests.test_result import _valid_payload
 
 if TYPE_CHECKING:
@@ -602,34 +602,22 @@ class TestCreateWorktree:
         Sets up a real bare remote at C1, advances the workspace checkout to C2
         on a feature branch, then asserts the ticket worktree's HEAD == C1.
         """
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-
-        def _git(*args: str, cwd: Path) -> str:
-            return subprocess.run(
-                ["git", *args],
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=str(cwd),
-                env=clean_env,
-            ).stdout.strip()
-
         workspace = make_git_repo("workspace")
-        c1 = _git("rev-parse", "HEAD", cwd=workspace)
+        c1 = git_in(workspace, "rev-parse", "HEAD")
 
         # Set up bare origin at C1 and fetch it into workspace
         origin = tmp_path / "origin.git"
         origin.mkdir()
-        _git("init", "--bare", "-b", "main", cwd=origin)
-        _git("remote", "add", "origin", str(origin), cwd=workspace)
-        _git("push", "origin", "main", cwd=workspace)
-        _git("fetch", "origin", cwd=workspace)
+        git_in(origin, "init", "--bare", "-b", "main")
+        git_in(workspace, "remote", "add", "origin", str(origin))
+        git_in(workspace, "push", "origin", "main")
+        git_in(workspace, "fetch", "origin")
 
         # Advance workspace to C2 on an operator feature branch (simulating
         # the operator having a non-main branch checked out — the bug scenario)
-        _git("checkout", "-b", "operator-feature", cwd=workspace)
-        _git("commit", "--allow-empty", "-m", "operator commit C2", cwd=workspace)
-        c2 = _git("rev-parse", "HEAD", cwd=workspace)
+        git_in(workspace, "checkout", "-b", "operator-feature")
+        git_in(workspace, "commit", "--allow-empty", "-m", "operator commit C2")
+        c2 = git_in(workspace, "rev-parse", "HEAD")
         assert c1 != c2
 
         client = ClientConfig(
@@ -639,7 +627,7 @@ class TestCreateWorktree:
         )
         wt_path = create_worktree(client, "dev/710")
 
-        actual_head = _git("rev-parse", "HEAD", cwd=wt_path)
+        actual_head = git_in(wt_path, "rev-parse", "HEAD")
         assert actual_head == c1, (
             f"Worktree HEAD should be origin/main ({c1}), got {actual_head} "
             f"(operator HEAD was {c2})"
@@ -655,38 +643,26 @@ class TestCreateWorktree:
         create_worktree must resume the branch's pushed history via
         origin/<branch> — not silently start a fresh branch from
         origin/main and discard real, already-pushed work (#2032)."""
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-
-        def _git(*args: str, cwd: Path) -> str:
-            return subprocess.run(
-                ["git", *args],
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=str(cwd),
-                env=clean_env,
-            ).stdout.strip()
-
         workspace = make_git_repo("workspace")
 
         # Bare origin with main pushed.
         origin = tmp_path / "origin.git"
         origin.mkdir()
-        _git("init", "--bare", "-b", "main", cwd=origin)
-        _git("remote", "add", "origin", str(origin), cwd=workspace)
-        _git("push", "origin", "main", cwd=workspace)
-        _git("fetch", "origin", cwd=workspace)
+        git_in(origin, "init", "--bare", "-b", "main")
+        git_in(workspace, "remote", "add", "origin", str(origin))
+        git_in(workspace, "push", "origin", "main")
+        git_in(workspace, "fetch", "origin")
 
         # Create the feature branch with a distinguishing commit, push it,
         # then delete the local ref — reproducing the exact
         # auto-dev-review.md:291 fix-loop reset (git branch -D after a
         # review restart) while origin still has the branch's real history.
-        _git("checkout", "-b", "dev/2032-feature", cwd=workspace)
-        _git("commit", "--allow-empty", "-m", "real feature work", cwd=workspace)
-        feature_sha = _git("rev-parse", "HEAD", cwd=workspace)
-        _git("push", "origin", "dev/2032-feature", cwd=workspace)
-        _git("checkout", "main", cwd=workspace)
-        _git("branch", "-D", "dev/2032-feature", cwd=workspace)
+        git_in(workspace, "checkout", "-b", "dev/2032-feature")
+        git_in(workspace, "commit", "--allow-empty", "-m", "real feature work")
+        feature_sha = git_in(workspace, "rev-parse", "HEAD")
+        git_in(workspace, "push", "origin", "dev/2032-feature")
+        git_in(workspace, "checkout", "main")
+        git_in(workspace, "branch", "-D", "dev/2032-feature")
 
         client = ClientConfig(
             name="test",
@@ -695,7 +671,7 @@ class TestCreateWorktree:
         )
         wt_path = create_worktree(client, "dev/2032-feature")
 
-        actual_head = _git("rev-parse", "HEAD", cwd=wt_path)
+        actual_head = git_in(wt_path, "rev-parse", "HEAD")
         assert actual_head == feature_sha, (
             f"Worktree HEAD should resume the pushed branch ({feature_sha}), "
             f"got {actual_head} — branch was likely recreated from "
@@ -1237,17 +1213,6 @@ class TestCreateWorktreeBranchHeldElsewhere:
     fixture would just re-assert our own assumption about that shape.
     """
 
-    def _git(self, *args: str, cwd: Path) -> str:
-        clean_env = _clean_git_env()
-        return subprocess.run(
-            ["git", *args],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=str(cwd),
-            env=clean_env,
-        ).stdout.strip()
-
     def _make_foreign_holder(
         self, tmp_path: Path, workspace: Path, branch: str
     ) -> Path:
@@ -1258,7 +1223,7 @@ class TestCreateWorktreeBranchHeldElsewhere:
         """
         holder = tmp_path / "external-harness" / "agent-abc123"
         holder.parent.mkdir(parents=True)
-        self._git("worktree", "add", str(holder), "-b", branch, cwd=workspace)
+        git_in(workspace, "worktree", "add", str(holder), "-b", branch)
         return holder
 
     def test_holder_path_named_in_error(
@@ -1302,7 +1267,7 @@ class TestCreateWorktreeBranchHeldElsewhere:
         # AC #3 by construction: the foreign worktree must still be on disk
         # AND still registered with git — never force-removed as a side effect.
         assert holder.exists()
-        listing = self._git("worktree", "list", cwd=workspace)
+        listing = git_in(workspace, "worktree", "list")
         assert str(holder) in listing
 
     def test_clean_holder_message_says_clean(
@@ -1519,6 +1484,8 @@ class TestIsMainBehindOrigin:
     # Option A: real bare-repo tests
     # ------------------------------------------------------------------
 
+    # Not tests.conftest.git_in: optional cwd and no -C, so bare
+    # "git init"/"git clone" callers pass no repo at all.
     @staticmethod
     def _run_bare_git(*args: str, cwd: Path | None = None) -> str:
         """Run a git command stripped of GIT_* env vars; return stdout."""
@@ -2424,6 +2391,8 @@ class TestFetchFeatureBranch:
     an empty diff, causing reviewers to return a false BLOCK.
     """
 
+    # Not tests.conftest.git_in: optional cwd and no -C, so bare
+    # "git init"/"git clone" callers pass no repo at all.
     @staticmethod
     def _run_bare_git(*args: str, cwd: Path | None = None) -> str:
         """Run a git command stripped of GIT_* env vars; return stdout."""

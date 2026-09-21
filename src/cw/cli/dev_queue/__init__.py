@@ -8,6 +8,9 @@ below is what registers those commands. Submodules:
 
 - ``_group`` — the ``dev_queue`` group object plus the ``_WAIT_EXIT_*`` /
   status-rendering constants shared across submodules.
+- ``_plan_marker`` — pure builders/matchers for the ``approve --post-marker``
+  plan-approved audit comment (bare and draft-fingerprint-bound forms, #2194),
+  used by ``crud``.
 - ``crud`` — queue mutation commands (add, move, approve, requeue, unblock,
   remove, cancel, clear, prune).
 - ``status`` — aggregate status table + lane breakdown rendering.

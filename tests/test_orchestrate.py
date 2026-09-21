@@ -2176,6 +2176,8 @@ def _write_client_with_lane(
     # Initialise a bare-minimum git repo (validate_worktree runs git rev-parse).
     clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
+    # Not tests.conftest.git_in: closes over a local workspace, not
+    # (repo, *args)-shaped.
     def _git(*args: str) -> None:
         subprocess.run(
             ["git", "-C", str(workspace), *args],

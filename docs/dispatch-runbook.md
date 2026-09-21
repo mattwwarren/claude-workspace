@@ -476,7 +476,7 @@ directly (see §6 in [`session-disposition.md`](session-disposition.md)).
 | `no_op` | Done. Ticket already satisfied; close as completed. |
 | `ambiguities_pending_resolution` | Resolve the ambiguities (post a `Pre-flight Resolutions` comment on the issue), then re-dispatch (`cw dev-queue requeue`). |
 | `premises_pending_verification` | Verify the flagged premises, record results on the issue, re-dispatch. |
-| `plan_pending_approval` | Only parks for **large** (or unresolved) scope tier — a small-tier plan advances unattended. Read the plan comment, verify it is faithful to the ticket, then `cw dev-queue approve <T> -c <client>`. The approval is recorded on the dev-queue row (`plan_approved_at`) and reaches the re-dispatched plan stage via `queue_metadata` on every tracker; on GitHub you may additionally pass `--post-marker` to post the `<!-- auto-dev-plan-approved -->` audit comment (it is a no-op on Linear, where `gh` cannot reach the ticket). Advances to impl only once the plan is quality-reviewed (both signoff markers present); otherwise `approve` re-queues at plan stage to run Plan Quality Review first (#968). |
+| `plan_pending_approval` | Only parks for **large** (or unresolved) scope tier — a small-tier plan advances unattended. Read the plan comment, verify it is faithful to the ticket, then `cw dev-queue approve <T> -c <client>`. The approval is recorded on the dev-queue row (`plan_approved_at`) and reaches the re-dispatched plan stage via `queue_metadata` on every tracker; on GitHub you may additionally pass `--post-marker` to post an audit-only `<!-- auto-dev-plan-approved: <sha> -->` comment binding the approval to the approved draft's fingerprint (the unbound `<!-- auto-dev-plan-approved -->` when no valid fingerprint is recorded). Approving a changed draft posts a fresh marker; re-approving the same draft does not duplicate it. Nothing reads the marker back as approval evidence — the evidence is the row's `plan_approved_at` and `plan_approved_fingerprint`. The flag is a no-op on Linear, where `gh` cannot reach the ticket. Advances to impl only once the plan is quality-reviewed (both signoff markers present); otherwise `approve` re-queues at plan stage to run Plan Quality Review first (#968). |
 | `review_pending_approval` | Only parks for large (or unresolved) tier. Verify the pushed branch diff and gates, then `cw dev-queue approve` to advance to FINALIZE (which creates the PR) — or ship manually (PR + auto-merge) and cancel the task. With signoff configured, `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again (§2). |
 | `merge_pending` | PR created but CI/merge gate not yet cleared (#899). Not a failure — the task parks with `pr_url` preserved; monitor/merge the PR. Do **not** re-dispatch. |
 | `scope_exceeded` | Scope rejection; close the ticket or relax the constraint, then re-dispatch. |
@@ -690,17 +690,125 @@ mechanically on every subsequent review pass — no LLM interprets it — and is
 persisted onto the queue row, so it survives regress, redispatch, and worktree
 teardown.
 
-Each key is `"<file>::<normalized summary>"`, where the normalized summary is
-the finding's summary lowercased, whitespace-collapsed, with line/position
-references stripped and every digit run replaced by `N`
-(`cw.review_debt.fingerprint_v1`). Compute it rather than normalizing by hand
-— the review comment's `### Debt — recorded, not blocking` section prints only
-the summary half of the same fingerprint, not the `file::` prefix:
+**A prose adjudication comment does nothing on the codex lane.** There is no
+LLM on that path to correlate "these four are settled, don't reopen" to a
+specific finding — only a sentinel-bearing comment counts. Free-text ingestion
+is a deliberate non-goal here (follow-up F1).
+
+**Hand-authoring the marker is unsupported (#2210).** `cw review settle` is
+the only supported producer, because it is the only path that records
+provenance and refuses to run anywhere it cannot prove is an operator's own
+interactive session. The reader enforces
+that: a disposition record is **applied only when it carries the full
+provenance set** — the finding's identity, an `actor`, a `recorded_at` that
+parses as a UTC instant, a `reviewed_sha`, and a non-empty rationale. A record
+missing any of those is ignored (never applied as a suppression, and never
+rendered into the reviewer's "previously adjudicated" prompt block), logged at
+WARNING, and reported on the review comment under **"Disposition records
+refused (no provenance)"** so you can see that something tried to suppress a
+finding and was refused. This applies to `ACCEPTED` entries too.
+
+A marker or queue row written before #2210 carries none of that provenance. It
+still loads — the fields are optional, so history is not lost — but it is no
+longer applied: the finding it used to suppress will re-appear, with the
+refusal reported on the comment. Re-settle it with `cw review settle`.
+
+The same goes for a record minted before the key bound the verbatim summary
+(#2210 review round 3): its key is the two-part `file::normalized summary`
+shape, which fails the identity binding below. It is refused and reported, not
+deleted; re-settle the finding with `cw review settle` and post the new marker.
+The refused row stays in the ticket's durable ledger and is re-reported on each
+review pass until the ticket ends — the fresh record is a separate key and
+applies normally.
+
+**A refused record is never written into the ledger and never replaces an
+entry that is already there (#2210, round 3).** Refusal used to mean only "not
+applied", so a malformed or pasted marker could still overwrite the record of a
+finding you had legitimately settled. Now the ledger write itself rejects an
+under-provenanced record: it can neither add a key nor evict a valid entry for
+the same key, whatever its `recorded_at` says. You will see it as one WARNING in
+the review log (`refusing a finding disposition ... ticket=<T>, key=<K>`) and
+in the comment's refused-records section; the prior entry keeps applying. Only
+`cw review settle` output replaces an existing entry, and only when the new
+record is itself valid and no older than the one it replaces.
+
+**Render the marker, don't write it (#2210).** Every blocking codex
+review comment now prints a `### Settle a finding` section with one
+ready-to-paste JSON payload per blocking finding, carrying the finding's
+verbatim `file` and `summary` — which are the record's whole identity — plus
+the `reviewed_sha` it was raised against, so nothing needs normalizing or
+editing:
 
 ```bash
-uv run python -c 'from cw.review_debt import fingerprint_v1; print("::".join(fingerprint_v1("src/cw/foo.py", "Bug at line 42")))'
-# -> src/cw/foo.py::bug
+# Save the payload from the review comment to settle.json, then, ON YOUR OWN
+# MACHINE, from inside an interactive cw session worktree (the command refuses
+# anywhere it cannot read a `.claude/cw-context.json` reporting headless:false):
+uv run cw review settle settle.json \
+  --reason "intentional tradeoff, see ADR-0012" \
+  --ticket "$TICKET" --out marker.md
+gh issue comment "$TICKET" --repo "$REPO" --body-file marker.md
 ```
+
+**`--reason` is mandatory** and must be non-blank — a suppression with no
+recorded rationale is the silent silencing this record exists to prevent. It
+applies to every entry; an entry's own `rationale` overrides it, so several
+findings can be settled for different reasons in one call.
+
+**`cw review settle` refuses to run anywhere it cannot prove is your own
+interactive session — run it from a `cw` session worktree.** A settled finding
+is never re-raised, so the pipeline must not be able to settle its own
+reviewer's findings. The command looks for the nearest
+`.claude/cw-context.json` (searched upward from cwd) and **proceeds only when
+it finds one reporting `headless: false`**, which is what `cw` stamps for an
+interactive session. Everything else exits non-zero and writes nothing — no
+marker, no `--out` file, no event:
+
+- `headless: true` — a dispatch worker.
+- no `.claude/cw-context.json` in this directory or any parent, an unreadable
+  or malformed one, one with no `headless` key, or a `headless` that is not a
+  boolean — the context is *indeterminate*, and "I cannot tell" is not
+  evidence that you are at the keyboard.
+
+Practically: **your plain checkout of the repo has no `.claude/cw-context.json`,
+so `cw review settle` will refuse there.** Run it from an interactive `cw`
+session worktree (`cw start <client>` / `cw switch <client>` puts you in one),
+or any directory beneath one. There is no bypass flag. If a worker hands you a
+payload, run the command yourself.
+
+**Post the marker as its own comment, unedited.** The reader recognises a
+disposition record by *position* as well as shape: the block must open the
+comment body, directly under its `## Review Finding Dispositions` title, which
+is exactly what `--out` writes. A block pasted below a preamble, quoted in a
+reply, or embedded in other text is not a record and is silently not applied —
+you will see the finding re-appear, with nothing in the refused-records section
+(nothing tried to settle anything). This is what stops a reviewer's own finding
+text from minting a suppression: marker syntax inside a finding's summary,
+file, evidence or contest claim is escaped on render (you will see it as
+`REVIEW-FINDING\-DISPOSITIONS`), and would not parse at that position anyway.
+
+Every record it writes carries provenance: your resolved `gh` login, a UTC
+timestamp stamped by the command (`recorded_at` is **rejected** as a payload
+key — it is audit data, not input), the verbatim summary, and the reviewed
+sha. An entry with no resolvable sha is refused; pass `--reviewed-sha <sha>`
+for a hand-written payload. The command exits non-zero rather than recording an
+anonymous settle if `gh api user` cannot resolve your identity.
+
+Each settled finding emits one `review.finding_settled` audit event,
+correlated to `--ticket` when you pass it (`cw event tail --type
+review.finding_settled --json`). Duplicate keys collapse newest-wins, so two
+payload entries with the same file and byte-identical summary are one entry
+and one event. `-` reads the
+payload from stdin.
+
+**The events are recorded before the marker is written.** If any of them
+cannot be recorded, the settle is refused outright — no marker on stdout, no
+`--out` file, non-zero exit, and a message naming the finding and the failure.
+An audit record with no effect is noise; a durable suppression with no audit
+record is invisible, so the ordering favours the first. Re-run the same
+payload once the event store is healthy.
+
+The rendered marker looks like this. Every field below is required for the
+record to be *applied* — a block missing any of them parses but is refused:
 
 ```markdown
 ## Review Finding Dispositions
@@ -709,23 +817,61 @@ uv run python -c 'from cw.review_debt import fingerprint_v1; print("::".join(fin
 {
   "schema_version": 1,
   "dispositions": {
-    "src/cw/foo.py::bug here": {
+    "src/cw/foo.py::bug here::4bffc7a70f587f3e984f1ab5279c1211005e73b789b8a7a27faf53299b44b48a": {
       "outcome": "REJECTED",
       "rationale": "intentional tradeoff, see ADR-0012",
-      "recorded_at": "2026-08-16T00:00:00Z"
+      "recorded_at": "2026-08-16T00:00:00Z",
+      "actor": "mattwwarren",
+      "reviewed_sha": "deadbee",
+      "summary": "Bug here"
     }
   }
 }
 REVIEW-FINDING-DISPOSITIONS -->
 ```
 
+**The settle section is capped.** A pass with many MUST_FIX findings prints at
+most 10 payloads (and at most 12,000 characters of them); the rest are listed
+compactly under the payloads, by file and trimmed summary. Write a payload for
+one of those by hand and run `cw review settle` on it — the identity is its
+file and the verbatim summary from its MUST_FIX line in the same comment. A
+hand-written *payload* is fine; a hand-written *marker* is not, because only
+the command records the provenance the reader requires. A payload block is
+never cut in half, so anything you
+can copy out of the section is complete.
+
+- The key is `"<file>::<normalized summary>::<digest>"`. The first two parts are
+  `cw.review_debt.fingerprint_v1`'s: the summary lowercased,
+  whitespace-collapsed, line/position references stripped, digit runs replaced
+  by `N`. The `<digest>` is the SHA-256 (64 hex characters) of the finding's
+  **exact** summary text — the key binds the verbatim summary, and the reader
+  refuses a record whose stored `summary` does not hash to its key's digest, so
+  a record can only ever apply to the finding it was settled for. The example
+  digest above is `sha256("Bug here")`. `cw review settle` mints it from the
+  payload's verbatim `summary`, so a pasted payload reproduces the key a
+  **byte-identical** re-raise will hit.
+- A reviewer's *reworded* re-raise no longer exact-matches: matching
+  non-identical text is the claim tier's job, and it is off by default (see the
+  claim-match gate in `config/CONFIG_REFERENCE.md`). Until a lane is armed the
+  finding blocks again and, when it clears the matcher, is logged as
+  `review.finding_claim_shadowed`. Settle the new wording too, or contest it
+  with `contests_adjudication`. The reviewed sha is deliberately **not** in the
+  key — a later fix commit must not orphan the record — but it is a required
+  field of it.
 - `outcome` is `REJECTED` or `ACCEPTED`. Only `REJECTED` suppresses the
   finding; `ACCEPTED` is recorded and shown to the reviewer but changes no gate.
-- Changed your mind? Re-post the marker with a later `recorded_at` — newest
-  wins per key. Removing the marker does **not** un-settle anything; the ledger
-  is forward-only by design.
+- The marker is **additive** across comments: the reader unions every marker on
+  the thread. Post only what you are settling now.
+- Changed your mind? Re-run `cw review settle` for the same finding with
+  `"outcome": "ACCEPTED"` and post the new marker — its `recorded_at` is later,
+  and newest wins per key. Removing the marker does **not** un-settle anything;
+  the ledger is forward-only by design. There is no per-record rollback command
+  yet (tracked as a follow-up); the provenance fields exist so one can target
+  exactly one record when it lands.
 - A malformed block degrades to "no dispositions" and never fails the review;
   the symptom is the finding re-appearing, which is visible and correctable.
+  A *well-formed but under-provenanced* block behaves the same way, and
+  additionally names itself in the comment's refused-records section.
 - Because the identity is not evidence-anchored, a suppression does not lapse
   when the code moves. Every suppression therefore prints itself on the review
   comment (`suppressed — rejected: finding … re-adjudicate if the code at this
@@ -737,6 +883,78 @@ Distinct from `cw review check-voided`'s `VOIDED-REVIEW-FINDINGS` record
 (#1814), which the Claude-native session mints from your prose and which lapses
 as soon as the cited evidence changes. Use this one when you want the decision
 to *stick*.
+
+**Linear-tracked tickets cannot feed this ledger yet.** The codex path's
+comment fetch is GitHub-only (`linear` reads go through MCP tools only a Claude
+session holds), so a marker posted on a Linear ticket is never read. The
+`### Settle a finding` section still renders and says so. Follow-up F5.
+
+#### The reworded re-raise, and the claim tier (#2210)
+
+The exact key above only matches text that normalizes identically. A reviewer
+that re-raises the same defect in *different words* produces a different key
+and is not suppressed — which is the original complaint this ticket came from.
+
+A second, fuzzy **claim tier** now matches a same-file MUST_FIX against a
+ledger entry by shared code symbols and content-word overlap. It ships **off**,
+and arming it takes two switches (an operator `!` command per
+`docs/release-playbook.md`; flipping either one back is the rollback):
+
+```yaml
+# ~/.claude-workspace/orchestrator.yaml
+codex_claim_suppression_enabled: true
+
+# ~/.config/cw/clients.yaml — on the lane, per client
+lanes:
+  - name: impl
+    codex_review_tiers:
+      claim_suppression: true
+```
+
+Both must be true. A lane that names no tier falls to a hardcoded-off floor,
+and a client with no declared lanes gets a synthesised `default` lane — so
+arming means declaring the lane first.
+
+**Measure before you arm.** While the gate is closed the tier still runs and
+records everything it *would* have suppressed:
+
+```bash
+cw event tail --type review.finding_claim_shadowed --json
+# also: grep the INFO line "claim-tier match NOT suppressed, gate off"
+```
+
+Read those, judge each pair same-defect versus distinct-defect, and arm a lane
+only after ~20 clean events on it with no distinct-defect pair among them. One
+distinct-defect pair is a reason to tighten the thresholds, not to arm.
+`cw event tail` reads only the live inbox; auto-prune **archives** older events
+to `events/inbox.<YYYY-MM-DD>.jsonl` rather than deleting them, so read those
+files for older ones (or raise `event_inbox_retention_count`). Known accepted
+trade-offs — the ledger is severity-blind and entries never expire — are
+recorded in ADR-0016.
+
+#### Contesting a settled finding (#2210)
+
+A reviewer that believes a settled decision is now wrong sets
+`contests_adjudication` on the finding to what changed, quoting the changed
+code. A non-blank value removes the finding from the ledger's match set on
+**both** tiers, so it stays blocking, and the review comment labels it
+`_(contests prior adjudication — …)_`.
+
+Two caveats worth knowing before you trust one:
+
+- It is **unverified and gameable**. Nothing checks that the quoted code
+  actually changed; the string is an assertion (follow-up F2). It can only fail
+  toward blocking.
+- It is guaranteed only on the codex **single-pass** lane and fix-loop cycle 0.
+  On later fix-loop cycles `_admit_new_must_fix` does not read the field, so a
+  contest on code the latest cycle did not touch is diverted to the debt ledger
+  and the contest text is dropped (follow-up F6).
+
+**One thing the pipeline hides from itself:** the `### Settle a finding`
+section of a *pipeline-authored* comment (one carrying `<!-- cw-agent-authored
+-->`) is stripped before the next reviewer sees the thread — a pre-filled
+`"outcome": "REJECTED"` payload must not read to the next reviewer as an
+operator decision. A payload **you** paste yourself is not stripped, by design.
 
 ### Spec-driven subagent escape hatch
 

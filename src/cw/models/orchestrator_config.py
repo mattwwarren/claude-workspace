@@ -220,6 +220,30 @@ class StagePipelineConfig(BaseModel):
         return self
 
 
+#: The one recognised key of :attr:`LaneConfig.codex_review_tiers` (#2210).
+#: A named constant, not a bare literal, because ``cw.codex_background``'s
+#: resolver and its hardcoded-off floor key on the same string.
+CODEX_TIER_CLAIM_SUPPRESSION = "claim_suppression"
+_CODEX_REVIEW_TIER_KEYS = frozenset({CODEX_TIER_CLAIM_SUPPRESSION})
+
+
+def _validate_codex_review_tier_keys(value: dict[str, bool]) -> dict[str, bool]:
+    """Fail loud on an unrecognized codex-review-tier key (#2210).
+
+    Same stance, and the same reason, as ``_validate_gate_recipe_keys``: a
+    typo'd key would otherwise resolve silently to the hardcoded default-off,
+    leaving the operator convinced they armed a tier they did not.
+    """
+    unknown = sorted(set(value) - _CODEX_REVIEW_TIER_KEYS)
+    if unknown:
+        msg = (
+            f"codex_review_tiers has unrecognized tier key(s): {unknown}. "
+            f"Recognised keys: {sorted(_CODEX_REVIEW_TIER_KEYS)}."
+        )
+        raise ValueError(msg)
+    return value
+
+
 class LaneConfig(BaseModel):
     """Configuration for a named dispatch lane.
 
@@ -310,8 +334,16 @@ class LaneConfig(BaseModel):
     # precedence: consulted when the ticket carries no override, and itself
     # overridden by TicketTask.park_on_abandoned_exit. The key absent from this
     # map (or None) defers to the hardcoded default-off. Recognised key:
-    # "park_on_abandoned_exit".
+    # PARK_ON_ABANDONED_EXIT_KEY.
     park_on_abandoned_exit: dict[str, bool] | None = None
+    # Lane-level codex-review tier enablement map (#2210). Middle tier in
+    # cw.codex_background._resolve_claim_tier_enabled's precedence, which is
+    # 2-tier rather than 3 (master switch -> lane map -> hardcoded-off floor):
+    # a per-ticket override would be a persisted dev-queue schema change this
+    # ticket deliberately does not make. A tier absent from this map (or None)
+    # defers to the hardcoded default-off. Recognised keys:
+    # "claim_suppression". See ADR-0016.
+    codex_review_tiers: dict[str, bool] | None = None
 
     @field_validator("name")
     @classmethod
@@ -379,6 +411,15 @@ class LaneConfig(BaseModel):
         if value is None:
             return None
         return _validate_park_on_abandoned_exit_keys(value)
+
+    @field_validator("codex_review_tiers")
+    @classmethod
+    def _check_codex_review_tiers(
+        cls, value: dict[str, bool] | None
+    ) -> dict[str, bool] | None:
+        if value is None:
+            return None
+        return _validate_codex_review_tier_keys(value)
 
 
 _USAGE_LIMIT_BACKOFF_SECONDS = 3600
@@ -729,6 +770,16 @@ class OrchestratorConfig(BaseModel):
     # (lane -> global) resolver -- see
     # cw.codex_background._resolve_codex_fix_loop_enabled.
     default_codex_fix_loop_enabled: bool = False
+    # #2210 — master opt-in for the codex review ledger's fuzzy claim-match
+    # suppression tier. Default False, mirroring gate_recipes_enabled's
+    # fail-safe posture. BOTH this and the task's lane
+    # (LaneConfig.codex_review_tiers["claim_suppression"]) must be true for the
+    # tier to suppress anything; either one set False is a kill switch. While
+    # it is off the tier still MEASURES itself, emitting one
+    # review.finding_claim_shadowed event per finding it would have
+    # suppressed -- that is the corpus an operator judges before arming a
+    # lane. See cw.codex_background._resolve_claim_tier_enabled and ADR-0016.
+    codex_claim_suppression_enabled: bool = False
     # RFC 0008 W2 — global ladder of transcript-staleness thresholds (minutes),
     # ordered [stale_15m, stale_30m, stale_45m]. A session's transcript-mtime
     # age is compared against these to classify Session.liveness_bucket.

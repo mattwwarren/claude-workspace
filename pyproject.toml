@@ -1,6 +1,6 @@
 [project]
 name = "claude-workspace"
-version = "1.46.0"
+version = "1.48.0"
 description = "Multi-session workspace orchestrator for Claude Code"
 readme = "README.md"
 authors = [
@@ -194,6 +194,17 @@ ignore = [
     # review_adjudication.py -> package split left this submodule with no
     # RUNTIME use of either alias (`REJECTED_ENTRY_SEVERITY`, the module's one
     # other `Severity` site, moved to the sibling `_deferred_md`).
+    "TC001",
+]
+"src/cw/auto_dev_result/schema/_result.py" = [
+    # `AutoDevResult.scope/pr/pr_created/review/health/blocker` are pydantic
+    # field annotations, so `Scope`, `PrInfo`, `PrCreated`, `Review`, `Health`
+    # and `Blocker` must be importable at runtime for pydantic to resolve them
+    # at class-build time — a TYPE_CHECKING-only import raises
+    # PydanticUndefinedAnnotation there. The same case as the three blocks
+    # above, and it only fires because the #2193 schema.py -> package split
+    # moved these models into the sibling `_models` submodule, leaving this one
+    # with no RUNTIME use of any of them.
     "TC001",
 ]
 "src/cw/tui.py" = [

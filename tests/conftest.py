@@ -828,6 +828,7 @@ class _RawFindingKwargs(TypedDict, total=False):
     no_diff_anchor: object
     transitive_impact_evidence: object
     release_critical_exception: object
+    contests_adjudication: object
 
 
 def _finding_kwargs(**overrides: object) -> _RawFindingKwargs:
@@ -1048,6 +1049,13 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "cw.native_daemon._ROSTER_PATH",
         tmp_path / ".claude" / "daemon" / "roster.json",
     )
+
+    # Redirect the #2226 user-level Stop-hook scan away from the operator's
+    # real ~/.claude, so `cw doctor` tests see a clean host regardless of what
+    # the machine running them has installed. (The sibling
+    # doctor.versions._CLAUDE_SETTINGS_PATH and doctor.skills_drift._CLAUDE_HOME
+    # seams are NOT patched here — a pre-existing gap, out of scope for #2226.)
+    monkeypatch.setattr("cw.doctor.user_level_hooks._CLAUDE_HOME", tmp_path / ".claude")
 
     # Stub _claude_agents_json so tests don't invoke the real ``claude``
     # binary. Tests that want specific liveness behaviour override this with
@@ -1469,8 +1477,8 @@ def capture_events(
 def _clean_git_env() -> dict[str, str]:
     """``os.environ`` with ``GIT_*`` vars stripped.
 
-    Shared by ``make_git_repo`` and the live codex contract suite's own
-    ``git`` helper (``tests/test_codex_contract_live.py``) so a nested git
+    Shared by ``make_git_repo``, ``git_in``, and any test that needs a
+    ``GIT_*``-stripped env for a raw ``subprocess`` call, so a nested git
     invocation never inherits a wrapping git call's env (e.g. ``GIT_DIR``).
     """
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -1484,7 +1492,8 @@ def git_in(repo: Path, *args: str) -> str:
     (``test_branch_ahead.py``, ``test_dispatch_branch_freshness.py``,
     ``test_worktree.py``, and ``test_dispatch.py``'s ``_git_in_repo``) — the
     same "hoist a duplicated private test helper into conftest.py" pattern as
-    ``_cmd`` and ``commit_tracked_file``. The env strip matters because pytest
+    ``_cmd`` and ``commit_tracked_file``, and the further private copies
+    consolidated by #2195. The env strip matters because pytest
     may itself be running inside a git hook, whose ``GIT_DIR``/``GIT_INDEX_FILE``
     would otherwise redirect the nested invocation away from *repo*.
     """

@@ -27,7 +27,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import subprocess
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -49,7 +48,7 @@ from cw.codex_review import (
 from cw.codex_runner import CodexRunResult, RealCodexRunner
 from cw.review_findings import ReviewerFindingsDocument, consolidate_verdict
 from tests._codex_review_helpers import _task
-from tests.conftest import _clean_git_env
+from tests.conftest import git_in
 from tests.test_codex_contract_secrets import _assert_no_secrets_leaked
 
 if TYPE_CHECKING:
@@ -63,13 +62,6 @@ _CODEX_LIVE = os.environ.get("INTEGRATION_CODEX_LIVE", "").strip() not in ("", "
 
 _LIVE_SESSION_ID = "live-contract-suite"
 _ROLE = "Code Quality Reviewer"
-
-
-def _git(repo: Path, *args: str) -> None:
-    clean_env = _clean_git_env()
-    subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, check=True, env=clean_env
-    )
 
 
 class _RecordingCodexRunner(RealCodexRunner):
@@ -147,10 +139,10 @@ def _seed_repo(
 ) -> Path:
     """Build a repo under *base* with a second commit adding *content*."""
     repo = make_git_repo(name, base=base)
-    _git(repo, "checkout", "-b", "feature")
+    git_in(repo, "checkout", "-b", "feature")
     (repo / filename).write_text(content, encoding="utf-8")
-    _git(repo, "add", filename)
-    _git(repo, "commit", "-m", f"add {filename}")
+    git_in(repo, "add", filename)
+    git_in(repo, "commit", "-m", f"add {filename}")
     return repo
 
 

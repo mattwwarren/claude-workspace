@@ -10,7 +10,6 @@ modules that use each helper.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -143,16 +142,6 @@ class _Clock:
         if self._i < len(self._values) - 1:
             self._i += 1
         return value
-
-
-def _git(repo: Path, *args: str) -> None:
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        check=True,
-        env=clean_env,
-    )
 
 
 def _write(path: Path, content: str) -> None:
