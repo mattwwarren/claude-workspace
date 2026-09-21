@@ -572,5 +572,8 @@ is still live; close it first with `cw spawn close --confirmed-dead`.
 - [`docs/headless-contract.md`](headless-contract.md) — `AUTO_DEV_RESULT` schema, status enum, `ReapReason` taxonomy, `queue.session_reaped` event.
 - [`docs/events.md`](events.md) — `session.park_vetoed` and the full orchestrator event-bus reference.
 - `src/cw/cli/_sentinels.py:_parse_sentinel_from_transcript` — transcript sentinel reader.
+- `src/cw/cli/_sentinels.py:_sentinel_frame_after` — the §6c false-park guard (negative evidence only).
+- `src/cw/cli/signal_park.py` — `cw signal-park`, the §6c park-marker writer.
+- `src/cw/models/park_comment_marker.py` — the marker model and its reader.
 - `src/cw/reconcile/_shared.py:_locate_session_transcript` — transcript path resolver.
 - `src/cw/reconcile/_shared.py:_csid_from_transcript` — claude_session_id derivation.
