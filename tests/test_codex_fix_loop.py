@@ -41,7 +41,11 @@ from cw.codex_runner import CodexRunResult
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
-from cw.review_finding_dispositions import FindingDisposition, _disposition_key
+from cw.review_finding_dispositions import (
+    FindingDisposition,
+    _disposition_key,
+    render_finding_disposition_block,
+)
 from cw.review_findings import (
     AcceptedFinding,
     ReviewVerdict,
@@ -2131,6 +2135,64 @@ class TestRereviewForwardsFindingDispositions:
         assert verdict is not None
         assert verdict.blocking is False
         assert result.status == "stage_complete"
+
+    def test_refused_marker_records_reach_the_verdict_from_a_rereview(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2210 round 3: the refusal hop, the fix loop's copy of ``run_review``.
+
+        A record the marker carried but the write path refused never enters the
+        ledger, so it can only reach the verdict if ``_rereview`` threads
+        ``prepared.refused_dispositions`` into synthesis beside it. Forwarding
+        the ledger alone would leave every fix-loop cycle silent about it.
+        """
+        worktree = _worktree(make_git_repo, "wt-2210-rereview-refused")
+        # The comment thread is only read for a resolvable GitHub tracker.
+        _write(
+            worktree / ".claude" / "project-config.yaml",
+            "tracking:\n  primary:\n    system: github-issues\n",
+        )
+        ledger = self._ledger()
+        (key,) = ledger
+        forged = {key: ledger[key].model_copy(update={"actor": ""})}
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "op"},
+                    "body": render_finding_disposition_block(forged),
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kw: None,
+        )
+        base = subprocess.check_output(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD~1"], text=True
+        ).strip()
+        _, verdict, prepared = codex_fix_loop._rereview(
+            runner=_FixLoopRunner([_MF_DOC]),
+            task=_make_ticket_task(
+                ticket_id="T-2210", client="test", stage=Stage.REVIEW
+            ),
+            worktree=worktree,
+            default_branch="main",
+            model=None,
+            reasoning_effort=None,
+            remaining=None,
+            session_id="s-2210-rereview-refused",
+            previous_reviewed_sha=base,
+            prior_open_findings=[],
+        )
+
+        assert prepared.finding_dispositions == {}
+        assert [(r.key, r.missing) for r in prepared.refused_dispositions] == [
+            (key, ["actor"])
+        ]
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert [r.key for r in verdict.refused_dispositions] == [key]
 
 
 class TestClaimTierGateReachesBothSynthesisHops:

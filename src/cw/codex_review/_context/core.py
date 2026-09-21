@@ -52,6 +52,7 @@ from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
 from cw.review_adjudication import parse_voided_findings_block
 from cw.review_finding_dispositions import (
     SETTLE_SECTION_HEADING,
+    log_refused_dispositions,
     merge_finding_dispositions,
     parse_finding_disposition_block,
 )
@@ -64,7 +65,7 @@ if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
-    from cw.review_finding_dispositions import FindingDisposition
+    from cw.review_finding_dispositions import FindingDisposition, RefusedDisposition
     from cw.review_findings import (
         AgentSpecStatus,
         CapturedDiff,
@@ -274,7 +275,7 @@ def _load_finding_dispositions(
     comments: list[dict[str, object]] | None | _CommentsNotProvided = (
         _COMMENTS_NOT_PROVIDED
     ),
-) -> dict[str, FindingDisposition]:
+) -> tuple[dict[str, FindingDisposition], list[RefusedDisposition]]:
     """Parse the operator's cross-round finding adjudications off the ticket.
 
     Sibling of :func:`_load_voided_findings` in every respect that matters —
@@ -287,15 +288,17 @@ def _load_finding_dispositions(
     a void lapses when the code moves, an adjudication does not. Merging the
     reads would couple two grammars that must be free to diverge.
 
-    Returns only what the CURRENT comment thread carries. The durable half of
-    the ledger lives on ``TicketTask.finding_dispositions``, and
+    Returns ``(enforceable, refused)`` for only what the CURRENT comment thread
+    carries (#2210 round 3): a record that fails provenance is in ``refused``
+    and never in ``enforceable``, so it cannot reach the ledger. The durable
+    half of the ledger lives on ``TicketTask.finding_dispositions``, and
     :func:`_prepare_review_pass` merges the two — so a degraded fetch costs the
     pass nothing it already knew.
     """
     if isinstance(comments, _CommentsNotProvided):
         comments = _fetch_ticket_comments(worktree, ticket_id)
     if not comments:
-        return {}
+        return {}, []
     bodies = [
         body for comment in comments if isinstance(body := comment.get("body"), str)
     ]
@@ -368,6 +371,13 @@ class _ReviewPassInputs(NamedTuple):
     ``run_review`` and the fix loop's per-cycle re-review already share, so
     both paths see the same ledger.
 
+    ``refused_dispositions`` (#2210 round 3) are the marker records this pass
+    REFUSED to write into that ledger for failing provenance. They are not in
+    ``finding_dispositions`` (validate first, write second), so they ride
+    separately to post-synthesis, where they are stamped onto the verdict so
+    the posted comment reports the attempt. Already logged by the time they
+    are returned.
+
     ``delta_diff``/``delta_changed_files`` (#1837) are the fix-loop re-review
     pair: the diff between the previous reviewed head and this one, and its
     changed-path set. Both are ``None`` on cycle 0, which reviews the whole
@@ -387,6 +397,7 @@ class _ReviewPassInputs(NamedTuple):
     agent_spec_status: list[AgentSpecStatus]
     voided_findings: list[VoidedFinding]
     finding_dispositions: dict[str, FindingDisposition]
+    refused_dispositions: list[RefusedDisposition]
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
 
@@ -398,7 +409,7 @@ def _merge_and_persist_finding_dispositions(
     comments: list[dict[str, object]] | None | _CommentsNotProvided = (
         _COMMENTS_NOT_PROVIDED
     ),
-) -> dict[str, FindingDisposition]:
+) -> tuple[dict[str, FindingDisposition], list[RefusedDisposition]]:
     """Fold this pass's marker entries into *task*'s ledger, and persist them.
 
     Two records, one answer (#1838). The tracker marker is the operator's INPUT
@@ -413,8 +424,21 @@ def _merge_and_persist_finding_dispositions(
     there is nothing new to record, and every review pass paying for a
     dev-queue lock + read + write to store what is already stored would be a
     real cost for no benefit.
+
+    **Validate first, write second** (#2210 round 3). The marker is the
+    hand-pasteable surface, so what it parsed is split BEFORE anything is
+    written: only the enforceable delta is merged and persisted to the running
+    dev-queue row, and every record that failed provenance is logged once at
+    WARNING here — naming the ticket and key — and returned as the second
+    element. It is never written and never replaces an existing entry, so a
+    malformed or pasted block cannot destroy the provenance of a legitimately
+    settled finding. The caller carries the refusals to the verdict so the
+    review output reports them too.
     """
-    parsed = _load_finding_dispositions(worktree, task.ticket_id, comments=comments)
+    parsed, refused = _load_finding_dispositions(
+        worktree, task.ticket_id, comments=comments
+    )
+    log_refused_dispositions(refused, task.ticket_id)
     merged = merge_finding_dispositions(task.finding_dispositions, parsed)
     if parsed:
         # Deferred import: cw.codex_background imports cw.codex_fix_loop, which
@@ -428,7 +452,7 @@ def _merge_and_persist_finding_dispositions(
             ticket_id=task.ticket_id,
             dispositions=parsed,
         )
-    return merged
+    return merged, refused
 
 
 def _prepare_review_pass(
@@ -502,8 +526,10 @@ def _prepare_review_pass(
     voided_findings = _load_voided_findings(
         worktree, task.ticket_id, comments=fetched_comments
     )
-    finding_dispositions = _merge_and_persist_finding_dispositions(
-        task, worktree, comments=fetched_comments
+    finding_dispositions, refused_dispositions = (
+        _merge_and_persist_finding_dispositions(
+            task, worktree, comments=fetched_comments
+        )
     )
     ruff_lint_config = _load_ruff_lint_config(worktree)
     quality_gates_text = _load_claude_md_quality_gates(worktree)
@@ -557,6 +583,7 @@ def _prepare_review_pass(
         agent_spec_status=[resolutions[role].status for role in roles],
         voided_findings=voided_findings,
         finding_dispositions=finding_dispositions,
+        refused_dispositions=refused_dispositions,
         delta_diff=delta_diff,
         delta_changed_files=delta_changed_files,
     )

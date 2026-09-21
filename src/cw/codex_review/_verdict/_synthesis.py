@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
-    from cw.review_finding_dispositions import FindingDisposition
+    from cw.review_finding_dispositions import FindingDisposition, RefusedDisposition
     from cw.review_findings import (
         AgentSpecStatus,
         CapturedDiff,
@@ -169,6 +169,7 @@ def synthesize_codex_review_result(
     agent_spec_status: list[AgentSpecStatus] | None = None,
     voided_findings: list[VoidedFinding] | None = None,
     finding_dispositions: dict[str, FindingDisposition] | None = None,
+    refused_dispositions: list[RefusedDisposition] | None = None,
     claim_tier_enabled: bool = False,
     pre_validation_rejected: list[RejectedFinding] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
@@ -256,6 +257,12 @@ def synthesize_codex_review_result(
     fingerprint-keyed and does not. Applied here for the identical reason —
     both call sites reach the blocking check through this function.
 
+    ``refused_dispositions`` (#2210 round 3) are the marker records the write
+    path refused for failing provenance. They never entered
+    ``finding_dispositions``, so they are forwarded to
+    ``suppress_adjudicated_findings`` to be reported on the verdict beside the
+    refusals it derives from the ledger itself.
+
     ``claim_tier_enabled`` (#2210) arms that ledger's fuzzy second matching
     tier for this pass. Default False — the fail-safe floor — so a call path
     that never threads it is off. It is forwarded, along with this function's
@@ -336,6 +343,7 @@ def synthesize_codex_review_result(
         ticket_id=task.ticket_id,
         claim_tier_enabled=claim_tier_enabled,
         reviewed_sha=reviewed_sha,
+        refused=refused_dispositions,
     )
     block_reason = _verdict_block_reason(verdict)
     if block_reason is not None:

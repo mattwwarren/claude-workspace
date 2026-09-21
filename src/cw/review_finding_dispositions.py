@@ -21,13 +21,15 @@ here:
    and redispatch, so round N+2 remembers what round N settled without
    re-reading anything.
 
-Identity is #1837's :func:`cw.review_debt.fingerprint_v1` — ``(file,
-normalized_summary)``, with **no evidence and no severity**. That is a
-deliberate divergence from ``_voided_fingerprint``: an evidence-anchored
-identity lapses the moment the code moves, which is exactly the memory loss
-this ticket exists to remove. The cost — a suppression that outlives the code
-it was granted for — is paid down by making every suppression VISIBLE rather
-than by adding an expiry: see :func:`_render_suppression_signal` and the
+Identity starts from #1837's :func:`cw.review_debt.fingerprint_v1` — ``(file,
+normalized_summary)``, with **no evidence and no severity** — and (#2210 round
+3) adds a digest of the VERBATIM summary, so the exact tier matches a
+byte-identical finding only. That is a deliberate divergence from
+``_voided_fingerprint``: an evidence-anchored identity lapses the moment the
+code moves, which is exactly the memory loss this ticket exists to remove. The
+cost — a suppression that outlives the code it was granted for — is paid down by
+making every suppression VISIBLE rather than by adding an expiry: see
+:func:`_render_suppression_signal` and the
 ``review.finding_disposition_suppressed`` event.
 
 Only the already-declared-shared ``review_findings`` types
@@ -64,17 +66,25 @@ comment itself. :func:`partition_enforceable_dispositions` moves the contract
 to the reader: a record is applied only when it carries the full provenance
 set, and anything short of it is ignored, logged, and reported on the comment.
 
+Round 3 finished the job on the WRITE side: ignoring an invalid record is not
+enough if it can still replace a valid one, so :func:`merge_finding_dispositions`
+— the one chokepoint every ledger write goes through — never writes a record
+that fails provenance, and a record whose key does not bind its own verbatim
+summary fails it. Validate first, write second.
+
 Public surface: :class:`FindingDisposition`, :class:`RefusedDisposition`,
 :data:`Outcome`, :data:`SETTLE_SECTION_HEADING`,
 :func:`build_finding_disposition_ledger`,
 :func:`render_finding_disposition_block`,
 :func:`parse_finding_disposition_block`,
-:func:`partition_enforceable_dispositions`, :func:`merge_finding_dispositions`,
-:func:`split_disposition_key`, :func:`suppress_adjudicated_findings`.
+:func:`partition_enforceable_dispositions`, :func:`log_refused_dispositions`,
+:func:`merge_finding_dispositions`, :func:`split_disposition_key`,
+:func:`suppress_adjudicated_findings`, :data:`DISPOSITION_SENTINEL`.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -117,12 +127,23 @@ SETTLE_SECTION_HEADING = "### Settle a finding"
 _MATCH_EXACT = "exact"
 _MATCH_CLAIM = "claim"
 
-#: Joins ``fingerprint_v1``'s ``(file, normalized_summary)`` tuple into the
-#: string a JSON object key has to be. A file path containing this sequence
-#: could in principle collide with another entry — the same exact-match-only
-#: false-merge review_debt already documents and accepts for the underlying
-#: fingerprint, not a new class of risk.
+#: Joins the parts of a ledger key — ``file``, the normalized summary and the
+#: verbatim-summary digest (see :func:`_disposition_key`) — into the string a
+#: JSON object key has to be. A file path containing this sequence could in
+#: principle collide with another entry — the same exact-match-only false-merge
+#: review_debt already documents and accepts for the underlying fingerprint,
+#: not a new class of risk. A NORMALIZED summary may contain it too, which is
+#: why :func:`split_disposition_key` recognises the digest by its fixed shape
+#: rather than by position.
 _KEY_SEPARATOR = "::"
+
+#: The trailing ``::<64 lowercase hex>`` of a current-shape ledger key: the
+#: full SHA-256 hex digest, in full, because a truncated digest buys nothing
+#: here (keys are JSON object keys, not display strings) and a full one makes a
+#: collision between two different summaries negligible. Anchored and
+#: fixed-width so a normalized summary that ends in something hex-like, or one
+#: containing ``::`` of its own, is never mistaken for a digest.
+_DIGEST_SUFFIX_RE = re.compile(rf"{_KEY_SEPARATOR}[0-9a-f]{{64}}$")
 
 #: Ticket-comment header the ledger block renders under, and the sentinel that
 #: is the actual contract. Mirrors ``_VOIDED_MD_TITLE``/``_VOIDED_SENTINEL``
@@ -130,7 +151,15 @@ _KEY_SEPARATOR = "::"
 #: ``auto-dev-preflight-resolutions``' free-prose grammar, which would need an
 #: LLM to read and would reintroduce the fragility class #1805 removed.
 _DISPOSITION_MD_TITLE = "## Review Finding Dispositions"
-_DISPOSITION_SENTINEL = "REVIEW-FINDING-DISPOSITIONS"
+#: The marker's sentinel. Public and owned HERE, next to the parser that keys on
+#: it, because other modules must agree with it byte for byte: the reviewer
+#: prompt (``codex_review._context._prompt_text``) and the blocking comment
+#: (``codex_review._verdict._render``) both NAME it when they tell a reader the
+#: hand-authored block is unsupported. A second spelling of a string a parser
+#: keys on is how the writer and reader drift apart in a later change, so those
+#: modules build their text from this constant instead of retyping it. Like
+#: :data:`SETTLE_SECTION_HEADING`, a plain string needs no ``cw`` import.
+DISPOSITION_SENTINEL = "REVIEW-FINDING-DISPOSITIONS"
 #: Bump when the sentinel's on-the-wire shape changes in a way a reader must
 #: branch on, following ``_VOIDED_SCHEMA_VERSION``'s convention. #2210's
 #: ``actor``/``reviewed_sha``/``summary`` fields deliberately did NOT bump it:
@@ -142,7 +171,7 @@ _DISPOSITION_SENTINEL = "REVIEW-FINDING-DISPOSITIONS"
 #: and this is a nested model gaining defaulted ones.
 _DISPOSITION_SCHEMA_VERSION = 1
 _DISPOSITION_BLOCK_RE = re.compile(
-    rf"<!--\s*{_DISPOSITION_SENTINEL}\s*(?P<body>.*?)\s*{_DISPOSITION_SENTINEL}\s*-->",
+    rf"<!--\s*{DISPOSITION_SENTINEL}\s*(?P<body>.*?)\s*{DISPOSITION_SENTINEL}\s*-->",
     re.DOTALL,
 )
 
@@ -183,12 +212,16 @@ class FindingDisposition(BaseModel):
     but the reader refuses to apply it. See
     :func:`partition_enforceable_dispositions`.
 
-    ``summary`` is the VERBATIM finding summary. The ledger key carries only
-    the *normalised* half (see :func:`_disposition_key`), which is lossy and
-    shared by every rewording that normalises alike — so the verbatim text is
-    what lets a future per-record rollback target exactly one entry rather than
-    a key's worth of them. It is deliberately not part of identity: nothing
-    matches on it.
+    ``summary`` is the VERBATIM finding summary, and it is BOUND to the key: the
+    key ends in a SHA-256 digest of exactly this text (see
+    :func:`_disposition_key`), and :func:`_provenance_gaps` recomputes the key
+    from it and refuses a record whose key was not minted from it. So a record
+    can only ever be applied to the finding whose verbatim summary it carries,
+    and the same text lets a future per-record rollback target exactly one
+    entry. (Round 2 said the opposite — that ``summary`` was "deliberately not
+    part of identity" — and the key then carried only the LOSSY normalized
+    half, shared by every rewording that normalises alike, so a finding could
+    drift onto a different finding's record.)
 
     Every field stays optional at the MODEL layer so a pre-#2210 marker or
     queue row still *loads*. Loading is not applying: whether a record may be
@@ -210,7 +243,9 @@ class RefusedDisposition(BaseModel):
     Carried on ``ReviewVerdict.refused_dispositions`` and rendered onto the
     posted review comment, because "ignored" must not mean "invisible": an
     operator has to be able to see that something tried to suppress a finding
-    and was refused. ``key`` is the ledger key (``file::normalized summary``),
+    and was refused. ``key`` is the ledger key
+    (``file::normalized summary::digest`` — or the digest-less legacy shape,
+    which is itself one of the things refused),
     ``missing`` the provenance fields it could not produce, in the fixed order
     :func:`_provenance_gaps` checks them.
 
@@ -224,12 +259,40 @@ class RefusedDisposition(BaseModel):
     missing: list[str] = Field(default_factory=list)
 
 
+def _summary_digest(summary: str) -> str:
+    """Full SHA-256 hex digest of *summary*'s exact text (#2210 round 3).
+
+    VERBATIM: no normalization, no ``strip``, no case folding. The conservative
+    direction is a non-match the operator can re-settle; the direction to
+    refuse is a silent match against a finding nobody adjudicated. The
+    ``surrogatepass`` handler keeps a lone surrogate — which ``json.loads``
+    happily produces from a hand-pasted marker — from raising inside the
+    reader; it hashes to a stable digest like any other text.
+    """
+    return hashlib.sha256(summary.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
 def _disposition_key(file: str, summary: str) -> str | None:
     """The ledger key for a finding, or ``None`` when it cannot be keyed.
 
-    Wraps :func:`cw.review_debt.fingerprint_v1` verbatim (#1838 R1) — no second
-    normalization implementation exists here, so the ledger and #1837's debt
-    ledger can never disagree about what "the same finding" means.
+    ``file::normalized_summary::sha256(verbatim summary)``. The first two parts
+    are :func:`cw.review_debt.fingerprint_v1` (#1838 R1) — the one
+    normalization implementation, imported rather than re-written, so the
+    ledger's notion of "same file, same claim after normalizing" is #1837's.
+    The key EXTENDS that fingerprint rather than equalling it (the debt ledger
+    keeps its own key), and the extension is the point (#2210 round 3): the
+    normalized half is lossy and shared by every rewording that normalises
+    alike, so a key made of it alone let a finding drift onto a different
+    finding's record — a silent suppression nobody adjudicated. The digest
+    makes the exact tier match a byte-identical summary only. The fuzzy claim
+    tier stays the ONLY path that may match non-identical text.
+
+    The reviewed sha is deliberately NOT part of the key, though it is a
+    required provenance field of the record. The reviewer re-raises a settled
+    finding on a LATER commit, so a key that included the sha it was settled at
+    would stop matching after any fix commit and the whole ledger would go
+    dead — defeating what #1814/#2210 exist for. The sha rides on the record
+    and on the audit events instead. See ADR-0016.
 
     ``None`` for a ``file="N/A"`` finding (#1817's no-diff-anchor case): there
     is no path to key on, so it gets no cross-round memory. Mirrors
@@ -241,18 +304,23 @@ def _disposition_key(file: str, summary: str) -> str | None:
     fingerprint = fingerprint_v1(file, summary)
     if fingerprint is None:
         return None
-    return _KEY_SEPARATOR.join(fingerprint)
+    return _KEY_SEPARATOR.join((*fingerprint, _summary_digest(summary)))
 
 
 def split_disposition_key(key: str) -> tuple[str, str]:
     """Recover ``(file, normalized_summary)`` from a ledger *key*.
 
     The inverse of :func:`_disposition_key`'s join, exposed because the prompt
-    renderer needs the file and summary back out to write a readable line.
-    Splits on the FIRST separator, so a normalized summary that happens to
-    contain one stays intact.
+    renderer needs the file and summary back out to write a readable line, and
+    the claim tier compares the normalized halves. The verbatim digest is
+    dropped: it is recognised by its fixed ``::<64 hex>`` tail and a key
+    without one is treated as digest-less (a legacy key, which
+    :func:`_provenance_gaps` refuses). Past the digest it splits on the FIRST
+    separator, so a normalized summary that happens to contain one stays
+    intact.
     """
-    file, _, summary = key.partition(_KEY_SEPARATOR)
+    body = _DIGEST_SUFFIX_RE.sub("", key, count=1)
+    file, _, summary = body.partition(_KEY_SEPARATOR)
     return file, summary
 
 
@@ -279,7 +347,7 @@ def render_finding_disposition_block(ledger: dict[str, FindingDisposition]) -> s
     body = json.dumps(payload, indent=2, sort_keys=True)
     return (
         f"{_DISPOSITION_MD_TITLE}\n\n"
-        f"<!-- {_DISPOSITION_SENTINEL}\n{body}\n{_DISPOSITION_SENTINEL} -->\n"
+        f"<!-- {DISPOSITION_SENTINEL}\n{body}\n{DISPOSITION_SENTINEL} -->\n"
     )
 
 
@@ -288,7 +356,7 @@ def _parse_one_disposition_block(body: str) -> dict[str, FindingDisposition]:
     try:
         data = json.loads(body)
     except json.JSONDecodeError:
-        _log.warning("auto-dev: ignoring malformed %s block", _DISPOSITION_SENTINEL)
+        _log.warning("auto-dev: ignoring malformed %s block", DISPOSITION_SENTINEL)
         return {}
     if not isinstance(data, dict):
         return {}
@@ -300,14 +368,23 @@ def _parse_one_disposition_block(body: str) -> dict[str, FindingDisposition]:
         try:
             entries[str(key)] = FindingDisposition.model_validate(item)
         except ValueError:
-            _log.warning("auto-dev: ignoring malformed %s entry", _DISPOSITION_SENTINEL)
+            _log.warning("auto-dev: ignoring malformed %s entry", DISPOSITION_SENTINEL)
     return entries
 
 
 def parse_finding_disposition_block(
     comment_bodies: list[str],
-) -> dict[str, FindingDisposition]:
+) -> tuple[dict[str, FindingDisposition], list[RefusedDisposition]]:
     """Union every disposition sentinel across *comment_bodies*.
+
+    Returns ``(enforceable, refused)``. Only a record that passes provenance
+    reaches ``enforceable`` (#2210 round 3: validate first, write second — this
+    is what the ledger is written FROM, so an invalid record must not be in
+    it). Every record that fails is reported in ``refused`` instead, once per
+    key, in key order, so the caller can log it and put it on the review
+    output rather than losing it silently. Validation happens BEFORE the
+    cross-comment fold, so a later invalid comment can never displace an
+    earlier valid one for the same key.
 
     Fail-open throughout — a missing, truncated, or malformed block yields
     nothing and never raises, and one bad block never discards a good sibling.
@@ -317,18 +394,22 @@ def parse_finding_disposition_block(
     suppression surfaces as the finding re-appearing, which an operator can act
     on.
 
-    A key recorded in more than one comment resolves through
+    A key recorded validly in more than one comment resolves through
     :func:`merge_finding_dispositions` (newest ``recorded_at`` wins), which is
     the #1654 marker-supersession convention: an operator who changes their
     mind re-posts the marker rather than editing history.
     """
     merged: dict[str, FindingDisposition] = {}
+    refused: dict[str, RefusedDisposition] = {}
     for body in comment_bodies:
         for match in _DISPOSITION_BLOCK_RE.finditer(body):
-            merged = merge_finding_dispositions(
-                merged, _parse_one_disposition_block(match.group("body"))
+            enforceable, rejected = partition_enforceable_dispositions(
+                _parse_one_disposition_block(match.group("body"))
             )
-    return merged
+            merged = merge_finding_dispositions(merged, enforceable)
+            for record in rejected:
+                refused.setdefault(record.key, record)
+    return merged, sorted(refused.values(), key=lambda record: record.key)
 
 
 def merge_finding_dispositions(
@@ -342,12 +423,35 @@ def merge_finding_dispositions(
     say — clearing it on absence would re-open every finding the moment a
     comment was edited or a fetch degraded to ``[]``.
 
-    Neither argument is mutated; a fresh dict is returned.
+    **Validate first, write second** (#2210 round 3), and it is enforced HERE
+    because this is the one chokepoint every ledger write goes through: the
+    thread-derived merge, the dev-queue row sync, and ``cw review settle``. A
+    *parsed* entry that fails :func:`_provenance_gaps` is never written — it
+    can neither add a key nor replace an existing entry. Ignoring it for
+    suppression (the reader's job) is not enough if it can still overwrite a
+    valid entry: a malformed or hand-pasted block would destroy the provenance
+    of a legitimately settled finding, on the very ledger that decides what
+    stays suppressed. Only a VALID entry may replace an entry for the same key,
+    and between two valid ones the newest ``recorded_at`` still wins. A valid
+    entry also replaces an INVALID one already in *existing* (legacy history
+    that applies nothing) whatever the timestamps say — that is a heal, not an
+    eviction.
+
+    Entries already in *existing* pass through untouched: legacy rows stay for
+    the reader to keep refusing and reporting. Neither argument is mutated; a
+    fresh dict is returned. Reporting a rejected entry is the caller's:
+    :func:`parse_finding_disposition_block` returns it in its ``refused`` list.
     """
     merged = dict(existing)
     for key, entry in parsed.items():
+        if _provenance_gaps(key, entry):
+            continue
         current = merged.get(key)
-        if current is None or entry.recorded_at >= current.recorded_at:
+        if (
+            current is None
+            or _provenance_gaps(key, current)
+            or entry.recorded_at >= current.recorded_at
+        ):
             merged[key] = entry
     return merged
 
@@ -368,18 +472,40 @@ def _is_utc_timestamp(value: str) -> bool:
     return parsed.tzinfo is not None and parsed.utcoffset() == timedelta(0)
 
 
+def _identity_is_bound(file: str, normalized: str, key: str, summary: str) -> bool:
+    """Whether *key* is the key :func:`_disposition_key` mints for *summary*.
+
+    A blank half is not an identity at all. Otherwise the key is recomputed
+    from its own file and the record's VERBATIM summary and compared for
+    equality, which pins three things at once: the digest is present, it is
+    the digest of THIS summary, and the normalized half is that summary's
+    normalization. A record whose payload summary is not the one its key was
+    minted from — or whose key is a digest-less legacy one — cannot pass, and
+    so cannot drift onto a different finding.
+
+    The comparison is skipped for a blank summary: the ``summary`` gap already
+    names that record's problem, and reporting the same defect twice would
+    only make the refusal line harder to read.
+    """
+    if not (file.strip() and normalized.strip()):
+        return False
+    if not summary.strip():
+        return True
+    return _disposition_key(file, summary) == key
+
+
 def _provenance_gaps(key: str, entry: FindingDisposition) -> list[str]:
     """Which parts of the audit record *entry* cannot produce (#2210 round 2).
 
     Empty means the record answers all five questions an applied suppression
-    must answer: WHICH finding (the key's file and normalized summary, plus
-    the verbatim ``summary`` the key's normalization loses), WHO settled it,
-    WHEN, against WHAT code, and WHY. Order is fixed so the rendered line and
-    the log message read the same way every time.
+    must answer: WHICH finding (the key's file and normalized summary, BOUND to
+    the record's verbatim ``summary`` through the key's digest — #2210 round
+    3), WHO settled it, WHEN, against WHAT code, and WHY. Order is fixed so the
+    rendered line and the log message read the same way every time.
     """
     file, normalized = split_disposition_key(key)
     checks = (
-        ("identity", bool(file.strip() and normalized.strip())),
+        ("identity", _identity_is_bound(file, normalized, key, entry.summary)),
         ("actor", bool(entry.actor.strip())),
         ("recorded_at", _is_utc_timestamp(entry.recorded_at)),
         ("reviewed_sha", bool(entry.reviewed_sha.strip())),
@@ -427,16 +553,23 @@ def partition_enforceable_dispositions(
     return enforceable, refused
 
 
-def _log_refused_dispositions(
-    refused: list[RefusedDisposition], ticket_id: str
-) -> None:
-    """Say out loud, once per record, that a suppression was refused."""
+def log_refused_dispositions(refused: list[RefusedDisposition], ticket_id: str) -> None:
+    """Say out loud, once per record, that a disposition was refused.
+
+    Public because two places refuse: :func:`suppress_adjudicated_findings`
+    (legacy rows already in the durable ledger) and the write path in
+    ``codex_review._context`` (records parsed off the ticket thread, which
+    never reach the ledger at all). Whoever refuses logs; a caller that has
+    already logged a record passes it back through ``refused=`` so it is not
+    logged a second time.
+    """
     for record in refused:
         _log.warning(
-            "auto-dev: ignoring a finding disposition with incomplete "
-            "provenance -- NOT applied as a suppression (ticket=%s, key=%s, "
-            "missing=%s). `cw review settle` is the only supported producer "
-            "of a disposition marker; hand-authored blocks are unsupported.",
+            "auto-dev: refusing a finding disposition with incomplete or "
+            "unbound provenance -- NOT applied as a suppression and NOT "
+            "written to the ledger (ticket=%s, key=%s, missing=%s). "
+            "`cw review settle` is the only supported producer of a "
+            "disposition marker; hand-authored blocks are unsupported.",
             ticket_id,
             record.key,
             ", ".join(record.missing),
@@ -646,6 +779,14 @@ def _match_ledger(
     suppresses, and an ``ACCEPTED`` one vetoes any fuzzy sibling rather than
     falling through to the claim tier.
 
+    "Exact" means BYTE-identical summary (#2210 round 3): the key carries a
+    digest of the verbatim text, so a finding that merely normalizes like a
+    recorded one misses ``ledger.get`` and falls through to the claim tier,
+    which is the only path allowed to match non-identical text — and which is
+    gated off and shadowed by default. A key can never reach
+    :func:`_best_claim_match` while sitting in the ledger itself, because the
+    exact lookup above has already decided that case either way.
+
     The claim tier is scoped to still-undecided MUST_FIX findings. A SHOULD_FIX
     or below does not block, so fuzzily suppressing one buys nothing and hides
     content; a finding a void pass already stamped must not be re-stamped here.
@@ -815,6 +956,7 @@ def suppress_adjudicated_findings(
     ticket_id: str,
     claim_tier_enabled: bool = False,
     reviewed_sha: str = "",
+    refused: list[RefusedDisposition] | None = None,
 ) -> ReviewVerdict:
     """Suppress every accepted finding a prior round already REJECTED (#1838).
 
@@ -860,6 +1002,15 @@ def suppress_adjudicated_findings(
     attempt instead of swallowing it. A refusal is per-record — a
     well-formed sibling in the same ledger still applies.
 
+    ``refused`` (#2210 round 3) carries the records the WRITE path already
+    refused: since :func:`merge_finding_dispositions` never lets an invalid
+    record into the ledger, partitioning the ledger can no longer discover
+    them, yet they must still reach the review output. The caller has already
+    logged them (``codex_review._context`` refuses at parse time), so they are
+    merged into ``refused_dispositions`` without a second WARNING; only the
+    refusals this function derives from legacy rows already in the durable
+    ledger are logged here, and a key refused on both sides is reported once.
+
     ``claim_tier_enabled`` (#2210) arms the fuzzy second tier for THIS pass.
     It defaults to ``False``, which is the fail-safe floor: a call path that
     never threads it is off, and the exact tier behaves identically either
@@ -870,10 +1021,15 @@ def suppress_adjudicated_findings(
     consumer can group a re-derived finding's events by ticket, file and
     summary and count the distinct reviewed commits behind them.
     """
-    enforceable, refused = partition_enforceable_dispositions(ledger)
-    if refused:
-        _log_refused_dispositions(refused, ticket_id)
-        verdict = verdict.model_copy(update={"refused_dispositions": refused})
+    enforceable, ledger_refused = partition_enforceable_dispositions(ledger)
+    reported = {record.key: record for record in refused or []}
+    fresh = [record for record in ledger_refused if record.key not in reported]
+    log_refused_dispositions(fresh, ticket_id)
+    reported.update((record.key, record) for record in fresh)
+    if reported:
+        verdict = verdict.model_copy(
+            update={"refused_dispositions": [reported[key] for key in sorted(reported)]}
+        )
     if not enforceable:
         return verdict
     matches = _ledger_matches(verdict.accepted, enforceable, ticket_id=ticket_id)
@@ -925,14 +1081,25 @@ def build_finding_disposition_ledger(
 
     Raises ``ValueError`` for an un-keyable file rather than silently dropping
     the entry: an operator asking to settle a finding and getting a marker that
-    quietly omits it is the worst of both outcomes. Duplicates fold through
-    :func:`merge_finding_dispositions`, so the newest ``recorded_at`` wins.
+    quietly omits it is the worst of both outcomes. It raises for an entry that
+    fails provenance for the same reason: :func:`merge_finding_dispositions`
+    would refuse to write it, and ``cw review settle`` always supplies the full
+    set, so a refusal here is a bug to surface, not a record to drop.
+    Duplicates fold through :func:`merge_finding_dispositions`, so the newest
+    ``recorded_at`` wins.
     """
     ledger: dict[str, FindingDisposition] = {}
     for file, summary, entry in entries:
         key = _disposition_key(file, summary)
         if key is None:
             msg = f"cannot record a disposition for file={file!r}: no path to key on"
+            raise ValueError(msg)
+        gaps = _provenance_gaps(key, entry)
+        if gaps:
+            msg = (
+                f"cannot record a disposition for file={file!r}: it fails "
+                f"provenance (missing {', '.join(gaps)})"
+            )
             raise ValueError(msg)
         ledger = merge_finding_dispositions(ledger, {key: entry})
     return ledger

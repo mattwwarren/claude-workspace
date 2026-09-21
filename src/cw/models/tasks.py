@@ -680,8 +680,9 @@ class TicketTask(BaseModel):
     stage_high_water: Stage | None = None
     salvage_no_sentinel_at: datetime | None = None
     # GitHub #1838 — cross-round adjudication memory for the codex review
-    # backend. Keys are stringified cw.review_debt.fingerprint_v1 identities
-    # (``"<file>::<normalized summary>"``, see
+    # backend. Keys extend a cw.review_debt.fingerprint_v1 identity with a
+    # digest of the verbatim summary (``"<file>::<normalized summary>::<sha256
+    # of the exact summary>"``, see
     # cw.review_finding_dispositions._disposition_key); values record the
     # operator's outcome, their rationale, and when it was recorded.
     #

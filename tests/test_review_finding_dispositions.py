@@ -10,25 +10,32 @@ generically reusable builders.
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import logging
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+import cw
 from cw.auto_dev_result import Review
 from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
 from cw.review_debt import fingerprint_v1
 from cw.review_finding_dispositions import (
+    DISPOSITION_SENTINEL,
     FindingDisposition,
+    RefusedDisposition,
     _claim_similarity,
     _claim_symbols,
     _claim_tokens,
     _disposition_key,
     _render_suppression_signal,
     build_finding_disposition_ledger,
+    log_refused_dispositions,
     merge_finding_dispositions,
     parse_finding_disposition_block,
     partition_enforceable_dispositions,
@@ -119,6 +126,18 @@ def _ledger(finding: Finding, **overrides: object) -> dict[str, FindingDispositi
     return _ledger_for(finding.file, finding.summary, **overrides)
 
 
+def _key(file: str = "src/cw/foo.py", summary: str = "Bug here") -> str:
+    """The real ledger key for ``(file, summary)``.
+
+    Goes through :func:`_disposition_key` rather than hard-coding the shape:
+    the key binds a digest of the verbatim summary (#2210 round 3), so a
+    hand-typed key is either a legacy digest-less one or a wrong one.
+    """
+    key = _disposition_key(file, summary)
+    assert key is not None
+    return key
+
+
 # ---------------------------------------------------------------------------
 # _disposition_key / split_disposition_key
 # ---------------------------------------------------------------------------
@@ -138,20 +157,67 @@ class TestDispositionKey:
         assert key is not None
         assert split_disposition_key(key) == fingerprint
 
-    def test_position_and_count_drift_collapse_onto_one_key(self) -> None:
-        # Mirrors review_debt's documented false-merge acceptance: two summaries
-        # that normalize alike deliberately share one identity.
-        assert _disposition_key("src/cw/foo.py", "3 call sites at line 10") == (
-            _disposition_key("src/cw/foo.py", "4 call sites at line 99")
+    def test_key_is_file_normalized_summary_and_verbatim_digest(self) -> None:
+        # #2210 round 3: the key extends fingerprint_v1 with a SHA-256 of the
+        # EXACT summary text, so a finding whose summary differs by even one
+        # byte is a different finding.
+        summary = "Bug at line 42"
+        fingerprint = fingerprint_v1("src/cw/foo.py", summary)
+        assert fingerprint is not None
+        digest = hashlib.sha256(summary.encode("utf-8")).hexdigest()
+        assert len(digest) == 64
+        assert (
+            _key("src/cw/foo.py", summary)
+            == f"{fingerprint[0]}::{fingerprint[1]}::{digest}"
+        )
+
+    def test_summaries_that_normalize_alike_no_longer_share_a_key(self) -> None:
+        # Round 2 keyed on the LOSSY normalized form, so a finding could drift
+        # onto a different finding's record. The verbatim digest ends that.
+        first = _key("src/cw/foo.py", "3 call sites at line 10")
+        second = _key("src/cw/foo.py", "4 call sites at line 99")
+        assert first != second
+        assert split_disposition_key(first) == split_disposition_key(second)
+
+    def test_the_digest_is_verbatim_not_normalized_or_stripped(self) -> None:
+        assert _key(summary="Bug here") != _key(summary="Bug here ")
+        assert _key(summary="Bug here") != _key(summary="bug here")
+
+    def test_a_lone_surrogate_in_the_summary_does_not_raise(self) -> None:
+        # The reader recomputes the key from a hand-pasteable JSON string, and
+        # json.loads accepts a lone surrogate escape.
+        assert _key(summary="Bug \ud800 here").endswith(
+            hashlib.sha256(
+                "Bug \ud800 here".encode("utf-8", errors="surrogatepass")
+            ).hexdigest()
         )
 
     def test_no_diff_anchor_file_is_never_keyed(self) -> None:
         assert _disposition_key("N/A", "Nothing to anchor on") is None
 
     def test_split_round_trips_a_key(self) -> None:
-        key = _disposition_key("src/cw/foo.py", "Bug here")
-        assert key is not None
-        assert split_disposition_key(key) == ("src/cw/foo.py", "bug here")
+        assert split_disposition_key(_key()) == ("src/cw/foo.py", "bug here")
+
+    def test_split_keeps_a_double_colon_inside_the_summary(self) -> None:
+        # The normalized summary may itself contain the separator, so the
+        # digest is recognised by its fixed shape, never by rpartition alone.
+        key = _key("src/cw/foo.py", "foo::bar Baz")
+        assert split_disposition_key(key) == ("src/cw/foo.py", "foo::bar baz")
+
+    @pytest.mark.parametrize(
+        "legacy",
+        [
+            "src/cw/foo.py::bug here",
+            "src/cw/foo.py::foo::bar",
+            f"src/cw/foo.py::bug here::{'a' * 63}",
+            f"src/cw/foo.py::bug here::{'A' * 64}",
+        ],
+    )
+    def test_split_treats_a_key_without_a_digest_as_digestless(
+        self, legacy: str
+    ) -> None:
+        file, _, rest = legacy.partition("::")
+        assert split_disposition_key(legacy) == (file, rest)
 
 
 # ---------------------------------------------------------------------------
@@ -161,16 +227,12 @@ class TestDispositionKey:
 
 class TestRenderParseFindingDispositionBlockRoundTrip:
     def test_round_trips_through_the_marker(self) -> None:
-        key = _disposition_key("src/cw/foo.py", "Bug here")
-        assert key is not None
-        ledger = {key: _entry()}
+        ledger = {_key(): _entry()}
         rendered = render_finding_disposition_block(ledger)
-        assert parse_finding_disposition_block([rendered]) == ledger
+        assert parse_finding_disposition_block([rendered]) == (ledger, [])
 
     def test_embeds_its_own_header(self) -> None:
-        key = _disposition_key("src/cw/foo.py", "Bug here")
-        assert key is not None
-        rendered = render_finding_disposition_block({key: _entry()})
+        rendered = render_finding_disposition_block({_key(): _entry()})
         assert rendered.startswith("## Review Finding Dispositions")
 
     def test_empty_ledger_renders_nothing(self) -> None:
@@ -181,11 +243,10 @@ class TestRenderParseFindingDispositionBlockRoundTrip:
             "<!-- REVIEW-FINDING-DISPOSITIONS\n{not json\n"
             "REVIEW-FINDING-DISPOSITIONS -->"
         )
-        assert parse_finding_disposition_block([body]) == {}
+        assert parse_finding_disposition_block([body]) == ({}, [])
 
     def test_malformed_entry_is_skipped_without_discarding_siblings(self) -> None:
-        key = _disposition_key("src/cw/foo.py", "Bug here")
-        assert key is not None
+        key = _key()
         payload = {
             "schema_version": 1,
             "dispositions": {
@@ -198,14 +259,14 @@ class TestRenderParseFindingDispositionBlockRoundTrip:
             f"{json.dumps(payload)}\n"
             "REVIEW-FINDING-DISPOSITIONS -->"
         )
-        assert parse_finding_disposition_block([body]) == {key: _entry()}
+        assert parse_finding_disposition_block([body]) == ({key: _entry()}, [])
 
     def test_non_object_payload_degrades_to_empty(self) -> None:
         body = (
             "<!-- REVIEW-FINDING-DISPOSITIONS\n[1, 2, 3]\n"
             "REVIEW-FINDING-DISPOSITIONS -->"
         )
-        assert parse_finding_disposition_block([body]) == {}
+        assert parse_finding_disposition_block([body]) == ({}, [])
 
     def test_non_object_dispositions_value_degrades_to_empty(self) -> None:
         body = (
@@ -213,7 +274,7 @@ class TestRenderParseFindingDispositionBlockRoundTrip:
             '{"schema_version": 1, "dispositions": ["not", "a", "map"]}\n'
             "REVIEW-FINDING-DISPOSITIONS -->"
         )
-        assert parse_finding_disposition_block([body]) == {}
+        assert parse_finding_disposition_block([body]) == ({}, [])
 
     def test_missing_dispositions_key_degrades_to_empty(self) -> None:
         body = (
@@ -221,28 +282,67 @@ class TestRenderParseFindingDispositionBlockRoundTrip:
             '{"schema_version": 1}\n'
             "REVIEW-FINDING-DISPOSITIONS -->"
         )
-        assert parse_finding_disposition_block([body]) == {}
+        assert parse_finding_disposition_block([body]) == ({}, [])
 
     def test_missing_marker_yields_empty(self) -> None:
-        assert parse_finding_disposition_block(["just prose", ""]) == {}
+        assert parse_finding_disposition_block(["just prose", ""]) == ({}, [])
 
     def test_unions_across_comments_newest_recorded_at_wins(self) -> None:
-        key_a = _disposition_key("src/cw/foo.py", "Bug here")
-        key_b = _disposition_key("src/cw/bar.py", "Other bug")
-        assert key_a is not None
-        assert key_b is not None
+        key_a = _key("src/cw/foo.py", "Bug here")
+        key_b = _key("src/cw/bar.py", "Other bug")
         older = render_finding_disposition_block(
-            {key_a: _entry(recorded_at="2026-08-01T00:00:00Z", rationale="old")}
+            {
+                key_a: _entry(recorded_at="2026-08-01T00:00:00Z", rationale="old"),
+            }
         )
         newer = render_finding_disposition_block(
             {
                 key_a: _entry(recorded_at="2026-08-15T00:00:00Z", rationale="new"),
-                key_b: _entry(outcome="ACCEPTED", rationale="accepted"),
+                key_b: _entry(
+                    outcome="ACCEPTED", rationale="accepted", summary="Other bug"
+                ),
             }
         )
-        parsed = parse_finding_disposition_block([older, newer])
+        parsed, refused = parse_finding_disposition_block([older, newer])
         assert parsed[key_a].rationale == "new"
         assert parsed[key_b].outcome == "ACCEPTED"
+        assert refused == []
+
+    def test_an_invalid_record_is_reported_and_never_returned(self) -> None:
+        # Validate first, write second: the parse result is what reaches the
+        # ledger, so a refused record must not be in it.
+        bad_key = _key("src/cw/bar.py", "Other bug")
+        rendered = render_finding_disposition_block(
+            {_key(): _entry(), bad_key: _entry(actor="", summary="Other bug")}
+        )
+        parsed, refused = parse_finding_disposition_block([rendered])
+        assert list(parsed) == [_key()]
+        assert refused == [RefusedDisposition(key=bad_key, missing=["actor"])]
+
+    def test_a_later_invalid_comment_does_not_displace_an_earlier_valid_one(
+        self,
+    ) -> None:
+        # The same eviction path as merge_finding_dispositions, one hop
+        # earlier: two comments on ONE thread carrying the same key.
+        key = _key()
+        valid = render_finding_disposition_block(
+            {key: _entry(rationale="the settled one")}
+        )
+        hijack = render_finding_disposition_block(
+            {
+                key: _entry(
+                    actor="", rationale="hijack", recorded_at="2099-01-01T00:00:00Z"
+                )
+            }
+        )
+        parsed, refused = parse_finding_disposition_block([valid, hijack])
+        assert parsed[key].rationale == "the settled one"
+        assert refused == [RefusedDisposition(key=key, missing=["actor"])]
+
+    def test_a_refused_key_is_reported_once_however_often_it_is_posted(self) -> None:
+        bad = render_finding_disposition_block({_key(): _entry(actor="")})
+        _, refused = parse_finding_disposition_block([bad, bad])
+        assert [r.key for r in refused] == [_key()]
 
 
 # ---------------------------------------------------------------------------
@@ -253,35 +353,149 @@ class TestRenderParseFindingDispositionBlockRoundTrip:
 class TestMergeFindingDispositions:
     def test_adds_new_entries_to_an_empty_ledger(self) -> None:
         entry = _entry()
-        assert merge_finding_dispositions({}, {"k": entry}) == {"k": entry}
+        assert merge_finding_dispositions({}, {_key(): entry}) == {_key(): entry}
 
     def test_newest_recorded_at_wins_on_a_duplicate_key(self) -> None:
         old = _entry(recorded_at="2026-08-01T00:00:00Z", rationale="old")
         new = _entry(recorded_at="2026-08-15T00:00:00Z", rationale="new")
+        key = _key()
         assert (
-            merge_finding_dispositions({"k": old}, {"k": new})["k"].rationale == "new"
+            merge_finding_dispositions({key: old}, {key: new})[key].rationale == "new"
         )
 
     def test_an_older_parsed_entry_does_not_overwrite_a_newer_stored_one(self) -> None:
         old = _entry(recorded_at="2026-08-01T00:00:00Z", rationale="old")
         new = _entry(recorded_at="2026-08-15T00:00:00Z", rationale="new")
-        merged = merge_finding_dispositions({"k": new}, {"k": old})
-        assert merged["k"].rationale == "new"
+        key = _key()
+        merged = merge_finding_dispositions({key: new}, {key: old})
+        assert merged[key].rationale == "new"
 
     def test_existing_entry_absent_from_the_parsed_set_is_preserved(self) -> None:
         # Forward-only (R3): the ledger is additive and durable. A pass whose
         # comment thread no longer carries the marker must not forget it.
         kept = _entry(rationale="settled long ago")
-        merged = merge_finding_dispositions({"kept": kept}, {"fresh": _entry()})
-        assert merged["kept"] == kept
-        assert set(merged) == {"kept", "fresh"}
+        kept_key = _key("src/cw/kept.py", "Bug here")
+        fresh_key = _key("src/cw/fresh.py", "Bug here")
+        merged = merge_finding_dispositions({kept_key: kept}, {fresh_key: _entry()})
+        assert merged[kept_key] == kept
+        assert set(merged) == {kept_key, fresh_key}
 
     def test_does_not_mutate_either_input(self) -> None:
-        existing = {"k": _entry(rationale="old")}
-        parsed = {"k": _entry(recorded_at="2026-09-01T00:00:00Z", rationale="new")}
+        key = _key()
+        existing = {key: _entry(rationale="old")}
+        parsed = {key: _entry(recorded_at="2026-09-01T00:00:00Z", rationale="new")}
         merge_finding_dispositions(existing, parsed)
-        assert existing["k"].rationale == "old"
-        assert set(parsed) == {"k"}
+        assert existing[key].rationale == "old"
+        assert set(parsed) == {key}
+
+
+class TestInvalidRecordNeverEvictsAValidEntry:
+    """Validate first, write second (#2210 round 3, MUST_FIX).
+
+    Round 2 made the READER ignore an under-provenanced record for suppression.
+    That is not enough if the same record can still REPLACE a valid entry on
+    write: a pasted or malformed block would destroy the provenance of a
+    legitimately settled finding on the ledger that decides what stays
+    suppressed. The invariant lives at the one write chokepoint.
+    """
+
+    def test_an_invalid_record_with_a_later_recorded_at_does_not_evict(self) -> None:
+        # The real eviction path: `>=` on recorded_at let ANY later record win.
+        key = _key()
+        valid = _entry(rationale="the settled one")
+        hijack = _entry(
+            actor="", rationale="hijack", recorded_at="2099-01-01T00:00:00Z"
+        )
+        merged = merge_finding_dispositions({key: valid}, {key: hijack})
+        assert merged == {key: valid}
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"actor": ""},
+            {"reviewed_sha": ""},
+            {"rationale": "  "},
+            {"summary": ""},
+            {"recorded_at": "not a timestamp"},
+            {"summary": "A different finding entirely"},
+        ],
+    )
+    def test_every_provenance_gap_is_kept_out_of_the_ledger(
+        self, overrides: dict[str, object]
+    ) -> None:
+        key = _key()
+        valid = _entry()
+        merged = merge_finding_dispositions(
+            {key: valid},
+            {key: _entry(**{"recorded_at": "2099-01-01T00:00:00Z", **overrides})},
+        )
+        assert merged == {key: valid}
+
+    def test_an_invalid_record_for_an_unknown_key_is_not_added(self) -> None:
+        merged = merge_finding_dispositions({}, {_key(): _entry(actor="")})
+        assert merged == {}
+
+    def test_a_digestless_legacy_key_is_not_added(self) -> None:
+        merged = merge_finding_dispositions({}, {"src/cw/foo.py::bug here": _entry()})
+        assert merged == {}
+
+    def test_the_valid_entry_still_suppresses_after_a_rejected_overwrite(
+        self,
+    ) -> None:
+        finding = _make_finding(severity="MUST_FIX")
+        key = _key(finding.file, finding.summary)
+        existing = _ledger(finding, rationale="the settled one")
+        hijack = {
+            key: _entry(
+                outcome="ACCEPTED",
+                actor="",
+                rationale="hijack",
+                recorded_at="2099-01-01T00:00:00Z",
+                summary=finding.summary,
+            )
+        }
+        merged = merge_finding_dispositions(existing, hijack)
+
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)), merged, ticket_id=_TICKET
+        )
+
+        assert result.blocking is False
+        assert result.accepted[0].disposition == "rejected"
+        assert "the settled one" in result.accepted[0].disposition_detail
+
+    def test_a_valid_newer_replacement_is_applied(self) -> None:
+        key = _key()
+        older = _entry(recorded_at="2026-01-01T00:00:00Z", rationale="older")
+        newer = _entry(recorded_at="2026-09-01T00:00:00Z", rationale="newer")
+        assert merge_finding_dispositions({key: older}, {key: newer}) == {key: newer}
+
+    def test_a_valid_entry_replaces_an_invalid_one_already_in_the_ledger(
+        self,
+    ) -> None:
+        # Legacy history may hold an under-provenanced row for this key. It
+        # applies nothing, so a valid record for the same key heals it
+        # whatever the two timestamps say.
+        key = _key()
+        stale = _entry(actor="", recorded_at="2099-01-01T00:00:00Z")
+        healed = _entry(rationale="healed", recorded_at="2026-01-01T00:00:00Z")
+        assert merge_finding_dispositions({key: stale}, {key: healed}) == {key: healed}
+
+    def test_entries_already_in_the_ledger_pass_through_untouched(self) -> None:
+        # Legacy history is the reader's to keep refusing and reporting; the
+        # writer neither drops nor rewrites it.
+        legacy = {"src/cw/foo.py::bug here": _entry(actor="")}
+        merged = merge_finding_dispositions(legacy, {_key("src/cw/bar.py"): _entry()})
+        assert merged["src/cw/foo.py::bug here"] == legacy["src/cw/foo.py::bug here"]
+        assert len(merged) == 2
+
+    def test_neither_argument_is_mutated_by_a_rejected_write(self) -> None:
+        key = _key()
+        existing = {key: _entry(rationale="the settled one")}
+        parsed = {key: _entry(actor="", rationale="hijack")}
+        merge_finding_dispositions(existing, parsed)
+        assert existing[key].rationale == "the settled one"
+        assert parsed[key].rationale == "hijack"
 
 
 # ---------------------------------------------------------------------------
@@ -1018,7 +1232,24 @@ class TestBuildFindingDispositionLedger:
             [("src/cw/foo.py", "Bug here", _entry())]
         )
         rendered = render_finding_disposition_block(ledger)
-        assert parse_finding_disposition_block([rendered]) == ledger
+        assert parse_finding_disposition_block([rendered]) == (ledger, [])
+
+    def test_a_minted_record_carries_the_digest_its_key_binds(self) -> None:
+        # The settle -> marker -> reader round trip must keep the binding: the
+        # minted record's key ends in the digest of the very summary it stores,
+        # and it survives the reader's provenance check (so it is applied).
+        ledger = build_finding_disposition_ledger(
+            [("src/cw/foo.py", "Bug here", _entry())]
+        )
+        ((key, entry),) = ledger.items()
+        assert key.endswith(hashlib.sha256(entry.summary.encode()).hexdigest())
+        enforceable, refused = partition_enforceable_dispositions(
+            parse_finding_disposition_block([render_finding_disposition_block(ledger)])[
+                0
+            ]
+        )
+        assert enforceable == ledger
+        assert refused == []
 
 
 # ---------------------------------------------------------------------------
@@ -1174,6 +1405,310 @@ class TestReaderEnforcedProvenance:
 
         assert list(enforceable) == [_disposition_key(good.file, good.summary)]
         assert [r.missing for r in refused] == [["actor", "reviewed_sha"]]
+
+
+# ---------------------------------------------------------------------------
+# The key binds the verbatim summary (#2210 round 3)
+# ---------------------------------------------------------------------------
+
+#: Two findings the normalizer cannot tell apart ("at line N" is stripped) whose
+#: verbatim text differs, and whose claim tokens clear the claim tier's anchored
+#: floor: the pair that USED to share one ledger key.
+_SETTLED_WORDING = "`foo_bar` drops the follow-up task at line 10"
+_DRIFTED_WORDING = "`foo_bar` drops the follow-up task at line 99"
+
+
+class TestKeyBindsTheVerbatimSummary:
+    """A record may only ever apply to the finding it was settled for.
+
+    The round-2 key held only the LOSSY normalized summary, so every rewording
+    that normalised alike shared one record and a finding could drift onto a
+    DIFFERENT finding's suppression. The verbatim digest closes that.
+    """
+
+    def test_two_findings_differing_only_in_summary_do_not_share_a_record(
+        self,
+    ) -> None:
+        settled = _make_finding(severity="MUST_FIX", summary=_SETTLED_WORDING)
+        drifted = _make_finding(severity="MUST_FIX", summary=_DRIFTED_WORDING)
+        assert split_disposition_key(_key(settled.file, settled.summary)) == (
+            split_disposition_key(_key(drifted.file, drifted.summary))
+        )
+        verdict = _verdict(_accepted(drifted))
+
+        result = suppress_adjudicated_findings(
+            verdict, _ledger(settled), ticket_id=_TICKET
+        )
+
+        assert result is verdict
+        assert result.blocking is True
+        assert not read_events(
+            event_types=[OrchestratorEventType.REVIEW_FINDING_DISPOSITION_SUPPRESSED]
+        )
+
+    def test_identical_summaries_do_share_a_record(self) -> None:
+        settled = _make_finding(severity="MUST_FIX", summary=_SETTLED_WORDING)
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(settled)), _ledger(settled), ticket_id=_TICKET
+        )
+        assert result.blocking is False
+
+    def test_a_same_normalized_different_verbatim_finding_falls_to_the_claim_tier(
+        self,
+    ) -> None:
+        # Gate off: shadowed, never applied. The exact tier cannot see it.
+        settled = _make_finding(severity="MUST_FIX", summary=_SETTLED_WORDING)
+        drifted = _make_finding(severity="MUST_FIX", summary=_DRIFTED_WORDING)
+        verdict = _verdict(_accepted(drifted))
+
+        result = suppress_adjudicated_findings(
+            verdict, _ledger(settled), ticket_id=_TICKET, reviewed_sha="abc1234"
+        )
+
+        assert result is verdict
+        shadowed = read_events(
+            event_types=[OrchestratorEventType.REVIEW_FINDING_CLAIM_SHADOWED]
+        )
+        assert len(shadowed) == 1
+        assert shadowed[0].payload["matched_key"] == _key(settled.file, settled.summary)
+
+    def test_the_claim_tier_is_the_only_path_that_applies_it_and_says_so(
+        self,
+    ) -> None:
+        settled = _make_finding(severity="MUST_FIX", summary=_SETTLED_WORDING)
+        drifted = _make_finding(severity="MUST_FIX", summary=_DRIFTED_WORDING)
+
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(drifted)),
+            _ledger(settled),
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+
+        assert result.blocking is False
+        assert "claim similarity" in result.accepted[0].disposition_detail
+        suppressed = read_events(
+            event_types=[OrchestratorEventType.REVIEW_FINDING_DISPOSITION_SUPPRESSED]
+        )
+        assert [e.payload["match_kind"] for e in suppressed] == ["claim"]
+
+    def test_the_exact_tier_accepted_veto_still_holds_for_a_byte_identical_twin(
+        self,
+    ) -> None:
+        settled = _make_finding(severity="MUST_FIX", summary=_SETTLED_WORDING)
+        drifted = _make_finding(severity="MUST_FIX", summary=_DRIFTED_WORDING)
+        ledger = {
+            **_ledger(drifted, outcome="ACCEPTED"),
+            **_ledger(settled),
+        }
+        verdict = _verdict(_accepted(drifted))
+
+        result = suppress_adjudicated_findings(
+            verdict, ledger, ticket_id=_TICKET, claim_tier_enabled=True
+        )
+
+        assert result is verdict
+
+    def test_a_record_whose_summary_is_not_the_one_its_key_was_minted_from_is_refused(
+        self,
+    ) -> None:
+        # The key says "Bug here"; the payload says something else entirely.
+        finding = _make_finding(severity="MUST_FIX")
+        ledger = _ledger(finding, summary="A different finding altogether")
+
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)), ledger, ticket_id=_TICKET
+        )
+
+        assert result.blocking is True
+        assert [r.missing for r in result.refused_dispositions] == [["identity"]]
+
+    def test_a_key_whose_digest_belongs_to_another_summary_is_refused(self) -> None:
+        finding = _make_finding(severity="MUST_FIX")
+        other_digest = _key(finding.file, "Some other summary").rsplit("::", 1)[1]
+        forged = {f"{finding.file}::bug here::{other_digest}": _entry()}
+
+        _, refused = partition_enforceable_dispositions(forged)
+
+        assert [r.missing for r in refused] == [["identity"]]
+
+    def test_a_digestless_legacy_key_is_refused_as_an_identity_gap(self) -> None:
+        # Every record minted before round 3 has this shape. It must be
+        # re-settled with `cw review settle`; it is never silently honoured.
+        finding = _make_finding(severity="MUST_FIX")
+        fingerprint = fingerprint_v1(finding.file, finding.summary)
+        assert fingerprint is not None
+        legacy = {"::".join(fingerprint): _entry()}
+
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)), legacy, ticket_id=_TICKET
+        )
+
+        assert result.blocking is True
+        assert [r.missing for r in result.refused_dispositions] == [["identity"]]
+
+    def test_a_blank_summary_reports_the_summary_gap_alone(self) -> None:
+        # The binding cannot be checked without a summary, and "summary" is
+        # already the gap that names it: one problem, one entry.
+        finding = _make_finding(severity="MUST_FIX")
+        _, refused = partition_enforceable_dispositions(_ledger(finding, summary=""))
+        assert [r.missing for r in refused] == [["summary"]]
+
+
+# ---------------------------------------------------------------------------
+# Refusals from the write path reach the verdict, once (#2210 round 3)
+# ---------------------------------------------------------------------------
+
+
+class TestRefusedRecordsFromTheWritePath:
+    def _refused(self, finding: Finding) -> RefusedDisposition:
+        return RefusedDisposition(
+            key=_key(finding.file, finding.summary), missing=["actor"]
+        )
+
+    def test_records_refused_at_parse_time_are_stamped_on_the_verdict(self) -> None:
+        finding = _make_finding(severity="MUST_FIX")
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            {},
+            ticket_id=_TICKET,
+            refused=[self._refused(finding)],
+        )
+        assert result.refused_dispositions == [self._refused(finding)]
+
+    def test_they_are_merged_with_refusals_from_legacy_ledger_rows(self) -> None:
+        finding = _make_finding(severity="MUST_FIX")
+        legacy_key = "src/cw/old.py::old bug"
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            {legacy_key: _entry(summary="old bug")},
+            ticket_id=_TICKET,
+            refused=[self._refused(finding)],
+        )
+        assert sorted(r.key for r in result.refused_dispositions) == sorted(
+            [legacy_key, self._refused(finding).key]
+        )
+
+    def test_a_record_refused_twice_is_reported_once_and_warned_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The same key can be refused at parse time AND sit as a legacy row in
+        # the durable ledger. One pass must not WARN for it twice: the parse
+        # side already logged, so only the ledger-derived remainder logs here.
+        finding = _make_finding(severity="MUST_FIX")
+        legacy = {self._refused(finding).key: _entry(actor="")}
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            result = suppress_adjudicated_findings(
+                _verdict(_accepted(finding)),
+                legacy,
+                ticket_id=_TICKET,
+                refused=[self._refused(finding)],
+            )
+        assert [r.key for r in result.refused_dispositions] == [
+            self._refused(finding).key
+        ]
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+    def test_log_refused_dispositions_names_ticket_key_and_gaps_once_each(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        refused = [
+            RefusedDisposition(key="k1", missing=["actor", "recorded_at"]),
+            RefusedDisposition(key="k2", missing=["identity"]),
+        ]
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            log_refused_dispositions(refused, _TICKET)
+        messages = [r.getMessage() for r in caplog.records]
+        assert len(messages) == 2
+        assert all(_TICKET in m for m in messages)
+        assert "key=k1" in messages[0]
+        assert "actor, recorded_at" in messages[0]
+        assert "NOT" in messages[0]
+
+    def test_refusals_are_reported_in_key_order(self) -> None:
+        finding = _make_finding(severity="MUST_FIX")
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            {"z::legacy": _entry(), "a::legacy": _entry()},
+            ticket_id=_TICKET,
+            refused=[RefusedDisposition(key="m::parsed", missing=["actor"])],
+        )
+        assert [r.key for r in result.refused_dispositions] == [
+            "a::legacy",
+            "m::parsed",
+            "z::legacy",
+        ]
+
+    def test_nothing_refused_leaves_the_verdict_untouched(self) -> None:
+        verdict = _verdict(_accepted(_make_finding(severity="MUST_FIX")))
+        assert (
+            suppress_adjudicated_findings(verdict, {}, ticket_id=_TICKET, refused=[])
+            is verdict
+        )
+
+
+class TestBuildLedgerRefusesAnInvalidEntry:
+    """``cw review settle`` always supplies full provenance; if an entry were
+    refused it must raise, exactly like an un-keyable file, never drop it."""
+
+    def test_an_entry_with_a_provenance_gap_raises_naming_the_gaps(self) -> None:
+        with pytest.raises(ValueError, match="actor"):
+            build_finding_disposition_ledger(
+                [("src/cw/foo.py", "Bug here", _entry(actor=""))]
+            )
+
+    def test_an_entry_whose_summary_is_not_the_keyed_summary_raises(self) -> None:
+        with pytest.raises(ValueError, match="identity"):
+            build_finding_disposition_ledger(
+                [("src/cw/foo.py", "Bug here", _entry(summary="Something else"))]
+            )
+
+
+def _sentinel_literals_outside_docstrings(tree: ast.AST) -> list[int]:
+    """Line numbers of string literals naming the sentinel, docstrings aside."""
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            first = node.body[0] if node.body else None
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                docstrings.add(id(first.value))
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and DISPOSITION_SENTINEL in node.value
+        and id(node) not in docstrings
+    ]
+
+
+class TestDispositionSentinelConstant:
+    def test_the_sentinel_is_the_wire_grammar_the_marker_uses(self) -> None:
+        rendered = render_finding_disposition_block({_key(): _entry()})
+        assert f"<!-- {DISPOSITION_SENTINEL}\n" in rendered
+        assert rendered.rstrip().endswith(f"{DISPOSITION_SENTINEL} -->")
+
+    def test_no_other_module_spells_the_sentinel_as_a_string_literal(self) -> None:
+        """#2210 round 3: a parser keys on this string, so it has ONE spelling.
+
+        The reviewer prompt and the blocking comment both named it inline, a
+        second copy the parser would never notice drifting. Asserts on the
+        SOURCE — behaviour is identical either way, which is the problem — in
+        the style of ``test_cli_hook_io``'s constant-drift guard. Docstrings and
+        comments naming it in prose are fine; a literal that reaches a prompt
+        or a comment body is not, so the only one left is the definition.
+        """
+        offenders: dict[str, list[int]] = {}
+        for path in sorted(Path(cw.__file__).parent.rglob("*.py")):
+            lines = _sentinel_literals_outside_docstrings(
+                ast.parse(path.read_text(encoding="utf-8"))
+            )
+            if lines:
+                offenders[path.name] = lines
+        assert list(offenders) == ["review_finding_dispositions.py"]
+        assert len(offenders["review_finding_dispositions.py"]) == 1
 
 
 # ---------------------------------------------------------------------------

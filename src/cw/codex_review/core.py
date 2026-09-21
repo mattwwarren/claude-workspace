@@ -51,7 +51,9 @@ def run_review(
     function, which applies them before deciding whether the pass blocks. Its
     ``finding_dispositions`` (#1838) ride the same hop, for the same reason —
     the prepared pass already merged the durable queue-row ledger with the
-    ticket thread's marker, so this only has to thread the result.
+    ticket thread's marker, so this only has to thread the result — along with
+    the marker records that merge refused (#2210 round 3), which are not in the
+    ledger and so must ride beside it to reach the review output.
 
     ``claim_tier_enabled`` (#2210) is the lane-resolved gate for the ledger's
     fuzzy claim-match tier, forwarded to the same function. Defaulted False so
@@ -91,6 +93,7 @@ def run_review(
         agent_spec_status=prepared.agent_spec_status,
         voided_findings=prepared.voided_findings,
         finding_dispositions=prepared.finding_dispositions,
+        refused_dispositions=prepared.refused_dispositions,
         claim_tier_enabled=claim_tier_enabled,
         pre_validation_rejected=pre_validation_rejected,
     )

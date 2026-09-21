@@ -44,11 +44,13 @@ from cw.codex_review._context import (
     _render_adjudicated_findings_block,
     _select_output_instructions,
 )
+from cw.codex_review._context._prompt_text import _ADJUDICATED_INSTRUCTIONS
 from cw.codex_runner import FakeCodexRunner
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, SessionOrigin
 from cw.review_adjudication import render_voided_findings_block
 from cw.review_finding_dispositions import (
+    DISPOSITION_SENTINEL,
     SETTLE_SECTION_HEADING,
     FindingDisposition,
     _disposition_key,
@@ -2178,7 +2180,7 @@ class TestLoadFindingDispositions:
         monkeypatch.setattr(
             "cw.codex_review._context.core.fetch_issue_comments", _fail_if_called
         )
-        assert _load_finding_dispositions(tmp_path, "T-1") == {}
+        assert _load_finding_dispositions(tmp_path, "T-1") == ({}, [])
 
     def test_returns_empty_on_fetch_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2187,7 +2189,10 @@ class TestLoadFindingDispositions:
             "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: None,
         )
-        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == {}
+        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == (
+            {},
+            [],
+        )
 
     def test_returns_empty_when_no_comment_carries_a_sentinel(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2196,7 +2201,10 @@ class TestLoadFindingDispositions:
             "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [{"author": {"login": "a"}, "body": "just prose"}],
         )
-        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == {}
+        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == (
+            {},
+            [],
+        )
 
     def test_fetches_fresh_and_parses_the_sentinel_out_of_the_thread(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2213,7 +2221,29 @@ class TestLoadFindingDispositions:
                 },
             ],
         )
-        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == ledger
+        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == (
+            ledger,
+            [],
+        )
+
+    def test_a_record_failing_provenance_is_reported_not_returned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad = _disposition_ledger(actor="")
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "b"},
+                    "body": render_finding_disposition_block(bad),
+                }
+            ],
+        )
+        enforceable, refused = _load_finding_dispositions(
+            self._github_repo(tmp_path), "T-1"
+        )
+        assert enforceable == {}
+        assert [(r.key, r.missing) for r in refused] == [(next(iter(bad)), ["actor"])]
 
 
 class TestRenderAdjudicatedFindingsBlock:
@@ -2239,6 +2269,17 @@ class TestRenderAdjudicatedFindingsBlock:
         )
         assert block is not None
         assert "ACCEPTED" in block
+
+    def test_the_hand_authored_block_warning_is_built_from_the_shared_sentinel(
+        self,
+    ) -> None:
+        # #2210 round 3: the prompt names the marker through the constant its
+        # parser owns, never a second spelling — asserted against the imported
+        # constant so it moves with it instead of pinning a copy of the text.
+        assert f"`{DISPOSITION_SENTINEL}` block yourself" in _ADJUDICATED_INSTRUCTIONS
+        block = _render_adjudicated_findings_block(_disposition_ledger())
+        assert block is not None
+        assert DISPOSITION_SENTINEL in block
 
     def test_block_states_the_contest_protocol_and_inline_rationale(self) -> None:
         # #2210: the intro now names the typed escape hatch and how an inline
@@ -2447,3 +2488,118 @@ class TestPrepareReviewPassFindingDispositions:
                 "dispositions": fresh,
             }
         ]
+
+    def _thread(
+        self, monkeypatch: pytest.MonkeyPatch, *ledgers: dict[str, FindingDisposition]
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "op"},
+                    "body": render_finding_disposition_block(ledger),
+                }
+                for ledger in ledgers
+            ],
+        )
+
+    def test_an_invalid_marker_record_never_evicts_the_stored_entry(
+        self,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Validate first, write second (#2210 round 3), through the real seam.
+
+        The marker is the hand-pasteable surface. A record for a key the
+        durable ledger already settled — with a LATER ``recorded_at`` that
+        would win a newest-wins merge — must not replace it, must not be
+        persisted onto the running row, must be logged once at WARNING naming
+        the ticket and key, and must come back on the pass inputs so the
+        verdict can report it.
+        """
+        repo = self._repo(make_git_repo, "wt-1838-evict")
+        stored = _disposition_ledger(rationale="the settled one")
+        key = next(iter(stored))
+        hijack = _disposition_ledger(
+            actor="", rationale="hijack", recorded_at="2099-01-01T00:00:00Z"
+        )
+        self._thread(monkeypatch, hijack)
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **kwargs: calls.append(kwargs),
+        )
+        with caplog.at_level(logging.WARNING, logger="cw.review_finding_dispositions"):
+            prepared = _prepare_review_pass(
+                _make_ticket_task(
+                    ticket_id="T-1", client="test", finding_dispositions=stored
+                ),
+                repo,
+                "main",
+                runner=FakeCodexRunner(),
+                session_id="s-1838-evict",
+            )
+
+        assert prepared.finding_dispositions == stored
+        assert [(r.key, r.missing) for r in prepared.refused_dispositions] == [
+            (key, ["actor"])
+        ]
+        assert calls == []
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and r.name == "cw.review_finding_dispositions"
+        ]
+        assert len(warnings) == 1
+        assert "T-1" in warnings[0]
+        assert key in warnings[0]
+
+    def test_only_the_enforceable_delta_is_persisted_from_a_mixed_thread(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-1838-mixed")
+        good = _disposition_ledger()
+        bad = _disposition_ledger(file="src/cw/bad.py", summary="Bad bug", actor="")
+        self._thread(monkeypatch, {**good, **bad})
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **kwargs: calls.append(kwargs),
+        )
+        prepared = _prepare_review_pass(
+            _make_ticket_task(ticket_id="T-1", client="test"),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1838-mixed",
+        )
+
+        assert prepared.finding_dispositions == good
+        assert [r.key for r in prepared.refused_dispositions] == list(bad)
+        assert [call["dispositions"] for call in calls] == [good]
+
+    def test_a_valid_newer_marker_record_still_replaces_the_stored_entry(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-1838-replace")
+        stored = _disposition_ledger(rationale="old")
+        newer = _disposition_ledger(rationale="new", recorded_at="2026-09-01T00:00:00Z")
+        self._thread(monkeypatch, newer)
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+        prepared = _prepare_review_pass(
+            _make_ticket_task(
+                ticket_id="T-1", client="test", finding_dispositions=stored
+            ),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1838-replace",
+        )
+
+        assert prepared.finding_dispositions == newer
+        assert prepared.refused_dispositions == []

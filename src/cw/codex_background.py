@@ -165,7 +165,10 @@ def _sync_finding_dispositions_to_running_task(
     :func:`~cw.review_finding_dispositions.merge_finding_dispositions` — so a
     second call with the same data is a no-op, and an entry the row already
     carries is never dropped because this pass's fetch did not see it (#1838
-    R3, forward-only).
+    R3, forward-only). That merge is also where an entry failing provenance is
+    refused (#2210 round 3): it never lands on the row and never replaces a
+    valid entry already there, whatever the caller passed. The caller hands
+    over only the enforceable delta and reports the refusals itself.
     """
     if not dispositions:
         return

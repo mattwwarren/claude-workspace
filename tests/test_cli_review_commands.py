@@ -7,6 +7,7 @@ for #2049 so the test modules mirror the ``src/cw/cli/review/`` package seams.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -1046,16 +1047,35 @@ class TestReviewSettle:
         )
 
     def _only_entry(self, output: str) -> FindingDisposition:
-        return next(iter(parse_finding_disposition_block([output]).values()))
+        return next(iter(parse_finding_disposition_block([output])[0].values()))
 
     def test_happy_path_renders_the_postable_marker(self, runner: CliRunner) -> None:
         result = self._invoke(runner, _settle_payload())
 
         assert result.exit_code == 0, result.output
         assert result.output.startswith("## Review Finding Dispositions")
-        ledger = parse_finding_disposition_block([result.output])
+        ledger, refused = parse_finding_disposition_block([result.output])
+        assert refused == []
         assert list(ledger) == [_disposition_key("src/cw/foo.py", "Bug here")]
         assert next(iter(ledger.values())).outcome == "REJECTED"
+
+    def test_the_minted_key_binds_the_verbatim_summary_digest(
+        self, runner: CliRunner
+    ) -> None:
+        """#2210 round 3: the settle -> reader round trip keeps the binding.
+
+        The key the command mints ends in the SHA-256 of the exact summary the
+        record stores, so the reader's provenance check accepts it (nothing is
+        refused) and a finding with any other wording cannot match it.
+        """
+        result = self._invoke(runner, _settle_payload())
+
+        assert result.exit_code == 0, result.output
+        ledger, refused = parse_finding_disposition_block([result.output])
+        assert refused == []
+        ((key, entry),) = ledger.items()
+        assert entry.summary == "Bug here"
+        assert key.endswith("::" + hashlib.sha256(b"Bug here").hexdigest())
 
     def test_out_writes_the_file_and_creates_parents(
         self, runner: CliRunner, tmp_path: Path
@@ -1064,7 +1084,9 @@ class TestReviewSettle:
         result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
 
         assert result.exit_code == 0, result.output
-        assert parse_finding_disposition_block([out_path.read_text(encoding="utf-8")])
+        assert parse_finding_disposition_block([out_path.read_text(encoding="utf-8")])[
+            0
+        ]
 
     @freeze_time("2026-09-20T12:00:00Z")
     def test_record_carries_actor_timestamp_identity_and_sha(
@@ -1295,7 +1317,8 @@ class TestReviewSettle:
         )
 
         assert result.exit_code == 0, result.output
-        ledger = parse_finding_disposition_block([result.output])
+        ledger, refused = parse_finding_disposition_block([result.output])
+        assert refused == []
         assert len(ledger) == 1
         assert next(iter(ledger.values())).rationale == "newer"
         assert len(read_events()) == 1
@@ -1394,7 +1417,8 @@ class TestReviewSettle:
 
         result = self._invoke(runner, payloads[0])
         assert result.exit_code == 0, result.output
-        ledger = parse_finding_disposition_block([result.output])
+        ledger, refused = parse_finding_disposition_block([result.output])
+        assert refused == []
         assert next(iter(ledger.values())).reviewed_sha == "sha"
 
         suppressed = suppress_adjudicated_findings(verdict, ledger, ticket_id="T-2210")

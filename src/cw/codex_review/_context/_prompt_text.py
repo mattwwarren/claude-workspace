@@ -8,10 +8,16 @@ inlined replacements for the agent specs' dangling ``.claude/docs`` references.
 
 Dependency-free by construction — nothing here reads a file or imports another
 ``_context`` submodule, so the prompt text and its regression locks cannot pick
-up a dependency on how any input happens to be loaded.
+up a dependency on how any input happens to be loaded. The one import is the
+disposition marker's sentinel constant (#2210 round 3): a string the ledger's
+parser keys on, so the prompt names it through the constant its owner exports
+rather than spelling it a second time. ``cw.review_finding_dispositions``
+imports nothing from ``cw`` at module scope, so this adds no cycle.
 """
 
 from __future__ import annotations
+
+from cw.review_finding_dispositions import DISPOSITION_SENTINEL
 
 # #1744: grounds reviewers in the repo's actual ruff opt-outs and complexity
 # thresholds so they stop raising MUST_FIX findings against rules the repo
@@ -153,7 +159,7 @@ _ADJUDICATED_INSTRUCTIONS = (
     "lines below repeat the first rule in short form; "
     '`contests_adjudication` is how you invoke their "unless the code at '
     'this location changed" exception. '
-    "Do not author a `REVIEW-FINDING-DISPOSITIONS` block yourself, in a "
+    f"Do not author a `{DISPOSITION_SENTINEL}` block yourself, in a "
     "comment or anywhere else: hand-authored disposition blocks are "
     "unsupported and are refused by the reader. `cw review settle`, run by an "
     "operator on their own machine, is the only supported producer, because "

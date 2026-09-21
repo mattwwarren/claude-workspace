@@ -37,6 +37,7 @@ from cw.codex_review._verdict._health import (
 )
 from cw.codex_review._verdict._render import (
     _REFUSED_DISPOSITION_HEADING,
+    _REFUSED_DISPOSITION_NOTE,
     _REFUSED_MAX_ROWS,
     _SETTLE_COMPACT_SUMMARY_MAX,
     _SETTLE_MAX_COMPACT_ROWS,
@@ -48,6 +49,7 @@ from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.models.enums import OrchestratorEventType
 from cw.review_finding_dispositions import (
+    DISPOSITION_SENTINEL,
     SETTLE_SECTION_HEADING,
     FindingDisposition,
     RefusedDisposition,
@@ -1690,6 +1692,17 @@ class TestRenderRefusedDispositions:
         assert "cw review settle" in body
         assert "unsupported" in body
 
+    def test_the_refusal_text_names_the_sentinel_through_the_shared_constant(
+        self,
+    ) -> None:
+        # #2210 round 3: compared against the imported constant, not a literal,
+        # so the assertion moves with the constant instead of freezing a copy.
+        assert f"`{DISPOSITION_SENTINEL}`" in _REFUSED_DISPOSITION_NOTE
+        key = _disposition_key("src/cw/foo.py", "Bug here")
+        assert key is not None
+        body = self._body(RefusedDisposition(key=key, missing=["actor"]))
+        assert DISPOSITION_SENTINEL in body
+
     def test_the_section_is_capped_with_a_counted_residue(self) -> None:
         refused = []
         for index in range(_REFUSED_MAX_ROWS + 3):
@@ -1737,7 +1750,23 @@ class TestRenderSettlePayloads:
         comment = self._comment(_make_finding(severity="MUST_FIX", summary=summary))
         assert _extract_settle_payloads(comment)[0]["entries"][0]["summary"] == summary
 
-    def test_findings_sharing_a_fingerprint_share_one_payload(self) -> None:
+    def test_byte_identical_findings_share_one_payload(self) -> None:
+        comment = self._comment(
+            _make_finding(severity="MUST_FIX", summary="Bug here"),
+            _make_finding(
+                severity="MUST_FIX",
+                summary="Bug here",
+                line_start=11,
+                line_end=11,
+                evidence="return 1",
+            ),
+        )
+        assert len(_extract_settle_payloads(comment)) == 1
+
+    def test_findings_that_only_normalize_alike_get_a_payload_each(self) -> None:
+        # #2210 round 3: the ledger key binds the VERBATIM summary, so these two
+        # are two records. One shared payload would leave the second finding
+        # with nothing to settle it by.
         comment = self._comment(
             _make_finding(severity="MUST_FIX", summary="3 call sites at line 10"),
             _make_finding(
@@ -1748,7 +1777,11 @@ class TestRenderSettlePayloads:
                 evidence="return 1",
             ),
         )
-        assert len(_extract_settle_payloads(comment)) == 1
+        payloads = _extract_settle_payloads(comment)
+        assert sorted(p["entries"][0]["summary"] for p in payloads) == [
+            "3 call sites at line 10",
+            "4 call sites at line 99",
+        ]
 
     def test_no_diff_anchor_finding_gets_no_payload(self) -> None:
         comment = self._comment(

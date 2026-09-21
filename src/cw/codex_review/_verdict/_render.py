@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, get_args
 
 from cw.review_debt import fingerprint_v1
 from cw.review_finding_dispositions import (
+    DISPOSITION_SENTINEL,
     SETTLE_SECTION_HEADING,
     split_disposition_key,
 )
@@ -148,8 +149,8 @@ _REFUSED_DISPOSITION_NOTE = (
     "These recorded dispositions were IGNORED, not applied. Each is missing "
     "provenance that `cw review settle` always records, and a suppression "
     "that cannot say who settled the finding, when, against what code and "
-    "why is not an audit record. Hand-authoring a "
-    "`REVIEW-FINDING-DISPOSITIONS` block is unsupported — `cw review settle` "
+    f"why is not an audit record. Hand-authoring a `{DISPOSITION_SENTINEL}` "
+    "block is unsupported — `cw review settle` "
     "is the only supported producer, because it is the only path that records "
     "provenance and refuses to run inside a dispatch worker. Re-settle each "
     "finding below with it and post the marker it renders."
@@ -713,16 +714,22 @@ def _settle_fence(body: str) -> str:
 
 
 def _settleable_findings(verdict: ReviewVerdict) -> list[Finding]:
-    """The blocking findings that can be keyed, one per fingerprint (#2210)."""
+    """The blocking findings that can be keyed, one per ledger key (#2210).
+
+    Deduplicated on the VERBATIM ``(file, summary)`` because that is what the
+    ledger key now binds (round 3): two findings whose summaries only
+    normalize alike are two records, and collapsing them here would leave the
+    second with no payload to settle it by.
+    """
     seen: set[tuple[str, str]] = set()
     keyable: list[Finding] = []
     for finding in verdict.must_fix:
-        fingerprint = fingerprint_v1(finding.file, finding.summary)
         # #1817's no-diff-anchor case: there is no path to key on, so this
         # finding gets no cross-round memory and no payload.
-        if fingerprint is None or fingerprint in seen:
+        identity = (finding.file, finding.summary)
+        if fingerprint_v1(*identity) is None or identity in seen:
             continue
-        seen.add(fingerprint)
+        seen.add(identity)
         keyable.append(finding)
     return keyable
 

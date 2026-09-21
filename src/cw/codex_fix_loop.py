@@ -849,6 +849,9 @@ def _rereview(
         # mid-loop. Re-merged every cycle for the same reason the voids are
         # re-fetched: an operator can settle a finding while the loop runs.
         finding_dispositions=prepared.finding_dispositions,
+        # #2210 round 3: marker records refused at parse time; not in the
+        # ledger above, so they ride beside it to reach the verdict.
+        refused_dispositions=prepared.refused_dispositions,
         # #2210: the lane-resolved claim-tier gate, forwarded unchanged.
         claim_tier_enabled=claim_tier_enabled,
         # #2029: this cycle's own parse-time rescues. Per-cycle, not carried

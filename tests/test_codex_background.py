@@ -47,7 +47,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
-from cw.review_finding_dispositions import FindingDisposition
+from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from tests.conftest import _make_daemon_session
 
 if TYPE_CHECKING:
@@ -845,13 +845,31 @@ def test_post_review_comment_logs_on_nonzero_returncode(
 
 
 def _disposition(**overrides: object) -> FindingDisposition:
+    """A record with the full provenance set the reader requires (#2210).
+
+    ``summary`` defaults to the one every ``_ledger_entry`` key below is minted
+    from, so the record's key binds to it.
+    """
     payload: dict[str, object] = {
         "outcome": "REJECTED",
         "rationale": "settled by the operator",
         "recorded_at": "2026-08-16T00:00:00Z",
+        "actor": "mattwwarren",
+        "reviewed_sha": "abc1234",
+        "summary": "Bug here",
     }
     payload.update(overrides)
     return FindingDisposition.model_validate(payload)
+
+
+def _ledger_entry(
+    file: str = "src/cw/foo.py", summary: str = "Bug here", **overrides: object
+) -> dict[str, FindingDisposition]:
+    """A one-entry ledger keyed through the real key function."""
+    key = _disposition_key(file, summary)
+    assert key is not None
+    overrides.setdefault("summary", summary)
+    return {key: _disposition(**overrides)}
 
 
 class TestSyncFindingDispositionsToRunningTask:
@@ -873,41 +891,67 @@ class TestSyncFindingDispositionsToRunningTask:
 
     def test_merges_entries_onto_the_matching_running_row(self) -> None:
         add_ticket(self._running())
+        fresh = _ledger_entry()
+        _sync_finding_dispositions_to_running_task(
+            client_name="test", ticket_id="T-1838", dispositions=fresh
+        )
+        stored = load_dev_queue().tasks[0]
+        assert stored.finding_dispositions == fresh
+
+    def test_merge_is_additive_and_idempotent(self) -> None:
+        old = _ledger_entry("src/cw/old.py", "Old bug")
+        add_ticket(self._running(finding_dispositions=old))
+        fresh = _ledger_entry()
+        _sync_finding_dispositions_to_running_task(
+            client_name="test", ticket_id="T-1838", dispositions=fresh
+        )
+        _sync_finding_dispositions_to_running_task(
+            client_name="test", ticket_id="T-1838", dispositions=fresh
+        )
+        stored = load_dev_queue().tasks[0]
+        assert stored.finding_dispositions == {**old, **fresh}
+
+    def test_an_invalid_record_never_replaces_a_valid_row_entry(self) -> None:
+        """Validate first, write second (#2210 round 3), at the persistence hop.
+
+        The dev-queue row is the DURABLE ledger. A record that fails provenance
+        — here one with a LATER ``recorded_at`` that would win a newest-wins
+        merge — must leave the valid entry already on the row exactly as it
+        was, even if a caller forgets to filter it out first.
+        """
+        settled = _ledger_entry(rationale="the settled one")
+        add_ticket(self._running(finding_dispositions=settled))
+        hijack = _ledger_entry(
+            actor="", rationale="hijack", recorded_at="2099-01-01T00:00:00Z"
+        )
+        _sync_finding_dispositions_to_running_task(
+            client_name="test", ticket_id="T-1838", dispositions=hijack
+        )
+        assert load_dev_queue().tasks[0].finding_dispositions == settled
+
+    def test_an_invalid_record_is_not_persisted_as_a_new_entry(self) -> None:
+        add_ticket(self._running())
         _sync_finding_dispositions_to_running_task(
             client_name="test",
             ticket_id="T-1838",
-            dispositions={"src/cw/foo.py::bug here": _disposition()},
+            dispositions=_ledger_entry(reviewed_sha=""),
         )
-        stored = load_dev_queue().tasks[0]
-        assert stored.finding_dispositions["src/cw/foo.py::bug here"].outcome == (
-            "REJECTED"
-        )
+        assert load_dev_queue().tasks[0].finding_dispositions == {}
 
-    def test_merge_is_additive_and_idempotent(self) -> None:
-        add_ticket(
-            self._running(
-                finding_dispositions={"src/cw/old.py::old bug": _disposition()}
-            )
-        )
-        fresh = {"src/cw/foo.py::bug here": _disposition()}
+    def test_a_valid_newer_record_replaces_the_row_entry(self) -> None:
+        add_ticket(self._running(finding_dispositions=_ledger_entry(rationale="old")))
+        newer = _ledger_entry(rationale="new", recorded_at="2026-09-01T00:00:00Z")
         _sync_finding_dispositions_to_running_task(
-            client_name="test", ticket_id="T-1838", dispositions=fresh
+            client_name="test", ticket_id="T-1838", dispositions=newer
         )
-        _sync_finding_dispositions_to_running_task(
-            client_name="test", ticket_id="T-1838", dispositions=fresh
-        )
-        stored = load_dev_queue().tasks[0]
-        assert set(stored.finding_dispositions) == {
-            "src/cw/old.py::old bug",
-            "src/cw/foo.py::bug here",
-        }
+        assert load_dev_queue().tasks[0].finding_dispositions == newer
 
     def test_no_matching_running_row_is_a_no_op(self) -> None:
         add_ticket(self._running(status=QueueItemStatus.PENDING))
         _sync_finding_dispositions_to_running_task(
             client_name="test",
             ticket_id="T-1838",
-            dispositions={"src/cw/foo.py::bug here": _disposition()},
+            dispositions=_ledger_entry(),
         )
         assert load_dev_queue().tasks[0].finding_dispositions == {}
 
