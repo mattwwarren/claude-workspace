@@ -638,12 +638,35 @@ def _ff_reused_worktree(
 ) -> None:
     """Fast-forward *wt_path* to *target* with ``merge --ff-only``, never raising.
 
+    First re-runs the FULL occupancy predicate (:func:`_reuse_occupancy_reason`:
+    expected branch, unsaved work, cw state, daemon roster), immediately before
+    the first mutating git call. The caller's occupancy gate ran before a
+    network fetch that can take a while, so a session or worker may have
+    started, or the tree been dirtied, in the meantime; if anything changed the
+    fast-forward is abandoned and the worktree used as-is. This narrows the
+    window but does not eliminate it: a session can still start between this
+    check and the merge. That remaining window is accepted because the only
+    alternative -- holding a lock across the network fetch (or across the
+    check-then-merge) -- is worse: it would stall every other claim behind a
+    slow remote.
+
     ``--ff-only`` cannot destroy work: it refuses (rc != 0, worktree untouched)
     when local uncommitted changes overlap files the merge must update, and
     carries non-overlapping local modifications through. A refusal is logged
     and the worktree is left exactly as it was. Submodules are synced after a
     successful fast-forward only, since the merge can move their pointers.
     """
+    changed = _reuse_occupancy_reason(client, branch, wt_path)
+    if changed is not None:
+        _log.debug(
+            "create_worktree: reused worktree occupied after the fetch; "
+            "fast-forward abandoned, using worktree as-is "
+            "(client=%s, path=%s): %s",
+            client.name,
+            wt_path,
+            changed,
+        )
+        return
     old_sha = _run_git("rev-parse", "HEAD", cwd=wt_path, check=False).stdout.strip()
     merge = _run_git("merge", "--ff-only", target, cwd=wt_path, check=False)
     if merge.returncode != 0:

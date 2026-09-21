@@ -2031,6 +2031,80 @@ class TestReuseOccupancyRosterAndPaths:
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert any("session state unreadable" in m for m in _debug_reasons(caplog))
 
+    @pytest.mark.parametrize(
+        ("change", "expected_reason"),
+        [
+            pytest.param("session", "live session", id="session-appeared"),
+            pytest.param("roster", "live daemon worker", id="worker-appeared"),
+            pytest.param("dirty", "unsaved work", id="tree-dirtied"),
+            pytest.param("branch", "dev/other", id="branch-switched"),
+        ],
+    )
+    def test_occupancy_change_after_fetch_aborts_before_the_merge(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        change: str,
+        expected_reason: str,
+    ) -> None:
+        """The occupancy gate runs before the (slow) fetch; the whole predicate
+        runs again immediately before ``merge --ff-only``. Anything that flips
+        in between -- a session or worker appearing, the tree being dirtied, a
+        branch switch -- aborts to use-as-is with HEAD untouched."""
+        client, wt, workspace, old_sha, new_sha = _seed_behind(tmp_path, make_git_repo)
+        assert old_sha != new_sha
+        real_fetch = fetch_feature_branch
+
+        def fetch_then_change(client: ClientConfig, branch_name: str) -> bool:
+            fetched_ok = real_fetch(client, branch_name)
+            if change == "session":
+                _seed_session(workspace, wt, SessionStatus.ACTIVE)
+            elif change == "roster":
+                _seed_roster(wt)
+            elif change == "dirty":
+                (wt / "scratch.txt").write_text("late edit\n", encoding="utf-8")
+            else:
+                git_in(wt, "checkout", "-b", "dev/other")
+            return fetched_ok
+
+        merges: list[tuple[str, ...]] = []
+
+        def spy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            if args[0] == "merge":
+                merges.append(args)
+            return _run_git(*args, cwd=cwd, check=check)
+
+        monkeypatch.setattr("cw.worktree.fetch_feature_branch", fetch_then_change)
+        monkeypatch.setattr("cw.worktree._run_git", spy)
+
+        result = _refresh_with_debug(client, caplog)
+
+        assert result == wt
+        assert merges == []
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert _cw_worktree_records(caplog, logging.WARNING) == []
+        assert any(
+            "occupied after the fetch" in m and str(wt) in m and expected_reason in m
+            for m in _debug_reasons(caplog)
+        )
+
+    def test_unchanged_occupancy_still_fast_forwards_after_recheck(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Control: the re-check must not veto a genuinely free worktree."""
+        client, wt, _workspace, _old, new_sha = _seed_behind(tmp_path, make_git_repo)
+
+        _refresh_with_debug(client, caplog)
+
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+
     def test_predicate_reports_unexpected_branch(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
     ) -> None:
