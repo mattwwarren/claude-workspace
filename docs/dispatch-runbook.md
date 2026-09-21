@@ -786,9 +786,12 @@ REVIEW-FINDING-DISPOSITIONS -->
 
 **The settle section is capped.** A pass with many MUST_FIX findings prints at
 most 10 payloads (and at most 12,000 characters of them); the rest are listed
-compactly under the payloads, by file and trimmed summary. Settle one of those
-by hand — the identity is its file and the verbatim summary from its MUST_FIX
-line in the same comment. A payload block is never cut in half, so anything you
+compactly under the payloads, by file and trimmed summary. Write a payload for
+one of those by hand and run `cw review settle` on it — the identity is its
+file and the verbatim summary from its MUST_FIX line in the same comment. A
+hand-written *payload* is fine; a hand-written *marker* is not, because only
+the command records the provenance the reader requires. A payload block is
+never cut in half, so anything you
 can copy out of the section is complete.
 
 - The key is `"<file>::<normalized summary>"` — the summary lowercased,

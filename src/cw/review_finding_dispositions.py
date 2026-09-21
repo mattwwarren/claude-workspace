@@ -178,7 +178,10 @@ class FindingDisposition(BaseModel):
     fills all three (and always stamps ``recorded_at`` from its own UTC clock —
     audit data is never operator-supplied); every one of them stays OPTIONAL
     and defaulted so a marker or a persisted queue row written before #2210
-    still loads unchanged, and so a hand-authored marker stays legal.
+    still loads unchanged. Round 2 withdrew the other half of that reasoning:
+    a hand-authored marker is no longer *legal* to act on — it still parses,
+    but the reader refuses to apply it. See
+    :func:`partition_enforceable_dispositions`.
 
     ``summary`` is the VERBATIM finding summary. The ledger key carries only
     the *normalised* half (see :func:`_disposition_key`), which is lossy and
