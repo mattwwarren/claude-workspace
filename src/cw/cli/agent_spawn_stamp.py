@@ -2,7 +2,7 @@
 
 Claude Code invokes this before every subagent-spawning tool call in a
 dispatched worker (wired via ``settings.local.json`` in
-:data:`cw.spawn._HOOK_SETTINGS_TEMPLATE`, matched on
+:func:`cw.spawn._build_hook_settings`, matched on
 :data:`cw.spawn._AGENT_TOOL_MATCHER`). It increments
 ``agent_spawn_stamp.unresolved_count`` in ``<cwd>/.claude/cw-context.json``
 before the spawn starts.
