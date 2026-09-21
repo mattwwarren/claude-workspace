@@ -252,17 +252,18 @@ def _read_roster_workers(path: Path) -> dict[str, object] | None:
     occupancy view) so the two can never disagree about what the file says.
 
     Returns ``{}`` when the roster file is absent (no daemon has ever run) and
-    ``None`` for every other failure -- another ``OSError``, invalid JSON, a
-    top level that is not an object, or ``workers`` missing / not an object --
-    each logged at WARNING. Callers decide what ``None`` means: fail open for
-    liveness, fail closed for a mutation guard. Only ``OSError`` and
-    ``json.JSONDecodeError`` are caught; anything else propagates.
+    ``None`` for every other failure -- another ``OSError``, bytes that are not
+    valid UTF-8, invalid JSON, a top level that is not an object, or ``workers``
+    missing / not an object -- each logged at WARNING. Callers decide what
+    ``None`` means: fail open for liveness, fail closed for a mutation guard.
+    Only ``OSError``, ``UnicodeDecodeError`` and ``json.JSONDecodeError`` are
+    caught; anything else propagates.
     """
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return {}
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         _log.warning("native daemon roster at %s is unreadable: %s", path, exc)
         return None
     try:

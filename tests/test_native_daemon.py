@@ -496,6 +496,26 @@ class TestRealNativeDaemonClientWorkerCwds:
             assert client.list_live_worker_cwds() is None
         assert any("not valid JSON" in r.getMessage() for r in caplog.records)
 
+    def test_invalid_utf8_returns_none_and_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # ``read_text(encoding="utf-8")`` raises UnicodeDecodeError -- a
+        # ValueError, NOT an OSError or JSONDecodeError -- on invalid bytes. It
+        # must read as "cannot determine" (None), never escape the reader (#2213).
+        roster = tmp_path / "roster.json"
+        roster.write_bytes(b'{"workers": {"aaaa1111": {"cwd": "/wt/\xff\xfe"}}}')
+        client = RealNativeDaemonClient(roster_path=roster)
+        with caplog.at_level("WARNING", logger="cw.native_daemon"):
+            assert client.list_live_worker_cwds() is None
+        assert any("unreadable" in r.getMessage() for r in caplog.records)
+
+    def test_short_ids_fail_open_on_invalid_utf8(self, tmp_path: Path) -> None:
+        """The same shared parser: the liveness view stays fail-open."""
+        roster = tmp_path / "roster.json"
+        roster.write_bytes(b"\xff\xfe\x00 not utf-8")
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_session_short_ids() == set()
+
     def test_non_enoent_oserror_returns_none_and_warns(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
