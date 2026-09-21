@@ -165,7 +165,9 @@ Two consequences worth knowing:
   a reset, never a raise). Any other worktree (occupied, dirty, ahead, or
   diverged, or one whose occupancy could not be determined) is left as it is,
   and a failed fetch skips the fast-forward entirely instead of moving HEAD to
-  a stale tracking ref.
+  a stale tracking ref. The fix-dispatch caller reports a failed refresh fetch
+  or submodule sync as a one-line friction note at the top of the fix agent's
+  prompt.
 - **The row stays RUNNING for the whole handoff.** `dispatch/claim.py` only
   claims PENDING rows, so nothing re-dispatches the ticket while the fix agent
   works. `fix_dispatch`'s completion phase reverts it to PENDING once the fix
