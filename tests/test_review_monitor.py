@@ -527,3 +527,123 @@ def test_register_subprocess_prints_result_line(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["registered"] is True
+
+
+# ---------------------------------------------------------------------------
+# state-read failures must not read as successful mutations (#2189)
+# ---------------------------------------------------------------------------
+
+_UNREADABLE_MESSAGE = "state unreadable"
+
+
+def _fail_reading(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Make ``Path.read_text`` raise ``OSError`` for *target* only.
+
+    Mocks the source of the exception (the read), so the write path stays
+    healthy — the shape of the bug: a read that fails while a write succeeds.
+    """
+    real_read_text = Path.read_text
+
+    def _read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == target:
+            raise PermissionError(_UNREADABLE_MESSAGE)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        _register_argv("def456"),
+        ["drop", "42", "--repo", _REPO],
+        ["complete", "42", "--repo", _REPO],
+    ],
+    ids=["register", "drop", "complete"],
+)
+def test_mutation_cli_exits_nonzero_when_state_unreadable(
+    argv: list[str],
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_cli(monkeypatch, capsys, *_register_argv("abc123"))
+    state_file = _mod.state_path_for_repo(_REPO)
+    before = state_file.read_bytes()
+
+    _fail_reading(monkeypatch, state_file)
+    code, out, err = _run_cli(monkeypatch, capsys, *argv)
+
+    assert code == 1
+    assert out == ""
+    assert "Error:" in err
+    assert argv[0] in err
+    assert _KEY in err
+    assert _UNREADABLE_MESSAGE in err
+    # The unreadable file is left exactly as it was — never replaced by fresh state.
+    assert state_file.read_bytes() == before
+
+
+def test_load_state_strict_raises_on_unreadable_state_file(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_cli(monkeypatch, capsys, *_register_argv())
+    _fail_reading(monkeypatch, _mod.state_path_for_repo(_REPO))
+
+    with pytest.raises(OSError, match=_UNREADABLE_MESSAGE):
+        _mod.load_state(_REPO, strict=True)
+
+
+def test_load_state_default_degrades_to_empty_on_unreadable_state_file(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Every non-mutation caller relies on this graceful fallback.
+    _run_cli(monkeypatch, capsys, *_register_argv())
+    _fail_reading(monkeypatch, _mod.state_path_for_repo(_REPO))
+
+    with caplog.at_level("WARNING"):
+        state = _mod.load_state(_REPO)
+
+    assert state.monitored == {}
+    assert any(_UNREADABLE_MESSAGE in r.message for r in caplog.records)
+
+
+def test_load_state_strict_still_starts_fresh_on_corrupt_json(
+    state_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Corrupt-but-readable content is a separate concern: strict does not touch it.
+    state_dir.mkdir(parents=True)
+    _mod.state_path_for_repo(_REPO).write_text("{not json")
+
+    with caplog.at_level("WARNING"):
+        state = _mod.load_state(_REPO, strict=True)
+
+    assert state.monitored == {}
+    assert any("Corrupt monitor state file" in r.message for r in caplog.records)
+
+
+def test_register_cli_malformed_thread_details_exits_nonzero(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, out, err = _run_cli(
+        monkeypatch,
+        capsys,
+        *_register_argv(),
+        "--thread-details",
+        "[not json",
+    )
+
+    assert code == 1
+    assert out == ""
+    assert "Error:" in err
+    assert _KEY in err
+    assert "Traceback" not in err
+    assert not _mod.state_path_for_repo(_REPO).exists()
