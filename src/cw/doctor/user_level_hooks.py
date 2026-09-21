@@ -13,7 +13,8 @@ only ``~/.claude/{commands,skills,agents,scripts}`` and ``cw init`` writes only
 the ``Bash(cw:*)`` allowlist entry — so the root cause of an observed
 user-level install is unidentified. This check is therefore detection only: it
 names the offending file, the exact ``hooks.Stop`` coordinates, and the line to
-delete. Advisory severity (``ok=True, warn=True``), so it never fails
+delete. A settings file it cannot read or parse is itself a WARN finding, not a
+crash. Advisory severity (``ok=True, warn=True``), so it never fails
 ``cw doctor``'s exit code. Leaf module — no cross-``doctor`` dependencies.
 """
 
@@ -109,33 +110,39 @@ def _format_finding(path: Path, location: str, command: str) -> str:
     )
 
 
-def _scan_settings_file(path: Path) -> tuple[list[str], bool]:
+def _scan_settings_file(path: Path) -> tuple[list[str], str | None]:
     """Scan one settings file for cw Stop hooks.
 
-    Returns ``(findings, skipped)``. A missing file is the ordinary case and
-    yields ``([], False)``. Anything we cannot read or parse — an unreadable
-    path, a directory where a file was expected, malformed JSON — yields
-    ``([], True)`` so the caller can say so without failing the check;
-    ``bypass-disclaimer`` already warns on a malformed ``settings.json``.
+    Returns ``(findings, problem)``. A missing file is the ordinary case and
+    yields ``([], None)``. A file we cannot read or parse yields
+    ``([], <failure class>)`` so the caller can WARN naming the file — a check
+    whose whole purpose is to diagnose a broken install must not crash on a
+    malformed one, and must not silently pass it either. The failure class is
+    a short label (``invalid UTF-8``, ``malformed JSON``, ``unreadable:
+    <ExcName>``), never the exception text, which can echo file contents.
+    Valid JSON of the wrong shape is not a read/parse failure: it simply has
+    no Stop hook to find.
     """
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return ([], False)
-    except OSError:
-        return ([], True)
+        return ([], None)
+    except UnicodeDecodeError:
+        return ([], "invalid UTF-8")
+    except OSError as exc:
+        return ([], f"unreadable: {type(exc).__name__}")
 
     try:
         data: object = json.loads(raw)
     except json.JSONDecodeError:
-        return ([], True)
+        return ([], "malformed JSON")
 
     return (
         [
             _format_finding(path, location, command)
             for location, command in _stop_hook_locations(data)
         ],
-        False,
+        None,
     )
 
 
@@ -144,28 +151,28 @@ def _check_user_level_stop_hook() -> CheckResult:
 
     Warns (``ok=True, warn=True``) when either ``~/.claude/settings.json`` or
     ``~/.claude/settings.local.json`` wires the Stop event to cw, naming each
-    finding's file, ``hooks.Stop`` coordinates and the exact line to remove.
-    Clean (``ok=True, warn=False``) otherwise, including when the files are
-    absent or unparseable — an unparseable file is noted in the detail rather
-    than warned on. Never ``ok=False``: a user-level hook is a performance
-    regression, not a broken environment.
+    finding's file, ``hooks.Stop`` coordinates and the exact line to remove. It
+    also warns, naming the file and the failure class, when a settings file
+    exists but cannot be read or parsed (invalid UTF-8, malformed JSON, an
+    unreadable path): the other file is still scanned and the check never
+    raises out of ``run_doctor``. Clean (``ok=True, warn=False``) when both
+    files are absent or hold no cw Stop hook. Never ``ok=False``: a user-level
+    hook is a performance regression, not a broken environment.
     """
-    findings: list[str] = []
-    skipped: list[str] = []
+    warnings: list[str] = []
 
     for filename in _USER_SETTINGS_FILENAMES:
         path = _CLAUDE_HOME / filename
-        file_findings, was_skipped = _scan_settings_file(path)
-        findings.extend(file_findings)
-        if was_skipped:
-            skipped.append(f"(skipped unparseable {path})")
+        findings, problem = _scan_settings_file(path)
+        warnings.extend(findings)
+        if problem is not None:
+            warnings.append(f"{path}: could not read/parse ({problem})")
 
-    if findings:
-        return CheckResult(
-            _CHECK_NAME, ok=True, warn=True, detail="; ".join(findings + skipped)
-        )
-
-    detail = "no cw Stop hook in user-level settings"
-    if skipped:
-        detail = f"{detail} {' '.join(skipped)}"
-    return CheckResult(_CHECK_NAME, ok=True, warn=False, detail=detail)
+    if warnings:
+        return CheckResult(_CHECK_NAME, ok=True, warn=True, detail="; ".join(warnings))
+    return CheckResult(
+        _CHECK_NAME,
+        ok=True,
+        warn=False,
+        detail="no cw Stop hook in user-level settings",
+    )

@@ -19,9 +19,12 @@ from cw.doctor.user_level_hooks import (
     _STOP_HOOK_PATTERN,
     _check_user_level_stop_hook,
 )
-from cw.spawn import STOP_HOOK_COMMAND
+from cw.spawn import _stop_hook_command
 
 _BARE_COMMAND = "cw signal-stop"
+
+# What cw actually injects today: the guard with a baked-in absolute path.
+_INJECTED_COMMAND = _stop_hook_command(Path("/wt/.claude/cw-context.json"))
 
 
 def _stop_hook_settings(*commands: str) -> dict[str, object]:
@@ -81,13 +84,13 @@ class TestUserLevelStopHookDetection:
         _seed(
             monkeypatch,
             tmp_path,
-            settings_json=json.dumps(_stop_hook_settings(STOP_HOOK_COMMAND)),
+            settings_json=json.dumps(_stop_hook_settings(_INJECTED_COMMAND)),
         )
 
         result = _check_user_level_stop_hook()
 
         assert result.warn is True
-        assert f'"command": {json.dumps(STOP_HOOK_COMMAND)}' in result.detail
+        assert f'"command": {json.dumps(_INJECTED_COMMAND)}' in result.detail
 
     def test_settings_local_json_only_warns(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -164,7 +167,7 @@ class TestUserLevelStopHookDetection:
 
 
 class TestUserLevelStopHookCleanAndMalformed:
-    """Negative, missing and malformed inputs — never warn, never raise."""
+    """Negative, missing and wrong-shape inputs — never warn, never raise."""
 
     def test_no_files_is_clean(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -215,7 +218,6 @@ class TestUserLevelStopHookCleanAndMalformed:
     @pytest.mark.parametrize(
         "raw",
         [
-            "not json at all {{{",
             json.dumps(["a", "list"]),
             json.dumps({"hooks": "not-a-dict"}),
             json.dumps({"hooks": {"Stop": "not-a-list"}}),
@@ -229,7 +231,7 @@ class TestUserLevelStopHookCleanAndMalformed:
     def test_wrong_shape_json_never_warns_or_raises(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: str
     ) -> None:
-        """Malformed or wrong-shape settings degrade to a silent skip."""
+        """Valid JSON of the wrong shape has no Stop hook: clean, not a failure."""
         _seed(monkeypatch, tmp_path, settings_json=raw)
 
         result = _check_user_level_stop_hook()
@@ -237,21 +239,56 @@ class TestUserLevelStopHookCleanAndMalformed:
         assert result.ok is True
         assert result.warn is False
 
-    def test_unparseable_file_is_noted(
+
+class TestUserLevelStopHookUnreadableFiles:
+    """A settings file we cannot read/parse is a WARN finding, never a crash."""
+
+    def test_missing_file_is_silent(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Unparseable JSON appends a skip note to the clean detail."""
-        home = _seed(monkeypatch, tmp_path, settings_json="{{{ nope")
+        """A missing settings file is the ordinary case: no warn, no note."""
+        _seed(monkeypatch, tmp_path)
 
         result = _check_user_level_stop_hook()
 
         assert result.warn is False
-        assert f"(skipped unparseable {home / 'settings.json'})" in result.detail
+        assert "could not read/parse" not in result.detail
 
-    def test_unreadable_file_does_not_raise(
+    def test_malformed_json_warns_naming_file(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """settings.json as a directory → IsADirectoryError, skipped not raised."""
+        """Unparseable-but-valid-UTF-8 JSON → WARN naming the file and class."""
+        home = _seed(monkeypatch, tmp_path, settings_json="{{{ nope")
+
+        result = _check_user_level_stop_hook()
+
+        assert result.ok is True
+        assert result.warn is True
+        assert (
+            f"{home / 'settings.json'}: could not read/parse (malformed JSON)"
+            in result.detail
+        )
+
+    def test_invalid_utf8_warns_instead_of_raising(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Invalid UTF-8 was an uncaught UnicodeDecodeError out of run_doctor."""
+        home = _seed(monkeypatch, tmp_path)
+        (home / "settings.json").write_bytes(b'{"hooks": "\xff\xfe\x80"}')
+
+        result = _check_user_level_stop_hook()
+
+        assert result.ok is True
+        assert result.warn is True
+        assert (
+            f"{home / 'settings.json'}: could not read/parse (invalid UTF-8)"
+            in result.detail
+        )
+
+    def test_unreadable_file_warns_instead_of_raising(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """settings.json as a directory → IsADirectoryError, WARN not raised."""
         claude_home = tmp_path / ".claude"
         (claude_home / "settings.json").mkdir(parents=True)
         monkeypatch.setattr(
@@ -261,25 +298,54 @@ class TestUserLevelStopHookCleanAndMalformed:
         result = _check_user_level_stop_hook()
 
         assert result.ok is True
-        assert result.warn is False
-        assert "skipped unparseable" in result.detail
+        assert result.warn is True
+        assert "could not read/parse (unreadable: IsADirectoryError)" in result.detail
 
-    def test_malformed_one_file_hit_in_other_still_warns(
+    def test_failure_detail_does_not_echo_file_contents(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A malformed settings.json does not mask a hit in settings.local.json."""
+        """The detail names a failure class, never the raw exception text."""
+        home = _seed(monkeypatch, tmp_path)
+        (home / "settings.json").write_bytes(b"sekrit-token-\xff")
+
+        result = _check_user_level_stop_hook()
+
+        assert "sekrit-token" not in result.detail
+
+    def test_unreadable_file_does_not_mask_hit_in_other_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An unreadable settings.json does not hide a hit in settings.local.json."""
         home = _seed(
             monkeypatch,
             tmp_path,
-            settings_json="{{{ nope",
             settings_local_json=json.dumps(_stop_hook_settings(_BARE_COMMAND)),
         )
+        (home / "settings.json").write_bytes(b"\xff\xfe")
 
         result = _check_user_level_stop_hook()
 
         assert result.warn is True
         assert str(home / "settings.local.json") in result.detail
-        assert f"(skipped unparseable {home / 'settings.json'})" in result.detail
+        assert f"{home / 'settings.json'}: could not read/parse" in result.detail
+
+    def test_both_files_unreadable_warn_twice(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Each unreadable file gets its own finding; the check still returns."""
+        home = _seed(
+            monkeypatch,
+            tmp_path,
+            settings_json="{{{",
+            settings_local_json="[[[",
+        )
+
+        result = _check_user_level_stop_hook()
+
+        assert result.warn is True
+        assert result.detail.count("could not read/parse") == 2
+        assert str(home / "settings.json") in result.detail
+        assert str(home / "settings.local.json") in result.detail
 
 
 class TestStopHookPatternCrossPin:
@@ -287,7 +353,7 @@ class TestStopHookPatternCrossPin:
 
     def test_pattern_matches_injected_and_legacy_commands(self) -> None:
         """Both the guarded #2226 form and the legacy bare form match."""
-        assert _STOP_HOOK_PATTERN.search(STOP_HOOK_COMMAND) is not None
+        assert _STOP_HOOK_PATTERN.search(_INJECTED_COMMAND) is not None
         assert _STOP_HOOK_PATTERN.search(_BARE_COMMAND) is not None
 
     def test_pattern_does_not_match_other_cw_subcommands(self) -> None:
