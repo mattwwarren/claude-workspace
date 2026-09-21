@@ -2422,6 +2422,24 @@ class TestCreateWorktreeReuseRefresh:
                 client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
             )
 
+    def test_unknown_ff_relation_never_fast_forwards(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The HEAD-vs-origin classification is matched exhaustively too: a
+        relation the refresh does not know is a bug, never "behind"."""
+        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        monkeypatch.setattr("cw.worktree._ff_relation", lambda *_a, **_kw: "sideways")
+
+        with pytest.raises(AssertionError):
+            create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
+
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+
     def test_is_main_behind_origin_rejects_an_unknown_fetch_outcome(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
