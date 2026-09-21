@@ -52,6 +52,7 @@ from cw.worktree import (
     worktree_has_unsaved_work,
     worktree_path_for,
 )
+from cw.worktree_gc import _live_worktree_paths
 from tests._reconcile_helpers import _no_op_salvage_payload
 from tests.conftest import git_in, push_commit_to_origin
 from tests.test_result import _valid_payload
@@ -1261,6 +1262,72 @@ class TestLiveSessionWorktreePaths:
 
         with pytest.raises(RuntimeError, match="not a state-read failure"):
             live_session_worktree_paths()
+
+
+def _write_corrupt_state() -> Path:
+    """Put a syntactically invalid ``sessions.json`` on disk, for real."""
+    path = state_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    return path
+
+
+class TestUnreadableStatePostures:
+    """One shared helper, two deliberately opposite failure postures (#2213).
+
+    The SAME unreadable ``sessions.json`` makes the reuse refresh fail CLOSED
+    (a mutation must not proceed when a live session cannot be ruled out) and
+    leaves the worktree GC failing OPEN (a corrupt state file must never block
+    garbage collection, unchanged from before #2213). Neither is a bug in the
+    other's terms; do not "fix" one into consistency with the other.
+    """
+
+    def test_reuse_refresh_fails_closed(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt")
+        fetched = _spy_fetch(monkeypatch)
+        # Written only after seeding, which itself reads and writes cw state.
+        _write_corrupt_state()
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
+            result = create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
+
+        assert result == wt
+        assert fetched == []
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert any(
+            r.levelno == logging.DEBUG and "unreadable" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.DEBUG)
+        )
+
+    def test_worktree_gc_fails_open(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _write_corrupt_state()
+        monkeypatch.setattr(
+            "cw.worktree_gc.load_dev_queue", lambda: MagicMock(tasks=[])
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            paths = _live_worktree_paths()
+
+        assert paths == frozenset()
+        assert any(
+            "failed to load session state" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.WARNING)
+        )
 
 
 class TestCreateWorktreeReuseRefresh:
