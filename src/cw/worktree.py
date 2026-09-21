@@ -654,6 +654,13 @@ class FetchResult:
     reason: str | None = None
 
 
+# One distinct fetch failure: ``(client name, outcome, reason)``. The caller-owned
+# dedup set of these (``warned_fetch_fail``) is what lets a repeat of the SAME
+# failure stay quiet while a DIFFERENT one for the same client -- an auth error
+# after a network error -- still gets reported (#2213).
+type FetchWarningKey = tuple[str, FetchOutcome, str]
+
+
 class RefreshOutcome(enum.Enum):
     """What the reuse refresh did with a reused worktree, in the caller's terms (#2213).
 
@@ -1621,7 +1628,7 @@ def _fetch_default_branch(
     client_name: str,
     default_branch: str,
     git_dir: Path,
-    warned_fetch_fail: set[str] | None = None,
+    warned_fetch_fail: set[FetchWarningKey] | None = None,
     *,
     quiet_missing_ref: bool = False,
 ) -> FetchResult:
@@ -1637,6 +1644,13 @@ def _fetch_default_branch(
     *quiet_missing_ref*; only the log level does: a branch absent from origin is
     logged at DEBUG instead of WARNING when it is set, and then does not touch
     *warned_fetch_fail*. Every other failure still WARNs.
+
+    *warned_fetch_fail* is a caller-owned set of :data:`FetchWarningKey`
+    (client, outcome, reason) that dedups the WARNING per distinct failure: a
+    repeat of the same failure for the same client stays quiet, but a different
+    one (an auth error after a network error) is new information and warns
+    again, so silence never reads as "the earlier problem persists". ``None``
+    always warns.
     """
     if not git_dir.exists():
         _log.warning(
@@ -1678,7 +1692,8 @@ def _fetch_default_branch(
             first_line,
         )
         return FetchResult(outcome, reason)
-    if warned_fetch_fail is None or client_name not in warned_fetch_fail:
+    warn_key: FetchWarningKey = (client_name, outcome, reason)
+    if warned_fetch_fail is None or warn_key not in warned_fetch_fail:
         _log.warning(
             "freshness_check_skip: fetch failed for %s (rc=%d): %s",
             client_name,
@@ -1686,7 +1701,7 @@ def _fetch_default_branch(
             first_line,
         )
         if warned_fetch_fail is not None:
-            warned_fetch_fail.add(client_name)
+            warned_fetch_fail.add(warn_key)
     return FetchResult(outcome, reason)
 
 
@@ -1740,7 +1755,7 @@ def _get_behind_count(
 
 def is_main_behind_origin(
     client: ClientConfig,
-    warned_fetch_fail: set[str] | None = None,
+    warned_fetch_fail: set[FetchWarningKey] | None = None,
 ) -> tuple[bool, str, str, int]:
     """Check whether the client's local default branch is behind origin.
 
@@ -1748,10 +1763,12 @@ def is_main_behind_origin(
 
     Args:
         client: Client configuration.
-        warned_fetch_fail: Caller-owned set of client names that have already
-            received a fetch-failure WARNING in this run. Suppresses repeated
-            WARNINGs for the same client across ticks. Pass ``None`` (default)
-            to always log (correct for one-shot callers).
+        warned_fetch_fail: Caller-owned set of :data:`FetchWarningKey`
+            ``(client, outcome, reason)`` entries that have already received a
+            fetch-failure WARNING in this run. Suppresses a repeat of the SAME
+            failure for the same client across ticks; a different failure for
+            that client still warns. Pass ``None`` (default) to always log
+            (correct for one-shot callers).
 
     Returns:
         A 4-tuple ``(is_stale, local_sha, origin_sha, behind_count)`` where

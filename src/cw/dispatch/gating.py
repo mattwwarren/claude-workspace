@@ -61,6 +61,7 @@ if TYPE_CHECKING:
         TicketTask,
     )
     from cw.ssh import RemoteScheme
+    from cw.worktree import FetchWarningKey
 from cw.dispatch.claim import _lane_occupants_for_client, _lane_stats_for_client
 
 _log = logging.getLogger("cw.dispatch")
@@ -613,7 +614,7 @@ def _resolve_freshness(
     client: ClientConfig,
     *,
     auto_ff: bool,
-    warned_fetch_fail: set[str] | None,
+    warned_fetch_fail: set[FetchWarningKey] | None,
 ) -> tuple[bool, str | None]:
     """Run the freshness gate for a client, returning (stale, freshness_detail).
 
