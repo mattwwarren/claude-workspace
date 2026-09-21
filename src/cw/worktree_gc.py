@@ -10,9 +10,9 @@ import subprocess as _sp
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from cw.config import load_state
 from cw.dev_queue import load_dev_queue
-from cw.models import QueueItemStatus, SessionStatus
+from cw.models import QueueItemStatus
+from cw.worktree import live_session_worktree_paths
 
 _log = logging.getLogger(__name__)
 
@@ -416,36 +416,6 @@ def _verdict_for_state(
     if state == _GH_PR_STATE_MERGED:
         return GcVerdict.REMOVE_MERGED
     return GcVerdict.REMOVE_CLOSED
-
-
-_NON_TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
-    {SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED}
-)
-
-
-def live_session_worktree_paths() -> frozenset[Path] | None:
-    """Return worktree paths of non-terminal sessions in cw state, or None.
-
-    The session-state half of the live-path guard, shared by
-    :func:`_live_worktree_paths` (GC) and ``cw.worktree``'s reuse refresh
-    (#2213). ``None`` means the state could not be loaded (logged at WARNING):
-    GC treats that as "no live sessions known" so a corrupted state file never
-    blocks it, while a caller about to *mutate* a worktree must treat it as
-    "cannot rule out a live session" and fail closed.
-    """
-    try:
-        state = load_state()
-    except Exception as exc:  # noqa: BLE001 — corrupted session state must not block worktree GC; degrades to no live-session guard for this run (see docstring)
-        _log.warning("gc: failed to load session state for live-path guard: %s", exc)
-        return None
-    live: set[Path] = set()
-    for session in state.sessions:
-        if (
-            session.status in _NON_TERMINAL_SESSION_STATUSES
-            and session.worktree_path is not None
-        ):
-            live.add(session.worktree_path)
-    return frozenset(live)
 
 
 def _live_worktree_paths() -> frozenset[Path]:

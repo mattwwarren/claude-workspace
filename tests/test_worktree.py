@@ -37,6 +37,7 @@ from cw.worktree import (
     fetch_feature_branch,
     is_main_behind_origin,
     is_main_checkout_dirty,
+    live_session_worktree_paths,
     remove_worktree,
     resolve_scope_guard_default_branch,
     resolve_worktree_base,
@@ -1153,6 +1154,66 @@ def _force_push_rewrite(origin: Path, work_dir: Path, branch: str) -> str:
     return git_in(work_dir, "rev-parse", "HEAD")
 
 
+def _session_at(name: str, status: SessionStatus, wt: Path | None) -> Session:
+    return Session(
+        name=name,
+        client="c",
+        purpose=SessionPurpose.IMPL,
+        status=status,
+        origin=SessionOrigin.DAEMON,
+        workspace_path=Path("/repo"),
+        worktree_path=wt,
+    )
+
+
+class TestLiveSessionWorktreePaths:
+    """The session-state half of the live-path guard, shared by the worktree GC
+    and the create_worktree reuse refresh (#2213)."""
+
+    @pytest.mark.parametrize(
+        "status",
+        [SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED],
+    )
+    def test_non_terminal_session_path_included(
+        self, monkeypatch: pytest.MonkeyPatch, status: SessionStatus
+    ) -> None:
+        live = Path("/live/wt")
+        state = CwState(sessions=[_session_at("c/impl", status, live)])
+        monkeypatch.setattr("cw.worktree.load_state", lambda: state)
+
+        assert live_session_worktree_paths() == frozenset({live})
+
+    def test_terminal_and_pathless_sessions_excluded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = CwState(
+            sessions=[
+                _session_at("c/done", SessionStatus.COMPLETED, Path("/done/wt")),
+                _session_at("c/nopath", SessionStatus.ACTIVE, None),
+            ]
+        )
+        monkeypatch.setattr("cw.worktree.load_state", lambda: state)
+
+        assert live_session_worktree_paths() == frozenset()
+
+    def test_state_load_failure_returns_none_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def _boom() -> CwState:
+            msg = "corrupt"
+            raise ValueError(msg)
+
+        monkeypatch.setattr("cw.worktree.load_state", _boom)
+
+        with caplog.at_level("WARNING", logger="cw.worktree"):
+            paths = live_session_worktree_paths()
+
+        assert paths is None
+        assert any(
+            "failed to load session state" in r.getMessage() for r in caplog.records
+        )
+
+
 class TestCreateWorktreeReuseRefresh:
     """#2213: with ``refresh_on_reuse=True`` the reuse path best-effort fetches
     and fast-forwards a *behind, unoccupied, clean* worktree. It never resets,
@@ -1384,7 +1445,7 @@ class TestCreateWorktreeReuseRefresh:
         push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt")
         # ``cw.worktree`` imports the function lazily (import cycle), so the
         # patch target is its home module.
-        monkeypatch.setattr("cw.worktree_gc.live_session_worktree_paths", lambda: None)
+        monkeypatch.setattr("cw.worktree.live_session_worktree_paths", lambda: None)
         fetched = _spy_fetch(monkeypatch)
 
         caplog.clear()  # drop seed-phase records

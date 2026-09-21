@@ -12,13 +12,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
 from cw.auto_dev_result import _PRE_IMPL_STAGES
-from cw.config import load_effective_clients
+from cw.config import load_effective_clients, load_state
 from cw.exceptions import (
     BranchHeldByWorktreeError,
     MissingWorkspaceError,
     StaleWorktreeError,
     WorktreeError,
 )
+from cw.models import SessionStatus
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
@@ -666,6 +667,41 @@ def _ff_reused_worktree(
     _init_submodules(_git_dir(client), wt_path)
 
 
+_NON_TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
+    {SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED}
+)
+
+
+def live_session_worktree_paths() -> frozenset[Path] | None:
+    """Return worktree paths of non-terminal sessions in cw state, or None.
+
+    The session-state half of the live-path guard, shared by the worktree GC
+    (``cw.worktree_gc._live_worktree_paths``) and the reuse refresh
+    (:func:`_reuse_occupancy_reason`, #2213). ``None`` means the state could
+    not be loaded (logged at WARNING): GC treats that as "no live sessions
+    known" so a corrupted state file never blocks it, while a caller about to
+    *mutate* a worktree must treat it as "cannot rule out a live session" and
+    fail closed.
+
+    Lives here rather than in ``cw.worktree_gc`` because that module imports
+    ``cw.dev_queue``, whose requeue/lifecycle modules import this one -- a
+    top-level import of it from here would be a cycle.
+    """
+    try:
+        state = load_state()
+    except Exception as exc:  # noqa: BLE001 — corrupted session state must not block worktree GC or the reuse refresh; degrades to "no live sessions known" for GC and fail-closed for the refresh (see docstring)
+        _log.warning("live-path guard: failed to load session state: %s", exc)
+        return None
+    live: set[Path] = set()
+    for session in state.sessions:
+        if (
+            session.status in _NON_TERMINAL_SESSION_STATUSES
+            and session.worktree_path is not None
+        ):
+            live.add(session.worktree_path)
+    return frozenset(live)
+
+
 def _reuse_occupancy_reason(
     client: ClientConfig, branch: str, wt_path: Path
 ) -> str | None:
@@ -677,8 +713,8 @@ def _reuse_occupancy_reason(
       work (checked regardless of the caller's ``allow_dirty_reuse``, which
       only tolerates such work, it does not license moving HEAD under it); or
     - a live (non-terminal) session in cw state is homed on *wt_path*, per
-      :func:`cw.worktree_gc.live_session_worktree_paths` -- the same predicate
-      the worktree GC uses. Unreadable session state is treated as occupied
+      :func:`live_session_worktree_paths` -- the same predicate the worktree GC
+      uses. Unreadable session state is treated as occupied
       (fail closed: this gates a mutation). The dev-queue RUNNING half of the
       GC guard is deliberately not consulted: at dispatch-claim time the task
       being claimed is itself RUNNING, so it would veto the very path this
@@ -688,11 +724,6 @@ def _reuse_occupancy_reason(
     unsaved = unsaved_work_reason(client, branch, wt_path=wt_path)
     if unsaved is not None:
         return f"unsaved work ({unsaved})"
-    # Why: function-level import -- cw.worktree_gc imports cw.dev_queue, whose
-    # requeue/lifecycle modules import cw.worktree, so a top-level import here
-    # would be a cycle.
-    from cw.worktree_gc import live_session_worktree_paths
-
     live = live_session_worktree_paths()
     if live is None:
         return "session state unreadable, cannot rule out a live session"

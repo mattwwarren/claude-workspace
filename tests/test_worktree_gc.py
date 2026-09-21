@@ -1270,7 +1270,7 @@ class TestLiveWorktreePaths:
         state = CwState(sessions=sessions)
 
         with (
-            patch("cw.worktree_gc.load_state", return_value=state),
+            patch("cw.worktree.load_state", return_value=state),
             patch("cw.worktree_gc.load_dev_queue", return_value=MagicMock(tasks=[])),
         ):
             paths = _live_worktree_paths()
@@ -1290,7 +1290,7 @@ class TestLiveWorktreePaths:
         queue.tasks = [task]
 
         with (
-            patch("cw.worktree_gc.load_state", return_value=CwState()),
+            patch("cw.worktree.load_state", return_value=CwState()),
             patch("cw.worktree_gc.load_dev_queue", return_value=queue),
         ):
             paths = _live_worktree_paths()
@@ -1299,7 +1299,7 @@ class TestLiveWorktreePaths:
 
     def test_state_load_error_returns_empty(self) -> None:
         with (
-            patch("cw.worktree_gc.load_state", side_effect=Exception("corrupt")),
+            patch("cw.worktree.load_state", side_effect=Exception("corrupt")),
             patch("cw.worktree_gc.load_dev_queue", return_value=MagicMock(tasks=[])),
         ):
             paths = _live_worktree_paths()
@@ -1309,7 +1309,7 @@ class TestLiveWorktreePaths:
 
     def test_dev_queue_load_error_returns_empty(self) -> None:
         with (
-            patch("cw.worktree_gc.load_state", return_value=CwState()),
+            patch("cw.worktree.load_state", return_value=CwState()),
             patch(
                 "cw.worktree_gc.load_dev_queue",
                 side_effect=Exception("queue corrupt"),
@@ -1342,69 +1342,6 @@ class TestLiveWorktreePaths:
             paths = _live_worktree_paths()
 
         assert paths == frozenset({running_wt})
-
-
-def _session_at(name: str, status: SessionStatus, wt: Path | None) -> Session:
-    return Session(
-        name=name,
-        client="c",
-        purpose=SessionPurpose.IMPL,
-        status=status,
-        origin=SessionOrigin.DAEMON,
-        workspace_path=Path("/repo"),
-        worktree_path=wt,
-    )
-
-
-class TestLiveSessionWorktreePaths:
-    """The session-state half of the live-path guard, shared with the
-    create_worktree reuse refresh (#2213)."""
-
-    @pytest.mark.parametrize(
-        "status",
-        [SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED],
-    )
-    def test_non_terminal_session_path_included(self, status: SessionStatus) -> None:
-        from cw.worktree_gc import live_session_worktree_paths
-
-        live = Path("/live/wt")
-        state = CwState(sessions=[_session_at("c/impl", status, live)])
-
-        with patch("cw.worktree_gc.load_state", return_value=state):
-            paths = live_session_worktree_paths()
-
-        assert paths == frozenset({live})
-
-    def test_terminal_and_pathless_sessions_excluded(self) -> None:
-        from cw.worktree_gc import live_session_worktree_paths
-
-        state = CwState(
-            sessions=[
-                _session_at("c/done", SessionStatus.COMPLETED, Path("/done/wt")),
-                _session_at("c/nopath", SessionStatus.ACTIVE, None),
-            ]
-        )
-
-        with patch("cw.worktree_gc.load_state", return_value=state):
-            paths = live_session_worktree_paths()
-
-        assert paths == frozenset()
-
-    def test_state_load_failure_returns_none_and_warns(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        from cw.worktree_gc import live_session_worktree_paths
-
-        with (
-            patch("cw.worktree_gc.load_state", side_effect=Exception("corrupt")),
-            caplog.at_level("WARNING", logger="cw.worktree_gc"),
-        ):
-            paths = live_session_worktree_paths()
-
-        assert paths is None
-        assert any(
-            "failed to load session state" in r.getMessage() for r in caplog.records
-        )
 
 
 # ---------------------------------------------------------------------------
