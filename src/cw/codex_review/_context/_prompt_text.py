@@ -9,15 +9,18 @@ inlined replacements for the agent specs' dangling ``.claude/docs`` references.
 Dependency-free by construction — nothing here reads a file or imports another
 ``_context`` submodule, so the prompt text and its regression locks cannot pick
 up a dependency on how any input happens to be loaded. The one import is the
-disposition marker's sentinel constant (#2210 round 3): a string the ledger's
-parser keys on, so the prompt names it through the constant its owner exports
-rather than spelling it a second time. ``cw.review_finding_dispositions``
-imports nothing from ``cw`` at module scope, so this adds no cycle.
+disposition marker's sentinel constant: a string the ledger's parser keys on,
+so the prompt names it through the constant its owner exports rather than
+spelling it a second time. It comes from :mod:`cw.review_markers`, the leaf
+that owns the marker vocabulary and imports nothing from ``cw`` at all —
+#2210 round 3 took it from ``cw.review_finding_dispositions`` instead, which
+pulled the whole ledger implementation (models, parser, matcher, event emitter)
+in behind one string.
 """
 
 from __future__ import annotations
 
-from cw.review_finding_dispositions import DISPOSITION_SENTINEL
+from cw.review_markers import DISPOSITION_SENTINEL
 
 # #1744: grounds reviewers in the repo's actual ruff opt-outs and complexity
 # thresholds so they stop raising MUST_FIX findings against rules the repo
@@ -160,11 +163,13 @@ _ADJUDICATED_INSTRUCTIONS = (
     '`contests_adjudication` is how you invoke their "unless the code at '
     'this location changed" exception. '
     f"Do not author a `{DISPOSITION_SENTINEL}` block yourself, in a "
-    "comment or anywhere else: hand-authored disposition blocks are "
-    "unsupported and are refused by the reader. `cw review settle`, run by an "
-    "operator on their own machine, is the only supported producer, because "
-    "it is the only path that records who settled the finding, when, and "
-    "against what code."
+    "comment, in a finding's text, or anywhere else: hand-authored "
+    "disposition blocks are unsupported and are refused by the reader. Marker "
+    "syntax inside a finding's summary, file, evidence or any other field is "
+    "escaped on render and is never read back as a record. `cw review settle`, "
+    "run by an operator in their own interactive session, is the only "
+    "supported producer, because it is the only path that records who settled "
+    "the finding, when, and against what code."
 )
 
 _DELTA_MODE_INSTRUCTIONS = (

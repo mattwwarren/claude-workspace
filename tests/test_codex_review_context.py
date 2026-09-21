@@ -50,12 +50,11 @@ from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, SessionOrigin
 from cw.review_adjudication import render_voided_findings_block
 from cw.review_finding_dispositions import (
-    DISPOSITION_SENTINEL,
-    SETTLE_SECTION_HEADING,
     FindingDisposition,
     _disposition_key,
     render_finding_disposition_block,
 )
+from cw.review_markers import DISPOSITION_SENTINEL, SETTLE_SECTION_HEADING
 from cw.spawn import _write_hook_context
 from tests._codex_review_helpers import (
     _doc_json,

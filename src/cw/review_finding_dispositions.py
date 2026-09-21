@@ -40,17 +40,20 @@ extends :func:`cw.review_adjudication.apply_adjudication`,
 two meanings are why those seams must stay apart.
 
 **Import discipline — load-bearing, not style.** This module MUST NOT import
-anything from ``cw`` at module scope. ``cw.models.tasks`` imports
-:class:`FindingDisposition` from here, so any runtime ``cw.*`` import at module
-scope closes a cycle through ``cw.models``' package ``__init__``: the shortest
-one is ``cw.review_findings -> cw.auto_dev_result.schema -> cw.models ->
-cw.models.tasks -> (this module) -> cw.review_debt -> cw.review_findings``,
-which raises ``ImportError`` on a partially initialized ``cw.review_findings``
-whenever ``cw.review_findings`` is the first of the two to be imported. Every
-``cw`` import below therefore lives either under ``TYPE_CHECKING`` (erased at
-runtime) or inside a function body (resolved after every module has finished
-loading). ``tests/test_review_finding_dispositions.py`` pins this by importing
-the module standalone in a subprocess.
+anything from ``cw`` at module scope EXCEPT :mod:`cw.review_markers`, which
+imports nothing from ``cw`` at all and so cannot be part of any cycle.
+``cw.models.tasks`` imports :class:`FindingDisposition` from here, so any other
+runtime ``cw.*`` import at module scope closes a cycle through ``cw.models``'
+package ``__init__``: the shortest one is ``cw.review_findings ->
+cw.auto_dev_result.schema -> cw.models -> cw.models.tasks -> (this module) ->
+cw.review_debt -> cw.review_findings``, which raises ``ImportError`` on a
+partially initialized ``cw.review_findings`` whenever ``cw.review_findings`` is
+the first of the two to be imported. Every other ``cw`` import below therefore
+lives either under ``TYPE_CHECKING`` (erased at runtime) or inside a function
+body (resolved after every module has finished loading).
+``tests/test_review_finding_dispositions.py`` pins this by importing the module
+standalone in a subprocess, and ``tests/test_review_markers.py`` pins the leaf
+module's own emptiness.
 
 #2210 adds a second, fuzzy matching tier to the backstop below — see
 :func:`_claim_similarity` and ADR-0016. It ships **gated per lane and off**:
@@ -72,14 +75,27 @@ enough if it can still replace a valid one, so :func:`merge_finding_dispositions
 that fails provenance, and a record whose key does not bind its own verbatim
 summary fails it. Validate first, write second.
 
-Public surface: :class:`FindingDisposition`, :class:`RefusedDisposition`,
-:data:`Outcome`, :data:`SETTLE_SECTION_HEADING`,
+Round 4 closed the layer underneath both of those: a record was recognised by
+SHAPE alone, so a model-authored finding summary carrying a well-formed
+sentinel block minted a suppression nobody authored, and the provenance checks
+above were the only thing standing in front of it. Two independent layers now
+sit in front of them — the renderer escapes marker syntax out of every piece of
+untrusted text it interpolates (:func:`cw.review_markers.neutralise_marker_syntax`),
+and :data:`_DISPOSITION_BLOCK_RE` honours a block only at the structural
+POSITION :func:`render_finding_disposition_block` emits it at. Position, not
+just shape, is what makes a record.
+
+Public surface: :class:`FindingDisposition`, :data:`Outcome`,
 :func:`build_finding_disposition_ledger`,
 :func:`render_finding_disposition_block`,
 :func:`parse_finding_disposition_block`,
 :func:`partition_enforceable_dispositions`, :func:`log_refused_dispositions`,
 :func:`merge_finding_dispositions`, :func:`split_disposition_key`,
-:func:`suppress_adjudicated_findings`, :data:`DISPOSITION_SENTINEL`.
+:func:`suppress_adjudicated_findings`. The marker's own vocabulary —
+:data:`~cw.review_markers.DISPOSITION_SENTINEL`,
+:data:`~cw.review_markers.SETTLE_SECTION_HEADING` and
+:class:`~cw.review_markers.RefusedDisposition` — belongs to
+:mod:`cw.review_markers`; import it from there.
 """
 
 from __future__ import annotations
@@ -91,7 +107,9 @@ import re
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
+from cw.review_markers import DISPOSITION_SENTINEL, RefusedDisposition
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -111,16 +129,6 @@ _MUST_FIX = "MUST_FIX"
 #: decided anything about this finding yet". The claim tier below refuses to
 #: re-stamp anything else, so a void pass's ``"rejected"`` survives untouched.
 _FIXED = "fixed"
-
-#: The heading the blocking review comment's ready-to-paste settle section
-#: renders under (#2210). Public and owned HERE, next to the rest of the
-#: record's wire grammar, because TWO modules must agree on it byte for byte:
-#: ``codex_review._verdict._render`` emits it, and
-#: ``codex_review._context.core`` builds its elision regex from it so a
-#: pipeline-authored payload never re-enters the next reviewer's prompt as
-#: evidence. A plain string needs no ``cw`` import, so the module's import
-#: discipline is untouched.
-SETTLE_SECTION_HEADING = "### Settle a finding"
 
 #: Which tier produced a match, carried onto the event payload and the log so
 #: an audit can tell an exact-identity suppression from a fuzzy one.
@@ -151,15 +159,6 @@ _DIGEST_SUFFIX_RE = re.compile(rf"{_KEY_SEPARATOR}[0-9a-f]{{64}}$")
 #: ``auto-dev-preflight-resolutions``' free-prose grammar, which would need an
 #: LLM to read and would reintroduce the fragility class #1805 removed.
 _DISPOSITION_MD_TITLE = "## Review Finding Dispositions"
-#: The marker's sentinel. Public and owned HERE, next to the parser that keys on
-#: it, because other modules must agree with it byte for byte: the reviewer
-#: prompt (``codex_review._context._prompt_text``) and the blocking comment
-#: (``codex_review._verdict._render``) both NAME it when they tell a reader the
-#: hand-authored block is unsupported. A second spelling of a string a parser
-#: keys on is how the writer and reader drift apart in a later change, so those
-#: modules build their text from this constant instead of retyping it. Like
-#: :data:`SETTLE_SECTION_HEADING`, a plain string needs no ``cw`` import.
-DISPOSITION_SENTINEL = "REVIEW-FINDING-DISPOSITIONS"
 #: Bump when the sentinel's on-the-wire shape changes in a way a reader must
 #: branch on, following ``_VOIDED_SCHEMA_VERSION``'s convention. #2210's
 #: ``actor``/``reviewed_sha``/``summary`` fields deliberately did NOT bump it:
@@ -170,8 +169,39 @@ DISPOSITION_SENTINEL = "REVIEW-FINDING-DISPOSITIONS"
 #: rides on: the migration ladder fills defaults for absent TicketTask FIELDS,
 #: and this is a nested model gaining defaulted ones.
 _DISPOSITION_SCHEMA_VERSION = 1
+
+#: A disposition record is recognised by POSITION as well as by shape (#2210
+#: round 4). A comment carries a record only when it IS the marker: the
+#: ``## Review Finding Dispositions`` title opens the body, and the sentinel
+#: block follows it with nothing but whitespace between. That is byte for byte
+#: what :func:`render_finding_disposition_block` produces and what ``cw review
+#: settle --out`` hands the operator to post, including through
+#: :func:`cw.gh.post_issue_comment`, which APPENDS its provenance marker and so
+#: never displaces the title.
+#:
+#: The layer this adds is independent of the provenance checks below, and the
+#: hole it closes is not hypothetical. The pipeline renders model-authored text
+#: — a finding summary, a file path, quoted evidence — into the very comments
+#: this parser reads on the next round, so a shape-only reader could not tell a
+#: record an operator minted from one a REVIEWER wrote into its own finding
+#: text. Rendered finding text is never at this position: it sits under the
+#: verdict comment's own ``## Codex Review Verdict`` title, many lines in. The
+#: renderer separately escapes the sentinel and the comment delimiters out of
+#: every untrusted span (:func:`cw.review_markers.neutralise_marker_syntax`),
+#: so an injection has to defeat both layers; the cost of this one is a single
+#: anchored regex.
+#:
+#: ``\A`` (not ``^``): a title on some later line of a longer body does not
+#: qualify, which is the whole point — ``re.MULTILINE`` would hand the
+#: injection exactly the foothold this removes. One marker per comment; the
+#: ledger's additive union across COMMENTS is unchanged and is how an operator
+#: settles more findings later.
 _DISPOSITION_BLOCK_RE = re.compile(
-    rf"<!--\s*{DISPOSITION_SENTINEL}\s*(?P<body>.*?)\s*{DISPOSITION_SENTINEL}\s*-->",
+    r"\A[ \t\r\n]*"
+    + re.escape(_DISPOSITION_MD_TITLE)
+    + r"[ \t\r]*\n\s*"
+    + rf"<!--\s*{DISPOSITION_SENTINEL}\s*(?P<body>.*?)"
+    + rf"\s*{DISPOSITION_SENTINEL}\s*-->",
     re.DOTALL,
 )
 
@@ -235,28 +265,6 @@ class FindingDisposition(BaseModel):
     actor: str = ""
     reviewed_sha: str = ""
     summary: str = ""
-
-
-class RefusedDisposition(BaseModel):
-    """One ledger record the reader refused to apply, and why (#2210 round 2).
-
-    Carried on ``ReviewVerdict.refused_dispositions`` and rendered onto the
-    posted review comment, because "ignored" must not mean "invisible": an
-    operator has to be able to see that something tried to suppress a finding
-    and was refused. ``key`` is the ledger key
-    (``file::normalized summary::digest`` — or the digest-less legacy shape,
-    which is itself one of the things refused),
-    ``missing`` the provenance fields it could not produce, in the fixed order
-    :func:`_provenance_gaps` checks them.
-
-    Lives here rather than in :mod:`cw.review_findings` — beside the contract
-    it enforces, and importable by :mod:`cw.models.tasks`' own importer
-    without an import-cycle exemption (this module still imports nothing from
-    ``cw`` at module scope).
-    """
-
-    key: str
-    missing: list[str] = Field(default_factory=list)
 
 
 def _summary_digest(summary: str) -> str:
@@ -398,17 +406,26 @@ def parse_finding_disposition_block(
     :func:`merge_finding_dispositions` (newest ``recorded_at`` wins), which is
     the #1654 marker-supersession convention: an operator who changes their
     mind re-posts the marker rather than editing history.
+
+    **Position is part of the grammar** (#2210 round 4): a body is read for a
+    record only when it IS the marker — see :data:`_DISPOSITION_BLOCK_RE`. A
+    sentinel block sitting inside rendered finding text, inside a fenced
+    payload, or anywhere below other content is not a record and is not
+    reported as a refusal either: nothing tried to settle anything, so there is
+    no operator-facing refusal to raise.
     """
     merged: dict[str, FindingDisposition] = {}
     refused: dict[str, RefusedDisposition] = {}
     for body in comment_bodies:
-        for match in _DISPOSITION_BLOCK_RE.finditer(body):
-            enforceable, rejected = partition_enforceable_dispositions(
-                _parse_one_disposition_block(match.group("body"))
-            )
-            merged = merge_finding_dispositions(merged, enforceable)
-            for record in rejected:
-                refused.setdefault(record.key, record)
+        match = _DISPOSITION_BLOCK_RE.match(body)
+        if match is None:
+            continue
+        enforceable, rejected = partition_enforceable_dispositions(
+            _parse_one_disposition_block(match.group("body"))
+        )
+        merged = merge_finding_dispositions(merged, enforceable)
+        for record in rejected:
+            refused.setdefault(record.key, record)
     return merged, sorted(refused.values(), key=lambda record: record.key)
 
 

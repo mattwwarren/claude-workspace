@@ -14,9 +14,9 @@ from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
 from cw.review_finding_dispositions import (
     FindingDisposition,
-    RefusedDisposition,
     _disposition_key,
 )
+from cw.review_markers import RefusedDisposition
 from tests._cli_review_helpers import CLAIM_ROW1_CANDIDATE, CLAIM_ROW1_RECORDED
 from tests._codex_review_helpers import (
     _finding_payload,

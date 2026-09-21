@@ -51,11 +51,11 @@ from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
 from cw.review_adjudication import parse_voided_findings_block
 from cw.review_finding_dispositions import (
-    SETTLE_SECTION_HEADING,
     log_refused_dispositions,
     merge_finding_dispositions,
     parse_finding_disposition_block,
 )
+from cw.review_markers import SETTLE_SECTION_HEADING
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
@@ -65,12 +65,13 @@ if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
-    from cw.review_finding_dispositions import FindingDisposition, RefusedDisposition
+    from cw.review_finding_dispositions import FindingDisposition
     from cw.review_findings import (
         AgentSpecStatus,
         CapturedDiff,
         Finding,
     )
+    from cw.review_markers import RefusedDisposition
 
 
 def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:

@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
-    from cw.review_finding_dispositions import FindingDisposition, RefusedDisposition
+    from cw.review_finding_dispositions import FindingDisposition
     from cw.review_findings import (
         AgentSpecStatus,
         CapturedDiff,
@@ -61,6 +61,7 @@ if TYPE_CHECKING:
         ReviewerRunMetrics,
         ReviewVerdict,
     )
+    from cw.review_markers import RefusedDisposition
 
 _log = logging.getLogger(__name__)
 

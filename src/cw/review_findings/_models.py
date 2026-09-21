@@ -20,11 +20,13 @@ from pydantic.json_schema import SkipJsonSchema
 from cw.auto_dev_result import Review
 
 # #2210: the one model group member NOT declared here. RefusedDisposition is
-# owned by cw.review_finding_dispositions, beside the ledger contract whose
-# refusals it records, for the same reason FindingDisposition is: that module
-# is the single source of truth for the disposition record's shape. Importing
-# it closes no cycle -- it imports nothing from ``cw`` at module scope.
-from cw.review_finding_dispositions import RefusedDisposition
+# owned by cw.review_markers, beside the marker vocabulary whose refusals it
+# records. Round 4 moved it there out of cw.review_finding_dispositions: this
+# package is the EXECUTOR-NEUTRAL finding contract, so a dependency on one
+# executor's ledger implementation inverted the direction the split exists to
+# keep. cw.review_markers imports nothing from ``cw`` at all, so this is a leaf
+# edge that can never close a cycle.
+from cw.review_markers import RefusedDisposition
 
 # "DEBT" (#1837) is the non-blocking severity for a real problem the reviewer
 # found on code this diff did not cause: it is tracked in the verdict's debt

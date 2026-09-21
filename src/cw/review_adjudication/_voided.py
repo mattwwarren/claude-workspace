@@ -24,6 +24,7 @@ from cw.review_adjudication._models import (
     Adjudication,
     VoidedFinding,
 )
+from cw.review_markers import VOIDED_SENTINEL
 
 if TYPE_CHECKING:
     from cw.review_findings import AcceptedFinding, ReviewVerdict
@@ -34,7 +35,11 @@ _log = logging.getLogger(__name__)
 #: Fixed text, mirroring ``## Blocking Review Findings`` (#1815) — the header
 #: is decorative and ignored on parse; the sentinel below is the contract.
 _VOIDED_MD_TITLE = "## Voided Review Findings"
-_VOIDED_SENTINEL = "VOIDED-REVIEW-FINDINGS"
+#: Aliased from :mod:`cw.review_markers` (#2210 round 4) rather than spelled
+#: here: the renderer that escapes marker syntax out of untrusted finding text
+#: needs this token too, and two spellings of a string a parser keys on is how
+#: a writer and a reader drift apart.
+_VOIDED_SENTINEL = VOIDED_SENTINEL
 #: Bump when the sentinel's on-the-wire shape changes in a way a reader must
 #: branch on, following ``ReviewVerdict.schema_version``'s convention (#1108).
 _VOIDED_SCHEMA_VERSION = 1
