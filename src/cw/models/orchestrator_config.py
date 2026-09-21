@@ -22,7 +22,11 @@ from cw.models.enums import (
     ReasoningEffort,
     Stage,
 )
-from cw.models.tasks import _validate_gate_recipe_keys, _validate_review_recipe_keys
+from cw.models.tasks import (
+    _validate_gate_recipe_keys,
+    _validate_park_on_abandoned_exit_keys,
+    _validate_review_recipe_keys,
+)
 
 
 class LaneConcurrencyOverride(BaseModel):
@@ -325,6 +329,13 @@ class LaneConfig(BaseModel):
     # to the hardcoded default-off. Recognised keys: "address_review",
     # "auto_fix_ci", "request_reviewer", "escalate_merge_block" (RFC 0010 P4).
     review_recipes: dict[str, bool] | None = None
+    # Lane-level enablement map for the Stop-hook abandoned-exit park (#2135).
+    # Middle tier in resolve_park_on_abandoned_exit_enabled's 3-tier
+    # precedence: consulted when the ticket carries no override, and itself
+    # overridden by TicketTask.park_on_abandoned_exit. The key absent from this
+    # map (or None) defers to the hardcoded default-off. Recognised key:
+    # PARK_ON_ABANDONED_EXIT_KEY.
+    park_on_abandoned_exit: dict[str, bool] | None = None
     # Lane-level codex-review tier enablement map (#2210). Middle tier in
     # cw.codex_background._resolve_claim_tier_enabled's precedence, which is
     # 2-tier rather than 3 (master switch -> lane map -> hardcoded-off floor):
@@ -391,6 +402,15 @@ class LaneConfig(BaseModel):
         if value is None:
             return None
         return _validate_review_recipe_keys(value)
+
+    @field_validator("park_on_abandoned_exit")
+    @classmethod
+    def _check_park_on_abandoned_exit(
+        cls, value: dict[str, bool] | None
+    ) -> dict[str, bool] | None:
+        if value is None:
+            return None
+        return _validate_park_on_abandoned_exit_keys(value)
 
     @field_validator("codex_review_tiers")
     @classmethod
@@ -854,6 +874,17 @@ class OrchestratorConfig(BaseModel):
     # construction until P2 ships). Default False, mirroring
     # gate_recipes_enabled's fail-safe default.
     review_recipes_enabled: bool = False
+    # GitHub #2135 — master switch for the Stop-hook abandoned-exit park.
+    # Default False: the park is a state-mutating auto-actor that moves a
+    # dev-queue row RUNNING -> BLOCKED_ON_USER off the worker's recorded park
+    # marker, so it ships dark and is armed per-lane by an operator —
+    # mirroring gate_recipes_enabled's fail-safe default and
+    # docs/release-playbook.md's default-off floor for this change class. With
+    # this False the Stop hook defers on a sentinel-less exit exactly as it did
+    # before #2135, without reading the marker. Per-lane / per-ticket
+    # resolution: LaneConfig.park_on_abandoned_exit,
+    # TicketTask.park_on_abandoned_exit, resolve_park_on_abandoned_exit_enabled.
+    park_on_abandoned_exit_enabled: bool = False
     # GitHub #1437 — operator escape hatch for the SSH-agent-key preflight
     # gate (#927). Default True (gate stays enforced): unlike
     # concierge_enabled/gate_recipes_enabled above, this does NOT gate new

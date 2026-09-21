@@ -4,12 +4,27 @@ Both ``signal-stop`` (headless DAEMON backstop) and ``dev-queue wait``
 (sentinel-aware polling) need to detect and parse the AUTO_DEV_RESULT
 sentinel inside a Claude session transcript. The logic lives here so both
 command submodules import the same implementation.
+
+:func:`_sentinel_frame_after` is the odd one out: it looks for the frame
+*markers* rather than a parseable sentinel, and it exists to produce NEGATIVE
+evidence only — its True answer can suppress the #2135 abandoned-exit park but
+can never cause one. Any read or parse trouble therefore counts as evidence
+that a frame may be present; only a clean read that finds none returns False.
 """
 
 from __future__ import annotations
 
-from cw._util import _iter_sentinel_text_blocks, claude_project_dir
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+from cw._util import (
+    _iter_sentinel_text_blocks,
+    _iter_sentinel_text_records,
+    claude_project_dir,
+)
 from cw.auto_dev_result import (
+    _CLOSE_SENTINEL,
+    _OPEN_SENTINEL,
     AutoDevResult,
     BlockedResult,
     _is_placeholder_sentinel_text,
@@ -17,6 +32,9 @@ from cw.auto_dev_result import (
     is_documented_example,
     parse_stdout,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _parse_sentinel_from_transcript(
@@ -82,3 +100,53 @@ def _sentinel_present_in_transcript(
     full parsed value, but the budget path only cares "did it emit?"
     """
     return _parse_sentinel_from_transcript(cwd, claude_session_id) is not None
+
+
+def _at_or_after(timestamp: str | None, pivot: datetime) -> bool:
+    """Whether a record stamped *timestamp* is at/after *pivot*.
+
+    An unorderable stamp — absent, unparseable, or naive (no offset, so not
+    comparable to the aware *pivot*) — counts as AFTER. Every such record then
+    suppresses a park rather than permitting one, which is the conservative
+    direction: the cost is a silent non-park, never a false park.
+    """
+    if timestamp is None:
+        return True
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return True
+    return parsed.tzinfo is None or parsed >= pivot
+
+
+def _sentinel_frame_after(transcript_path: Path, pivot: datetime) -> bool:
+    """True iff a sentinel frame marker appears at or after *pivot* (#2135).
+
+    Either marker counts, complete pair or not: an open marker with no close
+    never reaches ``parse_stdout`` (``extract_block`` needs the pair), so a
+    truncated frame reads to the Stop hook as "no sentinel" — exactly the case
+    that must NOT be parked as ``stopped_without_sentinel``, because doing so
+    would hide the worker's real blocker reason behind the wrong disposition.
+
+    Fails toward defer. It reads the transcript in ``strict`` mode, so an
+    unreadable file, a torn final line, or any undecodable line raises and is
+    caught here as True. Only a clean read that finds no frame returns False,
+    which is what makes "this guard can only suppress a park" true of the whole
+    function rather than only of the happy path. A missing file is the caller's
+    decision, not this function's (it returns False here and the caller's own
+    "no transcript found" branch defers).
+
+    Reads no clock: *pivot* comes from the marker the worker recorded, and the
+    comparison is ordering against record timestamps, never an age or expiry.
+    """
+    try:
+        for timestamp, text in _iter_sentinel_text_records(
+            transcript_path, strict=True
+        ):
+            if (_OPEN_SENTINEL in text or _CLOSE_SENTINEL in text) and _at_or_after(
+                timestamp, pivot
+            ):
+                return True
+    except (OSError, ValueError):
+        return True
+    return False

@@ -26,6 +26,16 @@ and the signal fires under the discriminating
 ``fix_loop_await_deadline_exceeded`` paused_status. Still signal-only: the
 deadline stops suppressing a signal, it never dispositions anything
 (ADR-0014).
+
+One more carve-out on that distress leg (#2135): a session whose ticket task
+is already parked ``BLOCKED_ON_USER`` with
+``disposition="stopped_without_sentinel"`` — the Stop hook's abandoned-exit
+park — and whose ``session_id`` this session owns does not page. That row has
+already been surfaced by its own ``session.needs_attention``, so a recurring
+``session_unresponsive`` for the same condition is noise. Signal-only again:
+nothing is mutated, bucket latching and ``session.liveness_changed`` are
+untouched, every other disposition still pages, and the predicate is
+evaluated per tick so a requeue re-enables the signal with no special casing.
 """
 
 from __future__ import annotations
@@ -41,6 +51,7 @@ from cw.models import (
     DEFAULT_STAGE,
     LivenessBucket,
     OrchestratorEventType,
+    QueueItemStatus,
     SessionOrigin,
 )
 from cw.reconcile import _deps
@@ -49,6 +60,7 @@ from cw.reconcile._shared import (
     _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON,
     _LIVE_STATUSES,
     _SESSION_UNRESPONSIVE_REASON,
+    _STOPPED_WITHOUT_SENTINEL_REASON,
     DanglingToolUseEvidence,
     _detect_dangling_tool_use,
     _has_terminal_sentinel,
@@ -60,7 +72,7 @@ from cw.reconcile._shared import (
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from cw.models import CwState, OrchestratorConfig, Stage, TicketTask
+    from cw.models import CwState, OrchestratorConfig, Session, Stage, TicketTask
 
 # Unit conversion for fix_loop_await_deadline_minutes, which is compared
 # against a seconds-valued spawn age (#2012).
@@ -102,6 +114,9 @@ class LivenessCandidate:
     # subagent *within its deadline* (multi-dimensional evidence, not bare
     # elapsed time). Drives a SESSION_NEEDS_ATTENTION + push in the act phase;
     # never a disposition.
+    # #2135: withheld entirely for a row parked BLOCKED_ON_USER by the
+    # Stop-hook abandoned-exit park, which has already paged through its own
+    # session.needs_attention. See _is_parked_stopped_without_sentinel.
     distress: bool = False
     # #2012 — how long this session's outstanding subagent spawn has been
     # unresolved, or None when there is no outstanding spawn (or no readable
@@ -184,6 +199,31 @@ def _classify_liveness_bucket(
     return LivenessBucket.STALE_15M
 
 
+def _is_parked_stopped_without_sentinel(
+    task: TicketTask | None, session: Session
+) -> bool:
+    """True iff *task* is parked by the #2135 abandoned-exit park FOR *session*.
+
+    Signal-only suppression key for the distress leg: the row has already
+    paged via its own ``session.needs_attention``, so a second recurring
+    ``session_unresponsive`` for the same condition is noise. Any other
+    disposition (or no task at all) keeps paging.
+
+    Matched by ``session_id`` because ``task_by_ticket`` is keyed by bare
+    ticket id (client stripped, last row wins), so two clients' tickets
+    sharing an id -- or a same-client add-after-terminal duplicate -- can
+    resolve to the wrong row. A collision must fail open to paging, never
+    silence a page; the park deliberately leaves ``session_id`` set, so the
+    match costs one conjunct.
+    """
+    return (
+        task is not None
+        and task.status is QueueItemStatus.BLOCKED_ON_USER
+        and task.disposition == _STOPPED_WITHOUT_SENTINEL_REASON
+        and task.session_id == session.id
+    )
+
+
 def _detect_liveness_candidates(
     state: CwState,
     *,
@@ -200,6 +240,10 @@ def _detect_liveness_candidates(
     latched at ``STALE_45M`` with no crossing but whose renotify debounce
     window has elapsed (a level-detect renotify, #1858). Makes zero writes
     to state, queue, or event bus.
+
+    The ``distress`` flag additionally carves out a row parked by the #2135
+    abandoned-exit park (see :func:`_is_parked_stopped_without_sentinel`); the
+    candidate itself is still produced, so the bucket latch is unaffected.
 
     Gating (RFC 0008 W2 round-1, R2): DAEMON origin + status in
     ``_LIVE_STATUSES`` + ``surface_ref`` present in *native_live* — the same
@@ -261,8 +305,20 @@ def _detect_liveness_candidates(
         # and both must NOT suppress — an unbounded wait is the failure mode.
         # Still signal-only: no disposition follows from the deadline
         # (ADR-0014).
+        #
+        # #2135: a row the Stop hook already parked BLOCKED_ON_USER on
+        # abandoned-exit evidence paged once through its own
+        # session.needs_attention; re-paging it here is noise. Signal-only --
+        # nothing is mutated, the bucket latch and session.liveness_changed
+        # still fire below, and the predicate is re-evaluated every tick, so a
+        # requeued row (status leaves BLOCKED_ON_USER) is distress-eligible
+        # again with no special casing.
         is_top_bucket = new_bucket is LivenessBucket.STALE_45M
-        distress_base = is_top_bucket and not _has_terminal_sentinel(session)
+        distress_base = (
+            is_top_bucket
+            and not _has_terminal_sentinel(session)
+            and not _is_parked_stopped_without_sentinel(task, session)
+        )
         spawn_age = (
             _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
             if distress_base

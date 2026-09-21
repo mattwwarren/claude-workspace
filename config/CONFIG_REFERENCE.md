@@ -57,7 +57,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `operator_github_login` | string \| null | `null` | Override the runtime-resolved GitHub login used for counterparty/self-identity resolution (RFC 0011 S1). Rare multi-account case; the runtime `gh api user` login is authoritative when unset. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
-| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below), `attempt_ceiling: int | false | null = null` (#1751 — lane override for the global attempt ceiling; `null` defers to `global_attempt_ceiling` in `orchestrator.yaml`, `false` disables the ceiling for this lane; see [Per-Lane Attempt Ceiling](#per-lane-attempt-ceiling-1751) below), `busy_wait_guard_enabled: bool | null = null` / `busy_wait_guard_repeat_threshold: int | null = null` / `busy_wait_guard_window_seconds: int | null = null` (#1946 — lane overrides for the `cw guard-busy-wait` PreToolUse hook; `null` on any of the three defers to the matching global in `orchestrator.yaml`; see [Busy-Wait Guard](#busy-wait-guard-1946) below), `codex_review_tiers: dict[str,bool] | null = null` (#2210 — per-lane enablement for the codex review ledger's optional matching tiers; the one recognised key is `claim_suppression`; an unrecognised key fails loud at config load; see [Codex Claim-Match Suppression Gate](#codex-claim-match-suppression-gate-2210) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `park_on_abandoned_exit: dict[str,bool] | null = null` (#2135 — per-lane enablement of the Stop-hook abandoned-exit park; see [Abandoned-Exit Park Enablement](#abandoned-exit-park-enablement-github-2135) below), `codex_review_tiers: dict[str,bool] | null = null` (#2210 — per-lane enablement for the codex review ledger's optional matching tiers; the one recognised key is `claim_suppression`; an unrecognised key fails loud at config load; see [Codex Claim-Match Suppression Gate](#codex-claim-match-suppression-gate-2210) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below), `attempt_ceiling: int | false | null = null` (#1751 — lane override for the global attempt ceiling; `null` defers to `global_attempt_ceiling` in `orchestrator.yaml`, `false` disables the ceiling for this lane; see [Per-Lane Attempt Ceiling](#per-lane-attempt-ceiling-1751) below), `busy_wait_guard_enabled: bool | null = null` / `busy_wait_guard_repeat_threshold: int | null = null` / `busy_wait_guard_window_seconds: int | null = null` (#1946 — lane overrides for the `cw guard-busy-wait` PreToolUse hook; `null` on any of the three defers to the matching global in `orchestrator.yaml`; see [Busy-Wait Guard](#busy-wait-guard-1946) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
 | `pipeline` | PipelineConfig | standard 4-stage pipeline, no per-stage models | Per-stage executor configuration (RFC 0005): `stages` (default `[plan, impl, review, finalize]`) and `executors` (default `{}`). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
@@ -819,6 +819,16 @@ gate_recipes_enabled: false
 # Enablement below.
 review_recipes_enabled: false
 
+# Stop-hook abandoned-exit park master switch (GitHub #2135). Default false,
+# mirroring gate_recipes_enabled's fail-safe posture: when true, `cw
+# signal-stop` may move a dev-queue row RUNNING -> BLOCKED_ON_USER on the
+# worker's recorded park marker alone, with NO human in the loop. This is a
+# hard top-level short-circuit -- when false, a sentinel-less Stop defers
+# exactly as it did before #2135 and the marker is not even read. Per-lane /
+# per-ticket enablement is still resolved below -- see Abandoned-Exit Park
+# Enablement.
+park_on_abandoned_exit_enabled: false
+
 # Codex review claim-match suppression master switch (GitHub #2210). Default
 # false, mirroring gate_recipes_enabled's fail-safe posture. Must be paired
 # with `codex_review_tiers: {claim_suppression: true}` on the lane -- both, or
@@ -1098,6 +1108,59 @@ clients:
 
 Unrecognized recipe keys fail loud at config-load time (a typo like
 `adress_review` raises rather than silently no-opping).
+
+## Abandoned-Exit Park Enablement (GitHub #2135)
+
+The Stop-hook **abandoned-exit park** moves a dev-queue row `RUNNING →
+BLOCKED_ON_USER` when `cw signal-stop` fires with no sentinel and the worker
+has recorded a `park_comment_marker` for the ticket — its own claim, written
+with `cw signal-park` after its park comment posted, that it is taking that
+exit (full contract: [`docs/session-disposition.md`](../docs/session-disposition.md)
+§6c). It is a state-mutating auto-actor driven by the worker's recorded
+marker, so it **ships dark** and is armed per-lane by an operator.
+
+Whether it fires for a given ticket is resolved with 3-tier precedence,
+highest first — the same shape as the gate and review recipes above:
+
+1. **Per-ticket** — a `park_on_abandoned_exit` map on the `TicketTask` (e.g.
+   `{park_on_abandoned_exit: true}`). There is **no CLI flag** for this tier;
+   it is a data-model surface only.
+2. **Per-lane** — a `park_on_abandoned_exit` map on a `LaneConfig` entry (see
+   the `lanes` field above).
+3. **Hardcoded default** — **OFF**. The key absent from the ticket map and the
+   lane map means disabled.
+
+Independently, the master switch `park_on_abandoned_exit_enabled` (in
+`orchestrator.yaml`, default `false`) is a hard top-level short-circuit: when
+`false` the park never fires regardless of any per-lane or per-ticket setting,
+and the Stop hook does not even read the marker — behaviour is identical
+to the pre-#2135 unconditional defer. The flag is only resolved after the
+Stop hook has found a `RUNNING` dev-queue row for the session, and the resolved
+config is memoized per `(client, lane)` for the life of that (short-lived)
+process.
+
+```yaml
+# clients.yaml — arm the park on one lane, leave the other off
+clients:
+  my-project:
+    workspace_path: /path/to/repo
+    lanes:
+      - name: fastlane
+        park_on_abandoned_exit:
+          park_on_abandoned_exit: true
+      - name: default   # stays off (hardcoded default)
+```
+
+Unrecognized keys fail loud at config-load time (a typo like
+`park_on_abandonned_exit` raises rather than silently no-opping). Resolution is
+fail-closed end to end: a `clients.yaml` or `orchestrator.yaml` that cannot be
+read or validated, an unreadable `dev_queue.json`, a ticket whose client is
+absent from `clients.yaml`, a row riding a lane that client never declares,
+and an absent lane entry all leave the park disabled, never enabled. The
+declared-lane check runs **ahead** of all three tiers above, so a per-ticket
+override cannot open a lane nobody armed. A failure is logged once per
+`(client, lane)` per process at WARNING with the names and the error class,
+and never raises out of the Stop hook.
 
 ## Review Strategy Config (RFC 0010 Phase 4)
 

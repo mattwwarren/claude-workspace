@@ -339,6 +339,7 @@ def test_resolve_and_complete_headless_session_completes_on_task_already_termina
     resolution = _resolve_and_complete_headless_session(
         state,
         session,
+        context={},
         cwd_value=str(worktree),
         claude_session_id=claude_session_id,
         ticket_id_value="1692-mut",
