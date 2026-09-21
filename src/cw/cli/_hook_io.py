@@ -135,7 +135,7 @@ def _read_cw_context(cwd: str) -> dict[str, object] | None:
     Best-effort: a missing file, unreadable file, malformed JSON, or a
     non-object payload all yield None.
     """
-    context_path = Path(cwd) / ".claude" / "cw-context.json"
+    context_path = Path(cwd) / HOOK_CONTEXT_RELATIVE_PATH
     if not context_path.is_file():
         return None
     try:
@@ -153,7 +153,10 @@ def find_cw_context(start: Path) -> dict[str, object] | None:
     not: it may be invoked from anywhere inside the tree, so it needs the
     upward walk ``.claude/scripts/check_not_main_checkout.py`` already does.
     This delegates the actual read to :func:`_read_cw_context` rather than
-    parsing the file a second way — one parser, two search strategies.
+    parsing the file a second way — one parser, two search strategies — and
+    joins the shared :data:`~cw.models.HOOK_CONTEXT_RELATIVE_PATH` rather than
+    re-spelling the path, so this discovery and #2226's guard cannot drift
+    onto two different files later.
 
     Returns the NEAREST context, or None when no ancestor has one. Same
     fail-open contract as every other cw context guard: a missing, unreadable
@@ -162,6 +165,6 @@ def find_cw_context(start: Path) -> dict[str, object] | None:
     """
     resolved = start.resolve()
     for candidate in [resolved, *resolved.parents]:
-        if (candidate / ".claude" / "cw-context.json").is_file():
+        if (candidate / HOOK_CONTEXT_RELATIVE_PATH).is_file():
             return _read_cw_context(str(candidate))
     return None

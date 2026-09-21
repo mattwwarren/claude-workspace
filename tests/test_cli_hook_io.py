@@ -12,20 +12,19 @@ cover the affected branch.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
+from cw.cli import _hook_io
 from cw.cli._hook_io import (
     _context_lock,
     _read_cw_context,
     _write_cw_context_locked,
+    find_cw_context,
 )
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 from tests.conftest import _hold_context_lock, _write_hook_context_file
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _seeded_worktree(tmp_path: Path, name: str = "wt") -> Path:
@@ -154,6 +153,34 @@ def test_read_cw_context_returns_none_for_non_object_payload(tmp_path: Path) -> 
     (worktree / HOOK_CONTEXT_RELATIVE_PATH).write_text("[]", encoding="utf-8")
 
     assert _read_cw_context(str(worktree)) is None
+
+
+def test_context_path_has_exactly_one_definition_in_this_module() -> None:
+    """#2210: every read path joins ``HOOK_CONTEXT_RELATIVE_PATH``, not a
+    second spelling of it.
+
+    ``find_cw_context`` (#2210) and ``_read_cw_context`` each re-spelled the
+    ``.claude/cw-context.json`` join inline while ``_write_cw_context_locked``
+    in the same module used the shared constant — which is exactly how #2226's
+    guard and this discovery would drift apart later. A literal is the
+    mutation this test catches, so it asserts on the source rather than on
+    behaviour (behaviour is identical either way, which is the problem).
+    """
+    source = Path(_hook_io.__file__).read_text(encoding="utf-8")
+    assert '"cw-context.json"' not in source
+    assert source.count("HOOK_CONTEXT_RELATIVE_PATH") >= 3
+
+
+def test_find_cw_context_walks_up_to_the_nearest_context(tmp_path: Path) -> None:
+    """The operator-run CLI guard is not handed a worktree root (#2210)."""
+    worktree = _seeded_worktree(tmp_path)
+    nested = worktree / "src" / "cw"
+    nested.mkdir(parents=True)
+
+    found = find_cw_context(nested)
+    assert found is not None
+    assert found == _read_cw_context(str(worktree))
+    assert find_cw_context(tmp_path / "elsewhere") is None
 
 
 def test_read_cw_context_round_trips_the_production_writer(tmp_path: Path) -> None:
