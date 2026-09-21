@@ -20,6 +20,8 @@ import yaml
 from cw.config import save_state
 from cw.disk import DiskUsage
 from cw.models import (
+    AGENT_SPAWN_STAMP_KEY,
+    HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
     CwState,
     OrchestratorEventType,
@@ -643,10 +645,18 @@ def _write_project_config_yaml(root: Path, content: str) -> None:
     (config_dir / "project-config.yaml").write_text(content, encoding="utf-8")
 
 
+# ``_write_hook_context_file``'s ``stamp`` sentinels (#2229): keep the real
+# writer's seeded ``{0, None}`` stamp, or delete the key entirely (a legacy
+# pre-#1646 context). Any other value replaces the stamp verbatim.
+_STAMP_UNCHANGED: object = object()
+_STAMP_ABSENT: object = object()
+
+
 def _write_hook_context_file(
     worktree: Path,
     workspace_path: Path | None = None,
     lane: str | None = None,
+    stamp: object = _STAMP_UNCHANGED,
 ) -> None:
     """Materialize ``<worktree>/.claude/cw-context.json`` via the real writer.
 
@@ -660,6 +670,11 @@ def _write_hook_context_file(
     ``cw guard-busy-wait``'s per-lane config tests read the same ``"lane"``
     key production stamps — an ad hoc parallel JSON writer in the test file
     is exactly the fixture drift this helper's hoist exists to prevent.
+
+    *stamp* (#2229) overrides the seeded ``agent_spawn_stamp`` after the real
+    writer runs: ``_STAMP_ABSENT`` deletes the key, any other non-default
+    value replaces it, so the Stop hook's stamp-shape edge cases are seeded
+    through the same file the production writer produced.
     """
     from cw.spawn import _write_hook_context
 
@@ -674,6 +689,15 @@ def _write_hook_context_file(
         workspace_path=workspace_path,
         lane=lane,
     )
+    if stamp is _STAMP_UNCHANGED:
+        return
+    context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    if stamp is _STAMP_ABSENT:
+        del context[AGENT_SPAWN_STAMP_KEY]
+    else:
+        context[AGENT_SPAWN_STAMP_KEY] = stamp
+    context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
 
 
 @contextlib.contextmanager
