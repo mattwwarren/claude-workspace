@@ -122,7 +122,14 @@ _KEY_SEPARATOR = "::"
 _DISPOSITION_MD_TITLE = "## Review Finding Dispositions"
 _DISPOSITION_SENTINEL = "REVIEW-FINDING-DISPOSITIONS"
 #: Bump when the sentinel's on-the-wire shape changes in a way a reader must
-#: branch on, following ``_VOIDED_SCHEMA_VERSION``'s convention.
+#: branch on, following ``_VOIDED_SCHEMA_VERSION``'s convention. #2210's
+#: ``actor``/``reviewed_sha``/``summary`` fields deliberately did NOT bump it:
+#: they are optional and defaulted, the model ignores unknown keys, and no
+#: reader branches on their presence — a v1 marker and a v1 queue row written
+#: either side of that change load identically. Same reasoning applies to
+#: ``DEV_QUEUE_SCHEMA_VERSION``, which ``TicketTask.finding_dispositions``
+#: rides on: the migration ladder fills defaults for absent TicketTask FIELDS,
+#: and this is a nested model gaining defaulted ones.
 _DISPOSITION_SCHEMA_VERSION = 1
 _DISPOSITION_BLOCK_RE = re.compile(
     rf"<!--\s*{_DISPOSITION_SENTINEL}\s*(?P<body>.*?)\s*{_DISPOSITION_SENTINEL}\s*-->",
@@ -153,11 +160,30 @@ class FindingDisposition(BaseModel):
     hand-authored marker JSON and may be blank when the producer had no clock
     handy. It is never part of identity — only :func:`merge_finding_dispositions`
     reads it, to resolve a duplicate key newest-wins.
+
+    ``actor``, ``reviewed_sha`` and ``summary`` are #2210's **provenance**
+    fields, and they exist because this record is a durable, blocking
+    SUPPRESSION: an entry that cannot answer "who silenced this finding, when,
+    and against what code" is not an audit record. ``cw review settle`` always
+    fills all three (and always stamps ``recorded_at`` from its own UTC clock —
+    audit data is never operator-supplied); every one of them stays OPTIONAL
+    and defaulted so a marker or a persisted queue row written before #2210
+    still loads unchanged, and so a hand-authored marker stays legal.
+
+    ``summary`` is the VERBATIM finding summary. The ledger key carries only
+    the *normalised* half (see :func:`_disposition_key`), which is lossy and
+    shared by every rewording that normalises alike — so the verbatim text is
+    what lets a future per-record rollback target exactly one entry rather than
+    a key's worth of them. It is deliberately not part of identity: nothing
+    matches on it.
     """
 
     outcome: Outcome
     rationale: str = ""
     recorded_at: str = ""
+    actor: str = ""
+    reviewed_sha: str = ""
+    summary: str = ""
 
 
 def _disposition_key(file: str, summary: str) -> str | None:

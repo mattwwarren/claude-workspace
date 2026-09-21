@@ -429,6 +429,17 @@ class OrchestratorEventType(StrEnum):
     # event is that it records the counterfactual. Reading these is how an
     # operator judges the matcher's thresholds before arming a lane (ADR-0016).
     REVIEW_FINDING_CLAIM_SHADOWED = "review.finding_claim_shadowed"
+    # GitHub #2210 -- an operator ran `cw review settle` and minted a durable
+    # REJECTED (or ACCEPTED) ledger entry for one finding. The mirror of
+    # REVIEW_FINDING_DISPOSITION_SUPPRESSED above: that one records a
+    # suppression FIRING, this one records the suppression being CREATED.
+    # Mandatory for the same reason both of those are: a settle is the one act
+    # that can silence a real defect permanently and invisibly, so the record
+    # of who did it, when, and against which reviewed sha cannot live only in
+    # a ticket comment an operator may later edit. One event per settled
+    # finding. `correlation_id` is the ticket id when `--ticket` names one
+    # (the payload the blocking comment renders carries no ticket), else None.
+    REVIEW_FINDING_SETTLED = "review.finding_settled"
     # GitHub #1927 -- a stale_dispatch park's WatchedPr registration found an
     # active watch for the same (repo, pr_number) already owned by a
     # DIFFERENT, non-None client. register_or_adopt_watched_pr refuses to
