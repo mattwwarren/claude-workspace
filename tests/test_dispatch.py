@@ -3245,6 +3245,251 @@ class TestClaimRefusesOccupiedWorktree:
 
 
 # ---------------------------------------------------------------------------
+# TestStaleWorktreeYieldsToLiveOccupant (#2213 round 7)
+# ---------------------------------------------------------------------------
+
+
+_STALE_OCCUPIED_SOURCES = ["state", "roster"]
+_STALE_INDETERMINATE_SOURCES = ["unreadable-state", "unreadable-roster"]
+
+
+class TestStaleWorktreeYieldsToLiveOccupant:
+    """A stale worktree that a live worker occupies must never be force-removed.
+
+    ``create_worktree`` raises ``StaleWorktreeError`` for a worktree on the wrong
+    branch (or not a worktree). The claim path used to consult only git-dirtiness
+    before ``remove_worktree(force=True)``, so a live cw session or daemon-roster
+    worker homed on that wrong-branch tree could still have it removed from under
+    it. Liveness (the predicate the same-branch reuse path already uses) is now
+    consulted FIRST, then dirtiness, then removal. An occupied or indeterminate
+    (fail closed) tree defers the claim through the same
+    ``OCCUPIED_BY_LIVE_SESSION`` handling the reuse-refresh occupancy refusal
+    reaches; a tree that is unoccupied and dirty parks, and one that is
+    unoccupied and clean is removed, exactly as before.
+    """
+
+    _TICKET = "GEN-2213S"
+    _BRANCH = "dev/GEN-2213S"
+
+    def _stub_stale(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        unsaved: str | None,
+    ) -> list[str]:
+        """Make ``create_worktree`` raise the stale error; return a call log.
+
+        The log records, in order, each consultation of the liveness predicate
+        (the REAL one, wrapped so it still reads the isolated state and roster),
+        the dirtiness check, and the removal, so a test can assert both WHAT ran
+        and in WHICH order.
+        """
+        from cw.worktree import live_home_reason
+
+        calls: list[str] = []
+
+        def _stale(*_args: object, **_kwargs: object) -> Path:
+            msg = "Refusing to reuse stale worktree"
+            raise StaleWorktreeError(msg)
+
+        def _live(wt_path: Path) -> str | None:
+            calls.append("live")
+            return live_home_reason(wt_path)
+
+        def _unsaved(_client: object, _branch: str) -> str | None:
+            calls.append("unsaved")
+            return unsaved
+
+        def _remove(_client: object, branch: str, *, force: bool = False) -> None:
+            calls.append(f"remove:{branch}:{force}")
+
+        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.live_home_reason", _live)
+        monkeypatch.setattr("cw.dispatch.claim.unsaved_work_reason", _unsaved)
+        monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _remove)
+        return calls
+
+    def _occupy(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        source: str,
+    ) -> Path:
+        """Home a live occupant (or an unreadable source) on the stale tree."""
+        from cw.worktree import worktree_path_for
+
+        stale_tree = worktree_path_for(client, self._BRANCH)
+        stale_tree.mkdir(parents=True)
+        if source == "unreadable-state":
+            # A corrupt sessions.json would also break dispatch_tick's own state
+            # reads before the claim is reached, so make only the liveness
+            # probe's state read indeterminate.
+            monkeypatch.setattr("cw.worktree.live_session_worktree_paths", lambda: None)
+        else:
+            occupy_worktree(client, stale_tree, source)
+        return stale_tree
+
+    def _assert_released_not_charged(self, stale_tree: Path) -> None:
+        """The row is back on PENDING as a release, not a failure or a park."""
+        assert stale_tree.exists()
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+        assert task.attempts == 0
+        assert task.unproductive_attempts == 0
+        assert task.spawn_error_count == 0
+        assert task.next_eligible_at is not None
+        assert task.next_eligible_at > datetime.now(UTC)
+
+    @pytest.mark.parametrize("source", _STALE_OCCUPIED_SOURCES)
+    def test_live_occupant_defers_without_removal_or_dirty_check(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        source: str,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        # Dirty on purpose: were dirtiness consulted first it would PARK the
+        # task BLOCKED_ON_USER instead of releasing it.
+        calls = self._stub_stale(monkeypatch, unsaved="1 uncommitted path(s)")
+        stale_tree = self._occupy(sample_client_config, monkeypatch, source)
+        daemon = FakeNativeDaemonClient()
+
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert daemon.spawn_calls == []
+        # Liveness ran, and NOTHING after it: no dirtiness check (order), no
+        # removal.
+        assert calls == ["live"]
+        self._assert_released_not_charged(stale_tree)
+        assert any(
+            str(stale_tree) in r.getMessage()
+            and _OCCUPANT_REASON[source] in r.getMessage()
+            for r in caplog.records
+            if r.name == "cw.dispatch" and r.levelno == logging.WARNING
+        )
+
+    @pytest.mark.parametrize("source", _STALE_INDETERMINATE_SOURCES)
+    def test_indeterminate_occupancy_fails_closed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        source: str,
+    ) -> None:
+        """An unreadable session state and an unreadable daemon roster are two
+        distinct early returns in the predicate; each must read as occupied."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        calls = self._stub_stale(monkeypatch, unsaved=None)
+        stale_tree = self._occupy(sample_client_config, monkeypatch, source)
+        daemon = FakeNativeDaemonClient()
+
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert daemon.spawn_calls == []
+        # Clean per git, yet NOT removed: "cannot tell" is not "free".
+        assert calls == ["live"]
+        self._assert_released_not_charged(stale_tree)
+
+    @pytest.mark.parametrize("source", _OCCUPANT_SOURCES)
+    def test_outcome_is_the_occupied_deferral_not_a_spawn_error(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        source: str,
+    ) -> None:
+        """The claim returns through ``_defer_occupied_claim`` (``occupied`` set,
+        no ``spawn_error``, so the lane breaker never counts it), the same
+        handling the reuse-refresh occupancy refusal reaches."""
+        from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        self._stub_stale(monkeypatch, unsaved="1 uncommitted path(s)")
+        stale_tree = self._occupy(sample_client_config, monkeypatch, source)
+        task, _skipped = _claim_next_pending(
+            "test-client",
+            lane="default",
+            client=sample_client_config,
+            config=simple_config,
+        )
+        assert task is not None
+        lines: list[str] = []
+
+        outcome = _spawn_claimed_task(
+            task,
+            sample_client_config,
+            resolved_native_daemon=FakeNativeDaemonClient(),
+            parent=None,
+            emit=lines.append,
+        )
+
+        assert outcome.occupied is True
+        assert outcome.spawned is False
+        assert outcome.spawn_error is False
+        assert outcome.usage_limit_detected is False
+        assert _OCCUPANT_REASON[source] in outcome.error
+        assert any(
+            "occupied" in line.lower()
+            and self._TICKET in line
+            and str(stale_tree) in line
+            for line in lines
+        ), lines
+
+    def test_unoccupied_dirty_tree_still_parks_after_the_liveness_check(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        calls = self._stub_stale(monkeypatch, unsaved="1 uncommitted path(s)")
+
+        result = dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert result.spawned == 0
+        # Liveness first, then dirtiness; the dirty tree is left alone.
+        assert calls == ["live", "unsaved"]
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.session_id is None
+        assert task.unproductive_attempts == 0
+
+    def test_unoccupied_clean_tree_is_still_force_removed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        calls = self._stub_stale(monkeypatch, unsaved=None)
+
+        result = dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert result.spawned == 0
+        # Liveness, then dirtiness, then removal.
+        assert calls == ["live", "unsaved", f"remove:{self._BRANCH}:True"]
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+
+# ---------------------------------------------------------------------------
 # TestDispatchCodexCapabilityGate
 # ---------------------------------------------------------------------------
 

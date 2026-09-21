@@ -36,7 +36,6 @@ from cw.worktree import (
     _fetch_default_branch,
     _git_dir,
     _hashed_worktree_base,
-    _live_home_reason,
     _normalize_path,
     _Occupancy,
     _ref_exists,
@@ -53,6 +52,7 @@ from cw.worktree import (
     fetch_feature_branch,
     is_main_behind_origin,
     is_main_checkout_dirty,
+    live_home_reason,
     live_session_worktree_paths,
     remove_worktree,
     resolve_scope_guard_default_branch,
@@ -2902,7 +2902,7 @@ class TestReuseOccupancyRosterAndPaths:
         elif side == "worker":
             _seed_roster(bad)
 
-        reason = _live_home_reason(bad if side == "target" else good)
+        reason = live_home_reason(bad if side == "target" else good)
 
         assert reason is not None
         assert "cannot be resolved" in reason
@@ -2939,7 +2939,7 @@ class TestReuseOccupancyRosterAndPaths:
         deleted worktree would otherwise veto every refresh."""
         _seed_roster(tmp_path / "deleted-worktree")
 
-        assert _live_home_reason(tmp_path / "wt") is None
+        assert live_home_reason(tmp_path / "wt") is None
 
     def test_symlink_loop_session_refuses_the_fast_forward(
         self,
@@ -4698,6 +4698,116 @@ class TestFetchDefaultBranch:
         assert result.outcome is FetchOutcome.BRANCH_ABSENT
         assert _freshness_warning_count(caplog) == 1
         assert ("test-client", FetchOutcome.BRANCH_ABSENT, reason) in warned
+
+    def test_missing_workspace_warns_once_per_distinct_path(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A permanently-missing workspace is the same failure every tick, so the
+        dedup set (which lives for the whole dispatch loop) must silence the
+        repeat. A different missing path is a different reason and warns."""
+        first_missing = tmp_path / "gone-a"
+        second_missing = tmp_path / "gone-b"
+        warned: set[FetchWarningKey] = set()
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            first = _fetch_default_branch("test-client", "main", first_missing, warned)
+            repeat = _fetch_default_branch("test-client", "main", first_missing, warned)
+            assert _freshness_warning_count(caplog) == 1
+            other = _fetch_default_branch("test-client", "main", second_missing, warned)
+
+        assert _freshness_warning_count(caplog) == 2
+        # The returned result is unchanged by the dedup.
+        for result, path in ((first, first_missing), (repeat, first_missing)):
+            assert result == FetchResult(
+                FetchOutcome.FAILED, f"workspace missing: {path}"
+            )
+        assert other == FetchResult(
+            FetchOutcome.FAILED, f"workspace missing: {second_missing}"
+        )
+        assert warned == {
+            ("test-client", FetchOutcome.FAILED, f"workspace missing: {first_missing}"),
+            (
+                "test-client",
+                FetchOutcome.FAILED,
+                f"workspace missing: {second_missing}",
+            ),
+        }
+
+    def test_missing_workspace_always_warns_without_a_set(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``None`` (a one-shot caller) keeps warning on every call."""
+        missing = tmp_path / "gone"
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            _fetch_default_branch("test-client", "main", missing)
+            _fetch_default_branch("test-client", "main", missing)
+
+        assert _freshness_warning_count(caplog) == 2
+
+    @pytest.mark.parametrize(
+        "exc_type", [FileNotFoundError, PermissionError, WorktreeError]
+    )
+    def test_os_failure_warns_once_then_warns_again_for_a_different_reason(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        exc_type: type[Exception],
+    ) -> None:
+        """A missing git binary (or unusable workspace) fails identically on every
+        tick; it must warn once. A different reason is new information."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        messages = ["git: command not found", "git: command not found", "denied"]
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            raise exc_type(messages.pop(0))
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        warned: set[FetchWarningKey] = set()
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            first = _fetch_default_branch("test-client", "main", ws, warned)
+            repeat = _fetch_default_branch("test-client", "main", ws, warned)
+            assert _freshness_warning_count(caplog) == 1
+            other = _fetch_default_branch("test-client", "main", ws, warned)
+
+        assert _freshness_warning_count(caplog) == 2
+        # The returned result is unchanged by the dedup.
+        assert (
+            first
+            == repeat
+            == FetchResult(FetchOutcome.FAILED, "git: command not found")
+        )
+        assert other == FetchResult(FetchOutcome.FAILED, "denied")
+        assert warned == {
+            ("test-client", FetchOutcome.FAILED, "git: command not found"),
+            ("test-client", FetchOutcome.FAILED, "denied"),
+        }
+
+    def test_os_failure_always_warns_without_a_set(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            msg = "git: command not found"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            _fetch_default_branch("test-client", "main", ws)
+            _fetch_default_branch("test-client", "main", ws)
+
+        assert _freshness_warning_count(caplog) == 2
 
     @pytest.mark.parametrize(
         ("stderr", "quiet_missing_ref", "expect_warning", "expected"),
