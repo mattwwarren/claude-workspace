@@ -105,12 +105,16 @@ def dispatch_fix_agent(
     anything.
 
     Order is load-bearing (R22): the live-session pre-check is a pure read that
-    runs before anything touches the worktree. ``create_worktree`` may then
-    fast-forward a behind reused worktree to ``origin/<branch>`` (#2213 --
-    never a reset, never a raise), and the HEAD verification runs after it,
-    before ``fetch``/``merge``, the only other mutating steps. A precondition
-    failure therefore leaves the worktree untouched except for that
-    fast-forward, which strictly advances HEAD and needs no compensating
+    runs before anything touches the worktree. ``create_worktree`` is then
+    called with ``refresh_on_reuse=True`` (#2213): a network ``git fetch`` of
+    ``origin/<branch>`` (can be slow; a failure degrades to using the worktree
+    as-is), then a fast-forward of the reused worktree to it -- only when the
+    worktree is unoccupied (no unsaved work, no live session homed on it),
+    clean, on the expected branch and strictly behind; otherwise it is left
+    exactly as it is. Never a reset, never a raise. The HEAD verification runs
+    after it, before ``fetch``/``merge``, the only other mutating steps. A
+    precondition failure therefore leaves the worktree untouched except for
+    that fast-forward, which strictly advances HEAD and needs no compensating
     restore.
 
     The HEAD verification confirms HEAD landed on the branch's resolved
@@ -169,7 +173,9 @@ def dispatch_fix_agent(
         )
 
     _refuse_if_worktree_references_live_session(client, branch)
-    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    worktree = create_worktree(
+        client, branch, allow_dirty_reuse=True, refresh_on_reuse=True
+    )
 
     resolved_ref = _resolve_remote_ref(branch, worktree)
     if resolved_ref is None:

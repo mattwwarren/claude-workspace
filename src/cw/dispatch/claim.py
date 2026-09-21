@@ -1108,7 +1108,16 @@ def _spawn_claimed_task(
         try:
             # allow_dirty_reuse: staged stages reuse one per-ticket
             # worktree and legitimately leave cross-stage churn (#712).
-            worktree_path = create_worktree(client, branch, allow_dirty_reuse=True)
+            # refresh_on_reuse (#2213): a reused per-ticket worktree can sit
+            # behind origin/<branch>, so ask for a best-effort refresh. NOTE
+            # this does a network `git fetch` (can be slow; a failure degrades
+            # to using the worktree as-is, never raises) and fast-forwards
+            # only an unoccupied, clean, strictly-behind worktree -- there is
+            # no friction-notes surface in this function, so this comment is
+            # the caller-side record of the network call.
+            worktree_path = create_worktree(
+                client, branch, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
         except StaleWorktreeError:
             # A stale worktree (wrong branch / not a worktree) refused
             # reuse (#404). No session exists yet, so reconcile's
