@@ -21,6 +21,7 @@ from cw.config import (
     orchestrator_config_file,
 )
 from cw.models import (
+    PARK_ON_ABANDONED_EXIT_KEY,
     ClientConfig,
     LaneConfig,
     OrchestratorConfig,
@@ -29,7 +30,6 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile.abandoned_exit import (
-    PARK_ON_ABANDONED_EXIT_KEY,
     clear_park_config_cache,
     park_gate_open,
     park_on_abandoned_exit_open,
@@ -362,6 +362,96 @@ class TestParkGateOpen:
         )
 
         assert park_gate_open(_task()) is False
+
+    def test_an_undeclared_lane_is_disabled_and_logged_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A row whose lane the client never declared cannot be parked, even by
+        a ticket override -- and the cache is keyed by (client, lane), so the
+        WARNING is emitted exactly once per pair per process."""
+        self._write_orchestrator("park_on_abandoned_exit_enabled: true\n")
+        self._write_clients(
+            yaml.safe_dump(
+                {
+                    "clients": {
+                        "acme": {
+                            "workspace_path": "/tmp/ws",
+                            "lanes": [
+                                {
+                                    "name": "fastlane",
+                                    "park_on_abandoned_exit": {KEY: True},
+                                }
+                            ],
+                        }
+                    }
+                }
+            )
+        )
+        task = _task(park_on_abandoned_exit={KEY: True})
+
+        with caplog.at_level(logging.WARNING, logger="cw.reconcile.abandoned_exit"):
+            first = park_gate_open(task)
+            second = park_gate_open(task)
+
+        assert (first, second) == (False, False)
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert "acme" in message
+        assert "default" in message
+        assert "not declared in clients.yaml" in message
+
+
+class TestTicketOverrideCannotOpenAnUndeclaredLane:
+    """MUST_FIX: the per-ticket tier must not bypass the missing-lane gate.
+
+    The resolver's 3-tier precedence reads the ticket map first, which used to
+    return True for a row whose lane the client never declared -- the one path
+    by which an operator who armed nothing could still get an automatic row
+    mutation.
+    """
+
+    @pytest.mark.parametrize("override", [True, False])
+    def test_a_ticket_override_cannot_open_an_undeclared_lane(
+        self, override: bool
+    ) -> None:
+        clients = {"acme": _client(LaneConfig(name="fastlane"))}
+
+        assert (
+            resolve_park_on_abandoned_exit_enabled(
+                _task(park_on_abandoned_exit={KEY: override}), clients
+            )
+            is False
+        )
+
+    def test_an_unknown_client_falls_to_the_floor_before_the_ticket_tier(self) -> None:
+        assert (
+            resolve_park_on_abandoned_exit_enabled(
+                _task(park_on_abandoned_exit={KEY: True}), {}
+            )
+            is False
+        )
+
+
+class TestParkOnAbandonedExitKeyHasOneDefinition:
+    """The config key lives once, in cw.models.tasks (#2135 MUST_FIX)."""
+
+    def test_key_has_one_definition(self) -> None:
+        import inspect
+
+        import cw.models.tasks
+        import cw.reconcile
+        import cw.reconcile.abandoned_exit
+
+        abandoned_source = inspect.getsource(cw.reconcile.abandoned_exit)
+        assert '"park_on_abandoned_exit"' not in abandoned_source
+        tasks_source = inspect.getsource(cw.models.tasks)
+        assert tasks_source.count('= "park_on_abandoned_exit"') == 1
+        validator_source = inspect.getsource(
+            cw.models.tasks._validate_park_on_abandoned_exit_keys
+        )
+        assert '"park_on_abandoned_exit"' not in validator_source
+        assert "PARK_ON_ABANDONED_EXIT_KEY" not in cw.reconcile.__all__
 
 
 class TestParkOnAbandonedExitKeyValidation:

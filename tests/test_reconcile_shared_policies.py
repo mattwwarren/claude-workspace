@@ -6,6 +6,7 @@ routing, and _apply_sentinel_to_task disposition.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2191,6 +2192,130 @@ def _blocked_autodev_payload(
         },
         "next_actions": [],
     }
+
+
+class TestFindRunningTaskForSession:
+    """The Stop hook's cheap precondition lookup, fail-closed (#2135).
+
+    A corrupt ``dev_queue.json`` must read as "no row, defer", never as an
+    exception out of the Stop hook: ``load_dev_queue`` raises for a torn file,
+    a schema-invalid payload and a non-object top level alike.
+    """
+
+    TICKET = "T-2135-lookup"
+    SESSION = "sess-lookup"
+
+    def _seed(self, **overrides: object) -> None:
+        kwargs: dict[str, object] = {
+            "ticket_id": self.TICKET,
+            "client": "test-client",
+            "status": QueueItemStatus.RUNNING,
+            "session_id": self.SESSION,
+        }
+        kwargs.update(overrides)
+        save_dev_queue(DevQueueStore(tasks=[_make_ticket_task(**kwargs)]))
+
+    def test_returns_the_running_row_this_session_owns(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.reconcile import find_running_task_for_session
+
+        self._seed()
+
+        task = find_running_task_for_session(self.TICKET, self.SESSION)
+
+        assert task is not None
+        assert task.ticket_id == self.TICKET
+
+    def test_a_non_running_row_is_none(self, tmp_config_dir: Path) -> None:
+        from cw.reconcile import find_running_task_for_session
+
+        self._seed(status=QueueItemStatus.BLOCKED_ON_USER)
+
+        assert find_running_task_for_session(self.TICKET, self.SESSION) is None
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param("{ not json", id="invalid-json"),
+            pytest.param('{"schema_version": 1, "tasks": "nope"}', id="schema-invalid"),
+            pytest.param("[]", id="top-level-list"),
+        ],
+    )
+    def test_a_corrupt_queue_is_none_with_one_warning(
+        self,
+        tmp_config_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+        payload: str,
+    ) -> None:
+        from cw.config import dev_queue_file
+        from cw.reconcile import find_running_task_for_session
+
+        self._seed()
+        queue_path = dev_queue_file()
+        queue_path.write_text(payload, encoding="utf-8")
+        before = queue_path.read_bytes()
+
+        with caplog.at_level(logging.WARNING, logger="cw.reconcile._shared"):
+            assert find_running_task_for_session(self.TICKET, self.SESSION) is None
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert "find_running_task_for_session" in message
+        assert self.TICKET in message
+        assert warnings[0].exc_info is None
+        assert queue_path.read_bytes() == before
+
+
+class TestRouteStoppedWithoutSentinelCorruptQueue:
+    """The park's authoritative reload is fail-closed too (#2135).
+
+    ``_route_stopped_without_sentinel`` re-reads the queue under
+    ``dev_queue_lock`` before mutating. A corrupt payload there must abort the
+    park silently rather than raise out of ``cw signal-stop``.
+    """
+
+    TICKET = "T-2135-reload"
+
+    def test_a_corrupt_queue_at_reload_parks_nothing(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from cw.config import dev_queue_file
+
+        session = _make_daemon_session(
+            id="sess-reload",
+            name=f"test-client/auto-dev/{self.TICKET}",
+            client="test-client",
+            lane="lane-b",
+            claude_session_id="claude-uuid-reload",
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id=self.TICKET,
+                        client="test-client",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=session.id,
+                        stage=Stage.PLAN,
+                    )
+                ]
+            )
+        )
+        queue_path = dev_queue_file()
+        queue_path.write_text("{ not json", encoding="utf-8")
+        before = queue_path.read_bytes()
+        events_before = len(read_events())
+
+        with caplog.at_level(logging.WARNING, logger="cw.reconcile._shared"):
+            _route_stopped_without_sentinel(self.TICKET, session)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "_route_stopped_without_sentinel" in warnings[0].getMessage()
+        assert queue_path.read_bytes() == before
+        assert len(read_events()) == events_before
 
 
 class TestApplySentinelToTaskLateRescue:
