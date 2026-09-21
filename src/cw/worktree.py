@@ -1731,6 +1731,27 @@ def _first_line(text: str) -> str:
     return lines[0] if lines else ""
 
 
+def _warn_fetch_skip_once(
+    warned_fetch_fail: set[FetchWarningKey] | None,
+    warn_key: FetchWarningKey,
+    message: str,
+    *args: object,
+) -> None:
+    """Log *message* at WARNING once per *warn_key*, then remember the key.
+
+    The single check-and-add every ``_fetch_default_branch`` failure path goes
+    through, so none can bypass the dedup: the warn-key set lives for the whole
+    dispatch loop, and a permanently missing workspace or git binary would
+    otherwise warn on every tick. ``None`` for *warned_fetch_fail* (a one-shot
+    caller) always warns and remembers nothing.
+    """
+    if warned_fetch_fail is not None and warn_key in warned_fetch_fail:
+        return
+    _log.warning(message, *args)
+    if warned_fetch_fail is not None:
+        warned_fetch_fail.add(warn_key)
+
+
 def _fetch_default_branch(
     client_name: str,
     default_branch: str,
@@ -1760,26 +1781,30 @@ def _fetch_default_branch(
     always warns.
     """
     if not git_dir.exists():
-        _log.warning(
+        reason = f"workspace missing: {git_dir}"
+        _warn_fetch_skip_once(
+            warned_fetch_fail,
+            (client_name, FetchOutcome.FAILED, reason),
             "freshness_check_skip: workspace missing for %s (%s)",
             client_name,
             git_dir,
         )
-        return FetchResult(FetchOutcome.FAILED, f"workspace missing: {git_dir}")
+        return FetchResult(FetchOutcome.FAILED, reason)
     try:
         result = _run_git(
             "fetch", "origin", default_branch, "--quiet", cwd=git_dir, check=False
         )
     except (WorktreeError, FileNotFoundError, PermissionError) as exc:
-        _log.warning(
+        reason = _first_line(str(exc)) or type(exc).__name__
+        _warn_fetch_skip_once(
+            warned_fetch_fail,
+            (client_name, FetchOutcome.FAILED, reason),
             "freshness_check_skip: %s (%s): %s",
             client_name,
             git_dir,
             exc,
         )
-        return FetchResult(
-            FetchOutcome.FAILED, _first_line(str(exc)) or type(exc).__name__
-        )
+        return FetchResult(FetchOutcome.FAILED, reason)
     if result.returncode == 0:
         return FetchResult(FetchOutcome.FETCHED)
     stderr = result.stderr.strip()
@@ -1799,16 +1824,14 @@ def _fetch_default_branch(
             first_line,
         )
         return FetchResult(outcome, reason)
-    warn_key: FetchWarningKey = (client_name, outcome, reason)
-    if warned_fetch_fail is None or warn_key not in warned_fetch_fail:
-        _log.warning(
-            "freshness_check_skip: fetch failed for %s (rc=%d): %s",
-            client_name,
-            result.returncode,
-            first_line,
-        )
-        if warned_fetch_fail is not None:
-            warned_fetch_fail.add(warn_key)
+    _warn_fetch_skip_once(
+        warned_fetch_fail,
+        (client_name, outcome, reason),
+        "freshness_check_skip: fetch failed for %s (rc=%d): %s",
+        client_name,
+        result.returncode,
+        first_line,
+    )
     return FetchResult(outcome, reason)
 
 
