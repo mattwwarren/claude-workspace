@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -25,15 +26,19 @@ from cw.models import (
     SessionStatus,
 )
 from cw.worktree import (
+    FetchOutcome,
+    ReuseRefreshReport,
     _fetch_default_branch,
     _git_dir,
     _hashed_worktree_base,
     _live_home_reason,
+    _normalize_path,
+    _Occupancy,
     _ref_exists,
     _refresh_reused_worktree,
     _register_cw_exclude,
     _resolve_remote_ref,
-    _reuse_occupancy_reason,
+    _reuse_occupancy,
     _run_git,
     check_main_ff_safety,
     check_not_main_checkout,
@@ -1108,7 +1113,7 @@ def _spy_fetch(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     real = fetch_feature_branch
     fetched: list[str] = []
 
-    def spy(client: ClientConfig, branch_name: str) -> bool:
+    def spy(client: ClientConfig, branch_name: str) -> FetchOutcome:
         fetched.append(branch_name)
         return real(client, branch_name)
 
@@ -1793,8 +1798,8 @@ class TestCreateWorktreeReuseRefresh:
         git_in(workspace, "fetch", "origin")
         merges: list[tuple[str, ...]] = []
 
-        def failing_fetch(client: ClientConfig, branch_name: str) -> bool:
-            return False
+        def failing_fetch(client: ClientConfig, branch_name: str) -> FetchOutcome:
+            return FetchOutcome.FAILED
 
         def spy(
             *args: str, cwd: Path, check: bool = True
@@ -1843,188 +1848,180 @@ class TestCreateWorktreeReuseRefresh:
         monkeypatch.setattr("cw.worktree._run_git", spy)
         monkeypatch.setattr("cw.worktree._ref_exists", no_tracking_ref)
         monkeypatch.setattr(
-            "cw.worktree.fetch_feature_branch", lambda *_args, **_kw: True
+            "cw.worktree.fetch_feature_branch",
+            lambda *_args, **_kw: FetchOutcome.FETCHED,
         )
         monkeypatch.setattr(
-            "cw.worktree._reuse_occupancy_reason", lambda *_args, **_kw: None
+            "cw.worktree._reuse_occupancy",
+            lambda *_args, **_kw: _Occupancy(live=None, local=None),
         )
 
-        _refresh_reused_worktree(client, _REUSE_BRANCH, wt, [])
+        _refresh_reused_worktree(client, _REUSE_BRANCH, wt, ReuseRefreshReport())
 
         assert merges == []
         assert git_in(wt, "rev-parse", "HEAD") == head
 
-    def test_submodule_sync_runs_when_fast_forward_adds_gitmodules(
-        self,
-        tmp_path: Path,
-        make_git_repo: Callable[..., Path],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The sync keys on the NEW HEAD's ``.gitmodules``, not the main
-        checkout's: here only the feature branch's upstream commit adds one, so
-        the old main-checkout-keyed check would have skipped it (#2213 round 3)."""
-        client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
-        assert not (workspace / ".gitmodules").exists()
-        calls = _spy_git(monkeypatch)
-
-        # Equal state: nothing to fast-forward, so no submodule sync.
-        create_worktree(
-            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
-        )
-        assert [c for c in calls if "submodule" in c[0]] == []
-
-        push_commit_to_origin(
-            origin, _REUSE_BRANCH, tmp_path / "side", ".gitmodules", content=""
-        )
-        create_worktree(
-            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
-        )
-
-        submodule_calls = [c for c in calls if "submodule" in c[0]]
-        assert len(submodule_calls) == 1
-        args, cwd = submodule_calls[0]
-        assert args == ("submodule", "update", "--init", "--recursive")
-        assert cwd == wt
-
-    def test_submodule_sync_skipped_when_new_head_has_no_gitmodules(
-        self,
-        tmp_path: Path,
-        make_git_repo: Callable[..., Path],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Nothing changes for a repository whose fast-forward target has no
-        ``.gitmodules`` -- even when the main checkout carries an untracked one."""
-        client, wt, workspace, _old, new_sha = _seed_behind(tmp_path, make_git_repo)
-        (workspace / ".gitmodules").write_text("", encoding="utf-8")
-        calls = _spy_git(monkeypatch)
-
-        create_worktree(
-            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
-        )
-
-        assert git_in(wt, "rev-parse", "HEAD") == new_sha
-        assert [c for c in calls if "submodule" in c[0]] == []
-
-    def test_failed_submodule_sync_degrades_and_reports(
-        self,
-        tmp_path: Path,
-        make_git_repo: Callable[..., Path],
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """A failing sync never raises and never resets: the worktree stays at
-        the fast-forwarded HEAD ("use as-is"), the reason is logged at WARNING
-        and reported through ``refresh_notes``."""
-        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
-        new_sha = push_commit_to_origin(
-            origin, _REUSE_BRANCH, tmp_path / "side", ".gitmodules", content=""
-        )
-
-        def failing(
-            *args: str, cwd: Path, check: bool = True
-        ) -> subprocess.CompletedProcess[str]:
-            if args[:1] == ("submodule",):
-                return subprocess.CompletedProcess(
-                    args, 1, stdout="", stderr="fatal: submodule exploded\nmore\n"
-                )
-            return _run_git(*args, cwd=cwd, check=check)
-
-        monkeypatch.setattr("cw.worktree._run_git", failing)
-        notes: list[str] = []
-
-        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
-            result = create_worktree(
-                client,
-                _REUSE_BRANCH,
-                allow_dirty_reuse=True,
-                refresh_on_reuse=True,
-                refresh_notes=notes,
-            )
-
-        assert result == wt
-        assert git_in(wt, "rev-parse", "HEAD") == new_sha
-        assert any(
-            "submodule exploded" in r.getMessage()
-            for r in _cw_worktree_records(caplog, logging.WARNING)
-        )
-        assert len(notes) == 1
-        assert str(wt) in notes[0]
-        assert "submodule" in notes[0]
-        assert "submodule exploded" in notes[0]
-        assert "\n" not in notes[0]
-
     def test_no_notes_on_a_clean_refresh(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
     ) -> None:
-        client, _wt, _workspace, _old, _new = _seed_behind(tmp_path, make_git_repo)
-        notes: list[str] = []
+        client, wt, _workspace, _old, new_sha = _seed_behind(tmp_path, make_git_repo)
 
-        create_worktree(
-            client,
-            _REUSE_BRANCH,
-            allow_dirty_reuse=True,
-            refresh_on_reuse=True,
-            refresh_notes=notes,
-        )
+        _path, report = _refresh_reporting(client)
 
-        assert notes == []
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+        assert report.notes == []
+        assert report.live_occupant is None
 
-    def test_fetch_failure_is_reported_in_notes(
+    @pytest.mark.parametrize(
+        ("outcome", "moves", "note_count"),
+        [
+            pytest.param(FetchOutcome.FETCHED, True, 0, id="fetched"),
+            pytest.param(FetchOutcome.BRANCH_ABSENT, False, 0, id="branch-absent"),
+            pytest.param(FetchOutcome.FAILED, False, 1, id="failed"),
+        ],
+    )
+    def test_fast_forward_only_on_a_fetched_outcome(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        outcome: FetchOutcome,
+        moves: bool,
+        note_count: int,
+    ) -> None:
+        """The three fetch outcomes are handled apart (#2213 round 4): only
+        ``FETCHED`` fast-forwards; ``BRANCH_ABSENT`` proceeds without a refresh
+        and is NOT friction; ``FAILED`` skips the fast-forward and IS reported.
+
+        The tracking ref is already fresh in every case, so an implementation
+        that fast-forwarded regardless of the outcome would visibly move HEAD."""
+        client, wt, workspace, old_sha, new_sha = _seed_behind(tmp_path, make_git_repo)
+        git_in(workspace, "fetch", "origin")
+        merges: list[tuple[str, ...]] = []
+
+        def spy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            if args[0] == "merge":
+                merges.append(args)
+            return _run_git(*args, cwd=cwd, check=check)
+
+        monkeypatch.setattr("cw.worktree._run_git", spy)
+        monkeypatch.setattr("cw.worktree.fetch_feature_branch", lambda _c, _b: outcome)
+
+        _path, report = _refresh_reporting(client)
+
+        assert git_in(wt, "rev-parse", "HEAD") == (new_sha if moves else old_sha)
+        assert len(merges) == (1 if moves else 0)
+        assert len(report.notes) == note_count
+        assert report.live_occupant is None
+
+    def test_real_missing_branch_is_branch_absent_not_a_failure(
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
-        monkeypatch.setattr("cw.worktree.fetch_feature_branch", lambda _c, _b: False)
-        notes: list[str] = []
+        """Against real git: a never-pushed branch is ``BRANCH_ABSENT`` (no
+        friction note), where a genuinely failed fetch is ``FAILED``."""
+        monkeypatch.setenv("LC_ALL", "C")  # the marker is git's English message
+        client, _wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        never_pushed = "dev/never-pushed"
+        wt = create_worktree(client, never_pushed)
+        report = ReuseRefreshReport()
 
-        result = create_worktree(
+        create_worktree(
             client,
-            _REUSE_BRANCH,
+            never_pushed,
             allow_dirty_reuse=True,
             refresh_on_reuse=True,
-            refresh_notes=notes,
+            refresh_report=report,
         )
 
-        assert result == wt
-        assert git_in(wt, "rev-parse", "HEAD") == old_sha
-        assert len(notes) == 1
-        assert str(wt) in notes[0]
-        assert f"origin/{_REUSE_BRANCH}" in notes[0]
-        assert "fetch" in notes[0]
+        assert fetch_feature_branch(client, never_pushed) is FetchOutcome.BRANCH_ABSENT
+        assert report.notes == []
+        assert wt.exists()
 
-    def test_occupied_worktree_is_not_a_reportable_failure(
+    def test_fetch_failure_is_reported_in_one_note(
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
     ) -> None:
-        """Refusing an occupied worktree is the design working, not a failure."""
-        client, wt, workspace, _old, _new = _seed_behind(tmp_path, make_git_repo)
-        _occupy("state", workspace, wt)
-        notes: list[str] = []
+        """A REAL failed fetch (origin unreachable): one note, naming the
+        worktree and the reason, and HEAD untouched."""
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        origin.rename(tmp_path / "origin-gone.git")
 
-        create_worktree(
-            client,
-            _REUSE_BRANCH,
-            allow_dirty_reuse=True,
-            refresh_on_reuse=True,
-            refresh_notes=notes,
-        )
+        result, report = _refresh_reporting(client)
 
-        assert notes == []
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert len(report.notes) == 1
+        assert str(wt) in report.notes[0]
+        assert f"origin/{_REUSE_BRANCH}" in report.notes[0]
+        assert "fetch" in report.notes[0]
+        assert "\n" not in report.notes[0]
 
-    def test_refresh_swallows_oserror(
+    def test_diverged_branch_is_reported_in_one_note(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        _force_push_rewrite(origin, tmp_path / "side", _REUSE_BRANCH)
+
+        result, report = _refresh_reporting(client)
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert len(report.notes) == 1
+        assert str(wt) in report.notes[0]
+        assert "diverged" in report.notes[0]
+        assert f"origin/{_REUSE_BRANCH}" in report.notes[0]
+
+    def test_git_refusing_the_fast_forward_is_reported_in_one_note(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt")
+
+        def spy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            if args[0] == "merge":
+                return subprocess.CompletedProcess(
+                    args, 1, "", "error: local changes would be overwritten\nmore\n"
+                )
+            return _run_git(*args, cwd=cwd, check=check)
+
+        monkeypatch.setattr("cw.worktree._run_git", spy)
+
+        result, report = _refresh_reporting(client)
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert len(report.notes) == 1
+        assert str(wt) in report.notes[0]
+        assert "local changes would be overwritten" in report.notes[0]
+        assert "\n" not in report.notes[0]
+
+    def test_os_error_is_reported_in_one_note(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A missing git binary (OSError) out of the refresh never escapes
-        ``create_worktree``. Injected at ``fetch_feature_branch`` itself:
-        ``_fetch_default_branch`` already swallows ``FileNotFoundError``
-        internally, so a fetch-level ``_run_git`` fault would never reach the
-        helper's own ``except OSError``."""
+        ``create_worktree``, and is reported. Injected at
+        ``fetch_feature_branch`` itself: ``_fetch_default_branch`` already
+        swallows ``FileNotFoundError`` internally, so a fetch-level ``_run_git``
+        fault would never reach the helper's own ``except OSError``."""
         client = ClientConfig(
             name="test",
             workspace_path=tmp_path / "ws",
@@ -2037,7 +2034,7 @@ class TestCreateWorktreeReuseRefresh:
             stdout = "feat/oserror\n" if "--show-current" in args else ""
             return MagicMock(returncode=0, stdout=stdout, stderr="")
 
-        def boom(client: ClientConfig, branch_name: str) -> bool:
+        def boom(client: ClientConfig, branch_name: str) -> FetchOutcome:
             msg = "git vanished"
             raise FileNotFoundError(msg)
 
@@ -2049,10 +2046,15 @@ class TestCreateWorktreeReuseRefresh:
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         monkeypatch.setattr("cw.worktree.unsaved_work_reason", clean)
         monkeypatch.setattr("cw.worktree.fetch_feature_branch", boom)
+        report = ReuseRefreshReport()
 
         with caplog.at_level(logging.WARNING, logger="cw.worktree"):
             result = create_worktree(
-                client, "feat/oserror", allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                "feat/oserror",
+                allow_dirty_reuse=True,
+                refresh_on_reuse=True,
+                refresh_report=report,
             )
 
         assert result == wt_path
@@ -2060,6 +2062,151 @@ class TestCreateWorktreeReuseRefresh:
             "refresh of reused worktree failed" in r.getMessage()
             for r in _cw_worktree_records(caplog, logging.WARNING)
         )
+        assert len(report.notes) == 1
+        assert str(wt_path) in report.notes[0]
+        assert "git vanished" in report.notes[0]
+        assert "OS error" in report.notes[0]
+
+    def test_os_error_after_the_fast_forward_step_started_is_one_note(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An OSError from the merge itself (not the fetch) is reported too,
+        still as exactly one note."""
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt")
+
+        def spy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            if args[0] == "merge":
+                msg = "git vanished mid-merge"
+                raise FileNotFoundError(msg)
+            return _run_git(*args, cwd=cwd, check=check)
+
+        monkeypatch.setattr("cw.worktree._run_git", spy)
+
+        result, report = _refresh_reporting(client)
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert len(report.notes) == 1
+        assert str(wt) in report.notes[0]
+        assert "git vanished mid-merge" in report.notes[0]
+
+    @pytest.mark.parametrize("source", ["state", "roster"])
+    def test_live_occupant_is_reported_not_noted_and_nothing_is_fetched(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        source: str,
+    ) -> None:
+        """Occupied is the design working, so no friction note -- but the live
+        occupant is reported so a caller that would mutate the tree can stop."""
+        client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        _occupy(source, workspace, wt)
+        fetched = _spy_fetch(monkeypatch)
+
+        result, report = _refresh_reporting(client)
+
+        assert result == wt
+        assert fetched == []
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert report.notes == []
+        assert report.live_occupant is not None
+        assert "live" in report.live_occupant
+
+    def test_unsaved_work_alone_is_not_a_live_occupant(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """Unsaved work refuses the refresh but leaves the worktree the
+        caller's to use: it must not read as a live occupant."""
+        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        (wt / "scratch.txt").write_text("churn\n", encoding="utf-8")
+
+        _path, report = _refresh_reporting(client)
+
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert report.live_occupant is None
+        assert report.notes == []
+
+    def test_unsaved_work_does_not_mask_a_live_occupant(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """Unsaved work is exactly what a live worker leaves behind. It refuses
+        the refresh first, but the live half is always evaluated."""
+        client, wt, workspace, _old, _new = _seed_behind(tmp_path, make_git_repo)
+        (wt / "scratch.txt").write_text("worker output\n", encoding="utf-8")
+        _occupy("roster", workspace, wt)
+
+        _path, report = _refresh_reporting(client)
+
+        assert report.live_occupant is not None
+        assert "live daemon worker" in report.live_occupant
+
+    @pytest.mark.parametrize("kind", ["roster-invalid-json", "state-corrupt"])
+    def test_unreadable_source_is_a_live_occupant_fail_closed(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        kind: str,
+    ) -> None:
+        client, _wt, _workspace, _old, _new = _seed_behind(tmp_path, make_git_repo)
+        if kind == "roster-invalid-json":
+            _seed_roster(raw="{not json")
+        else:
+            state_file().write_text("{not json", encoding="utf-8")
+
+        _path, report = _refresh_reporting(client)
+
+        assert report.live_occupant is not None
+        assert "unreadable" in report.live_occupant
+
+    @pytest.mark.parametrize("source", ["state", "roster"])
+    def test_occupant_appearing_during_the_fetch_is_reported(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        source: str,
+    ) -> None:
+        """The re-check before the merge reports a live occupant too, so a
+        caller is not told "free" by the first gate and then racing the second."""
+        client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        real_fetch = fetch_feature_branch
+
+        def fetch_then_occupy(client: ClientConfig, branch_name: str) -> FetchOutcome:
+            outcome = real_fetch(client, branch_name)
+            _occupy(source, workspace, wt)
+            return outcome
+
+        monkeypatch.setattr("cw.worktree.fetch_feature_branch", fetch_then_occupy)
+
+        _path, report = _refresh_reporting(client)
+
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert report.live_occupant is not None
+        assert report.notes == []
+
+    def test_refresh_report_is_optional(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """A caller with no surface (the dispatch claim) passes none."""
+        client, wt, _workspace, _old, new_sha = _seed_behind(tmp_path, make_git_repo)
+
+        create_worktree(
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+        )
+
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
 
 
 def _seed_roster(cwd: Path | None = None, *, raw: str | None = None) -> Path:
@@ -2086,6 +2233,31 @@ def _make_symlink_loop(base: Path) -> Path:
     first.symlink_to(second)
     second.symlink_to(first)
     return first
+
+
+def _unnormalizable_path(
+    kind: str, base: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Return a path under *base* whose ``stat()`` fails with the given errno."""
+    if kind == "eloop":
+        return _make_symlink_loop(base)
+    if kind == "enotdir":
+        blocker = base / "a-file"
+        blocker.write_text("not a directory\n", encoding="utf-8")
+        return blocker / "child"
+    if kind == "enametoolong":
+        return base / ("x" * 300)
+    denied = base / "denied"
+    denied.mkdir()
+    real_stat = Path.stat
+
+    def stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if self == denied:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    return denied
 
 
 def _occupy(source: str, workspace: Path, path: Path) -> None:
@@ -2117,6 +2289,19 @@ def _refresh_with_debug(client: ClientConfig, caplog: pytest.LogCaptureFixture) 
         return create_worktree(
             client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
         )
+
+
+def _refresh_reporting(client: ClientConfig) -> tuple[Path, ReuseRefreshReport]:
+    """Reuse ``_REUSE_BRANCH`` with the refresh on, returning what it reported."""
+    report = ReuseRefreshReport()
+    path = create_worktree(
+        client,
+        _REUSE_BRANCH,
+        allow_dirty_reuse=True,
+        refresh_on_reuse=True,
+        refresh_report=report,
+    )
+    return path, report
 
 
 def _debug_reasons(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -2318,7 +2503,7 @@ class TestReuseOccupancyRosterAndPaths:
         assert old_sha != new_sha
         real_fetch = fetch_feature_branch
 
-        def fetch_then_change(client: ClientConfig, branch_name: str) -> bool:
+        def fetch_then_change(client: ClientConfig, branch_name: str) -> FetchOutcome:
             fetched_ok = real_fetch(client, branch_name)
             if change == "session":
                 _seed_session(workspace, wt, SessionStatus.ACTIVE)
@@ -2373,11 +2558,11 @@ class TestReuseOccupancyRosterAndPaths:
         pre-mutation re-check covers it (``create_worktree``'s own guard raises
         earlier, but a checkout can land in between)."""
         client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
-        assert _reuse_occupancy_reason(client, _REUSE_BRANCH, wt) is None
+        assert _reuse_occupancy(client, _REUSE_BRANCH, wt).reason is None
 
         git_in(wt, "checkout", "-b", "dev/other")
 
-        reason = _reuse_occupancy_reason(client, _REUSE_BRANCH, wt)
+        reason = _reuse_occupancy(client, _REUSE_BRANCH, wt).reason
         assert reason is not None
         assert "dev/other" in reason
 
@@ -2387,42 +2572,67 @@ class TestReuseOccupancyRosterAndPaths:
         client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
         git_in(wt, "checkout", "--detach")
 
-        reason = _reuse_occupancy_reason(client, _REUSE_BRANCH, wt)
+        reason = _reuse_occupancy(client, _REUSE_BRANCH, wt).reason
 
         assert reason is not None
         assert "detached" in reason
 
-    def test_recorded_path_in_symlink_loop_fails_closed(self, tmp_path: Path) -> None:
-        """A REAL loop, not a monkeypatched ``resolve``: on Python 3.13 a bare
-        non-strict ``Path.resolve()`` swallows the loop and returns the path
-        unresolved, which would compare unequal to the worktree and read as "not
-        occupied". The normalization must surface it as indeterminate (#2213)."""
-        loop = _make_symlink_loop(tmp_path)
-        _seed_roster(loop)
-
-        reason = _live_home_reason(tmp_path / "wt")
-
-        assert reason is not None
-        assert "cannot be resolved" in reason
-
-    def test_session_path_in_symlink_loop_fails_closed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("kind", ["eloop", "enotdir", "eacces", "enametoolong"])
+    @pytest.mark.parametrize("side", ["target", "session", "worker"])
+    def test_path_that_cannot_be_normalized_fails_closed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        kind: str,
+        side: str,
     ) -> None:
-        loop = _make_symlink_loop(tmp_path)
-        monkeypatch.setattr(
-            "cw.worktree.live_session_worktree_paths", lambda: frozenset({loop})
-        )
+        """Round 4: ANY ``OSError`` while normalizing a path reads as occupied,
+        not just ``ELOOP``. Before, ``EACCES``, ``ENOTDIR``, ``ENAMETOOLONG``
+        and friends were swallowed by the loop probe and read as "not
+        occupied", which permitted the mutation. Covers the worktree being
+        checked and both kinds of recorded home (session state, daemon roster).
+        Real filesystem states, except ``EACCES``: ``chmod 000`` cannot deny a
+        root test runner, so ``Path.stat`` is made to deny that one path."""
+        bad = _unnormalizable_path(kind, tmp_path, monkeypatch)
+        good = tmp_path / "wt"
+        good.mkdir()
+        if side == "session":
+            monkeypatch.setattr(
+                "cw.worktree.live_session_worktree_paths", lambda: frozenset({bad})
+            )
+        elif side == "worker":
+            _seed_roster(bad)
 
-        reason = _live_home_reason(tmp_path / "wt")
+        reason = _live_home_reason(bad if side == "target" else good)
 
         assert reason is not None
         assert "cannot be resolved" in reason
 
-    def test_worktree_path_in_symlink_loop_fails_closed(self, tmp_path: Path) -> None:
-        reason = _live_home_reason(_make_symlink_loop(tmp_path))
+    def test_normalize_path_tolerates_only_a_missing_path(self, tmp_path: Path) -> None:
+        missing = tmp_path / "gone"
+        assert _normalize_path(missing) == missing.resolve()
+        with pytest.raises(OSError, match=r"\[Errno") as excinfo:
+            _normalize_path(_make_symlink_loop(tmp_path))
+        assert excinfo.value.errno == errno.ELOOP
 
-        assert reason is not None
-        assert "cannot be resolved" in reason
+    def test_permission_denied_session_path_refuses_the_fast_forward(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        denied = _unnormalizable_path("eacces", tmp_path, monkeypatch)
+        _seed_session(workspace, denied, SessionStatus.ACTIVE)
+        fetched = _spy_fetch(monkeypatch)
+
+        result, report = _refresh_reporting(client)
+
+        assert result == wt
+        assert fetched == []
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert report.live_occupant is not None
+        assert "cannot be resolved" in report.live_occupant
 
     def test_missing_recorded_path_is_not_a_loop(self, tmp_path: Path) -> None:
         """Control: a recorded path whose directory is simply gone is ENOENT,
@@ -3716,11 +3926,39 @@ class TestIsMainCheckoutDirty:
 
 
 class TestFetchDefaultBranch:
-    def test_missing_dir_returns_false_no_raise(self, tmp_path: Path) -> None:
-        """_fetch_default_branch with missing git_dir returns False, no exception."""
+    def test_missing_dir_returns_failed_no_raise(self, tmp_path: Path) -> None:
+        """_fetch_default_branch with missing git_dir is FAILED, no exception."""
         missing = tmp_path / "does-not-exist"
         result = _fetch_default_branch("test-client", "main", missing)
-        assert result is False
+        assert result is FetchOutcome.FAILED
+
+    def test_default_branch_absent_on_origin_is_still_a_skipped_freshness_check(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """``BRANCH_ABSENT`` is only a benign state for a *feature* branch. The
+        freshness check reads anything but ``FETCHED`` as "cannot tell": not
+        stale, and the failure still WARNs."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        client = ClientConfig(
+            name="test-client", workspace_path=ws, default_branch="main"
+        )
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            return MagicMock(
+                returncode=128, stdout="", stderr="fatal: couldn't find remote ref main"
+            )
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            result = is_main_behind_origin(client)
+
+        assert result == (False, "", "", 0)
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
 
     def test_multiline_stderr_collapses_to_single_line(
         self,
@@ -3803,24 +4041,27 @@ class TestFetchDefaultBranch:
         assert second_count == 0, "Expected no WARNING on second call (deduped)"
 
     @pytest.mark.parametrize(
-        ("stderr", "quiet_missing_ref", "expect_warning"),
+        ("stderr", "quiet_missing_ref", "expect_warning", "expected"),
         [
             pytest.param(
                 "fatal: couldn't find remote ref x",
                 True,
                 False,
+                FetchOutcome.BRANCH_ABSENT,
                 id="missing-ref-quiet-is-debug",
             ),
             pytest.param(
                 "fatal: couldn't find remote ref x",
                 False,
                 True,
+                FetchOutcome.BRANCH_ABSENT,
                 id="missing-ref-default-still-warns",
             ),
             pytest.param(
                 "fatal: 'origin' does not appear to be a git repository",
                 True,
                 True,
+                FetchOutcome.FAILED,
                 id="other-failure-quiet-still-warns",
             ),
         ],
@@ -3833,9 +4074,12 @@ class TestFetchDefaultBranch:
         stderr: str,
         quiet_missing_ref: bool,
         expect_warning: bool,
+        expected: FetchOutcome,
     ) -> None:
         """#2213: only a *missing remote ref* is downgraded to DEBUG, and only
-        when the caller opts in; every other fetch failure still WARNs."""
+        when the caller opts in; every other fetch failure still WARNs. The
+        outcome does not depend on the log level: a missing remote ref is
+        ``BRANCH_ABSENT`` either way, everything else ``FAILED``."""
         ws = tmp_path / "ws"
         ws.mkdir()
 
@@ -3846,7 +4090,7 @@ class TestFetchDefaultBranch:
         warned: set[str] = set()
 
         with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
-            ok = _fetch_default_branch(
+            outcome = _fetch_default_branch(
                 "test-client",
                 "x",
                 ws,
@@ -3854,7 +4098,7 @@ class TestFetchDefaultBranch:
                 quiet_missing_ref=quiet_missing_ref,
             )
 
-        assert ok is False
+        assert outcome is expected
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert bool(warnings) is expect_warning
         if expect_warning:
@@ -3957,8 +4201,8 @@ class TestFetchFeatureBranch:
         )
         assert diff_before.returncode != 0, "diff must fail before fetch (unknown ref)"
 
-        ok = fetch_feature_branch(client, "auto-dev/381")
-        assert ok is True
+        outcome = fetch_feature_branch(client, "auto-dev/381")
+        assert outcome is FetchOutcome.FETCHED
 
         # After fetch, origin/auto-dev/381 is known; diff is non-empty.
         diff_after = subprocess.run(
@@ -3972,24 +4216,30 @@ class TestFetchFeatureBranch:
         assert diff_after.returncode == 0
         assert "fix.py" in diff_after.stdout
 
-    def test_missing_workspace_returns_false(self, tmp_path: Path) -> None:
-        """Returns False without raising when workspace directory is absent."""
+    def test_missing_workspace_returns_failed(self, tmp_path: Path) -> None:
+        """FAILED without raising when workspace directory is absent."""
         client = ClientConfig(
             name="absent",
             workspace_path=tmp_path / "nonexistent",
             default_branch="main",
         )
-        assert fetch_feature_branch(client, "auto-dev/999") is False
+        assert fetch_feature_branch(client, "auto-dev/999") is FetchOutcome.FAILED
 
-    def test_nonexistent_remote_branch_returns_false(self, tmp_path: Path) -> None:
-        """Returns False when the remote branch does not exist."""
-        _bare, _parent, client = self._setup_repo(tmp_path)
-        assert fetch_feature_branch(client, "auto-dev/does-not-exist") is False
-
-    def test_run_git_exception_returns_false(
+    def test_nonexistent_remote_branch_returns_branch_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Returns False without raising when _run_git raises WorktreeError."""
+        """BRANCH_ABSENT (not FAILED) when the remote branch does not exist."""
+        monkeypatch.setenv("LC_ALL", "C")  # the marker is git's English message
+        _bare, _parent, client = self._setup_repo(tmp_path)
+        assert (
+            fetch_feature_branch(client, "auto-dev/does-not-exist")
+            is FetchOutcome.BRANCH_ABSENT
+        )
+
+    def test_run_git_exception_returns_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAILED without raising when _run_git raises WorktreeError."""
         _bare, _parent, client = self._setup_repo(tmp_path)
 
         def mock_run(*args: object, **kwargs: object) -> object:
@@ -3997,7 +4247,7 @@ class TestFetchFeatureBranch:
             raise WorktreeError(msg)
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert fetch_feature_branch(client, "auto-dev/381") is False
+        assert fetch_feature_branch(client, "auto-dev/381") is FetchOutcome.FAILED
 
 
 # ---------------------------------------------------------------------------

@@ -82,7 +82,7 @@ from cw.reconcile.review_recipes import (
     _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
 )
 from cw.review_strategy import ReviewStrategy
-from cw.worktree import create_worktree, worktree_path_for
+from cw.worktree import FetchOutcome, create_worktree, worktree_path_for
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
 # construction: _make_task accepts **kwargs (pr_url / pr_state / session_id /
@@ -2872,6 +2872,159 @@ def test_dispatch_fix_agent_fast_forwards_behind_worktree(
     assert "Friction note" not in str(stub_spawn.calls[0]["prompt"])
 
 
+def _tree_fingerprint(worktree: Path) -> tuple[str, str, str]:
+    """``(HEAD sha, porcelain status, digest of every working-tree file)``.
+
+    Byte-level: two equal fingerprints mean nothing moved HEAD, the index or a
+    single file's content in the worktree.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    for path in sorted(worktree.rglob("*")):
+        rel = path.relative_to(worktree)
+        if rel.parts[0] == ".git" or not path.is_file():
+            continue
+        digest.update(str(rel).encode())
+        digest.update(path.read_bytes())
+    return (
+        git_in(worktree, "rev-parse", "HEAD"),
+        git_in(worktree, "status", "--porcelain=v1", "--untracked-files=all"),
+        digest.hexdigest(),
+    )
+
+
+def _occupy_fix_worktree(client: ClientConfig, worktree: Path, source: str) -> None:
+    """Make a live occupant appear for *worktree* through the named source.
+
+    ``roster`` and ``state`` are positive matches; ``unreadable-roster`` is the
+    fail-closed case (occupancy cannot be ruled out).
+    """
+    from cw import native_daemon
+    from cw.config import load_state, save_state
+    from cw.models import Session
+
+    if source == "state":
+        state = load_state()
+        state.sessions.append(
+            Session(
+                name=f"{client.name}/impl/2017",
+                client=client.name,
+                purpose=SessionPurpose.IMPL,
+                workspace_path=client.workspace_path,
+                worktree_path=worktree,
+                status=SessionStatus.ACTIVE,
+            )
+        )
+        save_state(state)
+        return
+    roster = native_daemon._ROSTER_PATH
+    roster.parent.mkdir(parents=True, exist_ok=True)
+    if source == "roster":
+        payload = {"workers": {"aaaa1111": {"pid": 1, "cwd": str(worktree)}}}
+        roster.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        roster.write_text("{not json", encoding="utf-8")
+
+
+@pytest.mark.parametrize("worktree_is", ["in-sync", "behind"])
+@pytest.mark.parametrize("source", ["roster", "state", "unreadable-roster"])
+def test_dispatch_fix_agent_refuses_an_occupied_worktree_and_mutates_nothing(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    source: str,
+    worktree_is: str,
+) -> None:
+    """#2213 round 4: a refresh refusal for a live occupant must stop EVERY
+    later mutation on the fix-agent path, not just the fast-forward.
+
+    Before, ``create_worktree`` declined to fast-forward and dispatch then went
+    on regardless: ``git fetch origin``, a merge of ``origin/main`` INTO the
+    occupied worktree, and a spawn onto it. ``origin/main`` has moved here, so
+    any of those is observable: the worktree fingerprint (HEAD, index, every
+    file's bytes) and the workspace's ``origin/main`` tracking ref must all be
+    exactly as they were, and nothing is spawned.
+    """
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    origin = Path(git_in(client.workspace_path, "remote", "get-url", "origin"))
+    if worktree_is == "behind":
+        push_commit_to_origin(origin, branch, tmp_path / "side", "upstream.txt")
+        git_in(client.workspace_path, "fetch", "origin")
+    # origin/main moves on AFTER the workspace last fetched: a dispatch-level
+    # ``git fetch origin`` would advance the tracking ref, and the merge that
+    # follows it would put a merge commit on the worktree's HEAD.
+    push_commit_to_origin(origin, "main", tmp_path / "side-main", "main-only.txt")
+    _occupy_fix_worktree(client, worktree, source)
+    main_ref = "refs/remotes/origin/main"
+    main_before = git_in(client.workspace_path, "rev-parse", main_ref)
+    before = _tree_fingerprint(worktree)
+
+    with pytest.raises(HookContextConflictError) as excinfo:
+        dispatch_fix_agent(
+            client=client,
+            branch=branch,
+            prompt=_FIX_PROMPT_TEXT,
+            label="fix-2017",
+            ticket_id="2017",
+            lane="default",
+            parent="parent-session",
+        )
+
+    assert _tree_fingerprint(worktree) == before
+    assert git_in(client.workspace_path, "rev-parse", main_ref) == main_before
+    assert stub_spawn.calls == []
+    message = str(excinfo.value)
+    assert str(worktree) in message
+    assert branch in message
+    assert "worktree was not touched" in message
+    # The reason is named: which occupant, or that it could not be ruled out.
+    assert {
+        "roster": "live daemon worker",
+        "state": "live session",
+        "unreadable-roster": "roster unreadable",
+    }[source] in message
+
+
+def test_dispatch_fix_agent_proceeds_past_unsaved_work_alone(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """Control for the refusal test: only a LIVE occupant stops the dispatch.
+    Unsaved work refuses the fast-forward, but this path legitimately reuses a
+    worktree carrying a prior stage's churn (``allow_dirty_reuse``), so the
+    dispatch goes ahead and the churn survives."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    churn = worktree / "uv.lock"
+    churn.write_text("churn from the prior stage\n", encoding="utf-8")
+
+    dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert len(stub_spawn.calls) == 1
+    assert churn.read_text(encoding="utf-8") == "churn from the prior stage\n"
+
+
 def test_dispatch_fix_agent_reports_failed_refresh_fetch_in_friction_note(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
@@ -2890,7 +3043,9 @@ def test_dispatch_fix_agent_reports_failed_refresh_fetch_in_friction_note(
     worktree = create_worktree(client, branch, allow_dirty_reuse=True)
     # In sync with origin, so the HEAD check passes even though the refresh
     # fetch (patched) fails; only the dispatch's own real ``git fetch`` runs.
-    monkeypatch.setattr("cw.worktree.fetch_feature_branch", lambda _c, _b: False)
+    monkeypatch.setattr(
+        "cw.worktree.fetch_feature_branch", lambda _c, _b: FetchOutcome.FAILED
+    )
 
     dispatch_fix_agent(
         client=client,

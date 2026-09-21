@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import contextlib
-import errno
+import enum
 import hashlib
 import logging
 import os
 import re
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, NamedTuple, TypedDict
 
 from cw.auto_dev_result import _PRE_IMPL_STAGES
 from cw.config import load_effective_clients, load_state
@@ -616,49 +617,50 @@ def _branch_held_error(
     return BranchHeldByWorktreeError(msg, holder_path=holder)
 
 
-def _sync_submodules(wt_path: Path) -> str | None:
-    """Run ``git submodule update --init --recursive`` in *wt_path*.
+class FetchOutcome(enum.Enum):
+    """What one ``git fetch origin <branch>`` established about the remote (#2213).
 
-    Best-effort (``check=False``): never raises for a git failure, never resets
-    or deletes a submodule. Returns ``None`` on success, otherwise a one-line
-    reason (git's first stderr line) after logging it at WARNING, so a caller
-    with a friction surface can report it too.
+    Three states, because the two non-success outcomes need opposite handling:
+
+    - ``FETCHED``: the tracking ref is fresh, so it is safe to fast-forward from.
+    - ``BRANCH_ABSENT``: origin has no such branch. An expected, benign state for
+      a fresh ticket (a PLAN stage provisions the worktree before IMPL ever
+      pushes): there is nothing to refresh and nothing worth reporting.
+    - ``FAILED``: the fetch itself failed (offline, auth, no ``origin``, missing
+      workspace). The tracking ref is stale or unknown, so it must NOT be
+      fast-forwarded from, and the failure is worth reporting.
     """
-    result = _run_git(
-        "submodule", "update", "--init", "--recursive", cwd=wt_path, check=False
-    )
-    if result.returncode == 0:
-        return None
-    reason = _first_line(result.stderr) or f"git exited {result.returncode}"
-    _log.warning(
-        "create_worktree: submodule sync failed in %s; using worktree as-is: %s",
-        wt_path,
-        reason,
-    )
-    return reason
+
+    FETCHED = "fetched"
+    BRANCH_ABSENT = "branch_absent"
+    FAILED = "failed"
 
 
-def _init_submodules(git_cwd: Path, wt_path: Path) -> None:
-    """Initialize submodules in a fresh *wt_path* when the main checkout uses them.
+@dataclass
+class ReuseRefreshReport:
+    """What the reuse refresh learned, for callers that must act on it (#2213).
 
-    Best-effort: a submodule failure is logged (:func:`_sync_submodules`) and
-    never fails worktree provisioning. The first-time path's trigger is the main
-    checkout's ``.gitmodules``; the reuse path keys on the fast-forwarded
-    worktree's own HEAD instead (:func:`_head_has_gitmodules`).
+    ``create_worktree`` returns only a path. A caller that opts into
+    ``refresh_on_reuse`` and needs more than that passes one of these in:
+
+    - ``notes``: one single-line entry per refresh FAILURE the caller cannot
+      otherwise see, each naming the worktree and the reason -- the fetch
+      failed, git refused the fast-forward, the branch diverged from origin, or
+      an OS error aborted the refresh. A caller with a friction surface prints
+      them. Designed non-actions add nothing: branch absent from origin,
+      already equal or ahead, or a worktree that is occupied.
+    - ``live_occupant``: why a live session or daemon worker may be homed on the
+      worktree, or ``None``. It is set whenever the live-session half of the
+      occupancy check fired -- at the gate before the fetch and again at the
+      re-check before the fast-forward -- including when that half could not be
+      read (fail closed). Its point is that the refresh's refusal is not the
+      end of the story for a caller that goes on to MUTATE the worktree itself:
+      it must stop too. Unsaved work and an unexpected branch do not set it;
+      those refuse the refresh, but the worktree remains the caller's to use.
     """
-    if (git_cwd / ".gitmodules").exists():
-        _sync_submodules(wt_path)
 
-
-def _head_has_gitmodules(wt_path: Path) -> bool:
-    """Return True if the commit checked out in *wt_path* tracks ``.gitmodules``.
-
-    Reads the committed tree (``HEAD:.gitmodules``), not the file system, so an
-    untracked ``.gitmodules`` never triggers a sync and one that the new HEAD
-    introduced on a branch the main checkout does not have is still found.
-    """
-    probe = _run_git("cat-file", "-e", "HEAD:.gitmodules", cwd=wt_path, check=False)
-    return probe.returncode == 0
+    notes: list[str] = field(default_factory=list)
+    live_occupant: str | None = None
 
 
 def _ff_reused_worktree(
@@ -666,55 +668,52 @@ def _ff_reused_worktree(
     branch: str,
     wt_path: Path,
     target: str,
-    notes: list[str],
+    report: ReuseRefreshReport,
 ) -> None:
     """Fast-forward *wt_path* to *target* with ``merge --ff-only``, never raising.
 
-    First re-runs the FULL occupancy predicate (:func:`_reuse_occupancy_reason`:
+    First re-runs the FULL occupancy predicate (:func:`_reuse_occupancy`:
     expected branch, unsaved work, cw state, daemon roster), immediately before
     the first mutating git call. The caller's occupancy gate ran before a
     network fetch that can take a while, so a session or worker may have
     started, or the tree been dirtied, in the meantime; if anything changed the
-    fast-forward is abandoned and the worktree used as-is. This narrows the
-    window but does not eliminate it: a session can still start between this
-    check and the merge. That remaining window is accepted because the only
-    alternative -- holding a lock across the network fetch (or across the
-    check-then-merge) -- is worse: it would stall every other claim behind a
-    slow remote.
+    fast-forward is abandoned and the worktree used as-is (a live occupant is
+    recorded on *report*). This narrows the window but does not eliminate it: a
+    session can still start between this check and the merge. That remaining
+    window is accepted because the only alternative -- holding a lock across the
+    network fetch (or across the check-then-merge) -- is worse: it would stall
+    every other claim behind a slow remote.
 
     ``--ff-only`` cannot destroy work: it refuses (rc != 0, worktree untouched)
     when local uncommitted changes overlap files the merge must update, and
-    carries non-overlapping local modifications through. A refusal is logged
-    and the worktree is left exactly as it was.
-
-    After a successful fast-forward, when the NEW HEAD tracks ``.gitmodules``
-    (:func:`_head_has_gitmodules` -- the merge can introduce or move submodules
-    even when the main checkout has none), submodules are synced. A failed sync
-    is logged and appended to *notes* as one line naming the worktree and the
-    reason; the worktree is left usable at the fast-forwarded HEAD, and nothing
-    is reset or deleted. With no ``.gitmodules`` in the new HEAD the step is
-    skipped entirely.
+    carries non-overlapping local modifications through. A refusal is logged,
+    reported on *report*, and the worktree is left exactly as it was.
     """
-    changed = _reuse_occupancy_reason(client, branch, wt_path)
-    if changed is not None:
-        _log.debug(
-            "create_worktree: reused worktree occupied after the fetch; "
-            "fast-forward abandoned, using worktree as-is "
-            "(client=%s, path=%s): %s",
-            client.name,
-            wt_path,
-            changed,
-        )
+    if _occupancy_refuses_refresh(
+        client,
+        branch,
+        wt_path,
+        report,
+        action=(
+            "reused worktree occupied after the fetch; fast-forward abandoned, "
+            "using worktree as-is"
+        ),
+    ):
         return
     old_sha = _run_git("rev-parse", "HEAD", cwd=wt_path, check=False).stdout.strip()
     merge = _run_git("merge", "--ff-only", target, cwd=wt_path, check=False)
     if merge.returncode != 0:
+        reason = _first_line(merge.stderr) or f"git exited {merge.returncode}"
         _log.warning(
             "create_worktree: fast-forward of %s refused (client=%s, path=%s): %s",
             branch,
             client.name,
             wt_path,
-            _first_line(merge.stderr),
+            reason,
+        )
+        report.notes.append(
+            f"fast-forward of {branch} in reused worktree {wt_path} was refused "
+            f"by git ({reason}); it was not refreshed and may be behind origin"
         )
         return
     new_sha = _run_git("rev-parse", "HEAD", cwd=wt_path, check=False).stdout.strip()
@@ -727,14 +726,6 @@ def _ff_reused_worktree(
         old_sha[:_SHA_LOG_CHARS],
         new_sha[:_SHA_LOG_CHARS],
     )
-    if _head_has_gitmodules(wt_path):
-        failure = _sync_submodules(wt_path)
-        if failure is not None:
-            notes.append(
-                f"submodule sync failed in reused worktree {wt_path} after "
-                f"fast-forwarding {branch}: {failure}; its submodules may point "
-                "at stale commits"
-            )
 
 
 _NON_TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
@@ -764,7 +755,7 @@ def live_session_worktree_paths() -> frozenset[Path] | None:
     The two callers deliberately treat ``None`` in OPPOSITE directions:
 
     - The reuse refresh (:func:`_live_home_reason`, reached through
-      :func:`_reuse_occupancy_reason`, #2213) fails CLOSED. ``None`` means "cannot
+      :func:`_reuse_occupancy`, #2213) fails CLOSED. ``None`` means "cannot
       rule out a live session", i.e. occupied: the worktree is used as-is and
       never fast-forwarded. Reading "unknown" as "free" would rewrite a live
       worker's tree.
@@ -798,21 +789,26 @@ def live_session_worktree_paths() -> frozenset[Path] | None:
     return frozenset(live)
 
 
-def _resolve_detecting_loop(path: Path) -> Path:
-    """``Path.resolve()`` that raises ``OSError`` (``ELOOP``) on a symlink loop.
+def _normalize_path(path: Path) -> Path:
+    """Return *path* fully resolved, or raise ``OSError`` if it cannot be.
 
-    Since Python 3.13 a non-strict ``resolve()`` no longer raises on a loop: it
-    hands back the path only partly resolved, which would compare unequal to the
-    real home and read as "not occupied" -- the fail-open direction this guard
-    exists to prevent. ``stat()`` follows the whole chain and reports the loop.
-    Any other ``stat`` error (notably ``ENOENT``: a recorded worktree that is
-    simply gone) is ignored, since a missing path is not indeterminate.
+    A bare non-strict ``Path.resolve()`` is not enough. Since Python 3.13 it
+    swallows a symlink loop and hands back the path only partly resolved, and it
+    does not surface access errors either; the result would compare unequal to
+    the real home and read as "not occupied" -- the fail-open direction this
+    guard exists to prevent (#2213). ``stat()`` follows the whole chain first
+    and reports the truth: ``ELOOP``, ``EACCES``, ``ENOTDIR``,
+    ``ENAMETOOLONG`` and every other ``OSError`` propagate, and the caller
+    reads that as "cannot rule out occupancy". There is no ``OSError`` for which
+    "assume it is free" is the safe answer.
+
+    The one exception is ``FileNotFoundError``. A path that does not exist is a
+    fact, not a failure to look: it cannot be the existing worktree being
+    reused, and a stale record of a deleted worktree must not veto every future
+    refresh. It falls through to ``resolve()``, which normalizes what exists.
     """
-    try:
+    with contextlib.suppress(FileNotFoundError):
         path.stat()
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            raise
     return path.resolve()
 
 
@@ -826,12 +822,14 @@ def _live_home_reason(wt_path: Path) -> str | None:
       spawned in (``NativeDaemonClient.list_live_worker_cwds``) -- a worker can
       be live in the roster before, or after, cw state reflects it.
 
-    Fails closed: an unreadable state file, an unreadable roster, or a path that
-    cannot be resolved all read as "cannot rule out a live session", never as
-    "free". Every path is compared after normalization
-    (:func:`_resolve_detecting_loop`) on both sides, so a symlinked or
-    non-canonical spelling of the same directory still matches, and a symlink
-    loop reads as occupied rather than as a path that merely differs.
+    Fails closed: an unreadable state file, an unreadable roster, or ANY path
+    that cannot be normalized reads as "cannot rule out a live session", never
+    as "free". Every path is compared after normalization
+    (:func:`_normalize_path`) on both sides, so a symlinked or non-canonical
+    spelling of the same directory still matches, and a path that cannot be
+    normalized -- a symlink loop, a permission error, a component that is not a
+    directory, an over-long name -- reads as occupied rather than as a path that
+    merely differs.
     """
     sessions = live_session_worktree_paths()
     if sessions is None:
@@ -840,9 +838,9 @@ def _live_home_reason(wt_path: Path) -> str | None:
     if workers is None:
         return "daemon roster unreadable, cannot rule out a live session"
     try:
-        target = _resolve_detecting_loop(wt_path)
-        session_homes = {_resolve_detecting_loop(path) for path in sessions}
-        worker_homes = {_resolve_detecting_loop(path) for path in workers}
+        target = _normalize_path(wt_path)
+        session_homes = {_normalize_path(path) for path in sessions}
+        worker_homes = {_normalize_path(path) for path in workers}
     except OSError as exc:
         return f"a path cannot be resolved ({exc}), cannot rule out a live session"
     if target in session_homes:
@@ -852,39 +850,144 @@ def _live_home_reason(wt_path: Path) -> str | None:
     return None
 
 
-def _reuse_occupancy_reason(
-    client: ClientConfig, branch: str, wt_path: Path
-) -> str | None:
-    """Return why *wt_path* is occupied (must not be moved), or None if free.
+class _Occupancy(NamedTuple):
+    """The reuse refresh's occupancy verdict, split by what it lets a caller do.
+
+    - ``live``: a live session or daemon worker may be homed on the worktree
+      (:func:`_live_home_reason`), or the state or roster could not be read
+      (fail closed). Nothing may touch the tree.
+    - ``local``: an unexpected checked-out branch, or unsaved work. The refresh
+      must not move HEAD, but the worktree is still the caller's to use: the
+      staged pipeline reuses one per-ticket worktree that legitimately carries
+      churn (e.g. ``uv.lock``) from a prior stage.
+
+    Both halves are always evaluated. Unsaved work is exactly what a live worker
+    leaves behind, so it must never mask ``live``.
+    """
+
+    live: str | None
+    local: str | None
+
+    @property
+    def reason(self) -> str | None:
+        """The most serious reason the refresh is refused, or None if free."""
+        return self.live if self.live is not None else self.local
+
+
+def _reuse_occupancy(client: ClientConfig, branch: str, wt_path: Path) -> _Occupancy:
+    """Return whether *wt_path* is occupied (must not be moved), and why.
 
     The single predicate the reuse refresh consults, both up front and again
     immediately before it mutates (see :func:`_ff_reused_worktree`). Local
     reads only -- no network. Occupied means any of:
 
-    - the checked-out branch is not *branch* (or HEAD is detached);
-    - :func:`unsaved_work_reason` reports uncommitted, untracked or unpushed
+    - ``local``: the checked-out branch is not *branch* (or HEAD is detached);
+      or :func:`unsaved_work_reason` reports uncommitted, untracked or unpushed
       work (checked regardless of the caller's ``allow_dirty_reuse``, which
       only tolerates such work, it does not license moving HEAD under it); or
-    - :func:`_live_home_reason`: a live session in cw state or a live worker in
-      the daemon roster is homed on *wt_path*, or either could not be read
-      (fail closed: this gates a mutation). The dev-queue RUNNING half of the
-      GC guard is deliberately not consulted: at dispatch-claim time the task
-      being claimed is itself RUNNING, so it would veto the very path this
-      refresh serves, and a live session for that task already appears in the
-      state half.
+    - ``live``: :func:`_live_home_reason` -- a live session in cw state or a
+      live worker in the daemon roster is homed on *wt_path*, or either could
+      not be read (fail closed: this gates a mutation). The dev-queue RUNNING
+      half of the GC guard is deliberately not consulted: at dispatch-claim time
+      the task being claimed is itself RUNNING, so it would veto the very path
+      this refresh serves, and a live session for that task already appears in
+      the state half.
     """
     current = _checked_out_branch(wt_path)
+    local: str | None = None
     if current != branch:
         found = current or "(none / detached HEAD / not a worktree)"
-        return f"expected branch {branch!r} but found {found}"
-    unsaved = unsaved_work_reason(client, branch, wt_path=wt_path)
-    if unsaved is not None:
-        return f"unsaved work ({unsaved})"
-    return _live_home_reason(wt_path)
+        local = f"expected branch {branch!r} but found {found}"
+    else:
+        unsaved = unsaved_work_reason(client, branch, wt_path=wt_path)
+        if unsaved is not None:
+            local = f"unsaved work ({unsaved})"
+    return _Occupancy(live=_live_home_reason(wt_path), local=local)
+
+
+def _occupancy_refuses_refresh(
+    client: ClientConfig,
+    branch: str,
+    wt_path: Path,
+    report: ReuseRefreshReport,
+    *,
+    action: str,
+) -> bool:
+    """Return True (after logging *action* at DEBUG) when the refresh must stop.
+
+    Records a live occupant on *report* whenever the live half fired, so the
+    refusal reaches a caller that would otherwise go on to mutate the tree.
+    """
+    occupancy = _reuse_occupancy(client, branch, wt_path)
+    if occupancy.live is not None:
+        report.live_occupant = occupancy.live
+    reason = occupancy.reason
+    if reason is None:
+        return False
+    _log.debug(
+        "create_worktree: %s (client=%s, path=%s): %s",
+        action,
+        client.name,
+        wt_path,
+        reason,
+    )
+    return True
+
+
+def _refresh_reused_worktree_steps(
+    client: ClientConfig, branch: str, wt_path: Path, report: ReuseRefreshReport
+) -> None:
+    """The ordered steps of :func:`_refresh_reused_worktree`, which see OSError."""
+    if _occupancy_refuses_refresh(
+        client, branch, wt_path, report, action="not refreshing reused worktree"
+    ):
+        return
+    outcome = fetch_feature_branch(client, branch)
+    if outcome is FetchOutcome.BRANCH_ABSENT:
+        # Expected for a fresh ticket: nothing to refresh, nothing to report
+        # (the fetch already logged it at DEBUG).
+        return
+    if outcome is FetchOutcome.FAILED:
+        # A failed fetch leaves the tracking ref at whatever it was before, so
+        # fast-forwarding "to origin" would really move HEAD to stale state.
+        # The reason (rc + git's first stderr line) is already logged by
+        # ``fetch_feature_branch``, so this line stays at DEBUG rather than
+        # duplicating that noise policy.
+        _log.debug(
+            "create_worktree: fetch of origin/%s failed; fast-forward "
+            "skipped, using worktree as-is (client=%s, path=%s)",
+            branch,
+            client.name,
+            wt_path,
+        )
+        report.notes.append(
+            f"fetch of origin/{branch} failed while refreshing reused "
+            f"worktree {wt_path}; it was not fast-forwarded and may be "
+            "behind origin (git's error is in the cw log)"
+        )
+        return
+    target = f"refs/remotes/origin/{branch}"
+    if not _ref_exists(target, wt_path):
+        return
+    relation = _ff_relation("HEAD", target, wt_path)
+    if relation == "diverged":
+        _log.warning(
+            "create_worktree: reused worktree diverged from origin/%s; "
+            "leaving untouched (client=%s, path=%s)",
+            branch,
+            client.name,
+            wt_path,
+        )
+        report.notes.append(
+            f"reused worktree {wt_path} has diverged from origin/{branch}; it "
+            "was left untouched and not refreshed"
+        )
+    elif relation == "behind":
+        _ff_reused_worktree(client, branch, wt_path, target, report)
 
 
 def _refresh_reused_worktree(
-    client: ClientConfig, branch: str, wt_path: Path, notes: list[str]
+    client: ClientConfig, branch: str, wt_path: Path, report: ReuseRefreshReport
 ) -> None:
     """Best-effort fetch, then fast-forward a *behind, unoccupied* reused worktree.
 
@@ -898,96 +1001,58 @@ def _refresh_reused_worktree(
     Order of operations:
 
     1. **Occupancy gate, local reads only, no network**
-       (:func:`_reuse_occupancy_reason`). Occupied -- the checked-out branch is
-       not the expected one, unsaved work, a live session in cw state or a
-       live worker in the daemon roster homed here -- means use the worktree
-       as-is: a DEBUG log names the path and the reason, and nothing else
-       happens (no fetch, no move). Fail closed: unreadable session state, an
-       unreadable roster or an unresolvable path also count as occupied.
-       (``create_worktree``'s own identity guard *raises* on a wrong branch
-       before this helper is reached; the predicate repeats the branch check
-       because step 4 re-runs it.)
-    2. ``git fetch`` of ``origin/<branch>`` via :func:`fetch_feature_branch`.
-       This is a network call: it can be slow, or fail. Its outcome is
-       captured: on failure the tracking ref is whatever it was before, so
-       fast-forwarding "to origin" would really move HEAD to stale state --
-       the fast-forward is skipped entirely and the worktree used as-is (the
-       reason is logged by the fetch itself, and the skip at DEBUG here) and
-       one line naming the worktree is appended to *notes*.
+       (:func:`_reuse_occupancy`). Occupied -- the checked-out branch is not the
+       expected one, unsaved work, a live session in cw state or a live worker
+       in the daemon roster homed here -- means use the worktree as-is: a DEBUG
+       log names the path and the reason, and nothing else happens (no fetch, no
+       move). Fail closed: unreadable session state, an unreadable roster or a
+       path that cannot be normalized also count as occupied. A live occupant is
+       recorded on *report*. (``create_worktree``'s own identity guard *raises*
+       on a wrong branch before this helper is reached; the predicate repeats
+       the branch check because step 4 re-runs it.)
+    2. ``git fetch`` of ``origin/<branch>`` via :func:`fetch_feature_branch`,
+       which returns a :class:`FetchOutcome`. This is a network call: it can be
+       slow, or fail. Only ``FETCHED`` proceeds. ``BRANCH_ABSENT`` (never
+       pushed) stops quietly: an expected state, not friction. ``FAILED`` leaves
+       the tracking ref at whatever it was before, so fast-forwarding "to
+       origin" would really move HEAD to stale state: the fast-forward is
+       skipped and the worktree used as-is, and the failure is reported.
     3. Target is the branch's own ``refs/remotes/origin/<branch>``, NOT
        :func:`_resolve_remote_ref`: that ladder is upstream-first, and a
        misconfigured ``@{u}`` of ``origin/<default>`` (the #2114 failure mode)
-       would fast-forward a feature branch onto main. Target absent (branch
-       never pushed): no-op.
+       would fast-forward a feature branch onto main. Target absent (a fetch
+       can succeed without creating the tracking ref, under a narrow
+       ``remote.origin.fetch`` refspec): no-op.
     4. HEAD equal or ahead: no-op (unpushed commits kept). Diverged (remote
        history rewritten since the worktree pushed): WARNING, untouched --
        reconciling is not this function's job. Behind: the full occupancy
        predicate is re-run immediately before ``merge --ff-only`` (a session
        may have started during the fetch; see :func:`_ff_reused_worktree`),
-       then the fast-forward, then a submodule sync when the new HEAD tracks
-       ``.gitmodules`` (see :func:`_ff_reused_worktree`).
+       then the fast-forward.
 
-    *notes* is the caller-supplied friction surface (see ``refresh_notes`` on
-    :func:`create_worktree`). It receives one line per FAILURE the caller cannot
-    otherwise see -- a failed fetch or a failed submodule sync -- and nothing
-    for a designed refusal (occupied, diverged, never pushed): those are the
-    guard working, not the refresh failing.
+    *report* is the caller-supplied surface (see :class:`ReuseRefreshReport`).
+    Every FAILURE the caller cannot otherwise see -- a failed fetch, a diverged
+    branch, a fast-forward git refused, an ``OSError`` -- appends exactly one
+    note naming the worktree and the reason. Designed non-actions (occupied,
+    branch absent, equal or ahead) add none.
 
-    Never raises and never resets, ``checkout -f``s or deletes.
+    Never raises for a git or OS failure and never resets, ``checkout -f``s or
+    deletes. Anything that is not an ``OSError`` is a bug and propagates.
     """
     try:
-        reason = _reuse_occupancy_reason(client, branch, wt_path)
-        if reason is not None:
-            _log.debug(
-                "create_worktree: not refreshing reused worktree "
-                "(client=%s, path=%s): %s",
-                client.name,
-                wt_path,
-                reason,
-            )
-            return
-        if not fetch_feature_branch(client, branch):
-            # A failed fetch leaves the tracking ref at whatever it was before,
-            # so fast-forwarding "to origin" would really move HEAD to stale
-            # state. Skip the fast-forward and use the worktree as-is. The
-            # reason (rc + git's first stderr line) is already logged by
-            # ``fetch_feature_branch`` -- at WARNING for a real failure, DEBUG
-            # for the expected never-pushed branch -- so this line stays at
-            # DEBUG rather than duplicating that noise policy.
-            _log.debug(
-                "create_worktree: fetch of origin/%s failed; fast-forward "
-                "skipped, using worktree as-is (client=%s, path=%s)",
-                branch,
-                client.name,
-                wt_path,
-            )
-            notes.append(
-                f"fetch of origin/{branch} failed while refreshing reused "
-                f"worktree {wt_path}; it was not fast-forwarded and may be "
-                "behind origin (git's error is in the cw log)"
-            )
-            return
-        target = f"refs/remotes/origin/{branch}"
-        if not _ref_exists(target, wt_path):
-            return
-        relation = _ff_relation("HEAD", target, wt_path)
-        if relation == "diverged":
-            _log.warning(
-                "create_worktree: reused worktree diverged from origin/%s; "
-                "leaving untouched (client=%s, path=%s)",
-                branch,
-                client.name,
-                wt_path,
-            )
-        elif relation == "behind":
-            _ff_reused_worktree(client, branch, wt_path, target, notes)
+        _refresh_reused_worktree_steps(client, branch, wt_path, report)
     except OSError as exc:
+        reason = _first_line(str(exc)) or type(exc).__name__
         _log.warning(
             "create_worktree: refresh of reused worktree failed "
             "(client=%s, path=%s): %s",
             client.name,
             wt_path,
-            exc,
+            reason,
+        )
+        report.notes.append(
+            f"refresh of reused worktree {wt_path} failed with an OS error "
+            f"({reason}); it was not refreshed and may be behind origin"
         )
 
 
@@ -998,7 +1063,7 @@ def create_worktree(
     force: bool = False,
     allow_dirty_reuse: bool = False,
     refresh_on_reuse: bool = False,
-    refresh_notes: list[str] | None = None,
+    refresh_report: ReuseRefreshReport | None = None,
 ) -> Path:
     """Create a git worktree for the given branch.
 
@@ -1026,22 +1091,24 @@ def create_worktree(
     - **Refuses, and uses the worktree as-is** (DEBUG log naming the path and
       reason; never ``reset --hard``, ``checkout -f`` or delete) when: there is
       unsaved work (uncommitted, untracked or unpushed); a live session in cw
-      state or a live worker in the daemon roster is homed on the path
-      (compared after ``Path.resolve()``); cw session state or the roster is
-      unreadable (fail closed); the fetch failed; the branch has diverged from
+      state or a live worker in the daemon roster is homed on the path; cw
+      session state, the roster, or any path involved cannot be read or
+      normalized (fail closed -- ``Path.resolve()`` comparison, and any
+      ``OSError`` reads as occupied); the fetch failed (the tracking ref is
+      stale, so it is never fast-forwarded from); the branch has diverged from
       origin (WARNING); ``--ff-only`` itself refuses (WARNING); or
       ``origin/<branch>`` does not exist. A wrong branch is stricter still: the
       identity guard above raises :exc:`StaleWorktreeError` before any
-      refresh. After a successful fast-forward, submodules are re-synced when
-      the new HEAD tracks ``.gitmodules``; a failed sync is logged and the
-      worktree used as-is.
+      refresh.
 
-    *refresh_notes* (#2213) is an out-parameter for callers that have a friction
-    surface to report on, which ``create_worktree`` itself does not: when given,
-    one line is appended for each refresh FAILURE -- the fetch failed, or the
-    submodule sync failed -- naming the worktree and the reason, alongside the
-    log line. Designed refusals (occupied, diverged, branch not on origin) add
-    nothing. Ignored unless *refresh_on_reuse* is set.
+    *refresh_report* (#2213) is an out-parameter (:class:`ReuseRefreshReport`)
+    for callers that need to act on what the refresh learned, which this
+    function's ``Path`` return cannot carry. Its ``notes`` receive one line per
+    refresh FAILURE (fetch failed, fast-forward refused by git, diverged, an OS
+    error), each naming the worktree and the reason. Its ``live_occupant`` is
+    set when a live session or worker may be homed on the worktree: the refresh
+    refused, and a caller that would go on to mutate the tree itself must stop
+    too. Ignored unless *refresh_on_reuse* is set.
 
     See :func:`_refresh_reused_worktree`.
 
@@ -1095,7 +1162,7 @@ def create_worktree(
                 client,
                 branch,
                 wt_path,
-                refresh_notes if refresh_notes is not None else [],
+                refresh_report if refresh_report is not None else ReuseRefreshReport(),
             )
         return wt_path
 
@@ -1133,7 +1200,17 @@ def create_worktree(
             raise
         raise _branch_held_error(client, branch, holder) from exc
     _register_cw_exclude(git_cwd)
-    _init_submodules(git_cwd, wt_path)
+
+    # Initialize submodules if the repo uses them
+    if (git_cwd / ".gitmodules").exists():
+        _run_git(
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+            cwd=wt_path,
+            check=False,
+        )
 
     return wt_path
 
@@ -1372,12 +1449,16 @@ def _fetch_default_branch(
     warned_fetch_fail: set[str] | None = None,
     *,
     quiet_missing_ref: bool = False,
-) -> bool:
-    """Fetch origin/<default_branch>. Returns True on success, False on failure.
+) -> FetchOutcome:
+    """Fetch origin/<default_branch> and report what happened.
 
-    A branch absent from origin (git's ``couldn't find remote ref``) is logged
-    at DEBUG instead of WARNING when *quiet_missing_ref* is set, and does not
-    touch *warned_fetch_fail*. Every other failure still WARNs.
+    Returns :attr:`FetchOutcome.FETCHED` on success,
+    :attr:`FetchOutcome.BRANCH_ABSENT` when origin has no such branch (git's
+    ``couldn't find remote ref``), and :attr:`FetchOutcome.FAILED` for every
+    other failure. The outcome does not depend on *quiet_missing_ref*; only the
+    log level does: a branch absent from origin is logged at DEBUG instead of
+    WARNING when it is set, and then does not touch *warned_fetch_fail*.
+    Every other failure still WARNs.
     """
     if not git_dir.exists():
         _log.warning(
@@ -1385,7 +1466,7 @@ def _fetch_default_branch(
             client_name,
             git_dir,
         )
-        return False
+        return FetchOutcome.FAILED
     try:
         result = _run_git(
             "fetch", "origin", default_branch, "--quiet", cwd=git_dir, check=False
@@ -1397,32 +1478,33 @@ def _fetch_default_branch(
             git_dir,
             exc,
         )
-        return False
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        first_line = _first_line(stderr)
-        if quiet_missing_ref and _MISSING_REMOTE_REF_MARKER in stderr:
-            _log.debug(
-                "freshness_check_skip: fetch failed for %s (rc=%d): %s",
-                client_name,
-                result.returncode,
-                first_line,
-            )
-            return False
-        if warned_fetch_fail is None or client_name not in warned_fetch_fail:
-            _log.warning(
-                "freshness_check_skip: fetch failed for %s (rc=%d): %s",
-                client_name,
-                result.returncode,
-                first_line,
-            )
-            if warned_fetch_fail is not None:
-                warned_fetch_fail.add(client_name)
-        return False
-    return True
+        return FetchOutcome.FAILED
+    if result.returncode == 0:
+        return FetchOutcome.FETCHED
+    stderr = result.stderr.strip()
+    first_line = _first_line(stderr)
+    branch_absent = _MISSING_REMOTE_REF_MARKER in stderr
+    if branch_absent and quiet_missing_ref:
+        _log.debug(
+            "freshness_check_skip: fetch failed for %s (rc=%d): %s",
+            client_name,
+            result.returncode,
+            first_line,
+        )
+        return FetchOutcome.BRANCH_ABSENT
+    if warned_fetch_fail is None or client_name not in warned_fetch_fail:
+        _log.warning(
+            "freshness_check_skip: fetch failed for %s (rc=%d): %s",
+            client_name,
+            result.returncode,
+            first_line,
+        )
+        if warned_fetch_fail is not None:
+            warned_fetch_fail.add(client_name)
+    return FetchOutcome.BRANCH_ABSENT if branch_absent else FetchOutcome.FAILED
 
 
-def fetch_feature_branch(client: ClientConfig, branch_name: str) -> bool:
+def fetch_feature_branch(client: ClientConfig, branch_name: str) -> FetchOutcome:
     """Fetch origin/<branch_name> into the client's git directory.
 
     Resolves the stale-local-ref problem described in GitHub issue #381:
@@ -1431,9 +1513,12 @@ def fetch_feature_branch(client: ClientConfig, branch_name: str) -> bool:
     Calling this before computing ``git diff FORK_POINT...origin/<branch>``
     for reviewer prompts ensures the diff reflects the actual pushed state.
 
-    Returns True on success, False on any failure (fetch errors do not raise).
-    A branch that is not on origin is logged at DEBUG, not WARNING: a
-    never-pushed feature branch is an expected state (#2213).
+    Returns a :class:`FetchOutcome` and never raises for a fetch error:
+    ``FETCHED`` on success, ``BRANCH_ABSENT`` when origin has no such branch,
+    ``FAILED`` for anything else. The two non-success outcomes are distinct
+    because they need opposite handling (#2213): a branch that is not on origin
+    is an expected state for a never-pushed feature branch (logged at DEBUG, not
+    WARNING), while a failed fetch means the tracking ref is stale.
     """
     return _fetch_default_branch(
         client.name, branch_name, _git_dir(client), quiet_missing_ref=True
@@ -1490,8 +1575,11 @@ def is_main_behind_origin(
     git_dir = _git_dir(client)
     default_branch = client.default_branch
 
-    if not _fetch_default_branch(
-        client.name, default_branch, git_dir, warned_fetch_fail=warned_fetch_fail
+    if (
+        _fetch_default_branch(
+            client.name, default_branch, git_dir, warned_fetch_fail=warned_fetch_fail
+        )
+        is not FetchOutcome.FETCHED
     ):
         return (False, "", "", 0)
 

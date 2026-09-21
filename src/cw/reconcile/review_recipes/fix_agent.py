@@ -30,6 +30,7 @@ from cw.models import (
 )
 from cw.session_retention import find_session_by_id
 from cw.worktree import (
+    ReuseRefreshReport,
     _git_dir,
     _resolve_remote_ref,
     _run_git,
@@ -113,14 +114,30 @@ def dispatch_fix_agent(
     in cw state or worker in the daemon roster homed on it, occupancy
     re-checked immediately before the merge), clean, on the expected branch
     and strictly behind; otherwise it is left exactly as it is. Never a
-    reset, never a raise. The HEAD verification runs
-    after it, before ``fetch``/``merge``, the only other mutating steps. A
-    precondition failure therefore leaves the worktree untouched except for
-    that fast-forward, which strictly advances HEAD and needs no compensating
-    restore. Unlike ``create_worktree``, this caller has a friction surface (the
-    prompt prefix), so a failed refresh fetch or submodule sync -- reported
-    through ``refresh_notes`` -- is named there, worktree and reason, alongside
-    the log line; the dispatch itself proceeds.
+    reset, never a raise.
+
+    **A refusal for a live occupant stops this dispatch.** ``create_worktree``
+    reports it on a :class:`~cw.worktree.ReuseRefreshReport`
+    (``live_occupant``), and this function raises
+    :exc:`HookContextConflictError` straight away, before any later step can act
+    on the worktree: the HEAD verification, ``git fetch``, the merge of
+    ``origin/<default_branch>`` into it, the hook-context write and the spawn.
+    Refusing only the fast-forward and then merging into and spawning onto a
+    tree a live worker is using would defeat the guard's whole purpose.
+    The conflict is the existing transient one (retried next tick, escalated by
+    ``cw.reconcile.fix_dispatch`` once it stops being transient), so nothing is
+    lost by skipping. It covers a state or roster that cannot be read (fail
+    closed) as well as a positive match; unsaved work alone does not, because
+    this path legitimately reuses a worktree carrying a prior stage's churn.
+
+    Past that point the HEAD verification runs, before ``fetch``/``merge``, the
+    only other mutating steps. A precondition failure therefore leaves the
+    worktree untouched except for the fast-forward, which strictly advances HEAD
+    and needs no compensating restore. Unlike ``create_worktree``, this caller
+    has a friction surface (the prompt prefix), so each refresh failure -- fetch
+    failed, fast-forward refused, diverged, an OS error -- reported through the
+    report's ``notes`` is named there, worktree and reason, alongside the log
+    line; the dispatch itself proceeds.
 
     The HEAD verification confirms HEAD landed on the branch's resolved
     remote ref (upstream-first, ``origin/<branch>`` as fallback -- #2145)
@@ -178,16 +195,28 @@ def dispatch_fix_agent(
         )
 
     _refuse_if_worktree_references_live_session(client, branch)
-    refresh_notes: list[str] = []
+    refresh = ReuseRefreshReport()
     worktree = create_worktree(
         client,
         branch,
         allow_dirty_reuse=True,
         refresh_on_reuse=True,
-        refresh_notes=refresh_notes,
+        refresh_report=refresh,
     )
+    if refresh.live_occupant is not None:
+        # The refresh refused because a live session or worker may be homed on
+        # this worktree. Every step below mutates it (fetch, merge, hook-context
+        # write, spawn), so none may run: skip the whole dispatch, worktree
+        # untouched, and let the caller's transient-conflict handling retry.
+        msg = (
+            f"dispatch_fix_agent: worktree {worktree} for {branch} may be held "
+            f"by a live session or daemon worker ({refresh.live_occupant}). "
+            "Refusing to fetch, merge or dispatch the fix agent into it; the "
+            "worktree was not touched."
+        )
+        raise HookContextConflictError(msg)
     effective_prompt = (
-        "".join(f"_Friction note: {note}_\n\n" for note in refresh_notes)
+        "".join(f"_Friction note: {note}_\n\n" for note in refresh.notes)
         + effective_prompt
     )
 
