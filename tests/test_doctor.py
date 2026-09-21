@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pytest
 from click.testing import CliRunner
 
 from cw.cli import main
@@ -27,8 +28,6 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    import pytest
-
     from cw.models import ClientConfig, Session, SessionPurpose, TicketTask
     from cw.native_daemon import FakeNativeDaemonClient
 
@@ -51,6 +50,36 @@ def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
         "cw.doctor.core._check_codex_capability",
         lambda: CheckResult("codex-capability", ok=True, detail="0.144.5 (stubbed)"),
     )
+
+
+def _seed_user_level_stop_hook(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point user_level_hooks._CLAUDE_HOME at a tmp home carrying a cw Stop hook.
+
+    #2226: the check reads ``~/.claude/settings{,.local}.json`` directly, so a
+    seeded hit needs its own module-level patch on top of the autouse
+    tmp_config_dir isolation.
+    """
+    claude_home = tmp_path / "seeded-claude"
+    claude_home.mkdir(parents=True, exist_ok=True)
+    (claude_home / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "matcher": "",
+                            "hooks": [{"type": "command", "command": "cw signal-stop"}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "cw.doctor.user_level_hooks._CLAUDE_HOME", claude_home, raising=True
+    )
+    return claude_home
 
 
 class TestRunDoctorHealthy:
@@ -946,6 +975,103 @@ class TestRunDoctor10Checks:
         check = next(c for c in report.checks if c.name == "bypass-disclaimer")
         assert check.ok is True
         assert check.warn is False
+
+    @pytest.mark.parametrize(
+        ("payload", "reason"),
+        [
+            (b'{"k": "\xff\xfe\x80"}', "invalid UTF-8"),
+            (b"{{{ nope", "malformed JSON"),
+            (b'["not", "an", "object"]', "not a JSON object"),
+        ],
+    )
+    def test_run_doctor_survives_unreadable_user_settings(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        payload: bytes,
+        reason: str,
+    ) -> None:
+        """A broken ~/.claude/settings.json must not crash run_doctor (#2226).
+
+        Both user-settings readers (bypass-disclaimer and stop-hook-scope) see
+        this file. The crash predated #2226 (bypass-disclaimer never caught
+        UnicodeDecodeError/OSError or a non-object top level) and was surfaced
+        by it: on a genuinely broken install the diagnostic died before
+        printing anything. Every other check must still report.
+        """
+        settings_path, _ = self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({"skipDangerousModePermissionPrompt": True}),
+            roster_content=json.dumps({"supervisorPid": 12345}),
+        )
+        healthy_names = [c.name for c in run_doctor().checks]
+
+        settings_path.write_bytes(payload)
+        report = run_doctor()
+
+        assert [c.name for c in report.checks] == healthy_names
+        by_name = {c.name: c for c in report.checks}
+        for name in ("bypass-disclaimer", "stop-hook-scope"):
+            assert by_name[name].ok is True
+            assert by_name[name].warn is True
+            assert str(settings_path) in by_name[name].detail
+            assert reason in by_name[name].detail
+
+    def test_run_doctor_survives_settings_path_that_is_a_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """An OSError other than FileNotFoundError is a WARN, not a crash."""
+        settings_path, _ = self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            roster_content=json.dumps({"supervisorPid": 12345}),
+        )
+        settings_path.mkdir()
+
+        report = run_doctor()
+
+        by_name = {c.name: c for c in report.checks}
+        for name in ("bypass-disclaimer", "stop-hook-scope"):
+            assert by_name[name].warn is True
+            assert "unreadable: IsADirectoryError" in by_name[name].detail
+        assert "daemon-reachable" in by_name
+
+    def test_run_doctor_missing_settings_file_stays_quiet_for_hook_scope(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """A missing file is the ordinary case: bypass says so, hook scope is silent."""
+        settings_path, _ = self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            roster_content=json.dumps({"supervisorPid": 12345}),
+        )
+        assert not settings_path.exists()
+
+        report = run_doctor()
+
+        by_name = {c.name: c for c in report.checks}
+        assert "not found" in by_name["bypass-disclaimer"].detail
+        assert by_name["stop-hook-scope"].warn is False
+
+    def test_doctor_json_exits_zero_with_unreadable_settings(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """`cw doctor --json` on a broken settings file reports and exits 0."""
+        settings_path, _ = self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            roster_content=json.dumps({"supervisorPid": 12345}),
+        )
+        settings_path.write_bytes(b"\xff\xfe")
+        _stub_claude_version_ok(monkeypatch)
+
+        result = CliRunner().invoke(main, ["doctor", "--json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        names = {c["name"] for c in payload["checks"]}
+        assert {"bypass-disclaimer", "stop-hook-scope", "daemon-reachable"} <= names
 
     def test_daemon_reachable_warns_when_roster_missing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
@@ -6797,6 +6923,48 @@ class TestCheckInboxSize:
         report = run_doctor()
         names = {c.name for c in report.checks}
         assert "inbox-size" in names
+
+    def test_stop_hook_scope_check_registered_in_run_doctor(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """run_doctor() includes the #2226 user-level Stop-hook scope check.
+
+        The autouse tmp_config_dir fixture points
+        ``user_level_hooks._CLAUDE_HOME`` at an empty tmp dir, so a clean host
+        is the baseline here regardless of the operator's real ~/.claude.
+        """
+        _stub_claude_version_ok(monkeypatch)
+        report = run_doctor()
+        by_name = {c.name: c for c in report.checks}
+        assert "stop-hook-scope" in by_name
+        assert by_name["stop-hook-scope"].ok is True
+        assert by_name["stop-hook-scope"].warn is False
+
+    def test_stop_hook_scope_warn_in_json_report(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A seeded user-level Stop hook surfaces as warn=true, ok=true in JSON."""
+        from cw.doctor import format_report_json
+
+        _stub_claude_version_ok(monkeypatch)
+        _seed_user_level_stop_hook(monkeypatch, tmp_path)
+
+        payload = json.loads(format_report_json(run_doctor()))
+        entry = next(c for c in payload["checks"] if c["name"] == "stop-hook-scope")
+        assert entry["warn"] is True
+        assert entry["ok"] is True
+
+    def test_doctor_json_exits_zero_with_stop_hook_warn(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WARN never fails doctor's exit code — the check is perf hygiene."""
+        _stub_claude_version_ok(monkeypatch)
+        _seed_user_level_stop_hook(monkeypatch, tmp_path)
+
+        result = CliRunner().invoke(main, ["doctor", "--json"])
+
+        assert result.exit_code == 0
+        assert "stop-hook-scope" in result.output
 
     def test_bad_orchestrator_config_degrades_instead_of_raising(
         self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch

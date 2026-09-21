@@ -15,6 +15,7 @@ from cw.cli import main
 from cw.config import load_state, orchestrator_config_file, save_state
 from cw.exceptions import CwError
 from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -25,7 +26,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.spawn import build_disallowed_tools_arg
+from cw.spawn import _stop_hook_command, build_disallowed_tools_arg
 from tests.conftest import _make_ticket_task, _seed_daemon_session
 
 if TYPE_CHECKING:
@@ -35,6 +36,10 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Stand-in absolute context path for tests that inspect the generated
+# settings.local.json content without going through a real worktree.
+_FAKE_CONTEXT_PATH = Path("/wt/.claude/cw-context.json")
 
 
 def _make_client(tmp_path: Path, name: str = "test-client") -> ClientConfig:
@@ -921,13 +926,14 @@ class TestHookSettingsTemplate:
 
     def test_template_has_pretooluse_guard_and_preserves_stop(self) -> None:
         """PreToolUse/Bash/cw guard-cwd is present; Stop/cw signal-stop preserved."""
-        from cw.spawn import _HOOK_SETTINGS_TEMPLATE
+        from cw.spawn import _build_hook_settings
 
-        hooks = _HOOK_SETTINGS_TEMPLATE["hooks"]
+        hooks = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]
 
         stop_entries = hooks["Stop"]
         assert any(
-            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_entries
+            entry["hooks"][0]["command"] == _stop_hook_command(_FAKE_CONTEXT_PATH)
+            for entry in stop_entries
         )
 
         pretooluse_entries = hooks["PreToolUse"]
@@ -945,20 +951,34 @@ class TestHookSettingsTemplate:
         A second top-level "Bash" entry would be a different (unverified)
         dispatch question about how Claude Code handles duplicate matchers.
         """
-        from cw.spawn import _HOOK_SETTINGS_TEMPLATE
+        from cw.spawn import _build_hook_settings
 
-        entries = _HOOK_SETTINGS_TEMPLATE["hooks"]["PreToolUse"]
+        entries = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]["PreToolUse"]
         bash_entries = [e for e in entries if e.get("matcher") == "Bash"]
         assert len(bash_entries) == 1
 
         commands = [hook["command"] for hook in bash_entries[0]["hooks"]]
         assert commands == ["cw guard-cwd", "cw guard-busy-wait"]
 
+    def test_pretooluse_commands_stay_unguarded_literals(self) -> None:
+        """#2226 guarded the Stop hook ONLY — PreToolUse commands are untouched.
+
+        The three PreToolUse commands still pay an interpreter start per
+        invocation; wrapping them is a separate (unfiled) question. Pinning
+        the bare literals here makes any future guard an explicit decision
+        rather than a copy-paste side effect.
+        """
+        from cw.spawn import _build_hook_settings
+
+        entries = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]["PreToolUse"]
+        commands = [hook["command"] for entry in entries for hook in entry["hooks"]]
+        assert commands == ["cw guard-cwd", "cw guard-busy-wait", "cw agent-spawn-pre"]
+
     def test_hook_settings_template_includes_agent_spawn_pretooluse(self) -> None:
         """#1646: a subagent-tool PreToolUse entry sits alongside the Bash guard."""
-        from cw.spawn import _AGENT_TOOL_MATCHER, _HOOK_SETTINGS_TEMPLATE
+        from cw.spawn import _AGENT_TOOL_MATCHER, _build_hook_settings
 
-        entries = _HOOK_SETTINGS_TEMPLATE["hooks"]["PreToolUse"]
+        entries = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]["PreToolUse"]
         assert any(
             entry.get("matcher") == _AGENT_TOOL_MATCHER
             and entry["hooks"][0]["command"] == "cw agent-spawn-pre"
@@ -978,9 +998,9 @@ class TestHookSettingsTemplate:
         (``tests/test_cli_stop_hook.py``). No ``PostToolUse`` key should
         exist in the template at all -- it was the only entry in it.
         """
-        from cw.spawn import _HOOK_SETTINGS_TEMPLATE
+        from cw.spawn import _build_hook_settings
 
-        assert "PostToolUse" not in _HOOK_SETTINGS_TEMPLATE["hooks"]
+        assert "PostToolUse" not in _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]
 
     def test_agent_tool_matcher_is_anchored_and_matches_captured_tool_name(
         self,
@@ -1040,7 +1060,8 @@ class TestHookContextInjection:
         settings = json.loads(settings_path.read_text())
         stop_hooks = settings["hooks"]["Stop"]
         assert any(
-            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_hooks
+            entry["hooks"][0]["command"] == _stop_hook_command(context_path.resolve())
+            for entry in stop_hooks
         )
 
         context = json.loads(context_path.read_text())
@@ -1192,8 +1213,15 @@ class TestWriteHookContext:
         rewritten = json.loads(settings_path.read_text())
         stop_hooks = rewritten["hooks"]["Stop"]
         assert any(
-            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_hooks
+            entry["hooks"][0]["command"]
+            == _stop_hook_command((claude_dir / "cw-context.json").resolve())
+            for entry in stop_hooks
         )
+        # The guard bakes in the absolute context path of THIS worktree (#2226):
+        # no env var, no relative path, no cwd dependence.
+        command = stop_hooks[0]["hooks"][0]["command"]
+        assert str((worktree / HOOK_CONTEXT_RELATIVE_PATH).resolve()) in command
+        assert "$" not in command
         # Prior unrelated content is gone — confirms blind overwrite.
         assert rewritten != prior
 
@@ -1228,12 +1256,16 @@ class TestWriteHookContext:
         settings_path = worktree / ".claude" / "settings.local.json"
         assert settings_path.exists()
         settings = json.loads(settings_path.read_text())
+        context_path = worktree / ".claude" / "cw-context.json"
         stop_hooks = settings["hooks"]["Stop"]
         assert any(
-            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_hooks
+            entry["hooks"][0]["command"] == _stop_hook_command(context_path.resolve())
+            for entry in stop_hooks
         )
+        command = stop_hooks[0]["hooks"][0]["command"]
+        assert str(context_path.resolve()) in command
+        assert "$" not in command
         # Correlation file should still be written.
-        context_path = worktree / ".claude" / "cw-context.json"
         assert context_path.exists()
 
 
@@ -3193,9 +3225,9 @@ class TestHookMechanismIsPurposeAndStageAgnostic:
 
     def test_hook_settings_template_has_no_purpose_or_stage_keys(self) -> None:
         """The settings template is a constant, not a per-purpose computation."""
-        from cw.spawn import _HOOK_SETTINGS_TEMPLATE
+        from cw.spawn import _build_hook_settings
 
-        rendered = json.dumps(_HOOK_SETTINGS_TEMPLATE)
+        rendered = json.dumps(_build_hook_settings(_FAKE_CONTEXT_PATH))
         assert "purpose" not in rendered
         assert "stage" not in rendered
 
