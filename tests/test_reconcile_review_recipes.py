@@ -38,7 +38,12 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events, record_event
-from cw.exceptions import CwError, HookContextConflictError, SessionsLockReentryError
+from cw.exceptions import (
+    CwError,
+    HookContextConflictError,
+    SessionsLockReentryError,
+    WorktreeOccupiedError,
+)
 from cw.models import (
     ClientConfig,
     DevQueueStore,
@@ -82,14 +87,20 @@ from cw.reconcile.review_recipes import (
     _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
 )
 from cw.review_strategy import ReviewStrategy
-from cw.worktree import FetchOutcome, create_worktree, worktree_path_for
+from cw.worktree import FetchOutcome, FetchResult, create_worktree, worktree_path_for
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
 # construction: _make_task accepts **kwargs (pr_url / pr_state / session_id /
 # client / lane), _pr_state builds a PrState with sensible OPEN defaults.
 # _client_with_lanes builds a ClientConfig with the given lanes (reused by the
 # resolve-precedence tests below).
-from tests.conftest import _clean_git_env, git_in, push_commit_to_origin
+from tests.conftest import (
+    _clean_git_env,
+    git_in,
+    occupy_worktree,
+    push_commit_to_origin,
+    tree_fingerprint,
+)
 from tests.test_pr_hydrate import _pr_state, _watched
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 
@@ -2872,61 +2883,6 @@ def test_dispatch_fix_agent_fast_forwards_behind_worktree(
     assert "Friction note" not in str(stub_spawn.calls[0]["prompt"])
 
 
-def _tree_fingerprint(worktree: Path) -> tuple[str, str, str]:
-    """``(HEAD sha, porcelain status, digest of every working-tree file)``.
-
-    Byte-level: two equal fingerprints mean nothing moved HEAD, the index or a
-    single file's content in the worktree.
-    """
-    import hashlib
-
-    digest = hashlib.sha256()
-    for path in sorted(worktree.rglob("*")):
-        rel = path.relative_to(worktree)
-        if rel.parts[0] == ".git" or not path.is_file():
-            continue
-        digest.update(str(rel).encode())
-        digest.update(path.read_bytes())
-    return (
-        git_in(worktree, "rev-parse", "HEAD"),
-        git_in(worktree, "status", "--porcelain=v1", "--untracked-files=all"),
-        digest.hexdigest(),
-    )
-
-
-def _occupy_fix_worktree(client: ClientConfig, worktree: Path, source: str) -> None:
-    """Make a live occupant appear for *worktree* through the named source.
-
-    ``roster`` and ``state`` are positive matches; ``unreadable-roster`` is the
-    fail-closed case (occupancy cannot be ruled out).
-    """
-    from cw import native_daemon
-    from cw.config import load_state, save_state
-    from cw.models import Session
-
-    if source == "state":
-        state = load_state()
-        state.sessions.append(
-            Session(
-                name=f"{client.name}/impl/2017",
-                client=client.name,
-                purpose=SessionPurpose.IMPL,
-                workspace_path=client.workspace_path,
-                worktree_path=worktree,
-                status=SessionStatus.ACTIVE,
-            )
-        )
-        save_state(state)
-        return
-    roster = native_daemon._ROSTER_PATH
-    roster.parent.mkdir(parents=True, exist_ok=True)
-    if source == "roster":
-        payload = {"workers": {"aaaa1111": {"pid": 1, "cwd": str(worktree)}}}
-        roster.write_text(json.dumps(payload), encoding="utf-8")
-    else:
-        roster.write_text("{not json", encoding="utf-8")
-
-
 @pytest.mark.parametrize("worktree_is", ["in-sync", "behind"])
 @pytest.mark.parametrize("source", ["roster", "state", "unreadable-roster"])
 def test_dispatch_fix_agent_refuses_an_occupied_worktree_and_mutates_nothing(
@@ -2961,10 +2917,10 @@ def test_dispatch_fix_agent_refuses_an_occupied_worktree_and_mutates_nothing(
     # ``git fetch origin`` would advance the tracking ref, and the merge that
     # follows it would put a merge commit on the worktree's HEAD.
     push_commit_to_origin(origin, "main", tmp_path / "side-main", "main-only.txt")
-    _occupy_fix_worktree(client, worktree, source)
+    occupy_worktree(client, worktree, source)
     main_ref = "refs/remotes/origin/main"
     main_before = git_in(client.workspace_path, "rev-parse", main_ref)
-    before = _tree_fingerprint(worktree)
+    before = tree_fingerprint(worktree)
 
     with pytest.raises(HookContextConflictError) as excinfo:
         dispatch_fix_agent(
@@ -2977,9 +2933,15 @@ def test_dispatch_fix_agent_refuses_an_occupied_worktree_and_mutates_nothing(
             parent="parent-session",
         )
 
-    assert _tree_fingerprint(worktree) == before
+    assert tree_fingerprint(worktree) == before
     assert git_in(client.workspace_path, "rev-parse", main_ref) == main_before
     assert stub_spawn.calls == []
+    # Round 5: the transient conflict is raised FROM the typed refusal that
+    # ``create_worktree`` now raises, not from a flag the caller remembered to
+    # check -- so no later step of this function can run without it.
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, WorktreeOccupiedError)
+    assert cause.path == worktree
     message = str(excinfo.value)
     assert str(worktree) in message
     assert branch in message
@@ -3044,7 +3006,10 @@ def test_dispatch_fix_agent_reports_failed_refresh_fetch_in_friction_note(
     # In sync with origin, so the HEAD check passes even though the refresh
     # fetch (patched) fails; only the dispatch's own real ``git fetch`` runs.
     monkeypatch.setattr(
-        "cw.worktree.fetch_feature_branch", lambda _c, _b: FetchOutcome.FAILED
+        "cw.worktree.fetch_feature_branch",
+        lambda _c, _b: FetchResult(
+            FetchOutcome.FAILED, "rc=128: fatal: Could not read from remote repository."
+        ),
     )
 
     dispatch_fix_agent(
@@ -3065,6 +3030,8 @@ def test_dispatch_fix_agent_reports_failed_refresh_fetch_in_friction_note(
     assert str(worktree) in note
     assert f"origin/{branch}" in note
     assert "fetch" in note
+    # Round 5: the note says WHY, not just that the fetch failed.
+    assert "Could not read from remote repository" in note
     assert prompt.endswith(_FIX_PROMPT_TEXT)
 
 

@@ -105,6 +105,8 @@ from tests.conftest import (
     _make_tick_summary,
     _make_ticket_task,
     git_in,
+    occupy_worktree,
+    tree_fingerprint,
 )
 
 if TYPE_CHECKING:
@@ -2934,6 +2936,278 @@ class TestDispatchTickSpawnErrors:
         task = load_dev_queue().tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.hook_context_conflict_session_id == "still-live-conflict"
+
+
+# ---------------------------------------------------------------------------
+# TestClaimRefusesOccupiedWorktree (#2213 round 5)
+# ---------------------------------------------------------------------------
+
+
+_OCCUPANT_SOURCES = ["state", "roster", "unreadable-roster", "unreadable-state"]
+_OCCUPANT_REASON = {
+    "state": "live session",
+    "roster": "live daemon worker",
+    "unreadable-roster": "roster unreadable",
+    "unreadable-state": "session state unreadable",
+}
+
+
+class TestClaimRefusesOccupiedWorktree:
+    """A claim whose reused per-ticket worktree is occupied must NOT spawn.
+
+    ``create_worktree(refresh_on_reuse=True)`` raises ``WorktreeOccupiedError``
+    for a live cw session, a live daemon-roster worker, or an indeterminate read
+    of either. Before round 5 the claim path passed no report and so discarded
+    the refusal, then spawned a SECOND worker into the occupied tree: the exact
+    hazard the ticket exists to prevent. The refusal is now a type the claim
+    handles: the row goes back to PENDING for a later tick, nothing is spawned,
+    nothing is removed, and the transient skip is not charged as an attempt or a
+    spawn error (which would trip the lane circuit breaker over a per-ticket
+    condition).
+    """
+
+    _TICKET = "GEN-2213"
+
+    def _seed(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        source: str,
+        *,
+        ticket_id: str = _TICKET,
+    ) -> Path:
+        """Provision the ticket's per-ticket worktree, then occupy it."""
+        from cw.worktree import create_worktree
+
+        branch = f"{client.feature_branch_prefix}/{ticket_id}"
+        worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+        if source == "unreadable-state":
+            # A corrupt sessions.json would also break dispatch_tick's own state
+            # reads before the claim is reached, so make only the occupancy
+            # probe's state read indeterminate.
+            monkeypatch.setattr("cw.worktree.live_session_worktree_paths", lambda: None)
+        else:
+            occupy_worktree(client, worktree, source)
+        return worktree
+
+    @pytest.mark.parametrize("source", _OCCUPANT_SOURCES)
+    def test_occupied_worktree_is_not_spawned_into(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        source: str,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        worktree = self._seed(sample_client_config, monkeypatch, source)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        before = tree_fingerprint(worktree)
+        daemon = FakeNativeDaemonClient()
+
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        # No spawn of any kind, and nothing was removed or touched.
+        assert result.spawned == 0
+        assert daemon.spawn_calls == []
+        assert worktree.exists()
+        assert tree_fingerprint(worktree) == before
+        # The row is left for a later tick: PENDING, no session, no attempt
+        # charged, no spawn error stamped, and held off briefly so the same
+        # tick does not re-claim it in a loop.
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+        assert task.attempts == 0
+        assert task.unproductive_attempts == 0
+        assert task.spawn_error_count == 0
+        assert task.next_eligible_at is not None
+        assert task.next_eligible_at > datetime.now(UTC)
+        # The reason is recorded: the log names the ticket, the worktree and why.
+        messages = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == "cw.dispatch" and r.levelno == logging.WARNING
+        ]
+        assert any(
+            self._TICKET in m and str(worktree) in m and _OCCUPANT_REASON[source] in m
+            for m in messages
+        ), messages
+
+    def test_the_skip_never_trips_the_lane_circuit_breaker(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An occupied worktree is a per-ticket, transient condition. Counting
+        it as a spawn error would pause the whole lane after a few ticks while
+        the occupant is still running; it must not, and must not consume the
+        ticket's attempt budget either."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        self._seed(sample_client_config, monkeypatch, "roster")
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        daemon = FakeNativeDaemonClient()
+
+        # The breaker threshold is 2; go well past it, releasing the short hold
+        # each time so every tick genuinely re-attempts the claim.
+        for _ in range(4):
+            dispatch_tick(breaker_config, native_daemon=daemon)
+            with dev_queue_lock():
+                store = load_dev_queue()
+                store.tasks[0].next_eligible_at = None
+                save_dev_queue(store)
+
+        assert daemon.spawn_calls == []
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 0
+        assert task.unproductive_attempts == 0
+        lane = _load_concurrency_overrides().lanes.get("test-client/default")
+        assert lane is None or (
+            lane.consecutive_spawn_errors == 0 and lane.paused is False
+        )
+
+    def test_outcome_flags_the_skip_without_a_spawn_error(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        worktree = self._seed(sample_client_config, monkeypatch, "state")
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        task, _skipped = _claim_next_pending(
+            "test-client",
+            lane="default",
+            client=sample_client_config,
+            config=simple_config,
+        )
+        assert task is not None
+        daemon = FakeNativeDaemonClient()
+        lines: list[str] = []
+
+        outcome = _spawn_claimed_task(
+            task,
+            sample_client_config,
+            resolved_native_daemon=daemon,
+            parent=None,
+            emit=lines.append,
+        )
+
+        assert outcome.occupied is True
+        assert outcome.spawned is False
+        assert outcome.spawn_error is False
+        assert outcome.usage_limit_detected is False
+        assert "live session" in outcome.error
+        assert daemon.spawn_calls == []
+        assert any(
+            "occupied" in line.lower()
+            and self._TICKET in line
+            and str(worktree) in line
+            for line in lines
+        ), lines
+
+    def test_a_deferred_head_of_line_ticket_does_not_starve_the_next_one(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The hold stamped on the deferred row makes the next claim in the same
+        tick pass over it: without it the top-priority occupied ticket would be
+        re-claimed and re-refused on every iteration, and the free ticket behind
+        it would never get a slot."""
+        from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        self._seed(sample_client_config, monkeypatch, "roster")
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client", priority=9))
+        add_ticket(TicketTask(ticket_id="GEN-FREE", client="test-client"))
+        first, _ = _claim_next_pending(
+            "test-client",
+            lane="default",
+            client=sample_client_config,
+            config=simple_config,
+        )
+        assert first is not None
+        assert first.ticket_id == self._TICKET
+        outcome = _spawn_claimed_task(
+            first,
+            sample_client_config,
+            resolved_native_daemon=FakeNativeDaemonClient(),
+            parent=None,
+            emit=None,
+        )
+        assert outcome.occupied is True
+
+        second, backoff_skipped = _claim_next_pending(
+            "test-client",
+            lane="default",
+            client=sample_client_config,
+            config=simple_config,
+        )
+
+        assert second is not None
+        assert second.ticket_id == "GEN-FREE"
+        assert backoff_skipped is True
+
+    @pytest.mark.parametrize("roster_elsewhere", [False, True])
+    def test_a_completed_prior_stage_does_not_block_the_next_stage(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        roster_elsewhere: bool,
+    ) -> None:
+        """Control (the staged pipeline): once the previous stage's session is
+        terminal in state and its worker has left the roster, the next stage's
+        claim reuses the worktree and spawns. A roster entry for a DIFFERENT
+        worktree must not match either. Guards against the refusal turning
+        into a pipeline deadlock."""
+        from cw import native_daemon
+        from cw.config import load_state
+        from cw.worktree import create_worktree
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        branch = f"{sample_client_config.feature_branch_prefix}/{self._TICKET}"
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+        state = load_state()
+        state.sessions.append(
+            Session(
+                name=f"test-client/impl/{self._TICKET}",
+                client="test-client",
+                purpose=SessionPurpose.IMPL,
+                origin=SessionOrigin.DAEMON,
+                workspace_path=sample_client_config.workspace_path,
+                worktree_path=worktree,
+                status=SessionStatus.COMPLETED,
+            )
+        )
+        save_state(state)
+        if roster_elsewhere:
+            # A worker for some OTHER worktree is live in the roster.
+            roster = native_daemon._ROSTER_PATH
+            roster.parent.mkdir(parents=True, exist_ok=True)
+            roster.write_text(
+                json.dumps({"workers": {"bbbb2222": {"pid": 2, "cwd": "/elsewhere"}}}),
+                encoding="utf-8",
+            )
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        daemon = FakeNativeDaemonClient()
+
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        assert len(daemon.spawn_calls) == 1
+        assert daemon.spawn_calls[0][0] == worktree
 
 
 # ---------------------------------------------------------------------------

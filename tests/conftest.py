@@ -1619,3 +1619,62 @@ def push_commit_to_origin(
     )
     git_in(work_dir, "push", "origin", branch)
     return git_in(work_dir, "rev-parse", "HEAD")
+
+
+def tree_fingerprint(worktree: Path) -> tuple[str, str, str]:
+    """``(HEAD sha, porcelain status, digest of every working-tree file)``.
+
+    Byte-level: two equal fingerprints mean nothing moved HEAD, the index or a
+    single file's content in the worktree. Hoisted (#2213 round 5) from
+    ``test_reconcile_review_recipes.py`` once the dispatch claim tests needed
+    the same "nothing touched the occupied worktree" proof.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    for path in sorted(worktree.rglob("*")):
+        rel = path.relative_to(worktree)
+        if rel.parts[0] == ".git" or not path.is_file():
+            continue
+        digest.update(str(rel).encode())
+        digest.update(path.read_bytes())
+    return (
+        git_in(worktree, "rev-parse", "HEAD"),
+        git_in(worktree, "status", "--porcelain=v1", "--untracked-files=all"),
+        digest.hexdigest(),
+    )
+
+
+def occupy_worktree(client: ClientConfig, worktree: Path, source: str) -> None:
+    """Make a live occupant appear for *worktree* through the named source.
+
+    ``state`` (a non-terminal cw session homed there) and ``roster`` (a live
+    daemon worker with that ``cwd``) are positive matches; ``unreadable-roster``
+    is the fail-closed case (occupancy cannot be ruled out). Shared by the
+    fix-agent and dispatch-claim refusal tests (#2213 round 5).
+    """
+    from cw import native_daemon
+    from cw.config import load_state
+
+    if source == "state":
+        state = load_state()
+        state.sessions.append(
+            Session(
+                name=f"{client.name}/impl/occupant",
+                client=client.name,
+                purpose=SessionPurpose.IMPL,
+                origin=SessionOrigin.USER,
+                workspace_path=client.workspace_path,
+                worktree_path=worktree,
+                status=SessionStatus.ACTIVE,
+            )
+        )
+        save_state(state)
+        return
+    roster = native_daemon._ROSTER_PATH
+    roster.parent.mkdir(parents=True, exist_ok=True)
+    if source == "roster":
+        payload = {"workers": {"aaaa1111": {"pid": 1, "cwd": str(worktree)}}}
+        roster.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        roster.write_text("{not json", encoding="utf-8")

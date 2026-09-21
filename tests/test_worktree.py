@@ -16,7 +16,7 @@ import pytest
 from cw import native_daemon
 from cw.auto_dev_result import AutoDevResult
 from cw.config import save_state, state_file
-from cw.exceptions import StaleWorktreeError, WorktreeError
+from cw.exceptions import StaleWorktreeError, WorktreeError, WorktreeOccupiedError
 from cw.models import (
     ClientConfig,
     CwState,
@@ -27,6 +27,9 @@ from cw.models import (
 )
 from cw.worktree import (
     FetchOutcome,
+    FetchResult,
+    RefreshOutcome,
+    RefreshResult,
     ReuseRefreshReport,
     _fetch_default_branch,
     _git_dir,
@@ -1113,7 +1116,7 @@ def _spy_fetch(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     real = fetch_feature_branch
     fetched: list[str] = []
 
-    def spy(client: ClientConfig, branch_name: str) -> FetchOutcome:
+    def spy(client: ClientConfig, branch_name: str) -> FetchResult:
         fetched.append(branch_name)
         return real(client, branch_name)
 
@@ -1316,12 +1319,16 @@ class TestUnreadableStatePostures:
         _write_corrupt_state()
 
         caplog.clear()  # drop seed-phase records
-        with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
-            result = create_worktree(
+        with (
+            caplog.at_level(logging.DEBUG, logger="cw.worktree"),
+            pytest.raises(WorktreeOccupiedError) as excinfo,
+        ):
+            create_worktree(
                 client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
             )
 
-        assert result == wt
+        assert excinfo.value.path == wt
+        assert "unreadable" in excinfo.value.reason
         assert fetched == []
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert any(
@@ -1548,15 +1555,27 @@ class TestCreateWorktreeReuseRefresh:
         fetched = _spy_fetch(monkeypatch)
 
         caplog.clear()  # drop seed-phase records
-        with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
-            result = create_worktree(
+        if expect_moved:
+            with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
+                result = create_worktree(
+                    client,
+                    _REUSE_BRANCH,
+                    allow_dirty_reuse=True,
+                    refresh_on_reuse=True,
+                )
+            assert result == wt
+            assert git_in(wt, "rev-parse", "HEAD") == new_sha
+            return
+        with (
+            caplog.at_level(logging.DEBUG, logger="cw.worktree"),
+            pytest.raises(WorktreeOccupiedError) as excinfo,
+        ):
+            create_worktree(
                 client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
             )
 
-        assert result == wt
-        if expect_moved:
-            assert git_in(wt, "rev-parse", "HEAD") == new_sha
-            return
+        assert excinfo.value.path == wt
+        assert "live session" in excinfo.value.reason
         assert fetched == []
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert _cw_worktree_records(caplog, logging.WARNING) == []
@@ -1584,12 +1603,16 @@ class TestCreateWorktreeReuseRefresh:
         fetched = _spy_fetch(monkeypatch)
 
         caplog.clear()  # drop seed-phase records
-        with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
-            result = create_worktree(
+        with (
+            caplog.at_level(logging.DEBUG, logger="cw.worktree"),
+            pytest.raises(WorktreeOccupiedError) as excinfo,
+        ):
+            create_worktree(
                 client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
             )
 
-        assert result == wt
+        assert excinfo.value.path == wt
+        assert "unreadable" in excinfo.value.reason
         assert fetched == []
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert any(
@@ -1798,8 +1821,8 @@ class TestCreateWorktreeReuseRefresh:
         git_in(workspace, "fetch", "origin")
         merges: list[tuple[str, ...]] = []
 
-        def failing_fetch(client: ClientConfig, branch_name: str) -> FetchOutcome:
-            return FetchOutcome.FAILED
+        def failing_fetch(client: ClientConfig, branch_name: str) -> FetchResult:
+            return FetchResult(FetchOutcome.FAILED, "rc=128: fatal: simulated")
 
         def spy(
             *args: str, cwd: Path, check: bool = True
@@ -1817,7 +1840,11 @@ class TestCreateWorktreeReuseRefresh:
         assert merges == []  # skipped entirely, not merely refused
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert old_sha != new_sha
-        assert any("fast-forward skipped" in m for m in _debug_reasons(caplog))
+        # The log line names git's reason, not just that the fetch failed.
+        assert any(
+            "fast-forward skipped" in m and "fatal: simulated" in m
+            for m in _debug_reasons(caplog)
+        )
 
     def test_fetch_ok_but_tracking_ref_absent_is_a_no_op(
         self,
@@ -1849,17 +1876,21 @@ class TestCreateWorktreeReuseRefresh:
         monkeypatch.setattr("cw.worktree._ref_exists", no_tracking_ref)
         monkeypatch.setattr(
             "cw.worktree.fetch_feature_branch",
-            lambda *_args, **_kw: FetchOutcome.FETCHED,
+            lambda *_args, **_kw: FetchResult(FetchOutcome.FETCHED),
         )
         monkeypatch.setattr(
             "cw.worktree._reuse_occupancy",
             lambda *_args, **_kw: _Occupancy(live=None, local=None),
         )
 
-        _refresh_reused_worktree(client, _REUSE_BRANCH, wt, ReuseRefreshReport())
+        result = _refresh_reused_worktree(
+            client, _REUSE_BRANCH, wt, ReuseRefreshReport()
+        )
 
         assert merges == []
         assert git_in(wt, "rev-parse", "HEAD") == head
+        assert result.outcome is RefreshOutcome.NOT_REFRESHED
+        assert "origin/" in result.reason
 
     def test_no_notes_on_a_clean_refresh(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
@@ -1870,14 +1901,33 @@ class TestCreateWorktreeReuseRefresh:
 
         assert git_in(wt, "rev-parse", "HEAD") == new_sha
         assert report.notes == []
-        assert report.live_occupant is None
+        assert report.outcome is RefreshOutcome.REFRESHED
+        assert report.reason is not None
 
     @pytest.mark.parametrize(
-        ("outcome", "moves", "note_count"),
+        ("fetch", "moves", "note_count", "expected"),
         [
-            pytest.param(FetchOutcome.FETCHED, True, 0, id="fetched"),
-            pytest.param(FetchOutcome.BRANCH_ABSENT, False, 0, id="branch-absent"),
-            pytest.param(FetchOutcome.FAILED, False, 1, id="failed"),
+            pytest.param(
+                FetchResult(FetchOutcome.FETCHED),
+                True,
+                0,
+                RefreshOutcome.REFRESHED,
+                id="fetched",
+            ),
+            pytest.param(
+                FetchResult(FetchOutcome.BRANCH_ABSENT, "couldn't find remote ref"),
+                False,
+                0,
+                RefreshOutcome.NOT_REFRESHED,
+                id="branch-absent",
+            ),
+            pytest.param(
+                FetchResult(FetchOutcome.FAILED, "rc=128: fatal: no route"),
+                False,
+                1,
+                RefreshOutcome.NOT_REFRESHED,
+                id="failed",
+            ),
         ],
     )
     def test_fast_forward_only_on_a_fetched_outcome(
@@ -1885,9 +1935,10 @@ class TestCreateWorktreeReuseRefresh:
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
         monkeypatch: pytest.MonkeyPatch,
-        outcome: FetchOutcome,
+        fetch: FetchResult,
         moves: bool,
         note_count: int,
+        expected: RefreshOutcome,
     ) -> None:
         """The three fetch outcomes are handled apart (#2213 round 4): only
         ``FETCHED`` fast-forwards; ``BRANCH_ABSENT`` proceeds without a refresh
@@ -1907,14 +1958,20 @@ class TestCreateWorktreeReuseRefresh:
             return _run_git(*args, cwd=cwd, check=check)
 
         monkeypatch.setattr("cw.worktree._run_git", spy)
-        monkeypatch.setattr("cw.worktree.fetch_feature_branch", lambda _c, _b: outcome)
+        monkeypatch.setattr("cw.worktree.fetch_feature_branch", lambda _c, _b: fetch)
 
         _path, report = _refresh_reporting(client)
 
         assert git_in(wt, "rev-parse", "HEAD") == (new_sha if moves else old_sha)
         assert len(merges) == (1 if moves else 0)
         assert len(report.notes) == note_count
-        assert report.live_occupant is None
+        assert report.outcome is expected
+        assert report.reason
+        if fetch.outcome is FetchOutcome.FAILED:
+            # The friction note says WHY the fetch failed, not only that it did.
+            assert fetch.reason is not None
+            assert fetch.reason in report.notes[0]
+            assert fetch.reason in report.reason
 
     def test_real_missing_branch_is_branch_absent_not_a_failure(
         self,
@@ -1938,17 +1995,22 @@ class TestCreateWorktreeReuseRefresh:
             refresh_report=report,
         )
 
-        assert fetch_feature_branch(client, never_pushed) is FetchOutcome.BRANCH_ABSENT
+        fetched = fetch_feature_branch(client, never_pushed)
+        assert fetched.outcome is FetchOutcome.BRANCH_ABSENT
         assert report.notes == []
+        assert report.outcome is RefreshOutcome.NOT_REFRESHED
         assert wt.exists()
 
     def test_fetch_failure_is_reported_in_one_note(
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A REAL failed fetch (origin unreachable): one note, naming the
-        worktree and the reason, and HEAD untouched."""
+        worktree AND git's own reason, and HEAD untouched. The outcome is
+        ``NOT_REFRESHED`` (the tree is the caller's), never a raise."""
+        monkeypatch.setenv("LC_ALL", "C")  # the reason text is git's English
         client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
         old_sha = git_in(wt, "rev-parse", "HEAD")
         origin.rename(tmp_path / "origin-gone.git")
@@ -1961,7 +2023,11 @@ class TestCreateWorktreeReuseRefresh:
         assert str(wt) in report.notes[0]
         assert f"origin/{_REUSE_BRANCH}" in report.notes[0]
         assert "fetch" in report.notes[0]
+        assert "does not appear to be a git repository" in report.notes[0]
         assert "\n" not in report.notes[0]
+        assert report.outcome is RefreshOutcome.NOT_REFRESHED
+        assert report.reason is not None
+        assert "does not appear to be a git repository" in report.reason
 
     def test_diverged_branch_is_reported_in_one_note(
         self,
@@ -1980,6 +2046,9 @@ class TestCreateWorktreeReuseRefresh:
         assert str(wt) in report.notes[0]
         assert "diverged" in report.notes[0]
         assert f"origin/{_REUSE_BRANCH}" in report.notes[0]
+        assert report.outcome is RefreshOutcome.NOT_REFRESHED
+        assert report.reason is not None
+        assert "diverged" in report.reason
 
     def test_git_refusing_the_fast_forward_is_reported_in_one_note(
         self,
@@ -2010,6 +2079,7 @@ class TestCreateWorktreeReuseRefresh:
         assert str(wt) in report.notes[0]
         assert "local changes would be overwritten" in report.notes[0]
         assert "\n" not in report.notes[0]
+        assert report.outcome is RefreshOutcome.NOT_REFRESHED
 
     def test_os_error_is_reported_in_one_note(
         self,
@@ -2034,7 +2104,7 @@ class TestCreateWorktreeReuseRefresh:
             stdout = "feat/oserror\n" if "--show-current" in args else ""
             return MagicMock(returncode=0, stdout=stdout, stderr="")
 
-        def boom(client: ClientConfig, branch_name: str) -> FetchOutcome:
+        def boom(client: ClientConfig, branch_name: str) -> FetchResult:
             msg = "git vanished"
             raise FileNotFoundError(msg)
 
@@ -2066,6 +2136,9 @@ class TestCreateWorktreeReuseRefresh:
         assert str(wt_path) in report.notes[0]
         assert "git vanished" in report.notes[0]
         assert "OS error" in report.notes[0]
+        assert report.outcome is RefreshOutcome.NOT_REFRESHED
+        assert report.reason is not None
+        assert "git vanished" in report.reason
 
     def test_os_error_after_the_fast_forward_step_started_is_one_note(
         self,
@@ -2098,42 +2171,49 @@ class TestCreateWorktreeReuseRefresh:
         assert "git vanished mid-merge" in report.notes[0]
 
     @pytest.mark.parametrize("source", ["state", "roster"])
-    def test_live_occupant_is_reported_not_noted_and_nothing_is_fetched(
+    def test_live_occupant_raises_and_nothing_is_fetched(
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
         monkeypatch: pytest.MonkeyPatch,
         source: str,
     ) -> None:
-        """Occupied is the design working, so no friction note -- but the live
-        occupant is reported so a caller that would mutate the tree can stop."""
+        """Round 5: occupied is a refusal a caller CANNOT ignore. It raises
+        ``WorktreeOccupiedError`` (no usable path is returned), adds no friction
+        note (it is the design working, not a failure), and never fetches."""
         client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
         _occupy(source, workspace, wt)
         fetched = _spy_fetch(monkeypatch)
 
-        result, report = _refresh_reporting(client)
+        error, report = _refresh_occupied(client)
 
-        assert result == wt
+        assert error.path == wt
+        assert "live" in error.reason
+        assert str(wt) in str(error)
+        assert error.reason in str(error)
         assert fetched == []
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert report.notes == []
-        assert report.live_occupant is not None
-        assert "live" in report.live_occupant
+        assert report.outcome is RefreshOutcome.OCCUPIED_BY_LIVE_SESSION
+        assert report.reason == error.reason
 
-    def test_unsaved_work_alone_is_not_a_live_occupant(
+    def test_unsaved_work_alone_is_not_occupied_by_a_live_session(
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
     ) -> None:
         """Unsaved work refuses the refresh but leaves the worktree the
-        caller's to use: it must not read as a live occupant."""
+        caller's to use: ``NOT_REFRESHED`` (proceed), never a raise."""
         client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
         (wt / "scratch.txt").write_text("churn\n", encoding="utf-8")
 
-        _path, report = _refresh_reporting(client)
+        path, report = _refresh_reporting(client)
 
+        assert path == wt
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
-        assert report.live_occupant is None
+        assert report.outcome is RefreshOutcome.NOT_REFRESHED
+        assert report.reason is not None
+        assert "unsaved work" in report.reason
         assert report.notes == []
 
     def test_unsaved_work_does_not_mask_a_live_occupant(
@@ -2147,13 +2227,12 @@ class TestCreateWorktreeReuseRefresh:
         (wt / "scratch.txt").write_text("worker output\n", encoding="utf-8")
         _occupy("roster", workspace, wt)
 
-        _path, report = _refresh_reporting(client)
+        error, _report = _refresh_occupied(client)
 
-        assert report.live_occupant is not None
-        assert "live daemon worker" in report.live_occupant
+        assert "live daemon worker" in error.reason
 
     @pytest.mark.parametrize("kind", ["roster-invalid-json", "state-corrupt"])
-    def test_unreadable_source_is_a_live_occupant_fail_closed(
+    def test_unreadable_source_is_occupied_fail_closed(
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
@@ -2165,36 +2244,195 @@ class TestCreateWorktreeReuseRefresh:
         else:
             state_file().write_text("{not json", encoding="utf-8")
 
-        _path, report = _refresh_reporting(client)
+        error, report = _refresh_occupied(client)
 
-        assert report.live_occupant is not None
-        assert "unreadable" in report.live_occupant
+        assert "unreadable" in error.reason
+        assert report.outcome is RefreshOutcome.OCCUPIED_BY_LIVE_SESSION
 
     @pytest.mark.parametrize("source", ["state", "roster"])
-    def test_occupant_appearing_during_the_fetch_is_reported(
+    def test_occupant_appearing_during_the_fetch_raises(
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
         monkeypatch: pytest.MonkeyPatch,
         source: str,
     ) -> None:
-        """The re-check before the merge reports a live occupant too, so a
+        """The re-check before the merge refuses a live occupant too, so a
         caller is not told "free" by the first gate and then racing the second."""
         client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
         real_fetch = fetch_feature_branch
 
-        def fetch_then_occupy(client: ClientConfig, branch_name: str) -> FetchOutcome:
-            outcome = real_fetch(client, branch_name)
+        def fetch_then_occupy(client: ClientConfig, branch_name: str) -> FetchResult:
+            result = real_fetch(client, branch_name)
             _occupy(source, workspace, wt)
-            return outcome
+            return result
 
         monkeypatch.setattr("cw.worktree.fetch_feature_branch", fetch_then_occupy)
 
-        _path, report = _refresh_reporting(client)
+        error, report = _refresh_occupied(client)
+
+        assert error.path == wt
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert report.notes == []
+        assert report.outcome is RefreshOutcome.OCCUPIED_BY_LIVE_SESSION
+
+    def test_occupied_error_is_a_worktree_error_but_not_a_stale_one(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """It IS a ``WorktreeError`` (so a broad handler still contains it), but
+        a caller matching ``StaleWorktreeError`` -- the branch that removes the
+        worktree -- must NOT see it."""
+        client, wt, workspace, _old, _new = _seed_behind(tmp_path, make_git_repo)
+        _occupy("roster", workspace, wt)
+
+        with pytest.raises(WorktreeError) as excinfo:
+            create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
+
+        assert isinstance(excinfo.value, WorktreeOccupiedError)
+        assert not isinstance(excinfo.value, StaleWorktreeError)
+        assert wt.exists()
+
+    def test_default_reuse_ignores_a_live_occupant(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """``refresh_on_reuse=False`` is unchanged: path resolution only, so it
+        neither consults occupancy nor raises (``cw start`` does not opt in)."""
+        client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        _occupy("roster", workspace, wt)
+
+        result = create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+
+    def test_not_refreshed_dirty_returns_a_path(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        (wt / "tracked.txt").write_text("local edit\n", encoding="utf-8")
+
+        path, report = _refresh_reporting(client)
+
+        assert path == wt
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert report.outcome is RefreshOutcome.NOT_REFRESHED
+
+    def test_not_refreshed_branch_absent_returns_a_path(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("LC_ALL", "C")
+        client, _wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        never_pushed = "dev/never-pushed"
+        wt = create_worktree(client, never_pushed)
+        report = ReuseRefreshReport()
+
+        path = create_worktree(
+            client,
+            never_pushed,
+            allow_dirty_reuse=True,
+            refresh_on_reuse=True,
+            refresh_report=report,
+        )
+
+        assert path == wt
+        assert report.outcome is RefreshOutcome.NOT_REFRESHED
+        assert report.reason is not None
+        assert "origin/dev/never-pushed" in report.reason
+        assert report.notes == []
+
+    def test_refreshed_reports_the_move(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, wt, _workspace, old_sha, new_sha = _seed_behind(tmp_path, make_git_repo)
+
+        path, report = _refresh_reporting(client)
+
+        assert path == wt
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+        assert report.outcome is RefreshOutcome.REFRESHED
+        assert report.reason is not None
+        assert old_sha[:12] in report.reason
+        assert new_sha[:12] in report.reason
+
+    def test_equal_to_origin_is_not_refreshed_without_a_note(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        head = git_in(wt, "rev-parse", "HEAD")
+
+        path, report = _refresh_reporting(client)
+
+        assert path == wt
+        assert git_in(wt, "rev-parse", "HEAD") == head
+        assert report.outcome is RefreshOutcome.NOT_REFRESHED
+        assert report.reason is not None
+        assert "up to date" in report.reason
+        assert report.notes == []
+
+    def test_unknown_fetch_outcome_is_never_read_as_fetched(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Round 5 item 3: an outcome the refresh does not know is a bug, not
+        "fetched". The tracking ref is fresh here, so a fall-through to "fetched"
+        would visibly fast-forward HEAD; an exhaustive ``match`` hits
+        ``assert_never`` (``AssertionError``) instead and HEAD stays put. The
+        stand-in is a plain string: no real enum member is added."""
+        client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        git_in(workspace, "fetch", "origin")
+        monkeypatch.setattr(
+            "cw.worktree.fetch_feature_branch",
+            lambda _c, _b: FetchResult("not-a-real-outcome"),
+        )
+
+        with pytest.raises(AssertionError):
+            create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
 
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
-        assert report.live_occupant is not None
-        assert report.notes == []
+
+    def test_unknown_refresh_outcome_never_yields_a_path(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``create_worktree`` dispatches on the refresh outcome exhaustively: an
+        outcome it does not know must not be read as "proceed with this tree"."""
+        client, _wt, _workspace, _old, _new = _seed_behind(tmp_path, make_git_repo)
+        monkeypatch.setattr(
+            "cw.worktree._refresh_reused_worktree",
+            lambda *_a, **_kw: RefreshResult("not-a-real-outcome", "stand-in"),
+        )
+
+        with pytest.raises(AssertionError):
+            create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
+
+    def test_is_main_behind_origin_rejects_an_unknown_fetch_outcome(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        client = ClientConfig(name="test", workspace_path=tmp_path)
+        monkeypatch.setattr(
+            "cw.worktree._fetch_default_branch",
+            lambda *_a, **_kw: FetchResult("not-a-real-outcome"),
+        )
+
+        with pytest.raises(AssertionError):
+            is_main_behind_origin(client)
 
     def test_refresh_report_is_optional(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
@@ -2304,6 +2542,36 @@ def _refresh_reporting(client: ClientConfig) -> tuple[Path, ReuseRefreshReport]:
     return path, report
 
 
+def _refresh_occupied(
+    client: ClientConfig,
+) -> tuple[WorktreeOccupiedError, ReuseRefreshReport]:
+    """Reuse ``_REUSE_BRANCH`` with the refresh on, expecting the occupancy refusal.
+
+    Returns the raised error and the report the caller passed in (which the
+    refresh filled in before raising).
+    """
+    report = ReuseRefreshReport()
+    with pytest.raises(WorktreeOccupiedError) as excinfo:
+        create_worktree(
+            client,
+            _REUSE_BRANCH,
+            allow_dirty_reuse=True,
+            refresh_on_reuse=True,
+            refresh_report=report,
+        )
+    return excinfo.value, report
+
+
+def _refresh_occupied_with_debug(
+    client: ClientConfig, caplog: pytest.LogCaptureFixture
+) -> WorktreeOccupiedError:
+    """Like :func:`_refresh_occupied`, with DEBUG capture for the reason log."""
+    caplog.clear()  # drop seed-phase records
+    with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
+        error, _report = _refresh_occupied(client)
+    return error
+
+
 def _debug_reasons(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
@@ -2331,9 +2599,9 @@ class TestReuseOccupancyRosterAndPaths:
         assert alias != wt
         _occupy(source, workspace, alias)
 
-        result = _refresh_with_debug(client, caplog)
+        error = _refresh_occupied_with_debug(client, caplog)
 
-        assert result == wt
+        assert error.path == wt
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert any("live" in m and str(wt) in m for m in _debug_reasons(caplog))
 
@@ -2353,10 +2621,10 @@ class TestReuseOccupancyRosterAndPaths:
         aliased_client = client.model_copy(update={"worktree_base": alias_base})
         _occupy(source, workspace, wt)
 
-        result = _refresh_with_debug(aliased_client, caplog)
+        error = _refresh_occupied_with_debug(aliased_client, caplog)
 
-        assert result != wt
-        assert result.resolve() == wt.resolve()
+        assert error.path != wt
+        assert error.path.resolve() == wt.resolve()
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert any("live" in m for m in _debug_reasons(caplog))
 
@@ -2391,9 +2659,9 @@ class TestReuseOccupancyRosterAndPaths:
         _seed_roster(wt)  # live in the roster, absent from cw state
         fetched = _spy_fetch(monkeypatch)
 
-        result = _refresh_with_debug(client, caplog)
+        error = _refresh_occupied_with_debug(client, caplog)
 
-        assert result == wt
+        assert error.path == wt
         assert fetched == []
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert _cw_worktree_records(caplog, logging.WARNING) == []
@@ -2455,9 +2723,10 @@ class TestReuseOccupancyRosterAndPaths:
             _seed_roster(raw=json.dumps({"workers": {"aaaa1111": {"pid": 1}}}))
         fetched = _spy_fetch(monkeypatch)
 
-        result = _refresh_with_debug(client, caplog)
+        error = _refresh_occupied_with_debug(client, caplog)
 
-        assert result == wt
+        assert error.path == wt
+        assert "roster unreadable" in error.reason
         assert fetched == []
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert any("roster unreadable" in m for m in _debug_reasons(caplog))
@@ -2472,8 +2741,9 @@ class TestReuseOccupancyRosterAndPaths:
         client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
         state_file().write_text("{not json", encoding="utf-8")
 
-        _refresh_with_debug(client, caplog)
+        error = _refresh_occupied_with_debug(client, caplog)
 
+        assert "session state unreadable" in error.reason
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert any("session state unreadable" in m for m in _debug_reasons(caplog))
 
@@ -2503,7 +2773,7 @@ class TestReuseOccupancyRosterAndPaths:
         assert old_sha != new_sha
         real_fetch = fetch_feature_branch
 
-        def fetch_then_change(client: ClientConfig, branch_name: str) -> FetchOutcome:
+        def fetch_then_change(client: ClientConfig, branch_name: str) -> FetchResult:
             fetched_ok = real_fetch(client, branch_name)
             if change == "session":
                 _seed_session(workspace, wt, SessionStatus.ACTIVE)
@@ -2527,9 +2797,15 @@ class TestReuseOccupancyRosterAndPaths:
         monkeypatch.setattr("cw.worktree.fetch_feature_branch", fetch_then_change)
         monkeypatch.setattr("cw.worktree._run_git", spy)
 
-        result = _refresh_with_debug(client, caplog)
-
-        assert result == wt
+        # A live occupant (session/roster) refuses with the typed error; a tree
+        # that merely changed (dirty, branch switch) is the caller's to use.
+        if change in {"session", "roster"}:
+            error = _refresh_occupied_with_debug(client, caplog)
+            assert error.path == wt
+            assert expected_reason in error.reason
+        else:
+            result = _refresh_with_debug(client, caplog)
+            assert result == wt
         assert merges == []
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert _cw_worktree_records(caplog, logging.WARNING) == []
@@ -2626,13 +2902,13 @@ class TestReuseOccupancyRosterAndPaths:
         _seed_session(workspace, denied, SessionStatus.ACTIVE)
         fetched = _spy_fetch(monkeypatch)
 
-        result, report = _refresh_reporting(client)
+        error, report = _refresh_occupied(client)
 
-        assert result == wt
+        assert error.path == wt
         assert fetched == []
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
-        assert report.live_occupant is not None
-        assert "cannot be resolved" in report.live_occupant
+        assert "cannot be resolved" in error.reason
+        assert report.outcome is RefreshOutcome.OCCUPIED_BY_LIVE_SESSION
 
     def test_missing_recorded_path_is_not_a_loop(self, tmp_path: Path) -> None:
         """Control: a recorded path whose directory is simply gone is ENOENT,
@@ -2653,9 +2929,9 @@ class TestReuseOccupancyRosterAndPaths:
         _seed_session(workspace, _make_symlink_loop(tmp_path), SessionStatus.ACTIVE)
         fetched = _spy_fetch(monkeypatch)
 
-        result = _refresh_with_debug(client, caplog)
+        error = _refresh_occupied_with_debug(client, caplog)
 
-        assert result == wt
+        assert error.path == wt
         assert fetched == []
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert any("cannot be resolved" in m for m in _debug_reasons(caplog))
@@ -3930,7 +4206,10 @@ class TestFetchDefaultBranch:
         """_fetch_default_branch with missing git_dir is FAILED, no exception."""
         missing = tmp_path / "does-not-exist"
         result = _fetch_default_branch("test-client", "main", missing)
-        assert result is FetchOutcome.FAILED
+        assert result.outcome is FetchOutcome.FAILED
+        assert result.reason is not None
+        assert "workspace missing" in result.reason
+        assert str(missing) in result.reason
 
     def test_default_branch_absent_on_origin_is_still_a_skipped_freshness_check(
         self,
@@ -4090,7 +4369,7 @@ class TestFetchDefaultBranch:
         warned: set[str] = set()
 
         with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
-            outcome = _fetch_default_branch(
+            result = _fetch_default_branch(
                 "test-client",
                 "x",
                 ws,
@@ -4098,7 +4377,9 @@ class TestFetchDefaultBranch:
                 quiet_missing_ref=quiet_missing_ref,
             )
 
-        assert outcome is expected
+        assert result.outcome is expected
+        # The reason is git's own first stderr line plus the exit status.
+        assert result.reason == f"rc=128: {stderr}"
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert bool(warnings) is expect_warning
         if expect_warning:
@@ -4201,8 +4482,9 @@ class TestFetchFeatureBranch:
         )
         assert diff_before.returncode != 0, "diff must fail before fetch (unknown ref)"
 
-        outcome = fetch_feature_branch(client, "auto-dev/381")
-        assert outcome is FetchOutcome.FETCHED
+        fetched = fetch_feature_branch(client, "auto-dev/381")
+        assert fetched.outcome is FetchOutcome.FETCHED
+        assert fetched.reason is None
 
         # After fetch, origin/auto-dev/381 is known; diff is non-empty.
         diff_after = subprocess.run(
@@ -4223,7 +4505,10 @@ class TestFetchFeatureBranch:
             workspace_path=tmp_path / "nonexistent",
             default_branch="main",
         )
-        assert fetch_feature_branch(client, "auto-dev/999") is FetchOutcome.FAILED
+        result = fetch_feature_branch(client, "auto-dev/999")
+        assert result.outcome is FetchOutcome.FAILED
+        assert result.reason is not None
+        assert "workspace missing" in result.reason
 
     def test_nonexistent_remote_branch_returns_branch_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4231,10 +4516,10 @@ class TestFetchFeatureBranch:
         """BRANCH_ABSENT (not FAILED) when the remote branch does not exist."""
         monkeypatch.setenv("LC_ALL", "C")  # the marker is git's English message
         _bare, _parent, client = self._setup_repo(tmp_path)
-        assert (
-            fetch_feature_branch(client, "auto-dev/does-not-exist")
-            is FetchOutcome.BRANCH_ABSENT
-        )
+        result = fetch_feature_branch(client, "auto-dev/does-not-exist")
+        assert result.outcome is FetchOutcome.BRANCH_ABSENT
+        assert result.reason is not None
+        assert "couldn't find remote ref" in result.reason
 
     def test_run_git_exception_returns_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4247,7 +4532,86 @@ class TestFetchFeatureBranch:
             raise WorktreeError(msg)
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert fetch_feature_branch(client, "auto-dev/381") is FetchOutcome.FAILED
+        result = fetch_feature_branch(client, "auto-dev/381")
+        assert result.outcome is FetchOutcome.FAILED
+        assert result.reason == "simulated git failure"
+
+    @pytest.mark.parametrize(
+        ("stderr", "expected_fragment"),
+        [
+            pytest.param(
+                "git@github.com: Permission denied (publickey).\n"
+                "fatal: Could not read from remote repository.",
+                "Permission denied (publickey)",
+                id="auth",
+            ),
+            pytest.param(
+                "ssh: Could not resolve hostname github.com: Name not known\n"
+                "fatal: Could not read from remote repository.",
+                "Could not resolve hostname",
+                id="network",
+            ),
+            pytest.param(
+                "fatal: 'origin' does not appear to be a git repository",
+                "does not appear to be a git repository",
+                id="missing-remote",
+            ),
+        ],
+    )
+    def test_failed_fetch_reason_distinguishes_auth_network_and_missing_remote(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stderr: str,
+        expected_fragment: str,
+    ) -> None:
+        """Round 5 item 4: the FAILED reason is git's first stderr line plus the
+        exit status, so "not refreshed" says whether it was auth, network or a
+        missing remote, and it is one line (fit for a log field or a note)."""
+        _bare, _parent, client = self._setup_repo(tmp_path)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            return MagicMock(returncode=128, stdout="", stderr=stderr)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        result = fetch_feature_branch(client, "auto-dev/381")
+
+        assert result.outcome is FetchOutcome.FAILED
+        assert result.reason is not None
+        assert expected_fragment in result.reason
+        assert result.reason.startswith("rc=128: ")
+        assert "\n" not in result.reason
+
+    def test_failed_fetch_with_empty_stderr_still_carries_the_exit_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _bare, _parent, client = self._setup_repo(tmp_path)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            return MagicMock(returncode=1, stdout="", stderr="")
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        result = fetch_feature_branch(client, "auto-dev/381")
+
+        assert result == FetchResult(FetchOutcome.FAILED, "rc=1")
+
+    def test_os_error_reason_is_carried(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _bare, _parent, client = self._setup_repo(tmp_path)
+
+        def mock_run(*args: object, **kwargs: object) -> object:
+            msg = "git binary vanished"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        result = fetch_feature_branch(client, "auto-dev/381")
+
+        assert result.outcome is FetchOutcome.FAILED
+        assert result.reason == "git binary vanished"
 
 
 # ---------------------------------------------------------------------------
