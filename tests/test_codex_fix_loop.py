@@ -35,12 +35,17 @@ from cw.codex_review import (
     run_review,
     synthesize_codex_review_result,
 )
+from cw.codex_review import core as codex_review_core
 from cw.codex_review._capability import _PROBE_ARGV
 from cw.codex_runner import CodexRunResult
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
-from cw.review_finding_dispositions import FindingDisposition, _disposition_key
+from cw.review_finding_dispositions import (
+    FindingDisposition,
+    _disposition_key,
+    render_finding_disposition_block,
+)
 from cw.review_findings import (
     AcceptedFinding,
     ReviewVerdict,
@@ -253,6 +258,7 @@ def _run_loop(
     fix_loop_enabled: bool = True,
     task: TicketTask | None = None,
     reasoning_effort: str | None = None,
+    claim_tier_enabled: bool = False,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     return run_review_with_fix_loop(
         runner=runner,
@@ -264,6 +270,7 @@ def _run_loop(
         wall_clock_budget_seconds=budget,
         session_id=session_id,
         fix_loop_enabled=fix_loop_enabled,
+        claim_tier_enabled=claim_tier_enabled,
     )
 
 
@@ -2053,6 +2060,11 @@ class TestRereviewForwardsFindingDispositions:
                 outcome="REJECTED",
                 rationale="settled by the operator in an earlier round",
                 recorded_at="2026-08-16T00:00:00Z",
+                # #2210 round 2: only a fully-provenanced record is applied,
+                # so the fixture carries what `cw review settle` writes.
+                actor="mattwwarren",
+                reviewed_sha="abc1234",
+                summary="MFA",
             )
         }
 
@@ -2123,3 +2135,110 @@ class TestRereviewForwardsFindingDispositions:
         assert verdict is not None
         assert verdict.blocking is False
         assert result.status == "stage_complete"
+
+    def test_refused_marker_records_reach_the_verdict_from_a_rereview(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2210 round 3: the refusal hop, the fix loop's copy of ``run_review``.
+
+        A record the marker carried but the write path refused never enters the
+        ledger, so it can only reach the verdict if ``_rereview`` threads
+        ``prepared.refused_dispositions`` into synthesis beside it. Forwarding
+        the ledger alone would leave every fix-loop cycle silent about it.
+        """
+        worktree = _worktree(make_git_repo, "wt-2210-rereview-refused")
+        # The comment thread is only read for a resolvable GitHub tracker.
+        _write(
+            worktree / ".claude" / "project-config.yaml",
+            "tracking:\n  primary:\n    system: github-issues\n",
+        )
+        ledger = self._ledger()
+        (key,) = ledger
+        forged = {key: ledger[key].model_copy(update={"actor": ""})}
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "op"},
+                    "body": render_finding_disposition_block(forged),
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kw: None,
+        )
+        base = subprocess.check_output(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD~1"], text=True
+        ).strip()
+        _, verdict, prepared = codex_fix_loop._rereview(
+            runner=_FixLoopRunner([_MF_DOC]),
+            task=_make_ticket_task(
+                ticket_id="T-2210", client="test", stage=Stage.REVIEW
+            ),
+            worktree=worktree,
+            default_branch="main",
+            model=None,
+            reasoning_effort=None,
+            remaining=None,
+            session_id="s-2210-rereview-refused",
+            previous_reviewed_sha=base,
+            prior_open_findings=[],
+        )
+
+        assert prepared.finding_dispositions == {}
+        assert [(r.key, r.missing) for r in prepared.refused_dispositions] == [
+            (key, ["actor"])
+        ]
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert [r.key for r in verdict.refused_dispositions] == [key]
+
+
+class TestClaimTierGateReachesBothSynthesisHops:
+    """#2210: the per-lane claim-tier gate must reach cycle 0 AND `_rereview`.
+
+    `run_review_with_fix_loop` calls `run_review` directly for cycle 0 and
+    `_rereview` for every later cycle, and each reaches
+    `synthesize_codex_review_result` through its own module. A gate threaded
+    into only one would arm (or disarm) half the loop.
+    """
+
+    @pytest.mark.parametrize("claim_tier_enabled", [True, False])
+    def test_both_hops_receive_the_flag(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        claim_tier_enabled: bool,
+    ) -> None:
+        worktree = _worktree(make_git_repo, f"wt-2210-gate-{claim_tier_enabled}")
+        seen: list[object] = []
+
+        real_core_synth: Callable[..., object] = (
+            codex_review_core.synthesize_codex_review_result
+        )
+        real_loop_synth: Callable[..., object] = (
+            codex_fix_loop.synthesize_codex_review_result
+        )
+
+        def _spy_core(**kwargs: object) -> object:
+            seen.append(kwargs.get("claim_tier_enabled"))
+            return real_core_synth(**kwargs)
+
+        def _spy_loop(**kwargs: object) -> object:
+            seen.append(kwargs.get("claim_tier_enabled"))
+            return real_loop_synth(**kwargs)
+
+        monkeypatch.setattr(
+            codex_review_core, "synthesize_codex_review_result", _spy_core
+        )
+        monkeypatch.setattr(codex_fix_loop, "synthesize_codex_review_result", _spy_loop)
+
+        _run_loop(
+            _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]),
+            worktree,
+            claim_tier_enabled=claim_tier_enabled,
+        )
+
+        assert len(seen) == 2
+        assert seen == [claim_tier_enabled, claim_tier_enabled]

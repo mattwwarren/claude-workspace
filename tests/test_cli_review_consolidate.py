@@ -383,6 +383,10 @@ class TestReviewConsolidateCommand:
             "downgraded_disposition_count",
             "previous_reviewed_sha",
             "debt",
+            # #2210 round 2: ledger records the reader refused to apply for
+            # want of provenance. Always emitted, empty here — this command
+            # applies no disposition ledger at all.
+            "refused_dispositions",
         }
         assert verdict["unmatched_adjudication_count"] == 0
         assert verdict["capability_mode"] is None

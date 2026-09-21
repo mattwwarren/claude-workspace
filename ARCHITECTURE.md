@@ -367,6 +367,7 @@ new one.
 | [0010](docs/adr/0010-live-dashboard-extends-orchestrate-watch.md) | The live work dashboard extends `cw orchestrate watch`, not a new surface *(deprecated — see `cw board`)* | Accepted |
 | [0013](docs/adr/0013-agent-delegated-ticket-work.md) | Provider-portable ticket work is agent work; cw keeps one GitHub-only programmatic client | Accepted |
 | [0015](docs/adr/0015-voided-finding-suppression-is-content-anchored.md) | Voided-finding suppression is content-anchored, never positional | Accepted |
+| [0016](docs/adr/0016-ledger-claim-matching-is-gated-and-measured.md) | Ledger claim matching ships gated and measured, never on by default | Accepted |
 
 **Footnote:** `docs/adr/README.md`'s index table lists ADR-0005 as
 "Proposed", but ADR-0005's own file has `**Status:** Accepted — implemented
