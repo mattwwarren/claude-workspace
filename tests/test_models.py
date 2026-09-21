@@ -2052,7 +2052,9 @@ class TestPackageExportCompleteness:
     ``AGENT_SPAWN_*`` stamp keys = 53, plus #1646's own review-fix-loop
     addition of ``extract_unresolved_spawn_count`` = 54, plus #2100's
     ``occupies_lane_slot`` = 55, plus #2102's two ``PLAN_*_FINGERPRINT_KEY``
-    wire keys = 57) — hardcoded here, NOT
+    wire keys = 57, plus #2135's ``PARK_ON_ABANDONED_EXIT_KEY``,
+    ``PARK_COMMENT_MARKER_KEY``, ``ParkCommentMarker`` and
+    ``read_park_comment_marker`` = 61) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2099,6 +2101,9 @@ class TestPackageExportCompleteness:
             "OrchestratorConfig",
             "OrchestratorEvent",
             "OrchestratorEventType",
+            "PARK_COMMENT_MARKER_KEY",
+            "PARK_ON_ABANDONED_EXIT_KEY",
+            "ParkCommentMarker",
             "PLAN_APPROVED_FINGERPRINT_KEY",
             "PLAN_DRAFT_FINGERPRINT_KEY",
             "PendingFixDispatch",
@@ -2127,6 +2132,7 @@ class TestPackageExportCompleteness:
             "_validate_review_recipe_keys",
             "extract_unresolved_spawn_count",
             "occupies_lane_slot",
+            "read_park_comment_marker",
         }
         assert set(models.__all__) == expected
 
