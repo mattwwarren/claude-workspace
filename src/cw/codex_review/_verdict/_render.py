@@ -104,12 +104,36 @@ _BACKTICK_RUN_RE = re.compile(r"`+")
 
 _SETTLE_INTRO = (
     "Each payload below records one blocking finding as settled. Save one to "
-    "a file, run `cw review settle <file> --out settle.md`, and post "
-    "`settle.md` as a ticket comment. `file` and `summary` are the finding's "
-    "identity, copied verbatim, so nothing needs editing; put your reasoning "
-    "in `rationale`, or set `outcome` to `ACCEPTED` if you uphold the "
-    "finding. This works only on GitHub-tracked tickets: a marker posted on "
-    "any other tracker is not read by the codex lane."
+    "a file, run `cw review settle <file> --reason '<why>' --out settle.md` "
+    "**on your own machine**, and post `settle.md` as a ticket comment. "
+    "`file`, `summary` and `reviewed_sha` are the finding's identity and "
+    "provenance, copied verbatim, so nothing needs editing; put your "
+    "reasoning in `--reason` (or a per-entry `rationale`), or set `outcome` "
+    "to `ACCEPTED` if you uphold the finding. The command refuses to run "
+    "inside a dispatch worker — a settled finding is never re-raised, so the "
+    "pipeline must not be able to settle its own reviewer's findings. This "
+    "works only on GitHub-tracked tickets: a marker posted on any other "
+    "tracker is not read by the codex lane."
+)
+
+# Hard caps on the settle section. A blocking pass with many MUST_FIX findings
+# would otherwise carry one JSON payload each, and GitHub rejects a comment
+# body over 65,536 characters -- the rest of this comment (findings, debt,
+# rejected sections) needs the remainder. Past either cap the remaining
+# findings are named compactly and the operator is pointed at `cw review
+# settle`; a JSON block is NEVER truncated mid-structure, because half a
+# payload pastes into something that half-parses.
+_SETTLE_MAX_PAYLOADS = 10
+_SETTLE_SECTION_BUDGET_CHARS = 12_000
+# The compact overflow list is bounded independently of the byte budget above
+# (it is what the budget overflows INTO, so it cannot be charged to it): at
+# most this many rows, each summary trimmed, then a counted residue line.
+_SETTLE_MAX_COMPACT_ROWS = 40
+_SETTLE_COMPACT_SUMMARY_MAX = 120
+_SETTLE_OVERFLOW_NOTE = (
+    "Not enough room for the remaining findings' payloads. Settle any of "
+    "these by hand with `cw review settle` — the identity is the file and the "
+    "verbatim summary from its MUST_FIX line above:"
 )
 
 
@@ -149,6 +173,19 @@ def _degraded_annotation(finding: Finding) -> str:
     return _ANCHOR_DEGRADED_ANNOTATION
 
 
+def _truncate(text: str, limit: int) -> str:
+    """Whitespace-collapse *text* and cap it at *limit* characters (#2210).
+
+    Shared by the two places a comment line embeds model-authored free text —
+    a contest claim and an over-budget settle row — so one verbose model
+    cannot dominate the comment from either direction.
+    """
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[:limit].rstrip() + "…"
+
+
 def _contest_annotation(finding: Finding) -> str:
     """Annotate a finding that knowingly contests a settled decision (#2210).
 
@@ -156,11 +193,9 @@ def _contest_annotation(finding: Finding) -> str:
     the annotations above. The claim is whitespace-collapsed and truncated so
     one verbose model cannot dominate the comment.
     """
-    claim = " ".join(finding.contests_adjudication.split())
+    claim = _truncate(finding.contests_adjudication, _CONTEST_CLAIM_MAX)
     if not claim:
         return ""
-    if len(claim) > _CONTEST_CLAIM_MAX:
-        claim = claim[:_CONTEST_CLAIM_MAX].rstrip() + "…"
     return _CONTEST_ANNOTATION.format(claim=claim)
 
 
@@ -622,6 +657,62 @@ def _settle_fence(body: str) -> str:
     return "`" * max(_MIN_FENCE, longest + 1)
 
 
+def _settleable_findings(verdict: ReviewVerdict) -> list[Finding]:
+    """The blocking findings that can be keyed, one per fingerprint (#2210)."""
+    seen: set[tuple[str, str]] = set()
+    keyable: list[Finding] = []
+    for finding in verdict.must_fix:
+        fingerprint = fingerprint_v1(finding.file, finding.summary)
+        # #1817's no-diff-anchor case: there is no path to key on, so this
+        # finding gets no cross-round memory and no payload.
+        if fingerprint is None or fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        keyable.append(finding)
+    return keyable
+
+
+def _settle_payload_block(index: int, finding: Finding, reviewed_sha: str) -> list[str]:
+    """One labelled, fenced payload for *finding* (#2210)."""
+    body = json.dumps(
+        {
+            "entries": [
+                {
+                    "file": finding.file,
+                    "summary": finding.summary,
+                    "outcome": "REJECTED",
+                    "rationale": "",
+                    "reviewed_sha": reviewed_sha,
+                }
+            ]
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+    fence = _settle_fence(body)
+    return [f"**{index}. {finding.file}**", "", f"{fence}json", body, fence, ""]
+
+
+def _settle_overflow_lines(overflow: list[Finding]) -> list[str]:
+    """Name the findings that did not fit, compactly and with no JSON (#2210).
+
+    The whole point of the caps above is that a payload is never cut in half,
+    so what lands here must not look like one: identity in prose, nothing
+    fenced, nothing that could half-parse if an operator copied it.
+    """
+    if not overflow:
+        return []
+    rows = [
+        f"- **{finding.file}** — "
+        f"{_truncate(finding.summary, _SETTLE_COMPACT_SUMMARY_MAX)}"
+        for finding in overflow[:_SETTLE_MAX_COMPACT_ROWS]
+    ]
+    residue = len(overflow) - len(rows)
+    if residue:
+        rows.append(f"- …and {residue} more MUST_FIX finding(s) listed above.")
+    return [_SETTLE_OVERFLOW_NOTE, "", *rows, ""]
+
+
 def _render_settle_payloads(verdict: ReviewVerdict) -> list[str]:
     """Hand the operator a ready-to-paste settle payload per finding (#2210).
 
@@ -629,11 +720,19 @@ def _render_settle_payloads(verdict: ReviewVerdict) -> list[str]:
     no production writer, and its runbook told operators to compute the key by
     hand from a `python -c` one-liner. This section is the other end of
     ``cw review settle``: each payload carries the finding's VERBATIM ``file``
-    and ``summary``, which are the ledger's whole identity, so pasting it needs
-    no editing and reproduces exactly the key a later re-raise will hit.
+    and ``summary`` (the ledger's whole identity) plus the verdict's
+    ``reviewed_sha`` (the provenance the record needs to say what code it
+    silenced), so pasting it needs no editing and reproduces exactly the key a
+    later re-raise will hit.
 
     Empty-returns-``[]`` like its siblings, and renders nothing at all unless
     the pass actually blocks — there is nothing to settle otherwise.
+
+    **Bounded.** At most ``_SETTLE_MAX_PAYLOADS`` payloads, and at most
+    ``_SETTLE_SECTION_BUDGET_CHARS`` characters of them; the remainder is
+    listed compactly by :func:`_settle_overflow_lines`. Accounting is over the
+    joined text actually emitted, and a block is tested WHOLE before it is
+    kept, so the section can never end on a half-written JSON object.
 
     Deliberately NOT the postable ``REVIEW-FINDING-DISPOSITIONS`` marker
     itself: the dispositions reader ingests every comment body on the ticket,
@@ -644,43 +743,27 @@ def _render_settle_payloads(verdict: ReviewVerdict) -> list[str]:
     """
     if not verdict.blocking:
         return []
-    lines: list[str] = []
-    seen: set[tuple[str, str]] = set()
-    for finding in verdict.must_fix:
-        fingerprint = fingerprint_v1(finding.file, finding.summary)
-        # #1817's no-diff-anchor case: there is no path to key on, so this
-        # finding gets no cross-round memory and no payload.
-        if fingerprint is None or fingerprint in seen:
-            continue
-        seen.add(fingerprint)
-        body = json.dumps(
-            {
-                "entries": [
-                    {
-                        "file": finding.file,
-                        "summary": finding.summary,
-                        "outcome": "REJECTED",
-                        "rationale": "",
-                    }
-                ]
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-        fence = _settle_fence(body)
-        lines.extend(
-            [
-                f"**{len(seen)}. {finding.file}**",
-                "",
-                f"{fence}json",
-                body,
-                fence,
-                "",
-            ]
-        )
-    if not lines:
+    keyable = _settleable_findings(verdict)
+    if not keyable:
         return []
-    return [SETTLE_SECTION_HEADING, "", _SETTLE_INTRO, "", *lines]
+    head = [SETTLE_SECTION_HEADING, "", _SETTLE_INTRO, ""]
+    blocks: list[list[str]] = []
+    overflow: list[Finding] = []
+    for index, finding in enumerate(keyable, start=1):
+        candidate = [
+            *blocks,
+            _settle_payload_block(index, finding, verdict.reviewed_sha),
+        ]
+        joined = "\n".join([*head, *(line for block in candidate for line in block)])
+        if (
+            len(candidate) > _SETTLE_MAX_PAYLOADS
+            or len(joined) > _SETTLE_SECTION_BUDGET_CHARS
+        ):
+            overflow = keyable[index - 1 :]
+            break
+        blocks = candidate
+    body = [line for block in blocks for line in block]
+    return [*head, *body, *_settle_overflow_lines(overflow)]
 
 
 def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) -> str:
