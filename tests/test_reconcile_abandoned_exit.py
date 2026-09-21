@@ -244,6 +244,27 @@ class TestParkGateOpen:
         assert park_gate_open(_task()) is False
         assert counts == {"orchestrator": 1, "clients": 0}
 
+    def test_a_missing_orchestrator_file_is_disabled_and_never_created(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A default-off gate must not write the operator's config dir.
+
+        ``load_orchestrator_config`` creates a missing file with defaults, so
+        the gate has to test for it first: absent is disabled, silently (it is
+        the shipped default, not a failure), and is never read or created.
+        """
+        assert not orchestrator_config_file().exists()
+        counts = self._count_loads(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="cw.reconcile.abandoned_exit"):
+            assert park_gate_open(_task()) is False
+
+        assert not orchestrator_config_file().exists()
+        assert counts == {"orchestrator": 0, "clients": 0}
+        assert caplog.records == []
+
     def test_resolves_the_config_once_per_client_per_process(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

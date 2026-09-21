@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
 
-from cw.config import load_clients, load_orchestrator_config
+from cw.config import load_clients, load_orchestrator_config, orchestrator_config_file
 from cw.exceptions import CwError
 from cw.models import PARK_ON_ABANDONED_EXIT_KEY
 
@@ -145,12 +145,17 @@ def _load_park_config(client: str, lane: str) -> _ParkConfig | None:
 
     ``orchestrator.yaml`` is read first and ``clients.yaml`` only when the
     master switch is on, so a shipped-default (switch off) install pays for a
-    single config read. Any load failure, a *client* absent from
-    ``clients.yaml``, and a *lane* that client never declares are each logged
-    once at WARNING -- the names and the error class only, never a traceback --
-    and read as disabled.
+    single config read. A missing ``orchestrator.yaml`` is disabled without
+    being read: ``load_orchestrator_config`` creates the file with defaults
+    when it is absent, and a default-off feature must not write into the
+    operator's config directory just to discover that it is off. Any load
+    failure, a *client* absent from ``clients.yaml``, and a *lane* that client
+    never declares are each logged once at WARNING -- the names and the error
+    class only, never a traceback -- and read as disabled.
     """
     try:
+        if not orchestrator_config_file().exists():
+            return None
         config = load_orchestrator_config()
         if not config.park_on_abandoned_exit_enabled:
             return None
