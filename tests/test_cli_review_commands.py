@@ -14,6 +14,7 @@ import pytest
 from click.testing import CliRunner
 from freezegun import freeze_time
 
+import cw.events
 from cw.cli import main
 from cw.dev_queue import load_dev_queue
 from cw.events import read_events
@@ -60,6 +61,9 @@ def runner() -> CliRunner:
 
 
 _URL = "https://github.com/acme/widgets/pull/42"
+#: What a failing ``record_event`` raises in the settle audit-ordering tests.
+#: Asserted on in the command's own error output, so it is one literal.
+_EVENT_STORE_FAILURE = "event inbox is read-only"
 _OPERATOR = "mattwwarren"
 
 
@@ -1202,6 +1206,83 @@ class TestReviewSettle:
         assert payload["reviewed_sha"] == "abc1234"
         assert payload["recorded_at"] == "2026-09-20T12:00:00Z"
         assert payload["key"] == _disposition_key("src/cw/foo.py", "Bug here")
+
+    def test_the_audit_event_is_recorded_before_the_marker_is_written(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round 2: the record comes first, the durable suppression second.
+
+        A marker written before its audit event leaves a durable suppression
+        with no audit record behind if the emit then fails — precisely what
+        round 1 added the event for.
+        """
+        out_path = tmp_path / "settle.md"
+        real = cw.events.record_event
+        marker_existed_at_emit: list[bool] = []
+
+        def _spy(*args: Any, **kwargs: Any) -> object:
+            marker_existed_at_emit.append(out_path.exists())
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr("cw.events.record_event", _spy)
+        result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
+
+        assert result.exit_code == 0, result.output
+        assert marker_existed_at_emit == [False]
+        assert out_path.exists()
+
+    def test_failed_audit_emit_aborts_with_no_marker(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out_path = tmp_path / "settle.md"
+
+        def _boom(*_args: Any, **_kwargs: Any) -> object:
+            raise OSError(_EVENT_STORE_FAILURE)
+
+        monkeypatch.setattr("cw.events.record_event", _boom)
+        result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
+
+        assert result.exit_code != 0
+        assert not out_path.exists()
+        assert "REVIEW-FINDING-DISPOSITIONS" not in result.output
+        # The message must name the finding that failed and the failure.
+        assert "src/cw/foo.py" in result.output
+        assert _EVENT_STORE_FAILURE in result.output
+
+    def test_a_later_entrys_failed_emit_still_writes_no_marker(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All events first, then the marker — atomic in the safe direction.
+
+        An audit record with no effect is noise; a suppression with no audit
+        record is invisible. So a failure part-way through leaves the earlier
+        events recorded and writes NO marker at all.
+        """
+        out_path = tmp_path / "settle.md"
+        real = cw.events.record_event
+        calls: list[int] = []
+
+        def _fail_on_second(*args: Any, **kwargs: Any) -> object:
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError(_EVENT_STORE_FAILURE)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr("cw.events.record_event", _fail_on_second)
+        result = self._invoke(
+            runner,
+            _settle_payload(
+                _settle_entry(),
+                _settle_entry(summary="Second bug", file="src/cw/bar.py"),
+            ),
+            "--out",
+            str(out_path),
+        )
+
+        assert result.exit_code != 0
+        assert not out_path.exists()
+        assert "REVIEW-FINDING-DISPOSITIONS" not in result.output
+        assert len(read_events()) == 1
 
     def test_duplicate_entries_settle_once_and_emit_one_event(
         self, runner: CliRunner

@@ -540,25 +540,44 @@ def _emit_settle_events(
     a suppression firing, this one records it being created. Emitted over the
     COLLAPSED ledger, so two payload entries that key alike are one settled
     finding and one event — the same arithmetic the marker itself uses.
+
+    **Raises rather than degrading** (#2210 round 2). ``record_event`` is file
+    I/O and can fail; the caller must not write a marker for a finding whose
+    audit did not record, so an emit failure aborts the whole settle with a
+    message naming the finding and the failure. ALL events are emitted before
+    the caller writes anything, so a failure part-way through leaves the
+    earlier findings with an audit record and no effect — see the ordering
+    comment at the call site for why that asymmetry is the right one.
     """
     from cw.events import record_event
     from cw.models.enums import OrchestratorEventType
 
     for key, entry in sorted(ledger.items()):
-        record_event(
-            OrchestratorEventType.REVIEW_FINDING_SETTLED,
-            payload={
-                "key": key,
-                "file": split_disposition_key(key)[0],
-                "summary": entry.summary,
-                "outcome": entry.outcome,
-                "reason": entry.rationale,
-                "actor": entry.actor,
-                "recorded_at": entry.recorded_at,
-                "reviewed_sha": entry.reviewed_sha,
-            },
-            correlation_id=ticket,
-        )
+        file = split_disposition_key(key)[0]
+        try:
+            record_event(
+                OrchestratorEventType.REVIEW_FINDING_SETTLED,
+                payload={
+                    "key": key,
+                    "file": file,
+                    "summary": entry.summary,
+                    "outcome": entry.outcome,
+                    "reason": entry.rationale,
+                    "actor": entry.actor,
+                    "recorded_at": entry.recorded_at,
+                    "reviewed_sha": entry.reviewed_sha,
+                },
+                correlation_id=ticket,
+            )
+        except OSError as exc:
+            msg = (
+                f"Could not record the review.finding_settled audit event for "
+                f"{file} ({entry.summary!r}): {exc}. Nothing was written — no "
+                "marker, no --out file. A suppression with no audit record is "
+                "invisible, so the settle is refused rather than recorded "
+                "half-way. Fix the event store and re-run the same payload."
+            )
+            raise CwError(msg) from exc
 
 
 @review.command(name="settle")
@@ -639,7 +658,10 @@ def review_settle(
     is a record-only annotation that reaches the reviewer's prompt.
 
     Emits one `review.finding_settled` audit event per settled finding,
-    correlated to --ticket when given.
+    correlated to --ticket when given. The events are recorded BEFORE the
+    marker is written: if any of them cannot be recorded the settle is
+    refused outright — no marker, no --out file, non-zero exit — because a
+    durable suppression with no audit record is invisible.
 
     On success: exits 0, prints the marker to stdout.
     On failure: exits 1, prints 'field.path: message' lines to stderr.
@@ -672,11 +694,20 @@ def review_settle(
         )
         for entry in parsed.entries
     )
+    # The audit events go FIRST, and the marker is written only once every one
+    # of them has recorded. The two failure directions are not symmetric: an
+    # audit record with no effect is noise, a durable suppression with no audit
+    # record is invisible — which is the exact hole round 1 added this event to
+    # close. Do not "fix" this back to save-then-emit: #1617's precedent orders
+    # a STATE MUTATION before its event so the event cannot claim something
+    # that did not land, and here the record IS the safety mechanism, so it
+    # goes first. Atomicity is all-events-then-one-write for the same reason:
+    # if any event fails, no marker is written at all.
+    _emit_settle_events(ledger, ticket)
     rendered = render_finding_disposition_block(ledger)
     if out is not None:
         out.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(out, rendered)
-    _emit_settle_events(ledger, ticket)
     click.echo(rendered)
 
 
