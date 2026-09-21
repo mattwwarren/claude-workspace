@@ -22,6 +22,7 @@ from functools import partial
 from pathlib import Path
 
 WARMUP = 3
+MIN_ITERATIONS = 2  # statistics.quantiles needs two samples for a p95
 TRANSCRIPT_BYTES = 4 * 1024 * 1024
 MS_PER_S = 1000.0
 CTX = Path(".claude/cw-context.json")
@@ -46,10 +47,8 @@ def _cases(worktree: Path, tuid: str) -> list[Case]:
         msg = "settings.local.json lacks one of the four cw hook commands"
         raise SystemExit(msg)
     fg = {"tool_name": "Bash", "tool_input": {"command": "echo @@"}}
-    bg = {
-        "tool_name": "Bash",
-        "tool_input": {"command": "ls", "run_in_background": True},
-    }
+    bg_in = {"command": "ls", "run_in_background": True}
+    bg = {"tool_name": "Bash", "tool_input": bg_in}
     stop = cmd["signal-stop"]
     return [
         ("python -c pass", "python -c pass", {}, None),
@@ -85,17 +84,18 @@ def _time_case(
     extra: dict[str, object], cwd: Path, cmd: str, env: dict[str, str], n: int
 ) -> str:
     run = partial(subprocess.run, capture_output=True, check=False, env=env, cwd=cwd)
-    samples, codes = [], set()
+    samples = []
     for i in range(WARMUP + n):
         payload = {"session_id": "claude-uuid", "cwd": str(cwd), **extra}
         start = time.perf_counter()
         data = json.dumps(payload).replace("@@", str(i))
         proc = run(["sh", "-c", cmd], input=data, text=True)
-        codes.add(proc.returncode)
+        if proc.returncode:  # a failing hook times its error path, not the hook
+            sys.exit(f"hook exited {proc.returncode} on call {i}: {cmd}")
         if i >= WARMUP:
             samples.append((time.perf_counter() - start) * MS_PER_S)
     p95 = statistics.quantiles(samples, n=20)[-1]  # last of 19 cuts = 95th percentile
-    return f"{statistics.median(samples):8.1f} {p95:8.1f}  {sorted(codes)}"
+    return f"{statistics.median(samples):8.1f} {p95:8.1f}"
 
 
 def _measure(args: argparse.Namespace, worktree: Path, tmp: Path) -> str:
@@ -118,7 +118,7 @@ def _measure(args: argparse.Namespace, worktree: Path, tmp: Path) -> str:
     head = f"git {sha}  python {sys.version.split()[0]}  N={args.iterations}"
     out = [f"{head}  sessions={count}  transcript={TRANSCRIPT_BYTES} bytes"]
     out += [f"hook: {cmd}" for cmd in sorted({c[1] for c in cases[2:]})]
-    out.append(f"{'case':28} {'med ms':>8} {'p95 ms':>8}  exit codes")
+    out.append(f"{'case':28} {'med ms':>8} {'p95 ms':>8}  (every hook exit is 0)")
     medians = {}
     for label, command, extra, _sid in cases:
         cmd = command.replace(str(worktree / CTX), str(scratch[label] / CTX))
@@ -137,6 +137,8 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
+    if args.iterations < MIN_ITERATIONS:
+        parser.error(f"--iterations must be >= {MIN_ITERATIONS}")
     tmp = Path(tempfile.mkdtemp(prefix="cw-hook-cost-"))
     try:
         report = _measure(args, Path(args.worktree).resolve(), tmp)
