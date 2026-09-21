@@ -422,9 +422,12 @@ def _live_worktree_paths() -> frozenset[Path]:
     """Return paths of all worktrees backing live sessions or running dispatch tasks.
 
     Loads CwState and DevQueueStore the same way reconcile does. Conservative:
-    on any load error returns an empty set so a corrupted state file never
-    blocks GC from running — it only disables the live-session safety guard for
-    that run (logged at WARNING).
+    when the session state cannot be read or parsed (``OSError`` /
+    ``ValueError``, see :func:`cw.worktree.live_session_worktree_paths`) or the
+    dev-queue cannot be loaded, the affected half contributes nothing so a
+    corrupted state file never blocks GC from running — it only disables that
+    live-session safety guard for the run (logged at WARNING). An unexpected
+    exception type from the session-state read is a bug and propagates.
     """
     live: set[Path] = set(live_session_worktree_paths() or ())
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -12,7 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
-from cw.config import save_state
+from cw.config import save_state, state_file
 from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
     ClientConfig,
@@ -1212,6 +1213,49 @@ class TestLiveSessionWorktreePaths:
         assert any(
             "failed to load session state" in r.getMessage() for r in caplog.records
         )
+
+    @pytest.mark.parametrize("kind", ["oserror", "invalid-json", "validation-error"])
+    def test_expected_state_read_failures_return_none(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        kind: str,
+    ) -> None:
+        """The three failure families a state read can really raise -- I/O
+        (a directory where the file should be), a JSON syntax error, and a
+        pydantic ValidationError -- all degrade to None, via the real
+        ``load_state`` and a real file on disk."""
+        path = state_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "oserror":
+            path.mkdir()
+        elif kind == "invalid-json":
+            path.write_text("{not json", encoding="utf-8")
+        else:
+            path.write_text(
+                json.dumps({"sessions": [{"name": "c/impl"}]}), encoding="utf-8"
+            )
+
+        with caplog.at_level("WARNING", logger="cw.worktree"):
+            assert live_session_worktree_paths() is None
+
+        assert any(
+            "failed to load session state" in r.getMessage() for r in caplog.records
+        )
+
+    def test_unexpected_exception_type_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the enumerated read failures degrade to None; anything else is a
+        bug that must surface rather than read as "no live sessions" (#2213)."""
+
+        def _boom() -> CwState:
+            msg = "not a state-read failure"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.worktree.load_state", _boom)
+
+        with pytest.raises(RuntimeError, match="not a state-read failure"):
+            live_session_worktree_paths()
 
 
 class TestCreateWorktreeReuseRefresh:

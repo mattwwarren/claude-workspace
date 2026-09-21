@@ -672,16 +672,30 @@ _NON_TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
 )
 
 
+# What ``cw.config.load_state`` can really raise reading sessions.json:
+# ``OSError`` (open/read, the pre-migration backup copy) and ``ValueError`` --
+# the parent of ``json.JSONDecodeError`` and ``UnicodeDecodeError`` (a corrupt
+# file), of pydantic's ``ValidationError`` (a wrong-shaped file), and of the
+# ``int()`` schema-version coercion. It raises no project-specific state error.
+# Anything outside this set is a bug and must propagate (#2213).
+_STATE_READ_ERRORS: tuple[type[Exception], ...] = (OSError, ValueError)
+
+
 def live_session_worktree_paths() -> frozenset[Path] | None:
     """Return worktree paths of non-terminal sessions in cw state, or None.
 
     The session-state half of the live-path guard, shared by the worktree GC
     (``cw.worktree_gc._live_worktree_paths``) and the reuse refresh
     (:func:`_reuse_occupancy_reason`, #2213). ``None`` means the state could
-    not be loaded (logged at WARNING): GC treats that as "no live sessions
-    known" so a corrupted state file never blocks it, while a caller about to
-    *mutate* a worktree must treat it as "cannot rule out a live session" and
-    fail closed.
+    not be read or parsed (``OSError`` / ``ValueError`` -- see
+    :data:`_STATE_READ_ERRORS`; logged at WARNING): GC treats that as "no live
+    sessions known" so a corrupted state file never blocks it, while a caller
+    about to *mutate* a worktree must treat it as "cannot rule out a live
+    session" and fail closed. Any other exception is a bug, not a corrupt
+    file, and propagates.
+
+    Returns the paths exactly as recorded (unresolved): the GC compares them
+    against git-listed paths, and the refresh normalizes before comparing.
 
     Lives here rather than in ``cw.worktree_gc`` because that module imports
     ``cw.dev_queue``, whose requeue/lifecycle modules import this one -- a
@@ -689,7 +703,7 @@ def live_session_worktree_paths() -> frozenset[Path] | None:
     """
     try:
         state = load_state()
-    except Exception as exc:  # noqa: BLE001 — corrupted session state must not block worktree GC or the reuse refresh; degrades to "no live sessions known" for GC and fail-closed for the refresh (see docstring)
+    except _STATE_READ_ERRORS as exc:
         _log.warning("live-path guard: failed to load session state: %s", exc)
         return None
     live: set[Path] = set()
