@@ -226,9 +226,55 @@ class NativeDaemonClient(Protocol):
         """
         ...
 
+    def list_live_worker_cwds(self) -> frozenset[Path] | None:
+        """Return the working directories of the daemon's live workers, or None.
+
+        Answers "which worktree is a live worker homed on" for callers about to
+        *mutate* a worktree, so unlike :meth:`list_live_session_short_ids` it
+        fails **closed**: ``None`` means the roster could not be read or
+        understood and the caller must assume a worker may be live. An
+        *absent* roster (no daemon has ever run) is an empty frozenset. Paths
+        are returned exactly as recorded; callers normalize before comparing.
+        """
+        ...
+
     def stop(self, short_id: str) -> None:
         """Stop a backgrounded Claude session. Best-effort, no raise."""
         ...
+
+
+def _read_roster_workers(path: Path) -> dict[str, object] | None:
+    """Read the roster's ``workers`` mapping: the one parser for roster.json.
+
+    Shared by :meth:`RealNativeDaemonClient.list_live_session_short_ids` (the
+    fail-open liveness view) and
+    :meth:`RealNativeDaemonClient.list_live_worker_cwds` (the fail-closed
+    occupancy view) so the two can never disagree about what the file says.
+
+    Returns ``{}`` when the roster file is absent (no daemon has ever run) and
+    ``None`` for every other failure -- another ``OSError``, invalid JSON, a
+    top level that is not an object, or ``workers`` missing / not an object --
+    each logged at WARNING. Callers decide what ``None`` means: fail open for
+    liveness, fail closed for a mutation guard. Only ``OSError`` and
+    ``json.JSONDecodeError`` are caught; anything else propagates.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        _log.warning("native daemon roster at %s is unreadable: %s", path, exc)
+        return None
+    try:
+        data: object = json.loads(raw)
+    except json.JSONDecodeError:
+        _log.warning("native daemon roster at %s is not valid JSON", path)
+        return None
+    workers = data.get("workers") if isinstance(data, dict) else None
+    if not isinstance(workers, dict):
+        _log.warning("native daemon roster at %s has no 'workers' object", path)
+        return None
+    return workers
 
 
 def _build_spawn_argv(
@@ -328,22 +374,39 @@ class RealNativeDaemonClient:
         return match.group(1)
 
     def list_live_session_short_ids(self) -> set[str]:
-        """Read ``roster.json`` and return the set of worker short ids."""
-        try:
-            raw = self._roster_path.read_text(encoding="utf-8")
-        except OSError:
-            return set()
-        try:
-            data: dict[str, Any] = json.loads(raw)
-        except json.JSONDecodeError:
-            _log.warning(
-                "native daemon roster at %s is not valid JSON", self._roster_path
-            )
-            return set()
-        workers = data.get("workers")
-        if not isinstance(workers, dict):
+        """Read ``roster.json`` and return the set of worker short ids.
+
+        Fails open: an absent, unreadable or malformed roster yields an empty
+        set (see :func:`_read_roster_workers`).
+        """
+        workers = _read_roster_workers(self._roster_path)
+        if workers is None:
             return set()
         return {key for key in workers if isinstance(key, str)}
+
+    def list_live_worker_cwds(self) -> frozenset[Path] | None:
+        """Return the ``cwd`` of every roster worker, or None (fail closed).
+
+        An absent roster is an empty frozenset. Any other problem -- an
+        unreadable or malformed file, or a worker entry that is not an object
+        with a non-empty string ``cwd`` -- is ``None`` (logged at WARNING): a
+        worker whose home cannot be determined might be homed on any worktree.
+        """
+        workers = _read_roster_workers(self._roster_path)
+        if workers is None:
+            return None
+        cwds: set[Path] = set()
+        for short_id, entry in workers.items():
+            cwd = entry.get("cwd") if isinstance(entry, dict) else None
+            if not isinstance(cwd, str) or not cwd:
+                _log.warning(
+                    "native daemon roster at %s: worker %s has no usable cwd",
+                    self._roster_path,
+                    short_id,
+                )
+                return None
+            cwds.add(Path(cwd))
+        return frozenset(cwds)
 
     def stop(self, short_id: str) -> None:
         """Run ``claude stop <short_id>`` swallowing failures.
@@ -374,8 +437,11 @@ class FakeNativeDaemonClient:
         self.spawn_permission_modes: list[str | None] = []
         self.stop_calls: list[str] = []
         self._live: set[str] = set()
+        self._cwd_by_id: dict[str, Path] = {}
         self.raise_usage_limit: bool = False
         self.raise_unregistered: bool = False
+        # Simulates a present-but-unreadable roster for list_live_worker_cwds.
+        self.roster_unreadable: bool = False
 
     def spawn_bg(
         self,
@@ -405,11 +471,18 @@ class FakeNativeDaemonClient:
         self.spawn_permission_modes.append(permission_mode)
         if not self.raise_unregistered:
             self._live.add(short_id)
+            self._cwd_by_id[short_id] = cwd
         return short_id
 
     def list_live_session_short_ids(self) -> set[str]:
         """Return a copy of the in-memory live set."""
         return set(self._live)
+
+    def list_live_worker_cwds(self) -> frozenset[Path] | None:
+        """Return the spawn cwds of still-live workers; None if unreadable."""
+        if self.roster_unreadable:
+            return None
+        return frozenset(self._cwd_by_id[short_id] for short_id in self._live)
 
     def stop(self, short_id: str) -> None:
         """Record call and drop from live set (idempotent)."""
