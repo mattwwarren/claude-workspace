@@ -752,13 +752,18 @@ open enum; consumers MUST tolerate unknown values. Known values:
   Operator should inspect the session result (`cw session result <id>`) and
   either resolve the ambiguities and re-dispatch, or close the ticket. See #923.
 - `"stopped_without_sentinel"` — the Stop hook observed an **abandoned exit**
-  (#2135): the session's own transcript records a completed, non-error
-  park/blocker comment post to this ticket in its current run leg, the Stop
-  fired with no pending background tasks, and no sentinel — not even raw
-  `AUTO_DEV_RESULT` framing text — followed it. **Gated, default off:** the
+  (#2135): the worker recorded a `park_comment_marker` in its worktree's
+  `.claude/cw-context.json` (via `cw signal-park`, after its park comment
+  posted) matching this session, ticket and the RUNNING row's stage, the Stop
+  fired with no pending background tasks and no sentinel, and no
+  `AUTO_DEV_RESULT` framing text — not even an unpaired open marker — appears
+  in the transcript at or after the marker's `posted_at`. The marker is the
+  worker's own recorded claim, not an observation by cw that a tracker comment
+  exists. **Gated, default off:** the
   park requires `park_on_abandoned_exit_enabled: true` in `orchestrator.yaml`
   *and* a `park_on_abandoned_exit` map enabling it on the row's lane (or the
-  ticket). With the switch off this disposition is never emitted and a
+  ticket), whose lane the client must also declare. With the switch off this
+  disposition is never emitted and a
   sentinel-less Stop defers exactly as it did before #2135. Unlike its
   signal-only
   siblings above, this one **does mutate the task row**: `RUNNING →

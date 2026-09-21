@@ -821,10 +821,10 @@ review_recipes_enabled: false
 
 # Stop-hook abandoned-exit park master switch (GitHub #2135). Default false,
 # mirroring gate_recipes_enabled's fail-safe posture: when true, `cw
-# signal-stop` may move a dev-queue row RUNNING -> BLOCKED_ON_USER on
-# transcript evidence alone, with NO human in the loop. This is a hard
-# top-level short-circuit -- when false, a sentinel-less Stop defers exactly
-# as it did before #2135 and the transcript is not even scanned. Per-lane /
+# signal-stop` may move a dev-queue row RUNNING -> BLOCKED_ON_USER on the
+# worker's recorded park marker alone, with NO human in the loop. This is a
+# hard top-level short-circuit -- when false, a sentinel-less Stop defers
+# exactly as it did before #2135 and the marker is not even read. Per-lane /
 # per-ticket enablement is still resolved below -- see Abandoned-Exit Park
 # Enablement.
 park_on_abandoned_exit_enabled: false
@@ -1112,11 +1112,12 @@ Unrecognized recipe keys fail loud at config-load time (a typo like
 ## Abandoned-Exit Park Enablement (GitHub #2135)
 
 The Stop-hook **abandoned-exit park** moves a dev-queue row `RUNNING →
-BLOCKED_ON_USER` when `cw signal-stop` fires with no sentinel and the
-session's own transcript records a completed park/blocker comment post for the
-ticket (full contract: [`docs/session-disposition.md`](../docs/session-disposition.md)
-§6c). It is a state-mutating auto-actor driven by transcript evidence derived
-with regex, so it **ships dark** and is armed per-lane by an operator.
+BLOCKED_ON_USER` when `cw signal-stop` fires with no sentinel and the worker
+has recorded a `park_comment_marker` for the ticket — its own claim, written
+with `cw signal-park` after its park comment posted, that it is taking that
+exit (full contract: [`docs/session-disposition.md`](../docs/session-disposition.md)
+§6c). It is a state-mutating auto-actor driven by the worker's recorded
+marker, so it **ships dark** and is armed per-lane by an operator.
 
 Whether it fires for a given ticket is resolved with 3-tier precedence,
 highest first — the same shape as the gate and review recipes above:
@@ -1132,10 +1133,11 @@ highest first — the same shape as the gate and review recipes above:
 Independently, the master switch `park_on_abandoned_exit_enabled` (in
 `orchestrator.yaml`, default `false`) is a hard top-level short-circuit: when
 `false` the park never fires regardless of any per-lane or per-ticket setting,
-and the Stop hook performs no transcript scan at all — behaviour is identical
+and the Stop hook does not even read the marker — behaviour is identical
 to the pre-#2135 unconditional defer. The flag is only resolved after the
 Stop hook has found a `RUNNING` dev-queue row for the session, and the resolved
-config is memoized for the life of that (short-lived) process.
+config is memoized per `(client, lane)` for the life of that (short-lived)
+process.
 
 ```yaml
 # clients.yaml — arm the park on one lane, leave the other off
@@ -1152,10 +1154,13 @@ clients:
 Unrecognized keys fail loud at config-load time (a typo like
 `park_on_abandonned_exit` raises rather than silently no-opping). Resolution is
 fail-closed end to end: a `clients.yaml` or `orchestrator.yaml` that cannot be
-read or validated, a ticket whose client is absent from `clients.yaml` (even
-with a per-ticket override), and an absent lane entry all leave the park
-disabled, never enabled. A failure is logged once per process at WARNING with
-the client name and the error class, and never raises out of the Stop hook.
+read or validated, an unreadable `dev_queue.json`, a ticket whose client is
+absent from `clients.yaml`, a row riding a lane that client never declares,
+and an absent lane entry all leave the park disabled, never enabled. The
+declared-lane check runs **ahead** of all three tiers above, so a per-ticket
+override cannot open a lane nobody armed. A failure is logged once per
+`(client, lane)` per process at WARNING with the names and the error class,
+and never raises out of the Stop hook.
 
 ## Review Strategy Config (RFC 0010 Phase 4)
 

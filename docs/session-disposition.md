@@ -263,9 +263,9 @@ section of [`docs/headless-contract.md`](headless-contract.md) for the full
 > quiet-but-live worker now surfaces via the liveness distress signal
 > (`session.needs_attention` with `paused_status=session_unresponsive`)
 > and is never dispositioned automatically. The Stop-hook abandoned-exit
-> park (#2135, §6c) joins that evidence-driven set: it fires on an observed
-> conjunction of facts in the session's own transcript, never on elapsed
-> time, and mutates only the dev-queue row.
+> park (#2135, §6c) joins that evidence-driven set: it fires on the park
+> marker the worker itself recorded, never on elapsed time, and mutates only
+> the dev-queue row.
 
 If you need to force reconcile to re-examine state:
 
@@ -325,7 +325,7 @@ where one already existed:
 | phantom-sweep SIGNAL_ONLY reroute (clean crash) | `ReapReason.PHANTOM_SURFACE` |
 | phantom-sweep unresolved-subagent-spawn reroute (#1646) | `_UNRESOLVED_SUBAGENT_SPAWN_REASON` ("unresolved_subagent_spawn") — a clean *or* dirty crash whose worktree still carries an unresolved spawn stamp. Takes precedence over both `PHANTOM_SURFACE` and `dirty_worktree`, and **overrides `reap_policy: auto`**. See §6b |
 | phantom gh-check-blocked route | `_GH_CHECK_BLOCKED_REASON` |
-| Stop-hook abandoned-exit park (#2135) | `_STOPPED_WITHOUT_SENTINEL_REASON` ("stopped_without_sentinel") — the Stop hook saw a completed park/blocker comment post in the session's own transcript and no sentinel. See §6c |
+| Stop-hook abandoned-exit park (#2135) | `_STOPPED_WITHOUT_SENTINEL_REASON` ("stopped_without_sentinel") — the Stop hook saw the worker's recorded `park_comment_marker` and no sentinel. See §6c |
 | salvage LOW-path flag *(historical, ADR-0014)* | `_NEEDS_SALVAGE_REASON` |
 | terminal-sibling park (`tasks.py`) | `ReapReason.TERMINAL_SIBLING` |
 | unknown client / invalid pipeline stage (`dispatch.py`) | `"unknown_client"` / `"invalid_stage_config"` (deliberately excluded from concierge/escalation eligibility — config errors, not recoverable states) |
@@ -463,36 +463,42 @@ signal-stop` can now route that row itself.
 > is gated by `park_on_abandoned_exit_enabled` in `orchestrator.yaml` (default
 > `false`) plus a per-lane / per-ticket `park_on_abandoned_exit` map whose
 > floor is `false`. With the park disabled, a sentinel-less Stop defers
-> exactly as it did before #2135 and the transcript is not even scanned. The
+> exactly as it did before #2135 and the marker is not even read. The
 > Stop hook checks its preconditions cheapest-first — headless DAEMON session,
 > empty `background_tasks`, a `RUNNING` dev-queue row for the session — and
 > only then resolves the flag, so a session with no row to park never reads
-> config at all. The resolved config is memoized for the (short-lived) hook
-> process, and every failure resolves to *disabled*: an unreadable or invalid
-> `orchestrator.yaml` / `clients.yaml`, a client absent from `clients.yaml`,
-> and an absent lane entry all defer, log once at WARNING with the client name
-> and error class, and never raise out of the hook.
+> config at all. The resolved config is memoized per `(client, lane)` for the
+> (short-lived) hook process, and every failure resolves to *disabled*: an
+> unreadable or invalid `orchestrator.yaml` / `clients.yaml`, an unreadable
+> `dev_queue.json`, a client absent from `clients.yaml`, a lane that client
+> never declares, and an absent lane entry all defer, log once at WARNING with
+> the names and error class, and never raise out of the hook. The undeclared-lane
+> gate runs *ahead* of all three resolver tiers, so a per-ticket
+> `park_on_abandoned_exit` override cannot open a lane nobody armed.
 > Arming it is an operator action — see
 > [`config/CONFIG_REFERENCE.md`](../config/CONFIG_REFERENCE.md)'s *Abandoned-Exit
 > Park Enablement*.
 
-Once armed, the park fires on three-part evidence:
+Once armed, the park fires on four-part evidence:
 
 1. the Stop fired with **no pending background tasks** (the existing
    `background_tasks` guard in `signal_stop` already establishes this);
-2. **no sentinel** was parsed from the transcript — and, fail-closed, no raw
-   `AUTO_DEV_RESULT` framing text (not even an unpaired open marker, a
-   placeholder, or a #1692-discarded frame) appears after the post; and
-3. the session's **own transcript**, in its **current run leg** (after the
-   last user re-entry record), records a completed, non-error `gh issue
-   comment <ticket>` whose body carries the `<!-- cw-agent-authored -->`
-   marker under one of the exit-only pipeline headers (`## Pending
-   Verification Scan`, `## Blocking Review Findings`, `## Operator-Actionable
-   Review Findings`).
+2. **no sentinel** was parsed from the transcript;
+3. the worktree's `.claude/cw-context.json` carries a `park_comment_marker`
+   matching the current cw session id, the ticket id, and the **`RUNNING`
+   row's stage** — written by the worker itself with `cw signal-park` after
+   its park comment posted; and
+4. **no** `AUTO_DEV_RESULT` framing text — not even an unpaired open marker, a
+   placeholder, or a #1692-discarded frame — appears in the transcript at or
+   after the marker's `posted_at`.
 
 This is **evidence-driven, not a timer** — the same family as ADR-0014's
 "What remains" (roster-absence phantoms, recorded terminal results,
-emitted-sentinel routing). It mutates the dev-queue row only: `RUNNING →
+emitted-sentinel routing). `posted_at` is never compared to a wall clock: no
+age, no expiry, no threshold. Its only non-audit use is as the ordering pivot
+in conjunct 4, a comparison that can only ever *suppress* a park.
+
+It mutates the dev-queue row only: `RUNNING →
 BLOCKED_ON_USER`, `disposition="stopped_without_sentinel"`, no
 `blocked_reason`, and **no `unproductive_attempts` charge** (the park post is
 positive evidence the stage did its work).
@@ -513,24 +519,50 @@ Signal-only and per tick: bucket latching and `session.liveness_changed` are
 unaffected, every other disposition still pages, and once the row is requeued
 (its status leaves `BLOCKED_ON_USER`) the signal applies again.
 
-**Coverage limits.** The evidence is derived from the transcript, so the
-detector only recognises GitHub `gh issue comment` posts joined either to a
-prior `Write` of a literal `--body-file <path>` or to an inline `--body`
-argument, and the `gh issue comment` text must **start a shell command** —
-`timeout 60 gh …` and the second link of an `&&` chain qualify; inert text
-does not. The body is bound to **that invocation**: it is read only from the
-matched command's own shell segment (split at `;`, `&&`, `||`, `|` and
-newline, quote- and heredoc-aware) and parsed argv-style, so a `--body-file`
-belonging to a later or embedded command is never borrowed, and a segment with
-no body flag, or with more than one, is not evidence. A heredoc that writes an example post, an `echo` of one, or a body
-value opening with `$(`, a backtick or `<<` are all rejected: each carries the
-same header and marker a real post does while posting nothing, so counting one
-would falsely park a live session's row. A `--body-file` path holding an
-unexpanded shell variable, a body
-assembled by a heredoc, the `-F`/`-b` short flags, `--repo` before the issue
-number, and `--body-file -` are **documented false negatives**: each defers
-exactly as before, never producing a false park. Linear-tracked tickets get
-no behavior change.
+**Producer contract and limits.** The marker is a *recorded claim by the
+worker* that it posted its park comment and is taking that exit — not an
+observation by cw that any comment exists. cw never reads the tracker, which
+is what makes the evidence tracker-agnostic (GitHub and Linear alike). What
+follows from that:
+
+- **One wired stage.** Only the plan stage's consolidated park stamps today:
+  step 3a of `.claude/commands/auto-dev-plan-appendix.md`, after the single
+  `## Pending Verification Scan` comment that `ambiguities_pending_resolution`,
+  `premises_pending_verification`, `plan_pending_approval`,
+  `deferred_stub_unresolved` and `ambiguity_scan_unconverged` all share. The
+  impl and review park paths do not stamp yet (#2228); no impl exit posts a
+  tracker comment at all, so there is nothing there for the marker to mean.
+- **Crash window.** A worker that dies between deciding its exit and running
+  `cw signal-park` leaves no marker, and the Stop hook defers exactly as it did
+  before #2135 — the row then waits for the `stale_45m` liveness signal or an
+  operator.
+- **No marker means defer**, and so does a malformed one (treated as absent,
+  silently — the writer is cw code, so the only routes here are a hand edit or
+  corruption).
+- **A missing or unreadable transcript defers.** Conjunct 4 is negative
+  evidence: without a clean read, a late frame cannot be ruled out, so an
+  unreadable file and a torn final line both suppress the park.
+- **A `Read` of a stage doc after the stamp also defers**, because the quoted
+  frame literal lands in a `tool_result` the guard sees. That fails toward
+  pre-#2135 behavior.
+- **Stale markers do not count.** `cw.spawn` rewrites `cw-context.json`
+  wholesale on every dispatch, which is the *only* staleness guard — the
+  session-id and ticket-id checks compare that file with itself. A `cw bg`
+  followed by `cw resume` of the same daemon session re-enters under the same
+  session id **without** rewriting the file, so a marker stamped earlier in the
+  session can still cover the row. That path is a documented limit, not closed
+  in code.
+- **cwd mismatch defers.** A stamp run from a subdirectory, a gate worktree or
+  a nested agent worktree finds no `.claude/cw-context.json`, fails open, and
+  the hook reads no marker.
+
+**Operator recovery.** Requeue a parked row with `cw dev-queue requeue`. `cw
+dev-queue approve` **refuses** it (`_not_at_approval_gate`,
+`src/cw/dev_queue/approval.py`: the row has neither a scope-gated `last_result`
+nor an approval-gate disposition) — including when the parked comment was
+asking for plan approval, which is the common plan-stage case. The parked
+session stays ACTIVE, so a requeue may hit `HookContextConflictError` while it
+is still live; close it first with `cw spawn close --confirmed-dead`.
 
 ---
 
