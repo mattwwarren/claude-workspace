@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -284,3 +286,244 @@ def test_empty_path_entry_warns_and_is_ignored(
     messages = [r.message for r in caplog.records]
     assert any(_mod.CANONICAL_REPO_PATHS_ENV in m for m in messages)
     assert any("acme/widgets" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# register / drop / complete report a result (#2189)
+# ---------------------------------------------------------------------------
+
+_REPO = "acme/widgets"
+_KEY = "acme/widgets#42"
+
+
+@pytest.fixture
+def state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point review_monitor's state at an isolated per-test directory."""
+    central = tmp_path / "monitor-state"
+    monkeypatch.setattr(_mod, "CENTRAL_STATE_DIR", central)
+    monkeypatch.setattr(_mod, "LEGACY_STATE_FILE", tmp_path / "legacy-state.json")
+    monkeypatch.setattr(_mod, "CANONICAL_REPO_PATHS", {})
+    monkeypatch.delenv(_mod.CANONICAL_REPO_PATHS_ENV, raising=False)
+    return central
+
+
+def _run_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *argv: str,
+) -> tuple[int, str, str]:
+    """Run the real ``main()`` with *argv*; return (exit code, stdout, stderr)."""
+    monkeypatch.setattr(sys, "argv", ["review_monitor.py", *argv])
+    code = 0
+    try:
+        _mod.main()
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _register_argv(sha: str = "abc123") -> list[str]:
+    return [
+        "register",
+        "42",
+        "--role",
+        "author",
+        "--repo",
+        _REPO,
+        "--repo-path",
+        "/canon/widgets",
+        "--sha",
+        sha,
+    ]
+
+
+def test_register_cli_prints_one_line_json_on_success(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, out, _err = _run_cli(monkeypatch, capsys, *_register_argv())
+
+    assert code == 0
+    assert out.count("\n") == 1
+    assert json.loads(out) == {
+        "registered": True,
+        "key": _KEY,
+        "sha": "abc123",
+        "updated": False,
+    }
+    assert _mod.load_state(_REPO).monitored[_KEY].last_seen_sha == "abc123"
+
+
+def test_register_cli_reregister_reports_updated_true(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_cli(monkeypatch, capsys, *_register_argv("abc123"))
+    code, out, _err = _run_cli(monkeypatch, capsys, *_register_argv("def456"))
+
+    assert code == 0
+    assert json.loads(out) == {
+        "registered": True,
+        "key": _KEY,
+        "sha": "def456",
+        "updated": True,
+    }
+    pr = _mod.load_state(_REPO).monitored[_KEY]
+    assert pr.last_seen_sha == "def456"
+    assert pr.delta_base_sha == "def456"
+
+
+def test_register_cli_with_threads_and_details_still_one_line(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, out, _err = _run_cli(
+        monkeypatch,
+        capsys,
+        *_register_argv(),
+        "--threads",
+        "t1",
+        "t2",
+        "--thread-details",
+        '[{"id":"t1","file":"a.py","line":3}]',
+    )
+
+    assert code == 0
+    assert out.count("\n") == 1
+    assert json.loads(out)["registered"] is True
+    pr = _mod.load_state(_REPO).monitored[_KEY]
+    assert pr.our_threads == ["t1", "t2"]
+    assert pr.thread_status["t1"].file == "a.py"
+    assert pr.thread_status["t1"].line == 3
+
+
+def test_register_cli_exits_nonzero_when_state_unwritable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A regular file where the state directory should be: the real mkdir in
+    # save_state raises FileExistsError (an OSError) — no mocking needed.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    monkeypatch.setattr(_mod, "CENTRAL_STATE_DIR", blocker)
+    monkeypatch.setattr(_mod, "LEGACY_STATE_FILE", tmp_path / "legacy-state.json")
+    monkeypatch.setattr(_mod, "CANONICAL_REPO_PATHS", {})
+    monkeypatch.delenv(_mod.CANONICAL_REPO_PATHS_ENV, raising=False)
+
+    code, out, err = _run_cli(monkeypatch, capsys, *_register_argv())
+
+    assert code == 1
+    assert out == ""
+    assert "Error" in err
+    assert _KEY in err
+    assert "registered" not in out
+
+
+def test_drop_cli_reports_dropped_true(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_cli(monkeypatch, capsys, *_register_argv())
+    code, out, _err = _run_cli(monkeypatch, capsys, "drop", "42", "--repo", _REPO)
+
+    assert code == 0
+    assert out.count("\n") == 1
+    assert json.loads(out) == {"dropped": True, "key": _KEY}
+    assert _KEY not in _mod.load_state(_REPO).monitored
+
+
+def test_drop_cli_not_monitored_reports_false_exit_0(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, out, _err = _run_cli(monkeypatch, capsys, "drop", "42", "--repo", _REPO)
+
+    assert code == 0
+    assert json.loads(out) == {"dropped": False, "key": _KEY}
+
+
+def test_complete_cli_reports_completed_true_with_reason(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_cli(monkeypatch, capsys, *_register_argv())
+    code, out, _err = _run_cli(
+        monkeypatch, capsys, "complete", "42", "--repo", _REPO, "--reason", "approved"
+    )
+
+    assert code == 0
+    assert out.count("\n") == 1
+    assert json.loads(out) == {"completed": True, "key": _KEY, "reason": "approved"}
+    state = _mod.load_state(_REPO)
+    assert _KEY not in state.monitored
+    assert _KEY in state.completed
+
+
+def test_complete_cli_not_monitored_reports_false_exit_0(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, out, _err = _run_cli(monkeypatch, capsys, "complete", "42", "--repo", _REPO)
+
+    assert code == 0
+    assert json.loads(out) == {"completed": False, "key": _KEY, "reason": "merged"}
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["drop", "42", "--repo", _REPO],
+        ["complete", "42", "--repo", _REPO],
+    ],
+    ids=["drop", "complete"],
+)
+def test_drop_and_complete_cli_exit_nonzero_on_state_write_error(
+    argv: list[str],
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_cli(monkeypatch, capsys, *_register_argv())
+
+    disk_full_message = "disk full"
+
+    def _raise_oserror(*_a: object, **_k: object) -> None:
+        raise OSError(disk_full_message)
+
+    monkeypatch.setattr(_mod, "save_state", _raise_oserror)
+    code, out, err = _run_cli(monkeypatch, capsys, *argv)
+
+    assert code == 1
+    assert out == ""
+    assert "Error:" in err
+    assert argv[0] in err
+    assert _KEY in err
+    assert "disk full" in err
+
+
+def test_register_subprocess_prints_result_line(tmp_path: Path) -> None:
+    env = {
+        **os.environ,
+        "GLOBAL_CLAUDE_REVIEW_MONITOR_DIR": str(tmp_path / "state"),
+    }
+    env.pop(_mod.CANONICAL_REPO_PATHS_ENV, None)
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT), *_register_argv()],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["registered"] is True
