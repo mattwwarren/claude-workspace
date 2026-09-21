@@ -57,10 +57,19 @@ a ``review.finding_claim_shadowed`` event instead of being applied, so the
 matcher can be measured on real rewordings before anyone arms it. The exact
 tier above is unaffected by the gate in either direction.
 
-Public surface: :class:`FindingDisposition`, :data:`Outcome`,
-:data:`SETTLE_SECTION_HEADING`, :func:`build_finding_disposition_ledger`,
+#2210's round-2 review found the other half of that risk: every guard the
+settle path added lives in the WRITER, and the reader honoured any well-formed
+block it was handed — including one a dispatch worker could write into a ticket
+comment itself. :func:`partition_enforceable_dispositions` moves the contract
+to the reader: a record is applied only when it carries the full provenance
+set, and anything short of it is ignored, logged, and reported on the comment.
+
+Public surface: :class:`FindingDisposition`, :class:`RefusedDisposition`,
+:data:`Outcome`, :data:`SETTLE_SECTION_HEADING`,
+:func:`build_finding_disposition_ledger`,
 :func:`render_finding_disposition_block`,
-:func:`parse_finding_disposition_block`, :func:`merge_finding_dispositions`,
+:func:`parse_finding_disposition_block`,
+:func:`partition_enforceable_dispositions`, :func:`merge_finding_dispositions`,
 :func:`split_disposition_key`, :func:`suppress_adjudicated_findings`.
 """
 
@@ -69,9 +78,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -176,6 +186,11 @@ class FindingDisposition(BaseModel):
     what lets a future per-record rollback target exactly one entry rather than
     a key's worth of them. It is deliberately not part of identity: nothing
     matches on it.
+
+    Every field stays optional at the MODEL layer so a pre-#2210 marker or
+    queue row still *loads*. Loading is not applying: whether a record may be
+    acted on is decided by :func:`partition_enforceable_dispositions`, at the
+    reader, on every consumption path.
     """
 
     outcome: Outcome
@@ -184,6 +199,26 @@ class FindingDisposition(BaseModel):
     actor: str = ""
     reviewed_sha: str = ""
     summary: str = ""
+
+
+class RefusedDisposition(BaseModel):
+    """One ledger record the reader refused to apply, and why (#2210 round 2).
+
+    Carried on ``ReviewVerdict.refused_dispositions`` and rendered onto the
+    posted review comment, because "ignored" must not mean "invisible": an
+    operator has to be able to see that something tried to suppress a finding
+    and was refused. ``key`` is the ledger key (``file::normalized summary``),
+    ``missing`` the provenance fields it could not produce, in the fixed order
+    :func:`_provenance_gaps` checks them.
+
+    Lives here rather than in :mod:`cw.review_findings` — beside the contract
+    it enforces, and importable by :mod:`cw.models.tasks`' own importer
+    without an import-cycle exemption (this module still imports nothing from
+    ``cw`` at module scope).
+    """
+
+    key: str
+    missing: list[str] = Field(default_factory=list)
 
 
 def _disposition_key(file: str, summary: str) -> str | None:
@@ -312,6 +347,97 @@ def merge_finding_dispositions(
         if current is None or entry.recorded_at >= current.recorded_at:
             merged[key] = entry
     return merged
+
+
+def _is_utc_timestamp(value: str) -> bool:
+    """Whether *value* is an ISO-8601 instant expressed in UTC (#2210 round 2).
+
+    ``cw review settle`` stamps ``%Y-%m-%dT%H:%M:%SZ`` off its own clock, so a
+    record that cannot be parsed back to a UTC instant did not come from it. A
+    naive or offset stamp is refused rather than coerced: "when was this
+    silenced" is an audit question, and an answer nobody can place on a
+    timeline is not one.
+    """
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() == timedelta(0)
+
+
+def _provenance_gaps(key: str, entry: FindingDisposition) -> list[str]:
+    """Which parts of the audit record *entry* cannot produce (#2210 round 2).
+
+    Empty means the record answers all five questions an applied suppression
+    must answer: WHICH finding (the key's file and normalized summary, plus
+    the verbatim ``summary`` the key's normalization loses), WHO settled it,
+    WHEN, against WHAT code, and WHY. Order is fixed so the rendered line and
+    the log message read the same way every time.
+    """
+    file, normalized = split_disposition_key(key)
+    checks = (
+        ("identity", bool(file.strip() and normalized.strip())),
+        ("actor", bool(entry.actor.strip())),
+        ("recorded_at", _is_utc_timestamp(entry.recorded_at)),
+        ("reviewed_sha", bool(entry.reviewed_sha.strip())),
+        ("rationale", bool(entry.rationale.strip())),
+        ("summary", bool(entry.summary.strip())),
+    )
+    return [name for name, satisfied in checks if not satisfied]
+
+
+def partition_enforceable_dispositions(
+    ledger: dict[str, FindingDisposition],
+) -> tuple[dict[str, FindingDisposition], list[RefusedDisposition]]:
+    """Split *ledger* into records that may be applied, and refusals (#2210).
+
+    **The contract is enforced at the READER, and this is that reader.**
+    Round 1 put every guard on the minting side — the mandatory ``--reason``,
+    the resolved actor, the CLI-stamped clock, the refusal inside a DAEMON
+    worker — all of which live in ``cw review settle``. A marker pasted by
+    hand, or one a worker writes into a ticket comment itself, never passes
+    through any of them, so a writer-only contract enforces nothing. Every
+    consumption path (the reviewer prompt's binding "previously adjudicated"
+    block, and :func:`suppress_adjudicated_findings`' mechanical backstop)
+    goes through here instead, so no path can apply an under-provenanced
+    record.
+
+    Deliberately NOT a validator on :class:`FindingDisposition`: a record must
+    still LOAD — a pre-#2210 marker, and every persisted queue row written
+    before the provenance fields existed, are legitimate history and must not
+    raise on parse. They simply may not be *acted on*. The same goes for an
+    ``ACCEPTED`` entry, which suppresses nothing mechanically but reaches the
+    reviewer as a binding decision, and is refused on the same terms.
+
+    Logging is the caller's, not this function's: several readers run per
+    pass, and one WARNING per refused record per pass is the signal — one per
+    record per *reader* is noise.
+    """
+    enforceable: dict[str, FindingDisposition] = {}
+    refused: list[RefusedDisposition] = []
+    for key, entry in sorted(ledger.items()):
+        gaps = _provenance_gaps(key, entry)
+        if gaps:
+            refused.append(RefusedDisposition(key=key, missing=gaps))
+            continue
+        enforceable[key] = entry
+    return enforceable, refused
+
+
+def _log_refused_dispositions(
+    refused: list[RefusedDisposition], ticket_id: str
+) -> None:
+    """Say out loud, once per record, that a suppression was refused."""
+    for record in refused:
+        _log.warning(
+            "auto-dev: ignoring a finding disposition with incomplete "
+            "provenance -- NOT applied as a suppression (ticket=%s, key=%s, "
+            "missing=%s). `cw review settle` is the only supported producer "
+            "of a disposition marker; hand-authored blocks are unsupported.",
+            ticket_id,
+            record.key,
+            ", ".join(record.missing),
+        )
 
 
 def _render_suppression_signal(
@@ -722,6 +848,15 @@ def suppress_adjudicated_findings(
     and ``review.deferred`` are preserved verbatim — a suppression is not a
     fix, so the originally-found counts must keep saying what was found.
 
+    **Every record is gated on provenance first** (#2210 round 2). The ledger
+    is partitioned by :func:`partition_enforceable_dispositions` before
+    anything is matched: a record that cannot say which finding, who settled
+    it, when, against what code and why is never applied, is logged once at
+    WARNING naming the ticket, and is stamped onto
+    ``ReviewVerdict.refused_dispositions`` so the posted comment reports the
+    attempt instead of swallowing it. A refusal is per-record — a
+    well-formed sibling in the same ledger still applies.
+
     ``claim_tier_enabled`` (#2210) arms the fuzzy second tier for THIS pass.
     It defaults to ``False``, which is the fail-safe floor: a call path that
     never threads it is off, and the exact tier behaves identically either
@@ -732,9 +867,13 @@ def suppress_adjudicated_findings(
     consumer can group a re-derived finding's events by ticket, file and
     summary and count the distinct reviewed commits behind them.
     """
-    if not ledger:
+    enforceable, refused = partition_enforceable_dispositions(ledger)
+    if refused:
+        _log_refused_dispositions(refused, ticket_id)
+        verdict = verdict.model_copy(update={"refused_dispositions": refused})
+    if not enforceable:
         return verdict
-    matches = _ledger_matches(verdict.accepted, ledger, ticket_id=ticket_id)
+    matches = _ledger_matches(verdict.accepted, enforceable, ticket_id=ticket_id)
     if not matches:
         return verdict
 

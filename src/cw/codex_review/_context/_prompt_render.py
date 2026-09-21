@@ -21,7 +21,10 @@ from cw.codex_review._context._prompt_text import (
     _select_output_instructions,
 )
 from cw.codex_review._context._sensitive_files import _render_sensitive_block
-from cw.review_finding_dispositions import split_disposition_key
+from cw.review_finding_dispositions import (
+    partition_enforceable_dispositions,
+    split_disposition_key,
+)
 from cw.review_findings import ReviewerFindingsDocument, parse_reviewer_document
 
 if TYPE_CHECKING:
@@ -80,11 +83,21 @@ def _render_adjudicated_findings_block(
     only on the codex single-pass lane and fix-loop cycle 0 — on later cycles
     ``_admit_new_must_fix`` diverts an out-of-delta contest to the debt ledger
     without reading it. The per-entry lines are unchanged.
+
+    **Provenance-gated (#2210 round 2).** This block is an *application*
+    surface, not a display one: it tells the reviewer the decision is BINDING,
+    so an entry reaching it suppresses the finding through the model whether
+    or not the mechanical backstop ever sees it. It therefore renders only
+    what :func:`~cw.review_finding_dispositions.partition_enforceable_dispositions`
+    admits, and a ledger with nothing enforceable in it renders nothing at
+    all. The WARNING for each refused record is emitted once per pass by
+    ``suppress_adjudicated_findings``, not here.
     """
-    if not ledger:
+    enforceable, _refused = partition_enforceable_dispositions(ledger)
+    if not enforceable:
         return None
     lines = [_ADJUDICATED_HEADER, _ADJUDICATED_INSTRUCTIONS]
-    for key, entry in sorted(ledger.items()):
+    for key, entry in sorted(enforceable.items()):
         file, summary = split_disposition_key(key)
         rationale = f" ({entry.rationale})" if entry.rationale else ""
         lines.append(

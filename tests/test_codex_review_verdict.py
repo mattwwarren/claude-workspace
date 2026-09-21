@@ -36,6 +36,8 @@ from cw.codex_review._verdict._health import (
     _format_degraded_document_highlights,
 )
 from cw.codex_review._verdict._render import (
+    _REFUSED_DISPOSITION_HEADING,
+    _REFUSED_MAX_ROWS,
     _SETTLE_COMPACT_SUMMARY_MAX,
     _SETTLE_MAX_COMPACT_ROWS,
     _SETTLE_MAX_PAYLOADS,
@@ -48,6 +50,7 @@ from cw.models.enums import OrchestratorEventType
 from cw.review_finding_dispositions import (
     SETTLE_SECTION_HEADING,
     FindingDisposition,
+    RefusedDisposition,
     _disposition_key,
 )
 from cw.review_findings import (
@@ -1378,6 +1381,11 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
             "outcome": "REJECTED",
             "rationale": "settled by the operator in an earlier round",
             "recorded_at": "2026-08-16T00:00:00Z",
+            # #2210 round 2: the reader applies only fully-provenanced
+            # records, so the fixture carries what `cw review settle` writes.
+            "actor": "mattwwarren",
+            "reviewed_sha": "abc1234",
+            "summary": finding.summary,
         }
         payload.update(overrides)
         return {key: FindingDisposition.model_validate(payload)}
@@ -1535,6 +1543,9 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
                 outcome="REJECTED",
                 rationale="settled by the operator in an earlier round",
                 recorded_at="2026-08-16T00:00:00Z",
+                actor="mattwwarren",
+                reviewed_sha="abc1234",
+                summary=CLAIM_ROW1_RECORDED,
             )
         }
         return synthesize_codex_review_result(
@@ -1632,6 +1643,64 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
         assert result.status == "stage_complete"
         assert verdict is not None
         assert verdict.blocking is False
+
+
+class TestRenderRefusedDispositions:
+    """#2210 round 2: a refused suppression is reported, never silent.
+
+    The reader drops a disposition record that cannot say who settled the
+    finding, when, against what code, and why. "Dropped" must not mean
+    "invisible": an operator has to be able to see that something tried to
+    suppress a finding and was refused, and what to do about it.
+    """
+
+    def _verdict(self, *refused: RefusedDisposition) -> ReviewVerdict:
+        return ReviewVerdict(
+            blocking=False,
+            must_fix=[],
+            reviewed_sha="sha",
+            review=Review(
+                must_fix_initial=0,
+                should_fix=0,
+                fix_cycles_used=0,
+                deferred=0,
+                agents_run=1,
+            ),
+            refused_dispositions=list(refused),
+        )
+
+    def _body(self, *refused: RefusedDisposition) -> str:
+        return render_verdict_comment(self._verdict(*refused), fix_loop_enabled=False)
+
+    def test_nothing_refused_renders_nothing(self) -> None:
+        assert _REFUSED_DISPOSITION_HEADING not in self._body()
+
+    def test_a_refused_record_names_its_finding_and_its_gaps(self) -> None:
+        key = _disposition_key("src/cw/foo.py", "Bug here")
+        assert key is not None
+        body = self._body(
+            RefusedDisposition(key=key, missing=["actor", "reviewed_sha"])
+        )
+
+        assert _REFUSED_DISPOSITION_HEADING in body
+        assert "src/cw/foo.py" in body
+        assert "bug here" in body
+        assert "actor, reviewed_sha" in body
+        # It must say what the operator is supposed to do instead.
+        assert "cw review settle" in body
+        assert "unsupported" in body
+
+    def test_the_section_is_capped_with_a_counted_residue(self) -> None:
+        refused = []
+        for index in range(_REFUSED_MAX_ROWS + 3):
+            key = _disposition_key(f"src/cw/mod{index}.py", "Bug here")
+            assert key is not None
+            refused.append(RefusedDisposition(key=key, missing=["actor"]))
+        body = self._body(*refused)
+
+        assert "src/cw/mod0.py" in body
+        assert f"src/cw/mod{_REFUSED_MAX_ROWS}.py" not in body
+        assert "and 3 more refused" in body
 
 
 class TestRenderSettlePayloads:

@@ -2056,6 +2056,11 @@ class TestRereviewForwardsFindingDispositions:
                 outcome="REJECTED",
                 rationale="settled by the operator in an earlier round",
                 recorded_at="2026-08-16T00:00:00Z",
+                # #2210 round 2: only a fully-provenanced record is applied,
+                # so the fixture carries what `cw review settle` writes.
+                actor="mattwwarren",
+                reviewed_sha="abc1234",
+                summary="MFA",
             )
         }
 

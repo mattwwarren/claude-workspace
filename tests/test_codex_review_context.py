@@ -2141,6 +2141,12 @@ def _disposition_ledger(
         "outcome": "REJECTED",
         "rationale": "intentional tradeoff, settled in an earlier round",
         "recorded_at": "2026-08-16T00:00:00Z",
+        # #2210 round 2: the reader applies a record only with full
+        # provenance, so the default fixture carries what `cw review settle`
+        # records -- otherwise these tests would stop exercising the block.
+        "actor": "mattwwarren",
+        "reviewed_sha": "abc1234",
+        "summary": summary,
     }
     payload.update(overrides)
     return {key: FindingDisposition.model_validate(payload)}
@@ -2263,6 +2269,29 @@ class TestRenderAdjudicatedFindingsBlock:
         assert block is not None
         assert "in any wording" not in block
         assert "discarded unread" not in block
+
+    def test_an_under_provenanced_entry_never_reaches_the_prompt(self) -> None:
+        """#2210 round 2: the prompt is an application surface too.
+
+        This block tells the reviewer the decision is BINDING, so honouring a
+        record with no recorded actor would let a hand-pasted (or
+        worker-authored) block suppress a finding through the model instead of
+        through the backstop — the same unaudited suppression, one layer up.
+        """
+        assert _render_adjudicated_findings_block(_disposition_ledger(actor="")) is None
+
+    def test_only_the_provenanced_half_of_a_mixed_ledger_renders(self) -> None:
+        ledger = {
+            **_disposition_ledger(),
+            **_disposition_ledger(
+                file="src/cw/bar.py", summary="Other bug", reviewed_sha=""
+            ),
+        }
+        block = _render_adjudicated_findings_block(ledger)
+
+        assert block is not None
+        assert block.count("\n- ") == 1
+        assert "src/cw/bar.py" not in block
 
     def test_per_entry_lines_are_unchanged(self) -> None:
         block = _render_adjudicated_findings_block(_disposition_ledger())

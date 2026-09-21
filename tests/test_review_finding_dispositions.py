@@ -31,6 +31,7 @@ from cw.review_finding_dispositions import (
     build_finding_disposition_ledger,
     merge_finding_dispositions,
     parse_finding_disposition_block,
+    partition_enforceable_dispositions,
     render_finding_disposition_block,
     split_disposition_key,
     suppress_adjudicated_findings,
@@ -42,6 +43,8 @@ from .conftest import _make_finding
 
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-1838"
+#: The gh login ``cw review settle`` would record as having settled a finding.
+_OPERATOR = "mattwwarren"
 
 
 def _accepted(finding: Finding, **overrides: object) -> AcceptedFinding:
@@ -73,26 +76,41 @@ def _verdict(*accepted: AcceptedFinding, **overrides: object) -> ReviewVerdict:
 
 
 def _entry(**overrides: object) -> FindingDisposition:
+    """A FindingDisposition shaped the way ``cw review settle`` mints one.
+
+    Carries the full provenance set by default (#2210 round 2): the reader
+    applies a record only when it can say which finding, who settled it, when,
+    against what code, and why — so a fixture missing any of those would
+    silently stop testing suppression at all.
+    """
     kwargs: dict[str, object] = {
         "outcome": "REJECTED",
         "rationale": "intentional tradeoff, settled in round 1",
         "recorded_at": "2026-08-16T00:00:00Z",
+        "actor": _OPERATOR,
+        "reviewed_sha": "abc1234",
+        "summary": "Bug here",
     }
     kwargs.update(overrides)
     return FindingDisposition.model_validate(kwargs)
 
 
 def _ledger_for(
-    file: str, summary: str, **overrides: object
+    file: str, summary: str, /, **overrides: object
 ) -> dict[str, FindingDisposition]:
     """A single-entry ledger keyed on ``(file, summary)`` (#2210).
 
     Module-scope so the claim/contest/gate classes added by #2210 can build
     multi-entry ledgers as dict unions of it rather than each growing a
     near-identical class-local builder.
+
+    Both parameters are positional-only so ``**overrides`` can still carry a
+    ``summary=`` of its own — the entry's VERBATIM summary is a provenance
+    field a test may want to blank independently of the key it is filed under.
     """
     key = _disposition_key(file, summary)
     assert key is not None
+    overrides.setdefault("summary", summary)
     return {key: _entry(**overrides)}
 
 
@@ -1001,6 +1019,161 @@ class TestBuildFindingDispositionLedger:
         )
         rendered = render_finding_disposition_block(ledger)
         assert parse_finding_disposition_block([rendered]) == ledger
+
+
+# ---------------------------------------------------------------------------
+# Reader-enforced provenance (#2210 round 2)
+# ---------------------------------------------------------------------------
+
+
+class TestReaderEnforcedProvenance:
+    """The READER refuses a record that cannot say who/when/against what/why.
+
+    Every guard #2210 added — the mandatory ``--reason``, the recorded actor,
+    the CLI-stamped timestamp, the reviewed sha, the refusal inside a worker —
+    lives in ``cw review settle``, the WRITER. A block pasted by hand, or one a
+    worker writes into a ticket comment itself, never passes through it, so
+    enforcing there enforces nothing. These tests pin the enforcement to the
+    reader instead: a record short of the full provenance set is ignored,
+    logged, and reported, never applied.
+    """
+
+    def _blocking(self, finding: Finding) -> ReviewVerdict:
+        return _verdict(_accepted(finding))
+
+    def test_full_provenance_record_is_applied(self) -> None:
+        finding = _make_finding(severity="MUST_FIX")
+        result = suppress_adjudicated_findings(
+            self._blocking(finding), _ledger(finding), ticket_id=_TICKET
+        )
+
+        assert result.blocking is False
+        assert result.accepted[0].disposition == "rejected"
+        assert result.refused_dispositions == []
+
+    @pytest.mark.parametrize(
+        ("gap", "overrides"),
+        [
+            ("actor", {"actor": ""}),
+            ("actor", {"actor": "   "}),
+            ("rationale", {"rationale": ""}),
+            ("reviewed_sha", {"reviewed_sha": ""}),
+            ("summary", {"summary": ""}),
+            ("recorded_at", {"recorded_at": ""}),
+            ("recorded_at", {"recorded_at": "whenever"}),
+            ("recorded_at", {"recorded_at": "2026-08-16T00:00:00+02:00"}),
+        ],
+    )
+    def test_record_missing_provenance_is_never_applied(
+        self, gap: str, overrides: dict[str, object]
+    ) -> None:
+        finding = _make_finding(severity="MUST_FIX")
+        result = suppress_adjudicated_findings(
+            self._blocking(finding), _ledger(finding, **overrides), ticket_id=_TICKET
+        )
+
+        assert result.blocking is True
+        assert result.must_fix == [finding]
+        assert result.accepted[0].disposition == "fixed"
+        assert [r.key for r in result.refused_dispositions] == [
+            _disposition_key(finding.file, finding.summary)
+        ]
+        assert gap in result.refused_dispositions[0].missing
+        assert read_events() == []
+
+    def test_a_pre_provenance_record_is_refused_rather_than_honoured(self) -> None:
+        """A marker or queue row written before #2210 carries no provenance.
+
+        Those fields are optional and defaulted so such a record still LOADS —
+        but loading is not applying, and an entry that cannot name an actor,
+        a sha or a verbatim summary is exactly the unaudited suppression the
+        reader now refuses.
+        """
+        finding = _make_finding(severity="MUST_FIX")
+        key = _disposition_key(finding.file, finding.summary)
+        assert key is not None
+        legacy = {
+            key: FindingDisposition.model_validate(
+                {
+                    "outcome": "REJECTED",
+                    "rationale": "settled in round 1",
+                    "recorded_at": "2026-08-16T00:00:00Z",
+                }
+            )
+        }
+        result = suppress_adjudicated_findings(
+            self._blocking(finding), legacy, ticket_id=_TICKET
+        )
+
+        assert result.blocking is True
+        assert sorted(result.refused_dispositions[0].missing) == [
+            "actor",
+            "reviewed_sha",
+            "summary",
+        ]
+
+    def test_refusal_is_logged_once_at_warning_naming_ticket_and_record(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        finding = _make_finding(severity="MUST_FIX")
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            suppress_adjudicated_findings(
+                self._blocking(finding),
+                _ledger(finding, actor=""),
+                ticket_id=_TICKET,
+            )
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert _TICKET in message
+        assert finding.file in message
+        assert "actor" in message
+
+    def test_a_refused_record_does_not_stop_a_well_formed_sibling(self) -> None:
+        good = _make_finding(severity="MUST_FIX")
+        bad = _make_finding(
+            severity="MUST_FIX", file="src/cw/bar.py", summary="Other bug"
+        )
+        ledger = {**_ledger(good), **_ledger(bad, actor="")}
+
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(good), _accepted(bad)), ledger, ticket_id=_TICKET
+        )
+
+        assert [af.disposition for af in result.accepted] == ["rejected", "fixed"]
+        assert result.blocking is True
+        assert [r.key for r in result.refused_dispositions] == [
+            _disposition_key(bad.file, bad.summary)
+        ]
+
+    def test_an_under_provenanced_accepted_record_is_refused_too(self) -> None:
+        """An ``ACCEPTED`` entry is binding on the reviewer's prompt.
+
+        It changes no gate mechanically, but it reaches the model as a decided
+        finding — so an unaudited one is a suppression channel of its own and
+        gets the same treatment.
+        """
+        finding = _make_finding(severity="MUST_FIX")
+        result = suppress_adjudicated_findings(
+            self._blocking(finding),
+            _ledger(finding, outcome="ACCEPTED", reviewed_sha=""),
+            ticket_id=_TICKET,
+        )
+
+        assert [r.missing for r in result.refused_dispositions] == [["reviewed_sha"]]
+
+    def test_partition_splits_the_ledger_and_names_every_gap(self) -> None:
+        good = _make_finding(severity="MUST_FIX")
+        bad = _make_finding(
+            severity="MUST_FIX", file="src/cw/bar.py", summary="Other bug"
+        )
+        ledger = {**_ledger(good), **_ledger(bad, actor="", reviewed_sha="")}
+
+        enforceable, refused = partition_enforceable_dispositions(ledger)
+
+        assert list(enforceable) == [_disposition_key(good.file, good.summary)]
+        assert [r.missing for r in refused] == [["actor", "reviewed_sha"]]
 
 
 # ---------------------------------------------------------------------------

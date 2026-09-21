@@ -186,6 +186,11 @@ class TestPrepareReviewPass:
                     outcome="REJECTED",
                     rationale="settled in an earlier round",
                     recorded_at="2026-08-16T00:00:00Z",
+                    # #2210 round 2: only a fully-provenanced record is
+                    # applied, so the fixture carries what the writer records.
+                    actor="mattwwarren",
+                    reviewed_sha="abc1234",
+                    summary="Bug here",
                 )
             },
         )
@@ -240,6 +245,9 @@ class TestPrepareReviewPass:
                     outcome="REJECTED",
                     rationale="settled in an earlier round",
                     recorded_at="2026-08-16T00:00:00Z",
+                    actor="mattwwarren",
+                    reviewed_sha="abc1234",
+                    summary=CLAIM_ROW1_RECORDED,
                 )
             },
         )

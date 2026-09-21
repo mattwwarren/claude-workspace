@@ -19,7 +19,10 @@ import re
 from typing import TYPE_CHECKING, get_args
 
 from cw.review_debt import fingerprint_v1
-from cw.review_finding_dispositions import SETTLE_SECTION_HEADING
+from cw.review_finding_dispositions import (
+    SETTLE_SECTION_HEADING,
+    split_disposition_key,
+)
 from cw.review_findings import Severity
 
 if TYPE_CHECKING:
@@ -135,6 +138,27 @@ _SETTLE_OVERFLOW_NOTE = (
     "these by hand with `cw review settle` — the identity is the file and the "
     "verbatim summary from its MUST_FIX line above:"
 )
+
+# #2210 round 2: disposition records the reader refused to apply. A refusal's
+# EFFECT is already visible (the finding keeps blocking); what would otherwise
+# be invisible is the attempt, so it gets its own section rather than an
+# annotation on a finding that may not even be in this pass.
+_REFUSED_DISPOSITION_HEADING = "### Disposition records refused (no provenance)"
+_REFUSED_DISPOSITION_NOTE = (
+    "These recorded dispositions were IGNORED, not applied. Each is missing "
+    "provenance that `cw review settle` always records, and a suppression "
+    "that cannot say who settled the finding, when, against what code and "
+    "why is not an audit record. Hand-authoring a "
+    "`REVIEW-FINDING-DISPOSITIONS` block is unsupported — `cw review settle` "
+    "is the only supported producer, because it is the only path that records "
+    "provenance and refuses to run inside a dispatch worker. Re-settle each "
+    "finding below with it and post the marker it renders."
+)
+# Bounded for the same reason the settle section is: the rest of the comment
+# needs the remaining budget, and GitHub caps a body at 65,536 characters. A
+# row is one short line, so this cap costs far less than the payload section's.
+_REFUSED_MAX_ROWS = 20
+_REFUSED_SUMMARY_MAX = 120
 
 
 def _disposition_annotation(accepted: AcceptedFinding) -> str:
@@ -650,6 +674,37 @@ def _render_debt_note(verdict: ReviewVerdict) -> list[str]:
     return lines
 
 
+def _render_refused_dispositions(verdict: ReviewVerdict) -> list[str]:
+    """Report every disposition record the reader refused to apply (#2210).
+
+    The reader drops an under-provenanced ledger entry rather than letting it
+    silence a finding. Dropping it silently would trade one invisible act for
+    another: the operator would see a finding they believe they settled come
+    back, with nothing anywhere saying why. This section says why, names the
+    record, and points at the only supported way to produce one.
+
+    Empty-returns-``[]`` like every other per-concern helper here, and renders
+    on blocking and clean passes alike — a refused ``ACCEPTED`` record is worth
+    reporting even when nothing blocks.
+    """
+    refused = verdict.refused_dispositions
+    if not refused:
+        return []
+    lines = [_REFUSED_DISPOSITION_HEADING, "", _REFUSED_DISPOSITION_NOTE, ""]
+    for record in refused[:_REFUSED_MAX_ROWS]:
+        file, summary = split_disposition_key(record.key)
+        missing = ", ".join(record.missing)
+        lines.append(
+            f"- **{file}** — {_truncate(summary, _REFUSED_SUMMARY_MAX)} "
+            f"(missing: {missing})"
+        )
+    residue = len(refused) - _REFUSED_MAX_ROWS
+    if residue > 0:
+        lines.append(f"- …and {residue} more refused record(s).")
+    lines.append("")
+    return lines
+
+
 def _settle_fence(body: str) -> str:
     """A code fence guaranteed to be longer than any backtick run in *body*."""
     runs = _BACKTICK_RUN_RE.findall(body)
@@ -833,6 +888,11 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
     lines.extend(_render_debt_note(verdict))
     lines.extend(_render_findings(verdict, "MUST_FIX", "MUST_FIX"))
     lines.extend(_render_findings(verdict, "SHOULD_FIX", "SHOULD_FIX"))
+    # #2210 round 2: immediately before the settle machinery, because the
+    # action it asks for IS that machinery — an operator reading "this record
+    # was refused" needs "here is how to record it properly" next, not five
+    # sections away.
+    lines.extend(_render_refused_dispositions(verdict))
     # #2210: last, so the operator reads the findings before the machinery for
     # settling them. Every producer of this text (Blocker.details, the fix
     # loop's park, and the posted comment) goes through this one function, so
