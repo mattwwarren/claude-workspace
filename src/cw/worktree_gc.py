@@ -423,6 +423,31 @@ _NON_TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
 )
 
 
+def live_session_worktree_paths() -> frozenset[Path] | None:
+    """Return worktree paths of non-terminal sessions in cw state, or None.
+
+    The session-state half of the live-path guard, shared by
+    :func:`_live_worktree_paths` (GC) and ``cw.worktree``'s reuse refresh
+    (#2213). ``None`` means the state could not be loaded (logged at WARNING):
+    GC treats that as "no live sessions known" so a corrupted state file never
+    blocks it, while a caller about to *mutate* a worktree must treat it as
+    "cannot rule out a live session" and fail closed.
+    """
+    try:
+        state = load_state()
+    except Exception as exc:  # noqa: BLE001 — corrupted session state must not block worktree GC; degrades to no live-session guard for this run (see docstring)
+        _log.warning("gc: failed to load session state for live-path guard: %s", exc)
+        return None
+    live: set[Path] = set()
+    for session in state.sessions:
+        if (
+            session.status in _NON_TERMINAL_SESSION_STATUSES
+            and session.worktree_path is not None
+        ):
+            live.add(session.worktree_path)
+    return frozenset(live)
+
+
 def _live_worktree_paths() -> frozenset[Path]:
     """Return paths of all worktrees backing live sessions or running dispatch tasks.
 
@@ -431,18 +456,7 @@ def _live_worktree_paths() -> frozenset[Path]:
     blocks GC from running — it only disables the live-session safety guard for
     that run (logged at WARNING).
     """
-    live: set[Path] = set()
-
-    try:
-        state = load_state()
-        for session in state.sessions:
-            if (
-                session.status in _NON_TERMINAL_SESSION_STATUSES
-                and session.worktree_path is not None
-            ):
-                live.add(session.worktree_path)
-    except Exception as exc:  # noqa: BLE001 — corrupted session state must not block worktree GC; degrades to no live-session guard for this run (see docstring)
-        _log.warning("gc: failed to load session state for live-path guard: %s", exc)
+    live: set[Path] = set(live_session_worktree_paths() or ())
 
     try:
         queue = load_dev_queue()
