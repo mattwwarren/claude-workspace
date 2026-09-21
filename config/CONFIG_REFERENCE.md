@@ -405,6 +405,14 @@ suppressed mechanically on every later round. Its original identity is exact —
 `(file, normalized summary)` — so a reviewer that re-raises the same defect in
 *different words* slips past it and re-parks the ticket.
 
+Neither tier applies a record that cannot account for itself. A disposition is
+honoured only when it carries the full provenance set — the finding's
+identity, an `actor`, a UTC `recorded_at`, a `reviewed_sha` and a non-empty
+rationale — which in practice means it was produced by `cw review settle`, the
+only supported producer. Hand-authoring the marker is unsupported; a record
+short of that set is ignored and reported on the review comment. No
+configuration turns this off.
+
 A second, fuzzy **claim tier** matches a same-file MUST_FIX against a ledger
 entry on shared code symbols plus content-word overlap. It is **off by
 default** and takes two switches, both of which must be true:
