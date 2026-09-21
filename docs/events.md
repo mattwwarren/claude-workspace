@@ -1947,6 +1947,57 @@ not an interrupt.
 
 `correlation_id` is the `ticket_id`.
 
+### `review.finding_settled`
+
+**Emitter:** `cw review settle` (`cw.cli.review.commands`)
+**Payload:**
+```json
+{
+  "key": "<file>::<normalized summary>",
+  "file": "<str>",
+  "summary": "<str>",
+  "outcome": "REJECTED",
+  "reason": "<str>",
+  "actor": "<gh login>",
+  "recorded_at": "<ISO-8601 UTC>",
+  "reviewed_sha": "<str>"
+}
+```
+**Semantics:** GitHub #2210. An operator minted a durable cross-round ledger
+entry for one finding. The **mirror** of
+`review.finding_disposition_suppressed` above: that event records a suppression
+*firing*, this one records it being *created*.
+
+Mandatory for the same reason both of its siblings are. A settle is the one act
+that can silence a real defect permanently and invisibly — the ledger has no
+expiry and, today, no per-record rollback — so the record of who did it, when,
+and against which reviewed sha cannot live only in a ticket comment that can be
+edited afterwards. The same four facts are also written onto the durable
+`FindingDisposition` itself (`actor`, `recorded_at`, `summary`,
+`reviewed_sha`); the event is the queryable copy.
+
+**One event per settled finding**, counted over the *collapsed* ledger: two
+payload entries that key alike are one settled finding and one event, the same
+arithmetic the marker uses.
+
+`cw review settle` refuses to run inside a dispatch worker (see ADR-0016
+invariant 8), so no event of this type can originate from one. A refused run —
+blank `--reason`, unresolvable gh identity, an entry with no reviewed sha, or
+the worker refusal — emits nothing and writes nothing.
+
+**Querying:** `cw event tail --type review.finding_settled --json`. Same
+archive caveat as `review.finding_claim_shadowed` above.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`: the operator
+running the command already knows it happened; this is an audit record read
+after the fact, not an interrupt.
+
+`correlation_id` is the `ticket_id` when `cw review settle --ticket <id>` names
+one, and `null` otherwise. The payload the blocking comment renders carries no
+ticket id — `ReviewVerdict` has no such field and the comment renderer is not
+given one — so the command cannot infer it, and inventing a correlation id
+would be worse than an honest null. Pass `--ticket` to get grouping.
+
 ### `watched_pr.collision`
 
 **Emitter:** `register_or_adopt_watched_pr` (`cw.dev_queue.crud`).

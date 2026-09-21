@@ -52,6 +52,19 @@ not amended or superseded; the two seams stay independent.
    nothing else — from comments carrying `AGENT_COMMENT_MARKER`. The invariant
    is deliberately scoped to that route; the persisted `.claude/review-verdict.md`
    route is an accepted consequence below.
+8. **Minting a suppression is an audited operator act.** `cw review settle`
+   requires a non-blank `--reason`, records provenance on the entry itself
+   (`actor`, a CLI-stamped UTC `recorded_at`, the verbatim `summary`, the
+   `reviewed_sha` the finding was raised against), emits one
+   `review.finding_settled` event per settled finding, and **refuses to run
+   inside a dispatch worker** (nearest `.claude/cw-context.json` reporting
+   `headless`). There is no bypass flag: a control an agent can switch off is
+   not a control. The refusal is checked before any output, any file write and
+   any event, and fails open when no context file is found — the same
+   fail-open posture every other cw context guard takes. This is the mirror of
+   invariant 3: #2210 stops a settled finding being wrongly **re-raised**, and
+   an unaudited settle path would let one be wrongly **silenced**, which is the
+   direction that loses information permanently and invisibly.
 
 ## What this means for callers
 
@@ -72,14 +85,28 @@ not amended or superseded; the two seams stay independent.
 
 ## What this means for producers
 
-- `cw review settle <payload>` renders the postable
+- `cw review settle <payload> --reason '<why>'` renders the postable
   `REVIEW-FINDING-DISPOSITIONS` marker from a list of
-  `(file, summary, outcome, rationale)` entries, stamping a blank
-  `recorded_at` with the current time.
+  `(file, summary, outcome, rationale, reviewed_sha)` entries. `--reason` is
+  mandatory and must be non-blank; an entry's own `rationale` overrides it, so
+  several findings can be settled for different reasons in one call.
+  `recorded_at` is stamped by the command's own UTC clock and is **rejected**
+  as a payload key — it is audit data, not input.
 - Every blocking review comment prints one payload per keyable MUST_FIX
   finding, carrying the **verbatim** `file` and `summary` — the record's whole
-  identity — so pasting it needs no editing and reproduces exactly the key the
-  next re-raise will hit.
+  identity — plus the verdict's `reviewed_sha`, so pasting it needs no editing
+  and reproduces exactly the key the next re-raise will hit. An entry with no
+  resolvable sha is refused; `--reviewed-sha` supplies one for a hand-written
+  payload. There is deliberately no fallback to `git rev-parse HEAD`: the sha
+  of whatever directory the operator happened to be standing in is not
+  evidence.
+- The section is **bounded**: at most 10 payloads and 12,000 characters of
+  them. Past either cap the remaining findings are listed compactly (file plus
+  a trimmed summary, no JSON) and the operator is pointed at `cw review
+  settle`. A payload block is size-tested whole before it is kept, so the
+  section can never end on a half-written JSON object — a truncated payload
+  would paste into something that half-parses. GitHub rejects a comment body
+  over 65,536 characters and the rest of the comment needs the remainder.
 - The payload is deliberately **not** the postable marker itself. The
   dispositions reader ingests every comment body on the ticket, including the
   pipeline's own, so a `REVIEW-FINDING-DISPOSITIONS` block inside the blocking
@@ -90,15 +117,25 @@ not amended or superseded; the two seams stay independent.
 
 ## Consequences
 
-- **The ledger is severity-blind.** `FindingDisposition` stores only outcome,
-  rationale and date. The exact tier already suppresses any severity on an
+- **The ledger is severity-blind.** `FindingDisposition` stores an outcome, a
+  rationale, a date and (as of #2210) provenance — never a severity. The exact
+  tier already suppresses any severity on an
   identical `(file, normalized summary)`. Once armed, the claim tier can let a
   REJECTED entry recorded for a nit shield a same-file MUST_FIX that clears the
   matcher. Bounded by the tier being MUST_FIX-only, same-file and default-off;
   measured by shadow events that carry the candidate's severity; fixed durably
   by follow-up F7 (a schema bump recording severity and an expiry).
-- **Entries never expire.** Unlike voids, no evidence anchor lapses them. The
-  only mitigation is visibility: the suppression annotation and the events.
+- **Entries never expire, and there is no per-record rollback command.** Unlike
+  voids, no evidence anchor lapses them. The only mitigations today are
+  visibility (the suppression annotation, `review.finding_settled` and the
+  shadow events) and the marker's newest-wins merge, which lets an operator
+  re-post the same key as `ACCEPTED` to reverse a settle by hand. Expiry and a
+  real per-record rollback are a **precondition for ever arming the claim
+  tier**, not for landing it, and are tracked in a separate follow-up ticket
+  the operator filed. What #2210 does now, cheaply, is make that rollback
+  *possible later*: every record carries enough identity — the ledger key,
+  the verbatim `summary`, `reviewed_sha`, `actor` and `recorded_at` — to target
+  exactly one entry rather than a key's worth of them.
 - **ADR-0015's rationale is reversed for this seam.** "A spurious re-park costs
   one operator comment; a spurious suppression silently ships a real defect"
   applies with *more* force here, which is exactly why the tier is default-off
@@ -176,6 +213,13 @@ not amended or superseded; the two seams stay independent.
   dev-queue migration; deferred as F7.
 - **Amending ADR-0015.** Rejected: it is a dated record of a different seam's
   decision.
+- **A `--force`/`--i-am-an-operator` escape from the dispatch-worker refusal.**
+  Rejected: the worker is the party the refusal exists to stop, and it would be
+  the one passing the flag.
+- **Deriving the reviewed sha from `git rev-parse HEAD` when the payload has
+  none.** Rejected: it records the operator's current checkout, not the commit
+  the finding was raised against, and a confidently wrong provenance field is
+  worse than a refusal.
 - **Extending `_admit_new_must_fix` to read contests.** Rejected deliberately —
   the fix loop's convergence logic is out of scope here (F4/F6).
 

@@ -698,20 +698,47 @@ is a deliberate non-goal here (follow-up F1).
 **Don't hand-author the marker; render it (#2210).** Every blocking codex
 review comment now prints a `### Settle a finding` section with one
 ready-to-paste JSON payload per blocking finding, carrying the finding's
-verbatim `file` and `summary` — which are the record's whole identity, so
-nothing needs normalizing or editing:
+verbatim `file` and `summary` — which are the record's whole identity — plus
+the `reviewed_sha` it was raised against, so nothing needs normalizing or
+editing:
 
 ```bash
-# Save the payload from the review comment to settle.json, optionally filling
-# in `rationale`, then:
-uv run cw review settle settle.json --out marker.md
+# Save the payload from the review comment to settle.json, then, ON YOUR OWN
+# MACHINE:
+uv run cw review settle settle.json \
+  --reason "intentional tradeoff, see ADR-0012" \
+  --ticket "$TICKET" --out marker.md
 gh issue comment "$TICKET" --repo "$REPO" --body-file marker.md
 ```
 
-`cw review settle` stamps a blank `recorded_at` with the current time,
-collapses duplicate keys newest-wins, and emits no events. `-` reads the
-payload from stdin. The rendered marker looks like this — still valid to write
-by hand if you have to:
+**`--reason` is mandatory** and must be non-blank — a suppression with no
+recorded rationale is the silent silencing this record exists to prevent. It
+applies to every entry; an entry's own `rationale` overrides it, so several
+findings can be settled for different reasons in one call.
+
+**`cw review settle` refuses to run inside a dispatch worker.** A settled
+finding is never re-raised, so the pipeline must not be able to settle its own
+reviewer's findings. The command looks for the nearest
+`.claude/cw-context.json` (searched upward from cwd) and exits non-zero if it
+reports `headless`, writing nothing — no marker, no `--out` file, no event.
+There is no bypass flag. If a worker hands you a payload, run the command
+yourself.
+
+Every record it writes carries provenance: your resolved `gh` login, a UTC
+timestamp stamped by the command (`recorded_at` is **rejected** as a payload
+key — it is audit data, not input), the verbatim summary, and the reviewed
+sha. An entry with no resolvable sha is refused; pass `--reviewed-sha <sha>`
+for a hand-written payload. The command exits non-zero rather than recording an
+anonymous settle if `gh api user` cannot resolve your identity.
+
+Each settled finding emits one `review.finding_settled` audit event,
+correlated to `--ticket` when you pass it (`cw event tail --type
+review.finding_settled --json`). Duplicate keys collapse newest-wins, so two
+payload entries that key alike are one entry and one event. `-` reads the
+payload from stdin.
+
+The rendered marker looks like this — still valid to write by hand if you have
+to, and the provenance fields stay optional for that case:
 
 ```markdown
 ## Review Finding Dispositions
@@ -723,12 +750,22 @@ by hand if you have to:
     "src/cw/foo.py::bug here": {
       "outcome": "REJECTED",
       "rationale": "intentional tradeoff, see ADR-0012",
-      "recorded_at": "2026-08-16T00:00:00Z"
+      "recorded_at": "2026-08-16T00:00:00Z",
+      "actor": "mattwwarren",
+      "reviewed_sha": "deadbee",
+      "summary": "Bug here"
     }
   }
 }
 REVIEW-FINDING-DISPOSITIONS -->
 ```
+
+**The settle section is capped.** A pass with many MUST_FIX findings prints at
+most 10 payloads (and at most 12,000 characters of them); the rest are listed
+compactly under the payloads, by file and trimmed summary. Settle one of those
+by hand — the identity is its file and the verbatim summary from its MUST_FIX
+line in the same comment. A payload block is never cut in half, so anything you
+can copy out of the section is complete.
 
 - The key is `"<file>::<normalized summary>"` — the summary lowercased,
   whitespace-collapsed, line/position references stripped, digit runs replaced
@@ -739,9 +776,12 @@ REVIEW-FINDING-DISPOSITIONS -->
   finding; `ACCEPTED` is recorded and shown to the reviewer but changes no gate.
 - The marker is **additive** across comments: the reader unions every marker on
   the thread. Post only what you are settling now.
-- Changed your mind? Re-post the marker with a later `recorded_at` — newest
-  wins per key. Removing the marker does **not** un-settle anything; the ledger
-  is forward-only by design.
+- Changed your mind? Re-run `cw review settle` for the same finding with
+  `"outcome": "ACCEPTED"` and post the new marker — its `recorded_at` is later,
+  and newest wins per key. Removing the marker does **not** un-settle anything;
+  the ledger is forward-only by design. There is no per-record rollback command
+  yet (tracked as a follow-up); the provenance fields exist so one can target
+  exactly one record when it lands.
 - A malformed block degrades to "no dispositions" and never fails the review;
   the symptom is the finding re-appearing, which is visible and correctable.
 - Because the identity is not evidence-anchored, a suppression does not lapse
