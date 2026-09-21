@@ -4127,6 +4127,48 @@ class TestSignalStop:
         assert self._reload_task().status == QueueItemStatus.BLOCKED_ON_USER
         assert self._park_event_counts("799") == (1, 1)
 
+    def test_signal_stop_defers_when_only_the_second_transcript_carries_the_frame(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The frame guard reads every transcript that exists, not the first.
+
+        The hook cwd is shifted to a nested dir whose project dir holds a
+        transcript with NO frame, while the session worktree's project dir holds
+        the frame. ``_parse_headless_sentinel`` falls back to the second
+        location when the first yields no sentinel, so a guard that stopped at
+        the first existing file would park the row on a frame it never read.
+        """
+        from cw.models import QueueItemStatus
+
+        name = "two-locations"
+        session, worktree, _daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            name,
+            [_ul_record(_OPEN_SENTINEL, _PARK_AFTER)],
+        )
+        nested = worktree / "nested"
+        nested.mkdir()
+        self._write_headless_context(
+            nested,
+            session_id=session.id,
+            extra=_park_marker_extra(session.id, _CURRENT_MARKER, None),
+        )
+        _write_transcript_records(
+            tmp_path / f"fake-home-2135-{name}",
+            nested,
+            _PARK_BENIGN_RECORDS,
+            filename=f"{self._PARK_CSID}.jsonl",
+        )
+
+        self._invoke_stop(nested)
+
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert self._park_event_counts(name) == (0, 0)
+
     def test_signal_stop_defers_when_no_transcript_is_reachable(
         self,
         tmp_config_dir: Path,

@@ -240,26 +240,37 @@ def _sentinel_frame_follows_marker(
 ) -> bool:
     """Whether a sentinel frame appears after *marker* was stamped (#2135).
 
-    True suppresses the park. The transcript is resolved the same two ways
-    ``_parse_headless_sentinel`` resolves it: the hook's ``cwd`` first, then the
-    session's recorded ``worktree_path`` (issue #799, for an
-    EnterWorktree-shifted cwd).
+    True suppresses the park. Both candidate transcripts are read -- the hook's
+    ``cwd`` project dir and the session's recorded ``worktree_path`` project dir
+    (issue #799, for an EnterWorktree-shifted cwd). That is the same pair
+    ``_parse_headless_sentinel`` searches, but not the same stopping rule: it
+    falls back to the second location whenever the first yields no *sentinel*,
+    so a first transcript that exists yet carries no frame must not end this
+    search either. A frame is a hit wherever it lands.
 
-    A missing Claude session id, or no transcript in either location, also
-    returns True: without the transcript a late frame cannot be ruled out, and
-    the cost of being wrong that way is a silent non-park rather than a park
-    that hides a real blocker reason behind the wrong disposition.
+    Returns True on the first frame hit or read failure, and False only once
+    every transcript that exists has been read clean. A missing Claude session
+    id, or no transcript in either location, also returns True: without the
+    transcript a late frame cannot be ruled out, and the cost of being wrong
+    that way is a silent non-park rather than a park that hides a real blocker
+    reason behind the wrong disposition.
     """
     if not isinstance(claude_session_id, str) or not claude_session_id:
         return True
     search_dirs = [cwd_value]
     if session.worktree_path is not None:
         search_dirs.append(str(session.worktree_path))
-    for search_dir in search_dirs:
+    found_transcript = False
+    # ``dict.fromkeys`` drops a repeated directory (the common case: the hook's
+    # cwd IS the worktree) so the hot path never reads the same file twice.
+    for search_dir in dict.fromkeys(search_dirs):
         transcript_path = claude_project_dir(search_dir) / f"{claude_session_id}.jsonl"
-        if transcript_path.is_file():
-            return _sentinel_frame_after(transcript_path, marker.posted_at)
-    return True
+        if not transcript_path.is_file():
+            continue
+        found_transcript = True
+        if _sentinel_frame_after(transcript_path, marker.posted_at):
+            return True
+    return not found_transcript
 
 
 def _park_if_abandoned(
