@@ -2881,6 +2881,14 @@ def test_dispatch_fix_agent_fast_forwards_behind_worktree(
     assert git_in(worktree, "rev-parse", "HEAD") == new_sha
     # A refresh that worked leaves no friction note behind.
     assert "Friction note" not in str(stub_spawn.calls[0]["prompt"])
+    # Round 6: the fast-forward left exactly one audit event, attributed to the
+    # dispatching ticket (the fix-agent path threads its ``ticket_id`` through).
+    (event,) = read_events(event_types=[OrchestratorEventType.WORKTREE_FAST_FORWARDED])
+    assert event.correlation_id == "2017"
+    assert event.payload["ticket_id"] == "2017"
+    assert event.payload["branch"] == branch
+    assert event.payload["old_sha"] == old_sha
+    assert event.payload["new_sha"] == new_sha
 
 
 @pytest.mark.parametrize("worktree_is", ["in-sync", "behind"])

@@ -16,10 +16,12 @@ import pytest
 from cw import native_daemon
 from cw.auto_dev_result import AutoDevResult
 from cw.config import save_state, state_file
+from cw.events import read_events
 from cw.exceptions import StaleWorktreeError, WorktreeError, WorktreeOccupiedError
 from cw.models import (
     ClientConfig,
     CwState,
+    OrchestratorEventType,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -67,6 +69,9 @@ from tests.test_result import _valid_payload
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cw.models import OrchestratorEvent
+    from cw.worktree import FetchWarningKey
 
 
 class TestSlugifyBranch:
@@ -1884,7 +1889,7 @@ class TestCreateWorktreeReuseRefresh:
         )
 
         result = _refresh_reused_worktree(
-            client, _REUSE_BRANCH, wt, ReuseRefreshReport()
+            client, _REUSE_BRANCH, wt, ReuseRefreshReport(), ticket_id=None
         )
 
         assert merges == []
@@ -2953,6 +2958,252 @@ class TestReuseOccupancyRosterAndPaths:
         assert fetched == []
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert any("cannot be resolved" in m for m in _debug_reasons(caplog))
+
+
+_FULL_SHA_CHARS = 40
+
+
+def _ff_events() -> list[OrchestratorEvent]:
+    """Every ``worktree.fast_forwarded`` event in the (test-isolated) inbox."""
+    return read_events(event_types=[OrchestratorEventType.WORKTREE_FAST_FORWARDED])
+
+
+def _refresh_with_ticket(client: ClientConfig, ticket_id: str | None = "2213") -> Path:
+    return create_worktree(
+        client,
+        _REUSE_BRANCH,
+        allow_dirty_reuse=True,
+        refresh_on_reuse=True,
+        ticket_id=ticket_id,
+    )
+
+
+class TestFastForwardAuditEvent:
+    """#2213 round 6: a fast-forward that actually moves HEAD leaves exactly one
+    ``worktree.fast_forwarded`` audit event. Every path that moves nothing
+    (already current, ahead, diverged, refused, occupied, not refreshed) leaves
+    none: a record per turn would be noise."""
+
+    def test_real_fast_forward_emits_exactly_one_event_with_both_shas(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, wt, _workspace, old_sha, new_sha = _seed_behind(tmp_path, make_git_repo)
+        assert len(old_sha) == len(new_sha) == _FULL_SHA_CHARS
+
+        assert _refresh_with_ticket(client) == wt
+
+        events = _ff_events()
+        assert len(events) == 1
+        event = events[0]
+        assert event.type is OrchestratorEventType.WORKTREE_FAST_FORWARDED
+        assert event.correlation_id == "2213"
+        assert event.payload == {
+            "client": "test",
+            "ticket_id": "2213",
+            "branch": _REUSE_BRANCH,
+            "worktree_path": str(wt),
+            "old_sha": old_sha,
+            "new_sha": new_sha,
+        }
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+
+    def test_unknown_ticket_is_a_null_ticket_and_no_correlation_id(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, _wt, _workspace, _old, _new = _seed_behind(tmp_path, make_git_repo)
+
+        _refresh_with_ticket(client, ticket_id=None)
+
+        (event,) = _ff_events()
+        assert event.payload["ticket_id"] is None
+        assert event.correlation_id is None
+
+    def test_default_reuse_moves_nothing_and_emits_nothing(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, _wt, _workspace, _old, _new = _seed_behind(tmp_path, make_git_repo)
+
+        create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+
+        assert _ff_events() == []
+
+    def test_already_current_emits_nothing(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, _wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+
+        _refresh_with_ticket(client)
+
+        assert _ff_events() == []
+
+    def test_ahead_of_origin_emits_nothing(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        git_in(wt, "commit", "--allow-empty", "-m", "unpushed local work")
+        local_sha = git_in(wt, "rev-parse", "HEAD")
+
+        _refresh_with_ticket(client)
+
+        assert git_in(wt, "rev-parse", "HEAD") == local_sha
+        assert _ff_events() == []
+
+    def test_diverged_emits_nothing(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        _force_push_rewrite(origin, tmp_path / "side", _REUSE_BRANCH)
+
+        _refresh_with_ticket(client)
+
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert _ff_events() == []
+
+    def test_dirty_overlapping_worktree_emits_nothing(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        (wt / "tracked.txt").write_text("local edit\n", encoding="utf-8")
+        push_commit_to_origin(
+            origin,
+            _REUSE_BRANCH,
+            tmp_path / "side",
+            "tracked.txt",
+            content="upstream edit\n",
+        )
+
+        _refresh_with_ticket(client)
+
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert _ff_events() == []
+
+    def test_git_refusing_the_fast_forward_emits_nothing(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+
+        def spy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            if args[0] == "merge":
+                return subprocess.CompletedProcess(
+                    args, 1, "", "error: local changes would be overwritten\n"
+                )
+            return _run_git(*args, cwd=cwd, check=check)
+
+        monkeypatch.setattr("cw.worktree._run_git", spy)
+
+        _refresh_with_ticket(client)
+
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert _ff_events() == []
+
+    @pytest.mark.parametrize("source", ["state", "roster"])
+    def test_occupied_refusal_emits_nothing(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path], source: str
+    ) -> None:
+        client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        _occupy(source, workspace, wt)
+
+        with pytest.raises(WorktreeOccupiedError):
+            _refresh_with_ticket(client)
+
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert _ff_events() == []
+
+    def test_failed_fetch_emits_nothing(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        monkeypatch.setattr(
+            "cw.worktree.fetch_feature_branch",
+            lambda *_a, **_kw: FetchResult(FetchOutcome.FAILED, "rc=128: offline"),
+        )
+
+        _refresh_with_ticket(client)
+
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert _ff_events() == []
+
+    def test_merge_that_moves_nothing_emits_nothing(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A merge that succeeds ("Already up to date") but leaves HEAD where it
+        was is not a fast-forward that happened: REFRESHED, but no event."""
+        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+
+        def spy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            if args[0] == "merge":
+                return subprocess.CompletedProcess(args, 0, "Already up to date.\n", "")
+            return _run_git(*args, cwd=cwd, check=check)
+
+        monkeypatch.setattr("cw.worktree._run_git", spy)
+        report = ReuseRefreshReport()
+
+        create_worktree(
+            client,
+            _REUSE_BRANCH,
+            allow_dirty_reuse=True,
+            refresh_on_reuse=True,
+            refresh_report=report,
+            ticket_id="2213",
+        )
+
+        assert report.outcome is RefreshOutcome.REFRESHED
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert _ff_events() == []
+
+    def test_audit_write_failure_does_not_undo_the_fast_forward(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A failed audit write (``OSError``) is logged at WARNING and never
+        turns a completed fast-forward into NOT_REFRESHED, a note or a raise."""
+        client, wt, _workspace, _old, new_sha = _seed_behind(tmp_path, make_git_repo)
+
+        def boom(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.worktree.record_event", boom)
+        report = ReuseRefreshReport()
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            result = create_worktree(
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh_on_reuse=True,
+                refresh_report=report,
+                ticket_id="2213",
+            )
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+        assert report.outcome is RefreshOutcome.REFRESHED
+        assert report.notes == []
+        assert any(
+            "audit" in r.getMessage() and "disk full" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.WARNING)
+        )
+        assert _ff_events() == []
 
 
 class TestCheckNotMainCheckout:
@@ -4219,6 +4470,30 @@ class TestIsMainCheckoutDirty:
         assert is_main_checkout_dirty(client) is False
 
 
+def _mock_fetch_stderr(monkeypatch: pytest.MonkeyPatch, stderrs: list[str]) -> None:
+    """Make every ``git`` call fail with rc=128, one stderr per call in order.
+
+    The last entry repeats once the list is exhausted, so a single-item list
+    means "always this failure".
+    """
+    calls: list[object] = []
+
+    def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+        stderr = stderrs[min(len(calls), len(stderrs) - 1)]
+        calls.append(args)
+        return MagicMock(returncode=128, stdout="", stderr=stderr)
+
+    monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+
+def _freshness_warning_count(caplog: pytest.LogCaptureFixture) -> int:
+    return sum(
+        1
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "freshness_check_skip" in r.getMessage()
+    )
+
+
 class TestFetchDefaultBranch:
     def test_missing_dir_returns_failed_no_raise(self, tmp_path: Path) -> None:
         """_fetch_default_branch with missing git_dir is FAILED, no exception."""
@@ -4302,40 +4577,127 @@ class TestFetchDefaultBranch:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Second call for same client with warned_fetch_fail set does not log."""
+        """Second call, same client AND same failure, with the set does not log."""
         ws = tmp_path / "ws"
         ws.mkdir()
         client = ClientConfig(
             name="test-client", workspace_path=ws, default_branch="main"
         )
-
-        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
-            result = MagicMock()
-            result.returncode = 128
-            result.stdout = ""
-            result.stderr = "fatal: 'origin' does not appear to be a git repository"
-            return result
-
-        monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        warned_fetch_fail: set[str] = set()
+        stderr = "fatal: 'origin' does not appear to be a git repository"
+        _mock_fetch_stderr(monkeypatch, [stderr])
+        warned_fetch_fail: set[FetchWarningKey] = set()
 
         with caplog.at_level(logging.WARNING, logger="cw.worktree"):
             is_main_behind_origin(client, warned_fetch_fail=warned_fetch_fail)
-            first_count = sum(
-                1
-                for r in caplog.records
-                if r.levelno == logging.WARNING and "freshness_check_skip" in r.message
-            )
+            first_count = _freshness_warning_count(caplog)
             caplog.clear()
             is_main_behind_origin(client, warned_fetch_fail=warned_fetch_fail)
-            second_count = sum(
-                1
-                for r in caplog.records
-                if r.levelno == logging.WARNING and "freshness_check_skip" in r.message
-            )
+            second_count = _freshness_warning_count(caplog)
 
         assert first_count == 1, "Expected WARNING on first call"
         assert second_count == 0, "Expected no WARNING on second call (deduped)"
+        assert warned_fetch_fail == {
+            ("test-client", FetchOutcome.FAILED, f"rc=128: {stderr}")
+        }
+
+    def test_different_failure_reasons_for_one_client_warn_twice(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """#2213: dedup is keyed on the failure, not just the client. An auth
+        error arriving after a network error is new information, and silence
+        would read as "the earlier problem persists"."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        network = "fatal: unable to access 'https://x/': Could not resolve host: x"
+        auth = "git@x: Permission denied (publickey)."
+        _mock_fetch_stderr(monkeypatch, [network, auth])
+        warned: set[FetchWarningKey] = set()
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            first = _fetch_default_branch("test-client", "main", ws, warned)
+            second = _fetch_default_branch("test-client", "main", ws, warned)
+
+        messages = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "freshness_check_skip" in r.getMessage()
+        ]
+        assert len(messages) == 2
+        assert "Could not resolve host" in messages[0]
+        assert "Permission denied" in messages[1]
+        assert first.outcome is FetchOutcome.FAILED
+        assert second.outcome is FetchOutcome.FAILED
+        assert warned == {
+            ("test-client", FetchOutcome.FAILED, f"rc=128: {network}"),
+            ("test-client", FetchOutcome.FAILED, f"rc=128: {auth}"),
+        }
+
+    def test_same_failure_reason_twice_warns_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        stderr = "git@x: Permission denied (publickey)."
+        _mock_fetch_stderr(monkeypatch, [stderr, stderr])
+        warned: set[FetchWarningKey] = set()
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            _fetch_default_branch("test-client", "main", ws, warned)
+            _fetch_default_branch("test-client", "main", ws, warned)
+
+        assert _freshness_warning_count(caplog) == 1
+        assert len(warned) == 1
+
+    def test_same_failure_reason_for_a_different_client_still_warns(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The client stays part of the key: two clients failing identically
+        are two problems."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        stderr = "git@x: Permission denied (publickey)."
+        _mock_fetch_stderr(monkeypatch, [stderr, stderr, stderr])
+        warned: set[FetchWarningKey] = set()
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            _fetch_default_branch("client-a", "main", ws, warned)
+            _fetch_default_branch("client-b", "main", ws, warned)
+            _fetch_default_branch("client-a", "main", ws, warned)
+
+        assert _freshness_warning_count(caplog) == 2
+        assert {key[0] for key in warned} == {"client-a", "client-b"}
+
+    def test_same_reason_under_a_different_outcome_warns_again(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The outcome is part of the key too: a set already holding this client
+        and reason under ``FAILED`` does not silence the same text arriving as
+        ``BRANCH_ABSENT``."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        stderr = "fatal: couldn't find remote ref main"
+        _mock_fetch_stderr(monkeypatch, [stderr])
+        reason = f"rc=128: {stderr}"
+        warned: set[FetchWarningKey] = {("test-client", FetchOutcome.FAILED, reason)}
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            result = _fetch_default_branch("test-client", "main", ws, warned)
+
+        assert result.outcome is FetchOutcome.BRANCH_ABSENT
+        assert _freshness_warning_count(caplog) == 1
+        assert ("test-client", FetchOutcome.BRANCH_ABSENT, reason) in warned
 
     @pytest.mark.parametrize(
         ("stderr", "quiet_missing_ref", "expect_warning", "expected"),
@@ -4384,7 +4746,7 @@ class TestFetchDefaultBranch:
             return MagicMock(returncode=128, stdout="", stderr=stderr)
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        warned: set[str] = set()
+        warned: set[FetchWarningKey] = set()
 
         with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
             result = _fetch_default_branch(
@@ -4401,7 +4763,7 @@ class TestFetchDefaultBranch:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert bool(warnings) is expect_warning
         if expect_warning:
-            assert warned == {"test-client"}
+            assert warned == {("test-client", expected, f"rc=128: {stderr}")}
         else:
             # Quiet path: DEBUG breadcrumb, dedupe set untouched.
             assert warned == set()

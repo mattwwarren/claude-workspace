@@ -113,6 +113,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.native_daemon import NativeDaemonClient
+    from cw.worktree import FetchWarningKey
     from tests.conftest import CapturedEvent
 
 
@@ -2363,7 +2364,8 @@ class TestDispatchTickSpawnErrors:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The dispatch claim path asks ``create_worktree`` to refresh a reused
-        per-ticket worktree (#2213); the default stays path-only."""
+        per-ticket worktree (#2213) and names the ticket, so a fast-forward's
+        audit event is attributable; the default stays path-only."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-2213", client="test-client"))
         seen: list[dict[str, object]] = []
@@ -2377,7 +2379,13 @@ class TestDispatchTickSpawnErrors:
 
         dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
 
-        assert seen == [{"allow_dirty_reuse": True, "refresh_on_reuse": True}]
+        assert seen == [
+            {
+                "allow_dirty_reuse": True,
+                "refresh_on_reuse": True,
+                "ticket_id": "GEN-2213",
+            }
+        ]
 
     def test_stale_worktree_error_force_removes_then_reverts(
         self,
@@ -3730,7 +3738,7 @@ class TestDispatchTickFreshnessGate:
 
         def _freshness_check(
             client: ClientConfig,
-            warned_fetch_fail: set[str] | None = None,
+            warned_fetch_fail: set[FetchWarningKey] | None = None,
         ) -> tuple[bool, str, str, int]:
             if client.name == "test-client":
                 return (True, "aaa", "bbb", 2)
@@ -3801,7 +3809,7 @@ class TestDispatchTickFreshnessGate:
 
         def _counting(
             _client: ClientConfig,
-            warned_fetch_fail: set[str] | None = None,
+            warned_fetch_fail: set[FetchWarningKey] | None = None,
         ) -> tuple[bool, str, str, int]:
             nonlocal call_count
             call_count += 1
@@ -3875,7 +3883,7 @@ class TestDispatchTickFreshnessGate:
 
         def _boom(
             _client: ClientConfig,
-            warned_fetch_fail: set[str] | None = None,
+            warned_fetch_fail: set[FetchWarningKey] | None = None,
         ) -> tuple[bool, str, str, int]:
             msg = "network unreachable"
             raise RuntimeError(msg)
@@ -5131,7 +5139,7 @@ class TestRunDispatchLoopVerbose:
             native_daemon: FakeNativeDaemonClient | None = None,
             emit: Callable[[str], None] | None = None,
             warned_stale: set[tuple[str, str]] | None = None,
-            warned_fetch_fail: set[str] | None = None,
+            warned_fetch_fail: set[FetchWarningKey] | None = None,
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
             warned_disk_pressure: set[str] | None = None,
@@ -14838,7 +14846,7 @@ class TestWaveCollisionDetection:
             native_daemon: NativeDaemonClient | None = None,
             emit: Callable[[str], None] | None = None,
             warned_stale: set[tuple[str, str]] | None = None,
-            warned_fetch_fail: set[str] | None = None,
+            warned_fetch_fail: set[FetchWarningKey] | None = None,
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
             warned_disk_pressure: set[str] | None = None,
