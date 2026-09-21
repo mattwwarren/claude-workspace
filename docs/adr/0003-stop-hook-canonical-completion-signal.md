@@ -112,35 +112,42 @@ For every DAEMON-origin Session created by `cw.spawn.spawn_create_impl`:
 
 The command cw injects is no longer the bare `cw signal-stop`. It is a
 POSIX-sh short circuit that lands the *same* call under the *same*
-invariants:
+invariants, with the **absolute** path of the worktree's `cw-context.json`
+baked in at injection time:
 
 ```
-[ -z "$CLAUDE_PROJECT_DIR" ] || [ -f "$CLAUDE_PROJECT_DIR/.claude/cw-context.json" ] || [ -f .claude/cw-context.json ] || exit 0; cw signal-stop
+[ -f '/path/to/worktree/.claude/cw-context.json' ] || exit 0; cw signal-stop
 ```
 
 - **Why.** `signal_stop` is already a no-op when no `cw-context.json` is
   found, but it pays a Python interpreter start plus `from cw.cli import
   main` to reach that conclusion — ~250ms, against ~1.5ms for the guard.
   The short circuit is a transport-level concern only.
-- **Fail-open, deliberately.** The first arm invokes `cw signal-stop`
-  unchanged whenever `CLAUDE_PROJECT_DIR` is unset or empty, and the third
-  arm invokes it whenever the hook's own cwd holds the context file. The
-  "Alternatives considered" entry below — env vars are not a reliable
-  identity channel under `claude --bg` (#133) — is exactly why a
-  fail-closed guard was rejected: it would silently drop every completion
-  signal on an environment that does not carry the variable. The residual
-  is narrow and named: a variable set to a non-cw directory *and* a hook
-  cwd without the context file would skip.
+- **Identity-free, deliberately.** `_write_hook_context` writes the hook and
+  the context file together, per worktree, so it already knows the absolute
+  path; the guard tests exactly that file and nothing else. It reads no
+  environment variable and no ambient cwd. The "Alternatives considered"
+  entry below — env vars are not a reliable identity channel under
+  `claude --bg` (#133) — is why. A first revision keyed the test on
+  `$CLAUDE_PROJECT_DIR` with a hook-cwd fallback; both are ambient, and a
+  dispatch worker's cwd legitimately moves during a turn (Step 2.5 runs gates
+  inside a detached gate worktree that holds no context file), so when
+  neither pointed at the session worktree the guard skipped
+  `cw signal-stop` and silently lost the completion signal. The absolute
+  path cannot skip a dispatch worker: it is written by the same code that
+  spawns the worker.
 - **`signal_stop` is unchanged.** The three-layer priority order (Stop hook
   → wrapper sentinel buffer → reconcile sweep), idempotency, the
   `background_tasks` deferral, the USER-origin carve-out and the headless
   backstop all stand as written above. The guard runs *before* the
   interpreter; it cannot alter what the interpreter then does.
-- **The hook is worktree-scoped and only worktree-scoped.** Installing it in
-  `~/.claude/settings.json` or `~/.claude/settings.local.json` is
-  unsupported: it applies to every Claude session on the machine, cw-managed
-  or not. `cw doctor`'s `stop-hook-scope` check (WARN, never fatal) detects
-  that shape and names the file and the line to remove.
+- **The hook is worktree-scoped and only worktree-scoped.** A hand-written
+  or user-level copy has no worktree path to bake in and is unsupported: it
+  applies to every Claude session on the machine, cw-managed or not. The
+  guard's job is only to make cw's *own* injected hook cheap for sessions
+  that are not cw-managed; `cw doctor`'s `stop-hook-scope` check (WARN, never
+  fatal) is what detects a user-level copy and names the file and the line
+  to remove.
 - **No migration.** DAEMON-origin spawns blind-overwrite
   `settings.local.json`, so existing cw worktrees self-heal on their next
   spawn. USER-origin worktrees are never modified and keep the unguarded
