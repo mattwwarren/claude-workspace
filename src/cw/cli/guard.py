@@ -1,7 +1,7 @@
 """The ``cw guard-cwd`` PreToolUse hook handler (#940 R9a).
 
 Claude Code invokes this before every Bash tool call in a dispatched worker
-(wired via ``settings.local.json`` in :data:`cw.spawn._HOOK_SETTINGS_TEMPLATE`).
+(wired via ``settings.local.json`` in :func:`cw.spawn._build_hook_settings`).
 It reads the hook JSON from stdin, loads ``<cwd>/.claude/cw-context.json``, and
 exits ``2`` (block) only when the resolved ``cwd`` equals the resolved
 ``workspace_path`` — the operator's main checkout, forbidden for any git
