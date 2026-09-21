@@ -52,6 +52,7 @@ from cw.reconcile import resolve_attempt_ceiling
 from cw.worktree import (
     check_not_main_checkout,
     create_worktree,
+    live_home_reason,
     remove_worktree,
     unsaved_work_reason,
     worktree_path_for,
@@ -1120,8 +1121,13 @@ def _defer_occupied_claim(
     daemon-roster worker, or an indeterminate read of either (fail closed) may be
     operating in the ticket's per-ticket worktree. Spawning a second worker into
     it is the hazard the ticket exists to prevent, so nothing is spawned and the
-    worktree is neither touched nor removed (this is NOT the stale-worktree path,
-    which removes the tree).
+    worktree is neither touched nor removed.
+
+    The stale-worktree path (a wrong-branch tree that ``create_worktree`` refuses
+    with ``StaleWorktreeError``) routes here too when an occupant is present: it
+    consults liveness first and defers through this helper. It removes the tree
+    only when the tree is BOTH unoccupied and clean; an occupied tree is left
+    for a later tick, and a dirty one is parked for the operator instead.
 
     The row goes back to PENDING for a later tick as a RELEASE, not a failure
     (:func:`_revert_claimed_task_to_pending` with ``defer_for``): no attempt is
@@ -1150,6 +1156,30 @@ def _defer_occupied_claim(
             f" ({exc.reason}); deferred, not spawned"
         )
     return _SpawnOutcome(occupied=True, error=exc.reason)
+
+
+def _raise_if_stale_tree_occupied(client: ClientConfig, branch: str) -> None:
+    """Raise :exc:`WorktreeOccupiedError` if the stale tree must not be removed.
+
+    Guard 1 of the stale-worktree handler in :func:`_spawn_claimed_task`
+    (#2213): consults :func:`cw.worktree.live_home_reason` -- the same predicate
+    the same-branch reuse refresh uses, failing closed -- on the branch's
+    canonical worktree path. A live cw session or daemon-roster worker homed
+    there, or an unreadable state or roster, means the tree is not ours to
+    remove. The raised error is caught by ``_spawn_claimed_task``'s
+    ``except WorktreeOccupiedError`` and reaches :func:`_defer_occupied_claim`.
+    Returns normally (no occupant) so the dirty check and removal may follow.
+    """
+    stale_tree = worktree_path_for(client, branch)
+    occupant = live_home_reason(stale_tree)
+    if occupant is None:
+        return
+    msg = (
+        f"Refusing to remove stale worktree at {stale_tree} for branch "
+        f"{branch!r}: another worker may be operating in it ({occupant}). "
+        "The worktree was not touched."
+    )
+    raise WorktreeOccupiedError(msg, path=stale_tree, reason=occupant)
 
 
 def _spawn_claimed_task(
@@ -1207,7 +1237,10 @@ def _spawn_claimed_task(
             #     that cannot be ruled out): create_worktree RAISES
             #     WorktreeOccupiedError. That must never fall through to a
             #     spawn, so it is handled by its own narrow ``except`` below
-            #     (not the StaleWorktreeError branch: never remove it).
+            #     (not the StaleWorktreeError branch, which removes a tree:
+            #     an occupied one is never removed). A stale (wrong-branch)
+            #     tree gets its own occupancy check inside that branch and
+            #     reaches the same deferral.
             # ticket_id: names the ticket on the worktree.fast_forwarded audit
             # event a refresh that moves HEAD records; no other effect.
             worktree_path = create_worktree(
@@ -1228,12 +1261,38 @@ def _spawn_claimed_task(
             # Caught narrowly as StaleWorktreeError (not WorktreeError)
             # so the main-checkout guard never triggers a removal.
             #
-            # Dirty-check guard (#425): if the stale tree contains
-            # unsaved work, skip the removal and park the task as
-            # BLOCKED_ON_USER instead of PENDING so the operator can
-            # inspect. The outer except handler will not overwrite
-            # BLOCKED_ON_USER (it checks status == RUNNING before
-            # reverting).
+            # Three guards stand between a stale tree and that removal, in
+            # this order:
+            #
+            # 1. Liveness (#2213): if a live cw session or daemon-roster
+            #    worker is homed on the tree, or that cannot be ruled out
+            #    (unreadable state or roster: fail closed), leave it alone
+            #    and defer the claim through _defer_occupied_claim -- the
+            #    same OCCUPIED_BY_LIVE_SESSION handling the reuse-refresh
+            #    refusal reaches. A wrong branch does not mean an idle tree:
+            #    a worker may be running in it. It comes BEFORE the dirty
+            #    check because it is the stronger reason to keep hands off
+            #    (removing a live worker's tree destroys its working state),
+            #    and because unsaved_work_reason shells out to git inside a
+            #    directory that worker may be mutating concurrently, so the
+            #    liveness answer must not depend on that read.
+            # 2. Dirty-check guard (#425): if the stale tree contains
+            #    unsaved work, skip the removal and park the task as
+            #    BLOCKED_ON_USER instead of PENDING so the operator can
+            #    inspect. The outer except handler will not overwrite
+            #    BLOCKED_ON_USER (it checks status == RUNNING before
+            #    reverting).
+            # 3. Only a tree that is both unoccupied and clean is removed
+            #    (the #404 spin fix above).
+            #
+            # Guard 1 raises WorktreeOccupiedError from inside this handler;
+            # the sibling ``except WorktreeOccupiedError`` below (an exception
+            # raised here propagates to the enclosing try, so it does catch
+            # it) hands it to _defer_occupied_claim. Raising rather than
+            # returning that helper's outcome inline keeps this function within
+            # the PLR0911 return budget and gives the reuse-refresh refusal and
+            # this one a single exit.
+            _raise_if_stale_tree_occupied(client, branch)
             unsaved = unsaved_work_reason(client, branch)
             if unsaved is not None:
                 _log.warning(

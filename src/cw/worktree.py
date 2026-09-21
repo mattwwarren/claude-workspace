@@ -896,7 +896,7 @@ def live_session_worktree_paths() -> frozenset[Path] | None:
 
     The two callers deliberately treat ``None`` in OPPOSITE directions:
 
-    - The reuse refresh (:func:`_live_home_reason`, reached through
+    - The reuse refresh (:func:`live_home_reason`, reached through
       :func:`_reuse_occupancy`, #2213) fails CLOSED. ``None`` means "cannot
       rule out a live session", i.e. occupied: ``create_worktree`` raises
       :exc:`~cw.exceptions.WorktreeOccupiedError` and no caller spawns into,
@@ -955,8 +955,14 @@ def _normalize_path(path: Path) -> Path:
     return path.resolve()
 
 
-def _live_home_reason(wt_path: Path) -> str | None:
+def live_home_reason(wt_path: Path) -> str | None:
     """Return why a live session or daemon worker may be homed on *wt_path*.
+
+    The one liveness predicate for a worktree, public because two paths must
+    agree on it: the same-branch reuse refresh (:func:`_reuse_occupancy`) and
+    the dispatch claim's stale-worktree handler (``cw.dispatch.claim``), which
+    must not force-remove a wrong-branch tree a live worker is homed on (#2213).
+    Both fail closed.
 
     Consults BOTH sources and reports occupied when either says so:
 
@@ -997,7 +1003,7 @@ class _Occupancy(NamedTuple):
     """The reuse refresh's occupancy verdict, split by what it lets a caller do.
 
     - ``live``: a live session or daemon worker may be homed on the worktree
-      (:func:`_live_home_reason`), or the state or roster could not be read
+      (:func:`live_home_reason`), or the state or roster could not be read
       (fail closed). Nothing may touch the tree.
     - ``local``: an unexpected checked-out branch, or unsaved work. The refresh
       must not move HEAD, but the worktree is still the caller's to use: the
@@ -1028,7 +1034,7 @@ def _reuse_occupancy(client: ClientConfig, branch: str, wt_path: Path) -> _Occup
       or :func:`unsaved_work_reason` reports uncommitted, untracked or unpushed
       work (checked regardless of the caller's ``allow_dirty_reuse``, which
       only tolerates such work, it does not license moving HEAD under it); or
-    - ``live``: :func:`_live_home_reason` -- a live session in cw state or a
+    - ``live``: :func:`live_home_reason` -- a live session in cw state or a
       live worker in the daemon roster is homed on *wt_path*, or either could
       not be read (fail closed: this gates a mutation). The dev-queue RUNNING
       half of the GC guard is deliberately not consulted: at dispatch-claim time
@@ -1045,7 +1051,7 @@ def _reuse_occupancy(client: ClientConfig, branch: str, wt_path: Path) -> _Occup
         unsaved = unsaved_work_reason(client, branch, wt_path=wt_path)
         if unsaved is not None:
             local = f"unsaved work ({unsaved})"
-    return _Occupancy(live=_live_home_reason(wt_path), local=local)
+    return _Occupancy(live=live_home_reason(wt_path), local=local)
 
 
 def _occupancy_verdict(
