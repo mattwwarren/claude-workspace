@@ -2353,6 +2353,30 @@ class TestDispatchTickSpawnErrors:
             if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
         ), "expected ERROR log from cw.dispatch mentioning 'spawn failed'"
 
+    def test_claim_opts_into_reuse_refresh(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The dispatch claim path asks ``create_worktree`` to refresh a reused
+        per-ticket worktree (#2213); the default stays path-only."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-2213", client="test-client"))
+        seen: list[dict[str, object]] = []
+
+        def _record(*_args: object, **kwargs: object) -> Path:
+            seen.append(dict(kwargs))
+            msg = "stop after recording the call"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _record)
+
+        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert seen == [{"allow_dirty_reuse": True, "refresh_on_reuse": True}]
+
     def test_stale_worktree_error_force_removes_then_reverts(
         self,
         tmp_dispatch_dirs: Path,

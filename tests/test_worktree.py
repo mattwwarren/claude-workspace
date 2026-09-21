@@ -12,8 +12,16 @@ from unittest.mock import MagicMock
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
+from cw.config import save_state
 from cw.exceptions import StaleWorktreeError, WorktreeError
-from cw.models import ClientConfig
+from cw.models import (
+    ClientConfig,
+    CwState,
+    Session,
+    SessionOrigin,
+    SessionPurpose,
+    SessionStatus,
+)
 from cw.worktree import (
     _fetch_default_branch,
     _git_dir,
@@ -368,15 +376,16 @@ class TestCreateWorktree:
             return True
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        # ``ws`` does not exist here, so the real fetch would short-circuit on
-        # ``git_dir.exists()``; stub it to prove the reuse path invokes it (#2213).
         monkeypatch.setattr("cw.worktree.fetch_feature_branch", mock_fetch)
         result = create_worktree(client, "feat/search")
         assert result == wt_path
         # The behavior under test: an on-branch worktree is reused without a
         # `worktree add`. Assert that, not the exact verification command.
         assert not any("add" in call for call in calls)
-        assert fetch_calls == [(client, "feat/search")]
+        # Default reuse (refresh_on_reuse=False) is path resolution only: no
+        # network fetch and no fast-forward (#2213).
+        assert fetch_calls == []
+        assert not any("merge" in call for call in calls)
 
     def test_existing_worktree_wrong_branch_raises(
         self,
@@ -1082,9 +1091,93 @@ def _cw_worktree_records(
     ]
 
 
+def _spy_fetch(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Wrap ``cw.worktree.fetch_feature_branch`` with a delegating recorder.
+
+    Returns the list of branch names it was called with, so a test can prove
+    the refresh did (or did not) touch the network.
+    """
+    real = fetch_feature_branch
+    fetched: list[str] = []
+
+    def spy(client: ClientConfig, branch_name: str) -> bool:
+        fetched.append(branch_name)
+        return real(client, branch_name)
+
+    monkeypatch.setattr("cw.worktree.fetch_feature_branch", spy)
+    return fetched
+
+
+def _seed_session(
+    workspace: Path, worktree: Path | None, status: SessionStatus
+) -> None:
+    """Persist one session homed on *worktree* into the (tmp) cw state."""
+    save_state(
+        CwState(
+            sessions=[
+                Session(
+                    name="test/impl",
+                    client="test",
+                    purpose=SessionPurpose.IMPL,
+                    status=status,
+                    origin=SessionOrigin.DAEMON,
+                    workspace_path=workspace,
+                    worktree_path=worktree,
+                )
+            ]
+        )
+    )
+
+
+def _force_push_rewrite(origin: Path, work_dir: Path, branch: str) -> str:
+    """Replace ``origin/<branch>``'s history with a fresh commit off ``main``.
+
+    Simulates a rewritten remote (force-push) so the worktree's pushed commit
+    is no longer an ancestor of the remote tip. Returns the new tip SHA.
+    """
+    git_in(work_dir.parent, "clone", str(origin), str(work_dir))
+    git_in(work_dir, "checkout", "-B", branch, "origin/main")
+    (work_dir / "rewritten.txt").write_text("rewritten\n", encoding="utf-8")
+    git_in(work_dir, "add", "rewritten.txt")
+    git_in(
+        work_dir,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=cw test",
+        "commit",
+        "-m",
+        "rewritten history",
+    )
+    git_in(work_dir, "push", "--force", "origin", branch)
+    return git_in(work_dir, "rev-parse", "HEAD")
+
+
 class TestCreateWorktreeReuseRefresh:
-    """#2213: the reuse path best-effort fetches and fast-forwards a behind
-    worktree, never resetting and never raising."""
+    """#2213: with ``refresh_on_reuse=True`` the reuse path best-effort fetches
+    and fast-forwards a *behind, unoccupied, clean* worktree. It never resets,
+    never raises, and leaves an occupied or diverged worktree exactly as it is."""
+
+    def test_default_reuse_does_not_fetch_or_move(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt")
+        fetched = _spy_fetch(monkeypatch)
+
+        result = create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+
+        assert result == wt
+        assert fetched == []
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert (
+            git_in(workspace, "rev-parse", f"refs/remotes/origin/{_REUSE_BRANCH}")
+            == old_sha
+        )
 
     @pytest.mark.parametrize("allow_dirty_reuse", [False, True])
     def test_behind_worktree_fast_forwarded_on_reuse(
@@ -1111,7 +1204,10 @@ class TestCreateWorktreeReuseRefresh:
         caplog.clear()  # drop seed-phase records
         with caplog.at_level(logging.INFO, logger="cw.worktree"):
             result = create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=allow_dirty_reuse
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=allow_dirty_reuse,
+                refresh_on_reuse=True,
             )
 
         assert result == wt
@@ -1123,91 +1219,285 @@ class TestCreateWorktreeReuseRefresh:
             for r in _cw_worktree_records(caplog, logging.INFO)
         )
 
-    def test_ahead_of_origin_left_alone(
+    @pytest.mark.parametrize(
+        ("local_file", "local_content", "upstream_file", "upstream_content"),
+        [
+            pytest.param(
+                "tracked.txt",
+                "local churn\n",
+                "upstream.txt",
+                "out-of-band\n",
+                id="uncommitted-nonoverlapping",
+            ),
+            pytest.param(
+                "tracked.txt",
+                "local edit\n",
+                "tracked.txt",
+                "upstream edit\n",
+                id="uncommitted-overlapping",
+            ),
+            pytest.param(
+                "scratch.txt",
+                "untracked\n",
+                "upstream.txt",
+                "out-of-band\n",
+                id="untracked",
+            ),
+        ],
+    )
+    def test_uncommitted_work_is_not_fast_forwarded(
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
-        git_in(wt, "commit", "--allow-empty", "-m", "unpushed local work")
-        local_sha = git_in(wt, "rev-parse", "HEAD")
-
-        caplog.clear()  # drop seed-phase records
-        with caplog.at_level(logging.INFO, logger="cw.worktree"):
-            result = create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
-
-        assert result == wt
-        assert git_in(wt, "rev-parse", "HEAD") == local_sha
-        assert _cw_worktree_records(caplog, logging.WARNING) == []
-
-    def test_diverged_left_alone_and_warns(
-        self,
-        tmp_path: Path,
-        make_git_repo: Callable[..., Path],
-        caplog: pytest.LogCaptureFixture,
+        local_file: str,
+        local_content: str,
+        upstream_file: str,
+        upstream_content: str,
     ) -> None:
         client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
-        git_in(wt, "commit", "--allow-empty", "-m", "local divergent work")
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        (wt / local_file).write_text(local_content, encoding="utf-8")
+        push_commit_to_origin(
+            origin,
+            _REUSE_BRANCH,
+            tmp_path / "side",
+            upstream_file,
+            content=upstream_content,
+        )
+        fetched = _spy_fetch(monkeypatch)
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
+            result = create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
+
+        # The occupancy check is pre-network: no fetch, HEAD and edit untouched.
+        assert result == wt
+        assert fetched == []
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert (wt / local_file).read_text(encoding="utf-8") == local_content
+        assert _cw_worktree_records(caplog, logging.WARNING) == []
+        assert any(
+            r.levelno == logging.DEBUG
+            and str(wt) in r.getMessage()
+            and "uncommitted" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.DEBUG)
+        )
+
+    @pytest.mark.parametrize("remote_moved", [False, True])
+    def test_unpushed_local_commit_is_not_moved(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        remote_moved: bool,
+    ) -> None:
+        """Ahead of origin (remote_moved False) or diverged from it
+        (remote_moved True, an unpushed commit plus a different remote one):
+        either way the unpushed commit marks the worktree occupied."""
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        git_in(wt, "commit", "--allow-empty", "-m", "unpushed local work")
         local_sha = git_in(wt, "rev-parse", "HEAD")
-        push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "theirs.txt")
+        if remote_moved:
+            push_commit_to_origin(
+                origin, _REUSE_BRANCH, tmp_path / "side", "theirs.txt"
+            )
+        fetched = _spy_fetch(monkeypatch)
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
+            result = create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
+
+        assert result == wt
+        assert fetched == []
+        assert git_in(wt, "rev-parse", "HEAD") == local_sha
+        assert _cw_worktree_records(caplog, logging.WARNING) == []
+        assert any(
+            r.levelno == logging.DEBUG and "not on" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.DEBUG)
+        )
+
+    @pytest.mark.parametrize(
+        ("status", "homed_here", "expect_moved"),
+        [
+            pytest.param(SessionStatus.ACTIVE, True, False, id="active"),
+            pytest.param(SessionStatus.IDLE, True, False, id="idle"),
+            pytest.param(SessionStatus.BACKGROUNDED, True, False, id="backgrounded"),
+            pytest.param(SessionStatus.COMPLETED, True, True, id="terminal-completed"),
+            pytest.param(SessionStatus.ACTIVE, False, True, id="active-elsewhere"),
+        ],
+    )
+    def test_live_session_homed_on_worktree_blocks_fast_forward(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        status: SessionStatus,
+        homed_here: bool,
+        expect_moved: bool,
+    ) -> None:
+        client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        new_sha = push_commit_to_origin(
+            origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt"
+        )
+        _seed_session(workspace, wt if homed_here else tmp_path / "elsewhere", status)
+        fetched = _spy_fetch(monkeypatch)
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
+            result = create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
+
+        assert result == wt
+        if expect_moved:
+            assert git_in(wt, "rev-parse", "HEAD") == new_sha
+            return
+        assert fetched == []
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert _cw_worktree_records(caplog, logging.WARNING) == []
+        assert any(
+            r.levelno == logging.DEBUG
+            and str(wt) in r.getMessage()
+            and "live session" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.DEBUG)
+        )
+
+    def test_unreadable_session_state_fails_closed(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A mutation must not proceed when a live session cannot be ruled out."""
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt")
+        # ``cw.worktree`` imports the function lazily (import cycle), so the
+        # patch target is its home module.
+        monkeypatch.setattr("cw.worktree_gc.live_session_worktree_paths", lambda: None)
+        fetched = _spy_fetch(monkeypatch)
+
+        caplog.clear()  # drop seed-phase records
+        with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
+            result = create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
+
+        assert result == wt
+        assert fetched == []
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert any(
+            r.levelno == logging.DEBUG and "unreadable" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.DEBUG)
+        )
+
+    def test_diverged_after_remote_rewrite_left_alone_and_warns(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The worktree pushed commit A, then the remote history was rewritten
+        to B. The stale tracking ref still equals HEAD, so occupancy passes;
+        the fetch reveals the divergence and nothing is moved."""
+        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
+        new_tip = _force_push_rewrite(origin, tmp_path / "side", _REUSE_BRANCH)
+        assert new_tip != old_sha
 
         caplog.clear()  # drop seed-phase records
         with caplog.at_level(logging.INFO, logger="cw.worktree"):
-            result = create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+            result = create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
 
         assert result == wt
-        assert git_in(wt, "rev-parse", "HEAD") == local_sha
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert any(
             "diverged" in r.getMessage()
             for r in _cw_worktree_records(caplog, logging.WARNING)
         )
 
-    def test_dirty_nonoverlapping_behind_fast_forwards_and_keeps_modification(
+    def test_merge_refusal_is_logged_and_leaves_worktree_alone(
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
-    ) -> None:
-        client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
-        (wt / "tracked.txt").write_text("local churn\n", encoding="utf-8")
-        new_sha = push_commit_to_origin(
-            origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt"
-        )
-
-        create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
-
-        assert git_in(wt, "rev-parse", "HEAD") == new_sha
-        assert (wt / "tracked.txt").read_text(encoding="utf-8") == "local churn\n"
-        assert (wt / "upstream.txt").exists()
-
-    def test_dirty_overlapping_behind_refused_without_data_loss(
-        self,
-        tmp_path: Path,
-        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """``--ff-only`` can still refuse after the occupancy check passed (the
+        tree was dirtied in between); the refusal degrades to as-is."""
         client, wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
         old_sha = git_in(wt, "rev-parse", "HEAD")
-        (wt / "tracked.txt").write_text("local edit\n", encoding="utf-8")
-        push_commit_to_origin(
-            origin,
-            _REUSE_BRANCH,
-            tmp_path / "side",
-            "tracked.txt",
-            content="upstream edit\n",
-        )
+        push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt")
+
+        def spy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            if args[0] == "merge":
+                return subprocess.CompletedProcess(
+                    args, 1, "", "error: local changes would be overwritten\n"
+                )
+            return _run_git(*args, cwd=cwd, check=check)
+
+        monkeypatch.setattr("cw.worktree._run_git", spy)
 
         caplog.clear()  # drop seed-phase records
         with caplog.at_level(logging.INFO, logger="cw.worktree"):
-            result = create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+            result = create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
 
-        # Invariant: the local edit is never lost, and reuse never raises.
         assert result == wt
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
-        assert (wt / "tracked.txt").read_text(encoding="utf-8") == "local edit\n"
         assert any(
             "refused" in r.getMessage()
             for r in _cw_worktree_records(caplog, logging.WARNING)
+        )
+
+    def test_wrong_branch_still_raises_before_any_refresh(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The branch-identity guard (a StaleWorktreeError, stricter than
+        use-as-is) fires before the refresh: no fetch, worktree untouched."""
+        client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        git_in(wt, "checkout", "-b", "dev/other")
+        fetched = _spy_fetch(monkeypatch)
+
+        with pytest.raises(StaleWorktreeError):
+            create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
+
+        assert fetched == []
+        assert git_in(wt, "branch", "--show-current") == "dev/other"
+
+    def test_missing_path_creates_fresh_with_refresh_flag(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        client, _wt, _origin, workspace = _seed_reuse(tmp_path, make_git_repo)
+
+        created = create_worktree(client, "dev/fresh", refresh_on_reuse=True)
+
+        assert created.exists()
+        assert git_in(created, "branch", "--show-current") == "dev/fresh"
+        assert git_in(created, "rev-parse", "HEAD") == git_in(
+            workspace, "rev-parse", "main"
         )
 
     def test_branch_not_on_origin_is_silent(
@@ -1226,7 +1516,9 @@ class TestCreateWorktreeReuseRefresh:
 
         caplog.clear()  # drop seed-phase records
         with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
-            result = create_worktree(client, never_pushed, allow_dirty_reuse=True)
+            result = create_worktree(
+                client, never_pushed, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
 
         assert result == wt
         assert git_in(wt, "rev-parse", "HEAD") == head
@@ -1249,7 +1541,9 @@ class TestCreateWorktreeReuseRefresh:
 
         caplog.clear()  # drop seed-phase records
         with caplog.at_level(logging.INFO, logger="cw.worktree"):
-            result = create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+            result = create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
 
         assert result == wt
         assert git_in(wt, "rev-parse", "HEAD") == head
@@ -1271,7 +1565,9 @@ class TestCreateWorktreeReuseRefresh:
         # ... then origin becomes unreachable, so the fetch inside reuse fails.
         origin.rename(tmp_path / "origin-gone.git")
 
-        create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+        create_worktree(
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+        )
 
         assert git_in(wt, "rev-parse", "HEAD") == new_sha
 
@@ -1295,11 +1591,15 @@ class TestCreateWorktreeReuseRefresh:
         monkeypatch.setattr("cw.worktree._run_git", spy)
 
         # Equal state: nothing to fast-forward, so no submodule sync.
-        create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+        create_worktree(
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+        )
         assert [c for c in calls if "submodule" in c[0]] == []
 
         push_commit_to_origin(origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt")
-        create_worktree(client, _REUSE_BRANCH, allow_dirty_reuse=True)
+        create_worktree(
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+        )
 
         submodule_calls = [c for c in calls if "submodule" in c[0]]
         assert len(submodule_calls) == 1
@@ -1334,11 +1634,19 @@ class TestCreateWorktreeReuseRefresh:
             msg = "git vanished"
             raise FileNotFoundError(msg)
 
+        def clean(
+            client: ClientConfig, branch: str, *, wt_path: Path | None = None
+        ) -> None:
+            return None
+
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        monkeypatch.setattr("cw.worktree.unsaved_work_reason", clean)
         monkeypatch.setattr("cw.worktree.fetch_feature_branch", boom)
 
         with caplog.at_level(logging.WARNING, logger="cw.worktree"):
-            result = create_worktree(client, "feat/oserror", allow_dirty_reuse=True)
+            result = create_worktree(
+                client, "feat/oserror", allow_dirty_reuse=True, refresh_on_reuse=True
+            )
 
         assert result == wt_path
         assert any(
