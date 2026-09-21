@@ -876,13 +876,13 @@ class OrchestratorConfig(BaseModel):
     review_recipes_enabled: bool = False
     # GitHub #2135 — master switch for the Stop-hook abandoned-exit park.
     # Default False: the park is a state-mutating auto-actor that moves a
-    # dev-queue row RUNNING -> BLOCKED_ON_USER off transcript evidence derived
-    # by regex, so it ships dark and is armed per-lane by an operator —
+    # dev-queue row RUNNING -> BLOCKED_ON_USER off the worker's recorded park
+    # marker, so it ships dark and is armed per-lane by an operator —
     # mirroring gate_recipes_enabled's fail-safe default and
     # docs/release-playbook.md's default-off floor for this change class. With
     # this False the Stop hook defers on a sentinel-less exit exactly as it did
-    # before #2135, and performs no transcript scan at all. Per-lane /
-    # per-ticket resolution: LaneConfig.park_on_abandoned_exit,
+    # before #2135, without reading the marker. Per-lane / per-ticket
+    # resolution: LaneConfig.park_on_abandoned_exit,
     # TicketTask.park_on_abandoned_exit, resolve_park_on_abandoned_exit_enabled.
     park_on_abandoned_exit_enabled: bool = False
     # GitHub #1437 — operator escape hatch for the SSH-agent-key preflight

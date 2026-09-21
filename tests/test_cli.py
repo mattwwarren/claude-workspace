@@ -20,6 +20,7 @@ import pytest
 from click.testing import CliRunner, Result
 from freezegun import freeze_time
 
+from cw._util import claude_project_dir
 from cw.auto_dev_result import _CLOSE_SENTINEL, _OPEN_SENTINEL
 from cw.cli import (
     _complete_client,
@@ -29,17 +30,7 @@ from cw.cli import (
     _display_status,
     main,
 )
-from cw.cli._sentinels import (
-    _PARK_COMMENT_HEADERS,
-    _command_segments,
-    _is_leg_boundary,
-    _park_comment_posted_in_transcript,
-    _post_bodies,
-    _resolve_body,
-    _segment_at,
-    _skip_heredoc_body,
-    _skip_quoted,
-)
+from cw.cli._sentinels import _sentinel_frame_after
 from cw.cli.sprint import _resolve_version
 from cw.config import (
     clients_file,
@@ -51,10 +42,13 @@ from cw.config import (
 from cw.events import read_events
 from cw.exceptions import CwError, SprintApplyError
 from cw.models import (
+    PARK_COMMENT_MARKER_KEY,
+    PARK_ON_ABANDONED_EXIT_KEY,
     ClientConfig,
     CwState,
     LastResultSource,
     OrchestratorEventType,
+    ParkCommentMarker,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -62,18 +56,12 @@ from cw.models import (
     Stage,
     TicketTask,
 )
-from cw.reconcile.abandoned_exit import PARK_ON_ABANDONED_EXIT_KEY
 from cw.sprint import AppliedBuildout, BuildoutPlan
 from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
-    _bash_command_records,
     _inflate_scope,
     _make_stale_base_repo,
-    _park_body_text,
-    _park_post_records,
-    _tool_result_record,
-    _tool_use_record,
     _ul_record,
     _write_transcript_records,
 )
@@ -88,11 +76,106 @@ from tests.test_result import _valid_payload
 from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _plan
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
 
     import click
 
     from cw.models import QueueItemStatus
+
+
+def _frame_tool_result_record(
+    text: str, timestamp: str | None = None
+) -> dict[str, object]:
+    """A ``tool_result`` transcript record carrying *text* (#731 path, #2135).
+
+    The shape the sentinel scan reads a Bash-emitted frame out of: a ``user``
+    record whose message content holds a ``tool_result`` block. ``_ul_record``
+    only builds assistant ``text`` records, so the frame guard's tool_result
+    cases need this second builder. The ``timestamp`` key is omitted entirely
+    when *timestamp* is None -- that absence is itself a guard case.
+    """
+    record: dict[str, object] = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_frame",
+                    "content": text,
+                    "is_error": False,
+                }
+            ],
+        },
+    }
+    if timestamp is not None:
+        record["timestamp"] = timestamp
+    return record
+
+
+# Marker sentinels for TestSignalStop._seed_park_case (#2135). Distinct
+# objects rather than None/"" so "write a well-formed marker", "omit the key"
+# and "write this literal value" stay three separable intents -- a malformed
+# case genuinely needs to write ``None`` as the key's value.
+_CURRENT_MARKER = object()
+_NO_MARKER = object()
+# The stage the seeded RUNNING row carries. The marker's stage must equal it;
+# the stale-marker cases vary the marker's, never the row's.
+_PARK_ROW_STAGE = Stage.PLAN
+# A marker instant inside the frozen Stop clock's leg (_invoke_stop freezes at
+# 00:05:00Z), so a transcript record can be placed either side of it.
+_PARK_POSTED_AT = "2026-01-01T00:03:00+00:00"
+_PARK_BEFORE = "2026-01-01T00:02:00+00:00"
+_PARK_AFTER = "2026-01-01T00:04:00+00:00"
+# A frame-free record stamped before the marker: the transcript exists and
+# reads cleanly, so the frame guard permits the park. Cases that need the
+# park to fire pass this rather than None, because "no transcript at all"
+# defers (A11).
+_PARK_BENIGN_RECORDS: list[dict[str, object]] = [
+    {
+        "type": "assistant",
+        "timestamp": _PARK_BEFORE,
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Working on it."}],
+        },
+    }
+]
+
+
+def _park_marker_extra(
+    session_id: str, marker: object, overrides: dict[str, object] | None
+) -> dict[str, object] | None:
+    """Build the ``extra`` context keys for a seeded park marker (#2135)."""
+    if marker is _NO_MARKER:
+        return None
+    if marker is not _CURRENT_MARKER:
+        return {PARK_COMMENT_MARKER_KEY: marker}
+    payload: dict[str, object] = ParkCommentMarker(
+        ticket_id=TestSignalStop.SEED_TICKET_ID,
+        stage=_PARK_ROW_STAGE,
+        session_id=session_id,
+        posted_at=datetime.fromisoformat(_PARK_POSTED_AT),
+    ).model_dump(mode="json")
+    if overrides:
+        payload.update(overrides)
+    return {PARK_COMMENT_MARKER_KEY: payload}
+
+
+def _user_prose_record(text: str, timestamp: str | None = None) -> dict[str, object]:
+    """A ``user`` prose record the sentinel scan deliberately skips (#2135).
+
+    The paired negative of ``_frame_tool_result_record``: a frame literal
+    quoted only in user prose is invisible to the sentinel scan, so the frame
+    guard -- which walks the same record set -- must not see it either.
+    """
+    record: dict[str, object] = {
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+    }
+    if timestamp is not None:
+        record["timestamp"] = timestamp
+    return record
 
 
 class TestCli:
@@ -1083,22 +1166,27 @@ class TestSignalStop:
         *,
         session_id: str,
         ticket_id: str | None = SEED_TICKET_ID,
+        extra: dict[str, object] | None = None,
     ) -> None:
-        """Write a cw-context.json with ``headless: true`` (dispatch-spawned)."""
+        """Write a cw-context.json with ``headless: true`` (dispatch-spawned).
+
+        *extra* merges additional top-level keys into the written object --
+        ``park_comment_marker`` (#2135) and its malformed variants, which the
+        Stop hook reads straight out of this same file.
+        """
         claude_dir = worktree / ".claude"
         claude_dir.mkdir(parents=True, exist_ok=True)
-        (claude_dir / "cw-context.json").write_text(
-            json.dumps(
-                {
-                    "session_id": session_id,
-                    "session_name": "test-client/auto-dev/137",
-                    "client": "test-client",
-                    "purpose": "impl",
-                    "ticket_id": ticket_id,
-                    "headless": True,
-                }
-            )
-        )
+        context: dict[str, object] = {
+            "session_id": session_id,
+            "session_name": "test-client/auto-dev/137",
+            "client": "test-client",
+            "purpose": "impl",
+            "ticket_id": ticket_id,
+            "headless": True,
+        }
+        if extra:
+            context.update(extra)
+        (claude_dir / "cw-context.json").write_text(json.dumps(context))
 
     def test_signal_stop_no_sentinel_defers_even_long_past_former_budget(
         self,
@@ -3404,12 +3492,22 @@ class TestSignalStop:
         drop_worktree_path: bool = False,
         master_switch: bool = True,
         ticket_override: bool | None = True,
+        marker: object = _CURRENT_MARKER,
+        marker_overrides: dict[str, object] | None = None,
     ) -> tuple[Session, Path, object]:
         """Seed a headless session + RUNNING task + a hand-built transcript.
 
         Returns ``(session, worktree, daemon)``. *records* is written under the
         Claude project dir of *transcript_anchor* (the worktree by default);
-        ``None`` writes no transcript at all.
+        ``None`` writes no transcript at all. The transcript is still seeded
+        because the park's remaining transcript read is a *negative*-evidence
+        guard: it may only suppress a park, never cause one.
+
+        *marker* is the ``park_comment_marker`` written into cw-context.json.
+        :data:`_CURRENT_MARKER` builds a well-formed marker covering the seeded
+        session, ticket and row stage; :data:`_NO_MARKER` omits the key; any
+        other value is written verbatim (the malformed cases). Field-level
+        tweaks of the well-formed marker go through *marker_overrides*.
 
         The #2135 park ships dark, so every case that expects it to fire must
         arm it: *master_switch* writes ``park_on_abandoned_exit_enabled`` into
@@ -3445,6 +3543,7 @@ class TestSignalStop:
                         status=QueueItemStatus.RUNNING,
                         session_id=session.id,
                         attempts=1,
+                        stage=_PARK_ROW_STAGE,
                         park_on_abandoned_exit=park_map,
                     )
                 ]
@@ -3461,7 +3560,10 @@ class TestSignalStop:
             "clients:\n  test-client:\n    workspace_path: /tmp/ws-2135\n"
         )
         self._write_headless_context(
-            worktree, session_id=session.id, ticket_id=context_ticket_id
+            worktree,
+            session_id=session.id,
+            ticket_id=context_ticket_id,
+            extra=_park_marker_extra(session.id, marker, marker_overrides),
         )
         fake_home = tmp_path / f"fake-home-2135-{name}"
         if records is not None:
@@ -3517,7 +3619,7 @@ class TestSignalStop:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A completed park post with no sentinel routes the row (#2135).
+        """A covering park marker with no sentinel routes the row (#2135).
 
         The session is deliberately left ACTIVE and the daemon worker is left
         running: the park is reversible by a late sentinel through the #918
@@ -3526,7 +3628,7 @@ class TestSignalStop:
         from cw.models import QueueItemStatus
 
         session, worktree, daemon = self._seed_park_case(
-            tmp_path, monkeypatch, "park", _park_post_records(self.SEED_TICKET_ID)
+            tmp_path, monkeypatch, "park", _PARK_BENIGN_RECORDS
         )
 
         self._invoke_stop(worktree)
@@ -3538,6 +3640,11 @@ class TestSignalStop:
         assert task.disposition == "stopped_without_sentinel"
         assert task.session_id == session.id
         assert self._park_event_counts("park") == (1, 1)
+        attention = read_events(
+            consumer="t2135-lane",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert [e.payload["lane"] for e in attention] == [session.lane]
         for event_type in (
             OrchestratorEventType.SESSION_COMPLETED,
             OrchestratorEventType.SESSION_TIMED_OUT,
@@ -3558,7 +3665,7 @@ class TestSignalStop:
         from cw.models import QueueItemStatus
 
         _session, worktree, _daemon = self._seed_park_case(
-            tmp_path, monkeypatch, "twice", _park_post_records(self.SEED_TICKET_ID)
+            tmp_path, monkeypatch, "twice", _PARK_BENIGN_RECORDS
         )
 
         self._invoke_stop(worktree)
@@ -3567,52 +3674,301 @@ class TestSignalStop:
         assert self._reload_task().status == QueueItemStatus.BLOCKED_ON_USER
         assert self._park_event_counts("twice") == (1, 1)
 
-    def test_signal_stop_defers_when_comment_is_not_a_park_post(
+    def test_signal_stop_parks_on_a_marker_of_any_age(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A plan-of-record post is not an exit; the hook defers as today."""
+        """B4: ``posted_at`` carries no age semantics.
+
+        A marker stamped in 2000 and one stamped in 2099 both park under the
+        frozen 2026 Stop clock -- if the hook ever grew an expiry it would be a
+        timer, which ARCHITECTURE.md §7.13 forbids.
+        """
+        from cw.models import QueueItemStatus
+
+        for name, posted_at in (
+            ("ancient", "2000-01-01T00:00:00+00:00"),
+            ("future", "2099-01-01T00:00:00+00:00"),
+        ):
+            _session, worktree, _daemon = self._seed_park_case(
+                tmp_path,
+                monkeypatch,
+                f"age-{name}",
+                _PARK_BENIGN_RECORDS,
+                marker_overrides={"posted_at": posted_at},
+            )
+
+            self._invoke_stop(worktree)
+
+            assert self._reload_task().status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_signal_stop_defers_when_no_marker_is_present(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No marker means no evidence: defer, and never touch the transcript."""
+        from cw.models import QueueItemStatus
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path, monkeypatch, "no-marker", _PARK_BENIGN_RECORDS, marker=_NO_MARKER
+        )
+        lookups = self._count_transcript_lookups(monkeypatch)
+
+        self._invoke_stop(worktree)
+
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert self._park_event_counts("no-marker") == (0, 0)
+        assert lookups == []
+
+    def test_signal_stop_defers_when_the_producer_died_between_post_and_marker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The comment really was posted, but the stamp never ran (#2135).
+
+        The transcript carries the full ``gh issue comment`` tool call and its
+        successful result -- the exact evidence the deleted shell-parsing
+        detector read. The hook must not see it: commands are never positive
+        evidence, so a producer that died before the stamp defers.
+        """
+        from cw.models import QueueItemStatus
+
+        body = (
+            "## Pending Verification Scan\n\nPremises pending verification."
+            "\n\n<!-- cw-agent-authored -->"
+        )
+        records = [
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:02:00+00:00",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_frame",
+                            "name": "Bash",
+                            "input": {
+                                "command": (
+                                    f"gh issue comment {self.SEED_TICKET_ID} "
+                                    f'--body "{body}"'
+                                )
+                            },
+                        }
+                    ],
+                },
+            },
+            _frame_tool_result_record(
+                "https://github.com/o/r/issues/137#issuecomment-1",
+                "2026-01-01T00:02:30+00:00",
+            ),
+        ]
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path, monkeypatch, "producer-died", records, marker=_NO_MARKER
+        )
+        lookups = self._count_transcript_lookups(monkeypatch)
+
+        self._invoke_stop(worktree)
+
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert self._park_event_counts("producer-died") == (0, 0)
+        assert lookups == []
+
+    @pytest.mark.parametrize(
+        ("case", "overrides"),
+        [
+            pytest.param("session", {"session_id": "sess-somebody-else"}, id="session"),
+            pytest.param("ticket", {"ticket_id": "999"}, id="ticket"),
+            pytest.param("stage", {"stage": Stage.REVIEW.value}, id="stage"),
+        ],
+    )
+    def test_signal_stop_defers_for_a_stale_marker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        case: str,
+        overrides: dict[str, object],
+    ) -> None:
+        """A marker that does not cover this session/ticket/row-stage is inert."""
         from cw.models import QueueItemStatus
 
         _session, worktree, _daemon = self._seed_park_case(
             tmp_path,
             monkeypatch,
-            "plan-post",
-            _park_post_records(self.SEED_TICKET_ID, "## Plan: plan of record"),
+            f"stale-{case}",
+            _PARK_BENIGN_RECORDS,
+            marker_overrides=overrides,
         )
+        lookups = self._count_transcript_lookups(monkeypatch)
 
         self._invoke_stop(worktree)
 
         assert self._reload_task().status == QueueItemStatus.RUNNING
-        assert self._park_event_counts("plan-post") == (0, 0)
+        assert self._park_event_counts(f"stale-{case}") == (0, 0)
+        assert lookups == []
 
-    def test_signal_stop_defers_for_a_park_post_outside_the_current_leg(
+    @pytest.mark.parametrize(
+        ("case", "marker"),
+        [
+            pytest.param("none", None, id="none"),
+            pytest.param("string", "nope", id="not-a-dict"),
+            pytest.param(
+                "missing-field",
+                {"stage": "plan", "session_id": "x", "posted_at": _PARK_POSTED_AT},
+                id="missing-field",
+            ),
+            pytest.param(
+                "naive",
+                {
+                    "ticket_id": "137",
+                    "stage": "plan",
+                    "session_id": "x",
+                    "posted_at": "2026-01-01T00:03:00",
+                },
+                id="naive-timestamp",
+            ),
+            pytest.param(
+                "unknown-stage",
+                {
+                    "ticket_id": "137",
+                    "stage": "nonsense",
+                    "session_id": "x",
+                    "posted_at": _PARK_POSTED_AT,
+                },
+                id="unknown-stage",
+            ),
+            pytest.param(
+                "extra",
+                {
+                    "ticket_id": "137",
+                    "stage": "plan",
+                    "session_id": "x",
+                    "posted_at": _PARK_POSTED_AT,
+                    "attempt": 2,
+                },
+                id="extra-field",
+            ),
+        ],
+    )
+    def test_signal_stop_defers_for_a_malformed_marker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        case: str,
+        marker: object,
+    ) -> None:
+        """A malformed marker is an absent marker: exit 0, defer, no raise."""
+        from cw.models import QueueItemStatus
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            f"malformed-{case}",
+            _PARK_BENIGN_RECORDS,
+            marker=marker,
+        )
+
+        self._invoke_stop(worktree)  # asserts exit_code == 0: nothing raised
+
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert self._park_event_counts(f"malformed-{case}") == (0, 0)
+
+    def test_signal_stop_keeps_the_marker_across_a_deferred_stop(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A1 binding: a resumed worker's earlier post never parks its row."""
+        """The hook's own _clear_agent_spawn_stamp write must not eat it."""
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            "marker-survives",
+            _PARK_BENIGN_RECORDS,
+            master_switch=False,
+            ticket_override=None,
+        )
+
+        self._invoke_stop(worktree)
+
+        context = json.loads(
+            (worktree / ".claude" / "cw-context.json").read_text(encoding="utf-8")
+        )
+        assert PARK_COMMENT_MARKER_KEY in context
+
+    # -- B7: the marker-relative sentinel-frame guard -----------------------
+
+    @pytest.mark.parametrize(
+        ("case", "records"),
+        [
+            pytest.param(
+                "partial-open",
+                [_ul_record(f'{_OPEN_SENTINEL}\n{{"ticket_id": "137"', _PARK_AFTER)],
+                id="partial-open-frame",
+            ),
+            pytest.param(
+                "close-only",
+                [_ul_record(_CLOSE_SENTINEL, _PARK_AFTER)],
+                id="close-marker-only",
+            ),
+            pytest.param(
+                "placeholder",
+                [
+                    _ul_record(
+                        f"{_OPEN_SENTINEL}\n"
+                        '{"ticket_id": "<ticket-id>",'
+                        ' "status": "<stage_complete | blocked>"}\n'
+                        f"{_CLOSE_SENTINEL}",
+                        _PARK_AFTER,
+                    )
+                ],
+                id="complete-placeholder-frame",
+            ),
+            pytest.param(
+                "tool-result",
+                [_frame_tool_result_record(_OPEN_SENTINEL, _PARK_AFTER)],
+                id="frame-in-a-tool-result",
+            ),
+            pytest.param(
+                "no-timestamp",
+                [_ul_record(_OPEN_SENTINEL)],
+                id="frame-record-without-a-timestamp",
+            ),
+            pytest.param(
+                "naive-timestamp",
+                [_ul_record(_OPEN_SENTINEL, "2026-01-01T00:04:00")],
+                id="frame-record-with-a-naive-timestamp",
+            ),
+        ],
+    )
+    def test_signal_stop_defers_when_a_frame_follows_the_marker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        case: str,
+        records: list[dict[str, object]],
+    ) -> None:
+        """B7: a stamp followed by any frame text is left to the ordinary paths.
+
+        A truncated, unpaired or placeholder frame parses to ``None``, so the
+        hook reaches its no-sentinel branch -- and stamping
+        ``stopped_without_sentinel`` there would hide the real blocker reason
+        behind the wrong disposition. An unorderable record timestamp counts as
+        after the marker, the conservative direction.
+        """
         from cw.models import QueueItemStatus
 
-        records = [
-            *_park_post_records(self.SEED_TICKET_ID),
-            {
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": (
-                        "Continue auto-dev-plan stage 1 for ticket 137 "
-                        "(test-client, headless, resumed round)."
-                    ),
-                },
-            },
-            _ul_record("Picking the plan back up."),
-        ]
         session, worktree, _daemon = self._seed_park_case(
-            tmp_path, monkeypatch, "out-of-leg", records
+            tmp_path, monkeypatch, f"frame-{case}", records
         )
 
         self._invoke_stop(worktree)
@@ -3620,64 +3976,109 @@ class TestSignalStop:
         updated = next(s for s in load_state().sessions if s.id == session.id)
         assert updated.status == SessionStatus.ACTIVE
         assert self._reload_task().status == QueueItemStatus.RUNNING
-        assert self._park_event_counts("out-of-leg") == (0, 0)
+        assert self._park_event_counts(f"frame-{case}") == (0, 0)
 
-    def test_signal_stop_parks_for_a_park_post_inside_the_current_leg(
+    def test_signal_stop_defers_when_the_transcript_cannot_be_read(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A1 binding, the other side: the same post after the re-entry parks."""
+        """Soundness RISK 2: unreadable is evidence, not absence.
+
+        The ``Path.open`` patch is scoped to the seeded transcript filename:
+        ``signal_stop`` takes ``sessions_lock()`` first, which opens its own
+        lock file, and a blanket patch would break that before the guard runs.
+        It also keeps the case meaningful when the suite runs as root.
+        """
         from cw.models import QueueItemStatus
 
-        records = [
-            {
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": "Continue auto-dev-plan stage 1 for ticket 137.",
-                },
-            },
-            *_park_post_records(self.SEED_TICKET_ID),
-        ]
         _session, worktree, _daemon = self._seed_park_case(
-            tmp_path, monkeypatch, "in-leg", records
+            tmp_path, monkeypatch, "unreadable", _PARK_BENIGN_RECORDS
+        )
+        real_open = Path.open
+        target = f"{self._PARK_CSID}.jsonl"
+
+        def _scoped_open(self: Path, *args: object, **kwargs: object) -> object:
+            if self.name == target:
+                msg = "permission denied"
+                raise PermissionError(msg)
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr("pathlib.Path.open", _scoped_open)
+
+        self._invoke_stop(worktree)
+
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert self._park_event_counts("unreadable") == (0, 0)
+
+    def test_signal_stop_defers_on_a_torn_final_transcript_line(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A half-written final record is exactly the partial frame A5 defers."""
+        from cw.models import QueueItemStatus
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path, monkeypatch, "torn", _PARK_BENIGN_RECORDS
+        )
+        transcript = claude_project_dir(str(worktree)) / f"{self._PARK_CSID}.jsonl"
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(f'{{"type": "assistant", "text": "{_OPEN_SENTINEL} {{"')
+
+        self._invoke_stop(worktree)
+
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert self._park_event_counts("torn") == (0, 0)
+
+    def test_signal_stop_parks_when_the_frame_text_precedes_the_marker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A narrated open marker BEFORE the stamp is not a landing sentinel."""
+        from cw.models import QueueItemStatus
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            "frame-before",
+            [_ul_record(f"About to emit {_OPEN_SENTINEL}", _PARK_BEFORE)],
         )
 
         self._invoke_stop(worktree)
 
         assert self._reload_task().status == QueueItemStatus.BLOCKED_ON_USER
-        assert self._park_event_counts("in-leg") == (1, 1)
+        assert self._park_event_counts("frame-before") == (1, 1)
 
-    def test_signal_stop_defers_on_truncated_sentinel_framing_after_the_post(
+    def test_signal_stop_parks_when_a_frame_is_quoted_only_in_user_prose(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A2 binding: an unpaired frame defers rather than being stamped.
-
-        A late ``BlockedResult`` against a parked row is a deliberate no-op, so
-        stamping ``stopped_without_sentinel`` here would hide the real
-        ``blocker.reason`` behind the wrong disposition.
-        """
+        """The guard walks the sentinel scan's own record set: user prose is
+        invisible to both, so the prompt's schema example cannot suppress."""
         from cw.models import QueueItemStatus
 
-        records = [
-            *_park_post_records(self.SEED_TICKET_ID),
-            _ul_record(f'{_OPEN_SENTINEL}\n{{"ticket_id": "137"'),
-        ]
-        session, worktree, _daemon = self._seed_park_case(
-            tmp_path, monkeypatch, "truncated", records
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            "prose-frame",
+            [
+                _user_prose_record(
+                    f"emit {_OPEN_SENTINEL} ... {_CLOSE_SENTINEL}", _PARK_AFTER
+                )
+            ],
         )
 
         self._invoke_stop(worktree)
 
-        updated = next(s for s in load_state().sessions if s.id == session.id)
-        assert updated.status == SessionStatus.ACTIVE
-        assert self._reload_task().status == QueueItemStatus.RUNNING
-        assert self._park_event_counts("truncated") == (0, 0)
+        assert self._reload_task().status == QueueItemStatus.BLOCKED_ON_USER
+        assert self._park_event_counts("prose-frame") == (1, 1)
 
     def test_signal_stop_routes_a_complete_frame_through_the_sentinel_path(
         self,
@@ -3685,13 +4086,10 @@ class TestSignalStop:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A2 binding: a well-formed sentinel after the post is never a park."""
+        """A well-formed sentinel is never a park, marker or no marker."""
         from cw.models import QueueItemStatus
 
-        records = [
-            *_park_post_records(self.SEED_TICKET_ID),
-            _ul_record(_SENTINEL_251_NO_OP),
-        ]
+        records = [_ul_record(_SENTINEL_251_NO_OP, _PARK_AFTER)]
         session, worktree, _daemon = self._seed_park_case(
             tmp_path, monkeypatch, "complete-frame", records
         )
@@ -3714,11 +4112,15 @@ class TestSignalStop:
         from cw.models import QueueItemStatus
 
         _session, worktree, _daemon = self._seed_park_case(
-            tmp_path, monkeypatch, "799", _park_post_records(self.SEED_TICKET_ID)
+            tmp_path, monkeypatch, "799", _PARK_BENIGN_RECORDS
         )
         nested = worktree / "nested"
         nested.mkdir()
-        self._write_headless_context(nested, session_id=_session.id)
+        self._write_headless_context(
+            nested,
+            session_id=_session.id,
+            extra=_park_marker_extra(_session.id, _CURRENT_MARKER, None),
+        )
 
         self._invoke_stop(nested)
 
@@ -3731,7 +4133,11 @@ class TestSignalStop:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """No worktree_path and no transcript under cwd → defer, no exception."""
+        """A11: without a transcript a frame cannot be ruled out, so defer.
+
+        Conservative by design -- the cost is a silent non-park, never a false
+        one.
+        """
         from cw.models import QueueItemStatus
 
         _session, worktree, _daemon = self._seed_park_case(
@@ -3753,7 +4159,7 @@ class TestSignalStop:
         from cw.models import QueueItemStatus
 
         _session, worktree, _daemon = self._seed_park_case(
-            tmp_path, monkeypatch, "no-csid", _park_post_records(self.SEED_TICKET_ID)
+            tmp_path, monkeypatch, "no-csid", _PARK_BENIGN_RECORDS
         )
 
         self._invoke_stop(worktree, session_id=None)
@@ -3774,7 +4180,7 @@ class TestSignalStop:
             tmp_path,
             monkeypatch,
             "no-ticket",
-            _park_post_records(self.SEED_TICKET_ID),
+            _PARK_BENIGN_RECORDS,
             context_ticket_id=None,
         )
 
@@ -3793,7 +4199,7 @@ class TestSignalStop:
         from cw.models import QueueItemStatus
 
         _session, worktree, _daemon = self._seed_park_case(
-            tmp_path, monkeypatch, "bg-tasks", _park_post_records(self.SEED_TICKET_ID)
+            tmp_path, monkeypatch, "bg-tasks", _PARK_BENIGN_RECORDS
         )
 
         self._invoke_stop(worktree, background_tasks=[{"id": "bg-1"}])
@@ -3803,17 +4209,39 @@ class TestSignalStop:
 
     # -- the default-off gate (operator round 4, findings 2 and 3) ---------
 
-    def _count_scans(self, monkeypatch: pytest.MonkeyPatch) -> list[int]:
-        """Count calls to the transcript scan, preserving its real result."""
-        calls: list[int] = []
-        real = _park_comment_posted_in_transcript
+    @staticmethod
+    def _count_marker_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        """Count marker reads, preserving the real result."""
+        from cw.models import read_park_comment_marker
 
-        def _counting(transcript_path: Path, ticket_id: str) -> object:
+        calls: list[int] = []
+
+        def _counting(context: Mapping[str, object]) -> object:
             calls.append(1)
-            return real(transcript_path, ticket_id)
+            return read_park_comment_marker(context)
 
         monkeypatch.setattr(
-            "cw.cli.stop_hook._park_comment_posted_in_transcript", _counting
+            "cw.cli.stop_hook.read_park_comment_marker", _counting, raising=True
+        )
+        return calls
+
+    @staticmethod
+    def _count_transcript_lookups(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        """Count the park path's transcript lookups, preserving the real result.
+
+        ``claude_project_dir`` is imported into ``cw.cli.stop_hook`` for the
+        park path alone -- the sentinel parse resolves its own transcript
+        inside ``cw.cli._sentinels`` -- so patching it there counts exactly the
+        transcript I/O this feature added.
+        """
+        calls: list[int] = []
+
+        def _counting(path: str | Path) -> Path:
+            calls.append(1)
+            return claude_project_dir(path)
+
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.claude_project_dir", _counting, raising=True
         )
         return calls
 
@@ -3825,9 +4253,10 @@ class TestSignalStop:
     ) -> None:
         """The shipped default is dark: byte-identical to the pre-#2135 defer.
 
-        Same evidence that parks the row two tests up, with the master switch
-        off — the row stays RUNNING, nothing is emitted, and the transcript is
-        never scanned (finding 3: the scan must not run on every turn).
+        Same evidence that parks the row above, with the master switch off --
+        the row stays RUNNING, nothing is emitted, and neither the marker nor
+        the transcript is read (finding 3: the park must cost nothing on the
+        turn boundary it fires at).
         """
         from cw.models import QueueItemStatus
 
@@ -3835,11 +4264,12 @@ class TestSignalStop:
             tmp_path,
             monkeypatch,
             "dark",
-            _park_post_records(self.SEED_TICKET_ID),
+            _PARK_BENIGN_RECORDS,
             master_switch=False,
             ticket_override=None,
         )
-        scans = self._count_scans(monkeypatch)
+        reads = self._count_marker_reads(monkeypatch)
+        lookups = self._count_transcript_lookups(monkeypatch)
 
         self._invoke_stop(worktree)
 
@@ -3850,7 +4280,8 @@ class TestSignalStop:
         assert task.disposition is None
         assert self._park_event_counts("dark") == (0, 0)
         assert daemon.stop_calls == []
-        assert scans == []
+        assert reads == []
+        assert lookups == []
 
     def test_signal_stop_does_not_scan_when_no_running_row_matches(
         self,
@@ -3858,22 +4289,68 @@ class TestSignalStop:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Armed, but the cheap row precondition fails — still no scan."""
+        """Armed, but the cheap row precondition fails — still no reads."""
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import QueueItemStatus
 
         _session, worktree, _daemon = self._seed_park_case(
-            tmp_path, monkeypatch, "no-row", _park_post_records(self.SEED_TICKET_ID)
+            tmp_path, monkeypatch, "no-row", _PARK_BENIGN_RECORDS
         )
         store = load_dev_queue()
         store.tasks[0].status = QueueItemStatus.BLOCKED_ON_USER
         save_dev_queue(store)
-        scans = self._count_scans(monkeypatch)
+        reads = self._count_marker_reads(monkeypatch)
+        lookups = self._count_transcript_lookups(monkeypatch)
 
         self._invoke_stop(worktree)
 
         assert self._park_event_counts("no-row") == (0, 0)
-        assert scans == []
+        assert reads == []
+        assert lookups == []
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param("{ not json", id="invalid-json"),
+            pytest.param('{"schema_version": 1, "tasks": "nope"}', id="schema-invalid"),
+            pytest.param("[]", id="top-level-list"),
+        ],
+    )
+    def test_signal_stop_defers_on_a_corrupt_dev_queue(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        payload: str,
+    ) -> None:
+        """MUST_FIX: a corrupt queue must not raise out of the Stop hook.
+
+        ``load_dev_queue`` raises three different classes for the three shapes
+        an operator can end up with on disk; all three read as "no row, defer",
+        carrying one WARNING naming only the exception class.
+        """
+        from cw.config import dev_queue_file
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path, monkeypatch, f"corrupt-{payload[:4]}", _PARK_BENIGN_RECORDS
+        )
+        queue_path = dev_queue_file()
+        queue_path.write_text(payload, encoding="utf-8")
+        before = queue_path.read_bytes()
+        reads = self._count_marker_reads(monkeypatch)
+        loads = self._count_config_loads(monkeypatch)
+
+        with caplog.at_level("WARNING", logger="cw.reconcile._shared"):
+            self._invoke_stop(worktree)  # asserts exit_code == 0: nothing raised
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "find_running_task_for_session" in warnings[0].getMessage()
+        assert warnings[0].exc_info is None
+        assert reads == []
+        assert loads == {"orchestrator": 0, "clients": 0}
+        assert queue_path.read_bytes() == before
 
     def test_signal_stop_does_not_park_when_the_lane_is_disabled(
         self,
@@ -3888,7 +4365,7 @@ class TestSignalStop:
             tmp_path,
             monkeypatch,
             "lane-off",
-            _park_post_records(self.SEED_TICKET_ID),
+            _PARK_BENIGN_RECORDS,
             ticket_override=None,
         )
         self._write_park_lane_yaml(tmp_config_dir, enabled=False)
@@ -3904,14 +4381,14 @@ class TestSignalStop:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Master switch on + lane map on + real evidence ⇒ the row parks."""
+        """Master switch on + lane map on + a covering marker ⇒ the row parks."""
         from cw.models import QueueItemStatus
 
         _session, worktree, _daemon = self._seed_park_case(
             tmp_path,
             monkeypatch,
             "lane-on",
-            _park_post_records(self.SEED_TICKET_ID),
+            _PARK_BENIGN_RECORDS,
             ticket_override=None,
         )
         self._write_park_lane_yaml(tmp_config_dir, enabled=True)
@@ -3922,6 +4399,46 @@ class TestSignalStop:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "stopped_without_sentinel"
         assert self._park_event_counts("lane-on") == (1, 1)
+
+    def test_signal_stop_does_not_park_on_an_undeclared_lane(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """MUST_FIX: a per-ticket override cannot open a lane nobody declared.
+
+        The row rides the synthesized ``default`` lane; the client declares
+        only ``fastlane``. With the master switch on and the ticket map saying
+        True, a resolver that read the ticket tier first would park this row on
+        a lane the operator never armed.
+        """
+        from cw.models import QueueItemStatus
+
+        _session, worktree, _daemon = self._seed_park_case(
+            tmp_path, monkeypatch, "undeclared-lane", _PARK_BENIGN_RECORDS
+        )
+        clients_file().write_text(
+            "clients:\n"
+            "  test-client:\n"
+            "    workspace_path: /tmp/ws-2135\n"
+            "    lanes:\n"
+            "      - name: fastlane\n"
+            "        park_on_abandoned_exit:\n"
+            f"          {PARK_ON_ABANDONED_EXIT_KEY}: true\n"
+        )
+
+        with caplog.at_level("WARNING", logger="cw.reconcile.abandoned_exit"):
+            self._invoke_stop(worktree)  # asserts exit_code == 0
+
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert self._park_event_counts("undeclared-lane") == (0, 0)
+        warnings = [r for r in caplog.records if r.name.endswith("abandoned_exit")]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert "test-client" in message
+        assert "default" in message
 
     @staticmethod
     def _count_config_loads(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
@@ -3950,21 +4467,21 @@ class TestSignalStop:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Round 2, finding 3: dark means no scan and one config resolution."""
+        """Round 2, finding 3: dark means no reads and one config resolution."""
         _session, worktree, _daemon = self._seed_park_case(
             tmp_path,
             monkeypatch,
             "dark-cost",
-            _park_post_records(self.SEED_TICKET_ID),
+            _PARK_BENIGN_RECORDS,
             master_switch=False,
             ticket_override=None,
         )
-        scans = self._count_scans(monkeypatch)
+        lookups = self._count_transcript_lookups(monkeypatch)
         loads = self._count_config_loads(monkeypatch)
 
         self._invoke_stop(worktree)
 
-        assert scans == []
+        assert lookups == []
         assert loads == {"orchestrator": 1, "clients": 0}
 
     def test_signal_stop_reads_no_config_when_no_running_row_matches(
@@ -3978,7 +4495,7 @@ class TestSignalStop:
         from cw.models import QueueItemStatus
 
         _session, worktree, _daemon = self._seed_park_case(
-            tmp_path, monkeypatch, "row-first", _park_post_records(self.SEED_TICKET_ID)
+            tmp_path, monkeypatch, "row-first", _PARK_BENIGN_RECORDS
         )
         store = load_dev_queue()
         store.tasks[0].status = QueueItemStatus.BLOCKED_ON_USER
@@ -3989,13 +4506,13 @@ class TestSignalStop:
 
         assert loads == {"orchestrator": 0, "clients": 0}
 
-    def test_abandoned_exit_park_armed_checks_the_row_before_the_flag(
+    def test_armed_running_task_checks_the_row_before_the_flag(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """No RUNNING row ⇒ ``park_gate_open`` is never consulted."""
         from unittest.mock import MagicMock
 
-        from cw.cli.stop_hook import _abandoned_exit_park_armed
+        from cw.cli.stop_hook import _armed_running_task
 
         def _must_not_run(*_args: object) -> bool:
             msg = "the park flag must not be resolved without a RUNNING row"
@@ -4008,7 +4525,7 @@ class TestSignalStop:
         session = MagicMock(spec=Session)
         session.id = "sess-row-first"
 
-        assert _abandoned_exit_park_armed(session, self.SEED_TICKET_ID) is False
+        assert _armed_running_task(session, self.SEED_TICKET_ID) is None
 
     @pytest.mark.parametrize(
         "clients_content",
@@ -4031,7 +4548,7 @@ class TestSignalStop:
         """Round 2, finding 2: a broken clients.yaml is never a reason to park.
 
         The ticket-level override is on, so a gate that fell through on the
-        load error would park this row on the real evidence in the transcript.
+        load error would park this row on the marker it also carries.
         """
         from cw.models import QueueItemStatus
 
@@ -4039,17 +4556,17 @@ class TestSignalStop:
             tmp_path,
             monkeypatch,
             "bad-clients",
-            _park_post_records(self.SEED_TICKET_ID),
+            _PARK_BENIGN_RECORDS,
         )
         clients_file().write_bytes(clients_content)
-        scans = self._count_scans(monkeypatch)
+        lookups = self._count_transcript_lookups(monkeypatch)
 
         with caplog.at_level("WARNING", logger="cw.reconcile.abandoned_exit"):
             self._invoke_stop(worktree)  # asserts exit_code == 0: nothing raised
 
         assert self._reload_task().status == QueueItemStatus.RUNNING
         assert self._park_event_counts("bad-clients") == (0, 0)
-        assert scans == []
+        assert lookups == []
         assert daemon.stop_calls == []
         warnings = [r for r in caplog.records if r.name.endswith("abandoned_exit")]
         assert len(warnings) == 1
@@ -4067,15 +4584,15 @@ class TestSignalStop:
             tmp_path,
             monkeypatch,
             "bad-orchestrator",
-            _park_post_records(self.SEED_TICKET_ID),
+            _PARK_BENIGN_RECORDS,
         )
         orchestrator_config_file().write_text("park_on_abandoned_exit_enabled: [\n")
-        scans = self._count_scans(monkeypatch)
+        lookups = self._count_transcript_lookups(monkeypatch)
 
         self._invoke_stop(worktree)
 
         assert self._reload_task().status == QueueItemStatus.RUNNING
-        assert scans == []
+        assert lookups == []
 
     def test_signal_stop_defers_for_a_client_missing_from_clients_yaml(
         self,
@@ -4090,18 +4607,18 @@ class TestSignalStop:
             tmp_path,
             monkeypatch,
             "unknown-client",
-            _park_post_records(self.SEED_TICKET_ID),
+            _PARK_BENIGN_RECORDS,
         )
         clients_file().write_text(
             "clients:\n  someone-else:\n    workspace_path: /tmp/ws-2135\n"
         )
-        scans = self._count_scans(monkeypatch)
+        lookups = self._count_transcript_lookups(monkeypatch)
 
         self._invoke_stop(worktree)
 
         assert self._reload_task().status == QueueItemStatus.RUNNING
         assert self._park_event_counts("unknown-client") == (0, 0)
-        assert scans == []
+        assert lookups == []
 
     @staticmethod
     def _write_park_lane_yaml(tmp_config_dir: Path, *, enabled: bool) -> None:
@@ -4781,6 +5298,115 @@ _SENTINEL_1149_LATER_STAGE_BLOCKED = (
 )
 
 
+class TestSentinelFrameAfter:
+    """Direct tests for _sentinel_frame_after, the false-park guard (#2135).
+
+    Negative evidence only. It answers "could a sentinel frame have landed
+    after the worker stamped its marker?", and a True answer only ever
+    SUPPRESSES a park. Everything it cannot rule out -- an unorderable record
+    timestamp, an unreadable file, an undecodable line -- therefore counts as
+    True. Only a clean read that finds no frame may permit a park.
+    """
+
+    PIVOT = datetime(2026, 1, 1, 0, 3, tzinfo=UTC)
+    BEFORE = "2026-01-01T00:02:00+00:00"
+    AFTER = "2026-01-01T00:04:00+00:00"
+
+    @staticmethod
+    def _write(tmp_path: Path, records: list[dict[str, object]]) -> Path:
+        transcript = tmp_path / "t.jsonl"
+        transcript.write_text(
+            "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8"
+        )
+        return transcript
+
+    @pytest.mark.parametrize(
+        ("case", "text"),
+        [
+            pytest.param("open", _OPEN_SENTINEL, id="open-marker-only"),
+            pytest.param("close", _CLOSE_SENTINEL, id="close-marker-only"),
+            pytest.param(
+                "complete",
+                f"{_OPEN_SENTINEL}\n{{}}\n{_CLOSE_SENTINEL}",
+                id="complete-frame",
+            ),
+        ],
+    )
+    def test_any_frame_marker_after_the_pivot_is_true(
+        self, tmp_path: Path, case: str, text: str
+    ) -> None:
+        transcript = self._write(tmp_path, [_ul_record(text, self.AFTER)])
+
+        assert _sentinel_frame_after(transcript, self.PIVOT) is True
+
+    def test_a_frame_before_the_pivot_is_false(self, tmp_path: Path) -> None:
+        transcript = self._write(tmp_path, [_ul_record(_OPEN_SENTINEL, self.BEFORE)])
+
+        assert _sentinel_frame_after(transcript, self.PIVOT) is False
+
+    def test_a_frame_exactly_at_the_pivot_is_true(self, tmp_path: Path) -> None:
+        """``>=``: equality counts as after, the conservative direction."""
+        transcript = self._write(
+            tmp_path, [_ul_record(_OPEN_SENTINEL, "2026-01-01T00:03:00+00:00")]
+        )
+
+        assert _sentinel_frame_after(transcript, self.PIVOT) is True
+
+    @pytest.mark.parametrize(
+        ("case", "timestamp"),
+        [
+            pytest.param("absent", None, id="no-timestamp"),
+            pytest.param("unparseable", "not-a-timestamp", id="unparseable"),
+            pytest.param("naive", "2026-01-01T00:02:00", id="naive"),
+        ],
+    )
+    def test_an_unorderable_timestamp_counts_as_after(
+        self, tmp_path: Path, case: str, timestamp: str | None
+    ) -> None:
+        transcript = self._write(tmp_path, [_ul_record(_OPEN_SENTINEL, timestamp)])
+
+        assert _sentinel_frame_after(transcript, self.PIVOT) is True
+
+    def test_no_frame_text_is_false(self, tmp_path: Path) -> None:
+        transcript = self._write(tmp_path, [_ul_record("just narration", self.AFTER)])
+
+        assert _sentinel_frame_after(transcript, self.PIVOT) is False
+
+    def test_a_missing_file_is_false(self, tmp_path: Path) -> None:
+        """Absence is the caller's decision, not this helper's."""
+        assert _sentinel_frame_after(tmp_path / "nope.jsonl", self.PIVOT) is False
+
+    def test_an_unreadable_file_is_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        transcript = self._write(tmp_path, [_ul_record("narration", self.AFTER)])
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            msg = "permission denied"
+            raise PermissionError(msg)
+
+        monkeypatch.setattr("pathlib.Path.open", _boom)
+
+        assert _sentinel_frame_after(transcript, self.PIVOT) is True
+
+    def test_a_torn_final_line_is_true(self, tmp_path: Path) -> None:
+        """A half-written final record at Stop time is exactly the A5 hazard."""
+        transcript = self._write(tmp_path, [_ul_record("narration", self.BEFORE)])
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(f'{_OPEN_SENTINEL} {{"status": "blo')
+
+        assert _sentinel_frame_after(transcript, self.PIVOT) is True
+
+    def test_a_non_json_line_mid_file_is_true(self, tmp_path: Path) -> None:
+        """``errors="replace"`` means invalid bytes inside otherwise-valid JSON
+        never raise; an unparseable LINE is the actual trigger."""
+        transcript = self._write(tmp_path, [_ul_record("narration", self.BEFORE)])
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write("not json\n")
+
+        assert _sentinel_frame_after(transcript, self.PIVOT) is True
+
+
 class TestParseSentinelFromTranscript:
     """Tests for _parse_sentinel_from_transcript (GitHub issue #225).
 
@@ -5147,955 +5773,6 @@ class TestParseSentinelFromTranscript:
         self._write_transcript(worktree, "uuid-591b", example_sentinel, fake_home)
 
         assert _parse_sentinel_from_transcript(str(worktree), "uuid-591b") is None
-
-
-class TestShellCommandSegmentation:
-    """The pure helpers behind "is this match a real invocation?" (#2135).
-
-    Exercised directly because their whole job is to be wrong about nothing:
-    a missed segment boundary is a missed park, and a spurious one is a false
-    park of a live session's row.
-    """
-
-    @staticmethod
-    def _segment_texts(command: str) -> list[str]:
-        return [command[s.start : s.end] for s in _command_segments(command)]
-
-    @pytest.mark.parametrize(
-        ("command", "expected"),
-        [
-            ("gh issue comment 1 --body x", ["gh issue comment 1 --body x"]),
-            ("a && b", ["a ", " b"]),
-            ("a || b", ["a ", " b"]),
-            ("a; b", ["a", " b"]),
-            ("a | b", ["a ", " b"]),
-            ("a\nb", ["a", "b"]),
-            # A separator inside quotes is body text, not a boundary.
-            (
-                'gh issue comment 1 --body "a; b && c"',
-                ['gh issue comment 1 --body "a; b && c"'],
-            ),
-            # An escaped separator is literal too.
-            ("a \\; b", ["a \\; b"]),
-            # ...and so is an escaped newline (a line continuation).
-            ("a \\\n b", ["a \\\n b"]),
-        ],
-        ids=[
-            "single",
-            "and",
-            "or",
-            "semi",
-            "pipe",
-            "newline",
-            "quoted",
-            "escaped",
-            "continuation",
-        ],
-    )
-    def test_command_segments(self, command: str, expected: list[str]) -> None:
-        """Each span ends *before* the separator that closed it."""
-        assert self._segment_texts(command) == expected
-
-    def test_heredoc_body_lines_are_not_segments(self) -> None:
-        """Only the line after the terminator opens a new command."""
-        command = "cat <<'EOF' > f.sh\ninner one\ninner two\nEOF\nreal"
-
-        assert self._segment_texts(command) == ["cat <<'EOF' > f.sh", "real"]
-
-    def test_an_unterminated_heredoc_swallows_the_rest(self) -> None:
-        """Fail-closed: no terminator means every later line stays data."""
-        command = "cat <<'EOF' > f.sh\ninner\nstill inner"
-
-        assert self._segment_texts(command) == ["cat <<'EOF' > f.sh", ""]
-
-    def test_segment_at_is_none_inside_a_heredoc_body_and_on_a_separator(
-        self,
-    ) -> None:
-        command = "cat <<'EOF'\ninner\nEOF\nreal && x"
-        segments = _command_segments(command)
-
-        assert _segment_at(segments, command.index("inner")) is None
-        assert _segment_at(segments, command.index("&&")) is None
-        real = _segment_at(segments, command.index("real"))
-        assert real is not None
-        assert command[real.start : real.end] == "real "
-
-    def test_skip_quoted_handles_an_escaped_inner_quote(self) -> None:
-        command = '"a \\" b" tail'
-
-        assert _skip_quoted(command, 0) == command.index(" tail")
-
-    def test_skip_quoted_on_an_unterminated_quote_consumes_the_rest(self) -> None:
-        command = '"never closed'
-
-        assert _skip_quoted(command, 0) == len(command)
-
-    def test_skip_heredoc_body_stops_at_a_terminator_on_the_last_line(self) -> None:
-        command = "body\nEOF"
-
-        assert _skip_heredoc_body(command, 0, "EOF") == len(command)
-
-    def test_post_bodies_rejects_an_unresolvable_body_file(self) -> None:
-        """A ``--body-file`` naming a substitution is not evidence."""
-        command = "gh issue comment 42 --body-file $(mktemp)"
-
-        assert list(_post_bodies(command, {}, "42")) == []
-
-    def test_post_bodies_yields_nothing_for_the_short_body_flag(self) -> None:
-        """``-F`` is a documented false negative: no ``--body*`` flag, no body."""
-        command = "gh issue comment 42 -F body.md"
-
-        assert list(_post_bodies(command, {}, "42")) == []
-
-    def test_post_bodies_yields_each_qualifying_invocation_in_order(self) -> None:
-        """A harmless post earlier in a chain must not hide the park post."""
-        command = (
-            'gh issue comment 42 --body "hello" && '
-            "timeout 60 gh issue comment 42 --body-file /p.md"
-        )
-
-        assert list(_post_bodies(command, {"/p.md": "PARK"}, "42")) == ["hello", "PARK"]
-
-    @pytest.mark.parametrize(
-        ("arguments", "expected"),
-        [
-            (" --body-file /p.md", "PARK"),
-            (" --body-file=/p.md", "PARK"),
-            (' --body-file "/p.md"', "PARK"),
-            (" --body-file /p.md 2>", "PARK"),
-            (" \\\n  --body-file /p.md", "PARK"),
-            (' --body "inline text"', "inline text"),
-            (" --body=inline", "inline"),
-            (" --body 'a; b && c'", "a; b && c"),
-        ],
-        ids=[
-            "body-file",
-            "body-file-equals",
-            "body-file-quoted",
-            "trailing-redirect",
-            "line-continuation",
-            "inline",
-            "inline-equals",
-            "inline-quoted-separators",
-        ],
-    )
-    def test_resolve_body_reads_the_flag_positionally(
-        self, arguments: str, expected: str
-    ) -> None:
-        assert _resolve_body(arguments, {"/p.md": "PARK"}) == expected
-
-    @pytest.mark.parametrize(
-        "arguments",
-        [
-            "",
-            " -F /p.md",
-            " --body-file",
-            " --body-file /never-written.md",
-            " --body-file /p.md --body inline",
-            " --body a --body b",
-            ' --body "unterminated',
-            ' --body "$(cat /p.md)"',
-            " --body `cat /p.md`",
-            " --body-file $(mktemp)",
-            " --body <<EOF",
-            ' --title "note --body-file /p.md"',
-            ' --body "$(other --body-file /p.md)"',
-        ],
-        ids=[
-            "no-flag",
-            "short-flag",
-            "flag-without-value",
-            "unwritten-path",
-            "two-flags-mixed",
-            "two-flags-same",
-            "unbalanced-quote",
-            "command-substitution",
-            "backtick",
-            "unresolved-body-file",
-            "heredoc",
-            "flag-text-inside-another-flags-value",
-            "flag-text-inside-a-substitution",
-        ],
-    )
-    def test_resolve_body_is_none_when_not_knowable(self, arguments: str) -> None:
-        """No flag, several flags, or an unresolvable value: not evidence."""
-        assert _resolve_body(arguments, {"/p.md": "PARK"}) is None
-
-
-class TestParkCommentPostedInTranscript:
-    """`_park_comment_posted_in_transcript` — the #2135 abandoned-exit evidence.
-
-    Every assertion below is on a ``_ParkPostScan`` field (``.posted``,
-    ``.framing_after``, ``.leg_start``) rather than a bare bool, so a later
-    widening of the return shape cannot silently drop a leg.
-    """
-
-    TICKET = "2135"
-
-    @staticmethod
-    def _fixture_path() -> Path:
-        """The checked-in redacted real capture of a worker's park post."""
-        return (
-            Path(__file__).parent
-            / "fixtures"
-            / "claude_transcripts"
-            / "park_post_gh_issue_comment.jsonl"
-        )
-
-    @staticmethod
-    def _write(tmp_path: Path, records: list[dict[str, object]]) -> Path:
-        return _write_transcript_records(
-            tmp_path / "home", tmp_path / "wt", records, filename="uuid.jsonl"
-        )
-
-    @staticmethod
-    def _user_text_record(text: str) -> dict[str, object]:
-        """A user record whose content is a list holding one ``text`` block."""
-        return {
-            "type": "user",
-            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
-        }
-
-    @staticmethod
-    def _user_str_record(text: str) -> dict[str, object]:
-        """A user record whose ``message.content`` is a bare string."""
-        return {"type": "user", "message": {"role": "user", "content": text}}
-
-    @staticmethod
-    def _tool_result_text_record(tool_use_id: str, text: str) -> dict[str, object]:
-        """A user tool_result record carrying ``text`` as its stdout."""
-        return {
-            "type": "user",
-            "message": {
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": text,
-                        "is_error": False,
-                    }
-                ]
-            },
-        }
-
-    # -- the real capture ---------------------------------------------------
-
-    def test_real_capture_is_a_completed_park_post(self) -> None:
-        """The redacted real capture is the detector's canonical True case."""
-        scan = _park_comment_posted_in_transcript(self._fixture_path(), self.TICKET)
-
-        assert scan.posted is True
-        assert scan.framing_after is False
-        # The five-record slice holds no user re-entry record, so the whole
-        # file is the current run leg.
-        assert scan.leg_start is None
-
-    @pytest.mark.parametrize("other_ticket", ["2136", "213"])
-    def test_real_capture_rejects_other_and_prefix_ticket_ids(
-        self, other_ticket: str
-    ) -> None:
-        """A different issue number, and one the target merely prefixes, miss."""
-        scan = _park_comment_posted_in_transcript(self._fixture_path(), other_ticket)
-
-        assert scan.posted is False
-
-    def test_fixture_record_shapes_are_pinned(self) -> None:
-        """An accidental "cleanup" of the captured fixture must fail loudly."""
-        records = [
-            json.loads(line)
-            for line in self._fixture_path().read_text().splitlines()
-            if line
-        ]
-
-        assert [r["type"] for r in records] == [
-            "assistant",
-            "file-history-delta",
-            "user",
-            "assistant",
-            "user",
-        ]
-        write_result = records[2]["message"]["content"][0]
-        # Verbatim: a real Write result omits the key entirely.
-        assert "is_error" not in write_result
-        bash_result = records[4]["message"]["content"][0]
-        assert bash_result["is_error"] is False
-
-    # -- hand-authored positives -------------------------------------------
-
-    @pytest.mark.parametrize("header", list(_PARK_COMMENT_HEADERS[1:]))
-    def test_other_park_headers_are_accepted(self, tmp_path: Path, header: str) -> None:
-        """Every member of the exit-only park header set counts as evidence."""
-        path = self._write(tmp_path, _park_post_records(self.TICKET, header))
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is True
-        assert scan.framing_after is False
-
-    def test_inline_body_form_is_a_park_post(self, tmp_path: Path) -> None:
-        """``gh issue comment <id> --body "<header>…"`` needs no Write to join."""
-        path = self._write(tmp_path, _park_post_records(self.TICKET, via_write=False))
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is True
-
-    # -- hand-authored negatives -------------------------------------------
-
-    def test_errored_post_is_not_evidence(self, tmp_path: Path) -> None:
-        """A ``gh`` call whose tool_result is_error is True never posted."""
-        path = self._write(
-            tmp_path, _park_post_records(self.TICKET, post_is_error=True)
-        )
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    def test_errored_write_body_is_not_trusted(self, tmp_path: Path) -> None:
-        """A failed Write leaves the body unknowable, so the join fails closed."""
-        path = self._write(
-            tmp_path, _park_post_records(self.TICKET, write_is_error=True)
-        )
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    def test_non_park_header_body_is_not_evidence(self, tmp_path: Path) -> None:
-        """A plan-of-record post is followed by more work; it is not an exit."""
-        path = self._write(
-            tmp_path,
-            _park_post_records(
-                self.TICKET, "## Plan: plan of record\n\n<!-- plan-spec-reviewed -->"
-            ),
-        )
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    def test_body_without_agent_marker_is_not_evidence(self, tmp_path: Path) -> None:
-        """Provenance is half the evidence: no marker, no park."""
-        path = self._write(tmp_path, _park_post_records(self.TICKET, marker=False))
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    @pytest.mark.parametrize("posted_to", ["9999", "21350"])
-    def test_post_to_another_issue_is_not_evidence(
-        self, tmp_path: Path, posted_to: str
-    ) -> None:
-        """Another issue, and one the target is a bare prefix of, both miss."""
-        path = self._write(tmp_path, _park_post_records(posted_to))
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    def test_body_file_never_written_in_this_transcript(self, tmp_path: Path) -> None:
-        """No Write of that literal path ⇒ the body is unknowable ⇒ fail closed."""
-        records = _park_post_records(self.TICKET)[2:]
-        path = self._write(tmp_path, records)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    def test_dangling_post_call_is_not_evidence(self, tmp_path: Path) -> None:
-        """A ``gh`` tool_use with no tool_result never completed."""
-        path = self._write(tmp_path, _park_post_records(self.TICKET)[:3])
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    def test_missing_transcript_is_not_evidence(self, tmp_path: Path) -> None:
-        scan = _park_comment_posted_in_transcript(
-            tmp_path / "absent.jsonl", self.TICKET
-        )
-
-        assert scan.posted is False
-        assert scan.leg_start is None
-
-    def test_empty_transcript_is_not_evidence(self, tmp_path: Path) -> None:
-        path = tmp_path / "empty.jsonl"
-        path.write_text("")
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    def test_malformed_and_bookkeeping_records_are_skipped(
-        self, tmp_path: Path
-    ) -> None:
-        """A bad JSONL line, a non-dict record, and a record with no message."""
-        path = tmp_path / "malformed.jsonl"
-        path.write_text(
-            "{not json at all\n"
-            + json.dumps(["not", "a", "dict"])
-            + "\n"
-            + json.dumps({"type": "ai-title", "aiTitle": "x"})
-            + "\n"
-        )
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is False
-        assert scan.leg_start is None
-
-    # -- run-leg scoping (operator round 3, alternative (b)) ----------------
-
-    def test_park_post_before_a_re_entry_record_is_out_of_leg(
-        self, tmp_path: Path
-    ) -> None:
-        """A resumed worker's earlier post must not park its still-live row."""
-        records = [
-            *_park_post_records(self.TICKET),
-            self._user_str_record(
-                "Continue auto-dev-plan stage 1 for ticket 2135 "
-                "(test-client, headless, resumed round)."
-            ),
-            _ul_record("Back at it."),
-            *_park_post_records("9999", "## Unrelated"),
-        ]
-        path = self._write(tmp_path, records)
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is False
-        assert scan.leg_start == 4
-
-    def test_park_post_after_a_re_entry_record_is_in_leg(self, tmp_path: Path) -> None:
-        records = [
-            self._user_str_record("Continue auto-dev-plan stage 1 for ticket 2135."),
-            *_park_post_records(self.TICKET),
-        ]
-        path = self._write(tmp_path, records)
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is True
-        assert scan.leg_start == 0
-
-    def test_no_re_entry_record_means_the_whole_transcript_is_the_leg(
-        self, tmp_path: Path
-    ) -> None:
-        path = self._write(tmp_path, _park_post_records(self.TICKET))
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is True
-        assert scan.leg_start is None
-
-    @pytest.mark.parametrize(
-        "boundary_record",
-        [
-            {
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": "<task-notification> a job finished",
-                },
-            },
-            {
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": (
-                        "Another Claude session sent a message: "
-                        "<agent-message from='peer'>ping</agent-message>"
-                    ),
-                },
-            },
-            {
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "injected prose"}],
-                },
-            },
-        ],
-        ids=["task-notification", "agent-message", "text-block-list"],
-    )
-    def test_every_user_text_shape_after_the_post_resets_the_evidence(
-        self, tmp_path: Path, boundary_record: dict[str, object]
-    ) -> None:
-        """Over-matching the boundary is fail-safe: it only shrinks the window."""
-        path = self._write(
-            tmp_path, [*_park_post_records(self.TICKET), boundary_record]
-        )
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is False
-        assert scan.leg_start == 4
-
-    def test_written_body_map_is_cleared_at_the_leg_boundary(
-        self, tmp_path: Path
-    ) -> None:
-        """A Write before the boundary cannot supply a body for a post after it."""
-        write_use, write_result, bash_use, bash_result = _park_post_records(self.TICKET)
-        records = [
-            write_use,
-            write_result,
-            self._user_str_record("Continue auto-dev-plan stage 1 for ticket 2135."),
-            bash_use,
-            bash_result,
-        ]
-        path = self._write(tmp_path, records)
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is False
-        assert scan.leg_start == 2
-
-    def test_tool_result_only_user_records_never_reset_the_evidence(
-        self, tmp_path: Path
-    ) -> None:
-        """Ordinary post-post traffic is tool_result-only and is not a boundary."""
-        records = [
-            *_park_post_records(self.TICKET),
-            _tool_result_record("toolu_unrelated"),
-        ]
-        path = self._write(tmp_path, records)
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is True
-        assert scan.leg_start is None
-
-    @pytest.mark.parametrize(
-        ("record", "expected"),
-        [
-            ({"type": "user", "message": {"content": "bare string"}}, True),
-            (
-                {
-                    "type": "user",
-                    "message": {"content": [{"type": "text", "text": "prose"}]},
-                },
-                True,
-            ),
-            (
-                {
-                    "type": "user",
-                    "message": {
-                        "content": [{"type": "tool_result", "tool_use_id": "t1"}]
-                    },
-                },
-                False,
-            ),
-            (
-                {
-                    "type": "user",
-                    "message": {
-                        "content": [
-                            {"type": "text", "text": "prose"},
-                            {"type": "tool_result", "tool_use_id": "t1"},
-                        ]
-                    },
-                },
-                False,
-            ),
-            (
-                {
-                    "type": "assistant",
-                    "message": {"content": [{"type": "text", "text": "prose"}]},
-                },
-                False,
-            ),
-            ({"type": "attachment", "attachment": {"type": "hook_success"}}, False),
-            ({"type": "queue-operation", "content": "enqueue"}, False),
-            ({"type": "user", "message": {"content": 17}}, False),
-            ({"type": "user"}, False),
-            (
-                {
-                    "type": "user",
-                    "message": {"content": ["a bare string block", 17]},
-                },
-                False,
-            ),
-        ],
-        ids=[
-            "str-content",
-            "text-block-only",
-            "tool-result-only",
-            "mixed-list",
-            "assistant",
-            "attachment",
-            "queue-operation",
-            "malformed-content",
-            "no-message",
-            "non-dict-block-in-list",
-        ],
-    )
-    def test_is_leg_boundary_classifies_every_real_user_record_shape(
-        self, record: dict[str, object], expected: bool
-    ) -> None:
-        assert _is_leg_boundary(record) is expected
-
-    # -- fail closed on sentinel framing (operator round 3, alternative (b)) -
-
-    @pytest.mark.parametrize(
-        "framing_text",
-        [
-            _OPEN_SENTINEL,
-            _CLOSE_SENTINEL,
-            f'{_OPEN_SENTINEL}\n{{"ticket_id": "<ticket-id>", "status": "<status>"}}\n'
-            f"{_CLOSE_SENTINEL}",
-        ],
-        ids=["unpaired-open", "unpaired-close", "placeholder-frame"],
-    )
-    def test_framing_text_after_the_post_arms_the_fail_closed_flag(
-        self, tmp_path: Path, framing_text: str
-    ) -> None:
-        """No placeholder or documented-example carve-out: any frame defers."""
-        path = self._write(
-            tmp_path, [*_park_post_records(self.TICKET), _ul_record(framing_text)]
-        )
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is True
-        assert scan.framing_after is True
-
-    def test_framing_text_in_a_tool_result_after_the_post_counts(
-        self, tmp_path: Path
-    ) -> None:
-        """A frame emitted through Bash stdout is in the parser's block set."""
-        records = [
-            *_park_post_records(self.TICKET),
-            _tool_use_record("toolu_cat", "Bash", input_={"command": "cat frame.txt"}),
-            self._tool_result_text_record("toolu_cat", _OPEN_SENTINEL),
-        ]
-        path = self._write(tmp_path, records)
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is True
-        assert scan.framing_after is True
-
-    def test_framing_text_before_the_post_does_not_count(self, tmp_path: Path) -> None:
-        """Reading the stage doc's schema example is not an emitted sentinel."""
-        path = self._write(
-            tmp_path, [_ul_record(_OPEN_SENTINEL), *_park_post_records(self.TICKET)]
-        )
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is True
-        assert scan.framing_after is False
-
-    def test_framing_text_in_a_tool_use_echo_does_not_count(
-        self, tmp_path: Path
-    ) -> None:
-        """The command echo is deliberately outside the sentinel block set."""
-        records = [
-            *_park_post_records(self.TICKET),
-            _tool_use_record(
-                "toolu_echo",
-                "Bash",
-                input_={"command": f"printf '%s' '{_OPEN_SENTINEL}'"},
-            ),
-            _tool_result_record("toolu_echo"),
-        ]
-        path = self._write(tmp_path, records)
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is True
-        assert scan.framing_after is False
-
-    def test_park_post_with_no_framing_text_stays_unarmed(self, tmp_path: Path) -> None:
-        path = self._write(tmp_path, _park_post_records(self.TICKET))
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).framing_after is (
-            False
-        )
-
-    # -- documented false-negative post shapes (option (ii)) ----------------
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "timeout 60 gh issue comment 2135 --body-file "
-            '"$CLAUDE_JOB_DIR/tmp/park-comment-2135.md" 2>&1',
-            "timeout 60 gh issue comment 2135 -F /job/tmp/park-body-2135.md",
-            "timeout 60 gh issue comment --repo owner/repo 2135 "
-            "--body-file /job/tmp/park-body-2135.md",
-            "timeout 60 gh issue comment 2135 --body-file -",
-        ],
-        ids=["shell-variable-path", "short-flag", "repo-before-number", "stdin-body"],
-    )
-    def test_documented_false_negative_post_shapes_defer(
-        self, tmp_path: Path, command: str
-    ) -> None:
-        """Each of these is today's defer, never a false park (#2135 follow-up).
-
-        The detector joins a ``--body-file <literal path>`` to a prior
-        successful ``Write`` of that exact path. The four shapes here — an
-        unexpanded shell variable (the shape this ticket's own earlier park
-        used, with only a head ``Write``), the ``-F`` short flag, ``--repo``
-        placed before the issue number, and a body read from stdin — are
-        documented limitations; a producer-side park marker is the follow-up.
-        """
-        head_write, head_result = _park_post_records(self.TICKET)[:2]
-        records = [
-            head_write,
-            head_result,
-            _tool_use_record("toolu_alt", "Bash", input_={"command": command}),
-            _tool_result_record("toolu_alt"),
-        ]
-        path = self._write(tmp_path, records)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    # -- inert text is never evidence (operator round 4, finding 1) --------
-
-    BODY_PATH = "/job/tmp/park-body-2135.md"
-
-    def _write_then(self, tmp_path: Path, command: str) -> Path:
-        """A successful ``Write`` of :attr:`BODY_PATH`, then *command*."""
-        write_record, write_result = _park_post_records(self.TICKET)[:2]
-        return self._write(
-            tmp_path,
-            [write_record, write_result, *_bash_command_records(command)],
-        )
-
-    def test_heredoc_writing_an_example_post_is_not_evidence(
-        self, tmp_path: Path
-    ) -> None:
-        """A command that only *writes* an example body posted nothing.
-
-        The embedded text carries the header and the provenance marker, so
-        every content test passes — only "is this an invocation?" separates it
-        from a real post.
-        """
-        command = (
-            "cat <<'EOF' > example.sh\n"
-            f'gh issue comment {self.TICKET} --body "{_park_body_text()}"\n'
-            "EOF"
-        )
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    def test_echo_of_a_post_command_is_not_evidence(self, tmp_path: Path) -> None:
-        """Echoing the command text runs no ``gh`` at all."""
-        command = (
-            f"echo 'gh issue comment {self.TICKET} --body \"{_park_body_text()}\"'"
-        )
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    def test_real_invocation_later_in_an_and_chain_is_evidence(
-        self, tmp_path: Path
-    ) -> None:
-        """A post is still a post when it is the second link of a ``&&`` chain."""
-        command = (
-            "mkdir -p /job/tmp && timeout 60 gh issue comment "
-            f"{self.TICKET} --body-file {self.BODY_PATH} 2>&1"
-        )
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
-
-    def test_real_body_file_invocation_is_evidence(self, tmp_path: Path) -> None:
-        """The plain, unwrapped ``--body-file`` invocation still parks."""
-        command = f"gh issue comment {self.TICKET} --body-file {self.BODY_PATH}"
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
-
-    def test_quoted_separator_inside_the_body_does_not_split_the_post(
-        self, tmp_path: Path
-    ) -> None:
-        """A ``;`` inside the quoted body is body text, not a shell separator."""
-        body = _park_body_text().replace(
-            "redacted park body", "redacted park body; and more"
-        )
-        command = f'timeout 60 gh issue comment {self.TICKET} --body "{body}" 2>&1'
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
-
-    @pytest.mark.parametrize(
-        "body_arg",
-        ['--body "$(cat /job/tmp/park-body-2135.md)"', "--body `cat body.md`"],
-        ids=["command-substitution", "backtick"],
-    )
-    def test_unresolvable_body_is_not_evidence(
-        self, tmp_path: Path, body_arg: str
-    ) -> None:
-        """A body the transcript cannot resolve is not evidence of its content."""
-        command = f"timeout 60 gh issue comment {self.TICKET} {body_arg}"
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    # -- the body binds to its own invocation (operator round 5) ------------
-
-    def test_only_the_second_chained_invocation_counts(self, tmp_path: Path) -> None:
-        """A different-ticket first post neither counts nor supplies the body."""
-        command = (
-            "gh issue comment 9999 --body-file /job/tmp/other.md && "
-            f"gh issue comment {self.TICKET} --body-file {self.BODY_PATH}"
-        )
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
-
-    def test_first_invocation_does_not_borrow_the_second_ones_body(
-        self, tmp_path: Path
-    ) -> None:
-        """This ticket's post has no body of its own; the park body is 9999's."""
-        command = (
-            f"gh issue comment {self.TICKET} && "
-            f"gh issue comment 9999 --body-file {self.BODY_PATH}"
-        )
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    @pytest.mark.parametrize("separator", ["&&", ";", "|", "\n"])
-    def test_a_later_commands_body_file_is_not_bound(
-        self, tmp_path: Path, separator: str
-    ) -> None:
-        """One invocation, then an unrelated command that has a ``--body-file``."""
-        command = (
-            f"gh issue comment {self.TICKET} --title x {separator} "
-            f"other-tool --body-file {self.BODY_PATH}"
-        )
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    @pytest.mark.parametrize(
-        "quoted_arg",
-        [
-            f'--title "note --body-file {BODY_PATH}"',
-            f'--body "$(other --body-file {BODY_PATH})"',
-        ],
-        ids=["inside-another-flags-value", "inside-a-substitution"],
-    )
-    def test_a_body_flag_embedded_in_a_quoted_argument_is_not_bound(
-        self, tmp_path: Path, quoted_arg: str
-    ) -> None:
-        """Flag text inside one argument is that argument's data, not a flag."""
-        command = f"gh issue comment {self.TICKET} {quoted_arg}"
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    def test_a_harmless_earlier_post_does_not_hide_the_park_post(
-        self, tmp_path: Path
-    ) -> None:
-        """Both invocations are this ticket's; the second carries the park body."""
-        command = (
-            f'gh issue comment {self.TICKET} --body "working on it" && '
-            f"gh issue comment {self.TICKET} --body-file {self.BODY_PATH}"
-        )
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
-
-    def test_line_continued_invocation_is_evidence(self, tmp_path: Path) -> None:
-        """Workers wrap a long invocation across lines with a trailing ``\\``."""
-        command = (
-            f"timeout 60 gh issue comment {self.TICKET} \\\n"
-            f"  --body-file {self.BODY_PATH} 2>&1"
-        )
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is True
-
-    def test_two_body_flags_on_one_invocation_is_not_evidence(
-        self, tmp_path: Path
-    ) -> None:
-        command = (
-            f"gh issue comment {self.TICKET} --body-file {self.BODY_PATH} "
-            '--body "extra"'
-        )
-        path = self._write_then(tmp_path, command)
-
-        assert _park_comment_posted_in_transcript(path, self.TICKET).posted is False
-
-    # -- malformed-shape and error-path coverage ---------------------------
-
-    @pytest.mark.parametrize(
-        "records",
-        [
-            [{"type": "assistant", "message": {"content": "not a list"}}],
-            [{"type": "assistant", "message": {"content": ["not a dict", 7]}}],
-            [{"type": "assistant", "message": {"content": [{"type": "tool_use"}]}}],
-            [
-                {
-                    "type": "assistant",
-                    "message": {
-                        "content": [{"type": "tool_use", "id": "t1", "input": {}}]
-                    },
-                }
-            ],
-            [
-                {
-                    "type": "assistant",
-                    "message": {
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": "t1",
-                                "name": "Write",
-                                "input": "not a dict",
-                            }
-                        ]
-                    },
-                }
-            ],
-            [
-                _tool_use_record("t1", "Write", input_={"content": "body"}),
-                _tool_result_record("t1"),
-            ],
-            [
-                _tool_use_record(
-                    "t1", "Write", input_={"file_path": "/p", "content": 7}
-                ),
-                _tool_result_record("t1"),
-            ],
-            [_tool_result_record("never-seen")],
-            [{"type": "assistant", "message": {"content": [{"type": "text"}]}}],
-        ],
-        ids=[
-            "non-list-content",
-            "non-dict-block",
-            "tool-use-missing-id-and-name",
-            "tool-use-missing-name",
-            "tool-use-non-dict-input",
-            "write-without-file-path",
-            "write-with-non-string-content",
-            "unknown-tool-result-id",
-            "text-block-without-text",
-        ],
-    )
-    def test_malformed_record_shapes_never_raise(
-        self, tmp_path: Path, records: list[dict[str, object]]
-    ) -> None:
-        path = self._write(tmp_path, records)
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is False
-        assert scan.leg_start is None
-
-    def test_directory_at_transcript_path_is_not_evidence(self, tmp_path: Path) -> None:
-        directory = tmp_path / "not-a-file.jsonl"
-        directory.mkdir()
-
-        scan = _park_comment_posted_in_transcript(directory, self.TICKET)
-
-        assert scan.posted is False
-        assert scan.leg_start is None
-
-    def test_unreadable_transcript_is_not_evidence(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An OSError while reading stops the scan silently (no false park)."""
-        path = self._write(tmp_path, _park_post_records(self.TICKET))
-
-        def _boom(*_args: object, **_kwargs: object) -> object:
-            raise PermissionError
-
-        monkeypatch.setattr(Path, "open", _boom)
-
-        scan = _park_comment_posted_in_transcript(path, self.TICKET)
-
-        assert scan.posted is False
-        assert scan.leg_start is None
 
 
 class TestCompletion:

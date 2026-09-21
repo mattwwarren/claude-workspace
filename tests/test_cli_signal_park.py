@@ -366,10 +366,9 @@ class TestPostedAtIsAuditOnly:
         only ever SUPPRESS a park. Only the writer reads a clock."""
         import inspect
 
-        import cw.models.park_comment_marker
-
         import cw.cli._sentinels
         import cw.cli.stop_hook
+        import cw.models.park_comment_marker
 
         sources = [
             inspect.getsource(cw.models.park_comment_marker),
