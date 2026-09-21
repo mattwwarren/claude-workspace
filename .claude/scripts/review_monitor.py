@@ -584,13 +584,19 @@ def _merge_states(central: MonitorState, legacy: MonitorState) -> MonitorState:
     return central
 
 
-def load_state(repo: str) -> MonitorState:
+def load_state(repo: str, *, strict: bool = False) -> MonitorState:
     """Load monitor state for a specific repo from the central directory.
 
     If no central file exists but a legacy ``.claude/review-monitor-state.json``
     is present in the current directory, the legacy data is migrated
     automatically: it is merged into central (newer ``last_checked_at`` wins
     per PR), saved to the central location, and the legacy file is deleted.
+
+    An unreadable central file degrades to empty state with a warning, which
+    suits read-only callers. A caller that goes on to *write* the state passes
+    ``strict=True`` so an ``OSError`` reading the file propagates instead —
+    otherwise the write would replace whatever the unreadable file held. Corrupt
+    but readable content starts fresh either way.
     """
     state_file = state_path_for_repo(repo)
     central_state: MonitorState | None = None
@@ -600,6 +606,8 @@ def load_state(repo: str) -> MonitorState:
             data = json.loads(state_file.read_text())
             central_state = MonitorState.from_dict(data)
         except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
+            if strict and isinstance(e, OSError):
+                raise
             logger.warning(
                 "Corrupt monitor state file %s, starting fresh: %s", state_file, e
             )
@@ -829,11 +837,11 @@ def cmd_register(
 
     Returns ``{"registered": True, "key": ..., "sha": ..., "updated": bool}``
     once the state is saved; ``updated`` is True when the PR was already
-    monitored (a re-anchor). A state write failure raises ``OSError``.
+    monitored (a re-anchor). A state read or write failure raises ``OSError``.
     """
     threads = _normalize_thread_ids(threads)
     repo_path = _canonical_repo_path(repo, repo_path)
-    state = load_state(repo)
+    state = load_state(repo, strict=True)
     key = f"{repo}#{pr_number}"
     updated = key in state.monitored
 
@@ -918,7 +926,7 @@ def cmd_drop(pr_number: int, repo: str) -> dict[str, Any]:
     Returns ``{"dropped": bool, "key": ...}``; ``dropped`` is False (not an
     error) when the PR was not monitored.
     """
-    state = load_state(repo)
+    state = load_state(repo, strict=True)
     key = f"{repo}#{pr_number}"
     dropped = key in state.monitored
     if dropped:
@@ -933,7 +941,7 @@ def cmd_complete(pr_number: int, repo: str, reason: str) -> dict[str, Any]:
     No-op if not found. Returns ``{"completed": bool, "key": ..., "reason": ...}``;
     ``completed`` is False (not an error) when the PR was not monitored.
     """
-    state = load_state(repo)
+    state = load_state(repo, strict=True)
     key = f"{repo}#{pr_number}"
     if key not in state.monitored:
         logger.info("cmd_complete: %r not found in monitored, ignoring", key)
@@ -3038,13 +3046,14 @@ def _dispatch_discovery(args: argparse.Namespace) -> None:
 def _emit_mutation_result(label: str, run: Callable[[], dict[str, Any]]) -> None:
     """Run a state-mutating command and print its one-line JSON result.
 
-    A state read/write failure (``OSError``) becomes an ``Error:`` line on
-    stderr and exit 1 — never a silent success — so the caller learns from the
+    A state read/write failure (``OSError``) or malformed JSON in an argument
+    (``json.JSONDecodeError``) becomes an ``Error:`` line on stderr and exit 1 —
+    never a silent success or a traceback — so the caller learns from the
     command itself whether the mutation landed.
     """
     try:
         result = run()
-    except OSError as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         print(f"Error: {label} failed: {exc}", file=sys.stderr)
         sys.exit(1)
     print(json.dumps(result))
@@ -3055,7 +3064,6 @@ def _dispatch_mutation(args: argparse.Namespace) -> None:
     confirm-thread commands."""
     label = f"{args.command} {args.repo}#{args.pr_number}"
     if args.command == "register":
-        td = json.loads(args.thread_details) if args.thread_details else None
         _emit_mutation_result(
             label,
             lambda: cmd_register(
@@ -3066,7 +3074,9 @@ def _dispatch_mutation(args: argparse.Namespace) -> None:
                 sha=args.sha,
                 review_id=args.review_id,
                 threads=args.threads,
-                thread_details=td,
+                thread_details=(
+                    json.loads(args.thread_details) if args.thread_details else None
+                ),
                 slack_channel=args.slack_channel,
                 slack_ts=args.slack_ts,
             ),
