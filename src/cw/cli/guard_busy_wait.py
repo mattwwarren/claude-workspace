@@ -13,7 +13,7 @@ this is the enforcement surface it cited.
 
 Claude Code invokes this before every Bash tool call in a dispatched worker,
 wired as the second command on the existing ``"Bash"`` PreToolUse matcher in
-:data:`cw.spawn._HOOK_SETTINGS_TEMPLATE` (alongside ``cw guard-cwd``). It
+:func:`cw.spawn._build_hook_settings` (alongside ``cw guard-cwd``). It
 reads the hook JSON from stdin and exits ``2`` (block) on three shapes:
 
 1. a bare ``true`` / ``:`` no-op,

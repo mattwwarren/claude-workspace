@@ -439,3 +439,56 @@ class TestInstallSessionstartHookExtra:
             for h in item.get("hooks", [])
         ]
         assert _SESSIONSTART_COMMAND in commands
+
+
+# ---------------------------------------------------------------------------
+# #2226 — cw init must never write a user-level Stop hook
+# ---------------------------------------------------------------------------
+
+
+class TestOnboardingNeverWritesUserLevelStopHook:
+    """Regression guard: ``cw init`` touches ~/.claude/settings.json only for
+    the ``Bash(cw:*)`` allowlist — never for hooks. The Stop hook is
+    worktree-scoped (``<worktree>/.claude/settings.local.json``); a user-level
+    copy costs an interpreter start on every turn of every Claude session.
+    """
+
+    def test_allowlist_on_fresh_settings_adds_no_hooks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fresh settings.json gets permissions only, no hooks key."""
+        settings = tmp_path / "settings.json"
+        monkeypatch.setattr("cw.onboarding._CLAUDE_SETTINGS_PATH", settings)
+
+        install_cw_allowlist()
+
+        data = json.loads(settings.read_text())
+        assert "hooks" not in data
+
+    def test_allowlist_on_existing_settings_adds_no_hooks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Merging into an existing settings.json introduces no hooks key."""
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({"permissions": {"allow": ["Bash(gh:*)"]}}))
+        monkeypatch.setattr("cw.onboarding._CLAUDE_SETTINGS_PATH", settings)
+
+        install_cw_allowlist()
+
+        data = json.loads(settings.read_text())
+        assert "hooks" not in data
+
+    def test_sessionstart_hook_never_touches_user_settings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """install_sessionstart_hook writes the workspace file, not ~/.claude."""
+        user_settings = tmp_path / "user" / "settings.json"
+        monkeypatch.setattr("cw.onboarding._CLAUDE_SETTINGS_PATH", user_settings)
+        workspace = tmp_path / "repo"
+        workspace.mkdir()
+
+        install_sessionstart_hook(workspace)
+
+        assert not user_settings.exists()
+        data = json.loads((workspace / ".claude" / "settings.json").read_text())
+        assert "Stop" not in data["hooks"]

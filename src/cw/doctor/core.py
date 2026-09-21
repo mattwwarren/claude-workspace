@@ -42,6 +42,7 @@ from cw.doctor.loop_health import (
     _check_timed_out_merged,
 )
 from cw.doctor.skills_drift import _check_skills_commands_drift
+from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
     _check_bypass_disclaimer,
     _check_claude_version,
@@ -105,6 +106,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_cw_version())
     report.checks.append(_check_cw_deps())
     report.checks.append(_check_skills_commands_drift())
+    report.checks.append(_check_user_level_stop_hook())
     report.checks.append(_check_codex_capability())
     report.checks.append(_check_daemon_reachable())
     report.checks.append(_check_ssh_key_loaded())

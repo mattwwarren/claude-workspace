@@ -1050,6 +1050,13 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         tmp_path / ".claude" / "daemon" / "roster.json",
     )
 
+    # Redirect the #2226 user-level Stop-hook scan away from the operator's
+    # real ~/.claude, so `cw doctor` tests see a clean host regardless of what
+    # the machine running them has installed. (The sibling
+    # doctor.versions._CLAUDE_SETTINGS_PATH and doctor.skills_drift._CLAUDE_HOME
+    # seams are NOT patched here — a pre-existing gap, out of scope for #2226.)
+    monkeypatch.setattr("cw.doctor.user_level_hooks._CLAUDE_HOME", tmp_path / ".claude")
+
     # Stub _claude_agents_json so tests don't invoke the real ``claude``
     # binary. Tests that want specific liveness behaviour override this with
     # their own monkeypatch.setattr call; pytest patches stack and the
