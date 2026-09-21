@@ -158,9 +158,11 @@ Two consequences worth knowing:
 
 - **The worktree is never removed between review and fix.** Step 3b.1's old
   `git worktree remove --force` + `git branch -D` is gone. `create_worktree`
-  now hits its idempotent-reuse branch, which checks the worktree, then
-  best-effort fetches and fast-forwards a behind branch (never a reset, never
-  a raise); an equal, ahead, or diverged worktree is left untouched.
+  now hits its idempotent-reuse branch, which checks the worktree; the
+  dispatch and fix-dispatch callers pass `refresh_on_reuse=True`, which
+  best-effort fetches and fast-forwards an unoccupied, clean, strictly-behind
+  branch only (never a reset, never a raise). Any other worktree (occupied,
+  dirty, ahead, or diverged) is left as it is.
 - **The row stays RUNNING for the whole handoff.** `dispatch/claim.py` only
   claims PENDING rows, so nothing re-dispatches the ticket while the fix agent
   works. `fix_dispatch`'s completion phase reverts it to PENDING once the fix
