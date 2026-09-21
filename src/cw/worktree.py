@@ -831,7 +831,22 @@ def _refresh_reused_worktree(client: ClientConfig, branch: str, wt_path: Path) -
                 reason,
             )
             return
-        fetch_feature_branch(client, branch)
+        if not fetch_feature_branch(client, branch):
+            # A failed fetch leaves the tracking ref at whatever it was before,
+            # so fast-forwarding "to origin" would really move HEAD to stale
+            # state. Skip the fast-forward and use the worktree as-is. The
+            # reason (rc + git's first stderr line) is already logged by
+            # ``fetch_feature_branch`` -- at WARNING for a real failure, DEBUG
+            # for the expected never-pushed branch -- so this line stays at
+            # DEBUG rather than duplicating that noise policy.
+            _log.debug(
+                "create_worktree: fetch of origin/%s failed; fast-forward "
+                "skipped, using worktree as-is (client=%s, path=%s)",
+                branch,
+                client.name,
+                wt_path,
+            )
+            return
         target = f"refs/remotes/origin/{branch}"
         if not _ref_exists(target, wt_path):
             return

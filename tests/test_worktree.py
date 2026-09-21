@@ -1657,27 +1657,79 @@ class TestCreateWorktreeReuseRefresh:
         assert git_in(wt, "rev-parse", "HEAD") == head
         assert _cw_worktree_records(caplog, logging.WARNING)
 
-    def test_fetch_failure_still_fast_forwards_to_known_tip(
+    def test_fetch_failure_skips_fast_forward_from_stale_tracking_ref(
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """A failed fetch leaves the tracking ref at whatever it was before, so
+        a fast-forward "to origin" would really be a move to stale state. It is
+        skipped entirely: HEAD untouched, the reason reported, nothing raised."""
         client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
+        old_sha = git_in(wt, "rev-parse", "HEAD")
         new_sha = push_commit_to_origin(
             origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt"
         )
         # Another fetch (e.g. dispatch's freshness gate) advances the shared
         # tracking ref while the worktree's branch stays behind ...
         git_in(workspace, "fetch", "origin")
-        assert git_in(wt, "rev-parse", "HEAD") != new_sha
+        tracking = f"refs/remotes/origin/{_REUSE_BRANCH}"
+        assert git_in(workspace, "rev-parse", tracking) == new_sha
+        assert old_sha != new_sha
         # ... then origin becomes unreachable, so the fetch inside reuse fails.
         origin.rename(tmp_path / "origin-gone.git")
+        fetched = _spy_fetch(monkeypatch)
 
-        create_worktree(
-            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+        result = _refresh_with_debug(client, caplog)
+
+        assert result == wt
+        assert fetched == [_REUSE_BRANCH]
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert not (wt / "upstream.txt").exists()
+        # The reason is reported: fetch's own WARNING carries rc + git's stderr,
+        # and the refresh names the skip.
+        assert any(
+            "fetch failed" in r.getMessage() and "rc=" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.WARNING)
+        )
+        assert any(
+            "fast-forward skipped" in m and str(wt) in m for m in _debug_reasons(caplog)
         )
 
-        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+    def test_simulated_fetch_failure_leaves_head_and_reports_reason(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client, wt, workspace, old_sha, new_sha = _seed_behind(tmp_path, make_git_repo)
+        # A stale-but-newer tracking ref is what a real failure would leave.
+        git_in(workspace, "fetch", "origin")
+        merges: list[tuple[str, ...]] = []
+
+        def failing_fetch(client: ClientConfig, branch_name: str) -> bool:
+            return False
+
+        def spy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            if args[0] == "merge":
+                merges.append(args)
+            return _run_git(*args, cwd=cwd, check=check)
+
+        monkeypatch.setattr("cw.worktree.fetch_feature_branch", failing_fetch)
+        monkeypatch.setattr("cw.worktree._run_git", spy)
+
+        result = _refresh_with_debug(client, caplog)
+
+        assert result == wt
+        assert merges == []  # skipped entirely, not merely refused
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert old_sha != new_sha
+        assert any("fast-forward skipped" in m for m in _debug_reasons(caplog))
 
     def test_submodule_sync_runs_only_after_fast_forward(
         self,
