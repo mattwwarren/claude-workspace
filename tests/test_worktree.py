@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from cw import native_daemon
 from cw.auto_dev_result import AutoDevResult
 from cw.config import save_state, state_file
 from cw.exceptions import StaleWorktreeError, WorktreeError
@@ -27,8 +28,10 @@ from cw.worktree import (
     _fetch_default_branch,
     _git_dir,
     _hashed_worktree_base,
+    _live_home_reason,
     _register_cw_exclude,
     _resolve_remote_ref,
+    _reuse_occupancy_reason,
     _run_git,
     check_main_ff_safety,
     check_not_main_checkout,
@@ -1758,6 +1761,289 @@ class TestCreateWorktreeReuseRefresh:
             "refresh of reused worktree failed" in r.getMessage()
             for r in _cw_worktree_records(caplog, logging.WARNING)
         )
+
+
+def _seed_roster(cwd: Path | None = None, *, raw: str | None = None) -> Path:
+    """Write the (tmp-isolated) daemon roster.
+
+    *cwd* records one live worker homed there; *raw* writes arbitrary bytes
+    instead. ``tests/conftest.py`` points ``native_daemon._ROSTER_PATH`` at a
+    tmp path, so this never touches the developer's real roster.
+    """
+    roster = native_daemon._ROSTER_PATH
+    roster.parent.mkdir(parents=True, exist_ok=True)
+    payload = (
+        raw
+        if raw is not None
+        else json.dumps({"workers": {"aaaa1111": {"pid": 1, "cwd": str(cwd)}}})
+    )
+    roster.write_text(payload, encoding="utf-8")
+    return roster
+
+
+def _occupy(source: str, workspace: Path, path: Path) -> None:
+    """Make *path* look occupied via cw state or via the daemon roster."""
+    if source == "state":
+        _seed_session(workspace, path, SessionStatus.ACTIVE)
+    else:
+        _seed_roster(path)
+
+
+def _seed_behind(
+    tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> tuple[ClientConfig, Path, Path, str, str]:
+    """``_seed_reuse`` plus an upstream commit.
+
+    Returns ``(client, wt, workspace, old_sha, new_sha)``.
+    """
+    client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
+    old_sha = git_in(wt, "rev-parse", "HEAD")
+    new_sha = push_commit_to_origin(
+        origin, _REUSE_BRANCH, tmp_path / "side", "upstream.txt"
+    )
+    return client, wt, workspace, old_sha, new_sha
+
+
+def _refresh_with_debug(client: ClientConfig, caplog: pytest.LogCaptureFixture) -> Path:
+    caplog.clear()  # drop seed-phase records
+    with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
+        return create_worktree(
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+        )
+
+
+def _debug_reasons(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in _cw_worktree_records(caplog, logging.DEBUG)
+        if r.levelno == logging.DEBUG
+    ]
+
+
+class TestReuseOccupancyRosterAndPaths:
+    """#2213 round 2: the occupancy predicate consults the daemon roster as well
+    as cw state, compares *resolved* paths, and fails closed on anything it
+    cannot read."""
+
+    @pytest.mark.parametrize("source", ["state", "roster"])
+    def test_session_path_recorded_via_symlink_is_occupied(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+        source: str,
+    ) -> None:
+        client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        alias = tmp_path / "wt-alias"
+        alias.symlink_to(wt, target_is_directory=True)
+        assert alias != wt
+        _occupy(source, workspace, alias)
+
+        result = _refresh_with_debug(client, caplog)
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert any("live" in m and str(wt) in m for m in _debug_reasons(caplog))
+
+    @pytest.mark.parametrize("source", ["state", "roster"])
+    def test_worktree_reached_via_symlink_is_occupied(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+        source: str,
+    ) -> None:
+        """The reverse direction: the session/worker recorded the real path,
+        but the caller reaches the worktree through a symlinked worktree base."""
+        client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        alias_base = tmp_path / "wt-alias"
+        alias_base.symlink_to(tmp_path / "wt", target_is_directory=True)
+        aliased_client = client.model_copy(update={"worktree_base": alias_base})
+        _occupy(source, workspace, wt)
+
+        result = _refresh_with_debug(aliased_client, caplog)
+
+        assert result != wt
+        assert result.resolve() == wt.resolve()
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert any("live" in m for m in _debug_reasons(caplog))
+
+    @pytest.mark.parametrize("source", ["state", "roster"])
+    def test_symlink_to_a_different_worktree_is_not_occupied(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+        source: str,
+    ) -> None:
+        """Control for the symlink tests: normalization must not over-match."""
+        client, wt, workspace, _old, new_sha = _seed_behind(tmp_path, make_git_repo)
+        other = tmp_path / "other-dir"
+        other.mkdir()
+        alias = tmp_path / "other-alias"
+        alias.symlink_to(other, target_is_directory=True)
+        _occupy(source, workspace, alias)
+
+        _refresh_with_debug(client, caplog)
+
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+
+    def test_live_daemon_worker_homed_on_worktree_blocks_fast_forward(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        _seed_roster(wt)  # live in the roster, absent from cw state
+        fetched = _spy_fetch(monkeypatch)
+
+        result = _refresh_with_debug(client, caplog)
+
+        assert result == wt
+        assert fetched == []
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert _cw_worktree_records(caplog, logging.WARNING) == []
+        assert any(
+            "live daemon worker" in m and str(wt) in m for m in _debug_reasons(caplog)
+        )
+
+    def test_daemon_worker_homed_elsewhere_does_not_block(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client, wt, _workspace, _old, new_sha = _seed_behind(tmp_path, make_git_repo)
+        _seed_roster(tmp_path / "elsewhere")
+
+        _refresh_with_debug(client, caplog)
+
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+
+    def test_absent_roster_means_no_live_worker_and_fast_forwards(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client, wt, _workspace, _old, new_sha = _seed_behind(tmp_path, make_git_repo)
+        assert not native_daemon._ROSTER_PATH.exists()
+        # The isolation guard: the patched path is not the developer's real one.
+        assert (
+            Path.home() / ".claude" / "daemon" / "roster.json"
+        ) != native_daemon._ROSTER_PATH
+
+        _refresh_with_debug(client, caplog)
+
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+
+    @pytest.mark.parametrize("kind", ["invalid-json", "directory", "entry-no-cwd"])
+    def test_unreadable_roster_fails_closed(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        kind: str,
+    ) -> None:
+        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        if kind == "invalid-json":
+            _seed_roster(raw="{not json")
+        elif kind == "directory":
+            native_daemon._ROSTER_PATH.mkdir(parents=True)  # OSError, not ENOENT
+        else:
+            _seed_roster(raw=json.dumps({"workers": {"aaaa1111": {"pid": 1}}}))
+        fetched = _spy_fetch(monkeypatch)
+
+        result = _refresh_with_debug(client, caplog)
+
+        assert result == wt
+        assert fetched == []
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert any("roster unreadable" in m for m in _debug_reasons(caplog))
+
+    def test_corrupt_state_file_fails_closed(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Real corrupt sessions.json through the real reader: occupied."""
+        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        state_file().write_text("{not json", encoding="utf-8")
+
+        _refresh_with_debug(client, caplog)
+
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        assert any("session state unreadable" in m for m in _debug_reasons(caplog))
+
+    def test_predicate_reports_unexpected_branch(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """The expected-branch check lives in the one predicate, so the
+        pre-mutation re-check covers it (``create_worktree``'s own guard raises
+        earlier, but a checkout can land in between)."""
+        client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        assert _reuse_occupancy_reason(client, _REUSE_BRANCH, wt) is None
+
+        git_in(wt, "checkout", "-b", "dev/other")
+
+        reason = _reuse_occupancy_reason(client, _REUSE_BRANCH, wt)
+        assert reason is not None
+        assert "dev/other" in reason
+
+    def test_predicate_reports_detached_head_as_unexpected_branch(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        git_in(wt, "checkout", "--detach")
+
+        reason = _reuse_occupancy_reason(client, _REUSE_BRANCH, wt)
+
+        assert reason is not None
+        assert "detached" in reason
+
+    def test_unresolvable_recorded_path_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_resolve = Path.resolve
+
+        def flaky(self: Path, strict: bool = False) -> Path:
+            if self.name == "unresolvable":
+                msg = "symlink loop"
+                raise OSError(msg)
+            return real_resolve(self, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", flaky)
+        monkeypatch.setattr(
+            "cw.worktree.live_session_worktree_paths",
+            lambda: frozenset({tmp_path / "unresolvable"}),
+        )
+
+        reason = _live_home_reason(tmp_path / "wt")
+
+        assert reason is not None
+        assert "cannot be resolved" in reason
+
+    def test_unresolvable_worktree_path_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_resolve = Path.resolve
+
+        def flaky(self: Path, strict: bool = False) -> Path:
+            if self.name == "unresolvable":
+                msg = "symlink loop"
+                raise OSError(msg)
+            return real_resolve(self, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", flaky)
+
+        reason = _live_home_reason(tmp_path / "unresolvable")
+
+        assert reason is not None
+        assert "cannot be resolved" in reason
 
 
 class TestCheckNotMainCheckout:

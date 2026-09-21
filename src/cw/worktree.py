@@ -20,6 +20,7 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.models import SessionStatus
+from cw.native_daemon import get_native_daemon_client
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
@@ -716,34 +717,69 @@ def live_session_worktree_paths() -> frozenset[Path] | None:
     return frozenset(live)
 
 
+def _live_home_reason(wt_path: Path) -> str | None:
+    """Return why a live session or daemon worker may be homed on *wt_path*.
+
+    Consults BOTH sources and reports occupied when either says so:
+
+    - cw's persisted session state (:func:`live_session_worktree_paths`), and
+    - the daemon roster's live workers, each recorded with the ``cwd`` it was
+      spawned in (``NativeDaemonClient.list_live_worker_cwds``) -- a worker can
+      be live in the roster before, or after, cw state reflects it.
+
+    Fails closed: an unreadable state file, an unreadable roster, or a path that
+    cannot be resolved all read as "cannot rule out a live session", never as
+    "free". Every path is compared after ``Path.resolve()`` on both sides, so a
+    symlinked or non-canonical spelling of the same directory still matches.
+    """
+    sessions = live_session_worktree_paths()
+    if sessions is None:
+        return "session state unreadable, cannot rule out a live session"
+    workers = get_native_daemon_client().list_live_worker_cwds()
+    if workers is None:
+        return "daemon roster unreadable, cannot rule out a live session"
+    try:
+        target = wt_path.resolve()
+        session_homes = {path.resolve() for path in sessions}
+        worker_homes = {path.resolve() for path in workers}
+    except OSError as exc:
+        return f"a path cannot be resolved ({exc}), cannot rule out a live session"
+    if target in session_homes:
+        return "a live session is homed on this worktree"
+    if target in worker_homes:
+        return "a live daemon worker is homed on this worktree"
+    return None
+
+
 def _reuse_occupancy_reason(
     client: ClientConfig, branch: str, wt_path: Path
 ) -> str | None:
     """Return why *wt_path* is occupied (must not be moved), or None if free.
 
-    Local reads only -- no network. Occupied means either:
+    The single predicate the reuse refresh consults, both up front and again
+    immediately before it mutates (see :func:`_ff_reused_worktree`). Local
+    reads only -- no network. Occupied means any of:
 
+    - the checked-out branch is not *branch* (or HEAD is detached);
     - :func:`unsaved_work_reason` reports uncommitted, untracked or unpushed
       work (checked regardless of the caller's ``allow_dirty_reuse``, which
       only tolerates such work, it does not license moving HEAD under it); or
-    - a live (non-terminal) session in cw state is homed on *wt_path*, per
-      :func:`live_session_worktree_paths` -- the same predicate the worktree GC
-      uses. Unreadable session state is treated as occupied
+    - :func:`_live_home_reason`: a live session in cw state or a live worker in
+      the daemon roster is homed on *wt_path*, or either could not be read
       (fail closed: this gates a mutation). The dev-queue RUNNING half of the
       GC guard is deliberately not consulted: at dispatch-claim time the task
       being claimed is itself RUNNING, so it would veto the very path this
       refresh serves, and a live session for that task already appears in the
       state half.
     """
+    current = _checked_out_branch(wt_path)
+    if current != branch:
+        found = current or "(none / detached HEAD / not a worktree)"
+        return f"expected branch {branch!r} but found {found}"
     unsaved = unsaved_work_reason(client, branch, wt_path=wt_path)
     if unsaved is not None:
         return f"unsaved work ({unsaved})"
-    live = live_session_worktree_paths()
-    if live is None:
-        return "session state unreadable, cannot rule out a live session"
-    if wt_path in live:
-        return "a live session is homed on this worktree"
-    return None
+    return _live_home_reason(wt_path)
 
 
 def _refresh_reused_worktree(client: ClientConfig, branch: str, wt_path: Path) -> None:
