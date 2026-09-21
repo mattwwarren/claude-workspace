@@ -51,6 +51,8 @@ if TYPE_CHECKING:
 
     from click.testing import Result
 
+    from cw.review_finding_dispositions import FindingDisposition
+
 
 @pytest.fixture
 def runner() -> CliRunner:
@@ -1002,15 +1004,45 @@ class TestReviewCheckVoidedCommand:
         assert written[0].voided_at != ""
 
 
+_SETTLE_REASON = "operator rejected: intentional tradeoff, see ADR-0012"
+
+
 class TestReviewSettle:
-    """#2210: ``cw review settle`` is the ledger's first production writer."""
+    """#2210: ``cw review settle`` is the ledger's first production writer.
+
+    It is also the ledger's only *durable silencer*, so every test here is as
+    much about the audit trail as about the marker: a settle that cannot say
+    who ran it, when, and against which reviewed sha is not a record, and a
+    settle run from inside a dispatch worker is the pipeline silencing its own
+    reviewer.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _operator_machine(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Run every settle test from a directory with no dispatch context.
+
+        The repo checkout this suite runs in carries a real
+        ``.claude/cw-context.json``, so without this the worker refusal would
+        fire on every case. Chdir'ing to ``tmp_path`` reproduces the operator's
+        own machine (upward search finds nothing -> fail open).
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: _OPERATOR)
 
     def _invoke(self, runner: CliRunner, payload: dict[str, Any], *args: str) -> Result:
+        extra = list(args)
+        if "--reason" not in extra:
+            extra = ["--reason", _SETTLE_REASON, *extra]
         return runner.invoke(
             main,
-            ["review", "settle", *args, "-"],
+            ["review", "settle", *extra, "-"],
             input=json.dumps(payload),
         )
+
+    def _only_entry(self, output: str) -> FindingDisposition:
+        return next(iter(parse_finding_disposition_block([output]).values()))
 
     def test_happy_path_renders_the_postable_marker(self, runner: CliRunner) -> None:
         result = self._invoke(runner, _settle_payload())
@@ -1031,32 +1063,153 @@ class TestReviewSettle:
         assert parse_finding_disposition_block([out_path.read_text(encoding="utf-8")])
 
     @freeze_time("2026-09-20T12:00:00Z")
-    def test_blank_recorded_at_is_stamped_from_the_clock(
+    def test_record_carries_actor_timestamp_identity_and_sha(
         self, runner: CliRunner
     ) -> None:
+        """ "Who silenced this, when, against what code" — all four, durably."""
         result = self._invoke(runner, _settle_payload())
 
         assert result.exit_code == 0, result.output
-        entry = next(iter(parse_finding_disposition_block([result.output]).values()))
+        entry = self._only_entry(result.output)
+        assert entry.actor == _OPERATOR
         assert entry.recorded_at == "2026-09-20T12:00:00Z"
+        assert entry.reviewed_sha == "abc1234"
+        # The key holds only the NORMALISED summary; the verbatim one is what a
+        # future per-record rollback targets.
+        assert entry.summary == "Bug here"
+        assert entry.rationale == _SETTLE_REASON
 
-    @freeze_time("2026-09-20T12:00:00Z")
-    def test_supplied_recorded_at_is_preserved(self, runner: CliRunner) -> None:
+    def test_missing_reason_is_a_usage_error(self, runner: CliRunner) -> None:
+        result = runner.invoke(
+            main,
+            ["review", "settle", "-"],
+            input=json.dumps(_settle_payload()),
+        )
+        assert result.exit_code != 0
+        assert "--reason" in result.output
+
+    @pytest.mark.parametrize("reason", ["", "   ", "\t\n "])
+    def test_blank_reason_is_refused_and_writes_nothing(
+        self, runner: CliRunner, tmp_path: Path, reason: str
+    ) -> None:
+        out_path = tmp_path / "settle.md"
         result = self._invoke(
             runner,
-            _settle_payload(_settle_entry(recorded_at="2026-01-01T00:00:00Z")),
+            _settle_payload(),
+            "--reason",
+            reason,
+            "--out",
+            str(out_path),
+        )
+
+        assert result.exit_code != 0
+        assert "REVIEW-FINDING-DISPOSITIONS" not in result.output
+        assert not out_path.exists()
+        assert read_events() == []
+
+    def test_per_entry_rationale_overrides_the_reason(self, runner: CliRunner) -> None:
+        result = self._invoke(
+            runner, _settle_payload(_settle_entry(rationale="this one specifically"))
         )
 
         assert result.exit_code == 0, result.output
-        entry = next(iter(parse_finding_disposition_block([result.output]).values()))
-        assert entry.recorded_at == "2026-01-01T00:00:00Z"
+        assert self._only_entry(result.output).rationale == "this one specifically"
 
-    def test_duplicate_keys_collapse_newest_wins(self, runner: CliRunner) -> None:
+    def test_operator_supplied_recorded_at_is_refused(self, runner: CliRunner) -> None:
+        """``recorded_at`` is audit data, so only the CLI clock may set it."""
+        result = self._invoke(
+            runner,
+            {"entries": [{**_settle_entry(), "recorded_at": "1999-01-01T00:00:00Z"}]},
+        )
+
+        assert result.exit_code == 1
+        assert "recorded_at" in result.output
+
+    def test_entry_without_a_resolvable_sha_is_refused(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        out_path = tmp_path / "settle.md"
+        result = self._invoke(
+            runner,
+            _settle_payload(_settle_entry(reviewed_sha="")),
+            "--out",
+            str(out_path),
+        )
+
+        assert result.exit_code != 0
+        assert "reviewed_sha" in result.output
+        assert not out_path.exists()
+        assert read_events() == []
+
+    def test_reviewed_sha_option_supplies_a_hand_written_payload(
+        self, runner: CliRunner
+    ) -> None:
+        result = self._invoke(
+            runner,
+            _settle_payload(_settle_entry(reviewed_sha="")),
+            "--reviewed-sha",
+            "deadbee",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert self._only_entry(result.output).reviewed_sha == "deadbee"
+
+    def test_entry_sha_wins_over_the_option(self, runner: CliRunner) -> None:
+        result = self._invoke(runner, _settle_payload(), "--reviewed-sha", "deadbee")
+
+        assert result.exit_code == 0, result.output
+        assert self._only_entry(result.output).reviewed_sha == "abc1234"
+
+    def test_unresolvable_actor_is_refused_and_writes_nothing(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: None)
+        out_path = tmp_path / "settle.md"
+        result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
+
+        assert result.exit_code != 0
+        assert "identity" in result.output
+        assert not out_path.exists()
+        assert read_events() == []
+
+    @freeze_time("2026-09-20T12:00:00Z")
+    def test_one_audit_event_per_settled_finding(self, runner: CliRunner) -> None:
         result = self._invoke(
             runner,
             _settle_payload(
-                _settle_entry(rationale="older", recorded_at="2026-01-01T00:00:00Z"),
-                _settle_entry(rationale="newer", recorded_at="2026-09-01T00:00:00Z"),
+                _settle_entry(),
+                _settle_entry(summary="Second bug", file="src/cw/bar.py"),
+            ),
+            "--ticket",
+            "2210",
+        )
+
+        assert result.exit_code == 0, result.output
+        events = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.REVIEW_FINDING_SETTLED
+        ]
+        assert len(events) == 2
+        assert {e.correlation_id for e in events} == {"2210"}
+        payload = next(
+            e.payload for e in events if e.payload["file"] == "src/cw/foo.py"
+        )
+        assert payload["actor"] == _OPERATOR
+        assert payload["summary"] == "Bug here"
+        assert payload["outcome"] == "REJECTED"
+        assert payload["reason"] == _SETTLE_REASON
+        assert payload["reviewed_sha"] == "abc1234"
+        assert payload["recorded_at"] == "2026-09-20T12:00:00Z"
+        assert payload["key"] == _disposition_key("src/cw/foo.py", "Bug here")
+
+    def test_duplicate_entries_settle_once_and_emit_one_event(
+        self, runner: CliRunner
+    ) -> None:
+        result = self._invoke(
+            runner,
+            _settle_payload(
+                _settle_entry(rationale="older"), _settle_entry(rationale="newer")
             ),
         )
 
@@ -1064,6 +1217,56 @@ class TestReviewSettle:
         ledger = parse_finding_disposition_block([result.output])
         assert len(ledger) == 1
         assert next(iter(ledger.values())).rationale == "newer"
+        assert len(read_events()) == 1
+
+    def test_refuses_inside_a_dispatch_worker(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """A worker settling its own reviewer's findings is self-suppression."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "cw-context.json").write_text(
+            json.dumps({"schema_version": 8, "session_id": "abc", "headless": True}),
+            encoding="utf-8",
+        )
+        out_path = tmp_path / "settle.md"
+        result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
+
+        assert result.exit_code != 0
+        assert "dispatch worker" in result.output
+        assert "REVIEW-FINDING-DISPOSITIONS" not in result.output
+        assert not out_path.exists()
+        assert read_events() == []
+
+    def test_refusal_finds_the_context_from_a_subdirectory(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "cw-context.json").write_text(
+            json.dumps({"headless": True}), encoding="utf-8"
+        )
+        nested = tmp_path / "src" / "cw"
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
+
+        result = self._invoke(runner, _settle_payload())
+        assert result.exit_code != 0
+        assert "dispatch worker" in result.output
+
+    @pytest.mark.parametrize(
+        "body", ['{"headless": false}', '{"session_id": "abc"}', "{not json", ""]
+    )
+    def test_non_worker_context_fails_open_to_the_operator(
+        self, runner: CliRunner, tmp_path: Path, body: str
+    ) -> None:
+        """Fail open, exactly like every other cw context guard."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "cw-context.json").write_text(body, encoding="utf-8")
+
+        result = self._invoke(runner, _settle_payload())
+        assert result.exit_code == 0, result.output
 
     @pytest.mark.parametrize(
         "payload",
@@ -1084,14 +1287,12 @@ class TestReviewSettle:
         assert "entries" in result.output
 
     def test_malformed_json_exits_one(self, runner: CliRunner) -> None:
-        result = runner.invoke(main, ["review", "settle", "-"], input="{not json")
+        result = runner.invoke(
+            main,
+            ["review", "settle", "--reason", _SETTLE_REASON, "-"],
+            input="{not json",
+        )
         assert result.exit_code != 0
-
-    def test_settle_emits_no_events(self, runner: CliRunner) -> None:
-        result = self._invoke(runner, _settle_payload())
-
-        assert result.exit_code == 0, result.output
-        assert read_events() == []
 
     def test_payload_pasted_from_a_blocking_comment_is_sufficient_with_no_editing(
         self, runner: CliRunner
@@ -1113,6 +1314,7 @@ class TestReviewSettle:
         result = self._invoke(runner, payloads[0])
         assert result.exit_code == 0, result.output
         ledger = parse_finding_disposition_block([result.output])
+        assert next(iter(ledger.values())).reviewed_sha == "sha"
 
         suppressed = suppress_adjudicated_findings(verdict, ledger, ticket_id="T-2210")
         assert suppressed.blocking is False

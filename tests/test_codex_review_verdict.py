@@ -30,11 +30,18 @@ from cw.codex_review._capability import (
     _CodexFilesystemCapability,
     _CodexFingerprint,
 )
+from cw.codex_review._verdict import _render
 from cw.codex_review._verdict._health import (
     _READ_ONLY_SANDBOX_EXEMPT_ROLES,
     _format_degraded_document_highlights,
 )
-from cw.codex_review._verdict._render import _render_rejected_finding_text
+from cw.codex_review._verdict._render import (
+    _SETTLE_COMPACT_SUMMARY_MAX,
+    _SETTLE_MAX_COMPACT_ROWS,
+    _SETTLE_MAX_PAYLOADS,
+    _SETTLE_OVERFLOW_NOTE,
+    _render_rejected_finding_text,
+)
 from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.models.enums import OrchestratorEventType
@@ -1749,6 +1756,164 @@ class TestRenderSettlePayloads:
         assert "the guard was deleted " in comment
         assert "x" * 300 not in comment
         assert "…" in comment or "..." in comment
+
+    def test_payload_carries_the_reviewed_sha(self) -> None:
+        comment = self._comment(_make_finding(severity="MUST_FIX"))
+        assert (
+            _extract_settle_payloads(comment)[0]["entries"][0]["reviewed_sha"] == "sha"
+        )
+
+    def test_settle_section_states_operator_machine_only(self) -> None:
+        comment = self._comment(_make_finding(severity="MUST_FIX"))
+        assert "own machine" in comment
+        assert "--reason" in comment
+
+
+class TestSettlePayloadBudget:
+    """#2210: a blocking comment with many MUST_FIX findings has a hard cap.
+
+    GitHub rejects a comment body over 65,536 characters, and one JSON payload
+    per finding is the largest thing this renderer emits. Past the cap the
+    remaining findings are named compactly and the operator is pointed at
+    ``cw review settle`` — never a JSON block truncated mid-structure, which
+    would paste into something that half-parses.
+    """
+
+    def _verdict(self, *findings: Finding) -> ReviewVerdict:
+        """A blocking verdict built directly: the budget is a render concern."""
+        return ReviewVerdict.model_validate(
+            {
+                "blocking": True,
+                "must_fix": list(findings),
+                "reviewed_sha": "sha",
+                "review": Review(
+                    must_fix_initial=len(findings),
+                    should_fix=0,
+                    fix_cycles_used=0,
+                    deferred=0,
+                    agents_run=1,
+                ),
+            }
+        )
+
+    def _findings(self, count: int, summary_len: int = 0) -> list[Finding]:
+        return [
+            _make_finding(
+                severity="MUST_FIX",
+                file=f"src/cw/mod{index:03d}.py",
+                summary=f"finding {index:03d} " + ("x" * summary_len),
+            )
+            for index in range(count)
+        ]
+
+    def _section(self, comment: str) -> str:
+        return comment[comment.index(SETTLE_SECTION_HEADING) :]
+
+    def test_exactly_at_the_count_cap_renders_every_payload(self) -> None:
+        findings = self._findings(_SETTLE_MAX_PAYLOADS)
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+
+        assert len(_extract_settle_payloads(comment)) == _SETTLE_MAX_PAYLOADS
+        assert _SETTLE_OVERFLOW_NOTE not in comment
+
+    def test_one_past_the_count_cap_lists_the_remainder_compactly(self) -> None:
+        findings = self._findings(_SETTLE_MAX_PAYLOADS + 1)
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+
+        payloads = _extract_settle_payloads(comment)
+        assert len(payloads) == _SETTLE_MAX_PAYLOADS
+        assert _SETTLE_OVERFLOW_NOTE in comment
+        # The one that did not fit is still named -- identity, no JSON.
+        last = findings[-1]
+        assert last.file in self._section(comment)
+        assert last.file not in {p["entries"][0]["file"] for p in payloads}
+
+    def test_exactly_at_the_size_budget_renders_every_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        one = self._findings(1, summary_len=400)
+        baseline = render_verdict_comment(self._verdict(*one), fix_loop_enabled=False)
+        budget = len(self._section(baseline))
+        monkeypatch.setattr(_render, "_SETTLE_SECTION_BUDGET_CHARS", budget)
+
+        comment = render_verdict_comment(self._verdict(*one), fix_loop_enabled=False)
+        assert len(_extract_settle_payloads(comment)) == 1
+        assert _SETTLE_OVERFLOW_NOTE not in comment
+
+    def test_one_past_the_size_budget_is_listed_compactly_not_truncated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        findings = self._findings(2, summary_len=400)
+        baseline = render_verdict_comment(
+            self._verdict(findings[0]), fix_loop_enabled=False
+        )
+        monkeypatch.setattr(
+            _render, "_SETTLE_SECTION_BUDGET_CHARS", len(self._section(baseline))
+        )
+
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+        payloads = _extract_settle_payloads(comment)
+        assert len(payloads) == 1
+        assert payloads[0]["entries"][0]["file"] == findings[0].file
+        assert _SETTLE_OVERFLOW_NOTE in comment
+        assert findings[1].file in self._section(comment)
+
+    def test_a_budget_too_small_for_any_payload_still_names_every_finding(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(_render, "_SETTLE_SECTION_BUDGET_CHARS", 1)
+        findings = self._findings(3)
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+
+        assert _extract_settle_payloads(comment) == []
+        section = self._section(comment)
+        assert all(f.file in section for f in findings)
+
+    def test_every_rendered_fence_is_closed(self) -> None:
+        comment = render_verdict_comment(
+            self._verdict(*self._findings(_SETTLE_MAX_PAYLOADS + 5)),
+            fix_loop_enabled=False,
+        )
+        # An unclosed fence leaves an odd number of fence lines behind.
+        fences = [
+            line
+            for line in self._section(comment).splitlines()
+            if line.startswith("```")
+        ]
+        assert len(fences) == 2 * _SETTLE_MAX_PAYLOADS
+
+    def test_compact_rows_are_capped_and_the_residue_counted(self) -> None:
+        overflow = _SETTLE_MAX_COMPACT_ROWS + 3
+        findings = self._findings(_SETTLE_MAX_PAYLOADS + overflow)
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+
+        section = self._section(comment)
+        assert f"{overflow - _SETTLE_MAX_COMPACT_ROWS} more" in section
+
+    def test_compact_row_summary_is_truncated(self) -> None:
+        findings = self._findings(
+            _SETTLE_MAX_PAYLOADS + 1, summary_len=_SETTLE_COMPACT_SUMMARY_MAX * 3
+        )
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+
+        row = next(
+            line
+            for line in self._section(comment).splitlines()
+            if findings[-1].file in line and line.startswith("- ")
+        )
+        assert len(row) < _SETTLE_COMPACT_SUMMARY_MAX * 2
 
 
 class TestRenderFindingsIsDispositionAware:

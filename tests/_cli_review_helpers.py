@@ -101,12 +101,18 @@ _JSON_FENCE_RE = re.compile(
 
 
 def _settle_entry(**overrides: object) -> dict[str, Any]:
-    """One ``cw review settle`` entry, defaulted to the common REJECTED case."""
+    """One ``cw review settle`` entry, defaulted to the common REJECTED case.
+
+    ``reviewed_sha`` is part of the rendered payload as of #2210 — the record
+    has to be able to answer "against what code was this silenced", and the CLI
+    refuses an entry it cannot resolve one for.
+    """
     entry: dict[str, Any] = {
         "file": "src/cw/foo.py",
         "summary": "Bug here",
         "outcome": "REJECTED",
         "rationale": "",
+        "reviewed_sha": "abc1234",
     }
     entry.update(overrides)
     return entry
