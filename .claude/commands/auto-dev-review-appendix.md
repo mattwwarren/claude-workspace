@@ -162,17 +162,25 @@ Two consequences worth knowing:
   dispatch and fix-dispatch callers pass `refresh_on_reuse=True`, which
   best-effort fetches and fast-forwards an unoccupied (no live cw session or
   daemon-roster worker homed on it), clean, strictly-behind branch only (never
-  a reset, never a raise). Any other worktree (occupied, dirty, ahead, or
-  diverged, or one whose occupancy could not be determined) is left as it is,
-  and a failed fetch skips the fast-forward entirely instead of moving HEAD to
-  a stale tracking ref (a branch simply absent from origin is not a failure).
-  The fix-dispatch caller reports each refresh failure (failed fetch,
-  fast-forward git refused, diverged, OS error) as a one-line friction note at
-  the top of the fix agent's prompt. When a live session or daemon-roster worker
-  may be homed on the worktree (or that cannot be read), the fix dispatch stops
-  entirely, before it fetches, merges `origin/<default>` into the worktree or
-  spawns: it raises the transient hook-context conflict and is retried on a
-  later tick. Unsaved work alone does not stop it.
+  a reset). "The refresh did not move the worktree" means two different things,
+  handled oppositely:
+  - **Not refreshed — proceed.** A worktree that is dirty, ahead, diverged,
+    or behind after a failed fetch is the caller's to use as it is (a failed
+    fetch skips the fast-forward entirely instead of moving HEAD to a stale
+    tracking ref; a branch simply absent from origin is not a failure).
+    `create_worktree` returns the path. The fix-dispatch caller reports each
+    refresh failure (failed fetch with git's reason, fast-forward git refused,
+    diverged, OS error) as a one-line friction note at the top of the fix
+    agent's prompt.
+  - **Occupied — abort.** A live cw session or daemon-roster worker homed on the
+    worktree, or an occupancy that cannot be read (fail closed), means another
+    worker may be operating in it. `create_worktree` RAISES
+    `WorktreeOccupiedError` instead of returning the path. The dispatch claim
+    path spawns nothing and leaves the row PENDING for a later tick, without
+    charging an attempt; the fix dispatch stops entirely, before it fetches,
+    merges `origin/<default>` into the worktree or spawns: it raises the
+    transient hook-context conflict and is retried on a later tick. Unsaved
+    work alone is NOT this case and does not stop either.
 - **The row stays RUNNING for the whole handoff.** `dispatch/claim.py` only
   claims PENDING rows, so nothing re-dispatches the ticket while the fix agent
   works. `fix_dispatch`'s completion phase reverts it to PENDING once the fix

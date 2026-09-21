@@ -823,9 +823,10 @@ def live_session_worktree_paths() -> frozenset[Path] | None:
 
     - The reuse refresh (:func:`_live_home_reason`, reached through
       :func:`_reuse_occupancy`, #2213) fails CLOSED. ``None`` means "cannot
-      rule out a live session", i.e. occupied: the worktree is used as-is and
-      never fast-forwarded. Reading "unknown" as "free" would rewrite a live
-      worker's tree.
+      rule out a live session", i.e. occupied: ``create_worktree`` raises
+      :exc:`~cw.exceptions.WorktreeOccupiedError` and no caller spawns into,
+      dispatches against or fast-forwards the tree. Reading "unknown" as "free"
+      would rewrite (or spawn a second worker into) a live worker's tree.
     - The worktree GC (``cw.worktree_gc._live_worktree_paths``) fails OPEN,
       unchanged from before #2213. ``None`` contributes nothing, so a corrupted
       state file never blocks garbage collection; GC keeps running with this
