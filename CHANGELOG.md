@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Two of the four dispatch-worktree hook commands do less work per event (#2229):** `cw signal-stop` no longer takes the per-worktree lock and rewrites `cw-context.json` when `agent_spawn_stamp` is already `{unresolved_count: 0}` (`last_stamped_at` is unread at count 0; an absent, malformed, negative or nonzero stamp still takes the locked clear, and the deferral snapshot still writes every turn because the timestamp is load-bearing above zero), and it scans the headless transcript once instead of twice when the hook `cwd` equals the session's `worktree_path`. `cw guard-busy-wait` returns before parsing `orchestrator.yaml` and `clients.yaml` for a well-formed `run_in_background: true` call, which it allowed regardless. Behavior, hook command strings and ADR-0003 are unchanged. Process start (~250-340 ms per hook, the dominant cost) is untouched; `scripts/measure_hook_cost.py` reproduces the per-hook numbers.
+
 ## [1.48.0] - 2026-09-21
 
 ### Changed
