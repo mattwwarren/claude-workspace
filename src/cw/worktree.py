@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, TypedDict, assert_never
 
 from cw.auto_dev_result import _PRE_IMPL_STAGES
 from cw.config import load_effective_clients, load_state
+from cw.events import record_event
 from cw.exceptions import (
     BranchHeldByWorktreeError,
     MissingWorkspaceError,
@@ -22,7 +23,7 @@ from cw.exceptions import (
     WorktreeError,
     WorktreeOccupiedError,
 )
-from cw.models import SessionStatus
+from cw.models import OrchestratorEventType, SessionStatus
 from cw.native_daemon import get_native_daemon_client
 
 if TYPE_CHECKING:
@@ -728,12 +729,63 @@ class ReuseRefreshReport:
     reason: str | None = None
 
 
+def _record_fast_forward(
+    client: ClientConfig,
+    branch: str,
+    wt_path: Path,
+    *,
+    ticket_id: str | None,
+    old_sha: str,
+    new_sha: str,
+) -> None:
+    """Record one ``worktree.fast_forwarded`` audit event for a HEAD that moved.
+
+    The reuse refresh can move a worktree's ``HEAD`` on its own, so an operator
+    asking "why is my worktree at a different commit than I left it?" gets a
+    durable answer: client, ticket, branch, path and the FULL before/after SHAs
+    (the log line abbreviates them). ``correlation_id`` is *ticket_id* when
+    known. Audit-only: not forwarded to the operator-attention channel.
+
+    Only the write is guarded, and only for ``OSError`` (a full disk, an
+    unwritable inbox, a lock failure): the fast-forward has already happened,
+    so a lost audit line is logged at WARNING and must not turn it into
+    ``NOT_REFRESHED`` or raise. Anything else is a bug and propagates.
+    """
+    payload = {
+        "client": client.name,
+        "ticket_id": ticket_id,
+        "branch": branch,
+        "worktree_path": str(wt_path),
+        "old_sha": old_sha,
+        "new_sha": new_sha,
+    }
+    try:
+        record_event(
+            OrchestratorEventType.WORKTREE_FAST_FORWARDED,
+            payload,
+            correlation_id=ticket_id,
+        )
+    except OSError as exc:
+        _log.warning(
+            "create_worktree: could not record the worktree.fast_forwarded audit "
+            "event (client=%s, ticket=%s, path=%s, %s -> %s): %s",
+            client.name,
+            ticket_id,
+            wt_path,
+            old_sha[:_SHA_LOG_CHARS],
+            new_sha[:_SHA_LOG_CHARS],
+            _first_line(str(exc)) or type(exc).__name__,
+        )
+
+
 def _ff_reused_worktree(
     client: ClientConfig,
     branch: str,
     wt_path: Path,
     target: str,
     report: ReuseRefreshReport,
+    *,
+    ticket_id: str | None,
 ) -> RefreshResult:
     """Fast-forward *wt_path* to *target* with ``merge --ff-only``, never raising.
 
@@ -755,6 +807,13 @@ def _ff_reused_worktree(
     carries non-overlapping local modifications through. A refusal is logged,
     noted on *report*, returned as ``NOT_REFRESHED``, and the worktree is left
     exactly as it was. A completed fast-forward is ``REFRESHED``.
+
+    A fast-forward that actually MOVES ``HEAD`` (the SHA after differs from the
+    SHA before) leaves one ``worktree.fast_forwarded`` audit event
+    (:func:`_record_fast_forward`), carrying *ticket_id* (``None`` when the
+    caller has none). Nothing is recorded when nothing moved (a merge that says
+    "Already up to date"), and a failed audit write never undoes or
+    reclassifies the completed fast-forward.
     """
     verdict = _occupancy_verdict(
         client,
@@ -795,6 +854,15 @@ def _ff_reused_worktree(
         old_sha[:_SHA_LOG_CHARS],
         new_sha[:_SHA_LOG_CHARS],
     )
+    if new_sha != old_sha:
+        _record_fast_forward(
+            client,
+            branch,
+            wt_path,
+            ticket_id=ticket_id,
+            old_sha=old_sha,
+            new_sha=new_sha,
+        )
     return RefreshResult(
         RefreshOutcome.REFRESHED,
         f"fast-forwarded {branch} {old_sha[:_SHA_LOG_CHARS]} -> "
@@ -1061,7 +1129,12 @@ def _fetch_gate(
 
 
 def _refresh_from_tracking_ref(
-    client: ClientConfig, branch: str, wt_path: Path, report: ReuseRefreshReport
+    client: ClientConfig,
+    branch: str,
+    wt_path: Path,
+    report: ReuseRefreshReport,
+    *,
+    ticket_id: str | None,
 ) -> RefreshResult:
     """Classify HEAD against the freshly fetched ``origin/<branch>`` and act on it.
 
@@ -1105,13 +1178,20 @@ def _refresh_from_tracking_ref(
                 RefreshOutcome.NOT_REFRESHED, f"diverged from origin/{branch}"
             )
         case "behind":
-            return _ff_reused_worktree(client, branch, wt_path, target, report)
+            return _ff_reused_worktree(
+                client, branch, wt_path, target, report, ticket_id=ticket_id
+            )
         case _:
             assert_never(relation)
 
 
 def _refresh_reused_worktree_steps(
-    client: ClientConfig, branch: str, wt_path: Path, report: ReuseRefreshReport
+    client: ClientConfig,
+    branch: str,
+    wt_path: Path,
+    report: ReuseRefreshReport,
+    *,
+    ticket_id: str | None,
 ) -> RefreshResult:
     """The ordered steps of :func:`_refresh_reused_worktree`, which see OSError."""
     verdict = _occupancy_verdict(
@@ -1122,11 +1202,18 @@ def _refresh_reused_worktree_steps(
     stopped = _fetch_gate(client, branch, wt_path, report)
     if stopped is not None:
         return stopped
-    return _refresh_from_tracking_ref(client, branch, wt_path, report)
+    return _refresh_from_tracking_ref(
+        client, branch, wt_path, report, ticket_id=ticket_id
+    )
 
 
 def _refresh_reused_worktree(
-    client: ClientConfig, branch: str, wt_path: Path, report: ReuseRefreshReport
+    client: ClientConfig,
+    branch: str,
+    wt_path: Path,
+    report: ReuseRefreshReport,
+    *,
+    ticket_id: str | None,
 ) -> RefreshResult:
     """Best-effort fetch, then fast-forward a *behind, unoccupied* reused worktree.
 
@@ -1165,7 +1252,9 @@ def _refresh_reused_worktree(
     3. Target and relation: see :func:`_refresh_from_tracking_ref`.
     4. Behind: the full occupancy predicate is re-run immediately before
        ``merge --ff-only`` (a session may have started during the fetch; see
-       :func:`_ff_reused_worktree`), then the fast-forward.
+       :func:`_ff_reused_worktree`), then the fast-forward. A fast-forward that
+       moved HEAD records one ``worktree.fast_forwarded`` audit event carrying
+       *ticket_id*; no other path records anything.
 
     *report* is the caller-supplied surface (see :class:`ReuseRefreshReport`).
     Every FAILURE the caller cannot otherwise see -- a failed fetch, a diverged
@@ -1177,7 +1266,9 @@ def _refresh_reused_worktree(
     deletes. Anything that is not an ``OSError`` is a bug and propagates.
     """
     try:
-        result = _refresh_reused_worktree_steps(client, branch, wt_path, report)
+        result = _refresh_reused_worktree_steps(
+            client, branch, wt_path, report, ticket_id=ticket_id
+        )
     except OSError as exc:
         reason = _first_line(str(exc)) or type(exc).__name__
         _log.warning(
@@ -1230,6 +1321,7 @@ def create_worktree(
     allow_dirty_reuse: bool = False,
     refresh_on_reuse: bool = False,
     refresh_report: ReuseRefreshReport | None = None,
+    ticket_id: str | None = None,
 ) -> Path:
     """Create a git worktree for the given branch.
 
@@ -1286,6 +1378,14 @@ def create_worktree(
     returns or raises. The occupancy refusal does not depend on it: it is the
     exception. Ignored unless *refresh_on_reuse* is set.
 
+    *ticket_id* (#2213) names the ticket the caller is working, for the audit
+    event only: a refresh that actually moves HEAD records one
+    ``worktree.fast_forwarded`` event (see ``docs/events.md``) with it as the
+    payload's ``ticket_id`` and the ``correlation_id`` (``None`` when the
+    caller has no ticket). It has no other effect and is ignored unless
+    *refresh_on_reuse* is set. The audit write is best-effort: an ``OSError``
+    from it is logged and never changes the outcome.
+
     See :func:`_refresh_reused_worktree`.
 
     When no existing worktree is reused, the branch itself is resolved via a
@@ -1339,6 +1439,7 @@ def create_worktree(
                 branch,
                 wt_path,
                 refresh_report if refresh_report is not None else ReuseRefreshReport(),
+                ticket_id=ticket_id,
             )
             # Occupied means another worker may be using the tree: no path
             # is handed back. Every other outcome is the caller's to use.

@@ -114,7 +114,8 @@ def dispatch_fix_agent(
     in cw state or worker in the daemon roster homed on it, occupancy
     re-checked immediately before the merge), clean, on the expected branch
     and strictly behind; otherwise it is left exactly as it is. Never a
-    reset.
+    reset. A fast-forward that moves HEAD records one ``worktree.fast_forwarded``
+    audit event carrying *ticket_id* (see ``docs/events.md``).
 
     **"The refresh did not move the worktree" means two different things, and
     only one of them stops this dispatch.**
@@ -211,6 +212,7 @@ def dispatch_fix_agent(
             allow_dirty_reuse=True,
             refresh_on_reuse=True,
             refresh_report=refresh,
+            ticket_id=ticket_id,
         )
     except WorktreeOccupiedError as exc:
         # A live session or worker may be homed on this worktree. Every step

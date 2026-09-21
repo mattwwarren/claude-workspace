@@ -1208,8 +1208,14 @@ def _spawn_claimed_task(
             #     WorktreeOccupiedError. That must never fall through to a
             #     spawn, so it is handled by its own narrow ``except`` below
             #     (not the StaleWorktreeError branch: never remove it).
+            # ticket_id: names the ticket on the worktree.fast_forwarded audit
+            # event a refresh that moves HEAD records; no other effect.
             worktree_path = create_worktree(
-                client, branch, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                branch,
+                allow_dirty_reuse=True,
+                refresh_on_reuse=True,
+                ticket_id=task.ticket_id,
             )
         except StaleWorktreeError:
             # A stale worktree (wrong branch / not a worktree) refused
