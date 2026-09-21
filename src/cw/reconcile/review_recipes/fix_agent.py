@@ -21,7 +21,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cw.events import record_event
-from cw.exceptions import CwError, HookContextConflictError
+from cw.exceptions import CwError, HookContextConflictError, WorktreeOccupiedError
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     TERMINAL_SESSION_STATUSES,
@@ -114,30 +114,38 @@ def dispatch_fix_agent(
     in cw state or worker in the daemon roster homed on it, occupancy
     re-checked immediately before the merge), clean, on the expected branch
     and strictly behind; otherwise it is left exactly as it is. Never a
-    reset, never a raise.
+    reset.
 
-    **A refusal for a live occupant stops this dispatch.** ``create_worktree``
-    reports it on a :class:`~cw.worktree.ReuseRefreshReport`
-    (``live_occupant``), and this function raises
-    :exc:`HookContextConflictError` straight away, before any later step can act
-    on the worktree: the HEAD verification, ``git fetch``, the merge of
-    ``origin/<default_branch>`` into it, the hook-context write and the spawn.
-    Refusing only the fast-forward and then merging into and spawning onto a
-    tree a live worker is using would defeat the guard's whole purpose.
-    The conflict is the existing transient one (retried next tick, escalated by
-    ``cw.reconcile.fix_dispatch`` once it stops being transient), so nothing is
-    lost by skipping. It covers a state or roster that cannot be read (fail
-    closed) as well as a positive match; unsaved work alone does not, because
-    this path legitimately reuses a worktree carrying a prior stage's churn.
+    **"The refresh did not move the worktree" means two different things, and
+    only one of them stops this dispatch.**
 
-    Past that point the HEAD verification runs, before ``fetch``/``merge``, the
-    only other mutating steps. A precondition failure therefore leaves the
-    worktree untouched except for the fast-forward, which strictly advances HEAD
-    and needs no compensating restore. Unlike ``create_worktree``, this caller
-    has a friction surface (the prompt prefix), so each refresh failure -- fetch
-    failed, fast-forward refused, diverged, an OS error -- reported through the
-    report's ``notes`` is named there, worktree and reason, alongside the log
-    line; the dispatch itself proceeds.
+    - *Occupied -- abort.* A live cw session, a live daemon-roster worker, or an
+      indeterminate read of either (fail closed) means another worker may be
+      operating in the tree. ``create_worktree`` RAISES
+      :exc:`~cw.exceptions.WorktreeOccupiedError` for it, and this function
+      converts that straight away into the existing transient
+      :exc:`HookContextConflictError`, before any later step can act on the
+      worktree: the HEAD verification, ``git fetch``, the merge of
+      ``origin/<default_branch>`` into it, the hook-context write and the spawn.
+      Refusing only the fast-forward and then merging into and spawning onto a
+      tree a live worker is using would defeat the guard's whole purpose. The
+      conflict is the transient one (retried next tick, escalated by
+      ``cw.reconcile.fix_dispatch`` once it stops being transient), so nothing
+      is lost by skipping.
+    - *Not refreshed -- proceed.* Unsaved work (this path legitimately reuses a
+      worktree carrying a prior stage's churn), a failed fetch, a diverged
+      branch, a fast-forward git refused, an OS error or a branch absent from
+      origin all leave the tree the caller's to use as it is. The dispatch goes
+      on, and each failure is named in a friction note (below).
+
+    Past the occupancy refusal the HEAD verification runs, before
+    ``fetch``/``merge``, the only other mutating steps. A precondition failure
+    therefore leaves the worktree untouched except for the fast-forward, which
+    strictly advances HEAD and needs no compensating restore. Unlike
+    ``create_worktree``, this caller has a friction surface (the prompt prefix),
+    so each refresh failure -- fetch failed (with git's reason), fast-forward
+    refused, diverged, an OS error -- reported through the report's ``notes`` is
+    named there, worktree and reason, alongside the log line.
 
     The HEAD verification confirms HEAD landed on the branch's resolved
     remote ref (upstream-first, ``origin/<branch>`` as fallback -- #2145)
@@ -196,25 +204,26 @@ def dispatch_fix_agent(
 
     _refuse_if_worktree_references_live_session(client, branch)
     refresh = ReuseRefreshReport()
-    worktree = create_worktree(
-        client,
-        branch,
-        allow_dirty_reuse=True,
-        refresh_on_reuse=True,
-        refresh_report=refresh,
-    )
-    if refresh.live_occupant is not None:
-        # The refresh refused because a live session or worker may be homed on
-        # this worktree. Every step below mutates it (fetch, merge, hook-context
-        # write, spawn), so none may run: skip the whole dispatch, worktree
-        # untouched, and let the caller's transient-conflict handling retry.
+    try:
+        worktree = create_worktree(
+            client,
+            branch,
+            allow_dirty_reuse=True,
+            refresh_on_reuse=True,
+            refresh_report=refresh,
+        )
+    except WorktreeOccupiedError as exc:
+        # A live session or worker may be homed on this worktree. Every step
+        # below mutates it (fetch, merge, hook-context write, spawn), so none
+        # may run: skip the whole dispatch, worktree untouched, and let the
+        # caller's transient-conflict handling retry.
         msg = (
-            f"dispatch_fix_agent: worktree {worktree} for {branch} may be held "
-            f"by a live session or daemon worker ({refresh.live_occupant}). "
+            f"dispatch_fix_agent: worktree {exc.path} for {branch} may be held "
+            f"by a live session or daemon worker ({exc.reason}). "
             "Refusing to fetch, merge or dispatch the fix agent into it; the "
             "worktree was not touched."
         )
-        raise HookContextConflictError(msg)
+        raise HookContextConflictError(msg) from exc
     effective_prompt = (
         "".join(f"_Friction note: {note}_\n\n" for note in refresh.notes)
         + effective_prompt
