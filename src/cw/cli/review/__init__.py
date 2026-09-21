@@ -10,8 +10,8 @@ grown to 951 lines. Four focused modules:
   them.
 - ``consolidate`` — the ``cw review consolidate`` command and its
   ``--documents-from`` loading helpers.
-- ``commands`` — ``register``, ``adjudicate``, ``check-voided``, and
-  ``verify-fixes``.
+- ``commands`` — ``register``, ``adjudicate``, ``check-voided``, ``settle``
+  (#2210), and ``verify-fixes``.
 
 The per-command behavioral prose the flat module's docstring carried now lives
 on the submodule that owns that command. Importing the command submodules below

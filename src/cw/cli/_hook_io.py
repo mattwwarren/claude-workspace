@@ -135,7 +135,7 @@ def _read_cw_context(cwd: str) -> dict[str, object] | None:
     Best-effort: a missing file, unreadable file, malformed JSON, or a
     non-object payload all yield None.
     """
-    context_path = Path(cwd) / ".claude" / "cw-context.json"
+    context_path = Path(cwd) / HOOK_CONTEXT_RELATIVE_PATH
     if not context_path.is_file():
         return None
     try:
@@ -143,3 +143,28 @@ def _read_cw_context(cwd: str) -> dict[str, object] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return context if isinstance(context, dict) else None
+
+
+def find_cw_context(start: Path) -> dict[str, object] | None:
+    """Search *start* and its parents for a ``.claude/cw-context.json`` (#2210).
+
+    The hooks above are handed an exact worktree root by Claude Code, so
+    :func:`_read_cw_context` looks in one place. An operator-run CLI command is
+    not: it may be invoked from anywhere inside the tree, so it needs the
+    upward walk ``.claude/scripts/check_not_main_checkout.py`` already does.
+    This delegates the actual read to :func:`_read_cw_context` rather than
+    parsing the file a second way — one parser, two search strategies — and
+    joins the shared :data:`~cw.models.HOOK_CONTEXT_RELATIVE_PATH` rather than
+    re-spelling the path, so this discovery and #2226's guard cannot drift
+    onto two different files later.
+
+    Returns the NEAREST context, or None when no ancestor has one. Same
+    fail-open contract as every other cw context guard: a missing, unreadable
+    or malformed file is indistinguishable from "not a dispatch worker", which
+    is the safe direction for a guard that refuses work.
+    """
+    resolved = start.resolve()
+    for candidate in [resolved, *resolved.parents]:
+        if (candidate / HOOK_CONTEXT_RELATIVE_PATH).is_file():
+            return _read_cw_context(str(candidate))
+    return None

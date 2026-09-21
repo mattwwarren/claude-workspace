@@ -19,6 +19,15 @@ from pydantic.json_schema import SkipJsonSchema
 
 from cw.auto_dev_result import Review
 
+# #2210: the one model group member NOT declared here. RefusedDisposition is
+# owned by cw.review_markers, beside the marker vocabulary whose refusals it
+# records. Round 4 moved it there out of cw.review_finding_dispositions: this
+# package is the EXECUTOR-NEUTRAL finding contract, so a dependency on one
+# executor's ledger implementation inverted the direction the split exists to
+# keep. cw.review_markers imports nothing from ``cw`` at all, so this is a leaf
+# edge that can never close a cycle.
+from cw.review_markers import RefusedDisposition
+
 # "DEBT" (#1837) is the non-blocking severity for a real problem the reviewer
 # found on code this diff did not cause: it is tracked in the verdict's debt
 # ledger for later filing rather than handed to the fix loop. Like
@@ -228,9 +237,31 @@ class Finding(BaseModel):
     # tracked debt rather than blocking the loop.
     transitive_impact_evidence: str = ""
     release_critical_exception: str = ""
+    # #2210: the reviewer's typed escape hatch from the cross-round
+    # adjudication ledger. Non-blank means "I am KNOWINGLY re-raising a
+    # finding an operator settled", and the string itself is the argument --
+    # what changed since the recorded date, quoting the changed code. Blank on
+    # every other finding, so a reviewer that has never heard of the field
+    # degrades to the pre-#2210 shape: a bare re-raise, suppressed by the
+    # ledger backstop.
+    #
+    # Honoured by that backstop on EVERY codex pass and on both matching
+    # tiers, but guaranteed to keep a finding blocking only on the codex
+    # single-pass lane (and fix-loop cycle 0). On in-loop cycles 1+,
+    # `_admit_new_must_fix` does not read this field, so a contested finding
+    # on code the latest fix cycle did not touch is diverted to the debt
+    # ledger and the contest text is dropped (follow-up F6/F4).
+    #
+    # Unverified and gameable by construction: nothing checks that the quoted
+    # code actually changed. It can only fail TOWARD blocking, and SHA-anchored
+    # verification is follow-up F2. See ADR-0016.
+    contests_adjudication: str = ""
 
     @field_validator(
-        "transitive_impact_evidence", "release_critical_exception", mode="before"
+        "transitive_impact_evidence",
+        "release_critical_exception",
+        "contests_adjudication",
+        mode="before",
     )
     @classmethod
     def _null_admission_rationale_to_default(cls, v: str | None) -> str:
@@ -642,6 +673,14 @@ class ReviewVerdict(BaseModel):
     not something a pass should proceed past. NIT/DEBT/PRINCIPLE-only discards
     stay non-gating, consistent with #2000's "below MUST_FIX is informational".
 
+    ``refused_dispositions`` (#2210 round 2) is the cross-round ledger's own
+    "a finding nobody read is not a clean review" channel: one record per
+    disposition entry the reader refused to apply because it could not say who
+    settled the finding, when, against what code, and why. Purely recorded
+    here — the refusal's *effect* is that the finding keeps blocking, which
+    the findings sections already show; this list is what makes the attempt
+    visible rather than silent.
+
     ``unmatched_adjudication_count`` (#1805) is written solely by
     :func:`cw.review_adjudication.apply_adjudication`: the number of
     adjudication entries that matched no accepted finding (stale anchor,
@@ -707,6 +746,14 @@ class ReviewVerdict(BaseModel):
     # Deduplicated by fingerprint before it is stamped, so the renderer needs
     # no already-seen bookkeeping of its own.
     debt: list[DebtRecord] = Field(default_factory=list)
+    # #2210 round 2: disposition-ledger records the reader refused to apply
+    # for want of provenance, stamped exclusively by
+    # `cw.review_finding_dispositions.suppress_adjudicated_findings`. Additive
+    # and default-empty (the `rejected_must_fix`/`debt` precedent), and like
+    # `rejected_count` it is a REPORTING channel, not a gate: a refusal makes
+    # a finding keep blocking, which is already the visible consequence — this
+    # field is what stops the attempt itself from being invisible.
+    refused_dispositions: list[RefusedDisposition] = Field(default_factory=list)
 
 
 class CapturedDiff(BaseModel):

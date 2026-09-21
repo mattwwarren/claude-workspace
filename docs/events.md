@@ -1845,16 +1845,31 @@ debt itself is already surfaced on the posted review comment.
 {
   "file": "<str>",
   "summary": "<str>",
+  "severity": "<str>",
   "outcome": "REJECTED",
   "rationale": "<str>",
-  "recorded_at": "<str>"
+  "recorded_at": "<str>",
+  "match_kind": "exact" | "claim",
+  "similarity": "<float>",
+  "matched_key": "<str>"
 }
 ```
 **Semantics:** GitHub #1838. One event per re-derived review finding suppressed
-because its `review_debt.fingerprint_v1` identity matched a `REJECTED` entry in
-the ticket's cross-round adjudication ledger
-(`TicketTask.finding_dispositions`, schema v31). The finding is stamped
+because it matched a `REJECTED` entry in the ticket's cross-round adjudication
+ledger (`TicketTask.finding_dispositions`, schema v31). The finding is stamped
 `disposition="rejected"` and leaves `must_fix`/`blocking`.
+
+`match_kind` (#2210) says which tier matched. `"exact"` is the original
+identity — the finding's own ledger key equals the recorded one, which since
+review round 3 means a **byte-identical** summary (the key is
+`file::normalized summary::<sha256 of the verbatim summary>`, ADR-0016
+invariant 12) — and always carries `similarity: 1.0`. `"claim"` is the fuzzy same-file tier,
+which applies **only when armed** on the task's lane
+(`codex_claim_suppression_enabled` plus `codex_review_tiers:
+{claim_suppression: true}`); while it is off it emits
+`review.finding_claim_shadowed` below instead of suppressing anything.
+`matched_key` is the ledger key that won — including its trailing 64-hex
+digest — which for a claim match is NOT the finding's own key.
 
 Mandatory for the same reason as `review.finding_voided` above, and NOT a reuse
 of it: the two suppressions have different identities (fingerprint-keyed vs.
@@ -1878,6 +1893,133 @@ expected steady-state outcome once an operator has settled a finding, and it is
 already visible on the review comment.
 
 `correlation_id` is the `ticket_id`.
+
+### `review.finding_claim_shadowed`
+
+**Emitter:** `suppress_adjudicated_findings`
+(`cw.review_finding_dispositions`), on the same hop as
+`review.finding_disposition_suppressed` above.
+**Payload:**
+```json
+{
+  "file": "<str>",
+  "summary": "<str>",
+  "severity": "MUST_FIX",
+  "similarity": "<float>",
+  "matched_key": "<str>",
+  "matched_recorded_at": "<str>",
+  "matched_rationale": "<str>",
+  "reviewed_sha": "<str>"
+}
+```
+**Semantics:** GitHub #2210. The ledger's fuzzy **claim** tier matched a
+re-derived finding against a `REJECTED` entry, but the per-lane gate was
+closed — so nothing was suppressed and the finding stayed blocking. This event
+is the counterfactual record: reading these is how an operator judges the
+matcher's thresholds against real rewordings before arming a lane (ADR-0016).
+
+Deliberately a distinct type rather than a reuse of
+`review.finding_disposition_suppressed`, for the same reason that one is
+distinct from `review.finding_voided`: one type could not say whether a finding
+was actually suppressed or only *would* have been, and that distinction is the
+entire content of this event.
+
+It is recorded **even when the master switch is off**, for any ticket that has
+a ledger at all. That is a deliberate deviation from
+`docs/release-playbook.md`'s "a `False` master short-circuits the module"
+convention — the measurement is the point of the default-off period. A fresh
+install with no ledger still emits nothing.
+
+It fires on **every pass** that re-derives the finding, so a fix loop produces
+one per cycle. Group on `(correlation_id, file, summary)` and count distinct
+`reviewed_sha` values: each fix cycle commits and so has its own SHA, while
+equal SHAs are repeats within one reviewed commit (a requeue with no new
+commit, say). A failed write is logged at WARNING and never alters the verdict
+or aborts the pass — the shadow is observational.
+
+**Querying:** `cw event tail --type review.finding_claim_shadowed --json` reads
+only the **live** inbox. Auto-prune archives older events to
+`events/inbox.<YYYY-MM-DD>.jsonl` under `events_dir()` rather than deleting
+them, so read those files for older ones, or raise
+`event_inbox_retention_count`.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`, matching its
+three siblings above: it is an analysis record an operator goes looking for,
+not an interrupt.
+
+`correlation_id` is the `ticket_id`.
+
+### `review.finding_settled`
+
+**Emitter:** `cw review settle` (`cw.cli.review.commands`)
+**Payload:**
+```json
+{
+  "key": "<file>::<normalized summary>::<sha256 of the verbatim summary>",
+  "file": "<str>",
+  "summary": "<str>",
+  "outcome": "REJECTED",
+  "reason": "<str>",
+  "actor": "<gh login>",
+  "recorded_at": "<ISO-8601 UTC>",
+  "reviewed_sha": "<str>"
+}
+```
+**Semantics:** GitHub #2210. An operator minted a durable cross-round ledger
+entry for one finding. The **mirror** of
+`review.finding_disposition_suppressed` above: that event records a suppression
+*firing*, this one records it being *created*.
+
+Mandatory for the same reason both of its siblings are. A settle is the one act
+that can silence a real defect permanently and invisibly — the ledger has no
+expiry and, today, no per-record rollback — so the record of who did it, when,
+and against which reviewed sha cannot live only in a ticket comment that can be
+edited afterwards. The same four facts are also written onto the durable
+`FindingDisposition` itself (`actor`, `recorded_at`, `summary`,
+`reviewed_sha`); the event is the queryable copy.
+
+**One event per settled finding**, counted over the *collapsed* ledger: two
+payload entries with the same file and byte-identical summary are one settled
+finding and one event, the same arithmetic the marker uses. Two summaries that
+merely normalize alike are two findings (the key binds the verbatim text) and
+two events.
+
+**Emitted before the marker is written** (ADR-0016 invariant 10). Every event
+for the settle records first; only then does the command render the marker to
+stdout and `--out`. If any emit fails the whole settle is refused — no marker,
+no `--out` file, non-zero exit, a message naming the finding and the failure —
+so a durable suppression can never exist without its audit record. The
+converse can: if the third of five events fails, the first two are recorded
+with no marker written, which is accepted noise. This is deliberately the
+opposite ordering to #1617's save-then-emit rule, which governs a *state
+mutation* whose event must not claim something that did not land; here the
+event **is** the safety mechanism.
+
+`cw review settle` refuses to run anywhere it cannot prove is an operator's
+own interactive session — a dispatch worker, or a directory whose
+`.claude/cw-context.json` cannot be resolved at all (see ADR-0016 invariant 8,
+which fails CLOSED as of #2210 round 4) — so no event of this type can
+originate from one. A refused run — blank `--reason`, unresolvable gh
+identity, an entry with no reviewed sha, the session refusal, or a failed
+audit emit — emits no marker and writes nothing.
+
+A record that never went through this command is not applied by the reader at
+all (ADR-0016 invariant 9), so the absence of a `review.finding_settled` event
+for a suppression now means the suppression did not happen — not that it
+happened unaudited.
+
+**Querying:** `cw event tail --type review.finding_settled --json`. Same
+archive caveat as `review.finding_claim_shadowed` above.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`: the operator
+running the command already knows it happened; this is an audit record read
+after the fact, not an interrupt.
+
+`correlation_id` is the `ticket_id` when `cw review settle --ticket <id>` names
+one, and `null` otherwise. The payload the blocking comment renders carries no
+ticket id — `ReviewVerdict` has no such field and the comment renderer is not
+given one — so the command cannot infer it, and inventing a correlation id
+would be worse than an honest null. Pass `--ticket` to get grouping.
 
 ### `watched_pr.collision`
 

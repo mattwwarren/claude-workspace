@@ -30,15 +30,30 @@ from cw.codex_review._capability import (
     _CodexFilesystemCapability,
     _CodexFingerprint,
 )
+from cw.codex_review._verdict import _render
 from cw.codex_review._verdict._health import (
     _READ_ONLY_SANDBOX_EXEMPT_ROLES,
     _format_degraded_document_highlights,
 )
-from cw.codex_review._verdict._render import _render_rejected_finding_text
+from cw.codex_review._verdict._render import (
+    _REFUSED_DISPOSITION_HEADING,
+    _REFUSED_DISPOSITION_NOTE,
+    _REFUSED_MAX_ROWS,
+    _SETTLE_COMPACT_SUMMARY_MAX,
+    _SETTLE_MAX_COMPACT_ROWS,
+    _SETTLE_MAX_PAYLOADS,
+    _SETTLE_OVERFLOW_NOTE,
+    _render_rejected_finding_text,
+)
 from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.models.enums import OrchestratorEventType
-from cw.review_finding_dispositions import FindingDisposition, _disposition_key
+from cw.review_finding_dispositions import (
+    FindingDisposition,
+    _disposition_key,
+    parse_finding_disposition_block,
+    render_finding_disposition_block,
+)
 from cw.review_findings import (
     AcceptedFinding,
     AgentSpecSource,
@@ -51,6 +66,16 @@ from cw.review_findings import (
     parse_reviewer_document,
 )
 from cw.review_findings._consolidate import _count_rejected_by_severity
+from cw.review_markers import (
+    DISPOSITION_SENTINEL,
+    SETTLE_SECTION_HEADING,
+    RefusedDisposition,
+)
+from tests._cli_review_helpers import (
+    CLAIM_ROW1_CANDIDATE,
+    CLAIM_ROW1_RECORDED,
+    _extract_settle_payloads,
+)
 from tests._codex_review_helpers import _task
 from tests._reconcile_helpers import (
     SCOPE_GUARD_BRANCH,
@@ -73,6 +98,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from cw.auto_dev_result import AutoDevResult
     from cw.review_findings import Finding, ReviewerFindingsDocument
 
 
@@ -1361,6 +1387,11 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
             "outcome": "REJECTED",
             "rationale": "settled by the operator in an earlier round",
             "recorded_at": "2026-08-16T00:00:00Z",
+            # #2210 round 2: the reader applies only fully-provenanced
+            # records, so the fixture carries what `cw review settle` writes.
+            "actor": "mattwwarren",
+            "reviewed_sha": "abc1234",
+            "summary": finding.summary,
         }
         payload.update(overrides)
         return {key: FindingDisposition.model_validate(payload)}
@@ -1504,6 +1535,491 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
             )
             == []
         )
+
+    # -- #2210: the claim tier and the contest hatch, end to end -----------
+
+    def _reworded_synth(
+        self, worktree: Path, session_id: str, *, claim_tier_enabled: bool = False
+    ) -> tuple[AutoDevResult, ReviewVerdict | None]:
+        finding = _make_finding(severity="MUST_FIX", summary=CLAIM_ROW1_CANDIDATE)
+        key = _disposition_key("src/cw/foo.py", CLAIM_ROW1_RECORDED)
+        assert key is not None
+        ledger = {
+            key: FindingDisposition(
+                outcome="REJECTED",
+                rationale="settled by the operator in an earlier round",
+                recorded_at="2026-08-16T00:00:00Z",
+                actor="mattwwarren",
+                reviewed_sha="abc1234",
+                summary=CLAIM_ROW1_RECORDED,
+            )
+        }
+        return synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(finding)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id=session_id,
+            default_branch="main",
+            fix_loop_enabled=False,
+            finding_dispositions=ledger,
+            claim_tier_enabled=claim_tier_enabled,
+        )
+
+    def test_reworded_rederived_must_fix_is_suppressed_end_to_end_when_armed(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-claim-armed")
+        result, verdict = self._reworded_synth(
+            worktree, "s-claim-armed", claim_tier_enabled=True
+        )
+
+        assert result.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert "claim similarity" in verdict.accepted[0].disposition_detail
+
+    def test_reworded_rederived_must_fix_still_blocks_when_gate_off(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-claim-off")
+        result, verdict = self._reworded_synth(worktree, "s-claim-off")
+
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert (
+            len(
+                read_events(
+                    event_types=[OrchestratorEventType.REVIEW_FINDING_CLAIM_SHADOWED]
+                )
+            )
+            == 1
+        )
+
+    def test_contest_finding_still_blocks_and_is_labelled_on_the_comment(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-contest")
+        finding = _make_finding(
+            severity="MUST_FIX",
+            contests_adjudication="the guard was deleted since the recorded date",
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(finding)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-contest",
+            default_branch="main",
+            fix_loop_enabled=False,
+            finding_dispositions=self._ledger(finding),
+        )
+
+        assert result.status == "blocked"
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert result.blocker is not None
+        assert "contests prior adjudication" in result.blocker.details
+
+    def test_bare_reraise_with_contest_blank_is_suppressed(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-contest-blank")
+        finding = _make_finding(severity="MUST_FIX", contests_adjudication="")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(finding)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-contest-blank",
+            default_branch="main",
+            fix_loop_enabled=False,
+            finding_dispositions=self._ledger(finding),
+        )
+
+        assert result.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.blocking is False
+
+
+class TestRenderRefusedDispositions:
+    """#2210 round 2: a refused suppression is reported, never silent.
+
+    The reader drops a disposition record that cannot say who settled the
+    finding, when, against what code, and why. "Dropped" must not mean
+    "invisible": an operator has to be able to see that something tried to
+    suppress a finding and was refused, and what to do about it.
+    """
+
+    def _verdict(self, *refused: RefusedDisposition) -> ReviewVerdict:
+        return ReviewVerdict(
+            blocking=False,
+            must_fix=[],
+            reviewed_sha="sha",
+            review=Review(
+                must_fix_initial=0,
+                should_fix=0,
+                fix_cycles_used=0,
+                deferred=0,
+                agents_run=1,
+            ),
+            refused_dispositions=list(refused),
+        )
+
+    def _body(self, *refused: RefusedDisposition) -> str:
+        return render_verdict_comment(self._verdict(*refused), fix_loop_enabled=False)
+
+    def test_nothing_refused_renders_nothing(self) -> None:
+        assert _REFUSED_DISPOSITION_HEADING not in self._body()
+
+    def test_a_refused_record_names_its_finding_and_its_gaps(self) -> None:
+        key = _disposition_key("src/cw/foo.py", "Bug here")
+        assert key is not None
+        body = self._body(
+            RefusedDisposition(key=key, missing=["actor", "reviewed_sha"])
+        )
+
+        assert _REFUSED_DISPOSITION_HEADING in body
+        assert "src/cw/foo.py" in body
+        assert "bug here" in body
+        assert "actor, reviewed_sha" in body
+        # It must say what the operator is supposed to do instead.
+        assert "cw review settle" in body
+        assert "unsupported" in body
+
+    def test_the_refusal_text_names_the_sentinel_through_the_shared_constant(
+        self,
+    ) -> None:
+        # #2210 round 3: compared against the imported constant, not a literal,
+        # so the assertion moves with the constant instead of freezing a copy.
+        assert f"`{DISPOSITION_SENTINEL}`" in _REFUSED_DISPOSITION_NOTE
+        key = _disposition_key("src/cw/foo.py", "Bug here")
+        assert key is not None
+        body = self._body(RefusedDisposition(key=key, missing=["actor"]))
+        assert DISPOSITION_SENTINEL in body
+
+    def test_the_section_is_capped_with_a_counted_residue(self) -> None:
+        refused = []
+        for index in range(_REFUSED_MAX_ROWS + 3):
+            key = _disposition_key(f"src/cw/mod{index}.py", "Bug here")
+            assert key is not None
+            refused.append(RefusedDisposition(key=key, missing=["actor"]))
+        body = self._body(*refused)
+
+        assert "src/cw/mod0.py" in body
+        assert f"src/cw/mod{_REFUSED_MAX_ROWS}.py" not in body
+        assert "and 3 more refused" in body
+
+
+class TestRenderSettlePayloads:
+    """#2210: the blocking comment hands the operator a ready-to-paste record."""
+
+    def _verdict(self, *findings: Finding, **overrides: object) -> ReviewVerdict:
+        files: dict[str, list[int]] = {}
+        for f in findings:
+            if f.line_start is not None:
+                files.setdefault(f.file, []).append(f.line_start)
+        diff = _make_diff(files=files) if files else _make_diff()
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(*findings)], diff, reviewed_sha="sha"
+        )
+        return verdict.model_copy(update=overrides) if overrides else verdict
+
+    def _comment(self, *findings: Finding, **overrides: object) -> str:
+        return render_verdict_comment(
+            self._verdict(*findings, **overrides), fix_loop_enabled=False
+        )
+
+    def test_blocking_comment_prints_one_payload_per_keyable_must_fix(self) -> None:
+        comment = self._comment(_make_finding(severity="MUST_FIX"))
+        payloads = _extract_settle_payloads(comment)
+        assert len(payloads) == 1
+        entry = payloads[0]["entries"][0]
+        assert entry["file"] == "src/cw/foo.py"
+        assert entry["summary"] == "Bug here"
+        assert entry["outcome"] == "REJECTED"
+        assert entry["rationale"] == ""
+
+    def test_payload_summary_is_verbatim_not_normalised(self) -> None:
+        summary = "Broken Guard at line 42"
+        comment = self._comment(_make_finding(severity="MUST_FIX", summary=summary))
+        assert _extract_settle_payloads(comment)[0]["entries"][0]["summary"] == summary
+
+    def test_byte_identical_findings_share_one_payload(self) -> None:
+        comment = self._comment(
+            _make_finding(severity="MUST_FIX", summary="Bug here"),
+            _make_finding(
+                severity="MUST_FIX",
+                summary="Bug here",
+                line_start=11,
+                line_end=11,
+                evidence="return 1",
+            ),
+        )
+        assert len(_extract_settle_payloads(comment)) == 1
+
+    def test_findings_that_only_normalize_alike_get_a_payload_each(self) -> None:
+        # #2210 round 3: the ledger key binds the VERBATIM summary, so these two
+        # are two records. One shared payload would leave the second finding
+        # with nothing to settle it by.
+        comment = self._comment(
+            _make_finding(severity="MUST_FIX", summary="3 call sites at line 10"),
+            _make_finding(
+                severity="MUST_FIX",
+                summary="4 call sites at line 99",
+                line_start=11,
+                line_end=11,
+                evidence="return 1",
+            ),
+        )
+        payloads = _extract_settle_payloads(comment)
+        assert sorted(p["entries"][0]["summary"] for p in payloads) == [
+            "3 call sites at line 10",
+            "4 call sites at line 99",
+        ]
+
+    def test_no_diff_anchor_finding_gets_no_payload(self) -> None:
+        comment = self._comment(
+            _make_finding(
+                severity="MUST_FIX",
+                file="N/A",
+                line_start=None,
+                line_end=None,
+                no_diff_anchor=True,
+            ),
+            _make_finding(severity="MUST_FIX"),
+        )
+        payloads = _extract_settle_payloads(comment)
+        assert [p["entries"][0]["file"] for p in payloads] == ["src/cw/foo.py"]
+
+    def test_section_absent_when_only_unkeyable_findings(self) -> None:
+        comment = self._comment(
+            _make_finding(
+                severity="MUST_FIX",
+                file="N/A",
+                line_start=None,
+                line_end=None,
+                no_diff_anchor=True,
+            )
+        )
+        assert SETTLE_SECTION_HEADING not in comment
+
+    def test_should_fix_findings_get_no_payload(self) -> None:
+        comment = self._comment(
+            _make_finding(severity="MUST_FIX"),
+            _make_finding(
+                severity="SHOULD_FIX",
+                summary="Style nit",
+                line_start=11,
+                line_end=11,
+                evidence="return 1",
+            ),
+        )
+        payloads = _extract_settle_payloads(comment)
+        assert [p["entries"][0]["summary"] for p in payloads] == ["Bug here"]
+
+    def test_non_blocking_comment_has_no_settle_section(self) -> None:
+        comment = self._comment(
+            _make_finding(
+                severity="SHOULD_FIX",
+                summary="Style nit",
+            )
+        )
+        assert SETTLE_SECTION_HEADING not in comment
+
+    def test_fence_widens_around_backticks_in_the_summary(self) -> None:
+        summary = "the ``` fence inside `foo` breaks out"
+        comment = self._comment(_make_finding(severity="MUST_FIX", summary=summary))
+        payloads = _extract_settle_payloads(comment)
+        assert payloads[0]["entries"][0]["summary"] == summary
+
+    def test_settle_section_states_github_only_scope(self) -> None:
+        comment = self._comment(_make_finding(severity="MUST_FIX"))
+        assert "This works only on GitHub-tracked tickets" in comment
+
+    def test_blocking_comment_never_contains_the_disposition_sentinel(self) -> None:
+        # Self-ingest hazard: the dispositions reader parses EVERY comment body
+        # on the ticket, including the pipeline's own — printing the postable
+        # marker here would auto-settle every finding as REJECTED.
+        comment = self._comment(_make_finding(severity="MUST_FIX"))
+        assert "REVIEW-FINDING-DISPOSITIONS" not in comment
+
+    def test_contest_annotation_is_collapsed_and_truncated(self) -> None:
+        claim = "the guard\n   was deleted " + ("x" * 300)
+        comment = self._comment(
+            _make_finding(severity="MUST_FIX", contests_adjudication=claim)
+        )
+        assert "contests prior adjudication" in comment
+        assert "the guard was deleted " in comment
+        assert "x" * 300 not in comment
+        assert "…" in comment or "..." in comment
+
+    def test_payload_carries_the_reviewed_sha(self) -> None:
+        comment = self._comment(_make_finding(severity="MUST_FIX"))
+        assert (
+            _extract_settle_payloads(comment)[0]["entries"][0]["reviewed_sha"] == "sha"
+        )
+
+    def test_settle_section_states_operator_machine_only(self) -> None:
+        comment = self._comment(_make_finding(severity="MUST_FIX"))
+        assert "own machine" in comment
+        assert "--reason" in comment
+
+
+class TestSettlePayloadBudget:
+    """#2210: a blocking comment with many MUST_FIX findings has a hard cap.
+
+    GitHub rejects a comment body over 65,536 characters, and one JSON payload
+    per finding is the largest thing this renderer emits. Past the cap the
+    remaining findings are named compactly and the operator is pointed at
+    ``cw review settle`` — never a JSON block truncated mid-structure, which
+    would paste into something that half-parses.
+    """
+
+    def _verdict(self, *findings: Finding) -> ReviewVerdict:
+        """A blocking verdict built directly: the budget is a render concern."""
+        return ReviewVerdict.model_validate(
+            {
+                "blocking": True,
+                "must_fix": list(findings),
+                "reviewed_sha": "sha",
+                "review": Review(
+                    must_fix_initial=len(findings),
+                    should_fix=0,
+                    fix_cycles_used=0,
+                    deferred=0,
+                    agents_run=1,
+                ),
+            }
+        )
+
+    def _findings(self, count: int, summary_len: int = 0) -> list[Finding]:
+        return [
+            _make_finding(
+                severity="MUST_FIX",
+                file=f"src/cw/mod{index:03d}.py",
+                summary=f"finding {index:03d} " + ("x" * summary_len),
+            )
+            for index in range(count)
+        ]
+
+    def _section(self, comment: str) -> str:
+        return comment[comment.index(SETTLE_SECTION_HEADING) :]
+
+    def test_exactly_at_the_count_cap_renders_every_payload(self) -> None:
+        findings = self._findings(_SETTLE_MAX_PAYLOADS)
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+
+        assert len(_extract_settle_payloads(comment)) == _SETTLE_MAX_PAYLOADS
+        assert _SETTLE_OVERFLOW_NOTE not in comment
+
+    def test_one_past_the_count_cap_lists_the_remainder_compactly(self) -> None:
+        findings = self._findings(_SETTLE_MAX_PAYLOADS + 1)
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+
+        payloads = _extract_settle_payloads(comment)
+        assert len(payloads) == _SETTLE_MAX_PAYLOADS
+        assert _SETTLE_OVERFLOW_NOTE in comment
+        # The one that did not fit is still named -- identity, no JSON.
+        last = findings[-1]
+        assert last.file in self._section(comment)
+        assert last.file not in {p["entries"][0]["file"] for p in payloads}
+
+    def test_exactly_at_the_size_budget_renders_every_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        one = self._findings(1, summary_len=400)
+        baseline = render_verdict_comment(self._verdict(*one), fix_loop_enabled=False)
+        budget = len(self._section(baseline))
+        monkeypatch.setattr(_render, "_SETTLE_SECTION_BUDGET_CHARS", budget)
+
+        comment = render_verdict_comment(self._verdict(*one), fix_loop_enabled=False)
+        assert len(_extract_settle_payloads(comment)) == 1
+        assert _SETTLE_OVERFLOW_NOTE not in comment
+
+    def test_one_past_the_size_budget_is_listed_compactly_not_truncated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        findings = self._findings(2, summary_len=400)
+        baseline = render_verdict_comment(
+            self._verdict(findings[0]), fix_loop_enabled=False
+        )
+        monkeypatch.setattr(
+            _render, "_SETTLE_SECTION_BUDGET_CHARS", len(self._section(baseline))
+        )
+
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+        payloads = _extract_settle_payloads(comment)
+        assert len(payloads) == 1
+        assert payloads[0]["entries"][0]["file"] == findings[0].file
+        assert _SETTLE_OVERFLOW_NOTE in comment
+        assert findings[1].file in self._section(comment)
+
+    def test_a_budget_too_small_for_any_payload_still_names_every_finding(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(_render, "_SETTLE_SECTION_BUDGET_CHARS", 1)
+        findings = self._findings(3)
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+
+        assert _extract_settle_payloads(comment) == []
+        section = self._section(comment)
+        assert all(f.file in section for f in findings)
+
+    def test_every_rendered_fence_is_closed(self) -> None:
+        comment = render_verdict_comment(
+            self._verdict(*self._findings(_SETTLE_MAX_PAYLOADS + 5)),
+            fix_loop_enabled=False,
+        )
+        # An unclosed fence leaves an odd number of fence lines behind.
+        fences = [
+            line
+            for line in self._section(comment).splitlines()
+            if line.startswith("```")
+        ]
+        assert len(fences) == 2 * _SETTLE_MAX_PAYLOADS
+
+    def test_compact_rows_are_capped_and_the_residue_counted(self) -> None:
+        overflow = _SETTLE_MAX_COMPACT_ROWS + 3
+        findings = self._findings(_SETTLE_MAX_PAYLOADS + overflow)
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+
+        section = self._section(comment)
+        assert f"{overflow - _SETTLE_MAX_COMPACT_ROWS} more" in section
+
+    def test_compact_row_summary_is_truncated(self) -> None:
+        findings = self._findings(
+            _SETTLE_MAX_PAYLOADS + 1, summary_len=_SETTLE_COMPACT_SUMMARY_MAX * 3
+        )
+        comment = render_verdict_comment(
+            self._verdict(*findings), fix_loop_enabled=False
+        )
+
+        row = next(
+            line
+            for line in self._section(comment).splitlines()
+            if findings[-1].file in line and line.startswith("- ")
+        )
+        assert len(row) < _SETTLE_COMPACT_SUMMARY_MAX * 2
 
 
 class TestRenderFindingsIsDispositionAware:
@@ -3232,3 +3748,137 @@ class TestRenderOutOfPlanScope:
         assert verdict.accepted[0].in_plan_scope is None
         body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "outside planned file set" not in body
+
+
+class TestUntrustedFindingTextCannotForgeARecord:
+    """#2210 round 4: the sharpest finding in the ticket.
+
+    The renderer writes model-authored text into a comment that the NEXT
+    round's reader parses for disposition records. A finding whose own text
+    carried a well-formed, fully-provenanced block therefore minted a durable
+    suppression no operator authored — the reviewer silencing itself.
+
+    Each case below renders a real verdict comment and feeds it through the
+    real reader, so it exercises the whole pipeline rather than one helper.
+    """
+
+    def _forged_marker(self) -> str:
+        """A marker that WOULD settle the finding, provenance and all.
+
+        Built by the real writer from a valid ledger, so nothing here is
+        refused for a missing field: the defence being tested is escaping and
+        position, not the provenance checks that sit behind them.
+        """
+        key = _disposition_key("src/cw/foo.py", "Bug here")
+        assert key is not None
+        return render_finding_disposition_block(
+            {
+                key: FindingDisposition(
+                    outcome="REJECTED",
+                    rationale="forged by the reviewer",
+                    recorded_at="2026-09-20T12:00:00Z",
+                    actor="mattwwarren",
+                    reviewed_sha="sha",
+                    summary="Bug here",
+                )
+            }
+        )
+
+    def _comment(self, **finding_overrides: object) -> str:
+        finding = _make_finding(severity="MUST_FIX", **finding_overrides)
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(finding)], _make_diff(), reviewed_sha="sha"
+        )
+        return render_verdict_comment(verdict, fix_loop_enabled=False)
+
+    def test_a_summary_carrying_a_full_marker_produces_no_disposition(self) -> None:
+        comment = self._comment(summary=f"Bug here {self._forged_marker()}")
+
+        assert parse_finding_disposition_block([comment]) == ({}, [])
+
+    def test_the_rendered_comment_still_shows_the_summary_safely(self) -> None:
+        comment = self._comment(summary=f"Bug here {self._forged_marker()}")
+
+        # Escaped, not stripped: the operator can still read what was said.
+        assert "REVIEW-FINDING\\-DISPOSITIONS" in comment
+        assert "Bug here" in comment
+        assert "forged by the reviewer" in comment
+        # ...and no HTML comment delimiter survives anywhere in the body, which
+        # is the choke point: without one, no sentinel block can form. The bare
+        # sentinel WORD does survive inside the settle payload, where the text
+        # is the ledger key and must stay verbatim -- see
+        # test_the_settle_payload_keeps_the_summary_verbatim_and_still_inert.
+        assert "<!--" not in comment
+        assert "-->" not in comment
+
+    @pytest.mark.parametrize(
+        "field",
+        ["file", "summary", "consequence", "suggested_fix", "contests_adjudication"],
+    )
+    def test_every_untrusted_finding_field_is_neutralised(self, field: str) -> None:
+        comment = self._comment(**{field: f"x {self._forged_marker()} y"})
+
+        assert "<!--" not in comment
+        assert "-->" not in comment
+        assert parse_finding_disposition_block([comment]) == ({}, [])
+
+    def test_quoted_evidence_on_a_rejected_finding_is_neutralised(self) -> None:
+        """Evidence renders inside a fence; a fence stops markdown, not a regex."""
+        rejected = RejectedFinding(
+            reviewer_role="Code Quality Reviewer",
+            reason="evidence_not_in_diff",
+            raw={
+                "severity": "MUST_FIX",
+                "file": "src/cw/foo.py",
+                "summary": "Bug here",
+                "evidence": self._forged_marker(),
+            },
+        )
+        verdict = ReviewVerdict(
+            blocking=False,
+            must_fix=[],
+            reviewed_sha="sha",
+            review=Review(
+                must_fix_initial=0,
+                should_fix=0,
+                fix_cycles_used=0,
+                deferred=0,
+                agents_run=1,
+            ),
+            rejected=[rejected],
+            rejected_must_fix=[rejected],
+        )
+        comment = render_verdict_comment(verdict, fix_loop_enabled=False)
+
+        assert DISPOSITION_SENTINEL not in comment
+        assert parse_finding_disposition_block([comment]) == ({}, [])
+
+    def test_the_settle_payload_keeps_the_summary_verbatim_and_still_inert(
+        self,
+    ) -> None:
+        """The one span that may not be escaped: it IS the ledger key.
+
+        `cw review settle` mints the key from this text, so a visible escape
+        would record a finding that does not exist. It is made inert
+        losslessly instead — `json.loads` still yields the exact summary.
+        """
+        summary = f"Bug here {self._forged_marker()}"
+        comment = self._comment(summary=summary)
+        payloads = _extract_settle_payloads(comment)
+
+        assert payloads[0]["entries"][0]["summary"] == summary
+        # The sentinel WORD rides through verbatim; the delimiters it needs to
+        # become a block do not, so nothing parses.
+        assert DISPOSITION_SENTINEL in comment
+        assert "<!--" not in comment
+        assert parse_finding_disposition_block([comment]) == ({}, [])
+
+    def test_a_genuine_settle_marker_still_round_trips(self) -> None:
+        """The guard must not cost the feature it guards."""
+        marker = self._forged_marker()
+        parsed, refused = parse_finding_disposition_block([marker])
+
+        assert refused == []
+        assert [entry.rationale for entry in parsed.values()] == [
+            "forged by the reviewer"
+        ]
