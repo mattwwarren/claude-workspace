@@ -24,7 +24,7 @@ import json
 import re
 from pathlib import Path
 
-from cw.doctor._shared import CheckResult
+from cw.doctor._shared import CheckResult, SettingsReadFailure, _read_settings
 
 # Home-tree root scanned for a user-level Stop hook — a module-level
 # Path.home()-derived constant, patched in tests via
@@ -117,25 +117,16 @@ def _scan_settings_file(path: Path) -> tuple[list[str], str | None]:
     yields ``([], None)``. A file we cannot read or parse yields
     ``([], <failure class>)`` so the caller can WARN naming the file — a check
     whose whole purpose is to diagnose a broken install must not crash on a
-    malformed one, and must not silently pass it either. The failure class is
-    a short label (``invalid UTF-8``, ``malformed JSON``, ``unreadable:
-    <ExcName>``), never the exception text, which can echo file contents.
-    Valid JSON of the wrong shape is not a read/parse failure: it simply has
-    no Stop hook to find.
+    malformed one, and must not silently pass it either. The read goes through
+    the shared :func:`cw.doctor._shared._read_settings`, whose failure class is
+    a short label (``invalid UTF-8``, ``malformed JSON``, ``not a JSON
+    object``, ``unreadable: <ExcName>``), never exception text, which can echo
+    file contents. Valid JSON *object* of the wrong shape below the top level
+    is not a read/parse failure: it simply has no Stop hook to find.
     """
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ([], None)
-    except UnicodeDecodeError:
-        return ([], "invalid UTF-8")
-    except OSError as exc:
-        return ([], f"unreadable: {type(exc).__name__}")
-
-    try:
-        data: object = json.loads(raw)
-    except json.JSONDecodeError:
-        return ([], "malformed JSON")
+    data = _read_settings(path)
+    if isinstance(data, SettingsReadFailure):
+        return ([], None if data.missing else data.reason)
 
     return (
         [

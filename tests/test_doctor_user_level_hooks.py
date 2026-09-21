@@ -218,7 +218,6 @@ class TestUserLevelStopHookCleanAndMalformed:
     @pytest.mark.parametrize(
         "raw",
         [
-            json.dumps(["a", "list"]),
             json.dumps({"hooks": "not-a-dict"}),
             json.dumps({"hooks": {"Stop": "not-a-list"}}),
             json.dumps({"hooks": {"Stop": ["not-a-dict"]}}),
@@ -266,6 +265,25 @@ class TestUserLevelStopHookUnreadableFiles:
         assert result.warn is True
         assert (
             f"{home / 'settings.json'}: could not read/parse (malformed JSON)"
+            in result.detail
+        )
+
+    def test_top_level_non_object_warns_naming_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A settings file that is valid JSON but not an object is not settings.
+
+        It used to read as "no Stop hook, silent"; via the shared reader it is
+        a WARN, the same as the bypass-disclaimer check reports it.
+        """
+        home = _seed(monkeypatch, tmp_path, settings_json=json.dumps(["a", "list"]))
+
+        result = _check_user_level_stop_hook()
+
+        assert result.ok is True
+        assert result.warn is True
+        assert (
+            f"{home / 'settings.json'}: could not read/parse (not a JSON object)"
             in result.detail
         )
 

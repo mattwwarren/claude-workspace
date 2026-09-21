@@ -16,7 +16,7 @@ import tomllib
 import urllib.parse
 from pathlib import Path
 
-from cw.doctor._shared import CheckResult
+from cw.doctor._shared import CheckResult, SettingsReadFailure, _read_settings
 from cw.executor import (
     CODEX_NOT_FOUND,
     CODEX_VERSION_UNKNOWN,
@@ -53,25 +53,19 @@ _DEP_NAME_SEPARATORS = "<>=!~; "
 
 
 def _check_bypass_disclaimer() -> CheckResult:
-    """Check whether the user has accepted the bypass-permissions disclaimer."""
-    try:
-        raw = _CLAUDE_SETTINGS_PATH.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return CheckResult(
-            "bypass-disclaimer",
-            ok=True,
-            warn=True,
-            detail=f"settings.json not found at {_CLAUDE_SETTINGS_PATH}",
-        )
-    try:
-        data: dict[str, object] = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return CheckResult(
-            "bypass-disclaimer",
-            ok=True,
-            warn=True,
-            detail=f"could not parse settings.json: {exc}",
-        )
+    """Check whether the user has accepted the bypass-permissions disclaimer.
+
+    Reads through :func:`cw.doctor._shared._read_settings`, so an unreadable
+    or unparseable settings file is a WARN naming the file and the failure
+    class rather than an exception out of ``run_doctor`` (#2226).
+    """
+    data = _read_settings(_CLAUDE_SETTINGS_PATH)
+    if isinstance(data, SettingsReadFailure):
+        if data.missing:
+            detail = f"settings.json not found at {_CLAUDE_SETTINGS_PATH}"
+        else:
+            detail = f"could not read/parse {_CLAUDE_SETTINGS_PATH} ({data.reason})"
+        return CheckResult("bypass-disclaimer", ok=True, warn=True, detail=detail)
     if data.get("skipDangerousModePermissionPrompt"):
         return CheckResult("bypass-disclaimer", ok=True, warn=False, detail="accepted")
     return CheckResult(
