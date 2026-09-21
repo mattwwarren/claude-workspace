@@ -697,7 +697,8 @@ is a deliberate non-goal here (follow-up F1).
 
 **Hand-authoring the marker is unsupported (#2210).** `cw review settle` is
 the only supported producer, because it is the only path that records
-provenance and refuses to run inside a dispatch worker. The reader enforces
+provenance and refuses to run anywhere it cannot prove is an operator's own
+interactive session. The reader enforces
 that: a disposition record is **applied only when it carries the full
 provenance set** — the finding's identity, an `actor`, a `recorded_at` that
 parses as a UTC instant, a `reviewed_sha`, and a non-empty rationale. A record
@@ -740,7 +741,8 @@ editing:
 
 ```bash
 # Save the payload from the review comment to settle.json, then, ON YOUR OWN
-# MACHINE:
+# MACHINE, from inside an interactive cw session worktree (the command refuses
+# anywhere it cannot read a `.claude/cw-context.json` reporting headless:false):
 uv run cw review settle settle.json \
   --reason "intentional tradeoff, see ADR-0012" \
   --ticket "$TICKET" --out marker.md
@@ -752,13 +754,37 @@ recorded rationale is the silent silencing this record exists to prevent. It
 applies to every entry; an entry's own `rationale` overrides it, so several
 findings can be settled for different reasons in one call.
 
-**`cw review settle` refuses to run inside a dispatch worker.** A settled
-finding is never re-raised, so the pipeline must not be able to settle its own
+**`cw review settle` refuses to run anywhere it cannot prove is your own
+interactive session — run it from a `cw` session worktree.** A settled finding
+is never re-raised, so the pipeline must not be able to settle its own
 reviewer's findings. The command looks for the nearest
-`.claude/cw-context.json` (searched upward from cwd) and exits non-zero if it
-reports `headless`, writing nothing — no marker, no `--out` file, no event.
-There is no bypass flag. If a worker hands you a payload, run the command
-yourself.
+`.claude/cw-context.json` (searched upward from cwd) and **proceeds only when
+it finds one reporting `headless: false`**, which is what `cw` stamps for an
+interactive session. Everything else exits non-zero and writes nothing — no
+marker, no `--out` file, no event:
+
+- `headless: true` — a dispatch worker.
+- no `.claude/cw-context.json` in this directory or any parent, an unreadable
+  or malformed one, one with no `headless` key, or a `headless` that is not a
+  boolean — the context is *indeterminate*, and "I cannot tell" is not
+  evidence that you are at the keyboard.
+
+Practically: **your plain checkout of the repo has no `.claude/cw-context.json`,
+so `cw review settle` will refuse there.** Run it from an interactive `cw`
+session worktree (`cw start <client>` / `cw switch <client>` puts you in one),
+or any directory beneath one. There is no bypass flag. If a worker hands you a
+payload, run the command yourself.
+
+**Post the marker as its own comment, unedited.** The reader recognises a
+disposition record by *position* as well as shape: the block must open the
+comment body, directly under its `## Review Finding Dispositions` title, which
+is exactly what `--out` writes. A block pasted below a preamble, quoted in a
+reply, or embedded in other text is not a record and is silently not applied —
+you will see the finding re-appear, with nothing in the refused-records section
+(nothing tried to settle anything). This is what stops a reviewer's own finding
+text from minting a suppression: marker syntax inside a finding's summary,
+file, evidence or contest claim is escaped on render (you will see it as
+`REVIEW-FINDING\-DISPOSITIONS`), and would not parse at that position anyway.
 
 Every record it writes carries provenance: your resolved `gh` login, a UTC
 timestamp stamped by the command (`recorded_at` is **rejected** as a payload

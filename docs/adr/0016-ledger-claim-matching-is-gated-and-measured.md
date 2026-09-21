@@ -62,11 +62,22 @@ not amended or superseded; the two seams stay independent.
    (`actor`, a CLI-stamped UTC `recorded_at`, the verbatim `summary`, the
    `reviewed_sha` the finding was raised against), emits one
    `review.finding_settled` event per settled finding, and **refuses to run
-   inside a dispatch worker** (nearest `.claude/cw-context.json` reporting
-   `headless`). There is no bypass flag: a control an agent can switch off is
-   not a control. The refusal is checked before any output, any file write and
-   any event, and fails open when no context file is found — the same
-   fail-open posture every other cw context guard takes. This is the mirror of
+   anywhere it cannot prove is an operator's own interactive session**. There
+   is no bypass flag: a control an agent can switch off is not a control. The
+   refusal is checked before any output, any file write and any event, and it
+   **fails CLOSED** (round 4): the only state that proceeds is a discovered
+   nearest `.claude/cw-context.json` whose `headless` is the JSON boolean
+   `false`. A worker (`headless: true`) refuses, and so does every
+   indeterminate answer — no context file above cwd, an unreadable or
+   malformed one, one with no `headless` key, one whose `headless` is not a
+   bool. `find_cw_context` cannot distinguish "there is no dispatch context
+   here" from "the dispatch context could not be read", and the earlier
+   fail-open posture read that ambiguity as "operator's own machine", so a
+   worker with a missing or truncated context could settle its own reviewer's
+   findings. Operationally this means `cw review settle` must be run from an
+   interactive `cw` session worktree (or any directory beneath one); a plain
+   checkout of the repo carries no context file and is refused. This is the
+   mirror of
    invariant 3: #2210 stops a settled finding being wrongly **re-raised**, and
    an unaudited settle path would let one be wrongly **silenced**, which is the
    direction that loses information permanently and invisibly.
@@ -138,6 +149,38 @@ not amended or superseded; the two seams stay independent.
     deliberate reading of "the key includes the file, the summary and the
     reviewed sha": the ledger key carries what identifies the *finding*, the
     record carries what identifies the *decision*.
+14. **Review text is untrusted input, and a record is made by POSITION as well
+    as shape** (round 4). The pipeline renders model-authored text — a finding
+    summary, a file path, quoted evidence, a contest claim, reviewer prose —
+    into the very ticket comments the disposition reader parses on the next
+    round. A finding whose summary carried a well-formed, fully-provenanced
+    sentinel block therefore minted a durable suppression no operator
+    authored: the reviewer silencing itself, straight past invariants 8–13,
+    because every one of those asks *what the record says* and none asked
+    *who put it there*. Two independent layers now sit in front of them, and
+    either alone defeats the injection:
+    - **Escape on render.** Every untrusted span
+      `codex_review._verdict._render` interpolates goes through
+      `review_markers.neutralise_marker_syntax`, which escapes
+      `REVIEW-FINDING-DISPOSITIONS`, `VOIDED-REVIEW-FINDINGS` and the `<!--` /
+      `-->` delimiters (which is also what makes `AGENT_COMMENT_MARKER`
+      unforgeable, and so protects invariant 7's elision). The escape is a
+      visible backslash inside the token, never a silent strip and never a
+      zero-width character: the comment must still report what the reviewer
+      actually said. The one exception is the `### Settle a finding` payload,
+      whose `file` and `summary` ARE the ledger key and must survive
+      `json.loads` byte-identically; it is made inert losslessly instead, by
+      rewriting `<` and `>` as their `\uXXXX` JSON escapes.
+    - **Parse by position.** `_DISPOSITION_BLOCK_RE` honours a block only
+      where `render_finding_disposition_block` emits it: opening the comment
+      body, under the marker's own `## Review Finding Dispositions` title,
+      with nothing but whitespace between. Rendered finding text never sits
+      there — it is many lines inside a `## Codex Review Verdict` body — and
+      `post_issue_comment` appends its provenance marker, so a posted marker
+      still parses. A block found anywhere else is **not a record and not a
+      refusal**: nothing tried to settle anything, so there is nothing to
+      report. Consequence for operators: post the marker `cw review settle
+      --out` renders as its own comment, unedited.
 
 ## What this means for callers
 
@@ -198,8 +241,9 @@ not amended or superseded; the two seams stay independent.
   settle the genuinely actionable finding by pasting everything at once.
 - **Hand-authoring a `REVIEW-FINDING-DISPOSITIONS` block is unsupported.**
   `cw review settle` is the only supported producer, because it is the only
-  path that records provenance and refuses to run inside a dispatch worker.
-  A hand-written block is still *parsed* — the fields stay optional so history
+  path that records provenance and refuses to run outside an operator's own
+  interactive session. A hand-written block posted as its own comment is still
+  *parsed* — the fields stay optional so history
   loads — but under invariant 9 it is not *applied* unless it happens to carry
   the whole provenance set, and the review comment reports the refusal.
 
@@ -256,6 +300,27 @@ not amended or superseded; the two seams stay independent.
   refused one still applies. The refused section is bounded (20 rows, then a
   counted residue line) for the same comment-budget reason the settle section
   is.
+- **The marker vocabulary lives in a leaf module** (round 4).
+  `cw.review_markers` owns `DISPOSITION_SENTINEL`, `VOIDED_SENTINEL`,
+  `SETTLE_SECTION_HEADING`, `RefusedDisposition` and the neutraliser, and
+  imports nothing from `cw` at all. Two modules were pulling the whole ledger
+  implementation in behind one name apiece: `codex_review._context._prompt_text`
+  (static prompt text, which must stay dependency-free) and
+  `review_findings._models` (the **executor-neutral** finding contract, whose
+  dependency on one executor's ledger inverted the direction that package split
+  exists to keep). Same shape #1409's import cycle was fixed with. A test
+  parses the module's AST rather than trusting runtime behaviour, which is
+  identical either way and is precisely why the direction needs its own lock.
+- **`review_finding_dispositions.py` is a known seam.** It is ~1,100 lines,
+  over this repo's ~1,000-line module ceiling, and it holds six
+  responsibilities: the ledger record model, the marker renderer/parser, the
+  key/identity arithmetic, the provenance gate, the fuzzy claim tier, and the
+  suppression backstop with its event emission. Round 4 deliberately did **not**
+  split it — a restructure of the module every one of this ticket's invariants
+  lives in, in the same change that hardens them, would make the diff
+  unreviewable. Recorded here as the seam the next change to this area should
+  take: one submodule per responsibility behind a re-exporting `__init__`, the
+  shape `cw.cli` and `cw.reconcile` already use.
 - **Known false-match class, accepted:** same symbol, same verb phrase,
   different condition — "`foo` returns none when list is empty" versus
   "…contains duplicates" scores 0.73 and matches.
@@ -331,7 +396,16 @@ not amended or superseded; the two seams stay independent.
   decision.
 - **A `--force`/`--i-am-an-operator` escape from the dispatch-worker refusal.**
   Rejected: the worker is the party the refusal exists to stop, and it would be
-  the one passing the flag.
+  the one passing the flag. Round 4 closed the softer version of the same hole:
+  an unreadable context file was itself an escape, and it needed no flag.
+- **Stripping marker syntax out of a finding instead of escaping it.**
+  Rejected: an operator adjudicating a finding needs to read what the reviewer
+  said, and a finding about this very ledger will legitimately quote the
+  sentinel. Escaping keeps the text and removes the grammar.
+- **Relying on the provenance gate alone to stop an injected block.** Rejected:
+  an injected record lacks provenance today and would already be refused, but
+  that makes the whole defence one layer deep and couples it to a check whose
+  purpose is different. The injection must fail at parse.
 - **Keying on the reviewed sha as well.** Rejected: the reviewer re-raises on a
   later commit, so the key would never match again after a fix commit and the
   ledger would go dead (invariant 13). The sha is a required record field and
