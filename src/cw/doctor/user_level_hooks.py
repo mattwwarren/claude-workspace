@@ -78,15 +78,14 @@ def _hook_locations_in_entry(entry_index: int, entry: object) -> list[tuple[str,
     return found
 
 
-def _stop_hook_locations(data: object) -> list[tuple[str, str]]:
+def _stop_hook_locations(data: dict[str, object]) -> list[tuple[str, str]]:
     """Return ``(location, command)`` pairs for every cw Stop hook in *data*.
 
-    Pure function over already-parsed JSON. Only the ``Stop`` event is
+    Pure function over an already-parsed settings object (the shared reader
+    guarantees the top level is a dict). Only the ``Stop`` event is
     inspected; ``PreToolUse`` and ``SessionStart`` cw hooks are legitimate
     user-level configuration.
     """
-    if not isinstance(data, dict):
-        return []
     hooks: object = data.get("hooks")
     if not isinstance(hooks, dict):
         return []
