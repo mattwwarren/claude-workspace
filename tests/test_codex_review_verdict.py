@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from cw.auto_dev_result import AutoDevResult
     from cw.review_findings import Finding, ReviewerFindingsDocument
 
 
@@ -1517,8 +1518,8 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
     # -- #2210: the claim tier and the contest hatch, end to end -----------
 
     def _reworded_synth(
-        self, worktree: Path, session_id: str, **overrides: object
-    ) -> tuple[object, ReviewVerdict | None]:
+        self, worktree: Path, session_id: str, *, claim_tier_enabled: bool = False
+    ) -> tuple[AutoDevResult, ReviewVerdict | None]:
         finding = _make_finding(severity="MUST_FIX", summary=CLAIM_ROW1_CANDIDATE)
         key = _disposition_key("src/cw/foo.py", CLAIM_ROW1_RECORDED)
         assert key is not None
@@ -1540,7 +1541,7 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
             default_branch="main",
             fix_loop_enabled=False,
             finding_dispositions=ledger,
-            **overrides,  # type: ignore[arg-type]
+            claim_tier_enabled=claim_tier_enabled,
         )
 
     def test_reworded_rederived_must_fix_is_suppressed_end_to_end_when_armed(
@@ -1551,7 +1552,7 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
             worktree, "s-claim-armed", claim_tier_enabled=True
         )
 
-        assert result.status == "stage_complete"  # type: ignore[attr-defined]
+        assert result.status == "stage_complete"
         assert verdict is not None
         assert verdict.blocking is False
         assert "claim similarity" in verdict.accepted[0].disposition_detail
@@ -1562,9 +1563,9 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
         worktree = make_git_repo("wt-synth-claim-off")
         result, verdict = self._reworded_synth(worktree, "s-claim-off")
 
-        assert result.status == "blocked"  # type: ignore[attr-defined]
-        assert result.blocker is not None  # type: ignore[attr-defined]
-        assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS  # type: ignore[attr-defined]
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
         assert verdict is not None
         assert verdict.blocking is True
         assert (

@@ -2147,16 +2147,20 @@ class TestClaimTierGateReachesBothSynthesisHops:
         worktree = _worktree(make_git_repo, f"wt-2210-gate-{claim_tier_enabled}")
         seen: list[object] = []
 
-        real_core_synth = codex_review_core.synthesize_codex_review_result
-        real_loop_synth = codex_fix_loop.synthesize_codex_review_result
+        real_core_synth: Callable[..., object] = (
+            codex_review_core.synthesize_codex_review_result
+        )
+        real_loop_synth: Callable[..., object] = (
+            codex_fix_loop.synthesize_codex_review_result
+        )
 
         def _spy_core(**kwargs: object) -> object:
             seen.append(kwargs.get("claim_tier_enabled"))
-            return real_core_synth(**kwargs)  # type: ignore[arg-type]
+            return real_core_synth(**kwargs)
 
         def _spy_loop(**kwargs: object) -> object:
             seen.append(kwargs.get("claim_tier_enabled"))
-            return real_loop_synth(**kwargs)  # type: ignore[arg-type]
+            return real_loop_synth(**kwargs)
 
         monkeypatch.setattr(
             codex_review_core, "synthesize_codex_review_result", _spy_core

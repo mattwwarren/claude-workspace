@@ -228,7 +228,7 @@ class TestPrepareReviewPass:
         monkeypatch: pytest.MonkeyPatch,
         *,
         session_id: str,
-        **run_kwargs: object,
+        claim_tier_enabled: bool = False,
     ) -> tuple[AutoDevResult, ReviewVerdict | None]:
         """One `run_review` over a MUST_FIX that REWORDS a ledgered finding."""
         key = _disposition_key("mod.py", CLAIM_ROW1_RECORDED)
@@ -268,7 +268,7 @@ class TestPrepareReviewPass:
             wall_clock_budget_seconds=None,
             session_id=session_id,
             fix_loop_enabled=False,
-            **run_kwargs,  # type: ignore[arg-type]
+            claim_tier_enabled=claim_tier_enabled,
         )
 
     def _feature_repo(self, make_git_repo: Callable[[str], Path], name: str) -> Path:
