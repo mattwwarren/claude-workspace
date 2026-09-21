@@ -345,6 +345,24 @@ def _classify_command(
     return None
 
 
+def _is_settled_background_call(payload: dict[str, object]) -> bool:
+    """True for a well-formed backgrounded Bash call: ``tool_input`` a dict,
+    ``run_in_background`` exactly ``True`` and ``command`` a ``str`` (#2229).
+
+    Side-effect free, unlike :func:`_extract_bash_command`, so it can run
+    before the enabled gate without emitting shape warnings from a disabled
+    guard. In exactly this shape the extractor returns ``(command, True)``
+    with no warning and :func:`_classify` returns None whether or not the
+    guard is enabled -- so the config reads it would trigger are pure cost.
+    """
+    tool_input = payload.get("tool_input")
+    return (
+        isinstance(tool_input, dict)
+        and tool_input.get("run_in_background") is True
+        and isinstance(tool_input.get("command"), str)
+    )
+
+
 def _classify() -> _BlockDecision | None:
     """Return the block decision for this hook invocation, or None to allow."""
     payload = _read_hook_stdin_json()
@@ -352,6 +370,10 @@ def _classify() -> _BlockDecision | None:
         return None
     cwd_value = payload.get("cwd")
     if not isinstance(cwd_value, str) or not cwd_value:
+        return None
+    # #2229: a settled backgrounded call is allowed regardless of the guard's
+    # settings, so return before resolving them (see the predicate's docstring).
+    if _is_settled_background_call(payload):
         return None
 
     context = _read_cw_context(cwd_value) or {}

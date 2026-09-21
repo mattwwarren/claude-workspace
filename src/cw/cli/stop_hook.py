@@ -121,7 +121,18 @@ def _parse_headless_sentinel(
     """
     csid = claude_session_id if isinstance(claude_session_id, str) else None
     parsed = _parse_sentinel_from_transcript(cwd_value, csid)
-    if parsed is None and session.worktree_path is not None:
+    # Rescan only a *different* directory: when the hook cwd already equals the
+    # recorded worktree_path, the same transcript was just read (equal strings
+    # encode to the same project dir), so a second pass repeats it byte for
+    # byte. A per-call skip, not a cache -- nothing outlives this invocation.
+    # A sentinel landing in the few ms between the two scans is caught by the
+    # next Stop, exactly like one landing just after the second scan (deferring
+    # is the fail-safe direction, ADR-0003).
+    if (
+        parsed is None
+        and session.worktree_path is not None
+        and str(session.worktree_path) != cwd_value
+    ):
         parsed = _parse_sentinel_from_transcript(str(session.worktree_path), csid)
     if isinstance(parsed, AutoDevResult):
         parsed = _verify_headless_scope(parsed, session)
@@ -499,9 +510,11 @@ def _snapshot_agent_spawn_stamp(
     ``agent_spawn_stamp._adjust_unresolved_count`` this is a *set*, not a
     delta -- the Stop hook payload's own ``background_tasks`` list is already
     the harness's authoritative live count for this turn, so there is nothing
-    to accumulate against. ``last_stamped_at`` refreshes on every write
-    (snapshot or clear alike) per this ticket's Adopted Assumption: it is an
-    operator-facing nicety only, not load-bearing for any comparison.
+    to accumulate against. ``last_stamped_at`` refreshes on every snapshot,
+    even when the count is unchanged. At count > 0 it IS load-bearing: it bounds
+    the #2012 distress-suppression deadline (``reconcile/liveness.py``,
+    ``doctor/wedge.py``), which is why the deferral snapshot never skips a
+    write. At count 0 nothing reads it.
     """
     context[AGENT_SPAWN_STAMP_KEY] = {
         AGENT_SPAWN_UNRESOLVED_COUNT_KEY: count,
@@ -514,10 +527,12 @@ def _clear_agent_spawn_stamp(context: dict[str, object]) -> dict[str, object]:
     """Zero ``agent_spawn_stamp`` -- the counterpart of
     :func:`_snapshot_agent_spawn_stamp`.
 
-    Runs on every Stop whose ``background_tasks`` is empty/absent, i.e. every
-    turn that is NOT deferring for pending background work. This is what
-    retires a snapshot written by a prior deferred turn once the harness's
-    own accounting shows nothing outstanding -- see :func:`signal_stop`.
+    Runs on every Stop whose ``background_tasks`` is empty/absent -- i.e. every
+    turn that is NOT deferring for pending background work -- unless the stamp
+    is already the resolved shape (:func:`_agent_spawn_stamp_is_clear`, #2229).
+    This is what retires a snapshot written by a prior deferred turn once the
+    harness's own accounting shows nothing outstanding -- see
+    :func:`signal_stop`.
 
     #1947 review: logs when this actually retires a nonzero count -- this
     write otherwise vanishes silently (same fail-open contract as every
@@ -533,6 +548,22 @@ def _clear_agent_spawn_stamp(context: dict[str, object]) -> dict[str, object]:
             prior_count,
         )
     return _snapshot_agent_spawn_stamp(context, 0)
+
+
+def _agent_spawn_stamp_is_clear(context: dict[str, object]) -> bool:
+    """True only when the stamp is exactly the resolved shape: a dict whose
+    ``unresolved_count`` is a non-bool ``int`` equal to 0 (#2229).
+
+    Mirrors :func:`cw.models.extract_unresolved_spawn_count` but is stricter:
+    that helper collapses every malformed shape (absent, non-dict, ``"0"``,
+    ``False``, negative) to 0, whereas the clear write must still normalize
+    those to ``{0, <now>}``. Pure ``isinstance`` logic, so it cannot raise.
+    """
+    stamp = context.get(AGENT_SPAWN_STAMP_KEY)
+    if not isinstance(stamp, dict):
+        return False
+    count = stamp.get(AGENT_SPAWN_UNRESOLVED_COUNT_KEY)
+    return isinstance(count, int) and not isinstance(count, bool) and count == 0
 
 
 @main.command(name="signal-stop")
@@ -604,11 +635,20 @@ def signal_stop() -> None:
 
     # #1947: every Stop that reaches this point has background_tasks
     # empty/absent -- clear any stale agent_spawn_stamp snapshot a prior
-    # deferred turn left behind. Runs unconditionally here (before the
-    # session lookup below) so it fires even when no session in
-    # state.sessions matches this hook's session_id; fails open silently,
-    # same contract as the snapshot write above.
-    _write_cw_context_locked(cwd_value, _clear_agent_spawn_stamp)
+    # deferred turn left behind. Runs here (before the session lookup below)
+    # so it fires even when no session in state.sessions matches this hook's
+    # session_id; fails open silently, same contract as the snapshot write
+    # above.
+    #
+    # #2229: skipped when the stamp is already the resolved shape -- no lock,
+    # no rewrite. Safe because (a) ``last_stamped_at`` is unread at count 0
+    # (``reconcile/_shared.py`` returns early on a zero count), and (b) the
+    # decision uses the unlocked read from above, which is linearizable: an
+    # ``agent-spawn-pre`` increment landing after that read is equivalent to
+    # "this Stop cleared first, then the spawn incremented". The write path
+    # below re-reads under the lock and must never be handed ``context``.
+    if not _agent_spawn_stamp_is_clear(context):
+        _write_cw_context_locked(cwd_value, _clear_agent_spawn_stamp)
 
     # Why not mutate_state: dual-lock (dev_queue_lock nested at the TIMED_OUT path)
     # and daemon.stop() network call inside the lock window (criteria 1 and 2).

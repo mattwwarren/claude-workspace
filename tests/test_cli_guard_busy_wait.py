@@ -174,6 +174,63 @@ def test_allows_run_in_background_true_even_for_noop_command(tmp_path: Path) -> 
     assert _invoke(worktree, "true", run_in_background=True).exit_code == 0
 
 
+def test_background_call_resolves_no_config_and_leaves_no_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2229: a well-formed backgrounded call returns before any config read.
+
+    A ``run_in_background: true`` call is allowed whether the guard is enabled
+    or not, so resolving settings first is pure overhead (~1.5 ms for the
+    orchestrator config, ~4 ms more for ``clients.yaml`` when the context names
+    a client and lane). It also leaves no trace: no ``busy_wait_guard`` block
+    is written and no default ``orchestrator.yaml`` is created. The foreground
+    control proves the counting spies really sit on the resolution path.
+    """
+    import cw.cli.guard_busy_wait as guard
+
+    calls = {"orchestrator": 0, "clients": 0}
+    real_orchestrator = guard.load_orchestrator_config
+    real_clients = guard.load_clients
+
+    def _count_orchestrator() -> Any:
+        calls["orchestrator"] += 1
+        return real_orchestrator()
+
+    def _count_clients() -> Any:
+        calls["clients"] += 1
+        return real_clients()
+
+    monkeypatch.setattr(guard, "load_orchestrator_config", _count_orchestrator)
+    monkeypatch.setattr(guard, "load_clients", _count_clients)
+    worktree = _worktree(tmp_path, lane="fast")
+
+    result = _invoke(worktree, "true", run_in_background=True)
+
+    assert result.exit_code == 0
+    assert calls == {"orchestrator": 0, "clients": 0}
+    assert _state(worktree) == {}
+    assert not orchestrator_config_file().exists()
+
+    assert _invoke(worktree, "echo hi").exit_code == 0
+    assert calls == {"orchestrator": 1, "clients": 1}
+
+
+def test_background_call_with_non_string_command_still_warns(tmp_path: Path) -> None:
+    """The pre-gate must not swallow the shape warning (#1946 R1).
+
+    ``run_in_background: true`` with a non-str ``command`` is not the exact
+    shape the pre-gate exempts, so it falls through to the shared extractor,
+    which still warns loudly and fails open.
+    """
+    worktree = _worktree(tmp_path)
+
+    result = _invoke(worktree, 123, run_in_background=True)
+
+    assert result.exit_code == 0
+    assert "WARN" in result.output
+    assert "command is int" in result.output
+
+
 def test_blocks_identical_command_repeated_n_times_in_window(tmp_path: Path) -> None:
     """The default threshold (3) blocks the third identical call in-window."""
     worktree = _worktree(tmp_path)
