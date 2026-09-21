@@ -1403,6 +1403,10 @@ class TestCodexClaimSuppressionGate:
     def test_lane_config_codex_review_tiers_defaults_none(self) -> None:
         assert LaneConfig(name="x").codex_review_tiers is None
 
+    def test_explicit_none_passes_the_key_validator(self) -> None:
+        # An explicit null in YAML reaches the validator, unlike the default.
+        assert LaneConfig(name="x", codex_review_tiers=None).codex_review_tiers is None
+
     @pytest.mark.parametrize("enabled", [True, False])
     def test_lane_accepts_the_recognised_key(self, enabled: bool) -> None:
         lane = LaneConfig(name="x", codex_review_tiers={"claim_suppression": enabled})

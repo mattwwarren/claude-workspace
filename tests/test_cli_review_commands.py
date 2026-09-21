@@ -1005,9 +1005,7 @@ class TestReviewCheckVoidedCommand:
 class TestReviewSettle:
     """#2210: ``cw review settle`` is the ledger's first production writer."""
 
-    def _invoke(
-        self, runner: CliRunner, payload: dict[str, Any], *args: str
-    ) -> Result:
+    def _invoke(self, runner: CliRunner, payload: dict[str, Any], *args: str) -> Result:
         return runner.invoke(
             main,
             ["review", "settle", *args, "-"],
@@ -1116,9 +1114,7 @@ class TestReviewSettle:
         assert result.exit_code == 0, result.output
         ledger = parse_finding_disposition_block([result.output])
 
-        suppressed = suppress_adjudicated_findings(
-            verdict, ledger, ticket_id="T-2210"
-        )
+        suppressed = suppress_adjudicated_findings(verdict, ledger, ticket_id="T-2210")
         assert suppressed.blocking is False
         assert suppressed.accepted[0].disposition == "rejected"
 

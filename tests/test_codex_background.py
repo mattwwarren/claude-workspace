@@ -600,9 +600,7 @@ def test_resolve_codex_fix_loop_enabled_unmatched_lane_falls_through_to_global()
 
 
 def _claim_client(*lanes: LaneConfig) -> ClientConfig:
-    return ClientConfig(
-        name="test", workspace_path=Path("/tmp/x"), lanes=list(lanes)
-    )
+    return ClientConfig(name="test", workspace_path=Path("/tmp/x"), lanes=list(lanes))
 
 
 def _claim_task(lane: str = "trial") -> TicketTask:

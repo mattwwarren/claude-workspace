@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw import codex_fix_loop
-from cw.codex_review import core as codex_review_core
 from cw.codex_fix_loop import (
     _ESCALATE_AT_CYCLE,
     _FIX_CYCLE_FLOOR_SECONDS,
@@ -36,6 +35,7 @@ from cw.codex_review import (
     run_review,
     synthesize_codex_review_result,
 )
+from cw.codex_review import core as codex_review_core
 from cw.codex_review._capability import _PROBE_ARGV
 from cw.codex_runner import CodexRunResult
 from cw.executor_diagnostics import diagnostics_bundle_dir
@@ -2161,9 +2161,7 @@ class TestClaimTierGateReachesBothSynthesisHops:
         monkeypatch.setattr(
             codex_review_core, "synthesize_codex_review_result", _spy_core
         )
-        monkeypatch.setattr(
-            codex_fix_loop, "synthesize_codex_review_result", _spy_loop
-        )
+        monkeypatch.setattr(codex_fix_loop, "synthesize_codex_review_result", _spy_loop)
 
         _run_loop(
             _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]),

@@ -95,7 +95,9 @@ CLAIM_ROW1_CANDIDATE = (
 # Matches a fenced ```json block, back-referencing the opening fence's length
 # so a payload rendered in a widened (4+ backtick) fence still extracts.
 # re.DOTALL because the JSON body spans newlines.
-_JSON_FENCE_RE = re.compile(r"(?P<fence>`{3,})json\n(?P<body>.*?)\n(?P=fence)", re.DOTALL)
+_JSON_FENCE_RE = re.compile(
+    r"(?P<fence>`{3,})json\n(?P<body>.*?)\n(?P=fence)", re.DOTALL
+)
 
 
 def _settle_entry(**overrides: object) -> dict[str, Any]:

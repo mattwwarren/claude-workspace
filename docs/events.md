@@ -1845,16 +1845,29 @@ debt itself is already surfaced on the posted review comment.
 {
   "file": "<str>",
   "summary": "<str>",
+  "severity": "<str>",
   "outcome": "REJECTED",
   "rationale": "<str>",
-  "recorded_at": "<str>"
+  "recorded_at": "<str>",
+  "match_kind": "exact" | "claim",
+  "similarity": "<float>",
+  "matched_key": "<str>"
 }
 ```
 **Semantics:** GitHub #1838. One event per re-derived review finding suppressed
-because its `review_debt.fingerprint_v1` identity matched a `REJECTED` entry in
-the ticket's cross-round adjudication ledger
-(`TicketTask.finding_dispositions`, schema v31). The finding is stamped
+because it matched a `REJECTED` entry in the ticket's cross-round adjudication
+ledger (`TicketTask.finding_dispositions`, schema v31). The finding is stamped
 `disposition="rejected"` and leaves `must_fix`/`blocking`.
+
+`match_kind` (#2210) says which tier matched. `"exact"` is the original
+identity — the finding's `review_debt.fingerprint_v1` equals the ledger key —
+and always carries `similarity: 1.0`. `"claim"` is the fuzzy same-file tier,
+which applies **only when armed** on the task's lane
+(`codex_claim_suppression_enabled` plus `codex_review_tiers:
+{claim_suppression: true}`); while it is off it emits
+`review.finding_claim_shadowed` below instead of suppressing anything.
+`matched_key` is the ledger key that won, which for a claim match is NOT the
+finding's own key.
 
 Mandatory for the same reason as `review.finding_voided` above, and NOT a reuse
 of it: the two suppressions have different identities (fingerprint-keyed vs.
@@ -1876,6 +1889,61 @@ Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
 (`orchestrator_config.py`), matching both siblings above: a suppression is the
 expected steady-state outcome once an operator has settled a finding, and it is
 already visible on the review comment.
+
+`correlation_id` is the `ticket_id`.
+
+### `review.finding_claim_shadowed`
+
+**Emitter:** `suppress_adjudicated_findings`
+(`cw.review_finding_dispositions`), on the same hop as
+`review.finding_disposition_suppressed` above.
+**Payload:**
+```json
+{
+  "file": "<str>",
+  "summary": "<str>",
+  "severity": "MUST_FIX",
+  "similarity": "<float>",
+  "matched_key": "<str>",
+  "matched_recorded_at": "<str>",
+  "matched_rationale": "<str>",
+  "reviewed_sha": "<str>"
+}
+```
+**Semantics:** GitHub #2210. The ledger's fuzzy **claim** tier matched a
+re-derived finding against a `REJECTED` entry, but the per-lane gate was
+closed — so nothing was suppressed and the finding stayed blocking. This event
+is the counterfactual record: reading these is how an operator judges the
+matcher's thresholds against real rewordings before arming a lane (ADR-0016).
+
+Deliberately a distinct type rather than a reuse of
+`review.finding_disposition_suppressed`, for the same reason that one is
+distinct from `review.finding_voided`: one type could not say whether a finding
+was actually suppressed or only *would* have been, and that distinction is the
+entire content of this event.
+
+It is recorded **even when the master switch is off**, for any ticket that has
+a ledger at all. That is a deliberate deviation from
+`docs/release-playbook.md`'s "a `False` master short-circuits the module"
+convention — the measurement is the point of the default-off period. A fresh
+install with no ledger still emits nothing.
+
+It fires on **every pass** that re-derives the finding, so a fix loop produces
+one per cycle. Group on `(correlation_id, file, summary)` and count distinct
+`reviewed_sha` values: each fix cycle commits and so has its own SHA, while
+equal SHAs are repeats within one reviewed commit (a requeue with no new
+commit, say). A failed write is logged at WARNING and never alters the verdict
+or aborts the pass — the shadow is observational.
+
+**Querying:** `cw event tail --type review.finding_claim_shadowed --json` reads
+only the **live** inbox. Auto-prune archives older events to
+`events/inbox.<YYYY-MM-DD>.jsonl` under `events_dir()` rather than deleting
+them, so read those files for older ones, or raise
+`event_inbox_retention_count`.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`, matching its
+three siblings above: it is an analysis record an operator goes looking for,
+not an interrupt.
 
 `correlation_id` is the `ticket_id`.
 

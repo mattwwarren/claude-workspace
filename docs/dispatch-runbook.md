@@ -690,17 +690,28 @@ mechanically on every subsequent review pass — no LLM interprets it — and is
 persisted onto the queue row, so it survives regress, redispatch, and worktree
 teardown.
 
-Each key is `"<file>::<normalized summary>"`, where the normalized summary is
-the finding's summary lowercased, whitespace-collapsed, with line/position
-references stripped and every digit run replaced by `N`
-(`cw.review_debt.fingerprint_v1`). Compute it rather than normalizing by hand
-— the review comment's `### Debt — recorded, not blocking` section prints only
-the summary half of the same fingerprint, not the `file::` prefix:
+**A prose adjudication comment does nothing on the codex lane.** There is no
+LLM on that path to correlate "these four are settled, don't reopen" to a
+specific finding — only a sentinel-bearing comment counts. Free-text ingestion
+is a deliberate non-goal here (follow-up F1).
+
+**Don't hand-author the marker; render it (#2210).** Every blocking codex
+review comment now prints a `### Settle a finding` section with one
+ready-to-paste JSON payload per blocking finding, carrying the finding's
+verbatim `file` and `summary` — which are the record's whole identity, so
+nothing needs normalizing or editing:
 
 ```bash
-uv run python -c 'from cw.review_debt import fingerprint_v1; print("::".join(fingerprint_v1("src/cw/foo.py", "Bug at line 42")))'
-# -> src/cw/foo.py::bug
+# Save the payload from the review comment to settle.json, optionally filling
+# in `rationale`, then:
+uv run cw review settle settle.json --out marker.md
+gh issue comment "$TICKET" --repo "$REPO" --body-file marker.md
 ```
+
+`cw review settle` stamps a blank `recorded_at` with the current time,
+collapses duplicate keys newest-wins, and emits no events. `-` reads the
+payload from stdin. The rendered marker looks like this — still valid to write
+by hand if you have to:
 
 ```markdown
 ## Review Finding Dispositions
@@ -719,8 +730,15 @@ uv run python -c 'from cw.review_debt import fingerprint_v1; print("::".join(fin
 REVIEW-FINDING-DISPOSITIONS -->
 ```
 
+- The key is `"<file>::<normalized summary>"` — the summary lowercased,
+  whitespace-collapsed, line/position references stripped, digit runs replaced
+  by `N` (`cw.review_debt.fingerprint_v1`). `cw review settle` applies exactly
+  that normalizer on ingest, so a pasted payload reproduces the key the
+  reviewer's re-raise will hit.
 - `outcome` is `REJECTED` or `ACCEPTED`. Only `REJECTED` suppresses the
   finding; `ACCEPTED` is recorded and shown to the reviewer but changes no gate.
+- The marker is **additive** across comments: the reader unions every marker on
+  the thread. Post only what you are settling now.
 - Changed your mind? Re-post the marker with a later `recorded_at` — newest
   wins per key. Removing the marker does **not** un-settle anything; the ledger
   is forward-only by design.
@@ -737,6 +755,78 @@ Distinct from `cw review check-voided`'s `VOIDED-REVIEW-FINDINGS` record
 (#1814), which the Claude-native session mints from your prose and which lapses
 as soon as the cited evidence changes. Use this one when you want the decision
 to *stick*.
+
+**Linear-tracked tickets cannot feed this ledger yet.** The codex path's
+comment fetch is GitHub-only (`linear` reads go through MCP tools only a Claude
+session holds), so a marker posted on a Linear ticket is never read. The
+`### Settle a finding` section still renders and says so. Follow-up F5.
+
+#### The reworded re-raise, and the claim tier (#2210)
+
+The exact key above only matches text that normalizes identically. A reviewer
+that re-raises the same defect in *different words* produces a different key
+and is not suppressed — which is the original complaint this ticket came from.
+
+A second, fuzzy **claim tier** now matches a same-file MUST_FIX against a
+ledger entry by shared code symbols and content-word overlap. It ships **off**,
+and arming it takes two switches (an operator `!` command per
+`docs/release-playbook.md`; flipping either one back is the rollback):
+
+```yaml
+# ~/.claude-workspace/orchestrator.yaml
+codex_claim_suppression_enabled: true
+
+# ~/.config/cw/clients.yaml — on the lane, per client
+lanes:
+  - name: impl
+    codex_review_tiers:
+      claim_suppression: true
+```
+
+Both must be true. A lane that names no tier falls to a hardcoded-off floor,
+and a client with no declared lanes gets a synthesised `default` lane — so
+arming means declaring the lane first.
+
+**Measure before you arm.** While the gate is closed the tier still runs and
+records everything it *would* have suppressed:
+
+```bash
+cw event tail --type review.finding_claim_shadowed --json
+# also: grep the INFO line "claim-tier match NOT suppressed, gate off"
+```
+
+Read those, judge each pair same-defect versus distinct-defect, and arm a lane
+only after ~20 clean events on it with no distinct-defect pair among them. One
+distinct-defect pair is a reason to tighten the thresholds, not to arm.
+`cw event tail` reads only the live inbox; auto-prune **archives** older events
+to `events/inbox.<YYYY-MM-DD>.jsonl` rather than deleting them, so read those
+files for older ones (or raise `event_inbox_retention_count`). Known accepted
+trade-offs — the ledger is severity-blind and entries never expire — are
+recorded in ADR-0016.
+
+#### Contesting a settled finding (#2210)
+
+A reviewer that believes a settled decision is now wrong sets
+`contests_adjudication` on the finding to what changed, quoting the changed
+code. A non-blank value removes the finding from the ledger's match set on
+**both** tiers, so it stays blocking, and the review comment labels it
+`_(contests prior adjudication — …)_`.
+
+Two caveats worth knowing before you trust one:
+
+- It is **unverified and gameable**. Nothing checks that the quoted code
+  actually changed; the string is an assertion (follow-up F2). It can only fail
+  toward blocking.
+- It is guaranteed only on the codex **single-pass** lane and fix-loop cycle 0.
+  On later fix-loop cycles `_admit_new_must_fix` does not read the field, so a
+  contest on code the latest cycle did not touch is diverted to the debt ledger
+  and the contest text is dropped (follow-up F6).
+
+**One thing the pipeline hides from itself:** the `### Settle a finding`
+section of a *pipeline-authored* comment (one carrying `<!-- cw-agent-authored
+-->`) is stripped before the next reviewer sees the thread — a pre-filled
+`"outcome": "REJECTED"` payload must not read to the next reviewer as an
+operator decision. A payload **you** paste yourself is not stripped, by design.
 
 ### Spec-driven subagent escape hatch
 

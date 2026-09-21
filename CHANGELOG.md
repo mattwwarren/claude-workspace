@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`cw review settle`, a ready-to-paste settle payload in every blocking codex review comment, a `contests_adjudication` escape hatch, and a lane-gated claim-match tier for the cross-round finding ledger (#2210):** the #1838 ledger had no production writer and only matched exact normalised text, so a re-worded re-raise of an operator-settled finding re-parked the ticket. `cw review settle` now renders the ticket-postable `REVIEW-FINDING-DISPOSITIONS` marker, and each blocking comment prints one payload per finding whose verbatim `file`/`summary` are the ledger identity. `Finding.contests_adjudication` lets a reviewer knowingly contest a settled finding (honoured on the codex single-pass lane). A same-file claim/symbol match tier ships **off**: it needs `codex_claim_suppression_enabled: true` in `orchestrator.yaml` AND `codex_review_tiers: {claim_suppression: true}` on the lane, and until armed it records each finding it would have suppressed as a `review.finding_claim_shadowed` event. See ADR-0016.
+
 ## [1.47.0] - 2026-09-20
 
 ### Added

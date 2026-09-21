@@ -526,6 +526,19 @@ class TestClaimMatching:
         assert "re-adjudicate if the code at this location has changed" in detail
         assert "drops the follow-up task" in detail
 
+    def test_a_same_file_entry_below_the_thresholds_is_not_a_candidate(self) -> None:
+        # The entry shares the file but not the claim, so it never enters the
+        # nearest-decision contest at all.
+        finding = self._reworded()
+        verdict = _verdict(_accepted(finding))
+        suppressed = suppress_adjudicated_findings(
+            verdict,
+            _ledger_for("src/cw/foo.py", "the retry loop is slow"),
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+        assert suppressed is verdict
+
     def test_same_words_in_a_different_file_never_match(self) -> None:
         finding = self._reworded(file="src/cw/other.py")
         verdict = _verdict(_accepted(finding))
@@ -716,9 +729,7 @@ class TestClaimTierGate:
     def test_gate_off_claim_match_is_not_suppressed(self) -> None:
         finding, ledger = self._armed_inputs()
         verdict = _verdict(_accepted(finding))
-        suppressed = suppress_adjudicated_findings(
-            verdict, ledger, ticket_id=_TICKET
-        )
+        suppressed = suppress_adjudicated_findings(verdict, ledger, ticket_id=_TICKET)
         assert suppressed is verdict
         assert suppressed.blocking is True
         assert [f.summary for f in suppressed.must_fix] == [finding.summary]
@@ -789,9 +800,7 @@ class TestClaimTierGate:
         assert [s.payload["reviewed_sha"] for s in shadows] == ["sha-one", "sha-two"]
         assert {s.payload["summary"] for s in shadows} == {finding.summary}
 
-    def test_gate_off_shadow_is_logged(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_gate_off_shadow_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
         finding, ledger = self._armed_inputs()
         with caplog.at_level(logging.INFO, logger=_LOGGER):
             suppress_adjudicated_findings(

@@ -181,6 +181,8 @@ jq '.result.blocker' <<<"$RESULT"
 
 When `blocker.reason == "tool_denied"` (issue #182): re-dispatch is the typical recovery, but the classifier non-determinism flagged in #183 means a delay before retry is sensible. Recommend `cw dev-queue add <TICKET>` (optionally with `-c <CLIENT>`) with a 2-3 minute pause for the auto-mode classifier to settle; if the dispatch loop is idle, run `cw dev-queue run --once` after adding.
 
+When `blocker.reason == "codex_must_fix_findings"` (issue #2210): `blocker.details` is the rendered review comment, and it ends in a `### Settle a finding` section carrying one fenced `json` payload per blocking finding. Those payloads exist so an operator decision can be recorded permanently instead of the same finding re-parking the next round. Take one **only after the user has explicitly rejected that specific finding** — never on a default, and never under `--auto-accept-defaults`, because a ledger entry silently suppresses every future re-raise of that finding and the reader cannot tell who minted it. Then: fill in `rationale`, save the payload with the **Write tool** to a scratch file, run `cw review settle <file> --out <marker.md>`, and post it with `gh issue comment "$TICKET" --repo <REPO> --body-file <marker.md>`.
+
 When `blocker.reason` is anything else: read the Phase E retry fields the Blocker now carries (issue #174) — `retry_eligible`, `retry_delay_seconds`, and `recovery_hint`. When `retry_eligible` is true, recommend re-dispatch after `retry_delay_seconds` (surfacing `recovery_hint`); when it is false or absent, treat as human-escalation and surface verbatim.
 
 #### `plan_pending_approval`

@@ -145,7 +145,7 @@ _ADJUDICATED_INSTRUCTIONS = (
     "pipeline you are knowingly re-raising it. Leave "
     "`contests_adjudication` empty on every other finding. The per-entry "
     "lines below repeat the first rule in short form; "
-    "`contests_adjudication` is how you invoke their \"unless the code at "
+    '`contests_adjudication` is how you invoke their "unless the code at '
     'this location changed" exception.'
 )
 

@@ -1570,9 +1570,7 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
         assert (
             len(
                 read_events(
-                    event_types=[
-                        OrchestratorEventType.REVIEW_FINDING_CLAIM_SHADOWED
-                    ]
+                    event_types=[OrchestratorEventType.REVIEW_FINDING_CLAIM_SHADOWED]
                 )
             )
             == 1

@@ -567,9 +567,7 @@ def _stamp_suppressed(af: AcceptedFinding, match: _LedgerMatch) -> AcceptedFindi
     )
 
 
-def _emit_suppression(
-    af: AcceptedFinding, match: _LedgerMatch, ticket_id: str
-) -> None:
+def _emit_suppression(af: AcceptedFinding, match: _LedgerMatch, ticket_id: str) -> None:
     """Log and record one applied suppression (#1838 mandatory audit trail)."""
     # Deferred for the import-cycle reason the module docstring gives: a
     # module-scope `cw.events` import here closes cw.models -> cw.models.tasks
@@ -725,12 +723,12 @@ def suppress_adjudicated_findings(
 
     stamped: list[AcceptedFinding] = []
     for index, af in enumerate(verdict.accepted):
-        match = enforced.get(index)
-        if match is None:
+        applied = enforced.get(index)
+        if applied is None:
             stamped.append(af)
             continue
-        stamped.append(_stamp_suppressed(af, match))
-        _emit_suppression(af, match, ticket_id)
+        stamped.append(_stamp_suppressed(af, applied))
+        _emit_suppression(af, applied, ticket_id)
 
     must_fix = [
         af.finding
