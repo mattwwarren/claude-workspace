@@ -2637,7 +2637,14 @@ class TestDispatchTickSpawnErrors:
                         client=client.name,
                         status=SessionStatus.ACTIVE,
                         workspace_path=client.workspace_path,
-                        worktree_path=worktree,
+                        # Round 5 (#2213): a session record that DOES say it is
+                        # homed on this worktree is refused earlier, at claim
+                        # time, by ``create_worktree``'s occupancy check
+                        # (``TestClaimRefusesOccupiedWorktree``), before any
+                        # spawn attempt. This spawn-time guard remains for a
+                        # record that does not (legacy rows, an unrecorded
+                        # path), so the record here deliberately omits it.
+                        worktree_path=None,
                     )
                 ]
             )
@@ -3058,6 +3065,8 @@ class TestClaimRefusesOccupiedWorktree:
             dispatch_tick(breaker_config, native_daemon=daemon)
             with dev_queue_lock():
                 store = load_dev_queue()
+                # Not vacuous: every tick really claimed and released the row.
+                assert store.tasks[0].next_eligible_at is not None
                 store.tasks[0].next_eligible_at = None
                 save_dev_queue(store)
 
@@ -3160,54 +3169,71 @@ class TestClaimRefusesOccupiedWorktree:
         assert backoff_skipped is True
 
     @pytest.mark.parametrize("roster_elsewhere", [False, True])
-    def test_a_completed_prior_stage_does_not_block_the_next_stage(
+    def test_next_stage_is_refused_while_the_prior_stage_is_live_then_spawns(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
+        cap2_config: OrchestratorConfig,
         roster_elsewhere: bool,
     ) -> None:
-        """Control (the staged pipeline): once the previous stage's session is
-        terminal in state and its worker has left the roster, the next stage's
-        claim reuses the worktree and spawns. A roster entry for a DIFFERENT
-        worktree must not match either. Guards against the refusal turning
-        into a pipeline deadlock."""
+        """The staged pipeline, end to end on cw's OWN state (no hand-built
+        occupant): stage one's claim spawns and registers a session homed on the
+        per-ticket worktree; while that session is live a second claim of the
+        same ticket is refused (no second worker into the tree); once it is
+        terminal the next stage's claim reuses the worktree and spawns. A roster
+        entry for a DIFFERENT worktree never matches. This is the guard against
+        the refusal turning into a pipeline deadlock: the prior stage's terminal
+        session is what releases the tree."""
         from cw import native_daemon
-        from cw.config import load_state
-        from cw.worktree import create_worktree
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        branch = f"{sample_client_config.feature_branch_prefix}/{self._TICKET}"
-        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
-        state = load_state()
-        state.sessions.append(
-            Session(
-                name=f"test-client/impl/{self._TICKET}",
-                client="test-client",
-                purpose=SessionPurpose.IMPL,
-                origin=SessionOrigin.DAEMON,
-                workspace_path=sample_client_config.workspace_path,
-                worktree_path=worktree,
-                status=SessionStatus.COMPLETED,
-            )
-        )
-        save_state(state)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        daemon = FakeNativeDaemonClient()
         if roster_elsewhere:
-            # A worker for some OTHER worktree is live in the roster.
             roster = native_daemon._ROSTER_PATH
             roster.parent.mkdir(parents=True, exist_ok=True)
             roster.write_text(
                 json.dumps({"workers": {"bbbb2222": {"pid": 2, "cwd": "/elsewhere"}}}),
                 encoding="utf-8",
             )
-        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
-        daemon = FakeNativeDaemonClient()
 
-        result = dispatch_tick(simple_config, native_daemon=daemon)
+        # Stage one: spawns, and cw records a live session homed on the worktree.
+        assert dispatch_tick(cap2_config, native_daemon=daemon).spawned == 1
+        worktree = daemon.spawn_calls[0][0]
+        live = [
+            sess
+            for sess in load_state().sessions
+            if sess.worktree_path == worktree and sess.status == SessionStatus.ACTIVE
+        ]
+        assert len(live) == 1
 
-        assert result.spawned == 1
+        def release_row_for_next_stage() -> None:
+            with dev_queue_lock():
+                store = load_dev_queue()
+                task = store.tasks[0]
+                task.status = QueueItemStatus.PENDING
+                task.session_id = None
+                task.next_eligible_at = None
+                save_dev_queue(store)
+
+        # The row is claimable again, but the prior stage's session is still live.
+        release_row_for_next_stage()
+        assert dispatch_tick(cap2_config, native_daemon=daemon).spawned == 0
         assert len(daemon.spawn_calls) == 1
-        assert daemon.spawn_calls[0][0] == worktree
+        # Refused BY the occupancy check (not by a capacity gate): the claim was
+        # attempted and released, which is what stamps the short hold.
+        assert load_dev_queue().tasks[0].next_eligible_at is not None
+
+        # The prior stage completes; the next stage's claim proceeds.
+        state = load_state()
+        for sess in state.sessions:
+            if sess.id == live[0].id:
+                sess.status = SessionStatus.COMPLETED
+        save_state(state)
+        release_row_for_next_stage()
+        assert dispatch_tick(cap2_config, native_daemon=daemon).spawned == 1
+        assert len(daemon.spawn_calls) == 2
+        assert daemon.spawn_calls[1][0] == worktree
 
 
 # ---------------------------------------------------------------------------

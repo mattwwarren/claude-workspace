@@ -30,6 +30,7 @@ from cw.exceptions import (
     StaleWorktreeError,
     UsageLimitError,
     WorktreeError,
+    WorktreeOccupiedError,
 )
 from cw.executor import (
     CodexCapabilityDiagnosis,
@@ -75,6 +76,16 @@ _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS: int = 2
 
 
 _SPAWN_ERROR_BACKOFF_CAP_SECONDS: int = 300
+
+# How long a claim that found its reused worktree occupied by a live session or
+# daemon worker (``WorktreeOccupiedError``, #2213) is held off before the row is
+# eligible again. Short: the occupant is typically the prior stage's worker
+# still leaving the roster, and pickup after it goes should be prompt. Long
+# enough that the SAME tick does not re-claim the row it just released and burn
+# every remaining slot on one head-of-line ticket, starving the free tickets
+# queued behind it. Fixed rather than exponential because nothing is failing:
+# this is a wait, not a retry of a broken operation.
+_OCCUPIED_DEFER_SECONDS: int = 30
 
 # TTL (seconds) for the in-process codex-capability probe cache (#1238). Codex
 # CLI presence/version essentially never changes between dispatch ticks, so a
@@ -576,10 +587,18 @@ class _SpawnOutcome:
     ``spawned`` — True if a session was started (counters should be bumped).
     ``usage_limit_detected`` — True if a :class:`UsageLimitError` fired.
     ``spawn_error`` — True if a broad spawn failure reverted the task.
-    ``error`` — the exception string from a broad spawn failure, or the codex
-    capability diagnosis string when ``capability_parked`` is True (``""``
-    when neither), carried so the caller can stamp ``last_error`` on the
-    per-lane circuit-breaker LANE_PAUSED payload (#875).
+    ``occupied`` — True if the reused worktree was occupied by a live cw session
+    or daemon worker (``WorktreeOccupiedError``, #2213) and the claim was
+    released without a spawn. Deliberately decoupled from ``spawn_error``: an
+    occupied worktree is a transient, per-ticket condition, not the sporadic
+    backend failure the circuit breaker exists to catch, so it neither
+    increments the lane's spawn-error count nor aborts the rest of the tick's
+    lane/client loop.
+    ``error`` — the exception string from a broad spawn failure, the codex
+    capability diagnosis string when ``capability_parked`` is True, or the
+    occupancy reason when ``occupied`` is True (``""`` when none of these),
+    carried so the caller can stamp ``last_error`` on the per-lane
+    circuit-breaker LANE_PAUSED payload (#875).
     ``capability_parked`` — True if the codex capability gate (#1238) parked
     the task BLOCKED_ON_USER before any spawn was attempted. Below
     :data:`_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD` consecutive parks this is
@@ -602,6 +621,7 @@ class _SpawnOutcome:
     spawn_error: bool = False
     error: str = ""
     capability_parked: bool = False
+    occupied: bool = False
 
 
 def _revert_claimed_task_to_pending(
@@ -610,6 +630,7 @@ def _revert_claimed_task_to_pending(
     *,
     stamp_backoff: bool = False,
     hook_context_conflict_session_id: str | None = None,
+    defer_for: timedelta | None = None,
 ) -> None:
     """Revert a still-RUNNING claimed task back to PENDING, clearing session_id.
 
@@ -637,15 +658,26 @@ def _revert_claimed_task_to_pending(
     section. The stamp is stale-but-harmless once the predicate is False —
     the next successful spawn is what actually clears it.)
 
-    # Why: task.attempts is NOT decremented here. The increment-at-claim
-    # contract is intentional — usage_limit deaths and spawn errors consume
-    # real dispatch budget and must count toward task.attempts (#786). This
-    # revert leaves task.status RUNNING -> PENDING, which also charges
-    # task.unproductive_attempts by default (#1750) since a spawn that never
-    # succeeded produced no evidence of progress. The global_attempt_ceiling
-    # (this module) reads unproductive_attempts; the corollary #756
-    # stalled-stage cap deliberately still reads raw task.attempts — as of
-    # #1750 these are two separate counters, not one shared counter.
+    *defer_for* (#2213) turns the revert into a RELEASE of the claim, for a
+    transient skip in which no spawn was ever attempted (the reused worktree is
+    occupied by a live session). It undoes the claim's own charges instead of
+    billing a failure: ``task.attempts`` is decremented back to its pre-claim
+    value, ``unproductive_attempts`` is not charged (``unproductive=False``),
+    and ``spawn_error_count`` is left alone. The row is held off for *defer_for*
+    (``next_eligible_at``) so the same tick does not re-claim it. Nothing here
+    is a failure, so it must not spend the ticket's attempt budget toward the
+    global ceiling, and the caller must not signal ``spawn_error`` either.
+
+    # Why: task.attempts is NOT decremented on the FAILURE paths (no
+    # *defer_for*). The increment-at-claim contract is intentional —
+    # usage_limit deaths and spawn errors consume real dispatch budget and must
+    # count toward task.attempts (#786). Those reverts leave task.status
+    # RUNNING -> PENDING, which also charges task.unproductive_attempts by
+    # default (#1750) since a spawn that never succeeded produced no evidence
+    # of progress. The global_attempt_ceiling (this module) reads
+    # unproductive_attempts; the corollary #756 stalled-stage cap deliberately
+    # still reads raw task.attempts — as of #1750 these are two separate
+    # counters, not one shared counter.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -655,8 +687,15 @@ def _revert_claimed_task_to_pending(
                 and stored_task.client == client_name
                 and stored_task.status == QueueItemStatus.RUNNING
             ):
-                transition_task_status(stored_task, QueueItemStatus.PENDING)
+                transition_task_status(
+                    stored_task,
+                    QueueItemStatus.PENDING,
+                    unproductive=defer_for is None,
+                )
                 stored_task.session_id = None
+                if defer_for is not None:
+                    stored_task.attempts = max(0, stored_task.attempts - 1)
+                    stored_task.next_eligible_at = datetime.now(UTC) + defer_for
                 if hook_context_conflict_session_id is not None:
                     stored_task.hook_context_conflict_session_id = (
                         hook_context_conflict_session_id
@@ -1067,6 +1106,52 @@ def _apply_plan_bypass_if_available(
         )
 
 
+def _defer_occupied_claim(
+    task: TicketTask,
+    client: ClientConfig,
+    exc: WorktreeOccupiedError,
+    *,
+    emit: Callable[[str], None] | None,
+) -> _SpawnOutcome:
+    """Release a claim whose reused worktree is occupied; spawn nothing (#2213).
+
+    ``create_worktree(refresh_on_reuse=True)`` raised
+    :exc:`~cw.exceptions.WorktreeOccupiedError`: a live cw session, a live
+    daemon-roster worker, or an indeterminate read of either (fail closed) may be
+    operating in the ticket's per-ticket worktree. Spawning a second worker into
+    it is the hazard the ticket exists to prevent, so nothing is spawned and the
+    worktree is neither touched nor removed (this is NOT the stale-worktree path,
+    which removes the tree).
+
+    The row goes back to PENDING for a later tick as a RELEASE, not a failure
+    (:func:`_revert_claimed_task_to_pending` with ``defer_for``): no attempt is
+    charged and no spawn error is stamped. The returned outcome sets ``occupied``
+    and NOT ``spawn_error``, so the lane circuit breaker never counts it -- a
+    long-lived occupant would otherwise pause the whole lane over a per-ticket
+    condition. The reason is recorded in the log, in ``_SpawnOutcome.error`` and
+    on the operator's emit line.
+    """
+    _log.warning(
+        "dispatch_tick: worktree %s for %s/%s is occupied (%s); not spawning, "
+        "returning the task to PENDING for a later tick",
+        exc.path,
+        client.name,
+        task.ticket_id,
+        exc.reason,
+    )
+    _revert_claimed_task_to_pending(
+        client.name,
+        task.ticket_id,
+        defer_for=timedelta(seconds=_OCCUPIED_DEFER_SECONDS),
+    )
+    if emit is not None:
+        emit(
+            f"OCCUPIED {client.name}/{task.ticket_id} worktree={exc.path}"
+            f" ({exc.reason}); deferred, not spawned"
+        )
+    return _SpawnOutcome(occupied=True, error=exc.reason)
+
+
 def _spawn_claimed_task(
     task: TicketTask,
     client: ClientConfig,
@@ -1110,13 +1195,19 @@ def _spawn_claimed_task(
             # worktree and legitimately leave cross-stage churn (#712).
             # refresh_on_reuse (#2213): a reused per-ticket worktree can sit
             # behind origin/<branch>, so ask for a best-effort refresh. NOTE
-            # this does a network `git fetch` (can be slow; a failed fetch
-            # skips the fast-forward and uses the worktree as-is, never
-            # raises) and fast-forwards only an unoccupied (no live cw session
-            # or daemon-roster worker), clean, strictly-behind worktree --
-            # there is no friction-notes surface in this function, and
-            # create_worktree returns only the path, so the fetch outcome is
-            # reported in the log (cw.worktree), not to the caller.
+            # this does a network `git fetch` (can be slow) and fast-forwards
+            # only an unoccupied (no live cw session or daemon-roster worker),
+            # clean, strictly-behind worktree. The refresh has two kinds of
+            # "did not move it", handled oppositely:
+            #   * NOT refreshed (dirty, diverged, failed fetch, branch absent):
+            #     the tree is ours, just not up to date. create_worktree
+            #     returns the path and we spawn on it; the reason is logged
+            #     (cw.worktree) -- there is no friction-notes surface here.
+            #   * OCCUPIED (a live session or worker may be using the tree, or
+            #     that cannot be ruled out): create_worktree RAISES
+            #     WorktreeOccupiedError. That must never fall through to a
+            #     spawn, so it is handled by its own narrow ``except`` below
+            #     (not the StaleWorktreeError branch: never remove it).
             worktree_path = create_worktree(
                 client, branch, allow_dirty_reuse=True, refresh_on_reuse=True
             )
@@ -1255,6 +1346,11 @@ def _spawn_claimed_task(
             hook_context_conflict_session_id=exc.conflicting_session_id,
         )
         return _SpawnOutcome(spawn_error=True, error=str(exc))
+    except WorktreeOccupiedError as exc:
+        # Narrow catch ahead of the broad handler (order matters -- this is a
+        # WorktreeError and would otherwise be reverted WITH a spawn-error
+        # backoff and trip the circuit breaker). See _defer_occupied_claim.
+        return _defer_occupied_claim(task, client, exc, emit=emit)
     except Exception as exc:  # noqa: BLE001
         # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331.
         # Paired tests: TestDispatchTickSpawnErrors in
