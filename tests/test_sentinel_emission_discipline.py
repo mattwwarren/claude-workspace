@@ -12,7 +12,9 @@ sentinel. Both gaps are model-adherence, not schema — this pins the prose
 that closes them.
 """
 
-from tests.conftest import _appendix, _cmd
+import pytest
+
+from tests.conftest import _COMMANDS_ROOT, _appendix, _cmd
 
 FRAME_DISCIPLINE_ANCHOR = "Validating is not emitting"
 FRAME_DISCIPLINE_DETAIL = "final characters of this same message"
@@ -204,14 +206,195 @@ def test_plan_doc_every_exit_names_a_status_and_registered_reason() -> None:
     assert blocked_exits == reasoned_blocked_exits
 
 
-def test_park_comment_header_set_matches_provenance_rule() -> None:
-    """The code-side park-header set lives in the provenance rule's home (#2135)."""
-    from cw.cli._sentinels import _PARK_COMMENT_HEADERS
+# -- GitHub #2135: the park-comment stamp rule and its one wiring ------------
 
-    provenance = _section(
+PARK_STAMP_COMMAND = "cw signal-park"
+PARK_STAMP_RULE_REF = "*Park-comment stamp rule* in `.claude/commands/auto-dev.md`"
+# The stage docs this ticket wires. An INVENTORY, deliberately not a
+# completeness scan -- see test_park_stamp_is_wired_only_where_registered.
+PARK_STAMP_WIRED_DOCS = frozenset({"auto-dev-plan.md", "auto-dev-plan-appendix.md"})
+
+
+def _paragraph_containing(content: str, anchor: str) -> str:
+    """Return the whole blank-line-delimited paragraph *around* *anchor*.
+
+    The file's ``_section`` slices anchor-to-anchor and
+    ``test_prep_pr_ship_it_layouts._paragraph_at`` starts AT its anchor;
+    neither can express "the paragraph this phrase sits inside", which is what
+    the negative pins below need — a stamp clause bleeding into a neighbouring
+    sentence of the same paragraph must fail them.
+    """
+    index = content.index(anchor)
+    start = content.rfind("\n\n", 0, index)
+    start = 0 if start == -1 else start + 2
+    end = content.find("\n\n", index)
+    return content[start : len(content) if end == -1 else end]
+
+
+def _park_stamp_rule_section() -> str:
+    return _section(
         _cmd("auto-dev.md"),
-        "## Comment provenance rule",
-        "## Tool-Use Denial Exit",
+        "## Park-comment stamp rule (#2135)",
+        "## Guard Matrix",
     )
-    for header in _PARK_COMMENT_HEADERS:
-        assert header in provenance, header
+
+
+def test_park_stamp_rule_section_states_the_contract() -> None:
+    """F1: the rule section is the worker-facing contract for the stamp."""
+    rule = _park_stamp_rule_section()
+
+    for phrase in (
+        PARK_STAMP_COMMAND,
+        "`park_comment_marker`",
+        "`.claude/cw-context.json`",
+        "recorded claim",
+        "not an observation",
+        "posted its park comment",
+        "tracker-agnostic",
+        "Linear",
+        "carve-out from the Tool-Use Denial Exit",
+        "is **not** a `tool_denied` exit",
+        "a non-zero exit is ignored",
+        "No such command",
+        "version skew",
+        "park marker NOT recorded",
+        "emit the sentinel you were already about to emit, **unchanged**",
+    ):
+        assert phrase in rule, phrase
+
+    for not_stamped in (
+        "`no_op`",
+        "`scope_exceeded`",
+        "`forbidden_area`",
+        "`stale_dispatch`",
+        "`tool_denied`",
+    ):
+        assert not_stamped in rule, not_stamped
+
+    assert "Accepted limitation" in rule
+    assert "dies between deciding the exit and running the stamp" in rule
+
+
+def test_park_stamp_rule_sits_after_the_tool_use_denial_exit() -> None:
+    """F1: the carve-out must read after the rule it carves out of."""
+    doc = _cmd("auto-dev.md")
+
+    assert doc.index("## Tool-Use Denial Exit") < doc.index(
+        "## Park-comment stamp rule (#2135)"
+    )
+    assert doc.index("## Park-comment stamp rule (#2135)") < doc.index(
+        "## Guard Matrix"
+    )
+
+
+def test_denial_exit_carries_the_signal_park_exception() -> None:
+    """F2: the Denial Exit itself names the exception, not only the rule below."""
+    denial = _section(
+        _cmd("auto-dev.md"),
+        "## Tool-Use Denial Exit",
+        "## Park-comment stamp rule (#2135)",
+    )
+
+    assert "**Exception (#2135)" in denial
+    assert PARK_STAMP_COMMAND in denial
+
+
+def test_gate_collapse_row_carries_the_signal_park_parenthetical() -> None:
+    """F2: the reason-table row must not read as an unqualified tool_denied."""
+    row = next(
+        line
+        for line in _cmd("auto-dev.md").splitlines()
+        if "Tool call denied by auto-mode classifier" in line
+    )
+
+    assert PARK_STAMP_COMMAND in row
+
+
+@pytest.mark.parametrize(
+    ("doc", "anchor"),
+    [
+        pytest.param(
+            "auto-dev-plan.md",
+            "**THEN** post the same plan as a comment",
+            id="plan-of-record-post",
+        ),
+        pytest.param(
+            "auto-dev-plan.md",
+            "Absent both, EXIT",
+            id="no-evidence-re-park",
+        ),
+        pytest.param(
+            "auto-dev-review.md",
+            "It already carries its own",
+            id="voided-review-findings",
+        ),
+        pytest.param(
+            "auto-dev-finalize.md",
+            "**Post to Linear:** Comment on the issue with PR link",
+            id="finalize-pr-link",
+        ),
+    ],
+)
+def test_allowlisted_posts_are_never_stamped(doc: str, anchor: str) -> None:
+    """F3: a comment post that is not a park comment must not carry the stamp.
+
+    The two auto-dev-plan.md anchors are live guards -- this ticket edits that
+    doc -- and the review/finalize anchors guard the follow-up wiring (#2228).
+    """
+    assert PARK_STAMP_COMMAND not in _paragraph_containing(_cmd(doc), anchor)
+
+
+def test_park_stamp_is_wired_only_where_registered() -> None:
+    """F4: an INVENTORY pin, not a completeness scan.
+
+    It proves this ticket wired exactly the plan stage's consolidated park and
+    nothing else. It does NOT prove every park path is stamped: a new park path
+    added to another stage doc is not caught, and it does not scan
+    ``.claude/skills/**``, ``.claude/agents/**`` or sibling command docs such as
+    ``prep-pr.md``. Each follow-up wiring ticket (#2228) extends the registry in
+    the same commit as its doc edit.
+    """
+    wired = {
+        path.name
+        for path in sorted(_COMMANDS_ROOT.glob("auto-dev*.md"))
+        if path.name != "auto-dev.md" and PARK_STAMP_COMMAND in path.read_text("utf-8")
+    }
+
+    assert wired == set(PARK_STAMP_WIRED_DOCS)
+
+
+def _consolidated_park_section() -> str:
+    return _section(
+        _appendix("plan"),
+        "**Consolidated park (single-exit rule, #1650).**",
+        "## Why an inline ambiguity scan",
+    )
+
+
+def test_consolidated_park_step_3a_stamps_after_the_post() -> None:
+    """F5: the one wiring. Step 3a follows the comment post and precedes the
+    draft-persistence step, so every consolidated-park exit shares one clause."""
+    section = _consolidated_park_section()
+    step_3a = _section(section, "   3a. **Park marker (#2135):**", "   4. Persist")
+
+    assert PARK_STAMP_COMMAND in step_3a
+    assert PARK_STAMP_RULE_REF in step_3a
+    assert "once the step 3 comment has posted successfully" in step_3a
+    assert "ignore that and emit the exit sentinel unchanged" in step_3a
+    assert "Never run it for a `tool_denied` exit" in step_3a
+
+    assert (
+        section.index("   3. Post ONE comment")
+        < section.index("   3a. **Park marker (#2135):**")
+        < section.index("   4. Persist")
+    )
+
+
+def test_plan_core_pointer_names_the_stamp() -> None:
+    """F5: the core doc's Step 1c pointer paragraph points at step 3a."""
+    pointer = _paragraph_containing(
+        _cmd("auto-dev-plan.md"), "**Consolidated park (single-exit rule, #1650).**"
+    )
+
+    assert PARK_STAMP_COMMAND in pointer
+    assert PARK_STAMP_RULE_REF in pointer
