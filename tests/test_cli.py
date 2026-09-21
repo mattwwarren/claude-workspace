@@ -8620,7 +8620,6 @@ class TestDevQueueApproveCli:
         stage a marker bound to some other draft.
         """
         from cw.cli.dev_queue._plan_marker import _PLAN_APPROVED_MARKER
-
         from cw.config import save_state
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus
