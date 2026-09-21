@@ -36,7 +36,9 @@ SUPPRESSION rather than recording one pass's outcome, so it carries an audit
 contract the others do not: a mandatory ``--reason``, provenance
 (actor / CLI-stamped UTC timestamp / verbatim summary / reviewed sha) on every
 record, one ``review.finding_settled`` event per settled finding, and a flat
-refusal to run inside a dispatch worker. See ADR-0016.
+refusal to run anywhere that is not provably an interactive session — a
+dispatch worker, or a directory whose dispatch context cannot be resolved at
+all. See ADR-0016.
 """
 
 from __future__ import annotations
@@ -466,8 +468,29 @@ class _SettleInput(BaseModel):
     entries: list[_SettleEntry] = Field(min_length=1)
 
 
-def _refuse_settle_in_a_dispatch_worker() -> None:
-    """Refuse to mint a suppression from inside a dispatch worker (#2210).
+_SETTLE_IN_WORKER_MSG = (
+    "Refusing to settle a review finding from inside a dispatch worker "
+    "(.claude/cw-context.json reports headless). A ledger entry silently "
+    "suppresses every future re-raise of that finding, so it must be "
+    "minted by an operator on their own machine. Save the payload, and "
+    "run `cw review settle` there."
+)
+
+_SETTLE_CONTEXT_UNRESOLVED_MSG = (
+    "Refusing to settle a review finding: this directory's dispatch context "
+    "could not be resolved, so there is nothing that says you are NOT inside "
+    "a worker. No `.claude/cw-context.json` was found in this directory or "
+    "any parent, or the one that was found is unreadable, is not a JSON "
+    "object, or carries no boolean `headless` field. Run `cw review settle` "
+    "from an interactive cw session worktree (or any directory beneath one) — "
+    "a directory whose `.claude/cw-context.json` reports `headless: false`. A "
+    "plain checkout of the repo has no such file. Nothing was written: no "
+    "marker, no --out file, no event."
+)
+
+
+def _refuse_settle_outside_an_interactive_session() -> None:
+    """Refuse to mint a suppression unless this is provably an operator (#2210).
 
     A settle is the one act that can silence a real defect permanently and
     invisibly. A worker settling findings raised by its own reviewer is the
@@ -478,23 +501,34 @@ def _refuse_settle_in_a_dispatch_worker() -> None:
 
     Keyed on the nearest ``.claude/cw-context.json`` (searched upward from cwd,
     the way ``check_not_main_checkout.py`` does) reporting ``headless``, which
-    is what ``cw`` stamps for every DAEMON-origin ``/auto-dev`` worker it
-    spawns. Fails OPEN — an absent, unreadable or malformed context means
-    "operator's own machine", matching every other cw context guard.
+    is what ``cw`` stamps for every session it spawns — ``True`` for a
+    DAEMON-origin ``/auto-dev`` worker, an explicit ``False`` for an
+    interactive one.
+
+    **Fails CLOSED** (#2210 round 4). The only state that proceeds is a
+    discovered context whose ``headless`` is the JSON boolean ``false``.
+    Everything else — no context file anywhere above cwd, an unreadable or
+    malformed one, one with no ``headless`` key, one whose ``headless`` is not
+    a bool — refuses. :func:`~cw.cli._hook_io.find_cw_context` cannot tell
+    "there is no dispatch context here" apart from "the dispatch context could
+    not be read", and an indeterminate answer used to read as "operator's own
+    machine": a worker whose context file was missing, truncated or written by
+    a future schema would have settled its own reviewer's findings. The guard
+    that decides whether a durable suppression may be minted is the wrong
+    place to be optimistic — same posture, for the same reason, as #2213.
+
+    The operational cost is that a settle must be run from inside a cw session
+    worktree rather than a plain checkout; the runbook says so.
     """
     from cw.cli._hook_io import find_cw_context
 
     context = find_cw_context(Path.cwd())
-    if context is None or not context.get("headless"):
+    headless = None if context is None else context.get("headless")
+    if headless is False:
         return
-    msg = (
-        "Refusing to settle a review finding from inside a dispatch worker "
-        "(.claude/cw-context.json reports headless). A ledger entry silently "
-        "suppresses every future re-raise of that finding, so it must be "
-        "minted by an operator on their own machine. Save the payload, and "
-        "run `cw review settle` there."
+    raise CwError(
+        _SETTLE_IN_WORKER_MSG if headless is True else _SETTLE_CONTEXT_UNRESOLVED_MSG
     )
-    raise CwError(msg)
 
 
 def _resolve_settle_actor() -> str:
@@ -626,9 +660,14 @@ def review_settle(
 ) -> None:
     """Record operator-settled findings as a postable marker (#2210).
 
-    Run this on YOUR OWN MACHINE. It refuses inside a dispatch worker: a
-    ledger entry silently suppresses every future re-raise of that finding, so
-    the pipeline must not be able to settle its own reviewer's findings.
+    Run this on YOUR OWN MACHINE, from an interactive cw session worktree (or
+    any directory beneath one). It refuses inside a dispatch worker — a ledger
+    entry silently suppresses every future re-raise of that finding, so the
+    pipeline must not be able to settle its own reviewer's findings — and it
+    refuses just as flatly when it cannot tell: the nearest
+    `.claude/cw-context.json` must be readable and report `headless: false`.
+    A plain checkout of the repo has no such file, so run it from a session
+    worktree. There is no bypass flag.
 
     PATH is a file path or '-' for stdin. Payload: {"entries": [{"file":
     "<path>", "summary": "<verbatim finding summary>", "outcome":
@@ -666,7 +705,7 @@ def review_settle(
     On success: exits 0, prints the marker to stdout.
     On failure: exits 1, prints 'field.path: message' lines to stderr.
     """
-    _refuse_settle_in_a_dispatch_worker()
+    _refuse_settle_outside_an_interactive_session()
     settle_reason = reason.strip()
     if not settle_reason:
         msg = (

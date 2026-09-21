@@ -19,6 +19,7 @@ import cw.events
 from cw.cli import main
 from cw.dev_queue import load_dev_queue
 from cw.events import read_events
+from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.enums import OrchestratorEventType
 from cw.review_adjudication import (
     Adjudication,
@@ -1012,6 +1013,24 @@ class TestReviewCheckVoidedCommand:
 _SETTLE_REASON = "operator rejected: intentional tradeoff, see ADR-0012"
 
 
+def _write_session_context(root: Path, *, headless: bool) -> None:
+    """Stamp *root* with the ``.claude/cw-context.json`` ``cw`` would write.
+
+    Shared by every settle case because the refusal now fails CLOSED (#2210
+    round 4): a directory with no resolvable dispatch context refuses, so
+    "operator's machine" has to be expressed as a context reporting
+    ``headless: false`` rather than as the absence of one. Joins
+    :data:`~cw.models.HOOK_CONTEXT_RELATIVE_PATH`, the same constant the
+    writer and the guard use, so this fixture cannot drift onto another path.
+    """
+    path = root / HOOK_CONTEXT_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"schema_version": 8, "session_id": "abc", "headless": headless}),
+        encoding="utf-8",
+    )
+
+
 class TestReviewSettle:
     """#2210: ``cw review settle`` is the ledger's first production writer.
 
@@ -1026,13 +1045,17 @@ class TestReviewSettle:
     def _operator_machine(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Run every settle test from a directory with no dispatch context.
+        """Run every settle test from an interactive cw session worktree.
 
-        The repo checkout this suite runs in carries a real
-        ``.claude/cw-context.json``, so without this the worker refusal would
-        fire on every case. Chdir'ing to ``tmp_path`` reproduces the operator's
-        own machine (upward search finds nothing -> fail open).
+        The guard fails CLOSED since #2210 round 4: the ONLY state it proceeds
+        from is a discovered ``.claude/cw-context.json`` whose ``headless`` is
+        the JSON boolean ``false``, which is what ``cw`` stamps for an
+        interactive session. The repo checkout this suite runs in carries a
+        real context of its own (``headless: true`` under dispatch), so every
+        case needs its own; writing one here rather than per test keeps the
+        cases about what they are testing.
         """
+        _write_session_context(tmp_path, headless=False)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: _OPERATOR)
 
@@ -1327,12 +1350,7 @@ class TestReviewSettle:
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         """A worker settling its own reviewer's findings is self-suppression."""
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        (claude_dir / "cw-context.json").write_text(
-            json.dumps({"schema_version": 8, "session_id": "abc", "headless": True}),
-            encoding="utf-8",
-        )
+        _write_session_context(tmp_path, headless=True)
         out_path = tmp_path / "settle.md"
         result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
 
@@ -1345,11 +1363,7 @@ class TestReviewSettle:
     def test_refusal_finds_the_context_from_a_subdirectory(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        (claude_dir / "cw-context.json").write_text(
-            json.dumps({"headless": True}), encoding="utf-8"
-        )
+        _write_session_context(tmp_path, headless=True)
         nested = tmp_path / "src" / "cw"
         nested.mkdir(parents=True)
         monkeypatch.chdir(nested)
@@ -1358,19 +1372,53 @@ class TestReviewSettle:
         assert result.exit_code != 0
         assert "dispatch worker" in result.output
 
-    @pytest.mark.parametrize(
-        "body", ['{"headless": false}', '{"session_id": "abc"}', "{not json", ""]
-    )
-    def test_non_worker_context_fails_open_to_the_operator(
-        self, runner: CliRunner, tmp_path: Path, body: str
-    ) -> None:
-        """Fail open, exactly like every other cw context guard."""
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        (claude_dir / "cw-context.json").write_text(body, encoding="utf-8")
-
+    def test_an_interactive_session_context_proceeds(self, runner: CliRunner) -> None:
+        """``headless: false`` — a real JSON boolean — is the ONLY pass state."""
         result = self._invoke(runner, _settle_payload())
+
         assert result.exit_code == 0, result.output
+        assert "REVIEW-FINDING-DISPOSITIONS" in result.output
+
+    @pytest.mark.parametrize(
+        ("label", "body"),
+        [
+            ("no context file at all", None),
+            ("no headless key", '{"session_id": "abc"}'),
+            ("malformed json", "{not json"),
+            ("empty file", ""),
+            ("non-object payload", '["headless"]'),
+            ("headless is a string", '{"headless": "false"}'),
+            ("headless is a number", '{"headless": 0}'),
+            ("headless is null", '{"headless": null}'),
+        ],
+    )
+    def test_an_indeterminate_context_refuses_and_writes_nothing(
+        self, runner: CliRunner, tmp_path: Path, label: str, body: str | None
+    ) -> None:
+        """Fail CLOSED (#2210 round 4): "cannot tell" is treated as "worker".
+
+        ``find_cw_context`` returns ``None`` both for "no dispatch context
+        anywhere above cwd" and for "the context is there but unreadable", and
+        a non-bool ``headless`` says nothing either way. None of those is
+        evidence that an operator is at the keyboard, and this guard decides
+        whether a durable, invisible suppression may be minted — the same
+        fail-closed posture as #2213.
+        """
+        assert label
+        context_path = tmp_path / HOOK_CONTEXT_RELATIVE_PATH
+        if body is None:
+            context_path.unlink()
+        else:
+            context_path.write_text(body, encoding="utf-8")
+        out_path = tmp_path / "settle.md"
+
+        result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
+
+        assert result.exit_code != 0
+        assert "could not be resolved" in result.output
+        assert "REVIEW-FINDING-DISPOSITIONS" not in result.output
+        assert not out_path.exists()
+        assert read_events() == []
 
     @pytest.mark.parametrize(
         "payload",
