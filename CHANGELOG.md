@@ -4,11 +4,12 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.48.0] - 2026-09-21
 
 ### Changed
 
 - **The injected Stop hook is now guarded in the shell, so a session cw did not spawn no longer pays an interpreter start per turn (#2226):** `cw signal-stop` was already a no-op when no `.claude/cw-context.json` was found, but it started Python and imported `cw.cli` to reach that conclusion — measured at ~250 ms per invocation against ~1.5 ms for the guard. The command cw writes into `<worktree>/.claude/settings.local.json` is now `[ -f '<abs worktree>/.claude/cw-context.json' ] || exit 0; cw signal-stop`: one existence test on the **absolute** path of the context file the same code writes, in front of the unchanged call. cw writes the hook per worktree, so it already knows that path; the guard reads no environment variable and no ambient cwd, and therefore cannot skip a dispatch worker (an earlier revision keyed on `$CLAUDE_PROJECT_DIR` with a hook-cwd fallback, and a worker whose cwd had moved into a detached gate worktree could lose its completion signal — ADR-0003 rejected env vars as the identity channel for the same reason, #133). The path is `shlex.quote`-d. `signal_stop` itself, the three PreToolUse hooks and every ADR-0003 invariant are unchanged, and existing worktrees need no migration (DAEMON spawns self-heal; USER-origin files are never touched). `cw.spawn._HOOK_SETTINGS_TEMPLATE` is replaced by `_build_hook_settings(context_path)` because the Stop command is now per-worktree.
+- **`cw dev-queue approve --post-marker` now binds its audit comment to the approved draft's fingerprint (#2194):** the plan-approved marker was a bare `<!-- auto-dev-plan-approved -->` that named no draft, and its dedup keyed on bare presence, so re-approving a changed draft posted nothing new. The marker now embeds the draft fingerprint stamped by #2102 (`<!-- auto-dev-plan-approved: <sha> -->`) and dedup matches the exact fingerprinted string, so a changed draft posts a fresh marker while re-approving the same draft still posts nothing. A missing or malformed fingerprint (anything other than 64 lowercase hex characters) falls back to the bare marker, with a stderr warning in the malformed case that does not echo the value. The marker remains audit-only and is never plan-approval evidence; the README, runbook, session-disposition table, and the Stage 1 comment-provenance rule now say so.
 
 ### Added
 

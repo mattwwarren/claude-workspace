@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
 from click.testing import CliRunner, Result
 from freezegun import freeze_time
 
@@ -64,7 +65,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import click
-    import pytest
 
     from cw.models import QueueItemStatus
 
@@ -8596,6 +8596,8 @@ class TestDevQueueApproveCli:
         monkeypatch: pytest.MonkeyPatch,
         *,
         marker_present: bool = False,
+        fingerprint: str | None = None,
+        existing_comment_bodies: tuple[str, ...] = (),
     ) -> None:
         """Seed a PLAN-stage ticket at ``plan_pending_approval`` (#1419).
 
@@ -8608,8 +8610,16 @@ class TestDevQueueApproveCli:
         import site -- the binding ``--post-marker``'s dedup check reads --
         to either an empty list (no marker yet) or a marker-bearing
         comment, per *marker_present*.
+
+        *fingerprint* seeds the approving session's sentinel with a
+        ``plan_draft_fingerprint`` (#2102), which is what ``approve``
+        stamps on the row and ``--post-marker`` binds its marker to
+        (#2194); omitted, the approval carries none and the marker falls
+        back to its unbound bare form. *existing_comment_bodies* seeds
+        arbitrary comment bodies alongside *marker_present*, so a test can
+        stage a marker bound to some other draft.
         """
-        from cw.cli.dev_queue.crud import _PLAN_APPROVED_MARKER
+        from cw.cli.dev_queue._plan_marker import _PLAN_APPROVED_MARKER
         from cw.config import save_state
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus
@@ -8630,13 +8640,16 @@ class TestDevQueueApproveCli:
             session_id="sess-approve-cli",
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
+        last_result: dict[str, object] = {"status": "plan_pending_approval"}
+        if fingerprint is not None:
+            last_result["plan_draft_fingerprint"] = fingerprint
         session = Session(
             id="sess-approve-cli",
             name="acme/impl-1",
             client="acme",
             purpose=SessionPurpose.IMPL,
             workspace_path=ws,
-            last_result={"status": "plan_pending_approval"},
+            last_result=last_result,
         )
         save_state(CwState(sessions=[session]))
 
@@ -8646,11 +8659,9 @@ class TestDevQueueApproveCli:
             target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
 
-        comments = (
-            [{"body": f"Approved.\n{_PLAN_APPROVED_MARKER}\n"}]
-            if marker_present
-            else []
-        )
+        comments = [{"body": body} for body in existing_comment_bodies]
+        if marker_present:
+            comments.append({"body": f"Approved.\n{_PLAN_APPROVED_MARKER}\n"})
         monkeypatch.setattr(
             "cw.cli.dev_queue.crud.fetch_issue_comments",
             lambda *_args, **_kwargs: comments,
@@ -8662,8 +8673,12 @@ class TestDevQueueApproveCli:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """--post-marker posts the marker comment on a PLAN-stage ticket."""
-        from cw.cli.dev_queue.crud import _PLAN_APPROVED_MARKER
+        """--post-marker posts the marker comment on a PLAN-stage ticket.
+
+        No fingerprint is seeded, so this pins the unbound bare-marker
+        fallback that #2194 keeps for an approval that binds no draft.
+        """
+        from cw.cli.dev_queue._plan_marker import _PLAN_APPROVED_MARKER
 
         self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
         with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
@@ -8697,7 +8712,12 @@ class TestDevQueueApproveCli:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Marker already on the issue: --post-marker skips, no duplicate."""
+        """Marker already on the issue: --post-marker skips, no duplicate.
+
+        Bare marker present and no fingerprint on the approval, so the
+        bare marker is both what is matched and what would be posted
+        (#2194).
+        """
         self._seed_plan_pending(
             tmp_config_dir, tmp_path, monkeypatch, marker_present=True
         )
@@ -8970,6 +8990,289 @@ class TestDevQueueApproveCli:
         assert result.exit_code == 0, result.output
         post_mock.assert_called_once()
         assert "failed to post the plan-approved marker comment" in result.output
+
+    def _run_approve(self, *, post_marker: bool = True) -> Result:
+        """Invoke ``dev-queue approve`` on the seeded ACME-1 ticket."""
+        args = ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        if post_marker:
+            args.append("--post-marker")
+        return CliRunner().invoke(main, args)
+
+    @staticmethod
+    def _ok_post(post_mock: MagicMock) -> None:
+        """Stub *post_mock* as a successful ``gh issue comment`` run."""
+        post_mock.return_value = subprocess.CompletedProcess(
+            args=["gh"], returncode=0, stdout=b"", stderr=b""
+        )
+
+    def test_approve_post_marker_embeds_fingerprint_when_bound(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A valid recorded fingerprint binds the marker to that draft, so
+        the comment names which plan the operator actually approved (#2194)."""
+        fingerprint = "a" * 64
+        self._seed_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, fingerprint=fingerprint
+        )
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            self._ok_post(post_mock)
+            result = self._run_approve()
+        assert result.exit_code == 0, result.output
+        post_mock.assert_called_once_with(
+            "ACME-1",
+            f"<!-- auto-dev-plan-approved: {fingerprint} -->",
+            cwd=ANY,
+            operator_authored=True,
+        )
+        assert "posted the plan-approved marker comment" in result.output
+        assert fingerprint[:12] in result.output
+
+    def test_approve_post_marker_dedups_same_fingerprint(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Re-approving the same draft is a no-op: the marker for this exact
+        fingerprint is already on the ticket (#2194)."""
+        fingerprint = "a" * 64
+        self._seed_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            fingerprint=fingerprint,
+            existing_comment_bodies=(
+                f"Approved.\n<!-- auto-dev-plan-approved: {fingerprint} -->\n",
+            ),
+        )
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            result = self._run_approve()
+        assert result.exit_code == 0, result.output
+        post_mock.assert_not_called()
+        assert "already present" in result.output
+        assert fingerprint[:12] in result.output
+        assert (
+            "Pass --post-marker to also post the plan-approved audit"
+            " marker comment on this ticket."
+        ) not in result.output
+
+    def test_approve_post_marker_reposts_for_changed_fingerprint(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A marker bound to some *other* draft does not dedup this approval
+        -- the whole point of #2194, and proof the match is full-string."""
+        old_fingerprint = "a" * 63 + "b"
+        fingerprint = "a" * 64
+        self._seed_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            fingerprint=fingerprint,
+            existing_comment_bodies=(
+                f"<!-- auto-dev-plan-approved: {old_fingerprint} -->",
+            ),
+        )
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            self._ok_post(post_mock)
+            result = self._run_approve()
+        assert result.exit_code == 0, result.output
+        post_mock.assert_called_once_with(
+            "ACME-1",
+            f"<!-- auto-dev-plan-approved: {fingerprint} -->",
+            cwd=ANY,
+            operator_authored=True,
+        )
+
+    def test_approve_post_marker_legacy_bare_marker_does_not_dedup_bound_approval(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pre-#2194 bare marker attributes to no draft, so it cannot stand
+        in for a bound approval: the bound marker is still posted."""
+        fingerprint = "a" * 64
+        self._seed_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            marker_present=True,
+            fingerprint=fingerprint,
+        )
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            self._ok_post(post_mock)
+            result = self._run_approve()
+        assert result.exit_code == 0, result.output
+        post_mock.assert_called_once_with(
+            "ACME-1",
+            f"<!-- auto-dev-plan-approved: {fingerprint} -->",
+            cwd=ANY,
+            operator_authored=True,
+        )
+
+    def test_approve_post_marker_no_fingerprint_ignores_bound_marker_and_posts_bare(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Symmetric to the legacy case: with no fingerprint on the approval,
+        a bound marker for some draft does not satisfy the bare one."""
+        from cw.cli.dev_queue._plan_marker import _PLAN_APPROVED_MARKER
+
+        self._seed_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            existing_comment_bodies=(f"<!-- auto-dev-plan-approved: {'a' * 64} -->",),
+        )
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            self._ok_post(post_mock)
+            result = self._run_approve()
+        assert result.exit_code == 0, result.output
+        post_mock.assert_called_once_with(
+            "ACME-1", _PLAN_APPROVED_MARKER, cwd=ANY, operator_authored=True
+        )
+
+    def test_approve_post_marker_malformed_fingerprint_falls_back_to_bare_and_warns(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A malformed fingerprint is agent-produced text: it never reaches
+        the comment body, and the warning reports its length, never its
+        value (it could carry `-->` or terminal control sequences)."""
+        from cw.cli.dev_queue._plan_marker import _PLAN_APPROVED_MARKER
+
+        malformed = "x --> <!-- evil"
+        self._seed_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, fingerprint=malformed
+        )
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            self._ok_post(post_mock)
+            result = self._run_approve()
+        assert result.exit_code == 0, result.output
+        post_mock.assert_called_once_with(
+            "ACME-1", _PLAN_APPROVED_MARKER, cwd=ANY, operator_authored=True
+        )
+        assert "evil" not in post_mock.call_args.args[1]
+        assert "not a 64-character lowercase hex" in result.stderr
+        assert f"got {len(malformed)} characters" in result.stderr
+        assert "evil" not in result.output
+        assert "-->" not in result.stderr
+
+    def test_approve_post_marker_help_states_audit_only(self) -> None:
+        """The flag's own help has to say the marker is audit-only -- read off
+        the option object, since `--help` rewraps the hyphenated word."""
+        from click import Option
+
+        from cw.cli.dev_queue.crud import dev_queue_approve
+
+        option = next(
+            param
+            for param in dev_queue_approve.params
+            if isinstance(param, Option) and param.name == "post_marker"
+        )
+        assert option.help is not None
+        assert "audit-only" in option.help
+
+
+class TestPlanMarkerHelpers:
+    """Pure-function tests for ``cw.cli.dev_queue._plan_marker`` (#2194)."""
+
+    def test_bare_marker_is_not_substring_of_bound_marker(self) -> None:
+        """Exact-string containment is a sufficient dedup only because
+        neither form contains the other -- pin that both ways."""
+        from cw.cli.dev_queue._plan_marker import (
+            _PLAN_APPROVED_MARKER,
+            _plan_approved_marker,
+        )
+
+        bound = _plan_approved_marker("a" * 64)
+        assert _PLAN_APPROVED_MARKER not in bound
+        assert bound not in _PLAN_APPROVED_MARKER
+
+    def test_plan_approved_marker_none_returns_bare(self) -> None:
+        """No recorded fingerprint: the pre-#2194 bare marker, unchanged."""
+        from cw.cli.dev_queue._plan_marker import (
+            _PLAN_APPROVED_MARKER,
+            _plan_approved_marker,
+        )
+
+        assert _plan_approved_marker(None) == _PLAN_APPROVED_MARKER
+
+    def test_plan_approved_marker_valid_fingerprint_embeds(self) -> None:
+        """The bound form is the documented `<!-- ...: <sha> -->` string."""
+        from cw.cli.dev_queue._plan_marker import _plan_approved_marker
+
+        fingerprint = "0" * 63 + "f"
+        assert (
+            _plan_approved_marker(fingerprint)
+            == f"<!-- auto-dev-plan-approved: {fingerprint} -->"
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "a" * 63,
+            "a" * 65,
+            "A" * 64,
+            "g" * 64,
+            "a" * 64 + "\n",
+            "a" * 61 + " -->",
+            "x --> <!-- evil",
+        ],
+    )
+    def test_plan_approved_marker_malformed_returns_bare(self, value: str) -> None:
+        """Anything but a 64-character lowercase hex digest falls back to the
+        bare marker -- notably a trailing newline (why `fullmatch`, not
+        `^...$`) and anything that could break out of the HTML comment."""
+        from cw.cli.dev_queue._plan_marker import (
+            _PLAN_APPROVED_MARKER,
+            _plan_approved_marker,
+        )
+
+        assert _plan_approved_marker(value) == _PLAN_APPROVED_MARKER
+
+    def test_is_plan_draft_fingerprint_accepts_hashlib_sha256_hexdigest(self) -> None:
+        """The validator's contract is stdlib SHA-256 hex output, which is
+        what the *Plan-draft fingerprint rule* produces."""
+        import hashlib
+
+        from cw.cli.dev_queue._plan_marker import _is_plan_draft_fingerprint
+
+        assert _is_plan_draft_fingerprint(hashlib.sha256(b"x").hexdigest())
+
+    def test_marker_present_exact_match_only(self) -> None:
+        """Dedup matches the exact marker inside any body, skipping bodies
+        that are missing or not strings; a marker for another draft (or the
+        other form) never counts."""
+        from cw.cli.dev_queue._plan_marker import (
+            _PLAN_APPROVED_MARKER,
+            _marker_present,
+            _plan_approved_marker,
+        )
+
+        bound = _plan_approved_marker("a" * 64)
+        other = _plan_approved_marker("b" * 64)
+        comments: list[dict[str, object]] = [
+            {"body": None},
+            {"body": 5},
+            {},
+            {"body": f"Approved the plan.\n{bound}\nthanks"},
+        ]
+        assert _marker_present(comments, bound) is True
+        assert _marker_present(comments, other) is False
+        assert _marker_present(comments, _PLAN_APPROVED_MARKER) is False
+        assert _marker_present([{"body": _PLAN_APPROVED_MARKER}], bound) is False
 
 
 # ---------------------------------------------------------------------------
