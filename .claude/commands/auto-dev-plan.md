@@ -229,7 +229,7 @@ The single definition of the plan-draft content fingerprint (#2102). Every produ
 
 **Where it is computed.** Fresh, on demand, every time a site needs it — never persisted as a fourth bookkeeping line in `.cw/plan-draft.md` (the three-line grammar above is closed, #2154).
 
-**How it travels.** One channel, end to end: the sentinel's `plan_draft_fingerprint` field → `Session.last_result` → the dev-queue row's `TicketTask.plan_approved_fingerprint` (stamped by `cw dev-queue approve`) → `queue_metadata.plan_approved_fingerprint` in the next worker's `.claude/cw-context.json`, which is what Checkpoint 1 compares against. Nothing reads the fingerprint back out of any comment: the marker scope was cut (#2194), so a value shown to the operator in a park comment is display, never evidence.
+**How it travels.** One evidence channel, end to end: the sentinel's `plan_draft_fingerprint` field → `Session.last_result` → the dev-queue row's `TicketTask.plan_approved_fingerprint` (stamped by `cw dev-queue approve`) → `queue_metadata.plan_approved_fingerprint` in the next worker's `.claude/cw-context.json`, which is what Checkpoint 1 compares against. Nothing on the evidence path reads the fingerprint back out of any comment. `cw dev-queue approve --post-marker` also embeds it in an audit marker the operator posts (#2194), so the approved draft is identifiable on the ticket, but no stage reads that audit marker back: a fingerprint shown to the operator, in a park comment or in the audit marker, is display, never evidence.
 
 **When there is no draft.** No draft in hand means no fingerprint: emit `null` explicitly. `null` is absent evidence, never a wildcard that matches anything.
 

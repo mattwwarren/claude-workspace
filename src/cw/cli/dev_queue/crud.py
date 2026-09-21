@@ -33,6 +33,7 @@ from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments, post_issue_comme
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
+    PLAN_APPROVED_FINGERPRINT_KEY,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
@@ -44,12 +45,16 @@ from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
 from ._group import dev_queue
+from ._plan_marker import (
+    _is_plan_draft_fingerprint,
+    _marker_present,
+    _plan_approved_marker,
+)
 
-# Operator-facing human-signoff marker the auto-dev-plan runbooks document
-# (README.md, docs/dispatch-runbook.md, docs/session-disposition.md) --
-# distinct from lifecycle.py's `_PLAN_SPEC_MARKER`/`_PLAN_SOUNDNESS_MARKER`
-# pair (the coded plan-quality-review gate). See GitHub #1419.
-_PLAN_APPROVED_MARKER = "<!-- auto-dev-plan-approved -->"
+# The plan-approved marker strings themselves live in `_plan_marker` (#2194),
+# alongside their shape validator -- and are distinct from lifecycle.py's
+# `_PLAN_SPEC_MARKER`/`_PLAN_SOUNDNESS_MARKER` pair (the coded
+# plan-quality-review gate). See GitHub #1419.
 
 # Stage vocabulary shared by `dev-queue add --stage` and `dev-queue requeue
 # --stage` (GitHub #1682) -- HARDEN is excluded, matching requeue's original
@@ -203,6 +208,35 @@ def dev_queue_move(ticket_id: str, client: str, to_lane: str) -> None:
     click.echo(f"Moved {ticket_id} ({client}): {from_lane} -> {to_lane}")
 
 
+def _bound_fingerprint(result: dict[str, str | bool | None]) -> str | None:
+    """The approval's plan-draft fingerprint, or None when there is none.
+
+    Shape-validates at the marker boundary (#2194): ``_stamp_plan_approval``
+    records whatever string the sentinel emitted, unvalidated, and that value
+    is agent-produced and lands in a tracker comment, where a ``-->`` fragment
+    would break out of the HTML comment. A non-string (no approval bound a
+    draft) is silently None; a malformed string warns and falls back to the
+    unbound marker, which is the pre-#2194 behavior.
+
+    The warning reports the value's length, never the value: it is untrusted
+    text that could carry terminal control sequences, the length diagnoses the
+    common truncation/padding failures, and the raw value stays inspectable on
+    the session's ``last_result``.
+    """
+    raw = result[PLAN_APPROVED_FINGERPRINT_KEY]
+    if not isinstance(raw, str):
+        return None
+    if _is_plan_draft_fingerprint(raw):
+        return raw
+    click.echo(
+        "--post-marker: the approval's plan-draft fingerprint is not a"
+        f" 64-character lowercase hex digest (got {len(raw)} characters)"
+        " — posting the unbound marker instead.",
+        err=True,
+    )
+    return None
+
+
 def _post_plan_approved_marker(
     ticket_id: str, resolved: str, result: dict[str, str | bool | None]
 ) -> bool:
@@ -219,6 +253,15 @@ def _post_plan_approved_marker(
     and the operator is told the approval already lives on the dev-queue
     row (``plan_approved_at``), which the plan stage reads on re-dispatch.
     Fail-open on an unresolvable tracker, matching ``requeue.py``'s gate.
+
+    The marker is bound to the approval's draft fingerprint
+    (``<!-- auto-dev-plan-approved: <sha> -->``) when the recorded
+    fingerprint is a 64-character lowercase hex digest, and is the bare
+    ``<!-- auto-dev-plan-approved -->`` otherwise (no fingerprint, or a
+    malformed one, which also warns). Dedup is exact-string on that marker,
+    so re-approving a changed draft posts a fresh marker and re-approving the
+    same draft does not (#2194). The marker is audit-only: nothing reads it
+    back as approval evidence.
     """
     if result["from_stage"] != "plan":
         click.echo(
@@ -251,13 +294,15 @@ def _post_plan_approved_marker(
         )
         return False
 
-    if any(
-        isinstance(c.get("body"), str) and _PLAN_APPROVED_MARKER in c["body"]
-        for c in comments
-    ):
+    fingerprint = _bound_fingerprint(result)
+    marker = _plan_approved_marker(fingerprint)
+    draft = f" for draft {fingerprint[:12]}" if fingerprint else ""
+
+    if _marker_present(comments, marker):
         click.echo(
             f"--post-marker: plan-approved marker already present on"
-            f" {ticket_id} ({resolved}) — skipped (no duplicate posted)."
+            f" {ticket_id} ({resolved}){draft} — skipped (no duplicate"
+            " posted)."
         )
         return True
 
@@ -266,12 +311,12 @@ def _post_plan_approved_marker(
     # agent-authored provenance marker every pipeline-written comment gets. It
     # is the single operator-decision channel through this choke point.
     post_result = post_issue_comment(
-        ticket_id, _PLAN_APPROVED_MARKER, cwd=repo_cwd, operator_authored=True
+        ticket_id, marker, cwd=repo_cwd, operator_authored=True
     )
     if post_result is not None and post_result.returncode == 0:
         click.echo(
             f"--post-marker: posted the plan-approved marker comment"
-            f" to {ticket_id} ({resolved})."
+            f" to {ticket_id} ({resolved}){draft}."
         )
         return True
 
@@ -303,14 +348,17 @@ def _tracker_is_github_or_unknown(client_name: str) -> bool:
     is_flag=True,
     default=False,
     help=(
-        "Post the human-signoff marker comment"
-        " (<!-- auto-dev-plan-approved -->) to the ticket, confirming"
-        " operator sign-off on a PLAN-stage checkpoint. PLAN-stage only"
-        " (warns and skips on other stages). Distinct from `add"
-        " --signoff`, which requires operator signoff before a ticket"
-        " ships, and from this command's own REVIEW-stage"
-        " operator-signoff gate (see docstring above) — this flag only"
-        " posts an audit-trail comment."
+        "Post an audit-only plan-approved marker comment to the ticket,"
+        " binding it to the approved draft's fingerprint:"
+        " <!-- auto-dev-plan-approved: <sha> --> (the unbound"
+        " <!-- auto-dev-plan-approved --> when no valid fingerprint is"
+        " recorded). PLAN-stage only (warns and skips on other stages)."
+        " Approving a changed draft posts a fresh marker; re-approving the"
+        " same draft does not duplicate it. Nothing reads the marker back"
+        " as approval evidence. Distinct from `add --signoff`, which"
+        " requires operator signoff before a ticket ships, and from this"
+        " command's own REVIEW-stage operator-signoff gate (see docstring"
+        " above) — this flag only posts an audit-trail comment."
     ),
 )
 @handle_errors
@@ -326,7 +374,11 @@ def dev_queue_approve(ticket_id: str, client: str | None, post_marker: bool) -> 
 
     Pass --post-marker to also post the plan-approved audit marker on a
     PLAN-stage ticket (unrelated to the operator-signoff gate above or to
-    `add --signoff`).
+    `add --signoff`). The marker embeds the approved draft's fingerprint
+    (<!-- auto-dev-plan-approved: <sha> -->) and is audit-only: nothing
+    reads it back as approval evidence, which lives on the dev-queue row.
+    Approving a changed draft posts a fresh marker; re-approving the same
+    draft does not.
     """
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
