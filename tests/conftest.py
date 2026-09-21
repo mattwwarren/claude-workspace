@@ -828,6 +828,7 @@ class _RawFindingKwargs(TypedDict, total=False):
     no_diff_anchor: object
     transitive_impact_evidence: object
     release_critical_exception: object
+    contests_adjudication: object
 
 
 def _finding_kwargs(**overrides: object) -> _RawFindingKwargs:

@@ -45,9 +45,11 @@ from cw.codex_review._context import (
     _select_output_instructions,
 )
 from cw.codex_runner import FakeCodexRunner
+from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, SessionOrigin
 from cw.review_adjudication import render_voided_findings_block
 from cw.review_finding_dispositions import (
+    SETTLE_SECTION_HEADING,
     FindingDisposition,
     _disposition_key,
     render_finding_disposition_block,
@@ -60,7 +62,13 @@ from tests._codex_review_helpers import (
     _task,
     _write,
 )
-from tests.conftest import _make_diff, _make_finding, _make_ticket_task, git_in
+from tests.conftest import (
+    _make_diff,
+    _make_finding,
+    _make_reviewer_doc,
+    _make_ticket_task,
+    git_in,
+)
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
@@ -420,6 +428,120 @@ class TestLoadOperatorComments:
         assert rendered == (
             "### a (2026-08-10T00:00:00Z)\nBODY1\n\n### b (2026-08-10T01:00:00Z)\nBODY2"
         )
+
+    # -- #2210: settle-payload elision on pipeline-authored comments --------
+
+    def _rendered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+    ) -> str | None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: [{"author": {"login": "op"}, "body": body}],
+        )
+        return _load_operator_comments(self._github_repo(tmp_path), "T-1")
+
+    def _pipeline_body(self, *, marker: bool = True, settle: bool = True) -> str:
+        parts = [
+            "## Codex Review Verdict",
+            "",
+            "**BLOCKING** — 1 MUST_FIX finding(s) must be addressed.",
+            "",
+            "### MUST_FIX",
+            "",
+            "- **src/cw/foo.py:10** — Bug here",
+            "",
+        ]
+        if settle:
+            parts += [
+                SETTLE_SECTION_HEADING,
+                "",
+                "Each payload below records one blocking finding as settled.",
+                "",
+                "**1. src/cw/foo.py**",
+                "",
+                "```json",
+                '{\n  "entries": [\n    {\n      "file": "src/cw/foo.py",'
+                '\n      "summary": "Bug here",\n      "outcome": "REJECTED",'
+                '\n      "rationale": ""\n    }\n  ]\n}',
+                "```",
+                "",
+            ]
+        body = "\n".join(parts).rstrip() + "\n"
+        return f"{body}\n{AGENT_COMMENT_MARKER}" if marker else body
+
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    def test_marker_bearing_comment_settle_section_is_elided(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newline: str
+    ) -> None:
+        body = self._pipeline_body().replace("\n", newline)
+        rendered = self._rendered(tmp_path, monkeypatch, body)
+        assert rendered is not None
+        assert SETTLE_SECTION_HEADING not in rendered
+        assert '"outcome": "REJECTED"' not in rendered
+
+    def test_marker_bearing_comment_other_content_still_renders(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rendered = self._rendered(tmp_path, monkeypatch, self._pipeline_body())
+        assert rendered is not None
+        assert "## Codex Review Verdict" in rendered
+        assert "### MUST_FIX" in rendered
+        assert "- **src/cw/foo.py:10** — Bug here" in rendered
+        assert AGENT_COMMENT_MARKER in rendered
+
+    def test_unmarked_comment_with_lookalike_section_is_not_elided(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An operator may legitimately paste a payload themselves; elision is
+        # provenance-keyed, never content-keyed.
+        body = self._pipeline_body(marker=False)
+        rendered = self._rendered(tmp_path, monkeypatch, body)
+        assert rendered == f"### op\n{body}"
+
+    def test_marker_bearing_comment_without_the_section_is_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = self._pipeline_body(settle=False)
+        rendered = self._rendered(tmp_path, monkeypatch, body)
+        assert rendered == f"### op\n{body}"
+
+    def test_elision_stops_at_the_next_heading_and_at_the_marker_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = (
+            f"{SETTLE_SECTION_HEADING}\npayload text\n\n"
+            "### Debt — recorded, not blocking\n\n- **a.py** — keep me\n\n"
+            f"{SETTLE_SECTION_HEADING}\nsecond payload\n\n{AGENT_COMMENT_MARKER}"
+        )
+        rendered = self._rendered(tmp_path, monkeypatch, body)
+        assert rendered is not None
+        assert "payload text" not in rendered
+        assert "second payload" not in rendered
+        assert "### Debt — recorded, not blocking" in rendered
+        assert "- **a.py** — keep me" in rendered
+        assert AGENT_COMMENT_MARKER in rendered
+
+    def test_rendered_blocking_comment_round_trips_through_the_elider(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The renderer's heading and the elider share one constant (#2210)."""
+        from cw.codex_review import render_verdict_comment
+        from cw.review_findings import consolidate_verdict
+
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        assert verdict.blocking is True
+        review_text = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert SETTLE_SECTION_HEADING in review_text
+        body = f"{review_text}\n\n{AGENT_COMMENT_MARKER}"
+
+        rendered = self._rendered(tmp_path, monkeypatch, body)
+        assert rendered is not None
+        assert SETTLE_SECTION_HEADING not in rendered
+        assert '"outcome": "REJECTED"' not in rendered
 
 
 class TestLoadVoidedFindings:
@@ -2111,6 +2233,45 @@ class TestRenderAdjudicatedFindingsBlock:
         )
         assert block is not None
         assert "ACCEPTED" in block
+
+    def test_block_states_the_contest_protocol_and_inline_rationale(self) -> None:
+        # #2210: the intro now names the typed escape hatch and how an inline
+        # rationale comment is to be treated. The per-entry line is unchanged.
+        block = _render_adjudicated_findings_block(_disposition_ledger())
+        assert block is not None
+        assert "contests_adjudication" in block
+        assert "`# Why:`" in block
+        assert "knowingly re-raising" in block
+        assert "evidence to weigh" in block
+        assert "do not re-raise" in block
+
+    def test_inline_rationale_is_evidence_to_weigh_not_a_suppression_instruction(
+        self,
+    ) -> None:
+        # Round-2 soundness RISK 2: code-author-controlled text must never be
+        # able to instruct the reviewer to withhold a finding. Only
+        # operator-authored ledger entries may do that.
+        block = _render_adjudicated_findings_block(_disposition_ledger())
+        assert block is not None
+        assert "part of this record" not in block
+        assert "do not raise a finding that only disagrees" not in block
+        assert "`consequence` field" in block
+
+    def test_instructions_promise_no_automatic_discard_in_any_wording(self) -> None:
+        # Decision 12: no model-side suppression promise beyond the mechanism.
+        block = _render_adjudicated_findings_block(_disposition_ledger())
+        assert block is not None
+        assert "in any wording" not in block
+        assert "discarded unread" not in block
+
+    def test_per_entry_lines_are_unchanged(self) -> None:
+        block = _render_adjudicated_findings_block(_disposition_ledger())
+        assert block is not None
+        assert (
+            "- **src/cw/foo.py** — bug here — previously adjudicated: "
+            "REJECTED, do not re-raise unless the code at this location "
+            "changed (intentional tradeoff, settled in an earlier round)"
+        ) in block
 
 
 class TestBuildReviewerPromptAdjudicatedFindings:

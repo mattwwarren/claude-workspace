@@ -23,8 +23,12 @@ from cw.models.enums import OrchestratorEventType
 from cw.review_debt import fingerprint_v1
 from cw.review_finding_dispositions import (
     FindingDisposition,
+    _claim_similarity,
+    _claim_symbols,
+    _claim_tokens,
     _disposition_key,
     _render_suppression_signal,
+    build_finding_disposition_ledger,
     merge_finding_dispositions,
     parse_finding_disposition_block,
     render_finding_disposition_block,
@@ -32,6 +36,7 @@ from cw.review_finding_dispositions import (
     suppress_adjudicated_findings,
 )
 from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
+from tests._cli_review_helpers import CLAIM_ROW1_CANDIDATE, CLAIM_ROW1_RECORDED
 
 from .conftest import _make_finding
 
@@ -75,6 +80,25 @@ def _entry(**overrides: object) -> FindingDisposition:
     }
     kwargs.update(overrides)
     return FindingDisposition.model_validate(kwargs)
+
+
+def _ledger_for(
+    file: str, summary: str, **overrides: object
+) -> dict[str, FindingDisposition]:
+    """A single-entry ledger keyed on ``(file, summary)`` (#2210).
+
+    Module-scope so the claim/contest/gate classes added by #2210 can build
+    multi-entry ledgers as dict unions of it rather than each growing a
+    near-identical class-local builder.
+    """
+    key = _disposition_key(file, summary)
+    assert key is not None
+    return {key: _entry(**overrides)}
+
+
+def _ledger(finding: Finding, **overrides: object) -> dict[str, FindingDisposition]:
+    """A single-entry ledger keyed on *finding*'s own identity."""
+    return _ledger_for(finding.file, finding.summary, **overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -248,20 +272,13 @@ class TestMergeFindingDispositions:
 
 
 class TestSuppressAdjudicatedFindings:
-    def _ledger(
-        self, finding: Finding, **overrides: object
-    ) -> dict[str, FindingDisposition]:
-        key = _disposition_key(finding.file, finding.summary)
-        assert key is not None
-        return {key: _entry(**overrides)}
-
     def test_rejected_entry_suppresses_the_matching_must_fix(self) -> None:
         finding = _make_finding(severity="MUST_FIX")
         verdict = _verdict(_accepted(finding))
         assert verdict.blocking is True
 
         suppressed = suppress_adjudicated_findings(
-            verdict, self._ledger(finding), ticket_id=_TICKET
+            verdict, _ledger(finding), ticket_id=_TICKET
         )
 
         assert suppressed.blocking is False
@@ -278,7 +295,7 @@ class TestSuppressAdjudicatedFindings:
         entry = _entry(recorded_at="2026-08-16T12:00:00Z")
         suppressed = suppress_adjudicated_findings(
             _verdict(_accepted(finding)),
-            self._ledger(finding, recorded_at="2026-08-16T12:00:00Z"),
+            _ledger(finding, recorded_at="2026-08-16T12:00:00Z"),
             ticket_id=_TICKET,
         )
 
@@ -295,7 +312,7 @@ class TestSuppressAdjudicatedFindings:
         finding = _make_finding(severity="MUST_FIX")
         verdict = _verdict(_accepted(finding))
         suppressed = suppress_adjudicated_findings(
-            verdict, self._ledger(finding, outcome="ACCEPTED"), ticket_id=_TICKET
+            verdict, _ledger(finding, outcome="ACCEPTED"), ticket_id=_TICKET
         )
 
         assert suppressed.blocking is True
@@ -309,7 +326,7 @@ class TestSuppressAdjudicatedFindings:
         )
         verdict = _verdict(_accepted(finding))
         suppressed = suppress_adjudicated_findings(
-            verdict, self._ledger(other), ticket_id=_TICKET
+            verdict, _ledger(other), ticket_id=_TICKET
         )
 
         assert suppressed == verdict
@@ -333,7 +350,7 @@ class TestSuppressAdjudicatedFindings:
         )
 
         suppressed = suppress_adjudicated_findings(
-            verdict, self._ledger(finding), ticket_id=_TICKET
+            verdict, _ledger(finding), ticket_id=_TICKET
         )
 
         assert suppressed.blocking is False
@@ -356,7 +373,7 @@ class TestSuppressAdjudicatedFindings:
     def test_suppression_emits_exactly_one_audit_event(self) -> None:
         finding = _make_finding(severity="MUST_FIX")
         suppress_adjudicated_findings(
-            _verdict(_accepted(finding)), self._ledger(finding), ticket_id=_TICKET
+            _verdict(_accepted(finding)), _ledger(finding), ticket_id=_TICKET
         )
 
         events = read_events(
@@ -373,9 +390,608 @@ class TestSuppressAdjudicatedFindings:
         finding = _make_finding(severity="MUST_FIX")
         with caplog.at_level(logging.INFO, logger=_LOGGER):
             suppress_adjudicated_findings(
-                _verdict(_accepted(finding)), self._ledger(finding), ticket_id=_TICKET
+                _verdict(_accepted(finding)), _ledger(finding), ticket_id=_TICKET
             )
         assert any(_TICKET in record.getMessage() for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Claim tier: tokenizer, symbol extraction, similarity (#2210)
+# ---------------------------------------------------------------------------
+
+
+class TestClaimTokensAndSymbols:
+    def test_tokens_split_hyphens_and_drop_stopwords_and_short_tokens(self) -> None:
+        assert _claim_tokens("the early-return branch drops a follow-up task") == {
+            "early",
+            "return",
+            "branch",
+            "drops",
+            "follow",
+            "task",
+        }
+
+    def test_bare_dotted_filenames_and_abbreviations_are_never_symbols(self) -> None:
+        text = (
+            "e.g. foo.py and i.e. baz.md drop `Foo.bar()` and `x + y` "
+            "plus cw.review_debt"
+        )
+        assert _claim_symbols(text) == {"foo.bar", "review_debt"}
+
+    def test_backticked_identifiers_and_snake_case_tokens_are_symbols(self) -> None:
+        assert _claim_symbols(
+            "the `_track_open_findings` helper and self.parse_config drop `a b`"
+        ) == {"_track_open_findings", "parse_config"}
+
+    def test_a_backticked_span_shorter_than_three_characters_is_not_a_symbol(
+        self,
+    ) -> None:
+        assert _claim_symbols("the `x` value") == set()
+
+    def test_digit_placeholder_survives_inside_an_identifier(self) -> None:
+        # review_debt masks digit runs to an uppercase "N"; the tokenizer
+        # lowercases first, so `parse_vN` stays ONE token rather than splitting.
+        assert "parse_vn" in _claim_tokens("`parse_vN` fails")
+
+
+@pytest.mark.parametrize(
+    ("recorded", "candidate", "expected"),
+    [
+        (CLAIM_ROW1_RECORDED, CLAIM_ROW1_CANDIDATE, 0.86),
+        (
+            "retry loop swallows timeout errors silently",
+            "timeout errors are silently swallowed by the retry loop",
+            0.83,
+        ),
+        ("retry loop swallows timeout errors silently", "retry loop is slow", None),
+        ("`parse_config` missing null check", "`load_config` missing null check", None),
+        ("`load` crashes on empty input", "`load` leaks file handle on error", None),
+        (
+            "`load` crashes on empty input",
+            "`load` crashes when config is missing",
+            None,
+        ),
+        (
+            "`foo` returns none when list is empty",
+            "`foo` returns none when list contains duplicates",
+            0.73,
+        ),
+        (
+            "parsing the config ignores null check for missing values",
+            "`parse_config` ignores null check for missing values",
+            0.77,
+        ),
+        (
+            "parsing the config ignores null check",
+            "`parse_config` ignores null check for missing values",
+            None,
+        ),
+        ("it is not the", "`foo` drops the task", None),
+        ("", "", None),
+    ],
+)
+def test_claim_similarity_table(
+    recorded: str, candidate: str, expected: float | None
+) -> None:
+    """The matcher's contract, pinned case by case (#2210, ADR-0016).
+
+    Rows 4 and 6 are the vetoes (disjoint symbols; shared symbol but too few
+    shared tokens). Row 7 is the ACCEPTED false-match class ADR-0016 records.
+    """
+    score = _claim_similarity(recorded, candidate)
+    if expected is None:
+        assert score is None
+    else:
+        assert score == pytest.approx(expected, abs=0.005)
+
+
+def test_claim_similarity_table_row_one_pair_clears_the_thresholds() -> None:
+    # The shared wording pair every reworded-finding test imports must keep
+    # matching; a threshold or tokenizer edit fails HERE, at the source.
+    assert _claim_similarity(CLAIM_ROW1_RECORDED, CLAIM_ROW1_CANDIDATE) is not None
+
+
+# ---------------------------------------------------------------------------
+# Claim tier: matching through suppress_adjudicated_findings (#2210)
+# ---------------------------------------------------------------------------
+
+
+class TestClaimMatching:
+    """The armed claim tier, exercised at the seam it ships in."""
+
+    def _reworded(self, **overrides: object) -> Finding:
+        kwargs: dict[str, object] = {
+            "severity": "MUST_FIX",
+            "summary": CLAIM_ROW1_CANDIDATE,
+        }
+        kwargs.update(overrides)
+        return _make_finding(**kwargs)
+
+    def _recorded_ledger(self, **overrides: object) -> dict[str, FindingDisposition]:
+        return _ledger_for("src/cw/foo.py", CLAIM_ROW1_RECORDED, **overrides)
+
+    def test_reworded_must_fix_with_shared_symbol_is_suppressed(self) -> None:
+        finding = self._reworded()
+        suppressed = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            self._recorded_ledger(),
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+
+        assert suppressed.blocking is False
+        assert suppressed.accepted[0].disposition == "rejected"
+        detail = suppressed.accepted[0].disposition_detail
+        assert "claim similarity" in detail
+        assert "re-adjudicate if the code at this location has changed" in detail
+        assert "drops the follow-up task" in detail
+
+    def test_same_words_in_a_different_file_never_match(self) -> None:
+        finding = self._reworded(file="src/cw/other.py")
+        verdict = _verdict(_accepted(finding))
+        suppressed = suppress_adjudicated_findings(
+            verdict,
+            self._recorded_ledger(),
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+        assert suppressed is verdict
+
+    def test_claim_tier_only_considers_must_fix(self) -> None:
+        should_fix = self._reworded(severity="SHOULD_FIX")
+        verdict = _verdict(_accepted(should_fix))
+        suppressed = suppress_adjudicated_findings(
+            verdict,
+            self._recorded_ledger(),
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+        assert suppressed is verdict
+        assert read_events() == []
+
+    def test_exact_tier_still_suppresses_a_should_fix(self) -> None:
+        # The exact tier is severity-blind and unchanged by this ticket.
+        should_fix = _make_finding(severity="SHOULD_FIX")
+        suppressed = suppress_adjudicated_findings(
+            _verdict(_accepted(should_fix)),
+            _ledger(should_fix),
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+        assert suppressed.accepted[0].disposition == "rejected"
+
+    def test_claim_tier_skips_an_already_stamped_finding(self) -> None:
+        finding = self._reworded()
+        verdict = _verdict(
+            _accepted(
+                finding, disposition="rejected", disposition_detail="voided by operator"
+            ),
+            blocking=False,
+            must_fix=[],
+        )
+        suppressed = suppress_adjudicated_findings(
+            verdict,
+            self._recorded_ledger(),
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+        assert suppressed is verdict
+        assert read_events() == []
+
+    def test_accepted_entry_never_suppresses_even_fuzzily(self) -> None:
+        finding = self._reworded()
+        verdict = _verdict(_accepted(finding))
+        suppressed = suppress_adjudicated_findings(
+            verdict,
+            self._recorded_ledger(outcome="ACCEPTED"),
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+        assert suppressed is verdict
+
+    def test_exact_accepted_entry_vetoes_a_fuzzy_rejected_sibling(self) -> None:
+        finding = self._reworded()
+        ledger = {
+            **_ledger(finding, outcome="ACCEPTED"),
+            **self._recorded_ledger(),
+        }
+        verdict = _verdict(_accepted(finding))
+        suppressed = suppress_adjudicated_findings(
+            verdict, ledger, ticket_id=_TICKET, claim_tier_enabled=True
+        )
+        assert suppressed is verdict
+
+    def test_nearer_accepted_entry_vetoes_a_fuzzy_rejected_entry(self) -> None:
+        finding = self._reworded()
+        ledger = {
+            # An exact-wording ACCEPTED twin of the candidate scores 1.0 and
+            # therefore wins the nearest-decision contest against the REJECTED
+            # rewording below.
+            **_ledger_for("src/cw/foo.py", CLAIM_ROW1_CANDIDATE, outcome="ACCEPTED"),
+            **self._recorded_ledger(),
+        }
+        verdict = _verdict(_accepted(finding))
+        suppressed = suppress_adjudicated_findings(
+            verdict, ledger, ticket_id=_TICKET, claim_tier_enabled=True
+        )
+        assert suppressed is verdict
+
+    def test_best_similarity_wins_among_multiple_rejected_entries(self) -> None:
+        finding = self._reworded()
+        ledger = {
+            **self._recorded_ledger(rationale="the near one"),
+            **_ledger_for(
+                "src/cw/foo.py",
+                "`_track_open_findings` drops the follow-up task entirely",
+                rationale="the far one",
+            ),
+        }
+        suppressed = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            ledger,
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+        assert "the near one" in suppressed.accepted[0].disposition_detail
+
+    def test_full_tie_resolves_to_the_first_key_in_sort_order(self) -> None:
+        # Two REJECTED entries scoring identically against the candidate, with
+        # identical recorded_at: `max` keeps the first maximal element it meets
+        # and candidates are built over sorted(ledger.items()), so the
+        # alphabetically first key wins.
+        finding = self._reworded(summary="`alpha_helper` drops the follow-up task")
+        ledger = {
+            **_ledger_for(
+                "src/cw/foo.py",
+                "`alpha_helper` drops a follow-up task",
+                rationale="AAA first key",
+            ),
+            **_ledger_for(
+                "src/cw/foo.py",
+                "`alpha_helper` drops one follow-up task",
+                rationale="ZZZ later key",
+            ),
+        }
+        suppressed = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            ledger,
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+        assert "AAA first key" in suppressed.accepted[0].disposition_detail
+
+    def test_later_recorded_at_wins_at_equal_similarity(self) -> None:
+        finding = self._reworded(summary="`alpha_helper` drops the follow-up task")
+        ledger = {
+            **_ledger_for(
+                "src/cw/foo.py",
+                "`alpha_helper` drops a follow-up task",
+                rationale="AAA first key",
+                recorded_at="2026-01-01T00:00:00Z",
+            ),
+            **_ledger_for(
+                "src/cw/foo.py",
+                "`alpha_helper` drops one follow-up task",
+                rationale="ZZZ later key",
+                recorded_at="2026-09-01T00:00:00Z",
+            ),
+        }
+        suppressed = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            ledger,
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+        assert "ZZZ later key" in suppressed.accepted[0].disposition_detail
+
+    def test_no_diff_anchor_file_is_never_claim_matched(self) -> None:
+        finding = _make_finding(
+            severity="MUST_FIX",
+            file="N/A",
+            line_start=None,
+            line_end=None,
+            no_diff_anchor=True,
+            summary=CLAIM_ROW1_CANDIDATE,
+        )
+        verdict = _verdict(_accepted(finding))
+        suppressed = suppress_adjudicated_findings(
+            verdict,
+            self._recorded_ledger(),
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+        assert suppressed is verdict
+
+
+# ---------------------------------------------------------------------------
+# Claim tier: the per-lane gate and its shadow record (#2210)
+# ---------------------------------------------------------------------------
+
+
+class TestClaimTierGate:
+    def _armed_inputs(self) -> tuple[Finding, dict[str, FindingDisposition]]:
+        finding = _make_finding(severity="MUST_FIX", summary=CLAIM_ROW1_CANDIDATE)
+        return finding, _ledger_for("src/cw/foo.py", CLAIM_ROW1_RECORDED)
+
+    def test_gate_off_claim_match_is_not_suppressed(self) -> None:
+        finding, ledger = self._armed_inputs()
+        verdict = _verdict(_accepted(finding))
+        suppressed = suppress_adjudicated_findings(
+            verdict, ledger, ticket_id=_TICKET
+        )
+        assert suppressed is verdict
+        assert suppressed.blocking is True
+        assert [f.summary for f in suppressed.must_fix] == [finding.summary]
+
+    def test_gate_off_emits_a_shadow_event_and_no_suppression_event(self) -> None:
+        finding, ledger = self._armed_inputs()
+        suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            ledger,
+            ticket_id=_TICKET,
+            reviewed_sha="deadbee",
+        )
+
+        shadows = read_events(
+            event_types=[OrchestratorEventType.REVIEW_FINDING_CLAIM_SHADOWED]
+        )
+        assert len(shadows) == 1
+        payload = shadows[0].payload
+        assert shadows[0].correlation_id == _TICKET
+        assert payload["file"] == finding.file
+        assert payload["summary"] == finding.summary
+        assert payload["severity"] == "MUST_FIX"
+        assert float(payload["similarity"]) == pytest.approx(0.86, abs=0.005)
+        assert payload["matched_key"] == next(iter(ledger))
+        assert payload["matched_recorded_at"] == "2026-08-16T00:00:00Z"
+        assert payload["matched_rationale"] == (
+            "intentional tradeoff, settled in round 1"
+        )
+        assert payload["reviewed_sha"] == "deadbee"
+        assert (
+            read_events(
+                event_types=[
+                    OrchestratorEventType.REVIEW_FINDING_DISPOSITION_SUPPRESSED
+                ]
+            )
+            == []
+        )
+
+    def test_shadow_recording_failure_never_alters_the_verdict(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise OSError(2, "no such file")
+
+        monkeypatch.setattr("cw.events.record_event", _boom)
+        finding, ledger = self._armed_inputs()
+        verdict = _verdict(_accepted(finding))
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            suppressed = suppress_adjudicated_findings(
+                verdict, ledger, ticket_id=_TICKET
+            )
+        assert suppressed is verdict
+        assert suppressed.blocking is True
+        assert any(_TICKET in record.getMessage() for record in caplog.records)
+
+    def test_shadow_event_is_distinct_per_reviewed_sha(self) -> None:
+        finding, ledger = self._armed_inputs()
+        for sha in ("sha-one", "sha-two"):
+            suppress_adjudicated_findings(
+                _verdict(_accepted(finding)),
+                ledger,
+                ticket_id=_TICKET,
+                reviewed_sha=sha,
+            )
+        shadows = read_events(
+            event_types=[OrchestratorEventType.REVIEW_FINDING_CLAIM_SHADOWED]
+        )
+        assert [s.payload["reviewed_sha"] for s in shadows] == ["sha-one", "sha-two"]
+        assert {s.payload["summary"] for s in shadows} == {finding.summary}
+
+    def test_gate_off_shadow_is_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        finding, ledger = self._armed_inputs()
+        with caplog.at_level(logging.INFO, logger=_LOGGER):
+            suppress_adjudicated_findings(
+                _verdict(_accepted(finding)), ledger, ticket_id=_TICKET
+            )
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(_TICKET in m and "NOT suppressed" in m for m in messages)
+
+    def test_gate_on_claim_match_emits_the_suppression_event_with_claim_metadata(
+        self,
+    ) -> None:
+        finding, ledger = self._armed_inputs()
+        suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            ledger,
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+        events = read_events(
+            event_types=[OrchestratorEventType.REVIEW_FINDING_DISPOSITION_SUPPRESSED]
+        )
+        assert len(events) == 1
+        assert events[0].payload["match_kind"] == "claim"
+        assert isinstance(events[0].payload["similarity"], float)
+        assert events[0].payload["matched_key"] == next(iter(ledger))
+        assert events[0].payload["severity"] == "MUST_FIX"
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.REVIEW_FINDING_CLAIM_SHADOWED]
+            )
+            == []
+        )
+
+    @pytest.mark.parametrize("claim_tier_enabled", [True, False])
+    def test_exact_tier_is_byte_identical_whichever_way_the_gate_is_set(
+        self, claim_tier_enabled: bool
+    ) -> None:
+        finding = _make_finding(severity="MUST_FIX")
+        suppressed = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            _ledger(finding),
+            ticket_id=_TICKET,
+            claim_tier_enabled=claim_tier_enabled,
+        )
+        assert suppressed.blocking is False
+        assert suppressed.accepted[0].disposition_detail == _render_suppression_signal(
+            finding.file, finding.summary, _entry()
+        )
+        events = read_events(
+            event_types=[OrchestratorEventType.REVIEW_FINDING_DISPOSITION_SUPPRESSED]
+        )
+        assert events[0].payload["match_kind"] == "exact"
+        assert events[0].payload["similarity"] == 1.0
+
+    def test_shadow_is_independent_of_gate_state_elsewhere(self) -> None:
+        verdict = _verdict(_accepted(_make_finding(severity="MUST_FIX")))
+        assert suppress_adjudicated_findings(verdict, {}, ticket_id=_TICKET) is verdict
+        assert read_events() == []
+
+
+# ---------------------------------------------------------------------------
+# Finding.contests_adjudication — the typed escape hatch (#2210)
+# ---------------------------------------------------------------------------
+
+
+class TestContest:
+    def test_contested_exact_match_is_not_suppressed(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        finding = _make_finding(
+            severity="MUST_FIX",
+            contests_adjudication="the guard was deleted in commit abc123",
+        )
+        verdict = _verdict(_accepted(finding))
+        with caplog.at_level(logging.INFO, logger=_LOGGER):
+            suppressed = suppress_adjudicated_findings(
+                verdict, _ledger(finding), ticket_id=_TICKET
+            )
+        assert suppressed is verdict
+        assert suppressed.blocking is True
+        assert suppressed.accepted[0].disposition == "fixed"
+        assert (
+            read_events(
+                event_types=[
+                    OrchestratorEventType.REVIEW_FINDING_DISPOSITION_SUPPRESSED
+                ]
+            )
+            == []
+        )
+        assert any(
+            _TICKET in record.getMessage() and "admitted contest" in record.getMessage()
+            for record in caplog.records
+        )
+
+    @pytest.mark.parametrize("claim_tier_enabled", [True, False])
+    def test_contested_claim_match_is_not_suppressed_and_not_shadowed(
+        self, claim_tier_enabled: bool
+    ) -> None:
+        finding = _make_finding(
+            severity="MUST_FIX",
+            summary=CLAIM_ROW1_CANDIDATE,
+            contests_adjudication="the early-return branch is now unreachable",
+        )
+        verdict = _verdict(_accepted(finding))
+        suppressed = suppress_adjudicated_findings(
+            verdict,
+            _ledger_for("src/cw/foo.py", CLAIM_ROW1_RECORDED),
+            ticket_id=_TICKET,
+            claim_tier_enabled=claim_tier_enabled,
+        )
+        assert suppressed is verdict
+        assert read_events() == []
+
+    def test_whitespace_only_contest_is_treated_as_bare_and_suppressed(self) -> None:
+        finding = _make_finding(severity="MUST_FIX", contests_adjudication="   \n ")
+        suppressed = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)), _ledger(finding), ticket_id=_TICKET
+        )
+        assert suppressed.blocking is False
+        assert suppressed.accepted[0].disposition == "rejected"
+
+    def test_contest_on_an_unmatched_finding_is_a_no_op(self) -> None:
+        finding = _make_finding(
+            severity="MUST_FIX", contests_adjudication="something changed"
+        )
+        other = _make_finding(severity="MUST_FIX", file="src/cw/other.py")
+        verdict = _verdict(_accepted(finding))
+        suppressed = suppress_adjudicated_findings(
+            verdict, _ledger(other), ticket_id=_TICKET
+        )
+        assert suppressed is verdict
+
+    def test_contest_admission_emits_no_event(self) -> None:
+        # Admission is intentionally log-only (ADR-0016, follow-up F9).
+        finding = _make_finding(
+            severity="MUST_FIX", contests_adjudication="the code moved"
+        )
+        suppress_adjudicated_findings(
+            _verdict(_accepted(finding)), _ledger(finding), ticket_id=_TICKET
+        )
+        assert read_events() == []
+
+
+# ---------------------------------------------------------------------------
+# build_finding_disposition_ledger — the producer-side twin (#2210)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildFindingDispositionLedger:
+    def test_keys_equal_disposition_key(self) -> None:
+        ledger = build_finding_disposition_ledger(
+            [("src/cw/foo.py", "Bug here", _entry())]
+        )
+        assert list(ledger) == [_disposition_key("src/cw/foo.py", "Bug here")]
+
+    def test_unkeyable_file_raises(self) -> None:
+        with pytest.raises(ValueError, match="no path to key on"):
+            build_finding_disposition_ledger([("N/A", "Bug here", _entry())])
+
+    def test_duplicate_key_resolves_newest_recorded_at_first(self) -> None:
+        ledger = build_finding_disposition_ledger(
+            [
+                (
+                    "src/cw/foo.py",
+                    "Bug here",
+                    _entry(rationale="older", recorded_at="2026-01-01T00:00:00Z"),
+                ),
+                (
+                    "src/cw/foo.py",
+                    "Bug here",
+                    _entry(rationale="newer", recorded_at="2026-09-01T00:00:00Z"),
+                ),
+            ]
+        )
+        assert len(ledger) == 1
+        assert next(iter(ledger.values())).rationale == "newer"
+
+    def test_older_duplicate_never_overwrites_a_newer_entry(self) -> None:
+        ledger = build_finding_disposition_ledger(
+            [
+                (
+                    "src/cw/foo.py",
+                    "Bug here",
+                    _entry(rationale="newer", recorded_at="2026-09-01T00:00:00Z"),
+                ),
+                (
+                    "src/cw/foo.py",
+                    "Bug here",
+                    _entry(rationale="older", recorded_at="2026-01-01T00:00:00Z"),
+                ),
+            ]
+        )
+        assert next(iter(ledger.values())).rationale == "newer"
+
+    def test_round_trips_through_the_marker(self) -> None:
+        ledger = build_finding_disposition_ledger(
+            [("src/cw/foo.py", "Bug here", _entry())]
+        )
+        rendered = render_finding_disposition_block(ledger)
+        assert parse_finding_disposition_block([rendered]) == ledger
 
 
 # ---------------------------------------------------------------------------

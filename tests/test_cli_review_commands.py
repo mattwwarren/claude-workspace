@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from click.testing import CliRunner
+from freezegun import freeze_time
 
 from cw.cli import main
 from cw.dev_queue import load_dev_queue
@@ -25,16 +26,30 @@ from cw.review_adjudication import (
     render_deferred_findings_md,
     render_voided_findings_block,
 )
+from cw.review_finding_dispositions import (
+    _disposition_key,
+    parse_finding_disposition_block,
+)
 from tests._cli_review_helpers import (
     _CONSOLIDATE_DIFF,
     _branch_repo,
     _consolidate_payload,
+    _extract_settle_payloads,
+    _settle_entry,
+    _settle_payload,
 )
-from tests.conftest import _finding_kwargs, _make_finding, _make_reviewer_doc
+from tests.conftest import (
+    _finding_kwargs,
+    _make_diff,
+    _make_finding,
+    _make_reviewer_doc,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from click.testing import Result
 
 
 @pytest.fixture
@@ -985,6 +1000,127 @@ class TestReviewCheckVoidedCommand:
         assert result.exit_code == 0, result.output
         written = parse_voided_findings_block([out_path.read_text(encoding="utf-8")])
         assert written[0].voided_at != ""
+
+
+class TestReviewSettle:
+    """#2210: ``cw review settle`` is the ledger's first production writer."""
+
+    def _invoke(
+        self, runner: CliRunner, payload: dict[str, Any], *args: str
+    ) -> Result:
+        return runner.invoke(
+            main,
+            ["review", "settle", *args, "-"],
+            input=json.dumps(payload),
+        )
+
+    def test_happy_path_renders_the_postable_marker(self, runner: CliRunner) -> None:
+        result = self._invoke(runner, _settle_payload())
+
+        assert result.exit_code == 0, result.output
+        assert result.output.startswith("## Review Finding Dispositions")
+        ledger = parse_finding_disposition_block([result.output])
+        assert list(ledger) == [_disposition_key("src/cw/foo.py", "Bug here")]
+        assert next(iter(ledger.values())).outcome == "REJECTED"
+
+    def test_out_writes_the_file_and_creates_parents(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        out_path = tmp_path / "nested" / "settle.md"
+        result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
+
+        assert result.exit_code == 0, result.output
+        assert parse_finding_disposition_block([out_path.read_text(encoding="utf-8")])
+
+    @freeze_time("2026-09-20T12:00:00Z")
+    def test_blank_recorded_at_is_stamped_from_the_clock(
+        self, runner: CliRunner
+    ) -> None:
+        result = self._invoke(runner, _settle_payload())
+
+        assert result.exit_code == 0, result.output
+        entry = next(iter(parse_finding_disposition_block([result.output]).values()))
+        assert entry.recorded_at == "2026-09-20T12:00:00Z"
+
+    @freeze_time("2026-09-20T12:00:00Z")
+    def test_supplied_recorded_at_is_preserved(self, runner: CliRunner) -> None:
+        result = self._invoke(
+            runner,
+            _settle_payload(_settle_entry(recorded_at="2026-01-01T00:00:00Z")),
+        )
+
+        assert result.exit_code == 0, result.output
+        entry = next(iter(parse_finding_disposition_block([result.output]).values()))
+        assert entry.recorded_at == "2026-01-01T00:00:00Z"
+
+    def test_duplicate_keys_collapse_newest_wins(self, runner: CliRunner) -> None:
+        result = self._invoke(
+            runner,
+            _settle_payload(
+                _settle_entry(rationale="older", recorded_at="2026-01-01T00:00:00Z"),
+                _settle_entry(rationale="newer", recorded_at="2026-09-01T00:00:00Z"),
+            ),
+        )
+
+        assert result.exit_code == 0, result.output
+        ledger = parse_finding_disposition_block([result.output])
+        assert len(ledger) == 1
+        assert next(iter(ledger.values())).rationale == "newer"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"entries": [_settle_entry(file="N/A")]},
+            {"entries": [_settle_entry(file="  ")]},
+            {"entries": [_settle_entry(summary="")]},
+            {"entries": [_settle_entry(outcome="MAYBE")]},
+            {"entries": []},
+        ],
+    )
+    def test_invalid_payloads_exit_one_with_field_path_errors(
+        self, runner: CliRunner, payload: dict[str, Any]
+    ) -> None:
+        result = self._invoke(runner, payload)
+
+        assert result.exit_code == 1
+        assert "entries" in result.output
+
+    def test_malformed_json_exits_one(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["review", "settle", "-"], input="{not json")
+        assert result.exit_code != 0
+
+    def test_settle_emits_no_events(self, runner: CliRunner) -> None:
+        result = self._invoke(runner, _settle_payload())
+
+        assert result.exit_code == 0, result.output
+        assert read_events() == []
+
+    def test_payload_pasted_from_a_blocking_comment_is_sufficient_with_no_editing(
+        self, runner: CliRunner
+    ) -> None:
+        """The comment's payload carries the ledger's whole identity (#2210)."""
+        from cw.codex_review import render_verdict_comment
+        from cw.review_finding_dispositions import suppress_adjudicated_findings
+        from cw.review_findings import consolidate_verdict
+
+        finding = _make_finding(severity="MUST_FIX")
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(finding)], _make_diff(), reviewed_sha="sha"
+        )
+        assert verdict.blocking is True
+        comment = render_verdict_comment(verdict, fix_loop_enabled=False)
+        payloads = _extract_settle_payloads(comment)
+        assert payloads
+
+        result = self._invoke(runner, payloads[0])
+        assert result.exit_code == 0, result.output
+        ledger = parse_finding_disposition_block([result.output])
+
+        suppressed = suppress_adjudicated_findings(
+            verdict, ledger, ticket_id="T-2210"
+        )
+        assert suppressed.blocking is False
+        assert suppressed.accepted[0].disposition == "rejected"
 
 
 class TestReviewVerifyFixesBaseFlag:

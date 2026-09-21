@@ -22,8 +22,10 @@ import pytest
 from cw import codex_background
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_background import (
+    _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
     _default_background,
     _post_review_comment,
+    _resolve_claim_tier_enabled,
     _resolve_codex_fix_loop_enabled,
     _run_codex_review_and_complete,
     _start_daemon_thread,
@@ -590,6 +592,131 @@ def test_resolve_codex_fix_loop_enabled_unmatched_lane_falls_through_to_global()
     config = OrchestratorConfig(default_codex_fix_loop_enabled=True)
 
     assert _resolve_codex_fix_loop_enabled(client, task, config) is True
+
+
+# ---------------------------------------------------------------------------
+# _resolve_claim_tier_enabled precedence (#2210)
+# ---------------------------------------------------------------------------
+
+
+def _claim_client(*lanes: LaneConfig) -> ClientConfig:
+    return ClientConfig(
+        name="test", workspace_path=Path("/tmp/x"), lanes=list(lanes)
+    )
+
+
+def _claim_task(lane: str = "trial") -> TicketTask:
+    return TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW, lane=lane)
+
+
+@pytest.mark.parametrize(
+    ("lanes", "task_lane", "master", "expected"),
+    [
+        # Master off is a kill switch: an armed lane cannot override it.
+        (
+            [LaneConfig(name="trial", codex_review_tiers={"claim_suppression": True})],
+            "trial",
+            False,
+            False,
+        ),
+        # Master on, lane silent on the key -> the hardcoded-off floor.
+        ([LaneConfig(name="trial")], "trial", True, False),
+        (
+            [LaneConfig(name="trial", codex_review_tiers={"claim_suppression": True})],
+            "trial",
+            True,
+            True,
+        ),
+        (
+            [LaneConfig(name="trial", codex_review_tiers={"claim_suppression": False})],
+            "trial",
+            True,
+            False,
+        ),
+        # The task's lane is not declared by the client -> floor.
+        (
+            [LaneConfig(name="trial", codex_review_tiers={"claim_suppression": True})],
+            "no-such-lane",
+            True,
+            False,
+        ),
+        # No declared lanes at all: a synthesised `default` lane carries no
+        # tier map, so arming requires declaring the lane.
+        ([], "default", True, False),
+    ],
+)
+def test_resolve_claim_tier_enabled_table(
+    lanes: list[LaneConfig], task_lane: str, master: bool, expected: bool
+) -> None:
+    config = OrchestratorConfig(codex_claim_suppression_enabled=master)
+    resolved = _resolve_claim_tier_enabled(
+        _claim_client(*lanes), _claim_task(task_lane), config
+    )
+    assert resolved is expected
+
+
+def test_resolve_claim_tier_enabled_arms_only_the_named_lane() -> None:
+    client = _claim_client(
+        LaneConfig(name="armed", codex_review_tiers={"claim_suppression": True}),
+        LaneConfig(name="quiet"),
+    )
+    config = OrchestratorConfig(codex_claim_suppression_enabled=True)
+    assert _resolve_claim_tier_enabled(client, _claim_task("armed"), config) is True
+    assert _resolve_claim_tier_enabled(client, _claim_task("quiet"), config) is False
+
+
+def test_default_codex_review_tier_floor_is_off() -> None:
+    assert _DEFAULT_CODEX_REVIEW_TIER_ENABLED == {"claim_suppression": False}
+
+
+@pytest.mark.parametrize(
+    ("lanes", "master", "expected"),
+    [
+        (
+            [LaneConfig(name="trial", codex_review_tiers={"claim_suppression": True})],
+            True,
+            True,
+        ),
+        ([LaneConfig(name="trial")], False, False),
+    ],
+)
+def test_run_codex_review_and_complete_forwards_claim_tier(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    lanes: list[LaneConfig],
+    master: bool,
+    expected: bool,
+) -> None:
+    worktree = make_git_repo(f"wt-bg-claim-{master}")
+    _seed_session("bg-claim")
+    task = TicketTask(
+        ticket_id="T-claim", client="test", stage=Stage.REVIEW, lane="trial"
+    )
+    result = make_blocked(
+        ticket_id="T-claim",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        lanes=list(lanes),
+    )
+    with (
+        patch(
+            "cw.codex_background.load_effective_config",
+            return_value=OrchestratorConfig(codex_claim_suppression_enabled=master),
+        ),
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, None),
+        ) as fix_loop_mock,
+    ):
+        _run(sid="bg-claim", task=task, worktree=worktree, client=client)
+
+    assert fix_loop_mock.call_args.kwargs["claim_tier_enabled"] is expected
 
 
 # ---------------------------------------------------------------------------

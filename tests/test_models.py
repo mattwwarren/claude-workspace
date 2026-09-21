@@ -1394,6 +1394,33 @@ class TestCodexFixLoopEnabledGate:
         )
 
 
+class TestCodexClaimSuppressionGate:
+    """Lane-scoped codex claim-match suppression tier (#2210, ADR-0016)."""
+
+    def test_orchestrator_master_switch_defaults_false(self) -> None:
+        assert OrchestratorConfig().codex_claim_suppression_enabled is False
+
+    def test_lane_config_codex_review_tiers_defaults_none(self) -> None:
+        assert LaneConfig(name="x").codex_review_tiers is None
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_lane_accepts_the_recognised_key(self, enabled: bool) -> None:
+        lane = LaneConfig(name="x", codex_review_tiers={"claim_suppression": enabled})
+        assert lane.codex_review_tiers == {"claim_suppression": enabled}
+
+    def test_typo_key_raises_naming_the_recognised_keys(self) -> None:
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError, match="claim_suppression"):
+            LaneConfig(name="x", codex_review_tiers={"claim_supression": True})
+
+    def test_orchestrator_master_switch_round_trips(self) -> None:
+        config = OrchestratorConfig.model_validate(
+            {"codex_claim_suppression_enabled": True}
+        )
+        assert config.codex_claim_suppression_enabled is True
+
+
 class TestLaneAttemptCeiling:
     """Lane-scoped attempt_ceiling with global fallback (#1751).
 

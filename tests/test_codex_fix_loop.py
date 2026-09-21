@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw import codex_fix_loop
+from cw.codex_review import core as codex_review_core
 from cw.codex_fix_loop import (
     _ESCALATE_AT_CYCLE,
     _FIX_CYCLE_FLOOR_SECONDS,
@@ -253,6 +254,7 @@ def _run_loop(
     fix_loop_enabled: bool = True,
     task: TicketTask | None = None,
     reasoning_effort: str | None = None,
+    claim_tier_enabled: bool = False,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     return run_review_with_fix_loop(
         runner=runner,
@@ -264,6 +266,7 @@ def _run_loop(
         wall_clock_budget_seconds=budget,
         session_id=session_id,
         fix_loop_enabled=fix_loop_enabled,
+        claim_tier_enabled=claim_tier_enabled,
     )
 
 
@@ -2123,3 +2126,50 @@ class TestRereviewForwardsFindingDispositions:
         assert verdict is not None
         assert verdict.blocking is False
         assert result.status == "stage_complete"
+
+
+class TestClaimTierGateReachesBothSynthesisHops:
+    """#2210: the per-lane claim-tier gate must reach cycle 0 AND `_rereview`.
+
+    `run_review_with_fix_loop` calls `run_review` directly for cycle 0 and
+    `_rereview` for every later cycle, and each reaches
+    `synthesize_codex_review_result` through its own module. A gate threaded
+    into only one would arm (or disarm) half the loop.
+    """
+
+    @pytest.mark.parametrize("claim_tier_enabled", [True, False])
+    def test_both_hops_receive_the_flag(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        claim_tier_enabled: bool,
+    ) -> None:
+        worktree = _worktree(make_git_repo, f"wt-2210-gate-{claim_tier_enabled}")
+        seen: list[object] = []
+
+        real_core_synth = codex_review_core.synthesize_codex_review_result
+        real_loop_synth = codex_fix_loop.synthesize_codex_review_result
+
+        def _spy_core(**kwargs: object) -> object:
+            seen.append(kwargs.get("claim_tier_enabled"))
+            return real_core_synth(**kwargs)  # type: ignore[arg-type]
+
+        def _spy_loop(**kwargs: object) -> object:
+            seen.append(kwargs.get("claim_tier_enabled"))
+            return real_loop_synth(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            codex_review_core, "synthesize_codex_review_result", _spy_core
+        )
+        monkeypatch.setattr(
+            codex_fix_loop, "synthesize_codex_review_result", _spy_loop
+        )
+
+        _run_loop(
+            _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]),
+            worktree,
+            claim_tier_enabled=claim_tier_enabled,
+        )
+
+        assert len(seen) == 2
+        assert seen == [claim_tier_enabled, claim_tier_enabled]

@@ -10,7 +10,10 @@ import pytest
 
 from cw.codex_review import _prepare_review_pass, run_review
 from cw.codex_runner import FakeCodexRunner
+from cw.events import read_events
+from cw.models.enums import OrchestratorEventType
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
+from tests._cli_review_helpers import CLAIM_ROW1_CANDIDATE, CLAIM_ROW1_RECORDED
 from tests._codex_review_helpers import (
     _finding_payload,
     _ok_result,
@@ -22,6 +25,9 @@ from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cw.auto_dev_result import AutoDevResult
+    from cw.review_findings import ReviewVerdict
 
 
 def test_run_review_threads_session_id_and_reasoning_effort_to_run_codex_role(
@@ -215,6 +221,95 @@ class TestPrepareReviewPass:
         assert verdict.blocking is False
         assert result.status == "stage_complete"
         assert [af.disposition for af in verdict.accepted] == ["rejected"]
+
+    def _reworded_run(
+        self,
+        repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        session_id: str,
+        **run_kwargs: object,
+    ) -> tuple[AutoDevResult, ReviewVerdict | None]:
+        """One `run_review` over a MUST_FIX that REWORDS a ledgered finding."""
+        key = _disposition_key("mod.py", CLAIM_ROW1_RECORDED)
+        assert key is not None
+        monkeypatch.setattr(
+            "cw.codex_review._context.core._load_finding_dispositions",
+            lambda *_a, **_kw: {
+                key: FindingDisposition(
+                    outcome="REJECTED",
+                    rationale="settled in an earlier round",
+                    recorded_at="2026-08-16T00:00:00Z",
+                )
+            },
+        )
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id=session_id
+        )
+        results = [_ok_result() for _ in prepared.roles]
+        results[0] = _ok_result(
+            findings=[
+                _finding_payload(
+                    severity="MUST_FIX",
+                    file="mod.py",
+                    line_start=1,
+                    line_end=1,
+                    summary=CLAIM_ROW1_CANDIDATE,
+                )
+            ]
+        )
+        return run_review(
+            runner=_SequencedRunner(results),
+            task=_task(),
+            worktree=repo,
+            default_branch="main",
+            model=None,
+            reasoning_effort=None,
+            wall_clock_budget_seconds=None,
+            session_id=session_id,
+            fix_loop_enabled=False,
+            **run_kwargs,  # type: ignore[arg-type]
+        )
+
+    def _feature_repo(self, make_git_repo: Callable[[str], Path], name: str) -> Path:
+        repo = make_git_repo(name)
+        git_in(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
+        return repo
+
+    def test_run_review_threads_claim_tier_gate_into_synthesis(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._feature_repo(make_git_repo, "wt-claim-tier-on")
+        result, verdict = self._reworded_run(
+            repo,
+            monkeypatch,
+            session_id="sess-claim-on",
+            claim_tier_enabled=True,
+        )
+
+        assert result.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert [af.disposition for af in verdict.accepted] == ["rejected"]
+
+    def test_run_review_gate_off_keeps_the_reworded_finding_blocking(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._feature_repo(make_git_repo, "wt-claim-tier-off")
+        result, verdict = self._reworded_run(
+            repo, monkeypatch, session_id="sess-claim-off"
+        )
+
+        assert result.status == "blocked"
+        assert verdict is not None
+        assert verdict.blocking is True
+        shadows = read_events(
+            event_types=[OrchestratorEventType.REVIEW_FINDING_CLAIM_SHADOWED]
+        )
+        assert len(shadows) == 1
 
 
 # ---------------------------------------------------------------------------
