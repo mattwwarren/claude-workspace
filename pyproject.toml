@@ -149,7 +149,7 @@ ignore = [
 ".claude/scripts/*.py" = ["INP001"]
 # Operator tooling under .claude/ (PR review/finalize, queue-peek, smoke-test
 # preflight) is linted at the baseline ruff level but exempted from the package
-# complexity discipline — CLAUDE.md gate 1 scopes ruff complexity to src/ + tests/.
+# complexity discipline — CLAUDE.md's `ruff check` gate scopes ruff complexity to src/ + tests/.
 # These are untested standalone scripts; extracting helpers solely to satisfy the
 # refactor rules would be unverified churn. (PLR0913 is already globally ignored.)
 ".claude/**/*.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]

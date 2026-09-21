@@ -3,8 +3,9 @@
 Uses importlib to load the script directly (it lives outside the src/ tree).
 All fixtures are deterministic string literals — the live CLAUDE.md is never read,
 with one deliberate exception: ``TestRealClaudeMdGates`` pins the repo's own
-``## Quality Gates`` list so a regression in ``detect-gates`` (or an unannounced
-edit to that list) fails loudly.
+``## Quality Gates`` list (and reads ``.github/workflows/ci.yml`` to check it
+agrees) so a regression in ``detect-gates`` (or an unannounced edit to that
+list) fails loudly.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import sys
 import types
 from datetime import UTC, datetime
@@ -19,6 +21,9 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 import pytest
+
+from cw.codex_review._context import _load_claude_md_quality_gates
+from tests.conftest import _bash_fences
 
 # ---------------------------------------------------------------------------
 # Protocol for dynamically-loaded Gate objects
@@ -758,7 +763,8 @@ class TestDetectGatesAuthoritativeBlock:
 # ---------------------------------------------------------------------------
 
 EXPECTED_REPO_GATES: list[tuple[str, str]] = [
-    ("uv", "uv lock --check"),
+    ("uv-lock", "uv lock --check"),
+    ("uv-sync", "uv sync --locked --dev --extra mcp"),
     ("ruff-check", "uv run ruff check src/ tests/"),
     ("ruff-format", "uv run ruff format --check src/ tests/"),
     ("mypy", "uv run mypy --strict src/"),
@@ -785,15 +791,103 @@ _PIN_GUIDANCE = (
 )
 
 
+_CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+
+# Index of the sync gate in the repo's list (gate 2, right after `uv lock --check`).
+_SYNC_GATE_INDEX = 1
+
+
+def _real_repo_gates(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Run the real ``detect-gates`` against this repo's CLAUDE.md (full result)."""
+    monkeypatch.chdir(_REPO_ROOT)
+    return cast("dict[str, Any]", _mod.detect_gates())
+
+
 class TestRealClaudeMdGates:
     def test_repo_claude_md_yields_pinned_gate_list(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.chdir(_REPO_ROOT)
-        result = cast("dict[str, Any]", _mod.detect_gates())
+        result = _real_repo_gates(monkeypatch)
         gates = result["gates"]
         actual = [(g["name"], g["command"]) for g in gates]
         assert actual == EXPECTED_REPO_GATES, _PIN_GUIDANCE
         assert result["detected_from"] == ["CLAUDE.md"], _PIN_GUIDANCE
         assert all("autofix" not in g for g in gates), _PIN_GUIDANCE
         assert len({name for name, _ in actual}) == len(EXPECTED_REPO_GATES)
+
+    def test_lock_check_first_then_locked_sync(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Redundant with the exact-list pin above, kept to document intent (#2188):
+        # gate 1 asserts the lock, gate 2 syncs the venv against it with --locked
+        # (so it fails instead of rewriting a stale lock), both before type checks.
+        gates = _real_repo_gates(monkeypatch)["gates"]
+        assert len(gates) > _SYNC_GATE_INDEX, (
+            f"expected at least {_SYNC_GATE_INDEX + 1} gates, got {len(gates)}. "
+            + _PIN_GUIDANCE
+        )
+        assert gates[0]["command"] == "uv lock --check", _PIN_GUIDANCE
+        sync_command = gates[_SYNC_GATE_INDEX]["command"]
+        assert sync_command.startswith("uv sync"), _PIN_GUIDANCE
+        assert "--locked" in sync_command.split(), _PIN_GUIDANCE
+        names = [g["name"] for g in gates]
+        assert "mypy" in names, "no `mypy` gate detected. " + _PIN_GUIDANCE
+        assert names.index("mypy") > _SYNC_GATE_INDEX, (
+            "the venv sync must run before the type check. " + _PIN_GUIDANCE
+        )
+
+    def test_sync_gate_mirrors_ci_extras(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        gates = _real_repo_gates(monkeypatch)["gates"]
+        assert len(gates) > _SYNC_GATE_INDEX, (
+            f"expected at least {_SYNC_GATE_INDEX + 1} gates, got {len(gates)}. "
+            + _PIN_GUIDANCE
+        )
+        ci = _CI_WORKFLOW.read_text(encoding="utf-8")
+        # Anchor on the `run:` lines: the same phrases also appear earlier in ci.yml
+        # comments, so a raw substring index would compare comment positions.
+        m_lock = re.search(r"^\s*run: uv lock --check\s*$", ci, re.MULTILINE)
+        m_sync = re.search(r"^\s*run: (uv sync .*)$", ci, re.MULTILINE)
+        assert m_lock is not None, (
+            "no `run: uv lock --check` step in ci.yml (comments are not matched)"
+        )
+        assert m_sync is not None, (
+            "no `run: uv sync ...` step in ci.yml (comments are not matched)"
+        )
+        assert m_lock.start() < m_sync.start(), (
+            "ci.yml must assert the lock before it syncs the venv"
+        )
+        ci_extras = re.findall(r"--extra (\S+)", m_sync.group(1))
+        assert ci_extras, "ci.yml's `uv sync` step installs no `--extra`"
+        sync_command = gates[_SYNC_GATE_INDEX]["command"]
+        for extra in ci_extras:
+            assert f"--extra {extra}" in sync_command, (
+                f"CI syncs `--extra {extra}` but the CLAUDE.md sync gate "
+                f"({sync_command!r}) does not. " + _PIN_GUIDANCE
+            )
+
+    def test_gate_number_prose_matches_block(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Renumbering a gate silently invalidates prose that names gates by number
+        # (the drift class #1565 fixed by hand). Assert derived facts, not wording.
+        section = _load_claude_md_quality_gates(_REPO_ROOT)
+        assert section is not None, "CLAUDE.md has no `## Quality Gates` section"
+        fences = _bash_fences(section)
+        assert len(fences) == 1, (
+            f"expected exactly one bash fence in `## Quality Gates`, got {len(fences)}"
+        )
+        # Only the fenced block: the prose holds other `#N`-shaped tokens (#436, #1).
+        numbers = [int(n) for n in re.findall(r"#\s+(\d+)\.\s", fences[0])]
+        assert numbers == list(range(1, len(EXPECTED_REPO_GATES) + 1)), (
+            f"`# N.` gate comments are not consecutive from 1: {numbers}"
+        )
+        collapsed = " ".join(section.split())
+        m_hook = re.search(r"gates? (\d+) \*is\* the hook suite", collapsed)
+        assert m_hook is not None, (
+            "prose no longer says which gate `*is* the hook suite`"
+        )
+        names = [g["name"] for g in _real_repo_gates(monkeypatch)["gates"]]
+        assert "pre-commit" in names, "no `pre-commit` gate detected. " + _PIN_GUIDANCE
+        assert int(m_hook.group(1)) == names.index("pre-commit") + 1, (
+            "the prose names the wrong gate number for the hook suite. " + _PIN_GUIDANCE
+        )

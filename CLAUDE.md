@@ -58,21 +58,22 @@ uv run pytest tests/ --cov=cw      # Coverage report
 ## Quality Gates
 
 Before committing, run **every** gate CI enforces (`.github/workflows/ci.yml`),
-in order. The first six mirror CI exactly; passing only a subset is the #1
+in order. The first seven mirror CI exactly; passing only a subset is the #1
 cause of a green local run that fails CI (see #436):
 
 ```bash
 uv lock --check                                                  # 1. Lockfile in sync
-uv run ruff check src/ tests/                                    # 2. Lint
-uv run ruff format --check src/ tests/                           # 3. Format
-uv run mypy --strict src/                                        # 4. Type check
-uv run python .claude/scripts/check_imports.py                   # 5. Smoke-import .claude scripts
-uv run pre-commit run --all-files                                # 6. Hooks
+uv sync --locked --dev --extra mcp                               # 2. Sync venv (incl. mcp extra), as CI installs
+uv run ruff check src/ tests/                                    # 3. Lint
+uv run ruff format --check src/ tests/                           # 4. Format
+uv run mypy --strict src/                                        # 5. Type check
+uv run python .claude/scripts/check_imports.py                   # 6. Smoke-import .claude scripts
+uv run pre-commit run --all-files                                # 7. Hooks
 uv run --extra mcp pytest tests/ -m 'not integration' \
-  --cov=cw --cov-report=xml --cov-fail-under=88                  # 7. Unit + total cov ≥88%
-uv run pytest tests/ -m integration                              # 8. tmux integration
+  --cov=cw --cov-report=xml --cov-fail-under=88                  # 8. Unit + total cov ≥88%
+uv run pytest tests/ -m integration                              # 9. tmux integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \
-  --fail-under=90                                                # 9. Patch coverage ≥90%
+  --fail-under=90                                                # 10. Patch coverage ≥90%
 ```
 
 (CI additionally runs a separate `package-smoke` job — wheel build +
@@ -83,11 +84,37 @@ syncs implicitly, so any later gate silently repairs a stale `uv.lock` on disk �
 leaving the drift uncommitted and CI red. Do not fold it into a `uv run …`
 invocation.
 
-Pre-commit hooks enforce gates 1–4 (gate 6 *is* the hook suite) automatically
-on `git commit` (`uv run pre-commit install`) — git invokes them directly,
-with no `uv run` wrapper, so gate 1 is genuine on that path. Only running
-gate 6 **by hand** via `uv run pre-commit run` masks it. Gate 5 has no hook:
-it runs only in CI and this list.
+Gate 2 is CI's `uv sync --dev --extra mcp` install step, run with `--locked`.
+It exists because `uv run` (gates 3+) does not upgrade an extra that is already
+installed but stale. Observed case (#2188): the venv held `mcp 1.27.1` while
+`uv.lock` pinned `mcp 2.1.1`, and gate 5 failed with `[arg-type]` errors at
+`src/cw/_events_channel_base.py:50,130` on untouched code while CI was green.
+If gate 5 reports errors in files you did not touch, run gate 2 and re-run
+gate 5 before editing `src/`. `--locked` makes gate 2 fail instead of rewriting
+a stale `uv.lock`, so it cannot mask gate 1; CI's install step is the same
+command without `--locked`, which is safe there because CI's lock check has
+already asserted the lock. `uv sync` is exact by default: it removes packages
+the lock does not list, so a bare `uv sync` uninstalls hand-installed packages
+and, without `--extra mcp`, the mcp extra itself. That is why the gate is
+written `--locked --dev --extra mcp` rather than bare (`--dev` is redundant,
+since the dev group is on by default, and is kept only so the token set is
+CI-identical). The exact-sync removal still applies to the gate as written, so
+anything installed by hand into the project venv with `uv pip install` is
+removed. The pre-commit pytest hook (`uv run pytest tests/ -x -q`) does not yet
+carry the extra and can still hit the stale-extra failure (tracked in #2242).
+Gate 2 is an environment step that mutates the venv, not a check: a failure
+there (no network, cold cache) is an environment problem to report, not code
+to fix or a reason to revert a resolved merge.
+
+Pre-commit hooks enforce gates 1 and 3–5 (gate 7 *is* the hook suite)
+automatically on `git commit` (`uv run pre-commit install`) — git invokes them
+directly, with no `uv run` wrapper, so gate 1 is genuine on that path. Only
+running gate 7 **by hand** via `uv run pre-commit run` masks it. Gates 2 and 6
+have no hook: gate 6 runs only in CI and this list, and gate 2 is a venv sync,
+not a check. (The hook's mypy runs in pre-commit's isolated env without `mcp`,
+so it never sees the stale-extra failure. The pre-commit pytest hook does run
+in the project venv without `--extra mcp` and can still hit it; that gap is
+tracked in #2242.)
 
 **Requirements:**
 - `uv lock --check` - **ZERO drift**. Any `pyproject.toml` edit that moves the
@@ -402,7 +429,7 @@ When writing or resolving a test that runs code under a "bare" or *different* in
 
 ### Optional External Binary Isolation (test pitfall)
 
-A test whose outcome depends on an optional external CLI (`codex`, `opencode`, ...) being installed on the host is invisible to all nine local gates by construction — it's green on any dev machine that happens to have the binary, and only fails where it's genuinely absent (CI). `codex --version` shelling out for real, or a `shutil.which("codex")` pre-flight quietly taking its "found" branch, are the same shape of bug as the interpreter-isolation pitfall above: the test never actually exercised the absent-binary path it claims to cover.
+A test whose outcome depends on an optional external CLI (`codex`, `opencode`, ...) being installed on the host is invisible to all ten local gates by construction — it's green on any dev machine that happens to have the binary, and only fails where it's genuinely absent (CI). `codex --version` shelling out for real, or a `shutil.which("codex")` pre-flight quietly taking its "found" branch, are the same shape of bug as the interpreter-isolation pitfall above: the test never actually exercised the absent-binary path it claims to cover.
 
 - **Mechanism:** `tests/conftest.py`'s autouse `_hide_optional_binaries` fixture patches `shutil.which` process-wide so every name in `_OPTIONAL_BINARY_DENYLIST` resolves to `None` by default, reproducing CI's binary-absent condition on every local run.
 - **Adding a binary to the denylist:** edit `_OPTIONAL_BINARY_DENYLIST` in `tests/conftest.py` and justify the addition in the PR description — it changes default behavior for every test in the suite, not just the one that motivated it.
