@@ -1110,11 +1110,13 @@ def _spawn_claimed_task(
             # worktree and legitimately leave cross-stage churn (#712).
             # refresh_on_reuse (#2213): a reused per-ticket worktree can sit
             # behind origin/<branch>, so ask for a best-effort refresh. NOTE
-            # this does a network `git fetch` (can be slow; a failure degrades
-            # to using the worktree as-is, never raises) and fast-forwards
-            # only an unoccupied, clean, strictly-behind worktree -- there is
-            # no friction-notes surface in this function, so this comment is
-            # the caller-side record of the network call.
+            # this does a network `git fetch` (can be slow; a failed fetch
+            # skips the fast-forward and uses the worktree as-is, never
+            # raises) and fast-forwards only an unoccupied (no live cw session
+            # or daemon-roster worker), clean, strictly-behind worktree --
+            # there is no friction-notes surface in this function, and
+            # create_worktree returns only the path, so the fetch outcome is
+            # reported in the log (cw.worktree), not to the caller.
             worktree_path = create_worktree(
                 client, branch, allow_dirty_reuse=True, refresh_on_reuse=True
             )

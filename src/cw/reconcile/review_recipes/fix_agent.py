@@ -107,11 +107,13 @@ def dispatch_fix_agent(
     Order is load-bearing (R22): the live-session pre-check is a pure read that
     runs before anything touches the worktree. ``create_worktree`` is then
     called with ``refresh_on_reuse=True`` (#2213): a network ``git fetch`` of
-    ``origin/<branch>`` (can be slow; a failure degrades to using the worktree
-    as-is), then a fast-forward of the reused worktree to it -- only when the
-    worktree is unoccupied (no unsaved work, no live session homed on it),
-    clean, on the expected branch and strictly behind; otherwise it is left
-    exactly as it is. Never a reset, never a raise. The HEAD verification runs
+    ``origin/<branch>`` (can be slow; a failed fetch skips the fast-forward and
+    uses the worktree as-is), then a fast-forward of the reused worktree to it
+    -- only when the worktree is unoccupied (no unsaved work, no live session
+    in cw state or worker in the daemon roster homed on it, occupancy
+    re-checked immediately before the merge), clean, on the expected branch
+    and strictly behind; otherwise it is left exactly as it is. Never a
+    reset, never a raise. The HEAD verification runs
     after it, before ``fetch``/``merge``, the only other mutating steps. A
     precondition failure therefore leaves the worktree untouched except for
     that fast-forward, which strictly advances HEAD and needs no compensating

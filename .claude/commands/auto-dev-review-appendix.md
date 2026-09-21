@@ -160,9 +160,12 @@ Two consequences worth knowing:
   `git worktree remove --force` + `git branch -D` is gone. `create_worktree`
   now hits its idempotent-reuse branch, which checks the worktree; the
   dispatch and fix-dispatch callers pass `refresh_on_reuse=True`, which
-  best-effort fetches and fast-forwards an unoccupied, clean, strictly-behind
-  branch only (never a reset, never a raise). Any other worktree (occupied,
-  dirty, ahead, or diverged) is left as it is.
+  best-effort fetches and fast-forwards an unoccupied (no live cw session or
+  daemon-roster worker homed on it), clean, strictly-behind branch only (never
+  a reset, never a raise). Any other worktree (occupied, dirty, ahead, or
+  diverged, or one whose occupancy could not be determined) is left as it is,
+  and a failed fetch skips the fast-forward entirely instead of moving HEAD to
+  a stale tracking ref.
 - **The row stays RUNNING for the whole handoff.** `dispatch/claim.py` only
   claims PENDING rows, so nothing re-dispatches the ticket while the fix agent
   works. `fix_dispatch`'s completion phase reverts it to PENDING once the fix

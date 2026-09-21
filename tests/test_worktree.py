@@ -29,6 +29,8 @@ from cw.worktree import (
     _git_dir,
     _hashed_worktree_base,
     _live_home_reason,
+    _ref_exists,
+    _refresh_reused_worktree,
     _register_cw_exclude,
     _resolve_remote_ref,
     _reuse_occupancy_reason,
@@ -1730,6 +1732,46 @@ class TestCreateWorktreeReuseRefresh:
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert old_sha != new_sha
         assert any("fast-forward skipped" in m for m in _debug_reasons(caplog))
+
+    def test_fetch_ok_but_tracking_ref_absent_is_a_no_op(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A fetch can succeed without creating ``refs/remotes/origin/<branch>``
+        (a narrow ``remote.origin.fetch`` refspec): no target, nothing to move."""
+        client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        head = git_in(wt, "rev-parse", "HEAD")
+        merges: list[tuple[str, ...]] = []
+
+        def spy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            if args[0] == "merge":
+                merges.append(args)
+            return _run_git(*args, cwd=cwd, check=check)
+
+        real_ref_exists = _ref_exists
+
+        def no_tracking_ref(ref: str, git_cwd: Path) -> bool:
+            if ref == f"refs/remotes/origin/{_REUSE_BRANCH}":
+                return False
+            return real_ref_exists(ref, git_cwd)
+
+        monkeypatch.setattr("cw.worktree._run_git", spy)
+        monkeypatch.setattr("cw.worktree._ref_exists", no_tracking_ref)
+        monkeypatch.setattr(
+            "cw.worktree.fetch_feature_branch", lambda *_args, **_kw: True
+        )
+        monkeypatch.setattr(
+            "cw.worktree._reuse_occupancy_reason", lambda *_args, **_kw: None
+        )
+
+        _refresh_reused_worktree(client, _REUSE_BRANCH, wt)
+
+        assert merges == []
+        assert git_in(wt, "rev-parse", "HEAD") == head
 
     def test_submodule_sync_runs_only_after_fast_forward(
         self,
