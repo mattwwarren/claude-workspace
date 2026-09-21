@@ -712,6 +712,25 @@ still loads — the fields are optional, so history is not lost — but it is no
 longer applied: the finding it used to suppress will re-appear, with the
 refusal reported on the comment. Re-settle it with `cw review settle`.
 
+The same goes for a record minted before the key bound the verbatim summary
+(#2210 review round 3): its key is the two-part `file::normalized summary`
+shape, which fails the identity binding below. It is refused and reported, not
+deleted; re-settle the finding with `cw review settle` and post the new marker.
+The refused row stays in the ticket's durable ledger and is re-reported on each
+review pass until the ticket ends — the fresh record is a separate key and
+applies normally.
+
+**A refused record is never written into the ledger and never replaces an
+entry that is already there (#2210, round 3).** Refusal used to mean only "not
+applied", so a malformed or pasted marker could still overwrite the record of a
+finding you had legitimately settled. Now the ledger write itself rejects an
+under-provenanced record: it can neither add a key nor evict a valid entry for
+the same key, whatever its `recorded_at` says. You will see it as one WARNING in
+the review log (`refusing a finding disposition ... ticket=<T>, key=<K>`) and
+in the comment's refused-records section; the prior entry keeps applying. Only
+`cw review settle` output replaces an existing entry, and only when the new
+record is itself valid and no older than the one it replaces.
+
 **Render the marker, don't write it (#2210).** Every blocking codex
 review comment now prints a `### Settle a finding` section with one
 ready-to-paste JSON payload per blocking finding, carrying the finding's
@@ -751,7 +770,8 @@ anonymous settle if `gh api user` cannot resolve your identity.
 Each settled finding emits one `review.finding_settled` audit event,
 correlated to `--ticket` when you pass it (`cw event tail --type
 review.finding_settled --json`). Duplicate keys collapse newest-wins, so two
-payload entries that key alike are one entry and one event. `-` reads the
+payload entries with the same file and byte-identical summary are one entry
+and one event. `-` reads the
 payload from stdin.
 
 **The events are recorded before the marker is written.** If any of them
@@ -771,7 +791,7 @@ record to be *applied* — a block missing any of them parses but is refused:
 {
   "schema_version": 1,
   "dispositions": {
-    "src/cw/foo.py::bug here": {
+    "src/cw/foo.py::bug here::4bffc7a70f587f3e984f1ab5279c1211005e73b789b8a7a27faf53299b44b48a": {
       "outcome": "REJECTED",
       "rationale": "intentional tradeoff, see ADR-0012",
       "recorded_at": "2026-08-16T00:00:00Z",
@@ -794,11 +814,24 @@ the command records the provenance the reader requires. A payload block is
 never cut in half, so anything you
 can copy out of the section is complete.
 
-- The key is `"<file>::<normalized summary>"` — the summary lowercased,
+- The key is `"<file>::<normalized summary>::<digest>"`. The first two parts are
+  `cw.review_debt.fingerprint_v1`'s: the summary lowercased,
   whitespace-collapsed, line/position references stripped, digit runs replaced
-  by `N` (`cw.review_debt.fingerprint_v1`). `cw review settle` applies exactly
-  that normalizer on ingest, so a pasted payload reproduces the key the
-  reviewer's re-raise will hit.
+  by `N`. The `<digest>` is the SHA-256 (64 hex characters) of the finding's
+  **exact** summary text — the key binds the verbatim summary, and the reader
+  refuses a record whose stored `summary` does not hash to its key's digest, so
+  a record can only ever apply to the finding it was settled for. The example
+  digest above is `sha256("Bug here")`. `cw review settle` mints it from the
+  payload's verbatim `summary`, so a pasted payload reproduces the key a
+  **byte-identical** re-raise will hit.
+- A reviewer's *reworded* re-raise no longer exact-matches: matching
+  non-identical text is the claim tier's job, and it is off by default (see the
+  claim-match gate in `config/CONFIG_REFERENCE.md`). Until a lane is armed the
+  finding blocks again and, when it clears the matcher, is logged as
+  `review.finding_claim_shadowed`. Settle the new wording too, or contest it
+  with `contests_adjudication`. The reviewed sha is deliberately **not** in the
+  key — a later fix commit must not orphan the record — but it is a required
+  field of it.
 - `outcome` is `REJECTED` or `ACCEPTED`. Only `REJECTED` suppresses the
   finding; `ACCEPTED` is recorded and shown to the reviewer but changes no gate.
 - The marker is **additive** across comments: the reader unions every marker on

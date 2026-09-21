@@ -6,7 +6,8 @@
 ## Decision
 
 The cross-round finding ledger (#1838) gains a second, **fuzzy claim-matching
-tier** beside its exact `fingerprint_v1` tier, plus a typed contest signal
+tier** beside its exact tier (keyed on `fingerprint_v1` extended with a digest
+of the verbatim summary — invariant 12), plus a typed contest signal
 (`Finding.contests_adjudication`) and its first production **producer**
 (`cw review settle`, fed by a ready-to-paste payload in every blocking review
 comment). The claim tier ships **gated per lane and off**, and while it is off
@@ -19,9 +20,11 @@ not amended or superseded; the two seams stay independent.
 
 ## Invariant
 
-1. **The exact tier is independent of the gate.** An identical
-   `(file, normalized summary)` match suppresses exactly as it did before
-   #2210, whichever way `claim_tier_enabled` is set.
+1. **The exact tier is independent of the gate.** A byte-identical match —
+   same file, same VERBATIM summary (invariant 12) — suppresses whichever way
+   `claim_tier_enabled` is set. Round 3 made the tier stricter than it was
+   before #2210 (see Consequences): it used to match on the lossy normalized
+   summary alone.
 2. **The claim tier suppresses only when both switches are true.**
    `OrchestratorConfig.codex_claim_suppression_enabled` (master) **and**
    `LaneConfig.codex_review_tiers["claim_suppression"]` (per-lane), resolved
@@ -91,12 +94,64 @@ not amended or superseded; the two seams stay independent.
     why this deliberately does **not** follow #1617's save-then-emit
     precedent, whose subject is a state mutation whose event must not claim
     something that did not land.
+11. **An invalid record is never written and never evicts a valid entry —
+    validate first, write second** (round 3). Ignoring an under-provenanced
+    record when *applying* the ledger (invariant 9) is not enough if the same
+    record can still *replace* a valid entry when the ledger is *written*: a
+    malformed or hand-pasted block would destroy the provenance of a
+    legitimately settled finding on the very ledger that decides what stays
+    suppressed. `merge_finding_dispositions` — the one chokepoint every write
+    passes through: the ticket-thread merge, the dev-queue row sync and
+    `cw review settle` — therefore skips any incoming entry that fails
+    `_provenance_gaps`. Only a valid entry may add a key or replace an entry
+    for the same key, and between two valid ones the newest `recorded_at` still
+    wins. A valid entry also replaces an invalid one already in the ledger (a
+    heal); entries already in the ledger pass through untouched, so legacy rows
+    stay for the reader to keep refusing and reporting. A refused record is
+    logged once at WARNING (ticket and key) and reported on the review comment;
+    it is not persisted. `build_finding_disposition_ledger` raises on an invalid
+    entry rather than dropping it.
+12. **The key binds the verbatim summary; the exact tier is byte-identical
+    only** (round 3). A ledger key is
+    `file::normalized_summary::<sha256 of the exact summary>` — the first two
+    parts are `fingerprint_v1`, and the digest is the full 64-hex SHA-256 of the
+    verbatim text (no normalisation, no strip, no case folding). Round 2 keyed
+    on the lossy normalized half alone, so every rewording that normalised alike
+    shared one record and a finding could drift onto a **different** finding's
+    suppression, which nobody adjudicated: the silent-suppression direction
+    again. `_provenance_gaps` recomputes the key from the key's file and the
+    record's own `summary` and requires equality, so a record whose payload
+    summary is not the one its key was minted from — or a digest-less legacy
+    key — reports an `identity` gap and is refused. `split_disposition_key`
+    still returns `(file, normalized_summary)` for the claim tier and the
+    renderers, recognising the digest by its fixed anchored `::[0-9a-f]{64}$`
+    shape rather than by position, because a normalized summary can itself
+    contain `::`. The claim tier stays the **only** path that may match
+    non-identical text, and it stays gated off with its shadow event.
+13. **The reviewed sha is a required field of the record, not part of the key**
+    (round 3). The reviewer re-raises a settled finding on a LATER commit; a key
+    that included the sha it was settled at would stop matching after any fix
+    commit and the whole ledger would go dead, which is the memory loss #1814
+    and #2210 exist to remove. The sha still answers "against what code was
+    this silenced" — it is a mandatory provenance field (invariant 9) and rides
+    on `review.finding_settled` and `review.finding_claim_shadowed`. This is a
+    deliberate reading of "the key includes the file, the summary and the
+    reviewed sha": the ledger key carries what identifies the *finding*, the
+    record carries what identifies the *decision*.
 
 ## What this means for callers
 
 - `suppress_adjudicated_findings` takes `claim_tier_enabled` and `reviewed_sha`
   as defaulted keywords. Both default to the safe value; nothing has to change
   to stay on today's behaviour.
+- It also takes `refused` (round 3): the records the write path already refused
+  and logged. They never enter the ledger, so partitioning it cannot find them;
+  they ride `_ReviewPassInputs.refused_dispositions` →
+  `synthesize_codex_review_result` → here and are merged (by key, sorted) into
+  `ReviewVerdict.refused_dispositions` with the refusals derived from legacy
+  rows, without a second WARNING.
+- `parse_finding_disposition_block` returns `(enforceable, refused)`, not a
+  bare ledger, for the same reason.
 - The gate is resolved once, in `cw.codex_background._resolve_claim_tier_enabled`,
   where the lane, the client's lanes and the loaded `OrchestratorConfig` are
   already in hand, and threaded as one keyword:
@@ -119,9 +174,10 @@ not amended or superseded; the two seams stay independent.
   `recorded_at` is stamped by the command's own UTC clock and is **rejected**
   as a payload key — it is audit data, not input.
 - Every blocking review comment prints one payload per keyable MUST_FIX
-  finding, carrying the **verbatim** `file` and `summary` — the record's whole
-  identity — plus the verdict's `reviewed_sha`, so pasting it needs no editing
-  and reproduces exactly the key the next re-raise will hit. An entry with no
+  finding — per distinct **verbatim** `(file, summary)`, since that is what the
+  key binds — carrying that `file` and `summary` plus the verdict's
+  `reviewed_sha`, so pasting it needs no editing and reproduces exactly the key
+  a byte-identical re-raise will hit. An entry with no
   resolvable sha is refused; `--reviewed-sha` supplies one for a hand-written
   payload. There is deliberately no fallback to `git rev-parse HEAD`: the sha
   of whatever directory the operator happened to be standing in is not
@@ -151,8 +207,8 @@ not amended or superseded; the two seams stay independent.
 
 - **The ledger is severity-blind.** `FindingDisposition` stores an outcome, a
   rationale, a date and (as of #2210) provenance — never a severity. The exact
-  tier already suppresses any severity on an
-  identical `(file, normalized summary)`. Once armed, the claim tier can let a
+  tier already suppresses any severity on a byte-identical
+  `(file, summary)`. Once armed, the claim tier can let a
   REJECTED entry recorded for a nit shield a same-file MUST_FIX that clears the
   matcher. Bounded by the tier being MUST_FIX-only, same-file and default-off;
   measured by shadow events that carry the candidate's severity; fixed durably
@@ -181,6 +237,21 @@ not amended or superseded; the two seams stay independent.
   intended direction — the alternative is honouring a record that cannot say
   who created it — but it means the first review round after this change can
   re-park a ticket whose finding was settled under the old shape.
+- **The exact tier is now stricter, and a two-part key is refused** (round 3).
+  A reviewer's reworded re-raise no longer exact-matches a record it merely
+  normalises like — matching non-identical text is the claim tier's job, and
+  the claim tier is off by default, so until a lane is armed a reworded
+  re-raise of a settled finding **blocks again** (and, when it clears the claim
+  matcher's thresholds, is recorded as a `review.finding_claim_shadowed` event). That is the intended trade: a
+  non-match the operator can re-settle over a silent match against a finding
+  nobody adjudicated. Operator-visible: a record minted before this change
+  (two-part `file::normalized summary` key) fails the identity binding, is
+  refused and reported like any other unbound record, and must be re-settled
+  with `cw review settle`. It stays in the durable ledger (entries already
+  there pass through the writer untouched), so it is re-reported on every pass
+  until the ticket ends; the fresh three-part record is a separate key and
+  applies normally. Every `matched_key` on a suppression or shadow event now
+  carries the digest.
 - **Refusal is per record, not per ledger.** A well-formed entry alongside a
   refused one still applies. The refused section is bounded (20 rows, then a
   counted residue line) for the same comment-budget reason the settle section
@@ -261,6 +332,18 @@ not amended or superseded; the two seams stay independent.
 - **A `--force`/`--i-am-an-operator` escape from the dispatch-worker refusal.**
   Rejected: the worker is the party the refusal exists to stop, and it would be
   the one passing the flag.
+- **Keying on the reviewed sha as well.** Rejected: the reviewer re-raises on a
+  later commit, so the key would never match again after a fix commit and the
+  ledger would go dead (invariant 13). The sha is a required record field and
+  rides on the event payloads instead.
+- **Keying on the verbatim summary alone (no normalized half).** Rejected: the
+  normalized half is what the claim tier compares, what `split_disposition_key`
+  hands the renderers, and what keeps a marker human-readable; the digest is
+  appended, not substituted.
+- **Enforcing the write invariant only in the caller that parses the thread.**
+  Rejected: the durable dev-queue sync and `cw review settle` also reach
+  `merge_finding_dispositions`, and a guard a caller can forget is the
+  writer-only contract round 2 already refused for the reader.
 - **Deriving the reviewed sha from `git rev-parse HEAD` when the payload has
   none.** Rejected: it records the operator's current checkout, not the commit
   the finding was raised against, and a confidently wrong provenance field is

@@ -402,8 +402,9 @@ flagged as a possible follow-up, not a commitment.
 The codex review path carries a cross-round adjudication ledger (#1838): a
 finding an operator settled with a `REVIEW-FINDING-DISPOSITIONS` marker is
 suppressed mechanically on every later round. Its original identity is exact —
-`(file, normalized summary)` — so a reviewer that re-raises the same defect in
-*different words* slips past it and re-parks the ticket.
+the file plus a digest of the verbatim summary, so only a byte-identical
+re-raise matches — so a reviewer that re-raises the same defect in *different
+words* slips past it and re-parks the ticket.
 
 Neither tier applies a record that cannot account for itself. A disposition is
 honoured only when it carries the full provenance set — the finding's

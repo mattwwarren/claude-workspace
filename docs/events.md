@@ -1860,14 +1860,16 @@ ledger (`TicketTask.finding_dispositions`, schema v31). The finding is stamped
 `disposition="rejected"` and leaves `must_fix`/`blocking`.
 
 `match_kind` (#2210) says which tier matched. `"exact"` is the original
-identity — the finding's `review_debt.fingerprint_v1` equals the ledger key —
-and always carries `similarity: 1.0`. `"claim"` is the fuzzy same-file tier,
+identity — the finding's own ledger key equals the recorded one, which since
+review round 3 means a **byte-identical** summary (the key is
+`file::normalized summary::<sha256 of the verbatim summary>`, ADR-0016
+invariant 12) — and always carries `similarity: 1.0`. `"claim"` is the fuzzy same-file tier,
 which applies **only when armed** on the task's lane
 (`codex_claim_suppression_enabled` plus `codex_review_tiers:
 {claim_suppression: true}`); while it is off it emits
 `review.finding_claim_shadowed` below instead of suppressing anything.
-`matched_key` is the ledger key that won, which for a claim match is NOT the
-finding's own key.
+`matched_key` is the ledger key that won — including its trailing 64-hex
+digest — which for a claim match is NOT the finding's own key.
 
 Mandatory for the same reason as `review.finding_voided` above, and NOT a reuse
 of it: the two suppressions have different identities (fingerprint-keyed vs.
@@ -1953,7 +1955,7 @@ not an interrupt.
 **Payload:**
 ```json
 {
-  "key": "<file>::<normalized summary>",
+  "key": "<file>::<normalized summary>::<sha256 of the verbatim summary>",
   "file": "<str>",
   "summary": "<str>",
   "outcome": "REJECTED",
@@ -1977,8 +1979,10 @@ edited afterwards. The same four facts are also written onto the durable
 `reviewed_sha`); the event is the queryable copy.
 
 **One event per settled finding**, counted over the *collapsed* ledger: two
-payload entries that key alike are one settled finding and one event, the same
-arithmetic the marker uses.
+payload entries with the same file and byte-identical summary are one settled
+finding and one event, the same arithmetic the marker uses. Two summaries that
+merely normalize alike are two findings (the key binds the verbatim text) and
+two events.
 
 **Emitted before the marker is written** (ADR-0016 invariant 10). Every event
 for the settle records first; only then does the command render the marker to
