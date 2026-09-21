@@ -252,6 +252,35 @@ class TestSignalParkFailsOpen:
         )
         assert not _context_path(bare).exists()
 
+    def test_unresolvable_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A removed worktree makes ``Path.cwd()`` raise; the stamp must not.
+
+        The command documents itself as exiting 0 on every foreseeable failure,
+        and a worker ignores its exit code -- a traceback here would be the one
+        failure that is not a clean deferral.
+        """
+        worktree = _seeded_worktree(tmp_path)
+        _seed_running_row(worktree)
+
+        class _RemovedCwd:
+            @staticmethod
+            def cwd() -> object:
+                msg = "cwd was removed"
+                raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.cli.signal_park.Path", _RemovedCwd)
+
+        result = _invoke_hook_command("signal-park", {})
+
+        assert result.exit_code == 0
+        assert (
+            "park marker NOT recorded: could not resolve the current directory"
+            in result.output
+        )
+        assert PARK_COMMENT_MARKER_KEY not in _read_context(worktree)
+
     @pytest.mark.parametrize(
         ("key", "value"),
         [

@@ -7,13 +7,14 @@ immediately before it emits its exit sentinel; the CONSUMER is
 next Stop and may park the dev-queue row when no sentinel landed.
 
 Best-effort and fail-open throughout, mirroring ``cw agent-spawn-pre`` and
-``cw guard-cwd``: no readable context, no string ids, no RUNNING row, an
-unreadable dev queue, or a contended context lock each print one reason line to
-stderr, write nothing, and exit 0. A worker MUST be able to ignore this call
-entirely -- including an unknown-command error from a ``cw`` that predates it --
-and still emit the sentinel it was already going to emit. The whole feature is
-worth less than one wrongly-diverted exit, so every failure here costs at most
-a Stop-hook deferral, which is what happened before #2135 anyway.
+``cw guard-cwd``: an unresolvable current directory, no readable context, no
+string ids, no RUNNING row, an unreadable dev queue, or a contended context
+lock each print one reason line to stderr, write nothing, and exit 0. A worker
+MUST be able to ignore this call entirely -- including an unknown-command error
+from a ``cw`` that predates it -- and still emit the sentinel it was already
+going to emit. The whole feature is worth less than one wrongly-diverted exit,
+so every failure here costs at most a Stop-hook deferral, which is what
+happened before #2135 anyway.
 
 It emits no event and writes no audit row: the marker is fallback evidence for
 exactly one Stop-hook decision, and the parked row already emits
@@ -34,11 +35,12 @@ from cw.reconcile import find_running_task_for_session
 
 __all__ = ["signal_park"]
 
-# The four reasons a stamp can fail, verbatim. Five failure CASES map onto
-# four strings: ``find_running_task_for_session`` (shared with the Stop hook)
+# The five reasons a stamp can fail, verbatim. Six failure CASES map onto
+# five strings: ``find_running_task_for_session`` (shared with the Stop hook)
 # returns None for both an absent row and an unreadable dev queue, and the
 # unreadable-queue case is already distinguished by its own WARNING on stderr,
 # so a tri-state on a shared helper would buy one diagnostic line.
+_NO_CWD = "could not resolve the current directory"
 _NO_CONTEXT = "no readable .claude/cw-context.json in the current directory"
 _NO_IDS = "cw-context.json carries no string session_id and ticket_id"
 _NO_ROW = "no RUNNING dev-queue row for this session (or the dev queue is unreadable)"
@@ -105,7 +107,16 @@ def signal_park() -> None:
     Run it from the directory holding ``.claude/cw-context.json``; from a
     subdirectory it finds no context and fails open.
     """
-    outcome = _record_park_marker(str(Path.cwd()))
+    # ``Path.cwd()`` raises when the worktree directory has been removed out
+    # from under the process; ``guard_cwd`` wraps its body for the same reason.
+    # Only this call is guarded, so an unrelated ``OSError`` is never reported
+    # under the cwd reason string.
+    try:
+        cwd_value = str(Path.cwd())
+    except OSError:
+        outcome: ParkCommentMarker | str = _NO_CWD
+    else:
+        outcome = _record_park_marker(cwd_value)
     if isinstance(outcome, str):
         click.echo(
             f"park marker NOT recorded: {outcome}; the Stop hook will defer",
