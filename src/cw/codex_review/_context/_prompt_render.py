@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from cw.codex_review._context._prompt_text import (
     _ADJUDICATED_HEADER,
+    _ADJUDICATED_INSTRUCTIONS,
     _DELTA_MODE_INSTRUCTIONS,
     _codex_output_format_supplement,
     _select_output_instructions,
@@ -72,18 +73,17 @@ def _render_adjudicated_findings_block(
     was upheld and needs no restating, which is as useful as knowing one was
     rejected. Only ``REJECTED`` reaches the mechanical backstop in
     ``review_finding_dispositions.suppress_adjudicated_findings``.
+
+    The intro (:data:`_ADJUDICATED_INSTRUCTIONS`) names #2210's typed contest
+    hatch, ``Finding.contests_adjudication``. That hatch is honoured by the
+    backstop on every codex pass, but guaranteed to keep a finding blocking
+    only on the codex single-pass lane and fix-loop cycle 0 — on later cycles
+    ``_admit_new_must_fix`` diverts an out-of-delta contest to the debt ledger
+    without reading it. The per-entry lines are unchanged.
     """
     if not ledger:
         return None
-    lines = [
-        _ADJUDICATED_HEADER,
-        "An operator already adjudicated each finding below on an earlier "
-        "review round, and that decision is BINDING. Do not re-raise one "
-        "unless the code at that location has changed since the recorded "
-        "date -- re-reporting a settled finding is noise, not a finding. If "
-        "you believe a rejection is now wrong, say so in the finding's "
-        "`consequence` field rather than re-filing it as MUST_FIX.",
-    ]
+    lines = [_ADJUDICATED_HEADER, _ADJUDICATED_INSTRUCTIONS]
     for key, entry in sorted(ledger.items()):
         file, summary = split_disposition_key(key)
         rationale = f" ({entry.rationale})" if entry.rationale else ""

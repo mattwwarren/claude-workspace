@@ -648,7 +648,7 @@ class TestClaimMatching:
             ),
             **_ledger_for(
                 "src/cw/foo.py",
-                "`alpha_helper` drops one follow-up task",
+                "`alpha_helper` drops that follow-up task",
                 rationale="ZZZ later key",
             ),
         }
@@ -671,7 +671,7 @@ class TestClaimMatching:
             ),
             **_ledger_for(
                 "src/cw/foo.py",
-                "`alpha_helper` drops one follow-up task",
+                "`alpha_helper` drops that follow-up task",
                 rationale="ZZZ later key",
                 recorded_at="2026-09-01T00:00:00Z",
             ),

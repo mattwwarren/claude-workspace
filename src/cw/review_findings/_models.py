@@ -228,9 +228,31 @@ class Finding(BaseModel):
     # tracked debt rather than blocking the loop.
     transitive_impact_evidence: str = ""
     release_critical_exception: str = ""
+    # #2210: the reviewer's typed escape hatch from the cross-round
+    # adjudication ledger. Non-blank means "I am KNOWINGLY re-raising a
+    # finding an operator settled", and the string itself is the argument --
+    # what changed since the recorded date, quoting the changed code. Blank on
+    # every other finding, so a reviewer that has never heard of the field
+    # degrades to the pre-#2210 shape: a bare re-raise, suppressed by the
+    # ledger backstop.
+    #
+    # Honoured by that backstop on EVERY codex pass and on both matching
+    # tiers, but guaranteed to keep a finding blocking only on the codex
+    # single-pass lane (and fix-loop cycle 0). On in-loop cycles 1+,
+    # `_admit_new_must_fix` does not read this field, so a contested finding
+    # on code the latest fix cycle did not touch is diverted to the debt
+    # ledger and the contest text is dropped (follow-up F6/F4).
+    #
+    # Unverified and gameable by construction: nothing checks that the quoted
+    # code actually changed. It can only fail TOWARD blocking, and SHA-anchored
+    # verification is follow-up F2. See ADR-0016.
+    contests_adjudication: str = ""
 
     @field_validator(
-        "transitive_impact_evidence", "release_critical_exception", mode="before"
+        "transitive_impact_evidence",
+        "release_critical_exception",
+        "contests_adjudication",
+        mode="before",
     )
     @classmethod
     def _null_admission_rationale_to_default(cls, v: str | None) -> str:

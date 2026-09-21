@@ -45,6 +45,7 @@ from cw.events import record_event as _record_orchestrator_event
 from cw.gh import post_issue_comment
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.models.orchestrator_config import CODEX_TIER_CLAIM_SUPPRESSION
 from cw.review_finding_dispositions import merge_finding_dispositions
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
@@ -241,6 +242,46 @@ def _resolve_codex_fix_loop_enabled(
     return config.default_codex_fix_loop_enabled
 
 
+#: The hardcoded-off floor for the codex review tiers (#2210), mirroring
+#: ``reconcile.gate_recipes._DEFAULT_GATE_RECIPE_ENABLED``. A lane that names
+#: no tier lands here, so a tier can never arm by accident or by omission.
+_DEFAULT_CODEX_REVIEW_TIER_ENABLED: dict[str, bool] = {
+    CODEX_TIER_CLAIM_SUPPRESSION: False,
+}
+
+
+def _resolve_claim_tier_enabled(
+    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
+) -> bool:
+    """Resolve the claim-match suppression tier for *task* (#2210, ADR-0016).
+
+    Two switches, both of which must be true, resolved most-specific-wins down
+    to a hardcoded-off floor — the default-off flag convention
+    ``docs/release-playbook.md`` records, minus its optional ``TicketTask``
+    tier (that would be a persisted dev-queue schema change).
+
+      1. ``OrchestratorConfig.codex_claim_suppression_enabled`` (master).
+         False here is a kill switch no lane can override.
+      2. The task's lane's ``LaneConfig.codex_review_tiers``.
+      3. Otherwise :data:`_DEFAULT_CODEX_REVIEW_TIER_ENABLED` (False).
+
+    Resolved here, beside :func:`_resolve_codex_fix_loop_enabled`, because this
+    is the one place where the lane, the client's lanes and the loaded
+    ``OrchestratorConfig`` are all already in hand — no new config I/O. A
+    client with no declared lanes gets a synthesised ``default`` lane carrying
+    no tier map, so arming a lane means declaring it first.
+    """
+    if not config.codex_claim_suppression_enabled:
+        return False
+    for lane_cfg in client.effective_lanes:
+        if lane_cfg.name != task.lane or lane_cfg.codex_review_tiers is None:
+            continue
+        enabled = lane_cfg.codex_review_tiers.get(CODEX_TIER_CLAIM_SUPPRESSION)
+        if enabled is not None:
+            return enabled
+    return _DEFAULT_CODEX_REVIEW_TIER_ENABLED[CODEX_TIER_CLAIM_SUPPRESSION]
+
+
 # Durable copy of the rendered review verdict, written into the worktree's
 # ``.claude/`` beside ``cw-context.json`` before any tracker post is attempted
 # (#2095). On a tracker the daemon cannot write to (Linear -- ADR-0013 keeps
@@ -399,6 +440,10 @@ def _run_codex_review_and_complete(
         # being threaded through the StageExecutor Protocol.
         config = load_effective_config()
         fix_loop_enabled = _resolve_codex_fix_loop_enabled(client, task, config)
+        # #2210: the ledger's fuzzy claim tier resolves from the same three
+        # already-loaded objects, on the same hop, and is threaded as one
+        # keyword defaulting to False all the way down to the backstop.
+        claim_tier_enabled = _resolve_claim_tier_enabled(client, task, config)
         result, verdict = run_review_with_fix_loop(
             runner=runner,
             task=task,
@@ -409,6 +454,7 @@ def _run_codex_review_and_complete(
             wall_clock_budget_seconds=wall_clock_budget_seconds,
             session_id=sid,
             fix_loop_enabled=fix_loop_enabled,
+            claim_tier_enabled=claim_tier_enabled,
         )
 
         # Step 4: persist result under sessions_lock.

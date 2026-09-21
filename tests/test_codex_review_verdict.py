@@ -1636,10 +1636,9 @@ class TestRenderSettlePayloads:
         for f in findings:
             if f.line_start is not None:
                 files.setdefault(f.file, []).append(f.line_start)
+        diff = _make_diff(files=files) if files else _make_diff()
         verdict = consolidate_verdict(
-            [_make_reviewer_doc(*findings)],
-            _make_diff(files=files or None),
-            reviewed_sha="sha",
+            [_make_reviewer_doc(*findings)], diff, reviewed_sha="sha"
         )
         return verdict.model_copy(update=overrides) if overrides else verdict
 

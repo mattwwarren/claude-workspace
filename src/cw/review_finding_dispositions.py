@@ -50,7 +50,15 @@ runtime) or inside a function body (resolved after every module has finished
 loading). ``tests/test_review_finding_dispositions.py`` pins this by importing
 the module standalone in a subprocess.
 
+#2210 adds a second, fuzzy matching tier to the backstop below — see
+:func:`_claim_similarity` and ADR-0016. It ships **gated per lane and off**:
+while the gate is closed, every would-be claim-tier suppression is recorded as
+a ``review.finding_claim_shadowed`` event instead of being applied, so the
+matcher can be measured on real rewordings before anyone arms it. The exact
+tier above is unaffected by the gate in either direction.
+
 Public surface: :class:`FindingDisposition`, :data:`Outcome`,
+:data:`SETTLE_SECTION_HEADING`, :func:`build_finding_disposition_ledger`,
 :func:`render_finding_disposition_block`,
 :func:`parse_finding_disposition_block`, :func:`merge_finding_dispositions`,
 :func:`split_disposition_key`, :func:`suppress_adjudicated_findings`.
@@ -61,11 +69,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from cw.review_findings import AcceptedFinding, ReviewVerdict
 
 _log = logging.getLogger(__name__)
@@ -77,6 +87,25 @@ Outcome = Literal["ACCEPTED", "REJECTED"]
 
 _REJECTED: Outcome = "REJECTED"
 _MUST_FIX = "MUST_FIX"
+#: ``AcceptedFinding.disposition``'s post-consolidate default — "nothing has
+#: decided anything about this finding yet". The claim tier below refuses to
+#: re-stamp anything else, so a void pass's ``"rejected"`` survives untouched.
+_FIXED = "fixed"
+
+#: The heading the blocking review comment's ready-to-paste settle section
+#: renders under (#2210). Public and owned HERE, next to the rest of the
+#: record's wire grammar, because TWO modules must agree on it byte for byte:
+#: ``codex_review._verdict._render`` emits it, and
+#: ``codex_review._context.core`` builds its elision regex from it so a
+#: pipeline-authored payload never re-enters the next reviewer's prompt as
+#: evidence. A plain string needs no ``cw`` import, so the module's import
+#: discipline is untouched.
+SETTLE_SECTION_HEADING = "### Settle a finding"
+
+#: Which tier produced a match, carried onto the event payload and the log so
+#: an audit can tell an exact-identity suppression from a fuzzy one.
+_MATCH_EXACT = "exact"
+_MATCH_CLAIM = "claim"
 
 #: Joins ``fingerprint_v1``'s ``(file, normalized_summary)`` tuple into the
 #: string a JSON object key has to be. A file path containing this sequence
@@ -289,23 +318,341 @@ def _render_suppression_signal(
     )
 
 
-def _rejected_matches(
-    accepted: list[AcceptedFinding], ledger: dict[str, FindingDisposition]
-) -> dict[int, FindingDisposition]:
-    """Indices into *accepted* that a REJECTED ledger entry suppresses.
+#: Minimum length for a claim token or symbol. Two-letter words carry almost no
+#: claim content ("up", "in", "is") and would inflate the overlap of any two
+#: English sentences.
+_MIN_TOKEN_LEN = 3
+
+#: Two threshold regimes (#2210, ADR-0016). When BOTH summaries name at least
+#: one symbol, the symbol sets must intersect and the looser anchored floors
+#: apply — a shared identifier is strong evidence the two sentences are about
+#: the same code. With a symbol on one side or neither, nothing anchors the
+#: comparison, so the stricter prose floors apply. Both are judgement calls,
+#: not corpus-derived; the shadow events exist to supply the corpus.
+_ANCHORED_MIN_SHARED = 3
+_ANCHORED_MIN_DICE = 0.6
+_PROSE_MIN_SHARED = 4
+_PROSE_MIN_DICE = 0.75
+
+#: Function words that say nothing about WHAT a finding claims. Deliberately a
+#: short, hand-listed set rather than a stemmer or a stopword library: the
+#: whole matcher must stay stdlib-only (this module imports nothing from ``cw``
+#: at module scope, let alone a third-party NLP dependency).
+_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "and",
+        "are",
+        "but",
+        "can",
+        "does",
+        "for",
+        "from",
+        "has",
+        "have",
+        "its",
+        "may",
+        "not",
+        "should",
+        "than",
+        "that",
+        "the",
+        "this",
+        "was",
+        "were",
+        "when",
+        "will",
+        "with",
+    }
+)
+
+#: Every regex below operates on ALREADY-LOWERCASED text. Hyphens and dots
+#: split tokens (so "early-return" contributes "early" and "return"), while
+#: underscores stay inside one, which is what keeps a snake_case identifier a
+#: single token.
+_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+_BACKTICK_RE = re.compile(r"`([^`\n]+)`")
+#: Used with ``fullmatch`` to decide whether a backticked span is an
+#: identifier. There is deliberately NO free-standing dotted-identifier regex:
+#: a bare ``foo.py``, ``baz.md`` or ``e.g`` must never count as a symbol, so
+#: only backticked identifier spans and snake_case tokens qualify.
+_IDENTIFIER_SPAN_RE = re.compile(r"[a-z0-9_.]+")
+
+
+def _claim_tokens(text: str) -> frozenset[str]:
+    """The content words of an already-normalized summary (#2210)."""
+    return frozenset(
+        token
+        for token in _TOKEN_RE.findall(text.lower())
+        if len(token) >= _MIN_TOKEN_LEN and token not in _STOPWORDS
+    )
+
+
+def _claim_symbols(text: str) -> frozenset[str]:
+    """The code identifiers an already-normalized summary names (#2210).
+
+    Two sources, both conservative: a backticked span that is entirely an
+    identifier (with a trailing ``()`` call suffix tolerated), and any token
+    that still contains an underscore once leading/trailing ones are stripped.
+    A prose word, a filename and an abbreviation all fail both tests, which is
+    what keeps the symbol veto below from firing on "foo.py vs baz.md".
+    """
+    lowered = text.lower()
+    symbols: set[str] = set()
+    for span in _BACKTICK_RE.findall(lowered):
+        candidate = span.strip().removesuffix("()")
+        if _IDENTIFIER_SPAN_RE.fullmatch(candidate):
+            symbols.add(candidate)
+    symbols.update(
+        token for token in _TOKEN_RE.findall(lowered) if "_" in token.strip("_")
+    )
+    return frozenset(s for s in symbols if len(s) >= _MIN_TOKEN_LEN)
+
+
+def _claim_similarity(recorded: str, candidate: str) -> float | None:
+    """Score two already-normalized summaries, or ``None`` for "not a match".
+
+    The score is the Dice coefficient ``2|A∩B| / (|A|+|B|)`` over claim tokens,
+    returned ONLY when the applicable regime's shared-token and Dice floors
+    both clear. Dice rather than the overlap coefficient on purpose: overlap
+    scores a terse candidate that happens to be a subset of a long recorded
+    summary at a perfect 1.0, which is exactly the false match this tier must
+    not make.
+
+    ``None`` — never a low score — is the whole "no match" signal, so a caller
+    cannot accidentally treat a below-threshold pair as a weak match.
+    """
+    recorded_tokens = _claim_tokens(recorded)
+    candidate_tokens = _claim_tokens(candidate)
+    if not recorded_tokens or not candidate_tokens:
+        return None
+    recorded_symbols = _claim_symbols(recorded)
+    candidate_symbols = _claim_symbols(candidate)
+    if recorded_symbols and candidate_symbols:
+        if not recorded_symbols & candidate_symbols:
+            # The veto: both sides name code, and they name DIFFERENT code.
+            # "`parse_config` missing null check" and "`load_config` missing
+            # null check" are two findings, however alike they read.
+            return None
+        min_shared, min_dice = _ANCHORED_MIN_SHARED, _ANCHORED_MIN_DICE
+    else:
+        min_shared, min_dice = _PROSE_MIN_SHARED, _PROSE_MIN_DICE
+    shared = len(recorded_tokens & candidate_tokens)
+    dice = 2 * shared / (len(recorded_tokens) + len(candidate_tokens))
+    if shared < min_shared or dice < min_dice:
+        return None
+    return dice
+
+
+class _LedgerMatch(NamedTuple):
+    """One finding's resolved ledger match, with the tier that produced it."""
+
+    entry: FindingDisposition
+    key: str
+    kind: str
+    similarity: float
+
+
+def _best_claim_match(
+    key: str, ledger: dict[str, FindingDisposition]
+) -> _LedgerMatch | None:
+    """The nearest same-file recorded decision to *key*, or ``None`` (#2210).
+
+    Nearest DECISION, not nearest rejection: a closer ``ACCEPTED`` entry wins
+    the contest and then vetoes, because an operator who upheld a finding
+    worded almost exactly like this one has said the opposite of "suppress it".
+
+    Candidates are built over ``sorted(ledger.items())`` and ``max`` keeps the
+    first maximal element it meets, so a full tie (equal similarity AND equal
+    ``recorded_at``) resolves to the alphabetically first ledger key, and a
+    later ``recorded_at`` wins at equal similarity.
+    """
+    file, candidate = split_disposition_key(key)
+    matches: list[_LedgerMatch] = []
+    for entry_key, entry in sorted(ledger.items()):
+        entry_file, recorded = split_disposition_key(entry_key)
+        if entry_file != file:
+            continue
+        similarity = _claim_similarity(recorded, candidate)
+        if similarity is None:
+            continue
+        matches.append(_LedgerMatch(entry, entry_key, _MATCH_CLAIM, similarity))
+    if not matches:
+        return None
+    best = max(matches, key=lambda m: (m.similarity, m.entry.recorded_at))
+    return best if best.entry.outcome == _REJECTED else None
+
+
+def _match_ledger(
+    af: AcceptedFinding, ledger: dict[str, FindingDisposition]
+) -> _LedgerMatch | None:
+    """Resolve one accepted finding against the ledger, exact tier first.
+
+    An exact key hit is decisive in BOTH directions: a ``REJECTED`` entry
+    suppresses, and an ``ACCEPTED`` one vetoes any fuzzy sibling rather than
+    falling through to the claim tier.
+
+    The claim tier is scoped to still-undecided MUST_FIX findings. A SHOULD_FIX
+    or below does not block, so fuzzily suppressing one buys nothing and hides
+    content; a finding a void pass already stamped must not be re-stamped here.
+    """
+    key = _disposition_key(af.finding.file, af.finding.summary)
+    if key is None:
+        return None
+    entry = ledger.get(key)
+    if entry is not None:
+        if entry.outcome == _REJECTED:
+            return _LedgerMatch(entry, key, _MATCH_EXACT, 1.0)
+        return None
+    if af.finding.severity != _MUST_FIX or af.disposition != _FIXED:
+        return None
+    return _best_claim_match(key, ledger)
+
+
+def _ledger_matches(
+    accepted: list[AcceptedFinding],
+    ledger: dict[str, FindingDisposition],
+    *,
+    ticket_id: str,
+) -> dict[int, _LedgerMatch]:
+    """Indices into *accepted* a ledger entry matches, contests removed.
 
     An ``ACCEPTED`` entry deliberately never appears here: it is a record-only
     annotation that reaches the reviewer prompt and changes no gate.
+
+    A finding whose ``contests_adjudication`` is non-blank is dropped from the
+    match set entirely (#2210): the reviewer has said in a typed field that it
+    is knowingly re-raising a settled finding and what changed. Admission is
+    INFO-log only, by design — an audit event for it is follow-up F9.
     """
-    matches: dict[int, FindingDisposition] = {}
+    matches: dict[int, _LedgerMatch] = {}
     for index, af in enumerate(accepted):
-        key = _disposition_key(af.finding.file, af.finding.summary)
-        if key is None:
+        match = _match_ledger(af, ledger)
+        if match is None:
             continue
-        entry = ledger.get(key)
-        if entry is not None and entry.outcome == _REJECTED:
-            matches[index] = entry
+        if af.finding.contests_adjudication.strip():
+            _log.info(
+                "auto-dev: admitted contest of settled finding "
+                "(ticket=%s, file=%s, match=%s, recorded_at=%s)",
+                ticket_id,
+                af.finding.file,
+                match.kind,
+                match.entry.recorded_at,
+            )
+            continue
+        matches[index] = match
     return matches
+
+
+#: Appended to the exact tier's visibility signal when the CLAIM tier made the
+#: match, so a reader can see that the suppression rests on a rewording rather
+#: than on an identical summary — and what the operator actually settled.
+_CLAIM_NOTE = (
+    " Matched by claim similarity {similarity:.2f} to recorded finding: "
+    "{recorded_summary}."
+)
+
+
+def _stamp_suppressed(af: AcceptedFinding, match: _LedgerMatch) -> AcceptedFinding:
+    """Return *af* stamped rejected, with the match's visibility signal."""
+    detail = _render_suppression_signal(
+        af.finding.file, af.finding.summary, match.entry
+    )
+    if match.kind == _MATCH_CLAIM:
+        _, recorded_summary = split_disposition_key(match.key)
+        detail += _CLAIM_NOTE.format(
+            similarity=match.similarity, recorded_summary=recorded_summary
+        )
+    return af.model_copy(
+        update={"disposition": "rejected", "disposition_detail": detail}
+    )
+
+
+def _emit_suppression(
+    af: AcceptedFinding, match: _LedgerMatch, ticket_id: str
+) -> None:
+    """Log and record one applied suppression (#1838 mandatory audit trail)."""
+    # Deferred for the import-cycle reason the module docstring gives: a
+    # module-scope `cw.events` import here closes cw.models -> cw.models.tasks
+    # -> this module -> cw.events -> cw.models.
+    from cw.events import record_event
+    from cw.models.enums import OrchestratorEventType
+
+    _log.info(
+        "auto-dev: suppressed re-derived finding already adjudicated by "
+        "operator (ticket=%s, severity=%s, file=%s, recorded_at=%s, match=%s)",
+        ticket_id,
+        af.finding.severity,
+        af.finding.file,
+        match.entry.recorded_at,
+        match.kind,
+    )
+    record_event(
+        OrchestratorEventType.REVIEW_FINDING_DISPOSITION_SUPPRESSED,
+        payload={
+            "file": af.finding.file,
+            "summary": af.finding.summary,
+            "severity": af.finding.severity,
+            "outcome": match.entry.outcome,
+            "rationale": match.entry.rationale,
+            "recorded_at": match.entry.recorded_at,
+            "match_kind": match.kind,
+            "similarity": match.similarity,
+            "matched_key": match.key,
+        },
+        correlation_id=ticket_id,
+    )
+
+
+def _emit_shadow(
+    af: AcceptedFinding, match: _LedgerMatch, ticket_id: str, reviewed_sha: str
+) -> None:
+    """Record a claim-tier match the closed gate did NOT apply (#2210).
+
+    This is the measurement path ADR-0016 rests on: until an operator arms a
+    lane, every finding the claim tier WOULD have suppressed leaves a durable,
+    queryable record carrying the candidate's severity, the matched key and the
+    score, so the thresholds can be judged against real rewordings.
+
+    Purely observational, so it must never alter a verdict or abort a review
+    pass. ``record_event`` has no handler of its own (its lock and append are
+    file I/O), and this is the one ``record_event`` call added on the
+    DEFAULT-OFF path — on lanes that never opted into anything. The INFO line
+    is emitted BEFORE the event so a failed write still leaves the measurement
+    in the log.
+    """
+    from cw.events import record_event
+    from cw.models.enums import OrchestratorEventType
+
+    _log.info(
+        "auto-dev: claim-tier match NOT suppressed, gate off "
+        "(ticket=%s, severity=%s, file=%s, similarity=%.2f, recorded_at=%s)",
+        ticket_id,
+        af.finding.severity,
+        af.finding.file,
+        match.similarity,
+        match.entry.recorded_at,
+    )
+    try:
+        record_event(
+            OrchestratorEventType.REVIEW_FINDING_CLAIM_SHADOWED,
+            payload={
+                "file": af.finding.file,
+                "summary": af.finding.summary,
+                "severity": af.finding.severity,
+                "similarity": match.similarity,
+                "matched_key": match.key,
+                "matched_recorded_at": match.entry.recorded_at,
+                "matched_rationale": match.entry.rationale,
+                "reviewed_sha": reviewed_sha,
+            },
+            correlation_id=ticket_id,
+        )
+    except OSError:
+        _log.warning(
+            "auto-dev: could not record claim-tier shadow event (ticket=%s)",
+            ticket_id,
+            exc_info=True,
+        )
 
 
 def suppress_adjudicated_findings(
@@ -313,6 +660,8 @@ def suppress_adjudicated_findings(
     ledger: dict[str, FindingDisposition],
     *,
     ticket_id: str,
+    claim_tier_enabled: bool = False,
+    reviewed_sha: str = "",
 ) -> ReviewVerdict:
     """Suppress every accepted finding a prior round already REJECTED (#1838).
 
@@ -348,59 +697,45 @@ def suppress_adjudicated_findings(
     point in the pipeline. ``must_fix_initial``, ``should_fix``, ``agents_run``
     and ``review.deferred`` are preserved verbatim — a suppression is not a
     fix, so the originally-found counts must keep saying what was found.
+
+    ``claim_tier_enabled`` (#2210) arms the fuzzy second tier for THIS pass.
+    It defaults to ``False``, which is the fail-safe floor: a call path that
+    never threads it is off, and the exact tier behaves identically either
+    way. With the gate closed, a claim-tier match leaves the verdict untouched
+    (the same object is returned) and is recorded as a
+    ``review.finding_claim_shadowed`` event instead — see :func:`_emit_shadow`
+    and ADR-0016. ``reviewed_sha`` rides onto that shadow payload only, so a
+    consumer can group a re-derived finding's events by ticket, file and
+    summary and count the distinct reviewed commits behind them.
     """
     if not ledger:
         return verdict
-    matches = _rejected_matches(verdict.accepted, ledger)
+    matches = _ledger_matches(verdict.accepted, ledger, ticket_id=ticket_id)
     if not matches:
         return verdict
 
-    # Deferred for the import-cycle reason the module docstring gives: a
-    # module-scope `cw.events` import here closes cw.models -> cw.models.tasks
-    # -> this module -> cw.events -> cw.models.
-    from cw.events import record_event
-    from cw.models.enums import OrchestratorEventType
+    enforced: dict[int, _LedgerMatch] = {}
+    for index, match in matches.items():
+        if match.kind == _MATCH_EXACT or claim_tier_enabled:
+            enforced[index] = match
+        else:
+            _emit_shadow(verdict.accepted[index], match, ticket_id, reviewed_sha)
+    if not enforced:
+        return verdict
 
     stamped: list[AcceptedFinding] = []
     for index, af in enumerate(verdict.accepted):
-        entry = matches.get(index)
-        if entry is None:
+        match = enforced.get(index)
+        if match is None:
             stamped.append(af)
             continue
-        stamped.append(
-            af.model_copy(
-                update={
-                    "disposition": "rejected",
-                    "disposition_detail": _render_suppression_signal(
-                        af.finding.file, af.finding.summary, entry
-                    ),
-                }
-            )
-        )
-        _log.info(
-            "auto-dev: suppressed re-derived finding already adjudicated by "
-            "operator (ticket=%s, severity=%s, file=%s, recorded_at=%s)",
-            ticket_id,
-            af.finding.severity,
-            af.finding.file,
-            entry.recorded_at,
-        )
-        record_event(
-            OrchestratorEventType.REVIEW_FINDING_DISPOSITION_SUPPRESSED,
-            payload={
-                "file": af.finding.file,
-                "summary": af.finding.summary,
-                "outcome": entry.outcome,
-                "rationale": entry.rationale,
-                "recorded_at": entry.recorded_at,
-            },
-            correlation_id=ticket_id,
-        )
+        stamped.append(_stamp_suppressed(af, match))
+        _emit_suppression(af, match, ticket_id)
 
     must_fix = [
         af.finding
         for af in stamped
-        if af.finding.severity == _MUST_FIX and af.disposition == "fixed"
+        if af.finding.severity == _MUST_FIX and af.disposition == _FIXED
     ]
     return verdict.model_copy(
         update={
@@ -409,3 +744,29 @@ def suppress_adjudicated_findings(
             "blocking": bool(must_fix),
         }
     )
+
+
+def build_finding_disposition_ledger(
+    entries: Iterable[tuple[str, str, FindingDisposition]],
+) -> dict[str, FindingDisposition]:
+    """Fold ``(file, summary, entry)`` triples into a keyed ledger (#2210).
+
+    The producer-side twin of :func:`parse_finding_disposition_block`, and the
+    seam ``cw review settle`` builds its postable marker through — which is
+    what finally gives :func:`render_finding_disposition_block` a production
+    caller. Keying goes through :func:`_disposition_key`, so a marker minted
+    here and a finding re-derived later cannot disagree about identity.
+
+    Raises ``ValueError`` for an un-keyable file rather than silently dropping
+    the entry: an operator asking to settle a finding and getting a marker that
+    quietly omits it is the worst of both outcomes. Duplicates fold through
+    :func:`merge_finding_dispositions`, so the newest ``recorded_at`` wins.
+    """
+    ledger: dict[str, FindingDisposition] = {}
+    for file, summary, entry in entries:
+        key = _disposition_key(file, summary)
+        if key is None:
+            msg = f"cannot record a disposition for file={file!r}: no path to key on"
+            raise ValueError(msg)
+        ledger = merge_finding_dispositions(ledger, {key: entry})
+    return ledger

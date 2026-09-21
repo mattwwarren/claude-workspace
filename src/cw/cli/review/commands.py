@@ -1,8 +1,8 @@
 """The ``cw review`` commands without a seam of their own (#2048).
 
-``register``, ``adjudicate``, ``check-voided``, and ``verify-fixes`` — the four
-commands left after ``consolidate`` and the diff-integrity guards were given
-their own submodules.
+``register``, ``adjudicate``, ``check-voided``, ``settle`` and
+``verify-fixes`` — the commands left after ``consolidate`` and the
+diff-integrity guards were given their own submodules.
 
 ``cw review register <pr-url>`` records a PR you were asked to review as a
 watched PR (``DevQueueStore.watched_prs``). No ``list``/``remove`` subcommand
@@ -23,6 +23,13 @@ settled, and renders the durable record of those decisions back out for
 posting to the ticket. It is the Claude-native half of a mechanism the codex
 backend reaches through ``cw.codex_review`` instead — same library function,
 same outcome, no coordinating session required on that side.
+
+``cw review settle <path>`` (#2210) is the cross-round adjudication ledger's
+first production writer. #1838 shipped that ledger's renderer, parser and
+mechanical backstop but nothing that ever CALLED the renderer, so the runbook
+told operators to compute the key by hand from a ``python -c`` one-liner. This
+turns a payload — the one every blocking codex review comment now prints — into
+the postable ``REVIEW-FINDING-DISPOSITIONS`` marker.
 """
 
 from __future__ import annotations
@@ -31,7 +38,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import click
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors
@@ -59,6 +66,12 @@ from cw.review_adjudication import (
     render_deferred_findings_md,
     render_voided_findings_block,
     verify_fixed_dispositions,
+)
+from cw.review_finding_dispositions import (
+    FindingDisposition,
+    Outcome,
+    build_finding_disposition_ledger,
+    render_finding_disposition_block,
 )
 from cw.review_findings import ReviewVerdict
 
@@ -305,6 +318,15 @@ class _CheckVoidedOutput(BaseModel):
     adjudications: list[Adjudication]
 
 
+def _utc_now_iso() -> str:
+    """The ISO-8601 stamp both record-minting commands write (#2210).
+
+    One implementation, so ``check-voided``'s ``voided_at`` and ``settle``'s
+    ``recorded_at`` cannot come out in two shapes.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _stamp_voided_at(entry: VoidedFinding) -> VoidedFinding:
     """Fill a blank ``voided_at`` with now, leaving a supplied one alone.
 
@@ -314,8 +336,7 @@ def _stamp_voided_at(entry: VoidedFinding) -> VoidedFinding:
     """
     if entry.voided_at.strip():
         return entry
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return entry.model_copy(update={"voided_at": now})
+    return entry.model_copy(update={"voided_at": _utc_now_iso()})
 
 
 @review.command(name="check-voided")
@@ -375,6 +396,110 @@ def review_check_voided(path: str, voided_findings_out: Path | None) -> None:
 
     output = _CheckVoidedOutput(verdict=verdict, adjudications=adjudications)
     click.echo(output.model_dump_json(indent=2))
+
+
+class _SettleEntry(BaseModel):
+    """One operator decision to record in the ledger (#2210).
+
+    ``file`` and ``summary`` are the finding's identity, copied VERBATIM from
+    the blocking review comment's payload — normalization happens on ingest via
+    ``fingerprint_v1``, so a hand-normalized value here would key differently
+    from the re-derived finding it is meant to suppress.
+
+    ``file="N/A"`` is rejected rather than dropped: that is #1817's
+    no-diff-anchor case, which cannot be keyed at all, and silently omitting it
+    from the marker would leave an operator believing they settled something.
+    """
+
+    file: str
+    summary: str
+    outcome: Outcome
+    rationale: str = ""
+    recorded_at: str = ""
+
+    @field_validator("file")
+    @classmethod
+    def _keyable_file(cls, value: str) -> str:
+        if not value.strip():
+            msg = "file must be non-empty"
+            raise ValueError(msg)
+        if value == "N/A":
+            msg = "file 'N/A' has no path to key on; this finding cannot be settled"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("summary")
+    @classmethod
+    def _summary_nonempty(cls, value: str) -> str:
+        if not value.strip():
+            msg = "summary must be non-empty"
+            raise ValueError(msg)
+        return value
+
+
+class _SettleInput(BaseModel):
+    """Request envelope for ``cw review settle`` (#2210)."""
+
+    entries: list[_SettleEntry] = Field(min_length=1)
+
+
+@review.command(name="settle")
+@click.argument("path")
+@click.option(
+    "--out",
+    default=None,
+    type=click.Path(path_type=Path),
+    help=(
+        "Also write the rendered marker to this path, ready to post with "
+        "`gh issue comment --body-file`."
+    ),
+)
+@handle_errors
+def review_settle(path: str, out: Path | None) -> None:
+    """Record operator-settled findings as a postable marker (#2210).
+
+    PATH is a file path or '-' for stdin. Payload: {"entries": [{"file":
+    "<path>", "summary": "<verbatim finding summary>", "outcome":
+    "REJECTED"|"ACCEPTED", "rationale": "<why>", "recorded_at":
+    "<ISO-8601, optional>"}]}. Every blocking codex review comment prints one
+    such payload per finding under "### Settle a finding" — paste it unedited,
+    or fill in `rationale` first.
+
+    Identity is the VERBATIM `file` and `summary`; the same normalizer the
+    reviewer's re-raise will hit is applied on ingest, so nothing needs
+    hand-normalizing. A blank `recorded_at` is stamped with the current time;
+    a supplied one is preserved. Two entries that key alike collapse, newest
+    `recorded_at` winning.
+
+    The marker is ADDITIVE across comments: the reader unions every marker on
+    the thread, so post only what you are settling now rather than re-posting
+    the whole ledger. Only `REJECTED` suppresses a later re-raise; `ACCEPTED`
+    is a record-only annotation that reaches the reviewer's prompt.
+
+    Emits no events — this command only renders text; the event is emitted
+    later, by the suppression it eventually causes.
+
+    On success: exits 0, prints the marker to stdout.
+    On failure: exits 1, prints 'field.path: message' lines to stderr.
+    """
+    parsed = _parse_payload_or_exit(path, _SettleInput)
+    ledger = build_finding_disposition_ledger(
+        (
+            entry.file,
+            entry.summary,
+            FindingDisposition(
+                outcome=entry.outcome,
+                rationale=entry.rationale,
+                recorded_at=entry.recorded_at.strip() or _utc_now_iso(),
+            ),
+        )
+        for entry in parsed.entries
+    )
+    rendered = render_finding_disposition_block(ledger)
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(out, rendered)
+    click.echo(rendered)
 
 
 class _VerifyFixesInput(BaseModel):

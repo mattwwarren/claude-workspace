@@ -417,6 +417,18 @@ class OrchestratorEventType(StrEnum):
     # and different payloads, so one event type would make an audit trail that
     # cannot say which mechanism fired.
     REVIEW_FINDING_DISPOSITION_SUPPRESSED = "review.finding_disposition_suppressed"
+    # GitHub #2210 -- the ledger's fuzzy CLAIM tier matched a re-derived finding
+    # against a REJECTED entry, but the per-lane gate was closed, so nothing was
+    # suppressed and the finding stayed blocking. Emitted by
+    # `suppress_adjudicated_findings` on the DEFAULT-OFF path, for any ticket
+    # that has a ledger at all.
+    # Deliberately distinct from REVIEW_FINDING_DISPOSITION_SUPPRESSED above
+    # rather than a reuse of it, for the same reason that one is distinct from
+    # REVIEW_FINDING_VOIDED: one type could not say whether a finding was
+    # actually suppressed or only WOULD have been, and the entire point of this
+    # event is that it records the counterfactual. Reading these is how an
+    # operator judges the matcher's thresholds before arming a lane (ADR-0016).
+    REVIEW_FINDING_CLAIM_SHADOWED = "review.finding_claim_shadowed"
     # GitHub #1927 -- a stale_dispatch park's WatchedPr registration found an
     # active watch for the same (repo, pr_number) already owned by a
     # DIFFERENT, non-None client. register_or_adopt_watched_pr refuses to

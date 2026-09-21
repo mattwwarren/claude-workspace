@@ -5,12 +5,21 @@ every per-concern note section unconditionally, each written to the same
 empty-list-returns-``[]`` shape so a pass with nothing to say about a concern
 produces no bytes for it. Nothing here reads or influences the disposition
 table — the sections report what the verdict already decided.
+
+The one section that is not purely a report is :func:`_render_settle_payloads`
+(#2210): it hands the operator a ready-to-paste ``cw review settle`` payload
+per blocking finding, which is the producer half of the cross-round
+adjudication ledger's first real write path.
 """
 
 from __future__ import annotations
 
+import json
+import re
 from typing import TYPE_CHECKING, get_args
 
+from cw.review_debt import fingerprint_v1
+from cw.review_finding_dispositions import SETTLE_SECTION_HEADING
 from cw.review_findings import Severity
 
 if TYPE_CHECKING:
@@ -77,6 +86,32 @@ _EVIDENCE_DEGRADED_ANNOTATION = (
 # coordinating session's Checkpoint 3a (4d) plan-scope precedence rule.
 _OUT_OF_PLAN_SCOPE_ANNOTATION = " _(outside planned file set)_"
 
+# #2210: the reviewer set `contests_adjudication`, i.e. it is knowingly
+# re-raising a finding an operator settled and says what changed. Rendered
+# whenever the field is non-blank, matched or not -- the label reports what the
+# reviewer CLAIMS, and gating it on an actual ledger match would need the match
+# result threaded into this renderer. Display-only, exactly like the
+# annotations above: nothing here admits, filters, or reorders the finding.
+_CONTEST_ANNOTATION = " _(contests prior adjudication — {claim})_"
+# The claim is free text from a model; a comment line is not the place for an
+# essay, and GitHub caps a comment body at 65,536 characters.
+_CONTEST_CLAIM_MAX = 200
+
+# The fence the settle payloads render in, widened past any backtick run in
+# the body so a summary containing ``` cannot break out of its own block.
+_MIN_FENCE = 3
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+_SETTLE_INTRO = (
+    "Each payload below records one blocking finding as settled. Save one to "
+    "a file, run `cw review settle <file> --out settle.md`, and post "
+    "`settle.md` as a ticket comment. `file` and `summary` are the finding's "
+    "identity, copied verbatim, so nothing needs editing; put your reasoning "
+    "in `rationale`, or set `outcome` to `ACCEPTED` if you uphold the "
+    "finding. This works only on GitHub-tracked tickets: a marker posted on "
+    "any other tracker is not read by the codex lane."
+)
+
 
 def _disposition_annotation(accepted: AcceptedFinding) -> str:
     """Annotate a finding whose disposition says it is no longer blocking.
@@ -114,6 +149,21 @@ def _degraded_annotation(finding: Finding) -> str:
     return _ANCHOR_DEGRADED_ANNOTATION
 
 
+def _contest_annotation(finding: Finding) -> str:
+    """Annotate a finding that knowingly contests a settled decision (#2210).
+
+    ``""`` for the blank default, same uncluttered-common-path convention as
+    the annotations above. The claim is whitespace-collapsed and truncated so
+    one verbose model cannot dominate the comment.
+    """
+    claim = " ".join(finding.contests_adjudication.split())
+    if not claim:
+        return ""
+    if len(claim) > _CONTEST_CLAIM_MAX:
+        claim = claim[:_CONTEST_CLAIM_MAX].rstrip() + "…"
+    return _CONTEST_ANNOTATION.format(claim=claim)
+
+
 def _render_findings(
     verdict: ReviewVerdict, severity: Severity, heading: str
 ) -> list[str]:
@@ -134,13 +184,14 @@ def _render_findings(
             else _CONFIDENCE_ANNOTATION.format(confidence=finding.confidence)
         )
         suppression = _disposition_annotation(af)
+        contest = _contest_annotation(finding)
         degraded = _degraded_annotation(finding)
         out_of_scope = (
             _OUT_OF_PLAN_SCOPE_ANNOTATION if af.in_plan_scope is False else ""
         )
         lines.append(
-            f"- **{loc}**{annotation}{suppression}{degraded}{out_of_scope} — "
-            f"{finding.summary}"
+            f"- **{loc}**{annotation}{suppression}{contest}{degraded}"
+            f"{out_of_scope} — {finding.summary}"
         )
     lines.append("")
     return lines
@@ -543,6 +594,11 @@ def _render_debt_note(verdict: ReviewVerdict) -> list[str]:
     Empty-returns-``[]``, mirroring ``_render_failed_roles_note``. The list is
     already deduplicated by fingerprint before it reaches the verdict, so
     there is no "already rendered" bookkeeping to do here.
+
+    This prints ``record.fingerprint[1]`` — the SUMMARY half of the ledger
+    identity, not the ``file::`` prefix — and only for DEBT records. That gap
+    is what #2210's :func:`_render_settle_payloads` closes for the blocking
+    findings an operator actually has to settle.
     """
     if not verdict.debt:
         return []
@@ -557,6 +613,74 @@ def _render_debt_note(verdict: ReviewVerdict) -> list[str]:
             lines.append(f"  - {record.suggested_follow_up}")
     lines.append("")
     return lines
+
+
+def _settle_fence(body: str) -> str:
+    """A code fence guaranteed to be longer than any backtick run in *body*."""
+    runs = _BACKTICK_RUN_RE.findall(body)
+    longest = max((len(run) for run in runs), default=0)
+    return "`" * max(_MIN_FENCE, longest + 1)
+
+
+def _render_settle_payloads(verdict: ReviewVerdict) -> list[str]:
+    """Hand the operator a ready-to-paste settle payload per finding (#2210).
+
+    The cross-round ledger (#1838) had a renderer, a parser and a backstop but
+    no production writer, and its runbook told operators to compute the key by
+    hand from a `python -c` one-liner. This section is the other end of
+    ``cw review settle``: each payload carries the finding's VERBATIM ``file``
+    and ``summary``, which are the ledger's whole identity, so pasting it needs
+    no editing and reproduces exactly the key a later re-raise will hit.
+
+    Empty-returns-``[]`` like its siblings, and renders nothing at all unless
+    the pass actually blocks — there is nothing to settle otherwise.
+
+    Deliberately NOT the postable ``REVIEW-FINDING-DISPOSITIONS`` marker
+    itself: the dispositions reader ingests every comment body on the ticket,
+    including this one, so printing the marker here would auto-settle every
+    finding as REJECTED on the next pass. Per finding rather than one combined
+    block, so an operator cannot settle the genuinely actionable finding by
+    pasting everything at once.
+    """
+    if not verdict.blocking:
+        return []
+    lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for finding in verdict.must_fix:
+        fingerprint = fingerprint_v1(finding.file, finding.summary)
+        # #1817's no-diff-anchor case: there is no path to key on, so this
+        # finding gets no cross-round memory and no payload.
+        if fingerprint is None or fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        body = json.dumps(
+            {
+                "entries": [
+                    {
+                        "file": finding.file,
+                        "summary": finding.summary,
+                        "outcome": "REJECTED",
+                        "rationale": "",
+                    }
+                ]
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        fence = _settle_fence(body)
+        lines.extend(
+            [
+                f"**{len(seen)}. {finding.file}**",
+                "",
+                f"{fence}json",
+                body,
+                fence,
+                "",
+            ]
+        )
+    if not lines:
+        return []
+    return [SETTLE_SECTION_HEADING, "", _SETTLE_INTRO, "", *lines]
 
 
 def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) -> str:
@@ -626,4 +750,9 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
     lines.extend(_render_debt_note(verdict))
     lines.extend(_render_findings(verdict, "MUST_FIX", "MUST_FIX"))
     lines.extend(_render_findings(verdict, "SHOULD_FIX", "SHOULD_FIX"))
+    # #2210: last, so the operator reads the findings before the machinery for
+    # settling them. Every producer of this text (Blocker.details, the fix
+    # loop's park, and the posted comment) goes through this one function, so
+    # one insertion covers every lane.
+    lines.extend(_render_settle_payloads(verdict))
     return "\n".join(lines).rstrip() + "\n"

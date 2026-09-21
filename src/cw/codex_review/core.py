@@ -35,6 +35,7 @@ def run_review(
     wall_clock_budget_seconds: int | None,
     session_id: str,
     fix_loop_enabled: bool,
+    claim_tier_enabled: bool = False,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -51,6 +52,11 @@ def run_review(
     ``finding_dispositions`` (#1838) ride the same hop, for the same reason —
     the prepared pass already merged the durable queue-row ledger with the
     ticket thread's marker, so this only has to thread the result.
+
+    ``claim_tier_enabled`` (#2210) is the lane-resolved gate for the ledger's
+    fuzzy claim-match tier, forwarded to the same function. Defaulted False so
+    this entry point — the whole fix-loop-disabled lane, and cycle 0 of the
+    enabled one — is off unless a caller deliberately arms it.
 
     ``run_codex_roles``' fourth return value (#2029) — the findings rescued out
     of their documents at parse time — rides the same hop as well, so a
@@ -85,5 +91,6 @@ def run_review(
         agent_spec_status=prepared.agent_spec_status,
         voided_findings=prepared.voided_findings,
         finding_dispositions=prepared.finding_dispositions,
+        claim_tier_enabled=claim_tier_enabled,
         pre_validation_rejected=pre_validation_rejected,
     )
