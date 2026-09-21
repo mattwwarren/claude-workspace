@@ -2,7 +2,7 @@
 
 **Non-blocking** — no MUST_FIX findings. Single-pass review (fix loop disabled for this lane).
 
-**DEGRADED COVERAGE** — 2 roles ran degraded: Code Quality Reviewer: degraded — Static review completed. Mandatory lint, type-check, test, and repository gates could not run because the worktree is read-only and required tooling/dependency writes are unavailable., SysAdmin Reviewer: degraded — Targeted review, disposition/marker/CLI/codex tests, formatting, import checks, Ruff, and mypy passed. Full pre-commit, integration, coverage, diff-cover, and lock checks were not completed because the read-only environment prevented uv from creating its temporary lock file. Scope Assessment: Intended scope: prevent codex reviewer re-raises of operator-settled findings. Actual scope: ledger settlement, provenance validation, gated claim matching, renderer hardening, configuration/events, tests, and documentation. Verdict: Focused. Out-of-scope files: None..
+**DEGRADED COVERAGE** — 2 roles ran degraded: Code Quality Reviewer: degraded — Reviewed the complete changed-file diff, code paths, and repository Ruff configuration. Full test and lint gate execution was not performed because the environment is read-only., SysAdmin Reviewer: degraded — Static diff review completed. Full test and CI execution could not be performed in the read-only environment..
 
 _Reviewed with repo filesystem access (capable)._
 
@@ -10,6 +10,5 @@ _Agent specs loaded for all 3 reviewer role(s)._
 
 ### SHOULD_FIX
 
-- **CHANGELOG.md:9** — The #2210 feature is recorded under the already released 1.48.0 section
-- **src/cw/codex_review/_context/core.py:148** — Pipeline-comment elision is triggered by an untrusted heading
-- **src/cw/review_finding_dispositions.py:469** — Newest-wins merge compares UTC timestamps lexicographically
+- **scripts/measure_hook_cost.py:143** _(MEDIUM confidence)_ — Cleanup failures for copied state and configuration are silently ignored
+- **scripts/measure_hook_cost.py:147** — The documented output path fails when its parent does not exist
