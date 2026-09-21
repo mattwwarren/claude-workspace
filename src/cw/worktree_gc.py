@@ -428,6 +428,10 @@ def _live_worktree_paths() -> frozenset[Path]:
     corrupted state file never blocks GC from running — it only disables that
     live-session safety guard for the run (logged at WARNING). An unexpected
     exception type from the session-state read is a bug and propagates.
+
+    GC fails OPEN on that ``None`` (unchanged from before #2213); the
+    ``create_worktree`` reuse refresh fails CLOSED on the same ``None``. The
+    split is deliberate -- see :func:`cw.worktree.live_session_worktree_paths`.
     """
     live: set[Path] = set(live_session_worktree_paths() or ())
 

@@ -708,15 +708,27 @@ _STATE_READ_ERRORS: tuple[type[Exception], ...] = (OSError, ValueError)
 def live_session_worktree_paths() -> frozenset[Path] | None:
     """Return worktree paths of non-terminal sessions in cw state, or None.
 
-    The session-state half of the live-path guard, shared by the worktree GC
-    (``cw.worktree_gc._live_worktree_paths``) and the reuse refresh
-    (:func:`_reuse_occupancy_reason`, #2213). ``None`` means the state could
-    not be read or parsed (``OSError`` / ``ValueError`` -- see
-    :data:`_STATE_READ_ERRORS`; logged at WARNING): GC treats that as "no live
-    sessions known" so a corrupted state file never blocks it, while a caller
-    about to *mutate* a worktree must treat it as "cannot rule out a live
-    session" and fail closed. Any other exception is a bug, not a corrupt
-    file, and propagates.
+    This helper REPORTS what it can determine; it does not decide what an
+    indeterminate answer means -- EACH CALLER DECIDES that. It returns a
+    frozenset of paths when the session state was read, or ``None`` when it is
+    indeterminate: the state could not be read or parsed (``OSError`` /
+    ``ValueError`` -- see :data:`_STATE_READ_ERRORS`; logged at WARNING). Any
+    other exception is a bug, not a corrupt file, and propagates.
+
+    The two callers deliberately treat ``None`` in OPPOSITE directions:
+
+    - The reuse refresh (:func:`_live_home_reason`, reached through
+      :func:`_reuse_occupancy_reason`, #2213) fails CLOSED. ``None`` means "cannot
+      rule out a live session", i.e. occupied: the worktree is used as-is and
+      never fast-forwarded. Reading "unknown" as "free" would rewrite a live
+      worker's tree.
+    - The worktree GC (``cw.worktree_gc._live_worktree_paths``) fails OPEN,
+      unchanged from before #2213. ``None`` contributes nothing, so a corrupted
+      state file never blocks garbage collection; GC keeps running with this
+      live-session guard disabled for the run (the WARNING above is the trace).
+
+    The split is deliberate. Do not "fix" either posture into consistency with
+    the other.
 
     Returns the paths exactly as recorded (unresolved): the GC compares them
     against git-listed paths, and the refresh normalizes before comparing.
