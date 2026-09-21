@@ -250,6 +250,12 @@ ignore = [
 # result defers the cli._hook_io import to break the cli <-> result circular
 # dependency; inline import is the sanctioned mechanism, not a workaround.
 "src/cw/result.py" = ["PLC0415"]
+# worktree defers cw.worktree_gc.live_session_worktree_paths inside
+# _reuse_occupancy_reason to break the cw.worktree -> cw.worktree_gc ->
+# cw.dev_queue -> (requeue|lifecycle) -> cw.worktree circular dependency
+# (#2213). Inline import at function level is the sanctioned mechanism, not a
+# workaround.
+"src/cw/worktree.py" = ["PLC0415"]
 # reconcile defers the dispatch import inside _apply_sentinel_to_task to
 # break the reconcile ↔ dispatch circular dependency (#698). Inline import
 # at function level is the sanctioned mechanism, not a workaround.

@@ -666,37 +666,90 @@ def _ff_reused_worktree(
     _init_submodules(_git_dir(client), wt_path)
 
 
+def _reuse_occupancy_reason(
+    client: ClientConfig, branch: str, wt_path: Path
+) -> str | None:
+    """Return why *wt_path* is occupied (must not be moved), or None if free.
+
+    Local reads only -- no network. Occupied means either:
+
+    - :func:`unsaved_work_reason` reports uncommitted, untracked or unpushed
+      work (checked regardless of the caller's ``allow_dirty_reuse``, which
+      only tolerates such work, it does not license moving HEAD under it); or
+    - a live (non-terminal) session in cw state is homed on *wt_path*, per
+      :func:`cw.worktree_gc.live_session_worktree_paths` -- the same predicate
+      the worktree GC uses. Unreadable session state is treated as occupied
+      (fail closed: this gates a mutation). The dev-queue RUNNING half of the
+      GC guard is deliberately not consulted: at dispatch-claim time the task
+      being claimed is itself RUNNING, so it would veto the very path this
+      refresh serves, and a live session for that task already appears in the
+      state half.
+    """
+    unsaved = unsaved_work_reason(client, branch, wt_path=wt_path)
+    if unsaved is not None:
+        return f"unsaved work ({unsaved})"
+    # Why: function-level import -- cw.worktree_gc imports cw.dev_queue, whose
+    # requeue/lifecycle modules import cw.worktree, so a top-level import here
+    # would be a cycle.
+    from cw.worktree_gc import live_session_worktree_paths
+
+    live = live_session_worktree_paths()
+    if live is None:
+        return "session state unreadable, cannot rule out a live session"
+    if wt_path in live:
+        return "a live session is homed on this worktree"
+    return None
+
+
 def _refresh_reused_worktree(client: ClientConfig, branch: str, wt_path: Path) -> None:
-    """Best-effort fetch, then fast-forward a *behind* reused worktree (#2213).
+    """Best-effort fetch, then fast-forward a *behind, unoccupied* reused worktree.
 
-    Closes the asymmetry between the first-time path (which fetches) and the
-    reuse path (which used to return the worktree untouched): a per-ticket
-    worktree reused across pipeline stages could sit on a stale HEAD while
-    ``origin/<branch>`` had moved on.
+    Called from :func:`create_worktree` only when ``refresh_on_reuse`` is set
+    (#2213), after its branch-identity and unsaved-work guards. Closes the
+    asymmetry between the first-time path (which fetches) and the reuse path
+    (which used to return the worktree untouched): a per-ticket worktree reused
+    across pipeline stages could sit on a stale HEAD while ``origin/<branch>``
+    had moved on.
 
-    Never raises and never resets. The fetch result is ignored on purpose --
-    the fast-forward is a strict-ancestor operation, so even when the fetch
-    fails (offline) a worktree behind an already-known, fresher tracking ref
-    (advanced by some other fetch of the shared repo) is still brought up.
+    Order of operations:
 
-    The target is the branch's own ``refs/remotes/origin/<branch>``, NOT
-    :func:`_resolve_remote_ref`: that ladder is upstream-first, and a
-    misconfigured ``@{u}`` of ``origin/<default>`` (the #2114 failure mode)
-    would fast-forward a feature branch onto main.
+    1. **Occupancy gate, local reads only, no network**
+       (:func:`_reuse_occupancy_reason`). Occupied -- unsaved work, or a live
+       session homed here -- means use the worktree as-is: a DEBUG log names
+       the path and the reason, and nothing else happens (no fetch, no move).
+       The third occupancy criterion, "checked-out branch is not the expected
+       one", is already enforced by ``create_worktree``'s own guard, which
+       *raises* :exc:`StaleWorktreeError` (stricter than use-as-is) before
+       this helper is reached, so it is not re-checked here.
+    2. ``git fetch`` of ``origin/<branch>`` via :func:`fetch_feature_branch`.
+       This is a network call: it can be slow, or fail. The result is ignored
+       on purpose -- the fast-forward is a strict-ancestor operation, so even
+       when the fetch fails (offline) a worktree behind an already-known,
+       fresher tracking ref (advanced by some other fetch of the shared repo)
+       is still brought up.
+    3. Target is the branch's own ``refs/remotes/origin/<branch>``, NOT
+       :func:`_resolve_remote_ref`: that ladder is upstream-first, and a
+       misconfigured ``@{u}`` of ``origin/<default>`` (the #2114 failure mode)
+       would fast-forward a feature branch onto main. Target absent (branch
+       never pushed): no-op.
+    4. HEAD equal or ahead: no-op (unpushed commits kept). Diverged (remote
+       history rewritten since the worktree pushed): WARNING, untouched --
+       reconciling is not this function's job. Behind: ``merge --ff-only``
+       (see :func:`_ff_reused_worktree`).
 
-    - target ref absent (branch never pushed), or HEAD equal/ahead: no-op --
-      unpushed local commits are kept;
-    - diverged: WARNING, worktree untouched;
-    - behind: ``merge --ff-only`` (see :func:`_ff_reused_worktree`).
-
-    Known limitation: interactive ``cw start`` reaches this (via
-    ``session._resolve_start_worktree``) before it checks for an active
-    session, so a live session occupying the same clean, fully-pushed worktree
-    can have its HEAD and files fast-forwarded under it. No work is lost --
-    the unsaved-work guard and ``--ff-only`` bound it to a strict fast-forward
-    the branch needed anyway.
+    Never raises and never resets, ``checkout -f``s or deletes.
     """
     try:
+        reason = _reuse_occupancy_reason(client, branch, wt_path)
+        if reason is not None:
+            _log.debug(
+                "create_worktree: not refreshing reused worktree "
+                "(client=%s, path=%s): %s",
+                client.name,
+                wt_path,
+                reason,
+            )
+            return
         fetch_feature_branch(client, branch)
         target = f"refs/remotes/origin/{branch}"
         if not _ref_exists(target, wt_path):
@@ -728,6 +781,7 @@ def create_worktree(
     *,
     force: bool = False,
     allow_dirty_reuse: bool = False,
+    refresh_on_reuse: bool = False,
 ) -> Path:
     """Create a git worktree for the given branch.
 
@@ -736,12 +790,29 @@ def create_worktree(
     *different* branch (or not a worktree at all) is treated as stale and
     raises :exc:`StaleWorktreeError` rather than being reused (see below).
 
-    On reuse, after the guards pass, the worktree is best-effort refreshed
-    (#2213): ``origin/<branch>`` is fetched and a strictly *behind* worktree is
-    fast-forwarded to it. This is never a reset and never raises -- equal,
-    ahead and diverged worktrees are left untouched, and a fetch or
-    fast-forward failure only logs a warning. See
-    :func:`_refresh_reused_worktree`.
+    By default reuse is path resolution only: no fetch, no fast-forward.
+
+    *refresh_on_reuse* (#2213) opts a caller into a best-effort refresh of a
+    reused worktree, for callers whose purpose is a fresh per-ticket worktree
+    (dispatch claim, fix-agent dispatch). It has side effects a path-resolution
+    call would not suggest:
+
+    - **Network:** it runs ``git fetch origin <branch>``, which can be slow or
+      fail. A fetch failure degrades to using the worktree as-is; it never
+      raises out of this function.
+    - **Moves HEAD** only for a strict fast-forward (``merge --ff-only``) of a
+      worktree that is unoccupied, clean, already on *branch*, and strictly
+      behind ``origin/<branch>``.
+    - **Refuses, and uses the worktree as-is** (DEBUG log naming the path and
+      reason; never ``reset --hard``, ``checkout -f`` or delete) when: there is
+      unsaved work (uncommitted, untracked or unpushed); a live session is
+      homed on the path; cw session state is unreadable; the branch has
+      diverged from origin (WARNING); ``--ff-only`` itself refuses (WARNING);
+      or ``origin/<branch>`` does not exist. A wrong branch is stricter still:
+      the identity guard above raises :exc:`StaleWorktreeError` before any
+      refresh. Submodules are re-synced after a successful fast-forward.
+
+    See :func:`_refresh_reused_worktree`.
 
     When no existing worktree is reused, the branch itself is resolved via a
     three-way check (#2032): a local ``refs/heads/<branch>`` is used as-is; if
@@ -788,7 +859,8 @@ def create_worktree(
                 f"Commit or push the work, then re-dispatch."
             )
             raise StaleWorktreeError(msg)
-        _refresh_reused_worktree(client, branch, wt_path)
+        if refresh_on_reuse:
+            _refresh_reused_worktree(client, branch, wt_path)
         return wt_path
 
     wt_path.parent.mkdir(parents=True, exist_ok=True)
