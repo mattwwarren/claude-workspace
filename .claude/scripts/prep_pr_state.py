@@ -18,9 +18,11 @@ import argparse
 import contextlib
 import json
 import logging
+import re
 import subprocess
 import sys
-from dataclasses import asdict, dataclass, field
+from collections import Counter
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -255,7 +257,9 @@ ECOSYSTEM_GATES: dict[str, list[Gate]] = {
 # triggers, NOT sized to guarantee inline completion -- mypy/pytest/
 # pre-commit routinely exceed these on repos this size (see #1432,
 # GEN-5458/GEN-5463). Tunable per-gate; unlisted gates fall back to
-# GATE_TIMEOUT_FALLBACK_SECONDS.
+# GATE_TIMEOUT_FALLBACK_SECONDS. Keys match by longest hyphen-delimited
+# prefix of the gate name (see gate_timeout_seconds), so derived names such
+# as ``pytest-integration`` inherit the ``pytest`` ceiling.
 GATE_TIMEOUT_DEFAULTS: dict[str, int] = {
     "mypy": 600,
     "pytest": 600,
@@ -275,8 +279,19 @@ GATE_POLL_CEILING_SECONDS: int = 1800
 
 
 def gate_timeout_seconds(name: str) -> int:
-    """Foreground ceiling for a gate by name, falling back to the default."""
-    return GATE_TIMEOUT_DEFAULTS.get(name, GATE_TIMEOUT_FALLBACK_SECONDS)
+    """Foreground ceiling for a gate by name, falling back to the default.
+
+    Lookup is by longest hyphen-delimited prefix: the full name first, then
+    with trailing ``-segment`` parts dropped one at a time, so a derived name
+    such as ``pytest-integration`` resolves to ``pytest`` while ``pre-commit``
+    still matches its own exact key.
+    """
+    parts = name.split("-")
+    for end in range(len(parts), 0, -1):
+        prefix = "-".join(parts[:end])
+        if prefix in GATE_TIMEOUT_DEFAULTS:
+            return GATE_TIMEOUT_DEFAULTS[prefix]
+    return GATE_TIMEOUT_FALLBACK_SECONDS
 
 
 def elapsed_exceeds_ceiling(
@@ -322,16 +337,33 @@ def _strip_inline_comment(line: str) -> str:
     return line[:idx] if idx != -1 else line
 
 
-def _derive_gate_name(command: str) -> str:
-    """Derive a gate name from a shell command string.
+# A bullet gate name is one identifier-like token: names are passed as CLI args
+# (``gate-timeout <name>``) and printed in ``gate: <name>`` blocks, so they
+# cannot contain spaces or backticks. This is what separates ``- mypy: cmd``
+# from a prose bullet such as ``- Test suite: 100% pass rate required``.
+_GATE_NAME_RE = re.compile(r"[\w][\w.+-]*")
 
-    - ``uv run [options] <cmd>`` → ``<cmd>`` (skips uv-run flags and their args)
-    - ``npx <cmd>`` → ``<cmd>``
+# A subcommand token (``check`` in ``ruff check``) usable as a name qualifier.
+_SUBCOMMAND_RE = re.compile(r"[a-z][a-z-]*")
+
+# ``-m <expr>`` pytest marker expression, bare or single/double quoted.
+_MARKER_RE = re.compile(r"""(?:^|\s)-m\s+(?P<q>['"]?)(?P<expr>.+?)(?P=q)(?:\s|$)""")
+
+# A command wrapped in exactly one backtick pair: ``- name: `cmd` ``.
+_BACKTICKS_IN_FENCE = 2
+
+
+def _split_command(command: str) -> tuple[str, list[str]]:
+    """Split a shell command into ``(executable, remaining_tokens)``.
+
+    - ``uv run [options] <cmd> ...`` → ``<cmd>`` (skips uv-run flags and their
+      args; the remaining tokens are those after ``<cmd>``)
+    - ``npx <cmd> ...`` → ``<cmd>``
     - Anything else → first token
     """
     tokens = command.split()
     if not tokens:
-        return ""
+        return "", []
     if len(tokens) >= 2 and tokens[0] == "uv" and tokens[1] == "run":
         i = 2
         while i < len(tokens):
@@ -346,11 +378,54 @@ def _derive_gate_name(command: str) -> str:
                 ):
                     i += 1  # skip the flag's value token
             else:
-                return tok
-        return ""
+                return tok, tokens[i + 1 :]
+        return "", []
     if tokens[0] == "npx" and len(tokens) >= 2:
-        return tokens[1]
-    return tokens[0]
+        return tokens[1], tokens[2:]
+    return tokens[0], tokens[1:]
+
+
+def _gate_qualifier(command: str) -> str:
+    """Name qualifier that tells a gate apart from same-executable siblings.
+
+    - the first argument when it is a bare subcommand (``ruff check`` →
+      ``check``, ``ruff format`` → ``format``)
+    - otherwise the slugified ``-m <marker>`` expression
+      (``-m 'not integration'`` → ``not-integration``)
+    - otherwise ``""`` (no qualifier available)
+    """
+    _, args = _split_command(command)
+    if args and _SUBCOMMAND_RE.fullmatch(args[0]):
+        return args[0]
+    marker = _MARKER_RE.search(command)
+    if marker:
+        return re.sub(r"[^a-z0-9]+", "-", marker.group("expr").lower()).strip("-")
+    return ""
+
+
+def _disambiguate_gate_names(gates: list[Gate]) -> list[Gate]:
+    """Make gate names unique, qualifying only the names that collide.
+
+    A gate keeps its bare executable name unless another gate shares it; the
+    colliding gates get ``-<qualifier>`` (see ``_gate_qualifier``). Any names
+    still duplicated afterwards get an ordinal suffix on the second and later
+    occurrences (``mypy``, ``mypy-2``).
+    """
+    counts = Counter(g.name for g in gates)
+    qualified: list[Gate] = []
+    for gate in gates:
+        qualifier = _gate_qualifier(gate.command) if counts[gate.name] > 1 else ""
+        qualified.append(
+            replace(gate, name=f"{gate.name}-{qualifier}") if qualifier else gate
+        )
+
+    seen: Counter[str] = Counter()
+    unique: list[Gate] = []
+    for gate in qualified:
+        prior = seen[gate.name]
+        seen[gate.name] += 1
+        unique.append(replace(gate, name=f"{gate.name}-{prior + 1}") if prior else gate)
+    return unique
 
 
 def _parse_bash_block_gates(fence_lines: list[str]) -> list[Gate]:
@@ -370,27 +445,77 @@ def _parse_bash_block_gates(fence_lines: list[str]) -> list[Gate]:
             command = _strip_inline_comment(full).strip()
             if not command or command.startswith("#"):
                 continue
-            name = _derive_gate_name(command)
+            name, _ = _split_command(command)
             if name:
                 gates.append(Gate(name=name, command=command))
     if pending.strip():
         command = _strip_inline_comment(pending.strip()).strip()
         if command and not command.startswith("#"):
-            name = _derive_gate_name(command)
+            name, _ = _split_command(command)
             if name:
                 gates.append(Gate(name=name, command=command))
     return gates
 
 
-def _parse_claude_md_gates(claude_md_path: Path) -> list[Gate]:
+@dataclass(frozen=True)
+class ClaudeMdGates:
+    """Gates parsed from a CLAUDE.md ``## Quality Gates`` section.
+
+    ``authoritative`` is True when a bash block contributed at least one gate:
+    the block then defines the complete gate set, so ecosystem defaults must
+    not be merged in.
+    """
+
+    gates: list[Gate]
+    authoritative: bool
+
+
+def _strip_backtick_fence(text: str) -> str:
+    """Unwrap exactly one surrounding backtick pair; otherwise return unchanged."""
+    if (
+        text.count("`") == _BACKTICKS_IN_FENCE
+        and text.startswith("`")
+        and text.endswith("`")
+    ):
+        return text[1:-1].strip()
+    return text
+
+
+def _parse_bullet_gate(gate_text: str) -> Gate | None:
+    """Parse ``name: command [| autofix]`` into a Gate, or None for prose.
+
+    The name before the first ``": "`` must be a single identifier-like token
+    (``_GATE_NAME_RE``), and the command must be non-empty. Anything else is
+    treated as prose, not a gate. A command or autofix wrapped in one backtick
+    pair is unwrapped.
+    """
+    name, separator, rest = gate_text.partition(": ")
+    name = name.strip()
+    if not separator or not _GATE_NAME_RE.fullmatch(name):
+        return None
+    command, _, autofix = rest.partition(" | ")
+    command = _strip_backtick_fence(command.strip())
+    autofix = _strip_backtick_fence(autofix.strip())
+    if not command:
+        return None
+    return Gate(name=name, command=command, autofix=autofix or None)
+
+
+def _parse_claude_md_gates(claude_md_path: Path) -> ClaudeMdGates:
     """Parse quality gates from a CLAUDE.md file.
 
     Supports two formats inside the ``## Quality Gates`` section:
 
-    Bullet lines (name with optional autofix)::
+    Bullet lines (single-token name, optional autofix)::
 
         - name: command
         - name: command | autofix_command
+        - name: `command` | `autofix_command`
+
+    A bullet is a gate only when the text before the first ``": "`` is one
+    identifier-like token and the command is non-empty; prose bullets such as
+    ``- Test suite: 100% pass rate required`` are ignored. One wrapping
+    backtick pair around the command or autofix is stripped.
 
     Bash code block (gate name derived from executable)::
 
@@ -400,18 +525,25 @@ def _parse_claude_md_gates(claude_md_path: Path) -> list[Gate]:
           --fail-under=90
         ```
 
+    Bash-block gates keep their bare executable name unless another gate in the
+    section shares it, in which case each colliding gate is qualified by its
+    subcommand or ``-m`` marker (``ruff-check``, ``ruff-format``,
+    ``pytest-not-integration``); leftover duplicates get an ordinal suffix.
+    The result is authoritative when a bash block yielded at least one gate
+    (see ``ClaudeMdGates``); an empty or unclosed block is not.
+
     When both formats appear in the same section, bash-block gates override
     bullet gates that share the same name (bullets first, then bash-block wins).
     Inline comments (`` # …``) are stripped from bash-block commands.
     An unclosed fence returns no bash-block gates and raises no exception.
     """
     if not claude_md_path.exists():
-        return []
+        return ClaudeMdGates(gates=[], authoritative=False)
 
     try:
         content = claude_md_path.read_text()
     except OSError:
-        return []
+        return ClaudeMdGates(gates=[], authoritative=False)
 
     in_gates_section = False
     in_bash_fence = False
@@ -442,35 +574,31 @@ def _parse_claude_md_gates(claude_md_path: Path) -> list[Gate]:
             in_bash_fence = True
             fence_lines = []
         elif stripped.startswith("- "):
-            gate_text = stripped[2:].strip()
-            if ": " not in gate_text:
-                continue
-            name, rest = gate_text.split(": ", 1)
-            name = name.strip()
-            if " | " in rest:
-                command, autofix = rest.split(" | ", 1)
-                bullet_gates.append(
-                    Gate(
-                        name=name.strip(),
-                        command=command.strip(),
-                        autofix=autofix.strip(),
-                    )
-                )
-            else:
-                bullet_gates.append(Gate(name=name.strip(), command=rest.strip()))
+            bullet_gate = _parse_bullet_gate(stripped[2:].strip())
+            if bullet_gate is not None:
+                bullet_gates.append(bullet_gate)
+
+    # Disambiguate once, after every fence in the section has been collected,
+    # so same-executable gates split across fences are still told apart.
+    block_gates = _disambiguate_gate_names(block_gates)
 
     # Bash-block gates override bullet gates of the same name; bullets kept first
-    # for any names not overridden (mirrors detect_gates() dedup logic).
+    # for any names not overridden.
     block_names = {g.name for g in block_gates}
     merged = [g for g in bullet_gates if g.name not in block_names]
     merged.extend(block_gates)
-    return merged
+    return ClaudeMdGates(gates=merged, authoritative=bool(block_gates))
 
 
 def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:
     """Auto-detect quality gates from project files and CLAUDE.md overrides.
 
     Returns dict with 'gates' list and 'detected_from' list.
+
+    A CLAUDE.md bash block that yields at least one gate is authoritative:
+    ecosystem defaults are dropped and ``detected_from`` lists only
+    ``CLAUDE.md``. Otherwise CLAUDE.md bullet gates override same-named
+    ecosystem defaults.
     """
     cwd = Path.cwd()
     gates: list[Gate] = []
@@ -486,13 +614,17 @@ def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:
     if claude_md_path is None:
         claude_md_path = cwd / "CLAUDE.md"
 
-    override_gates = _parse_claude_md_gates(claude_md_path)
-    if override_gates:
+    parsed = _parse_claude_md_gates(claude_md_path)
+    if parsed.authoritative:
+        # The bash block is the complete gate set: drop every ecosystem default.
+        gates = []
+        detected_from = ["CLAUDE.md"]
+    elif parsed.gates:
         detected_from.append("CLAUDE.md")
         # Override: if a CLAUDE.md gate has the same name as a default, replace it
-        override_names = {g.name for g in override_gates}
+        override_names = {g.name for g in parsed.gates}
         gates = [g for g in gates if g.name not in override_names]
-        gates.extend(override_gates)
+    gates.extend(parsed.gates)
 
     return {
         "gates": [g.to_dict() for g in gates],
