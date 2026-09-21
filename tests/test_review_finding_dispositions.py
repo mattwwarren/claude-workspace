@@ -1547,6 +1547,13 @@ class TestKeyBindsTheVerbatimSummary:
         assert result.blocking is True
         assert [r.missing for r in result.refused_dispositions] == [["identity"]]
 
+    @pytest.mark.parametrize("key", ["", "::", "src/cw/foo.py", "::bug here"])
+    def test_a_key_with_no_file_or_no_normalized_summary_is_an_identity_gap(
+        self, key: str
+    ) -> None:
+        _, refused = partition_enforceable_dispositions({key: _entry()})
+        assert [r.missing for r in refused] == [["identity"]]
+
     def test_a_blank_summary_reports_the_summary_gap_alone(self) -> None:
         # The binding cannot be checked without a summary, and "summary" is
         # already the gap that names it: one problem, one entry.
