@@ -2868,6 +2868,49 @@ def test_dispatch_fix_agent_fast_forwards_behind_worktree(
 
     assert len(stub_spawn.calls) == 1
     assert git_in(worktree, "rev-parse", "HEAD") == new_sha
+    # A refresh that worked leaves no friction note behind.
+    assert "Friction note" not in str(stub_spawn.calls[0]["prompt"])
+
+
+def test_dispatch_fix_agent_reports_failed_refresh_fetch_in_friction_note(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2213 round 3: unlike ``create_worktree``, this caller has a friction
+    surface (the prompt prefix), so a failed refresh fetch is named there --
+    worktree and reason -- alongside the log line, and the dispatch proceeds."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    # In sync with origin, so the HEAD check passes even though the refresh
+    # fetch (patched) fails; only the dispatch's own real ``git fetch`` runs.
+    monkeypatch.setattr("cw.worktree.fetch_feature_branch", lambda _c, _b: False)
+
+    dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert len(stub_spawn.calls) == 1
+    prompt = str(stub_spawn.calls[0]["prompt"])
+    note = next(
+        line for line in prompt.splitlines() if line.startswith("_Friction note:")
+    )
+    assert str(worktree) in note
+    assert f"origin/{branch}" in note
+    assert "fetch" in note
+    assert prompt.endswith(_FIX_PROMPT_TEXT)
 
 
 def test_dispatch_fix_agent_verifies_head_before_merge(

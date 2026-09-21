@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import logging
 import os
@@ -615,26 +616,57 @@ def _branch_held_error(
     return BranchHeldByWorktreeError(msg, holder_path=holder)
 
 
-def _init_submodules(git_cwd: Path, wt_path: Path) -> None:
-    """Initialize submodules in *wt_path* when the main checkout uses them.
+def _sync_submodules(wt_path: Path) -> str | None:
+    """Run ``git submodule update --init --recursive`` in *wt_path*.
 
-    Best-effort (``check=False``): a submodule failure never fails worktree
-    provisioning. Called after a fresh ``worktree add`` and after a reuse-path
-    fast-forward, which can move submodule pointers (#2213).
+    Best-effort (``check=False``): never raises for a git failure, never resets
+    or deletes a submodule. Returns ``None`` on success, otherwise a one-line
+    reason (git's first stderr line) after logging it at WARNING, so a caller
+    with a friction surface can report it too.
+    """
+    result = _run_git(
+        "submodule", "update", "--init", "--recursive", cwd=wt_path, check=False
+    )
+    if result.returncode == 0:
+        return None
+    reason = _first_line(result.stderr) or f"git exited {result.returncode}"
+    _log.warning(
+        "create_worktree: submodule sync failed in %s; using worktree as-is: %s",
+        wt_path,
+        reason,
+    )
+    return reason
+
+
+def _init_submodules(git_cwd: Path, wt_path: Path) -> None:
+    """Initialize submodules in a fresh *wt_path* when the main checkout uses them.
+
+    Best-effort: a submodule failure is logged (:func:`_sync_submodules`) and
+    never fails worktree provisioning. The first-time path's trigger is the main
+    checkout's ``.gitmodules``; the reuse path keys on the fast-forwarded
+    worktree's own HEAD instead (:func:`_head_has_gitmodules`).
     """
     if (git_cwd / ".gitmodules").exists():
-        _run_git(
-            "submodule",
-            "update",
-            "--init",
-            "--recursive",
-            cwd=wt_path,
-            check=False,
-        )
+        _sync_submodules(wt_path)
+
+
+def _head_has_gitmodules(wt_path: Path) -> bool:
+    """Return True if the commit checked out in *wt_path* tracks ``.gitmodules``.
+
+    Reads the committed tree (``HEAD:.gitmodules``), not the file system, so an
+    untracked ``.gitmodules`` never triggers a sync and one that the new HEAD
+    introduced on a branch the main checkout does not have is still found.
+    """
+    probe = _run_git("cat-file", "-e", "HEAD:.gitmodules", cwd=wt_path, check=False)
+    return probe.returncode == 0
 
 
 def _ff_reused_worktree(
-    client: ClientConfig, branch: str, wt_path: Path, target: str
+    client: ClientConfig,
+    branch: str,
+    wt_path: Path,
+    target: str,
+    notes: list[str],
 ) -> None:
     """Fast-forward *wt_path* to *target* with ``merge --ff-only``, never raising.
 
@@ -653,8 +685,15 @@ def _ff_reused_worktree(
     ``--ff-only`` cannot destroy work: it refuses (rc != 0, worktree untouched)
     when local uncommitted changes overlap files the merge must update, and
     carries non-overlapping local modifications through. A refusal is logged
-    and the worktree is left exactly as it was. Submodules are synced after a
-    successful fast-forward only, since the merge can move their pointers.
+    and the worktree is left exactly as it was.
+
+    After a successful fast-forward, when the NEW HEAD tracks ``.gitmodules``
+    (:func:`_head_has_gitmodules` -- the merge can introduce or move submodules
+    even when the main checkout has none), submodules are synced. A failed sync
+    is logged and appended to *notes* as one line naming the worktree and the
+    reason; the worktree is left usable at the fast-forwarded HEAD, and nothing
+    is reset or deleted. With no ``.gitmodules`` in the new HEAD the step is
+    skipped entirely.
     """
     changed = _reuse_occupancy_reason(client, branch, wt_path)
     if changed is not None:
@@ -688,7 +727,14 @@ def _ff_reused_worktree(
         old_sha[:_SHA_LOG_CHARS],
         new_sha[:_SHA_LOG_CHARS],
     )
-    _init_submodules(_git_dir(client), wt_path)
+    if _head_has_gitmodules(wt_path):
+        failure = _sync_submodules(wt_path)
+        if failure is not None:
+            notes.append(
+                f"submodule sync failed in reused worktree {wt_path} after "
+                f"fast-forwarding {branch}: {failure}; its submodules may point "
+                "at stale commits"
+            )
 
 
 _NON_TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
@@ -752,6 +798,24 @@ def live_session_worktree_paths() -> frozenset[Path] | None:
     return frozenset(live)
 
 
+def _resolve_detecting_loop(path: Path) -> Path:
+    """``Path.resolve()`` that raises ``OSError`` (``ELOOP``) on a symlink loop.
+
+    Since Python 3.13 a non-strict ``resolve()`` no longer raises on a loop: it
+    hands back the path only partly resolved, which would compare unequal to the
+    real home and read as "not occupied" -- the fail-open direction this guard
+    exists to prevent. ``stat()`` follows the whole chain and reports the loop.
+    Any other ``stat`` error (notably ``ENOENT``: a recorded worktree that is
+    simply gone) is ignored, since a missing path is not indeterminate.
+    """
+    try:
+        path.stat()
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise
+    return path.resolve()
+
+
 def _live_home_reason(wt_path: Path) -> str | None:
     """Return why a live session or daemon worker may be homed on *wt_path*.
 
@@ -764,8 +828,10 @@ def _live_home_reason(wt_path: Path) -> str | None:
 
     Fails closed: an unreadable state file, an unreadable roster, or a path that
     cannot be resolved all read as "cannot rule out a live session", never as
-    "free". Every path is compared after ``Path.resolve()`` on both sides, so a
-    symlinked or non-canonical spelling of the same directory still matches.
+    "free". Every path is compared after normalization
+    (:func:`_resolve_detecting_loop`) on both sides, so a symlinked or
+    non-canonical spelling of the same directory still matches, and a symlink
+    loop reads as occupied rather than as a path that merely differs.
     """
     sessions = live_session_worktree_paths()
     if sessions is None:
@@ -774,9 +840,9 @@ def _live_home_reason(wt_path: Path) -> str | None:
     if workers is None:
         return "daemon roster unreadable, cannot rule out a live session"
     try:
-        target = wt_path.resolve()
-        session_homes = {path.resolve() for path in sessions}
-        worker_homes = {path.resolve() for path in workers}
+        target = _resolve_detecting_loop(wt_path)
+        session_homes = {_resolve_detecting_loop(path) for path in sessions}
+        worker_homes = {_resolve_detecting_loop(path) for path in workers}
     except OSError as exc:
         return f"a path cannot be resolved ({exc}), cannot rule out a live session"
     if target in session_homes:
@@ -817,7 +883,9 @@ def _reuse_occupancy_reason(
     return _live_home_reason(wt_path)
 
 
-def _refresh_reused_worktree(client: ClientConfig, branch: str, wt_path: Path) -> None:
+def _refresh_reused_worktree(
+    client: ClientConfig, branch: str, wt_path: Path, notes: list[str]
+) -> None:
     """Best-effort fetch, then fast-forward a *behind, unoccupied* reused worktree.
 
     Called from :func:`create_worktree` only when ``refresh_on_reuse`` is set
@@ -844,7 +912,8 @@ def _refresh_reused_worktree(client: ClientConfig, branch: str, wt_path: Path) -
        captured: on failure the tracking ref is whatever it was before, so
        fast-forwarding "to origin" would really move HEAD to stale state --
        the fast-forward is skipped entirely and the worktree used as-is (the
-       reason is logged by the fetch itself, and the skip at DEBUG here).
+       reason is logged by the fetch itself, and the skip at DEBUG here) and
+       one line naming the worktree is appended to *notes*.
     3. Target is the branch's own ``refs/remotes/origin/<branch>``, NOT
        :func:`_resolve_remote_ref`: that ladder is upstream-first, and a
        misconfigured ``@{u}`` of ``origin/<default>`` (the #2114 failure mode)
@@ -855,7 +924,14 @@ def _refresh_reused_worktree(client: ClientConfig, branch: str, wt_path: Path) -
        reconciling is not this function's job. Behind: the full occupancy
        predicate is re-run immediately before ``merge --ff-only`` (a session
        may have started during the fetch; see :func:`_ff_reused_worktree`),
-       then the fast-forward.
+       then the fast-forward, then a submodule sync when the new HEAD tracks
+       ``.gitmodules`` (see :func:`_ff_reused_worktree`).
+
+    *notes* is the caller-supplied friction surface (see ``refresh_notes`` on
+    :func:`create_worktree`). It receives one line per FAILURE the caller cannot
+    otherwise see -- a failed fetch or a failed submodule sync -- and nothing
+    for a designed refusal (occupied, diverged, never pushed): those are the
+    guard working, not the refresh failing.
 
     Never raises and never resets, ``checkout -f``s or deletes.
     """
@@ -885,6 +961,11 @@ def _refresh_reused_worktree(client: ClientConfig, branch: str, wt_path: Path) -
                 client.name,
                 wt_path,
             )
+            notes.append(
+                f"fetch of origin/{branch} failed while refreshing reused "
+                f"worktree {wt_path}; it was not fast-forwarded and may be "
+                "behind origin (git's error is in the cw log)"
+            )
             return
         target = f"refs/remotes/origin/{branch}"
         if not _ref_exists(target, wt_path):
@@ -899,7 +980,7 @@ def _refresh_reused_worktree(client: ClientConfig, branch: str, wt_path: Path) -
                 wt_path,
             )
         elif relation == "behind":
-            _ff_reused_worktree(client, branch, wt_path, target)
+            _ff_reused_worktree(client, branch, wt_path, target, notes)
     except OSError as exc:
         _log.warning(
             "create_worktree: refresh of reused worktree failed "
@@ -917,6 +998,7 @@ def create_worktree(
     force: bool = False,
     allow_dirty_reuse: bool = False,
     refresh_on_reuse: bool = False,
+    refresh_notes: list[str] | None = None,
 ) -> Path:
     """Create a git worktree for the given branch.
 
@@ -950,7 +1032,16 @@ def create_worktree(
       origin (WARNING); ``--ff-only`` itself refuses (WARNING); or
       ``origin/<branch>`` does not exist. A wrong branch is stricter still: the
       identity guard above raises :exc:`StaleWorktreeError` before any
-      refresh. Submodules are re-synced after a successful fast-forward.
+      refresh. After a successful fast-forward, submodules are re-synced when
+      the new HEAD tracks ``.gitmodules``; a failed sync is logged and the
+      worktree used as-is.
+
+    *refresh_notes* (#2213) is an out-parameter for callers that have a friction
+    surface to report on, which ``create_worktree`` itself does not: when given,
+    one line is appended for each refresh FAILURE -- the fetch failed, or the
+    submodule sync failed -- naming the worktree and the reason, alongside the
+    log line. Designed refusals (occupied, diverged, branch not on origin) add
+    nothing. Ignored unless *refresh_on_reuse* is set.
 
     See :func:`_refresh_reused_worktree`.
 
@@ -1000,7 +1091,12 @@ def create_worktree(
             )
             raise StaleWorktreeError(msg)
         if refresh_on_reuse:
-            _refresh_reused_worktree(client, branch, wt_path)
+            _refresh_reused_worktree(
+                client,
+                branch,
+                wt_path,
+                refresh_notes if refresh_notes is not None else [],
+            )
         return wt_path
 
     wt_path.parent.mkdir(parents=True, exist_ok=True)

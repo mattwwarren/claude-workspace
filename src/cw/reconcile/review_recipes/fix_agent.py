@@ -117,7 +117,10 @@ def dispatch_fix_agent(
     after it, before ``fetch``/``merge``, the only other mutating steps. A
     precondition failure therefore leaves the worktree untouched except for
     that fast-forward, which strictly advances HEAD and needs no compensating
-    restore.
+    restore. Unlike ``create_worktree``, this caller has a friction surface (the
+    prompt prefix), so a failed refresh fetch or submodule sync -- reported
+    through ``refresh_notes`` -- is named there, worktree and reason, alongside
+    the log line; the dispatch itself proceeds.
 
     The HEAD verification confirms HEAD landed on the branch's resolved
     remote ref (upstream-first, ``origin/<branch>`` as fallback -- #2145)
@@ -175,8 +178,17 @@ def dispatch_fix_agent(
         )
 
     _refuse_if_worktree_references_live_session(client, branch)
+    refresh_notes: list[str] = []
     worktree = create_worktree(
-        client, branch, allow_dirty_reuse=True, refresh_on_reuse=True
+        client,
+        branch,
+        allow_dirty_reuse=True,
+        refresh_on_reuse=True,
+        refresh_notes=refresh_notes,
+    )
+    effective_prompt = (
+        "".join(f"_Friction note: {note}_\n\n" for note in refresh_notes)
+        + effective_prompt
     )
 
     resolved_ref = _resolve_remote_ref(branch, worktree)
