@@ -40,12 +40,14 @@ not amended or superseded; the two seams stay independent.
 5. **A contest fails toward blocking.** A non-blank `contests_adjudication`
    removes the finding from the match set entirely, on both tiers, regardless
    of the gate. It can never cause a suppression, only prevent one.
-6. **Ledger entries are meant to be minted by operators — by convention, not
-   by mechanism.** The dispositions reader has no author filter, and the
-   `cw-followup` paragraph has an *agent* post the marker, so the skill
-   requires an explicit per-finding operator rejection first and is not run
-   under `--auto-accept-defaults`. ADR-0015 invariant 4 stands; mechanical
-   free-text ingestion is follow-up F1.
+6. **Ledger entries are minted by operators — by mechanism at the reader, and
+   by convention above it.** The dispositions reader still has no *author*
+   filter (a comment's `login` proves little), but as of round 2 it has a
+   **provenance** filter: see invariant 9. The `cw-followup` paragraph has an
+   *agent* post the marker, so the skill still requires an explicit
+   per-finding operator rejection first and is not run under
+   `--auto-accept-defaults`. ADR-0015 invariant 4 stands; mechanical free-text
+   ingestion is follow-up F1.
 7. **A pipeline-authored convenience payload must not re-enter the pipeline's
    own prompt as evidence through the ticket-comments route.**
    `_load_operator_comments` elides the `### Settle a finding` section — and
@@ -65,6 +67,30 @@ not amended or superseded; the two seams stay independent.
    invariant 3: #2210 stops a settled finding being wrongly **re-raised**, and
    an unaudited settle path would let one be wrongly **silenced**, which is the
    direction that loses information permanently and invisibly.
+9. **The reader enforces the contract; the writer alone cannot** (round 2).
+   Every guard in invariant 8 lives in `cw review settle`, and a marker pasted
+   by hand — or one a worker writes into a ticket comment itself — never
+   passes through any of them. So `partition_enforceable_dispositions` gates
+   every consumption path: a record is **applied** only when it carries the
+   full provenance set (finding identity, `actor`, a `recorded_at` that parses
+   as a UTC instant, `reviewed_sha`, and a non-empty `rationale`). Anything
+   short of that is ignored, logged once per pass at WARNING naming the ticket
+   and the offending record, and reported on the posted comment under
+   "Disposition records refused (no provenance)". This covers the reviewer
+   prompt's `## Previously Adjudicated Findings` block as well as the
+   mechanical backstop: that block tells the model the decision is BINDING, so
+   an unaudited entry reaching it would suppress the finding one layer up. An
+   `ACCEPTED` entry is gated on the same terms — it changes no gate, but it
+   reaches the reviewer as a decided finding.
+10. **The audit record is written before the effect it audits** (round 2).
+    `cw review settle` emits every `review.finding_settled` event first and
+    writes the marker (stdout and `--out`) only once all of them have
+    recorded; a failed emit aborts with no marker and a non-zero exit. The two
+    failure directions are not symmetric — an audit record with no effect is
+    noise, a durable suppression with no audit record is invisible — which is
+    why this deliberately does **not** follow #1617's save-then-emit
+    precedent, whose subject is a state mutation whose event must not claim
+    something that did not land.
 
 ## What this means for callers
 
@@ -114,6 +140,12 @@ not amended or superseded; the two seams stay independent.
   pins the sentinel's absence from `render_verdict_comment`'s output.
 - Payloads are per finding, not one combined block, so an operator cannot
   settle the genuinely actionable finding by pasting everything at once.
+- **Hand-authoring a `REVIEW-FINDING-DISPOSITIONS` block is unsupported.**
+  `cw review settle` is the only supported producer, because it is the only
+  path that records provenance and refuses to run inside a dispatch worker.
+  A hand-written block is still *parsed* — the fields stay optional so history
+  loads — but under invariant 9 it is not *applied* unless it happens to carry
+  the whole provenance set, and the review comment reports the refusal.
 
 ## Consequences
 
@@ -140,6 +172,19 @@ not amended or superseded; the two seams stay independent.
   one operator comment; a spurious suppression silently ships a real defect"
   applies with *more* force here, which is exactly why the tier is default-off
   and measure-first rather than suppress-by-default.
+- **Pre-#2210 ledger records stop being applied.** A marker posted, or a queue
+  row persisted, before the provenance fields existed carries no `actor`, no
+  `reviewed_sha` and no verbatim `summary`, so invariant 9 refuses it. It is
+  not deleted and not silently dropped: it still loads, the reader reports it
+  on the comment, and the finding it used to suppress starts blocking again
+  until an operator re-settles it with `cw review settle`. That is the
+  intended direction — the alternative is honouring a record that cannot say
+  who created it — but it means the first review round after this change can
+  re-park a ticket whose finding was settled under the old shape.
+- **Refusal is per record, not per ledger.** A well-formed entry alongside a
+  refused one still applies. The refused section is bounded (20 rows, then a
+  counted residue line) for the same comment-budget reason the settle section
+  is.
 - **Known false-match class, accepted:** same symbol, same verb phrase,
   different condition — "`foo` returns none when list is empty" versus
   "…contains duplicates" scores 0.73 and matches.

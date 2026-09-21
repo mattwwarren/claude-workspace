@@ -695,7 +695,24 @@ LLM on that path to correlate "these four are settled, don't reopen" to a
 specific finding — only a sentinel-bearing comment counts. Free-text ingestion
 is a deliberate non-goal here (follow-up F1).
 
-**Don't hand-author the marker; render it (#2210).** Every blocking codex
+**Hand-authoring the marker is unsupported (#2210).** `cw review settle` is
+the only supported producer, because it is the only path that records
+provenance and refuses to run inside a dispatch worker. The reader enforces
+that: a disposition record is **applied only when it carries the full
+provenance set** — the finding's identity, an `actor`, a `recorded_at` that
+parses as a UTC instant, a `reviewed_sha`, and a non-empty rationale. A record
+missing any of those is ignored (never applied as a suppression, and never
+rendered into the reviewer's "previously adjudicated" prompt block), logged at
+WARNING, and reported on the review comment under **"Disposition records
+refused (no provenance)"** so you can see that something tried to suppress a
+finding and was refused. This applies to `ACCEPTED` entries too.
+
+A marker or queue row written before #2210 carries none of that provenance. It
+still loads — the fields are optional, so history is not lost — but it is no
+longer applied: the finding it used to suppress will re-appear, with the
+refusal reported on the comment. Re-settle it with `cw review settle`.
+
+**Render the marker, don't write it (#2210).** Every blocking codex
 review comment now prints a `### Settle a finding` section with one
 ready-to-paste JSON payload per blocking finding, carrying the finding's
 verbatim `file` and `summary` — which are the record's whole identity — plus
@@ -737,8 +754,15 @@ review.finding_settled --json`). Duplicate keys collapse newest-wins, so two
 payload entries that key alike are one entry and one event. `-` reads the
 payload from stdin.
 
-The rendered marker looks like this — still valid to write by hand if you have
-to, and the provenance fields stay optional for that case:
+**The events are recorded before the marker is written.** If any of them
+cannot be recorded, the settle is refused outright — no marker on stdout, no
+`--out` file, non-zero exit, and a message naming the finding and the failure.
+An audit record with no effect is noise; a durable suppression with no audit
+record is invisible, so the ordering favours the first. Re-run the same
+payload once the event store is healthy.
+
+The rendered marker looks like this. Every field below is required for the
+record to be *applied* — a block missing any of them parses but is refused:
 
 ```markdown
 ## Review Finding Dispositions
@@ -784,6 +808,8 @@ can copy out of the section is complete.
   exactly one record when it lands.
 - A malformed block degrades to "no dispositions" and never fails the review;
   the symptom is the finding re-appearing, which is visible and correctable.
+  A *well-formed but under-provenanced* block behaves the same way, and
+  additionally names itself in the comment's refused-records section.
 - Because the identity is not evidence-anchored, a suppression does not lapse
   when the code moves. Every suppression therefore prints itself on the review
   comment (`suppressed — rejected: finding … re-adjudicate if the code at this

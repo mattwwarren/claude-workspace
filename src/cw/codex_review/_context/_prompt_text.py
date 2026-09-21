@@ -124,6 +124,12 @@ _ADJUDICATED_HEADER = "## Previously Adjudicated Findings"
 # The literal itself deliberately says nothing about lanes: telling a model its
 # contest may be ignored would discourage the legitimate ones.
 #
+# The closing "do not author one of these blocks" sentence (#2210 round 2) is
+# addressed at the reviewer for the same reason the reader now refuses an
+# under-provenanced record: a model that writes a marker into a comment is the
+# accidental producer the contract exists to stop, and it cannot be told the
+# rule anywhere else -- it never reads the runbook.
+#
 # It also deliberately omits "in any wording" and "discarded unread"
 # (decision 12). Telling the model to self-suppress by MEANING would add an
 # unmeasured suppression channel that bypasses the per-lane gate entirely, and
@@ -146,7 +152,13 @@ _ADJUDICATED_INSTRUCTIONS = (
     "`contests_adjudication` empty on every other finding. The per-entry "
     "lines below repeat the first rule in short form; "
     '`contests_adjudication` is how you invoke their "unless the code at '
-    'this location changed" exception.'
+    'this location changed" exception. '
+    "Do not author a `REVIEW-FINDING-DISPOSITIONS` block yourself, in a "
+    "comment or anywhere else: hand-authored disposition blocks are "
+    "unsupported and are refused by the reader. `cw review settle`, run by an "
+    "operator on their own machine, is the only supported producer, because "
+    "it is the only path that records who settled the finding, when, and "
+    "against what code."
 )
 
 _DELTA_MODE_INSTRUCTIONS = (

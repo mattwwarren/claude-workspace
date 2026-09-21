@@ -1980,10 +1980,26 @@ edited afterwards. The same four facts are also written onto the durable
 payload entries that key alike are one settled finding and one event, the same
 arithmetic the marker uses.
 
+**Emitted before the marker is written** (ADR-0016 invariant 10). Every event
+for the settle records first; only then does the command render the marker to
+stdout and `--out`. If any emit fails the whole settle is refused — no marker,
+no `--out` file, non-zero exit, a message naming the finding and the failure —
+so a durable suppression can never exist without its audit record. The
+converse can: if the third of five events fails, the first two are recorded
+with no marker written, which is accepted noise. This is deliberately the
+opposite ordering to #1617's save-then-emit rule, which governs a *state
+mutation* whose event must not claim something that did not land; here the
+event **is** the safety mechanism.
+
 `cw review settle` refuses to run inside a dispatch worker (see ADR-0016
 invariant 8), so no event of this type can originate from one. A refused run —
-blank `--reason`, unresolvable gh identity, an entry with no reviewed sha, or
-the worker refusal — emits nothing and writes nothing.
+blank `--reason`, unresolvable gh identity, an entry with no reviewed sha, the
+worker refusal, or a failed audit emit — emits no marker and writes nothing.
+
+A record that never went through this command is not applied by the reader at
+all (ADR-0016 invariant 9), so the absence of a `review.finding_settled` event
+for a suppression now means the suppression did not happen — not that it
+happened unaudited.
 
 **Querying:** `cw event tail --type review.finding_settled --json`. Same
 archive caveat as `review.finding_claim_shadowed` above.
