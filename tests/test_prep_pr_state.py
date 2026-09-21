@@ -1,7 +1,10 @@
 """Tests for .claude/scripts/prep_pr_state.py gate detection.
 
 Uses importlib to load the script directly (it lives outside the src/ tree).
-All fixtures are deterministic string literals — the live CLAUDE.md is never read.
+All fixtures are deterministic string literals — the live CLAUDE.md is never read,
+with one deliberate exception: ``TestRealClaudeMdGates`` pins the repo's own
+``## Quality Gates`` list so a regression in ``detect-gates`` (or an unannounced
+edit to that list) fails loudly.
 """
 
 from __future__ import annotations
@@ -30,6 +33,13 @@ class _GateP(Protocol):
     autofix: str | None
 
 
+class _ClaudeMdGatesP(Protocol):
+    """Structural type for the ClaudeMdGates dataclass loaded via importlib."""
+
+    gates: list[_GateP]
+    authoritative: bool
+
+
 # ---------------------------------------------------------------------------
 # Script loader
 # ---------------------------------------------------------------------------
@@ -53,7 +63,7 @@ _raw_parse = _mod._parse_claude_md_gates
 
 
 def _parse_claude_md_gates(path: Path) -> list[_GateP]:
-    return cast("list[_GateP]", _raw_parse(path))
+    return cast("_ClaudeMdGatesP", _raw_parse(path)).gates
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +162,30 @@ def _write_claude_md(tmp_path: Path, content: str) -> Path:
     return p
 
 
+def _detect_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, claude_md: str | None = None
+) -> dict[str, Any]:
+    """Run ``detect_gates`` in a tmp project with a ``pyproject.toml`` marker.
+
+    When *claude_md* is given it is written as the project's CLAUDE.md.
+    """
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    if claude_md is not None:
+        _write_claude_md(tmp_path, claude_md)
+    monkeypatch.chdir(tmp_path)
+    return cast("dict[str, Any]", _mod.detect_gates())
+
+
+def _gates_section(*body_lines: str) -> str:
+    """Build a minimal CLAUDE.md whose ``## Quality Gates`` holds *body_lines*."""
+    return "# Project\n\n## Quality Gates\n\n" + "\n".join(body_lines) + "\n"
+
+
+def _bash_block(*command_lines: str) -> str:
+    """Build a fenced bash block (as a CLAUDE.md fragment) of *command_lines*."""
+    return "```bash\n" + "\n".join(command_lines) + "\n```"
+
+
 # ---------------------------------------------------------------------------
 # Case (a): bullet-only — existing behaviour unchanged
 # ---------------------------------------------------------------------------
@@ -214,7 +248,7 @@ class TestBashBlockOnly:
     def test_pytest_extra_mcp_command_joined(self, tmp_path: Path) -> None:
         """The --extra mcp pytest continuation must be joined."""
         gates = self._gates(tmp_path)
-        pytest_gates = [g for g in gates if g.name == "pytest"]
+        pytest_gates = [g for g in gates if g.name.startswith("pytest")]
         extra_mcp = next(
             (g for g in pytest_gates if "--extra" in g.command),
             None,
@@ -224,14 +258,19 @@ class TestBashBlockOnly:
         assert "\\" not in extra_mcp.command
 
     def test_pytest_name_derived_skipping_flags(self, tmp_path: Path) -> None:
-        """uv run --extra mcp pytest → name must be 'pytest', not '--extra'."""
+        """uv run --extra mcp pytest → name is qualified, never '--extra'.
+
+        Two pytest gates collide on the bare name, so the ``-m`` marker
+        expression qualifies each; the uv-run flag skipping itself is pinned
+        directly in ``TestSplitCommand``.
+        """
         gates = self._gates(tmp_path)
         extra_mcp = next(
             (g for g in gates if "--extra" in g.command),
             None,
         )
         assert extra_mcp is not None
-        assert extra_mcp.name == "pytest"
+        assert extra_mcp.name == "pytest-not-integration"
 
     def test_inline_comments_stripped_from_commands(self, tmp_path: Path) -> None:
         """Trailing # comments must not appear in Gate.command."""
@@ -343,6 +382,154 @@ class TestTrailingContinuation:
 
 
 # ---------------------------------------------------------------------------
+# #2187: prose bullets are not gates
+# ---------------------------------------------------------------------------
+
+_NOT_GATE_BULLETS = [
+    "- Test suite: 100% pass rate required",
+    "- Coverage target: total >=88%",
+    "- Overview",
+    "- name:  | uv run fix",
+]
+
+
+class TestBulletProseRejection:
+    def test_ticket_prose_bullet_is_not_a_gate(self, tmp_path: Path) -> None:
+        """The exact prose line from this repo's CLAUDE.md must not parse."""
+        content = _gates_section(
+            "- No suppressions (`# noqa`, `# type: ignore`) without explicit "
+            "user approval"
+        )
+        path = _write_claude_md(tmp_path, content)
+        assert _parse_claude_md_gates(path) == []
+
+    def test_prose_bullet_beside_real_bullet_gate(self, tmp_path: Path) -> None:
+        content = _gates_section(
+            "- mypy: uv run mypy .",
+            "- No suppressions (`# noqa`, `# type: ignore`) without explicit "
+            "user approval",
+        )
+        path = _write_claude_md(tmp_path, content)
+        assert [g.name for g in _parse_claude_md_gates(path)] == ["mypy"]
+
+    @pytest.mark.parametrize("bullet", _NOT_GATE_BULLETS)
+    def test_multi_word_or_malformed_bullet_is_not_a_gate(
+        self, tmp_path: Path, bullet: str
+    ) -> None:
+        path = _write_claude_md(tmp_path, _gates_section(bullet))
+        assert _parse_claude_md_gates(path) == []
+
+    def test_backtick_fenced_command_and_autofix_unwrapped(
+        self, tmp_path: Path
+    ) -> None:
+        content = _gates_section(
+            "- ruff: `uv run ruff check .` | `uv run ruff check --fix .`"
+        )
+        path = _write_claude_md(tmp_path, content)
+        (gate,) = _parse_claude_md_gates(path)
+        assert gate.name == "ruff"
+        assert gate.command == "uv run ruff check ."
+        assert gate.autofix == "uv run ruff check --fix ."
+
+    def test_inner_backticks_are_left_alone(self, tmp_path: Path) -> None:
+        """Only one wrapping backtick pair is stripped, never inner ones."""
+        content = _gates_section("- shell: echo `date` now")
+        path = _write_claude_md(tmp_path, content)
+        (gate,) = _parse_claude_md_gates(path)
+        assert gate.command == "echo `date` now"
+
+
+# ---------------------------------------------------------------------------
+# #2187: _split_command (replaces _derive_gate_name)
+# ---------------------------------------------------------------------------
+
+
+class TestSplitCommand:
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("uv run --extra mcp pytest tests/", ("pytest", ["tests/"])),
+            ("uv run --python=3.13 ruff check", ("ruff", ["check"])),
+            ("uv run", ("", [])),
+            ("uv run --extra", ("", [])),
+            ("", ("", [])),
+            ("npx eslint .", ("eslint", ["."])),
+            ("npx", ("npx", [])),
+            ("uv lock --check", ("uv", ["lock", "--check"])),
+            ("diff-cover coverage.xml", ("diff-cover", ["coverage.xml"])),
+        ],
+    )
+    def test_split_command(self, command: str, expected: tuple[str, list[str]]) -> None:
+        assert _mod._split_command(command) == expected
+
+
+# ---------------------------------------------------------------------------
+# #2187: collision-only gate name disambiguation
+# ---------------------------------------------------------------------------
+
+
+class TestGateNameDisambiguation:
+    def _names(self, tmp_path: Path, content: str) -> list[str]:
+        path = _write_claude_md(tmp_path, content)
+        return [g.name for g in _parse_claude_md_gates(path)]
+
+    def test_ruff_check_and_format_use_subcommand(self, tmp_path: Path) -> None:
+        content = _gates_section(
+            _bash_block(
+                "uv run ruff check src/ tests/",
+                "uv run ruff format --check src/ tests/",
+            )
+        )
+        assert self._names(tmp_path, content) == ["ruff-check", "ruff-format"]
+
+    def test_pytest_pair_uses_marker_expression(self, tmp_path: Path) -> None:
+        names = self._names(tmp_path, _BASH_BLOCK_ONLY)
+        assert names == [
+            "ruff-check",
+            "ruff-format",
+            "mypy",
+            "pre-commit",
+            "pytest-not-integration",
+            "pytest-integration",
+            "diff-cover",
+        ]
+
+    def test_double_quoted_marker_expression(self, tmp_path: Path) -> None:
+        content = _gates_section(
+            _bash_block('uv run pytest -m "not slow"', "uv run pytest -m slow")
+        )
+        assert self._names(tmp_path, content) == ["pytest-not-slow", "pytest-slow"]
+
+    def test_non_colliding_gates_keep_bare_names(self, tmp_path: Path) -> None:
+        content = _gates_section(
+            _bash_block("uv run ruff check src/", "uv run pytest tests/")
+        )
+        assert self._names(tmp_path, content) == ["ruff", "pytest"]
+
+    def test_residual_duplicates_get_ordinals(self, tmp_path: Path) -> None:
+        content = _gates_section(_bash_block("uv run mypy src/", "uv run mypy tests/"))
+        assert self._names(tmp_path, content) == ["mypy", "mypy-2"]
+
+    def test_residual_duplicates_after_qualifier_get_ordinals(
+        self, tmp_path: Path
+    ) -> None:
+        content = _gates_section(
+            _bash_block("uv run ruff check a/", "uv run ruff check b/")
+        )
+        assert self._names(tmp_path, content) == ["ruff-check", "ruff-check-2"]
+
+    def test_duplicates_split_across_fences_are_disambiguated(
+        self, tmp_path: Path
+    ) -> None:
+        content = _gates_section(
+            _bash_block("uv run ruff check src/"),
+            "",
+            _bash_block("uv run ruff format --check src/"),
+        )
+        assert self._names(tmp_path, content) == ["ruff-check", "ruff-format"]
+
+
+# ---------------------------------------------------------------------------
 # #1432: gate-timeout / gate-elapsed liveness helpers
 # ---------------------------------------------------------------------------
 
@@ -355,6 +542,27 @@ class TestGateTimeoutSeconds:
 
     def test_unknown_gate_falls_back_to_default(self) -> None:
         assert _mod.gate_timeout_seconds("ruff") == _mod.GATE_TIMEOUT_FALLBACK_SECONDS
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("pytest-integration", 600),
+            ("pytest-not-integration", 600),
+            ("pre-commit", 480),
+            ("pre-commit-hooks", 480),
+            ("mypy-strict", 600),
+        ],
+    )
+    def test_derived_name_resolves_by_longest_hyphen_prefix(
+        self, name: str, expected: int
+    ) -> None:
+        assert _mod.gate_timeout_seconds(name) == expected
+
+    def test_unrelated_derived_name_falls_back(self) -> None:
+        assert (
+            _mod.gate_timeout_seconds("ruff-check")
+            == _mod.GATE_TIMEOUT_FALLBACK_SECONDS
+        )
 
     def test_gate_timeout_cli_subcommand_json_shape(
         self, capsys: pytest.CaptureFixture[str]
@@ -422,24 +630,17 @@ class TestGateElapsedExceedsCeiling:
 
 
 class TestEcosystemGatesPyproject:
-    def _detect(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> dict[str, Any]:
-        (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
-        monkeypatch.chdir(tmp_path)
-        return cast("dict[str, Any]", _mod.detect_gates())
-
     def test_default_gates_include_ruff_format(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        result = self._detect(tmp_path, monkeypatch)
+        result = _detect_gates(tmp_path, monkeypatch)
         names = [g["name"] for g in result["gates"]]
         assert "ruff-format" in names
 
     def test_ruff_format_gate_command_and_autofix(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        result = self._detect(tmp_path, monkeypatch)
+        result = _detect_gates(tmp_path, monkeypatch)
         ruff_format = next(g for g in result["gates"] if g["name"] == "ruff-format")
         assert ruff_format["command"] == "uv run ruff format --check ."
         assert ruff_format["autofix"] == "uv run ruff format ."
@@ -447,7 +648,7 @@ class TestEcosystemGatesPyproject:
     def test_ruff_check_and_ruff_format_are_distinct_gates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        result = self._detect(tmp_path, monkeypatch)
+        result = _detect_gates(tmp_path, monkeypatch)
         names = [g["name"] for g in result["gates"]]
         assert names.count("ruff") == 1
         assert names.count("ruff-format") == 1
@@ -455,7 +656,7 @@ class TestEcosystemGatesPyproject:
     def test_existing_default_gates_unchanged(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        result = self._detect(tmp_path, monkeypatch)
+        result = _detect_gates(tmp_path, monkeypatch)
         names = {g["name"] for g in result["gates"]}
         assert names == {"ruff", "ruff-format", "mypy", "pytest"}
 
@@ -472,3 +673,127 @@ class TestEcosystemGatesPyproject:
         result = cast("dict[str, Any]", _mod.detect_gates())
         ruff_format = next(g for g in result["gates"] if g["name"] == "ruff-format")
         assert ruff_format["command"] == "uv run ruff format --check review_bingo_hub"
+
+
+# ---------------------------------------------------------------------------
+# #2187: a CLAUDE.md bash block is authoritative — ecosystem defaults dropped
+# ---------------------------------------------------------------------------
+
+_BULLET_OVERRIDES = _gates_section(
+    "- mypy: uv run mypy --strict src/",
+    "- pytest: uv run pytest -q",
+)
+
+_NO_GATE_CONTENT = [
+    _gates_section(_bash_block("# only a comment")),
+    _UNCLOSED_FENCE,
+]
+
+
+class TestDetectGatesAuthoritativeBlock:
+    def test_bash_block_drops_ecosystem_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_gates(tmp_path, monkeypatch, claude_md=_BASH_BLOCK_ONLY)
+        gates = result["gates"]
+        assert [g["name"] for g in gates] == [
+            "ruff-check",
+            "ruff-format",
+            "mypy",
+            "pre-commit",
+            "pytest-not-integration",
+            "pytest-integration",
+            "diff-cover",
+        ]
+        (ruff_format,) = (g for g in gates if g["name"] == "ruff-format")
+        assert ruff_format["command"] == "uv run ruff format --check src/ tests/"
+        assert all(g["command"] != "uv run ruff format --check ." for g in gates)
+        assert result["detected_from"] == ["CLAUDE.md"]
+
+    def test_bullet_only_claude_md_still_merges_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_gates(tmp_path, monkeypatch, claude_md=_BULLET_OVERRIDES)
+        by_name = {g["name"]: g for g in result["gates"]}
+        assert set(by_name) == {"ruff", "ruff-format", "mypy", "pytest"}
+        assert by_name["ruff-format"]["command"] == "uv run ruff format --check ."
+        assert by_name["mypy"]["command"] == "uv run mypy --strict src/"
+        assert by_name["pytest"]["command"] == "uv run pytest -q"
+        assert result["detected_from"] == ["pyproject.toml", "CLAUDE.md"]
+
+    @pytest.mark.parametrize("content", _NO_GATE_CONTENT)
+    def test_block_with_no_gates_falls_back_to_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str
+    ) -> None:
+        result = _detect_gates(tmp_path, monkeypatch, claude_md=content)
+        names = {g["name"] for g in result["gates"]}
+        assert names == {"ruff", "ruff-format", "mypy", "pytest"}
+        assert result["detected_from"] == ["pyproject.toml"]
+        parsed = _raw_parse(tmp_path / "CLAUDE.md")
+        assert parsed.authoritative is False
+        assert parsed.gates == []
+
+    def test_block_with_gates_is_authoritative(self, tmp_path: Path) -> None:
+        path = _write_claude_md(tmp_path, _BASH_BLOCK_ONLY)
+        assert cast("_ClaudeMdGatesP", _raw_parse(path)).authoritative is True
+
+    def test_bullet_only_is_not_authoritative(self, tmp_path: Path) -> None:
+        path = _write_claude_md(tmp_path, _BULLET_OVERRIDES)
+        assert cast("_ClaudeMdGatesP", _raw_parse(path)).authoritative is False
+
+    def test_mixed_bullet_and_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_gates(tmp_path, monkeypatch, claude_md=_MIXED)
+        by_name = {g["name"]: g for g in result["gates"]}
+        # defaults dropped; non-colliding bullet (mypy) kept; the bullet whose
+        # name equals a block gate name (ruff) is overridden by the block.
+        assert set(by_name) == {"mypy", "ruff", "diff-cover"}
+        assert by_name["ruff"]["command"] == "uv run ruff check src/ tests/"
+        assert result["detected_from"] == ["CLAUDE.md"]
+
+
+# ---------------------------------------------------------------------------
+# #2187: pin the repo's own CLAUDE.md gate list (CI contract tripwire)
+# ---------------------------------------------------------------------------
+
+EXPECTED_REPO_GATES: list[tuple[str, str]] = [
+    ("uv", "uv lock --check"),
+    ("ruff-check", "uv run ruff check src/ tests/"),
+    ("ruff-format", "uv run ruff format --check src/ tests/"),
+    ("mypy", "uv run mypy --strict src/"),
+    ("python", "uv run python .claude/scripts/check_imports.py"),
+    ("pre-commit", "uv run pre-commit run --all-files"),
+    (
+        "pytest-not-integration",
+        "uv run --extra mcp pytest tests/ -m 'not integration' "
+        "--cov=cw --cov-report=xml --cov-fail-under=88",
+    ),
+    ("pytest-integration", "uv run pytest tests/ -m integration"),
+    (
+        "diff-cover",
+        "uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90",
+    ),
+]
+
+_PIN_GUIDANCE = (
+    "If you intentionally added, removed, reordered or changed a gate in "
+    "CLAUDE.md `## Quality Gates`, update `EXPECTED_REPO_GATES` in this file and "
+    "confirm `.github/workflows/ci.yml` agrees. If you did not touch the gate "
+    "list, `detect-gates` regressed: a prose bullet parsed as a gate, an "
+    "ecosystem default leaked back in, or the naming scheme changed."
+)
+
+
+class TestRealClaudeMdGates:
+    def test_repo_claude_md_yields_pinned_gate_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(_REPO_ROOT)
+        result = cast("dict[str, Any]", _mod.detect_gates())
+        gates = result["gates"]
+        actual = [(g["name"], g["command"]) for g in gates]
+        assert actual == EXPECTED_REPO_GATES, _PIN_GUIDANCE
+        assert result["detected_from"] == ["CLAUDE.md"], _PIN_GUIDANCE
+        assert all("autofix" not in g for g in gates), _PIN_GUIDANCE
+        assert len({name for name, _ in actual}) == len(EXPECTED_REPO_GATES)

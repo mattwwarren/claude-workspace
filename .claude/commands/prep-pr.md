@@ -146,6 +146,13 @@ Run the resolved script to auto-detect quality gates:
 
 This scans for `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod` and checks the project's `CLAUDE.md` for `## Quality Gates` overrides. `CLAUDE.md` remains the canonical contract filename even when this workflow is reused from Codex.
 
+How the `## Quality Gates` section is read:
+
+- **A bash code block is authoritative.** When the block yields at least one gate, the ecosystem defaults are dropped entirely (`detected_from` is then just `["CLAUDE.md"]`); the block is the complete gate set. A block with no commands, or an unclosed fence, is ignored and the defaults stay.
+- **Bullet gates** use `- name: command [| autofix]`, where `name` is a single token (no spaces). A command may be wrapped in one backtick pair. Other bullets, such as `- No suppressions (...) without explicit user approval`, are prose and are not gates. With no bash block, a bullet gate replaces the same-named ecosystem default; alongside a bash block, a block gate replaces a same-named bullet gate.
+- **Gate names** are the executable (`mypy`, `pre-commit`, `diff-cover`). Gates that share an executable are named `<tool>-<qualifier>` from the subcommand or `-m` marker, e.g. `ruff-check`, `ruff-format`, `pytest-not-integration`, `pytest-integration`.
+- **No automatic autofix for bash-block gates.** The bash block has no autofix syntax, so `/prep-pr` no longer auto-fixes format failures (previously the ecosystem `ruff-format` default supplied `ruff format .`) for repos whose gates come from a `CLAUDE.md` bash block. Autofix is available only for bullet-declared gates whose name is not also a bash-block gate. A failing block gate such as `ruff-format` is fixed manually, or by the Step 7 fix loop for gates without an autofix.
+
 Store the result — you'll run these gates in Step 7.
 
 ## Step 3: Capture Initial Scope Snapshot
@@ -247,7 +254,7 @@ Before running each gate, fetch its timeout ceiling:
 ```bash
 "$PREP_PR_STATE" gate-timeout <gate-name>
 ```
-This returns `foreground_ceiling_s` (when to switch this gate to background) and `poll_ceiling_s` (total wall-clock budget once backgrounded before declaring the result lost).
+Pass `<gate-name>` exactly as `detect-gates` printed it; names derived from a shared executable (e.g. `pytest-integration`) resolve to the base tool's ceiling by longest hyphen-delimited prefix. This returns `foreground_ceiling_s` (when to switch this gate to background) and `poll_ceiling_s` (total wall-clock budget once backgrounded before declaring the result lost).
 
 For each gate:
 1. Record the start time: capture `date -u +%Y-%m-%dT%H:%M:%SZ` as `<started>`.
@@ -268,7 +275,7 @@ For each gate:
      details: foreground ceiling <foreground_ceiling_s>s exceeded at <started>; backgrounded; poll ceiling <poll_ceiling_s>s elapsed with no completion notification and no output growth in <output_file> since <last-observed-timestamp>. Last captured output: <tail of output_file>
      PREP_PR_BLOCK>>>
      ```
-     This applies uniformly to all 8 quality gates detected by Step 2/`detect-gates` (uv lock check, ruff check, ruff format, mypy, pre-commit, pytest units, pytest integration, diff-cover), not only mypy/pytest/pre-commit. Known limitation: the pytest-units and pytest-integration gates currently derive the same gate name (`pytest`), so a `gate: pytest` block cannot distinguish which of the two stalled from that field alone — use the block's own `<output_file>` tail to disambiguate.
+     This applies uniformly to every gate detected by Step 2/`detect-gates`, not only mypy/pytest/pre-commit. `<gate name>` is the name exactly as `detect-gates` printed it; gates that share an executable already carry a distinguishing qualifier (e.g. `pytest-not-integration` vs `pytest-integration`), so the block identifies which of them stalled.
    - This is an **interactive-mode override too**: outside `--headless`, surface the same block content as a friction BLOCK to the user rather than silently parking — a lost gate result is never something to wait out quietly.
 5. If it **fails** (not timed out) and has an autofix command (e.g., ruff, eslint):
    - Run the autofix command
