@@ -212,6 +212,19 @@ _DIRTY_WORKTREE_REASON = "dirty_worktree"
 # union term in escalation.py (same split #1702/#1714/#1823 already use), so
 # splitting it off phantom_surface does not cost it its operator page.
 _UNRESOLVED_SUBAGENT_SPAWN_REASON = "unresolved_subagent_spawn"
+# disposition/paused_status stamped by fix_dispatch._park_for_unresolved_ref
+# when no candidate in dispatch_fix_agent's reported/upstream/templated ladder
+# has a tip matching the worktree's HEAD (GitHub #2209).
+#
+# Same treatment as _UNRESOLVED_SUBAGENT_SPAWN_REASON above and for the same
+# reason: escalation-eligible via its own union term in escalation.py, but
+# deliberately NOT in _REAP_ELIGIBLE_DISPOSITIONS_BASE below. A branch cw
+# cannot locate is not a false park to auto-requeue -- the requeue would just
+# re-run the same failing resolution. It is not a hold or drain disposition
+# either. Uniquely among the park dispositions, the row keeps its
+# ``pending_fix_dispatch``, so an operator requeue resumes the same fix cycle
+# instead of restarting REVIEW.
+_FIX_DISPATCH_REF_UNRESOLVED_REASON = "fix_dispatch_ref_unresolved"
 # paused_status written to SESSION_NEEDS_ATTENTION events when
 # complete_timed_out_merged_tasks refuses a COMPLETED transition for a
 # PENDING row with no claim history (attempts == spawn_error_count,

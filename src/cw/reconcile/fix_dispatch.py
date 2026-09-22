@@ -46,14 +46,22 @@ The detect/act/deferred-post-lock-dispatch *shape* is still borrowed from
 The #2064 hoist also runs this module one step later, per tick, relative to
 ``cw.reconcile.escalation.run_escalation_sweep`` (previously before it inside
 ``core._run_terminal_backstops_and_sweeps``, now after ``_reconcile_locked``
-returns). Inert: the only status this module ever writes is
-RUNNING->PENDING (status stays RUNNING for the whole handoff, per the
-paragraph above), while escalation eligibility requires
-BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF/FAILED. Neither RUNNING nor PENDING
-is ever escalation-eligible, so this module cannot move a row into or out of
-the set the sweep scans, in either order. The #2142 stale-handoff drop is the
-one path that touches a non-RUNNING row at all, and it only clears
-``pending_fix_dispatch`` — never the status — so the same argument holds.
+returns). The ordinary path is inert: it writes only RUNNING->PENDING (status
+stays RUNNING for the whole handoff, per the paragraph above), while escalation
+eligibility requires BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF/FAILED, and
+neither RUNNING nor PENDING is ever escalation-eligible. The #2142
+stale-handoff drop is the one other path that touches a non-RUNNING row, and it
+only clears ``pending_fix_dispatch`` — never the status — so the same argument
+holds there.
+
+The ONE exception is ``_park_for_unresolved_ref`` (#2209), which does move a row
+RUNNING->BLOCKED_ON_USER with a disposition that IS in
+``escalation._ELIGIBLE_DISPOSITIONS``. Because this module now runs after the
+sweep, a row parked on one tick is first observed by ``run_escalation_sweep`` on
+the NEXT tick. That one-tick delay is harmless: the sweep only stamps
+``escalation_parked_at`` on first sight and pages nothing until
+``ESCALATION_PARK_MINUTES`` (45) have elapsed, so no operator can observe the
+difference.
 
 Throughout, the row's ``status`` is left at RUNNING for the whole handoff. That
 is load-bearing, not incidental: ``dispatch/claim.py`` only ever claims PENDING
@@ -75,17 +83,22 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import record_event
-from cw.exceptions import CwError, HookContextConflictError
+from cw.exceptions import CwError, HookContextConflictError, RemoteRefUnresolvedError
 from cw.models import (
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
     QueueItemStatus,
+)
+from cw.reconcile._shared import (
+    _FIX_DISPATCH_REF_UNRESOLVED_REASON,
+    ticket_id_for_session,
 )
 from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
 
 if TYPE_CHECKING:
     from cw.models import (
         ClientConfig,
+        CwState,
         DevQueueStore,
         OrchestratorConfig,
         PendingFixDispatch,
@@ -161,12 +174,60 @@ def _find_task(store: DevQueueStore, ticket_id: str, client: str) -> TicketTask 
 def _detect_pending_fix_dispatches(
     tasks: list[TicketTask],
 ) -> list[_FixDispatchCandidate]:
-    """Rows carrying a recorded, not-yet-dispatched fix-loop handoff."""
+    """Rows carrying a recorded, not-yet-dispatched fix-loop handoff.
+
+    A row parked by ``_park_for_unresolved_ref`` still carries its handoff on
+    purpose (#2209), so it must be filtered out HERE rather than later: detect
+    runs before ``_act_on_pending_fix_dispatches``'s
+    ``_MAX_FIX_DISPATCHES_PER_TICK`` slice, and a parked row left in the
+    candidate list would consume a cap slot on every tick forever, starving
+    healthy rows behind it.
+    """
     return [
         _FixDispatchCandidate(ticket_id=t.ticket_id, client=t.client)
         for t in tasks
-        if t.pending_fix_dispatch is not None
+        if t.pending_fix_dispatch is not None and not _is_parked_for_unresolved_ref(t)
     ]
+
+
+def _is_parked_for_unresolved_ref(task: TicketTask) -> bool:
+    """True for a row this module parked on an unresolvable remote ref (#2209)."""
+    return (
+        task.status == QueueItemStatus.BLOCKED_ON_USER
+        and task.disposition == _FIX_DISPATCH_REF_UNRESOLVED_REASON
+    )
+
+
+def _reported_branch(state: CwState, client: str, ticket_id: str) -> str | None:
+    """The branch the ticket's newest auto-dev sentinel reported having pushed.
+
+    The seam that lets ``dispatch_fix_agent`` find a branch pushed under a
+    slugified name (#2209) without a persisted-schema change: IMPL, REVIEW and
+    FINALIZE sentinels all carry the same pushed branch in
+    ``AutoDevResult.branch``, and ``session_retention.prune_sessions`` exempts
+    any terminal session whose ``(client, ticket_id)`` still has a dev-queue
+    row — so the value is in hot state for as long as a fix-dispatch row exists.
+
+    Sessions are scanned newest-first on ``started_at``, the same tie-break key
+    ``concierge._find_session_for_ticket`` sorts on. A session whose sentinel
+    carries no branch, a blank one, or a non-``str`` value is skipped rather
+    than ending the scan: the newest session for a ticket is often the REVIEW
+    session, whose payload may predate any push. ``Session.stage`` cannot narrow
+    this — it is None for every claude-native session.
+    """
+    matches = [
+        session
+        for session in state.sessions
+        if session.client == client and ticket_id_for_session(session.name) == ticket_id
+    ]
+    for session in sorted(matches, key=lambda s: s.started_at, reverse=True):
+        result = session.last_result
+        if result is None:
+            continue
+        branch = result.get("branch")
+        if isinstance(branch, str) and branch.strip():
+            return branch
+    return None
 
 
 def _detect_fix_dispatch_completions(
@@ -194,6 +255,10 @@ class _DispatchJob(NamedTuple):
     # SAME stage immediately before dispatch, not just still RUNNING — see
     # ``_job_still_valid``.
     stage: Stage
+    # Branch the impl sentinel reported having pushed (#2209), which need not
+    # be the templated ``branch`` above. Defaulted so the existing constructors
+    # — and any row whose sessions carry no sentinel branch — stay valid.
+    remote_branch: str | None = None
 
 
 def _emit_fix_dispatch_operator_signal(
@@ -452,6 +517,10 @@ def _build_dispatch_jobs(
     """
     if not candidates:
         return [], []
+    # Read once, before the lock: _reported_branch below needs session state,
+    # and loading it per-candidate under the dev-queue lock would hold that
+    # lock across unrelated I/O. Mirrors _act_on_fix_dispatch_completions.
+    state = load_state()
     jobs: list[_DispatchJob] = []
     stale: list[_StaleHandoffSnapshot] = []
     with dev_queue_lock():
@@ -460,6 +529,12 @@ def _build_dispatch_jobs(
             task = _find_task(store, candidate.ticket_id, candidate.client)
             if task is None or task.pending_fix_dispatch is None:
                 continue  # concurrently dispatched or removed — silent skip
+            if _is_parked_for_unresolved_ref(task):
+                # Re-checked under the lock, closing the detect-to-build race
+                # (#2209). Silent, and the handoff is retained on purpose: the
+                # operator's ``cw dev-queue requeue`` resumes this same fix
+                # cycle rather than restarting REVIEW from scratch.
+                continue
             if not _job_still_valid(task):
                 if task.status != QueueItemStatus.RUNNING:
                     # #2142: some other non-sentinel RUNNING->PENDING revert
@@ -513,6 +588,7 @@ def _build_dispatch_jobs(
                     client=task.client,
                     lane=task.lane,
                     stage=task.stage,
+                    remote_branch=_reported_branch(state, task.client, task.ticket_id),
                 )
             )
     return jobs, stale
@@ -566,6 +642,40 @@ def _stamp_dispatch_failure(job: _DispatchJob, exc: CwError) -> None:
             error_kind=_ERROR_KIND_DISPATCH_FAILED,
             breadcrumbs=str(exc),
         )
+
+
+def _park_for_unresolved_ref(job: _DispatchJob, exc: RemoteRefUnresolvedError) -> None:
+    """Park the row BLOCKED_ON_USER, keeping its action list (#2209).
+
+    The deliberate opposite of ``_stamp_dispatch_failure``'s clear-and-revert.
+    That path assumes a fresh REVIEW session can re-derive the action list, but
+    an unresolvable remote ref recurs identically for every REVIEW round —
+    and since #2075 the revert charges no attempt, so nothing bounded the
+    review/failed-dispatch/review loop at all. Parking ends it, and retaining
+    ``pending_fix_dispatch`` means the operator's ``cw dev-queue requeue``
+    resumes this same fix cycle rather than paying for a whole new review.
+
+    ``_park_running_task_blocked_on_user`` is imported function-locally for the
+    same import-cycle reason ``cw.reconcile.codex_boot`` does it: ``claim.py``
+    imports ``cw.executor``, which imports ``cw.reconcile``. It matches only a
+    still-RUNNING row under its own lock (so a row already reverted to PENDING
+    is left to the ordinary stale-handoff drop), clears ``session_id`` after
+    reading it for the attention event, and never touches
+    ``pending_fix_dispatch``.
+
+    ``unproductive=False`` for the same reason ``_stamp_dispatch_failure``
+    passes it (#2075): the REVIEW round behind this handoff produced a real
+    action list, and the dispatch failure is infra-side.
+    """
+    from cw.dispatch.claim import _park_running_task_blocked_on_user
+
+    _park_running_task_blocked_on_user(
+        ticket_id=job.ticket_id,
+        client_name=job.client,
+        disposition=_FIX_DISPATCH_REF_UNRESOLVED_REASON,
+        breadcrumbs=str(exc),
+        unproductive=False,
+    )
 
 
 def _act_on_pending_fix_dispatches(
@@ -622,6 +732,7 @@ def _act_on_pending_fix_dispatches(
                 ticket_id=job.ticket_id,
                 lane=job.lane,
                 parent=job.pending.requested_by_session_id,
+                remote_branch=job.remote_branch,
             )
         except HookContextConflictError as exc:
             age_seconds = (datetime.now(UTC) - job.pending.requested_at).total_seconds()
@@ -650,6 +761,13 @@ def _act_on_pending_fix_dispatches(
                 job.ticket_id,
                 exc_info=True,
             )
+            continue
+        except RemoteRefUnresolvedError as exc:
+            # Must precede the broad CwError clause below — it is a subclass.
+            _log.warning(
+                "fix_dispatch_ref_unresolved ticket=%s", job.ticket_id, exc_info=True
+            )
+            _park_for_unresolved_ref(job, exc)
             continue
         except CwError as exc:
             _log.warning("fix_dispatch_failed ticket=%s", job.ticket_id, exc_info=True)
