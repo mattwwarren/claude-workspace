@@ -46,6 +46,7 @@ from cw.dev_queue import (
 from cw.events import record_event
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.reconcile._shared import (
+    _FIX_DISPATCH_REF_UNRESOLVED_REASON,
     _REAP_ELIGIBLE_DISPOSITIONS_BASE,
     _UNRESOLVED_SUBAGENT_SPAWN_REASON,
 )
@@ -126,6 +127,14 @@ ESCALATION_PARK_MINUTES = 45
 # exists to do. Adding it to the shared base instead would hand the same rows to
 # concierge's false-park requeue, which would re-run a session over
 # possibly-committed work without a human ever looking. Escalate, never requeue.
+#
+# GitHub #2209 joins as an EIGHTH union term on the #1646 reasoning exactly: the
+# fix-dispatch unresolvable-ref park is unresolved and non-operator-initiated --
+# nobody chose to stop this ticket, the fix-loop dispatcher simply found no
+# remote ref whose tip matches the worktree's HEAD -- so its escalation clock
+# starts immediately. Kept out of _REAP_ELIGIBLE_DISPOSITIONS_BASE because
+# auto-requeueing a branch cw cannot locate would re-run the same failing
+# resolution rather than fix anything.
 _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
     (PAUSED_FOR_USER_INPUT_STATUSES - {"premises_pending_verification"})
     | _REAP_ELIGIBLE_DISPOSITIONS_BASE
@@ -134,6 +143,7 @@ _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
         REVIEW_HEALTH_GATE_DISPOSITION,
         REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
         REVIEW_STALENESS_GATE_DISPOSITION,
+        _FIX_DISPATCH_REF_UNRESOLVED_REASON,
         _UNRESOLVED_SUBAGENT_SPAWN_REASON,
     }
 )

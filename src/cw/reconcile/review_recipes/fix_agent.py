@@ -21,7 +21,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cw.events import record_event
-from cw.exceptions import CwError, HookContextConflictError
+from cw.exceptions import CwError, HookContextConflictError, RemoteRefUnresolvedError
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     TERMINAL_SESSION_STATUSES,
@@ -31,7 +31,7 @@ from cw.models import (
 from cw.session_retention import find_session_by_id
 from cw.worktree import (
     _git_dir,
-    _resolve_remote_ref,
+    _ref_exists,
     _run_git,
     _upstream_ref,
     create_worktree,
@@ -84,6 +84,43 @@ def _refuse_if_worktree_references_live_session(
     raise HookContextConflictError(msg, conflicting_session_id=prior_session_id)
 
 
+def _resolve_fix_remote_ref(
+    branch: str, remote_branch: str | None, worktree: Path
+) -> str | None:
+    """Return the first candidate remote ref whose TIP equals *worktree*'s HEAD.
+
+    Three rungs, in priority order: the impl sentinel's reported branch (when
+    one was reported), the checked-out branch's configured ``@{u}``, and the
+    templated ``origin/<branch>`` guess (#2145's fallback).
+
+    Selection is on tip-equality, not existence (#2209). A candidate that
+    resolves but points somewhere other than HEAD is SKIPPED and the ladder
+    keeps walking — it neither wins nor raises. That is the whole divergence
+    from :func:`cw.worktree._resolve_remote_ref`, which stops at the first ref
+    that merely exists and so cannot express "exists but stale, keep going":
+    under git's default ``branch.autoSetupMerge`` a cw dispatch worktree's
+    ``@{u}`` is ``origin/<default_branch>``, which always exists and is never
+    the fix branch, and treating that as the answer reproduced the exact
+    review -> failed dispatch -> review loop #2209 exists to end.
+
+    ``None`` only once no rung's tip matches — the caller turns that into a
+    :exc:`RemoteRefUnresolvedError`.
+    """
+    head_sha = _run_git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+    upstream = _upstream_ref(worktree)
+    candidates = [
+        f"origin/{remote_branch}" if remote_branch else None,
+        upstream,
+        f"origin/{branch}",
+    ]
+    for candidate in candidates:
+        if candidate is None or not _ref_exists(candidate, worktree):
+            continue
+        if _run_git("rev-parse", candidate, cwd=worktree).stdout.strip() == head_sha:
+            return candidate
+    return None
+
+
 def dispatch_fix_agent(
     *,
     client: ClientConfig,
@@ -93,6 +130,7 @@ def dispatch_fix_agent(
     ticket_id: str,
     lane: str,
     parent: str,
+    remote_branch: str | None = None,
 ) -> str:
     """Provision the ticket's worktree, refresh it against main, dispatch the fix agent.
 
@@ -109,9 +147,17 @@ def dispatch_fix_agent(
     the only mutating steps. A precondition failure therefore leaves the
     worktree untouched and needs no compensating restore.
 
-    The HEAD verification confirms HEAD landed on the branch's resolved
-    remote ref (upstream-first, ``origin/<branch>`` as fallback -- #2145)
-    (replacing an agent eyeballing ``git log --oneline -1``); the merge of
+    The HEAD verification IS the ref resolution since #2209:
+    :func:`_resolve_fix_remote_ref` walks a three-rung ladder -- the impl
+    sentinel's *remote_branch*, then the branch's ``@{u}`` (#2145), then the
+    templated ``origin/<branch>`` guess -- and returns the first candidate
+    whose TIP equals this worktree's HEAD, skipping any that resolve but are
+    stale. Nothing matching raises :exc:`RemoteRefUnresolvedError`, which the
+    caller parks on rather than retrying. ``remote_branch`` is the branch the
+    impl session's sentinel reported having pushed, which need not be the
+    templated name; ``branch`` stays the local/worktree key either way, because
+    every other pipeline stage provisions this ticket's worktree under it.
+    (This replaces an agent eyeballing ``git log --oneline -1``.) The merge of
     ``origin/<default_branch>`` puts the fix on
     top of any sibling PR that merged mid-pipeline -- without it a later push
     would silently ship a branch missing main's commits (CI passes because it
@@ -167,29 +213,23 @@ def dispatch_fix_agent(
     _refuse_if_worktree_references_live_session(client, branch)
     worktree = create_worktree(client, branch, allow_dirty_reuse=True)
 
-    resolved_ref = _resolve_remote_ref(branch, worktree)
-    if resolved_ref is None:
+    if _resolve_fix_remote_ref(branch, remote_branch, worktree) is None:
         upstream = _upstream_ref(worktree)
+        reported_clause = (
+            f"reported remote branch origin/{remote_branch} does not resolve; "
+            if remote_branch
+            else ""
+        )
         msg = (
             f"dispatch_fix_agent: cannot determine remote ref for {branch} "
-            f"-- configured upstream is {upstream!r} and it does not "
-            f"resolve, and origin/{branch} does not exist either."
+            f"-- {reported_clause}configured upstream is {upstream!r} and it "
+            f"does not resolve, and origin/{branch} does not resolve either."
             if upstream is not None
             else f"dispatch_fix_agent: cannot determine remote ref for "
-            f"{branch} -- no upstream configured, and origin/{branch} "
-            "does not exist either."
+            f"{branch} -- {reported_clause}no upstream configured, and "
+            f"origin/{branch} does not resolve either."
         )
-        raise CwError(msg)
-    expected_sha = _run_git("rev-parse", resolved_ref, cwd=worktree).stdout.strip()
-    actual_sha = _run_git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
-    if actual_sha != expected_sha:
-        msg = (
-            f"dispatch_fix_agent: worktree HEAD ({actual_sha}) does not "
-            f"match {resolved_ref} ({expected_sha}) after create_worktree "
-            "-- refusing to dispatch the fix agent against unexpected "
-            "branch state."
-        )
-        raise CwError(msg)
+        raise RemoteRefUnresolvedError(msg)
 
     _run_git("fetch", "origin", cwd=_git_dir(client))
     merge_result = _run_git(

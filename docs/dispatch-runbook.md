@@ -1232,6 +1232,27 @@ reason. Wait for the annotation to clear; only a tick line still reading
   left parked here still pages after 45 minutes; it is deliberately excluded
   from concierge's auto-requeue (§11.1) for the same reason the override
   exists.
+- `disposition: fix_dispatch_ref_unresolved` (#2209) means the fix-loop
+  dispatcher found **no remote ref whose tip matches the worktree's HEAD**,
+  across all three rungs of its ladder: the branch the impl session's sentinel
+  reported pushing (`last_result.branch`), the local branch's configured
+  `@{u}`, and the templated `origin/<prefix>/<ticket>` guess. Either nothing
+  was pushed, or everything that was pushed is behind the worktree.
+  `pending_fix_dispatch` is **retained** on this park — uniquely among the
+  dispositions here — preserving the REVIEW round's action list so you can read
+  what the fix agent was going to be told. It is **not** a resume point:
+  `cw dev-queue requeue` sets the row back to PENDING, which stops matching the
+  parked-row exemption (that check gates on `BLOCKED_ON_USER`), so the #2142
+  stale-handoff sweep drops the retained handoff and the ticket is claimed into
+  a **fresh REVIEW session**. Whether requeue should resume the handoff instead
+  is #2265. **Check before requeueing:** the
+  worktree's HEAD versus what `origin` actually holds, and the impl session's
+  reported branch name. If the work was never pushed, push it before requeuing;
+  a requeue alone will re-derive the same failure. The reason is
+  escalation-eligible (§11.2) and deliberately excluded from concierge's
+  auto-requeue (§11.1), on the same reasoning as `unresolved_subagent_spawn`
+  above: an agent-authored branch name is not automatically safe to keep
+  retrying against.
 
 ### Dispatch-loop staleness page (`dispatch_loop_stale`)
 
