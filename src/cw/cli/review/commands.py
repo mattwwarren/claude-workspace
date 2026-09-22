@@ -568,12 +568,20 @@ def _settle_reviewed_sha(entry: _SettleEntry, fallback: str) -> str:
 def _emit_settle_events(
     ledger: dict[str, FindingDisposition], ticket: str | None
 ) -> None:
-    """One ``review.finding_settled`` event per settled finding (#2210).
+    """One audit event per settled finding (#2210, #2232).
 
     The mirror of ``review.finding_disposition_suppressed``: that event records
     a suppression firing, this one records it being created. Emitted over the
     COLLAPSED ledger, so two payload entries that key alike are one settled
     finding and one event — the same arithmetic the marker itself uses.
+
+    The event TYPE carries the semantic, not a field inside the payload: a
+    ``REVERSED`` entry (#2232) emits ``review.finding_disposition_reverted``
+    and everything else emits ``review.finding_settled``. That is this enum
+    region's own convention — an operator asking "what has been withdrawn"
+    runs one ``cw event tail --type ...`` rather than filtering settles by
+    their ``outcome``. The payload is identical either way; it already carries
+    ``outcome``, so nothing is lost to a consumer that wants both.
 
     **Raises rather than degrading** (#2210 round 2). ``record_event`` is file
     I/O and can fail; the caller must not write a marker for a finding whose
@@ -588,9 +596,14 @@ def _emit_settle_events(
 
     for key, entry in sorted(ledger.items()):
         file = split_disposition_key(key)[0]
+        event_type = (
+            OrchestratorEventType.REVIEW_FINDING_DISPOSITION_REVERTED
+            if entry.outcome == "REVERSED"
+            else OrchestratorEventType.REVIEW_FINDING_SETTLED
+        )
         try:
             record_event(
-                OrchestratorEventType.REVIEW_FINDING_SETTLED,
+                event_type,
                 payload={
                     "key": key,
                     "file": file,
@@ -605,7 +618,7 @@ def _emit_settle_events(
             )
         except OSError as exc:
             msg = (
-                f"Could not record the review.finding_settled audit event for "
+                f"Could not record the {event_type.value} audit event for "
                 f"{file} ({entry.summary!r}): {exc}. Nothing was written — no "
                 "marker, no --out file. A suppression with no audit record is "
                 "invisible, so the settle is refused rather than recorded "
@@ -639,7 +652,7 @@ def _emit_settle_events(
     "--ticket",
     default=None,
     type=str,
-    help="Ticket id to correlate the review.finding_settled audit events to.",
+    help="Ticket id to correlate the settle/reversal audit events to.",
 )
 @click.option(
     "--out",
@@ -671,9 +684,18 @@ def review_settle(
 
     PATH is a file path or '-' for stdin. Payload: {"entries": [{"file":
     "<path>", "summary": "<verbatim finding summary>", "outcome":
-    "REJECTED"|"ACCEPTED", "rationale": "<why, optional>", "reviewed_sha":
-    "<sha>"}]}. Every blocking codex review comment prints one such payload per
-    finding under "### Settle a finding" — paste it unedited.
+    "REJECTED"|"ACCEPTED"|"REVERSED", "rationale": "<why, optional>",
+    "reviewed_sha": "<sha>"}]}. Every blocking codex review comment prints one
+    such payload per finding under "### Settle a finding" — paste it unedited.
+
+    ROLLBACK (#2232): `outcome: "REVERSED"` withdraws a settle you already
+    made. Paste the SAME `file` and `summary` the earlier settle used — read
+    them off `cw review dispositions <ticket>` or the original settle marker —
+    and post the marker this prints. The newest-`recorded_at`-wins merge is
+    what makes the withdrawal stick, so no new command and no new write path
+    is involved; a reversed record matches neither suppression tier and is not
+    shown to the reviewer as a decision. It stays visible in `cw review
+    dispositions`, because reversal history is part of the audit trail.
 
     --reason is REQUIRED and must be non-blank; it is the rationale recorded
     for every entry that does not carry its own. An entry's own `rationale`
@@ -696,7 +718,8 @@ def review_settle(
     the whole ledger. Only `REJECTED` suppresses a later re-raise; `ACCEPTED`
     is a record-only annotation that reaches the reviewer's prompt.
 
-    Emits one `review.finding_settled` audit event per settled finding,
+    Emits one audit event per settled finding — `review.finding_settled`, or
+    `review.finding_disposition_reverted` for a `REVERSED` entry (#2232) —
     correlated to --ticket when given. The events are recorded BEFORE the
     marker is written: if any of them cannot be recorded the settle is
     refused outright — no marker, no --out file, non-zero exit — because a
