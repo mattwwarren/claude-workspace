@@ -111,18 +111,37 @@ class TestImplDocSpawnRules:
 
 
 class TestAgentSpawnRule:
-    """The cross-stage rule in auto-dev.md."""
+    """The cross-stage rule in auto-dev.md.
+
+    Asserted against the rule's own paragraph, not the whole file: ``fork``
+    and ``subagent_type`` both occur incidentally elsewhere in a document
+    this size, so a file-wide substring check would pass even if the rule
+    were deleted outright.
+    """
+
+    def _rule(self) -> str:
+        content = _cmd("auto-dev.md")
+        start = content.index("**Agent spawn typing rule (#2211):**")
+        return content[start : content.index("\n\n", start)]
 
     def test_spawn_rule_requires_a_named_subagent_type(self) -> None:
-        content = _cmd("auto-dev.md")
+        rule = self._rule()
 
-        assert "subagent_type" in content
-        assert "#2211" in content
+        assert "MUST name an explicit `subagent_type`" in rule
+        assert "general-purpose" in rule
+
+    def test_spawn_rule_names_the_read_only_helper_alternative(self) -> None:
+        assert "Read Only Helper" in self._rule()
 
     def test_spawn_rule_states_the_explicit_fork_refusal(self) -> None:
-        content = _cmd("auto-dev.md")
+        rule = self._rule()
 
-        assert "fork" in content.lower()
+        assert "Never fork" in rule
+        assert "refuses an explicit fork" in rule
+
+    def test_spawn_rule_does_not_claim_deny_on_omission(self) -> None:
+        """An omitted type only WARNs — promising a refusal would be a lie."""
+        assert "warns on an omitted type" in self._rule()
 
 
 class TestBareSpawnSitesAreTyped:
