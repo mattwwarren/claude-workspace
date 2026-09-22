@@ -10,9 +10,17 @@ Two distinct things are pinned here:
 2. every ``.claude/commands/*.md`` spawn site this ticket typed, so a future
    edit cannot quietly drop back to an unnamed (unrostered) spawn.
 
-``review-sweep.md`` and ``orchestrate-phase.md`` are deliberately unasserted:
-the former names six roles that are not registered agent types (residual gap
-R7), and the latter is outside the cw dispatch pipeline.
+``orchestrate-phase.md`` is deliberately unasserted: it is outside the cw
+dispatch pipeline, and its three mentions are descriptive bullets about what
+other commands do rather than spawn instructions of their own.
+
+``review-sweep.md`` **is** asserted, per site. Round 1 left it out because its
+six role names are not registered agent types (then-residual gap R7); the
+resolution is that they never were types — they are prompt-defined roles that
+already ran as implicitly-general-purpose agents, so naming ``general-purpose``
+is behavior-preserving. That closed the inventory, which is what let
+``classify_spawn`` flip from record-only to deny on an omitted type. Registering
+any of the six as real agents is #2253's question, not this file's.
 """
 
 from __future__ import annotations
@@ -166,3 +174,79 @@ class TestBareSpawnSitesAreTyped:
         content = _cmd("review-monitor.md")
 
         assert content.count(_GENERAL_PURPOSE) >= 5
+
+
+#: The six ``review-sweep.md`` reviewer roles, each of which resolved to
+#: ``general-purpose`` rather than to a new agent definition (#2253).
+_REVIEW_SWEEP_ROLES = (
+    "Bug Hunter",
+    "CLAUDE.md Auditor",
+    "Context Checker",
+    "silent-failure-hunter",
+    "pr-test-analyzer",
+    "type-design-analyzer",
+)
+
+
+class TestReviewSweepSitesAreTyped:
+    """The inventory gap that gated deny-on-omission, closed and pinned.
+
+    Asserted per row rather than by occurrence count: a count passes no matter
+    which rows carry the type, so it would not notice one role losing it.
+    """
+
+    def test_every_role_row_names_general_purpose(self) -> None:
+        content = _cmd("review-sweep.md")
+
+        for role in _REVIEW_SWEEP_ROLES:
+            assert f"| **{role}** | `{_GENERAL_PURPOSE}` |" in content
+
+    def test_confidence_scorer_spawn_is_typed(self) -> None:
+        """The seventh site, in prose rather than a table row."""
+        content = _cmd("review-sweep.md")
+
+        assert f'(`{_GENERAL_PURPOSE}`, `model: "haiku"`)' in content
+
+    def test_roles_are_documented_as_roles_not_registered_types(self) -> None:
+        """Without this note the six names read as types someone forgot to
+        register, which is exactly the misreading that stalled round 1."""
+        content = _cmd("review-sweep.md")
+
+        assert "The Agent column is a role, not a registered type (#2211)" in content
+        assert "#2253" in content
+
+    def test_no_agent_file_was_minted_for_any_role(self) -> None:
+        """#2253 owns that decision — creating them here would pre-empt it."""
+        registered = {path.stem for path in _AGENTS_ROOT.glob("*.md")}
+
+        for role in _REVIEW_SWEEP_ROLES:
+            assert role.lower().replace(" ", "-").replace(".", "") not in registered
+
+
+class TestReviewMdWasAlreadyClean:
+    """``review.md`` needed no edit — its table already names real types.
+
+    Pinned rather than merely asserted in prose: this file is the record that
+    the inventory behind deny-on-omission was actually checked here, so a
+    later edit that drops the Agent Type column has to argue with a test.
+    """
+
+    def test_every_reviewer_row_names_a_registered_agent_type(self) -> None:
+        content = _cmd("review.md")
+        registered = {
+            _agent_frontmatter(path.name)["name"] for path in _AGENTS_ROOT.glob("*.md")
+        }
+
+        for reviewer in (
+            "Code Quality Reviewer",
+            "Architecture Reviewer",
+            "Test Reviewer",
+            "Performance Reviewer",
+            "API Contract Validator",
+            "Deployment Reviewer",
+            "SysAdmin Reviewer",
+            "Data Safety Reviewer",
+            "Product Manager Reviewer",
+        ):
+            assert f"`{reviewer}`" in content
+            assert reviewer in registered
