@@ -211,7 +211,7 @@ Fix directly in the current session. For each finding:
 
 ### Large number of findings (4+):
 
-Spawn parallel subagents via the Task tool, grouped by file for exclusive ownership. Each agent receives:
+Spawn parallel subagents via the Task tool (`subagent_type: "general-purpose"`), grouped by file for exclusive ownership. Each agent receives:
 - The findings for its assigned files
 - The project's CLAUDE.md (if present)
 - Instruction to fix and commit each change

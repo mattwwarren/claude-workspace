@@ -78,7 +78,7 @@ option semantics live in `.claude/commands/auto-dev-finalize-appendix.md`,
 section "Step 4a — interactive open-PR prompt". Read it now if that applies; do
 not improvise the prompt from memory.
 
-- **Fix** → Enter fix mode for the prior PR: if CI is failing, spawn agent (`model: "sonnet"`) in that branch's worktree to fix and push; if merge conflicts, fetch main, merge, resolve, push; if changes requested, enter Step 5b feedback handling for that PR. Then re-check status and re-present options.
+- **Fix** → Enter fix mode for the prior PR: if CI is failing, spawn agent (`model: "sonnet"`) in that branch's worktree to fix and push — pass `subagent_type: "general-purpose"` (#2211); if merge conflicts, fetch main, merge, resolve, push; if changes requested, enter Step 5b feedback handling for that PR. Then re-check status and re-present options.
 
 **If no open PR from this pipeline:** Proceed immediately.
 
@@ -163,8 +163,9 @@ from a normal checkout.
 #### Step 4c.2 — spawn the agent, `isolation` flag SET BY the gate
 
 Only now, with `IN_DISPATCH_WORKTREE` decided by Step 4c.1, spawn the agent.
-Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr`, and set its
-`isolation` flag from the gate result per the two cases below:
+Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr` — pass
+`subagent_type: "general-purpose"` (#2211) — and set its `isolation` flag from the gate
+result per the two cases below:
 
 - **`IN_DISPATCH_WORKTREE=true` (default for every headless/cw-spawned run): OMIT
   `isolation: "worktree"` entirely.** Spawn scoped to the session cwd (`worktree_path` in
@@ -450,7 +451,7 @@ After `/prep-pr` returns with a PR number:
    2. Ship anyway — proceed to auto-merge (you'll attach evidence post-merge)
    3. Hold — leave PR open, do NOT enable auto-merge, exit ticket
    ```
-   - **Capture now** → apply the same Dispatch Detection test as Step 4c (`.claude/cw-context.json` present). **In a dispatch worktree:** spawn a `general-purpose` agent (`model: "haiku"`, no `isolation` key) scoped to the session cwd — same #766/#1047 rationale as Step 4c. **Otherwise:** spawn a `general-purpose` agent (`isolation: "worktree"`, `model: "haiku"`). Agent spawns are async unconditionally (`run_in_background` is not one of their parameters) — end the turn and resume on the completion notification rather than polling. This async-dispatch exemption is scoped to the Agent tool's subagent spawn only — it does not extend to a raw Bash call; see `auto-dev.md`'s Worker Execution Discipline section for the no-backgrounding rule that applies there. **Non-Claude executor (opencode FINALIZE, #1670):** this file is also consumed by `opencode run`, which has no Agent tool, no Stop hook, and no completion notifications — there, do NOT attempt a spawn or a turn-end wait; run the capture inline in the current session and keep going. Either way, pass the playwright-cli capture + `gh pr edit --body` instructions from the project's `/ship-it` Step 6b. Re-run this gate after the agent returns; max 2 capture attempts before falling through to "Hold".
+   - **Capture now** → apply the same Dispatch Detection test as Step 4c (`.claude/cw-context.json` present). **In a dispatch worktree:** spawn a `general-purpose` agent (`subagent_type: "general-purpose"`, `model: "haiku"`, no `isolation` key) scoped to the session cwd — same #766/#1047 rationale as Step 4c. **Otherwise:** spawn a `general-purpose` agent (`subagent_type: "general-purpose"`, `isolation: "worktree"`, `model: "haiku"`). Agent spawns are async unconditionally (`run_in_background` is not one of their parameters) — end the turn and resume on the completion notification rather than polling. This async-dispatch exemption is scoped to the Agent tool's subagent spawn only — it does not extend to a raw Bash call; see `auto-dev.md`'s Worker Execution Discipline section for the no-backgrounding rule that applies there. **Non-Claude executor (opencode FINALIZE, #1670):** this file is also consumed by `opencode run`, which has no Agent tool, no Stop hook, and no completion notifications — there, do NOT attempt a spawn or a turn-end wait; run the capture inline in the current session and keep going. Either way, pass the playwright-cli capture + `gh pr edit --body` instructions from the project's `/ship-it` Step 6b. Re-run this gate after the agent returns; max 2 capture attempts before falling through to "Hold".
    - **Ship anyway** → continue to step 2 (auto-merge enable). Append `"ui_evidence_missing_user_override"` to `friction_highlights`.
    - **Hold** → skip step 2 entirely (do NOT enable auto-merge). The PR waits on the human to attach evidence and run `gh pr merge --auto --squash`. Set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence"]`.
 
@@ -542,11 +543,11 @@ The two agent spawns it refers back to are pinned here:
 
 ### Step 5a: Wait for CI (10 minutes max)
 
-- **Fix** → Spawn agent (`model: "sonnet"`) in the worktree to investigate CI failure, apply fix, push to branch. Loop back to Step 5a. Max 2 fix attempts, then escalate.
+- **Fix** → Spawn agent (`model: "sonnet"`) in the worktree to investigate CI failure, apply fix, push to branch. Pass `subagent_type: "general-purpose"` (#2211). Loop back to Step 5a. Max 2 fix attempts, then escalate.
 
 ### Step 5b: Initial Review Feedback Check
 
-- **Address** → Spawn agent (`model: "sonnet"`) in the worktree. Agent reads all review comments, applies fixes, pushes to branch, and replies to each addressed comment summarizing the fix. Loop back to Step 5a for CI wait on the new push.
+- **Address** → Spawn agent (`model: "sonnet"`) in the worktree. Agent reads all review comments, applies fixes, pushes to branch, and replies to each addressed comment summarizing the fix. Pass `subagent_type: "general-purpose"` (#2211). Loop back to Step 5a for CI wait on the new push.
 
 ---
 
