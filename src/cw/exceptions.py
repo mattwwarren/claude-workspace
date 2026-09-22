@@ -80,10 +80,13 @@ def parse_usage_limit_reset(text: str, *, now: datetime) -> datetime | None:
     the real spawn-time text differs, this returns None and dispatch keeps
     today's flat ``usage_limit_backoff_seconds`` back-off.
 
-    *now* MUST be timezone-aware; production passes the host-local clock
-    (``datetime.now(UTC).astimezone()``). A naive *now* yields None rather
-    than raising — this function is total by construction, since it runs on
-    untrusted subprocess output at a spawn failure.
+    *now* MUST be timezone-aware; production passes the host-local clock via
+    ``native_daemon._local_now()`` (``datetime.now(_host_timezone())``), a real
+    :class:`~zoneinfo.ZoneInfo` rather than a frozen offset, so the DST
+    transition table is consulted at resolution time (review round 2). A naive
+    *now* yields None rather than raising — this function is total by
+    construction, since it runs on untrusted subprocess output at a spawn
+    failure.
 
     Resolution rules (from the #1344 comment history, as narrowed for the
     spawn path):
