@@ -2132,9 +2132,10 @@ class TestAwaitingOperatorRows:
             blocked_reason="secondary",
             advisory_note="tertiary",
         )
-        assert "stopped_without_sentinel" in queue_peek.format_row(task, {}, _NOW)[
-            "reason"
-        ]
+        assert (
+            "stopped_without_sentinel"
+            in queue_peek.format_row(task, {}, _NOW)["reason"]
+        )
 
     def test_reason_falls_back_to_blocked_reason(self) -> None:
         task = self._blocked_task(

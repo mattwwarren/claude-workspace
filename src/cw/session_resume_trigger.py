@@ -154,9 +154,7 @@ class NativeDaemonResumeTriggerAdapter:
                 delivered=False, reason=DEFERRED_LIVE_DELIVERY_REASON
             )
         if not session.claude_session_id:
-            return ResumeTriggerResult(
-                delivered=False, reason=_NO_TRANSCRIPT_REASON
-            )
+            return ResumeTriggerResult(delivered=False, reason=_NO_TRANSCRIPT_REASON)
         try:
             return self._respawn(session, message)
         except CwError as exc:

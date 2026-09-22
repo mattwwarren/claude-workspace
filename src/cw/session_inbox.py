@@ -97,9 +97,7 @@ def _inbox_lock(session_id: str) -> Iterator[None]:
         fd.close()
 
 
-def append_message(
-    session_id: str, *, author: str, body: str
-) -> SessionInboxMessage:
+def append_message(session_id: str, *, author: str, body: str) -> SessionInboxMessage:
     """Append one operator message to *session_id*'s inbox and return it."""
     message = SessionInboxMessage(
         id=uuid.uuid4().hex[:_MESSAGE_ID_LENGTH],
@@ -179,9 +177,7 @@ def advance_cursor(session_id: str, message_id: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
         path,
-        json.dumps(
-            {"cursor": message_id, "updated_at": datetime.now(UTC).isoformat()}
-        ),
+        json.dumps({"cursor": message_id, "updated_at": datetime.now(UTC).isoformat()}),
     )
 
 

@@ -62,9 +62,7 @@ def _invoke(
     adapter: FakeResumeTriggerAdapter | None = None,
 ) -> tuple[int, str, FakeResumeTriggerAdapter]:
     fake = adapter or FakeResumeTriggerAdapter()
-    with patch(
-        "cw.cli.session_send.get_resume_trigger_adapter", return_value=fake
-    ):
+    with patch("cw.cli.session_send.get_resume_trigger_adapter", return_value=fake):
         result = runner.invoke(main, ["session", "send", *args])
     return result.exit_code, result.output, fake
 

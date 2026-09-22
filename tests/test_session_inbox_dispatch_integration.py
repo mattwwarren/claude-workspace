@@ -81,9 +81,7 @@ def _enqueue_blocked_task() -> None:
 
 def _send(runner: CliRunner, body: str) -> int:
     fake = FakeResumeTriggerAdapter()
-    with patch(
-        "cw.cli.session_send.get_resume_trigger_adapter", return_value=fake
-    ):
+    with patch("cw.cli.session_send.get_resume_trigger_adapter", return_value=fake):
         return runner.invoke(
             main, ["session", "send", _SESSION_ID, "--message", body]
         ).exit_code
