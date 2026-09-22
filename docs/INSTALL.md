@@ -83,7 +83,7 @@ cd claude-workspace
 ./scripts/install.sh
 ```
 
-The install script runs `uv tool install --from "$PROJECT_DIR" --force --reinstall --no-cache "claude-workspace[mcp]"`, making `cw` globally available, and then syncs cw's bundled skills, commands, and helper scripts into `~/.claude/` via `scripts/install-skills.sh`.
+The install script runs `uv tool install --force --reinstall --no-cache "claude-workspace[mcp] @ file://$PROJECT_DIR"`, making `cw` globally available, and then syncs cw's bundled skills, commands, and helper scripts into `~/.claude/` via `scripts/install-skills.sh`. It percent-encodes `$PROJECT_DIR` first, since a space (and `%`, `#`, `?`) is URL-significant inside a PEP 508 requirement; the older `--from "$PROJECT_DIR"` form is not used because uv >= 0.11 removed that flag (#2186).
 
 ### How skills/commands/scripts stay in sync
 
