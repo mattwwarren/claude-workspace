@@ -63,10 +63,14 @@ the NEXT tick. That one-tick delay is harmless: the sweep only stamps
 ``ESCALATION_PARK_MINUTES`` (45) have elapsed, so no operator can observe the
 difference.
 
-Throughout, the row's ``status`` is left at RUNNING for the whole handoff. That
-is load-bearing, not incidental: ``dispatch/claim.py`` only ever claims PENDING
-rows, so a RUNNING row cannot be re-dispatched as a second REVIEW session while
-the fix agent is still working.
+For an ordinary handoff — every path but that one exception — the row's
+``status`` is left at RUNNING throughout. That is load-bearing, not incidental:
+``dispatch/claim.py`` only ever claims PENDING rows, so a RUNNING row cannot be
+re-dispatched as a second REVIEW session while the fix agent is still working.
+``_park_for_unresolved_ref`` is the one path that deliberately ends that
+RUNNING tenure early (RUNNING->BLOCKED_ON_USER), and it is safe for the same
+reason: BLOCKED_ON_USER is not claimable either, so the row still cannot be
+re-dispatched — it waits for the operator instead of for a fix agent.
 """
 
 from __future__ import annotations
@@ -531,9 +535,16 @@ def _build_dispatch_jobs(
                 continue  # concurrently dispatched or removed — silent skip
             if _is_parked_for_unresolved_ref(task):
                 # Re-checked under the lock, closing the detect-to-build race
-                # (#2209). Silent, and the handoff is retained on purpose: the
-                # operator's ``cw dev-queue requeue`` resumes this same fix
-                # cycle rather than restarting REVIEW from scratch.
+                # (#2209). Silent, and the handoff is retained on purpose: it
+                # is the record of what the REVIEW round already derived, kept
+                # for the operator to inspect while the row sits parked. It is
+                # NOT resumed by ``cw dev-queue requeue`` today — a requeue
+                # moves the row to PENDING, which stops matching
+                # ``_is_parked_for_unresolved_ref`` (it gates on
+                # BLOCKED_ON_USER), so the #2142 stale-handoff drop clears
+                # ``pending_fix_dispatch`` and the row is claimed into a fresh
+                # REVIEW session. Whether requeue *should* resume the handoff
+                # is #2265.
                 continue
             if not _job_still_valid(task):
                 if task.status != QueueItemStatus.RUNNING:
@@ -651,9 +662,15 @@ def _park_for_unresolved_ref(job: _DispatchJob, exc: RemoteRefUnresolvedError) -
     That path assumes a fresh REVIEW session can re-derive the action list, but
     an unresolvable remote ref recurs identically for every REVIEW round —
     and since #2075 the revert charges no attempt, so nothing bounded the
-    review/failed-dispatch/review loop at all. Parking ends it, and retaining
-    ``pending_fix_dispatch`` means the operator's ``cw dev-queue requeue``
-    resumes this same fix cycle rather than paying for a whole new review.
+    review/failed-dispatch/review loop at all. Parking ends it.
+
+    ``pending_fix_dispatch`` is retained as evidence, not as a resume point:
+    it preserves the action list the REVIEW round derived so the operator can
+    read what the fix agent was going to be told. ``cw dev-queue requeue`` does
+    NOT resume it — requeue sets the row PENDING, which no longer matches
+    ``_is_parked_for_unresolved_ref``, so the #2142 stale-handoff drop clears
+    the handoff and the ticket is claimed into a fresh REVIEW session. #2265
+    decides whether requeue should resume it instead.
 
     ``_park_running_task_blocked_on_user`` is imported function-locally for the
     same import-cycle reason ``cw.reconcile.codex_boot`` does it: ``claim.py``
@@ -662,6 +679,18 @@ def _park_for_unresolved_ref(job: _DispatchJob, exc: RemoteRefUnresolvedError) -
     is left to the ordinary stale-handoff drop), clears ``session_id`` after
     reading it for the attention event, and never touches
     ``pending_fix_dispatch``.
+
+    ``expected_session_id`` is passed because status alone does not identify the
+    claim. The job was built from an unlocked snapshot taken tick-earlier; by the
+    time this park re-acquires the lock the row may have been reverted and
+    re-claimed by a *newer* REVIEW session, which is RUNNING again and matches
+    ``(ticket_id, client, RUNNING)`` just as well. Parking then would file a
+    healthy, unrelated session as blocked on a ref failure that was never its
+    own. ``job.pending.requested_by_session_id`` is that identity: the REVIEW
+    session that recorded the handoff is the session that claimed the row, and
+    ``claim.py`` stamps ``session_id`` with the same ``$CW_SESSION`` value the
+    handoff carries. A mismatch skips the park silently and the row is left to
+    the ordinary stale-handoff drop, exactly as the not-RUNNING case is.
 
     ``unproductive=False`` for the same reason ``_stamp_dispatch_failure``
     passes it (#2075): the REVIEW round behind this handoff produced a real
@@ -674,6 +703,7 @@ def _park_for_unresolved_ref(job: _DispatchJob, exc: RemoteRefUnresolvedError) -
         client_name=job.client,
         disposition=_FIX_DISPATCH_REF_UNRESOLVED_REASON,
         breadcrumbs=str(exc),
+        expected_session_id=job.pending.requested_by_session_id,
         unproductive=False,
     )
 

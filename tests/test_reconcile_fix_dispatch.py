@@ -1306,17 +1306,18 @@ def test_run_fix_dispatch_remote_branch_none_without_sentinel_branch(
 def _seed_e2e_fix_row(ticket_id: str, *, with_impl_session: bool) -> None:
     """A RUNNING row with a handoff, plus the sessions reconcile() will resolve.
 
-    Both sessions are terminal so neither enters phantom detection
+    The row carries ``session_id="review-sess"`` — the REVIEW session that
+    recorded the handoff is the row's claimant (``auto-dev-review`` writes only
+    ``pending_fix_dispatch``, never ``session_id``), and
+    ``_park_for_unresolved_ref``'s ``expected_session_id`` guard matches on that
+    identity. That session is deliberately NOT seeded into state here: a
+    COMPLETED DAEMON session with a RUNNING row is exactly what
+    ``revert_completed_silent_tasks`` reverts to PENDING, which would short the
+    row out of the fix-dispatch pass before it runs. Any IMPL session seeded
+    below is terminal, so it does not enter phantom detection
     (``_LIVE_STATUSES``-only), matching the sibling sessions_lock e2e test.
     """
-    sessions = [
-        _make_daemon_session(
-            id="review-sess",
-            name=f"{_CLIENT}/review/{ticket_id}",
-            client=_CLIENT,
-            status=SessionStatus.COMPLETED,
-        )
-    ]
+    sessions: list[Any] = []
     if with_impl_session:
         sessions.append(
             _impl_session(
@@ -1331,6 +1332,10 @@ def _seed_e2e_fix_row(ticket_id: str, *, with_impl_session: bool) -> None:
         client=_CLIENT,
         status=QueueItemStatus.RUNNING,
     )
+    # The REVIEW session that recorded the handoff is the row's claimant, as
+    # claim.py stamps it; _park_for_unresolved_ref's expected_session_id guard
+    # matches on that identity.
+    task.session_id = "review-sess"
     task.pending_fix_dispatch = _pending(label=f"fix-{ticket_id}")
     save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -1430,7 +1435,11 @@ def test_act_on_pending_fix_dispatches_parks_row_on_unresolved_remote_ref(
     pages the operator exactly once.
     """
     stub_dispatch.side_effect = _raise_unresolved
-    _seed_task(pending_fix_dispatch=_pending(), session_id="fix-sess-1")
+    # session_id matches the handoff's requested_by_session_id, as it does in
+    # production: the REVIEW session that recorded the handoff is the session
+    # claim.py stamped on the row. The park's ``expected_session_id`` guard
+    # requires that identity (see the mismatch test below).
+    _seed_task(pending_fix_dispatch=_pending(), session_id="review-sess")
 
     with caplog.at_level(logging.WARNING, logger="cw.reconcile.fix_dispatch"):
         acted = fix_dispatch._act_on_pending_fix_dispatches(
@@ -1452,9 +1461,8 @@ def test_act_on_pending_fix_dispatches_parks_row_on_unresolved_remote_ref(
     assert len(attention) == 1
     assert attention[0].payload["paused_status"] == "fix_dispatch_ref_unresolved"
     assert "cannot determine remote ref" in attention[0].payload["breadcrumbs"]
-    # The row's own session_id, read before the park cleared it — NOT the
-    # peer-failure path's pending.requested_by_session_id ("review-sess").
-    assert attention[0].payload["session_id"] == "fix-sess-1"
+    # The row's own session_id, read before the park cleared it.
+    assert attention[0].payload["session_id"] == "review-sess"
 
     assert any(
         rec.message.startswith("fix_dispatch_ref_unresolved ticket=")
@@ -1499,8 +1507,9 @@ def test_parked_unresolved_ref_row_survives_stale_handoff_drop(
     """#2142 interplay: the retained handoff is exempt from the stale drop.
 
     Every other non-RUNNING row carrying a handoff gets it cleared and paged.
-    This one keeps it, so ``cw dev-queue requeue`` resumes the same fix cycle
-    instead of restarting REVIEW from scratch.
+    This one keeps it while parked, preserving the REVIEW round's action list
+    as evidence for the operator. (It is not a resume point: a requeue sets the
+    row PENDING, and the drop this test exempts then applies normally — #2265.)
     """
     _seed_task(
         status=QueueItemStatus.BLOCKED_ON_USER,
@@ -1548,3 +1557,40 @@ def test_park_is_noop_when_row_no_longer_running(
     assert task.status == QueueItemStatus.PENDING
     assert task.disposition is None
     assert task.pending_fix_dispatch is not None
+
+
+def test_park_is_noop_when_row_reclaimed_by_a_newer_session(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+) -> None:
+    """RUNNING alone does not identify the claim this job belongs to.
+
+    The row was reverted and re-claimed by a newer REVIEW session between the
+    unlocked snapshot the job was built from and this park's own lock
+    acquisition. It is RUNNING again, so ``(ticket_id, client, RUNNING)``
+    matches — but the ref failure belongs to the *previous* claim. Parking here
+    would file a healthy, unrelated session as blocked. ``expected_session_id``
+    closes that window.
+    """
+    _seed_task(
+        pending_fix_dispatch=_pending(),
+        session_id="newer-review-sess",
+    )
+    job = fix_dispatch._DispatchJob(
+        client_cfg=acme_client,
+        branch="dev/2017",
+        pending=_pending(),  # requested_by_session_id="review-sess"
+        ticket_id=_TICKET,
+        client=_CLIENT,
+        lane="default",
+        stage=Stage.REVIEW,
+    )
+
+    fix_dispatch._park_for_unresolved_ref(job, RemoteRefUnresolvedError("no ref"))
+
+    task = _only_task()
+    assert task.status == QueueItemStatus.RUNNING
+    assert task.disposition is None
+    assert task.session_id == "newer-review-sess"
+    assert task.pending_fix_dispatch is not None
+    assert read_events() == []
