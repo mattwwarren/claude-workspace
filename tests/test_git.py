@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -11,6 +11,7 @@ from cw._git import capture_head_sha, git_clean_env
 from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
