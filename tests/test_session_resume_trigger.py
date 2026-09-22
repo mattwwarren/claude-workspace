@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -729,6 +730,110 @@ class TestPostSpawnCompensation:
         assert "post-commit" in result.reason
         assert mock_native_daemon.stop_calls == []
         assert load_state().sessions[0].status == SessionStatus.ACTIVE
+
+
+# ---------------------------------------------------------------------------
+# Commit precondition (#2212 review round 4, finding 1): a no-op _update --
+# the session vanished, went terminal, or moved since `fresh` was read,
+# all during the spawn/roster-verify window, which _resume_trigger_lock does
+# not guard against a caller mutating state through a different path -- must
+# not be treated as a successful commit. It belongs on the pre-commit side
+# of the boundary: stop the surface, do not advance the cursor.
+# ---------------------------------------------------------------------------
+
+
+class TestCommitPrecondition:
+    def test_session_vanishing_during_spawn_window_is_a_failed_commit(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """The session disappears from state between the roster-verify poll
+        and the commit -- _update's precondition must catch the no-op write
+        instead of mutate_state returning normally being read as success."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(session)
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        def _vanish(*_args: object, **_kwargs: object) -> None:
+            save_state(CwState(sessions=[]))
+
+        with (
+            patch("cw.session_resume_trigger.list_tickets", return_value=[]),
+            patch(
+                "cw.session_resume_trigger._verify_roster_registration",
+                side_effect=_vanish,
+            ),
+        ):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is False
+        assert "state changed during respawn" in result.reason
+        spawned_short_id = f"{mock_native_daemon._counter:08x}"
+        assert mock_native_daemon.stop_calls == [spawned_short_id]
+
+    def test_session_going_terminal_during_spawn_window_is_not_resurrected(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """The session independently completes during the spawn/roster-verify
+        window -- the commit must not set it back to ACTIVE."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(session)
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        def _complete(*_args: object, **_kwargs: object) -> None:
+            completed = _eligible_session(sample_client, status=SessionStatus.COMPLETED)
+            save_state(CwState(sessions=[completed]))
+
+        with (
+            patch("cw.session_resume_trigger.list_tickets", return_value=[]),
+            patch(
+                "cw.session_resume_trigger._verify_roster_registration",
+                side_effect=_complete,
+            ),
+        ):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is False
+        updated = load_state().sessions[0]
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.surface_ref == "deadbeef"
+        spawned_short_id = f"{mock_native_daemon._counter:08x}"
+        assert mock_native_daemon.stop_calls == [spawned_short_id]
+
+    def test_stop_failure_during_precommit_compensation_is_logged(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A failed daemon.stop() during pre-commit compensation must not
+        vanish silently -- it leaks an untracked process with nothing
+        recording it (#2212 review round 4, finding 2)."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(session)
+        mock_native_daemon.raise_unregistered = True
+        mock_native_daemon.stop = Mock(side_effect=RuntimeError("stop failed"))
+        adapter = NativeDaemonResumeTriggerAdapter(
+            native_daemon=mock_native_daemon, roster_poll_timeout=0.0
+        )
+
+        with (
+            patch("cw.session_resume_trigger.list_tickets", return_value=[]),
+            caplog.at_level(logging.ERROR, logger="cw.session_resume_trigger"),
+        ):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is False
+        assert any("failed to stop orphaned" in r.message for r in caplog.records)
 
 
 class TestResumeTriggerResult:

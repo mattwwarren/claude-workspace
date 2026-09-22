@@ -25,14 +25,15 @@ import click
 
 from cw import session_inbox
 from cw.cli._base import handle_errors
-from cw.cli.session_inspect import _resolve_session, session_group
+from cw.cli.session_inspect import session_group
 from cw.config import load_state
 from cw.events import record_event
 from cw.models import TERMINAL_SESSION_STATUSES, OrchestratorEventType
 from cw.session_resume_trigger import get_resume_trigger_adapter
+from cw.session_retention import find_session_by_id
 
 if TYPE_CHECKING:
-    from cw.models import Session
+    from cw.models import CwState, Session
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,10 @@ def _resolve_body(message: str | None, message_file: Path | None) -> str:
     return body
 
 
-def _ambiguous_matches(prefix: str) -> list[Session]:
+def _ambiguous_matches(state: CwState, prefix: str) -> list[Session]:
     """Return every session an id-or-claude_session_id prefix resolves to.
 
-    ``_resolve_session`` -> ``find_session_by_id`` -> ``_find_by_prefix``
+    ``find_session_by_id`` -> ``_find_by_prefix``
     (``session_retention.py:173-189``) returns only the *first* match, with
     no ambiguity check -- fine for its existing read/spawn-resolution
     consumers, but ``send`` is the first *mutating* one, and a colliding
@@ -76,14 +77,19 @@ def _ambiguous_matches(prefix: str) -> list[Session]:
     review). Scoped to the hot ``sessions.json`` state only -- unlike
     ``find_session_by_id`` this does not fall back to scanning archives,
     since a mutating command's targets are live sessions, not archived ones.
+
+    Takes an already-loaded *state* rather than reloading, so the caller can
+    reuse the same snapshot for both this check and the actual resolution
+    below (``find_session_by_id(prefix, state=state)``) instead of reading
+    ``sessions.json`` twice and judging ambiguity and identity against two
+    different points in time (#2212 review round 4, finding 3).
     """
-    sessions = load_state().sessions
-    id_matches = [s for s in sessions if s.id.startswith(prefix)]
+    id_matches = [s for s in state.sessions if s.id.startswith(prefix)]
     if id_matches:
         return id_matches
     return [
         s
-        for s in sessions
+        for s in state.sessions
         if s.claude_session_id and s.claude_session_id.startswith(prefix)
     ]
 
@@ -120,7 +126,12 @@ def session_send(
     """
     body = _resolve_body(message, message_file)
 
-    candidates = _ambiguous_matches(session_ref)
+    # Single load, reused for both the ambiguity check and the actual
+    # resolution below -- two separate reads previously judged ambiguity
+    # and identity against two different snapshots, a genuine TOCTOU window
+    # (#2212 review round 4, finding 3).
+    state = load_state()
+    candidates = _ambiguous_matches(state, session_ref)
     if len(candidates) > 1:
         ids = ", ".join(sorted(s.id for s in candidates))
         click.echo(
@@ -130,7 +141,12 @@ def session_send(
         )
         raise click.exceptions.Exit(1)
 
-    session = _resolve_session(session_ref)
+    # find_session_by_id's archive fallback still applies on a hot-state
+    # miss, so a prefix matching only an archived terminal session still
+    # gets the friendlier "will never read an inbox message" message below
+    # instead of a generic "not found" (#2212 review round 4, finding 3
+    # caveat).
+    session = find_session_by_id(session_ref, state=state)
     if session is None:
         click.echo(f"Session not found: {session_ref}", err=True)
         raise click.exceptions.Exit(1)

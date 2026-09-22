@@ -349,6 +349,59 @@ class TestEventBusResilience:
         assert "queued" in output.lower()
 
 
+class TestSingleStateResolution:
+    def test_ambiguity_check_and_resolution_share_one_state_load(
+        self, sample_client: ClientConfig, runner: CliRunner
+    ) -> None:
+        """Two separate load_state() reads previously let the ambiguity
+        check and the actual resolution judge two different snapshots of
+        the world (#2212 review round 4, finding 3) -- assert there is only
+        one read now."""
+        from cw.config import load_state as real_load_state
+
+        _persist(_session(sample_client))
+
+        with patch(
+            "cw.cli.session_send.load_state", side_effect=real_load_state
+        ) as mock_load_state:
+            code, _output, _fake = _invoke(runner, [_SESSION_ID, "--message", "hi"])
+
+        assert code == 0
+        assert mock_load_state.call_count == 1
+
+    def test_archived_terminal_session_still_gets_the_friendly_refusal_message(
+        self, sample_client: ClientConfig, runner: CliRunner
+    ) -> None:
+        """A prefix matching only an archived terminal session must still
+        get the friendlier "it will never read an inbox message" refusal,
+        not a generic "not found" -- the caveat the operator asked to
+        preserve when resolution was collapsed to a single read (#2212
+        review round 4, finding 3 caveat)."""
+        from freezegun import freeze_time
+
+        from cw.config import load_state as real_load_state
+        from cw.session_retention import prune_sessions
+
+        session = _session(
+            sample_client,
+            status=SessionStatus.COMPLETED,
+            started_at=datetime(2025, 1, 1, tzinfo=UTC),
+            completed_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        _persist(session)
+        with freeze_time(datetime(2026, 9, 22, tzinfo=UTC)):
+            prune_sessions()
+        assert real_load_state().sessions == []
+
+        code, output, fake = _invoke(runner, [_SESSION_ID, "--message", "hi"])
+
+        assert code == 1
+        assert "will never read an inbox message" in output
+        assert "completed" in output.lower()
+        assert fake.trigger_calls == []
+        assert session_inbox.read_messages(_SESSION_ID) == []
+
+
 class TestMailboxDeliveryEndToEnd:
     def test_send_to_a_parked_session_is_visible_after_respawn(
         self,

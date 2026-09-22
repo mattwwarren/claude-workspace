@@ -40,7 +40,12 @@ from cw.config import get_client, load_state, mutate_state
 from cw.dev_queue import list_tickets
 from cw.exceptions import CwError
 from cw.history import EventType, HistoryEvent, record_event
-from cw.models import CwState, QueueItemStatus, SessionStatus
+from cw.models import (
+    TERMINAL_SESSION_STATUSES,
+    CwState,
+    QueueItemStatus,
+    SessionStatus,
+)
 from cw.native_daemon import get_native_daemon_client
 from cw.session import _resolve_resume_cwd, _resume_spawn_args
 from cw.session_inbox import advance_cursor, read_unconsumed, session_inbox_dir
@@ -244,39 +249,22 @@ class NativeDaemonResumeTriggerAdapter:
         (#2212 review round 2, finding 1/2: a liveness-only recheck let a
         task that moved out of BLOCKED_ON_USER between the outer gate and
         this lock still get respawned).
+
+        Split into a gate/spawn/commit/finalize sequence (#2212 review round
+        4, finding 4) so the pre-commit/post-commit boundary -- the subtlest
+        thing in this module -- is visible from the shape of the calls, not
+        only from the comments inside one long function. The lock still
+        spans the entire sequence; extraction changes nothing about what is
+        guarded.
         """
         daemon = self._native_daemon_override or get_native_daemon_client()
         client = get_client(session.client)
 
         with _resume_trigger_lock(session.id):
-            fresh = load_state().find_by_name_or_id(session.id)
-            if fresh is None:
-                return ResumeTriggerResult(delivered=False, reason=_VANISHED_REASON)
-            if not fresh.claude_session_id:
-                return ResumeTriggerResult(
-                    delivered=False, reason=_NO_TRANSCRIPT_REASON
-                )
-            if not _is_eligible(fresh):
-                # The outer gate in trigger() checked eligibility against
-                # whatever Session the caller happened to pass in; a second
-                # racing call that reaches the lock later must recheck the
-                # task-status half too, not just daemon liveness below --
-                # otherwise a task that moved out of BLOCKED_ON_USER between
-                # the outer check and this lock still gets respawned (#2212
-                # review round 2, finding 1/2). Mechanical reuse of the same
-                # gate, just against freshly reloaded state.
-                return ResumeTriggerResult(
-                    delivered=False, reason=DEFERRED_LIVE_DELIVERY_REASON
-                )
-            if (
-                fresh.surface_ref
-                and fresh.surface_ref in daemon.list_live_session_short_ids()
-            ):
-                return ResumeTriggerResult(
-                    delivered=False,
-                    reason=_ALREADY_RESUMED_REASON,
-                    surface_ref=fresh.surface_ref,
-                )
+            gate = self._recheck_gate(session.id, daemon)
+            if isinstance(gate, ResumeTriggerResult):
+                return gate
+            fresh = gate
 
             session_cwd = _resolve_resume_cwd(fresh, client)
             extra_args, permission_mode = _resume_spawn_args(fresh, client)
@@ -287,96 +275,220 @@ class NativeDaemonResumeTriggerAdapter:
             # unconsumed (e.g. a caller that never durably queued it).
             unconsumed = read_unconsumed(fresh.id) or [message]
 
-            new_short_id = daemon.spawn_bg(
-                cwd=session_cwd,
-                prompt=_build_resume_prompt(unconsumed),
-                extra_args=extra_args or None,
-                permission_mode=permission_mode,
+            new_short_id = self._spawn_and_verify(
+                daemon, session.id, session_cwd, unconsumed, extra_args, permission_mode
             )
-            try:
-                _verify_roster_registration(
-                    daemon,
-                    new_short_id,
-                    timeout=self._roster_poll_timeout,
-                    interval=self._roster_poll_interval,
-                )
-            except CwError:
-                # Registration failed after the process was already spawned
-                # -- stop it rather than leaving an orphan the operator's
-                # `delivered=False` result gives no hint even exists (#2212
-                # review finding 3). Best-effort: a failed cleanup must not
-                # mask the original registration error.
-                with contextlib.suppress(Exception):
-                    daemon.stop(new_short_id)
-                raise
+            self._commit_resume(daemon, session, fresh, new_short_id)
+            return self._finalize_post_commit(session, fresh, unconsumed, new_short_id)
 
-            def _update(state: CwState) -> None:
-                live = state.find_by_name_or_id(session.id)
-                if live is not None:
-                    live.surface_ref = new_short_id
-                    live.status = SessionStatus.ACTIVE
-                    live.resumed_at = datetime.now(UTC)
+    def _recheck_gate(
+        self, session_id: str, daemon: NativeDaemonClient
+    ) -> Session | ResumeTriggerResult:
+        """Re-validate eligibility against freshly reloaded state.
 
-            try:
-                mutate_state(_update)
-            except (CwError, OSError):
-                # Nothing committed yet -- same compensation as a
-                # roster-verify failure above (#2212 review round 2,
-                # finding 3, pre-commit half): a spawned process with no
-                # committed state is exactly the orphan finding 3 already
-                # covers, so stop it before propagating.
-                with contextlib.suppress(Exception):
-                    daemon.stop(new_short_id)
-                raise
+        Returns the fresh :class:`~cw.models.Session` on success, or the
+        decline result ``_respawn`` should return immediately otherwise.
+        Isolated from the spawn/commit sequence so "should this even be
+        attempted" reads as one block (#2212 review round 4, finding 4).
+        """
+        fresh = load_state().find_by_name_or_id(session_id)
+        if fresh is None:
+            return ResumeTriggerResult(delivered=False, reason=_VANISHED_REASON)
+        if not fresh.claude_session_id:
+            return ResumeTriggerResult(delivered=False, reason=_NO_TRANSCRIPT_REASON)
+        if not _is_eligible(fresh):
+            # The outer gate in trigger() checked eligibility against
+            # whatever Session the caller happened to pass in; a second
+            # racing call that reaches the lock later must recheck the
+            # task-status half too, not just daemon liveness below --
+            # otherwise a task that moved out of BLOCKED_ON_USER between
+            # the outer check and this lock still gets respawned (#2212
+            # review round 2, finding 1/2). Mechanical reuse of the same
+            # gate, just against freshly reloaded state.
+            return ResumeTriggerResult(
+                delivered=False, reason=DEFERRED_LIVE_DELIVERY_REASON
+            )
+        if (
+            fresh.surface_ref
+            and fresh.surface_ref in daemon.list_live_session_short_ids()
+        ):
+            return ResumeTriggerResult(
+                delivered=False,
+                reason=_ALREADY_RESUMED_REASON,
+                surface_ref=fresh.surface_ref,
+            )
+        return fresh
 
-            # Past this point state IS committed: surface_ref/status/
-            # resumed_at point at the new, genuinely-live process. A
-            # failure in the history event or the mailbox cursor below must
-            # NOT stop the surface (#2212 review round 2, finding 3,
-            # post-commit half) -- that would leave sessions.json asserting
-            # a live surface_ref for a process we just killed, manufacturing
-            # exactly the phantom shape compute_drift exists to detect, at
-            # the moment of failure. The operator-approved choice (see
-            # docs/adr/0017-session-inbox-and-resume-trigger.md) is to
-            # accept the write's own at-least-once/idempotent-replay
-            # invariant and reconcile's safety net instead: log loudly and
-            # surface it in the returned reason, but the session did
-            # genuinely resume.
-            try:
-                # The history-bus SESSION_RESUMED record every daemon
-                # respawn already emits (session.py:530-539). Distinct from
-                # cw.events.record_event, which the CLI layer emits for the
-                # inbox append -- same name, different module, different
-                # signature, neither substituting for the other.
-                record_event(
-                    session.client,
-                    HistoryEvent(
-                        event_type=EventType.SESSION_RESUMED,
-                        client=session.client,
-                        session_id=session.id,
-                        session_name=session.name,
-                        purpose=session.purpose,
-                    ),
+    def _stop_and_log(
+        self, daemon: NativeDaemonClient, session_id: str, short_id: str, why: str
+    ) -> None:
+        """Best-effort stop of an orphaned pre-commit surface; log on failure.
+
+        A failed stop leaks an untracked process with nothing recording it
+        -- previously silent (#2212 review round 4, finding 2). Never
+        raises: a failed cleanup must not mask the original error the
+        caller is about to re-raise.
+        """
+        try:
+            daemon.stop(short_id)
+        except Exception:
+            logger.exception(
+                "resume trigger for session %s: failed to stop orphaned"
+                " surface %s after %s -- process may be leaked; reconcile"
+                " is the remaining safety net",
+                session_id,
+                short_id,
+                why,
+            )
+
+    def _spawn_and_verify(
+        self,
+        daemon: NativeDaemonClient,
+        session_id: str,
+        session_cwd: Path,
+        unconsumed: list[SessionInboxMessage],
+        extra_args: list[str],
+        permission_mode: str | None,
+    ) -> str:
+        """Spawn the resumed surface and confirm roster registration.
+
+        Raises CwError (from ``_verify_roster_registration``) after
+        stopping the orphaned process on a registration failure --
+        nothing has been committed to sessions.json yet at this point.
+        """
+        new_short_id = daemon.spawn_bg(
+            cwd=session_cwd,
+            prompt=_build_resume_prompt(unconsumed),
+            extra_args=extra_args or None,
+            permission_mode=permission_mode,
+        )
+        try:
+            _verify_roster_registration(
+                daemon,
+                new_short_id,
+                timeout=self._roster_poll_timeout,
+                interval=self._roster_poll_interval,
+            )
+        except CwError:
+            # Registration failed after the process was already spawned --
+            # stop it rather than leaving an orphan the operator's
+            # `delivered=False` result gives no hint even exists (#2212
+            # review finding 3).
+            self._stop_and_log(
+                daemon, session_id, new_short_id, "roster-verify failure"
+            )
+            raise
+        return new_short_id
+
+    def _commit_resume(
+        self,
+        daemon: NativeDaemonClient,
+        session: Session,
+        fresh: Session,
+        new_short_id: str,
+    ) -> None:
+        """Commit the respawn to sessions.json, or compensate and raise.
+
+        The precondition inside ``_update`` -- the session row is still
+        present, non-terminal, and unmoved since ``fresh`` was read -- is
+        what makes a no-op write visible as a failure instead of silently
+        succeeding (#2212 review round 4, finding 1). ``mutate_state``
+        returning is not the same as the write having happened: the session
+        can vanish, reach a terminal status, or be independently mutated by
+        another ``mutate_state`` caller during the spawn/roster-verify
+        window above -- none of that window is guarded by
+        ``_resume_trigger_lock``, only concurrent resume triggers are.
+        Raising here routes the no-op case into the same pre-commit
+        compensation as a roster-verify or ``mutate_state`` I/O failure:
+        stop the surface, do not advance the cursor -- a no-op update never
+        committed anything, so it belongs on that side of the line by the
+        boundary's own logic.
+        """
+
+        def _update(state: CwState) -> None:
+            live = state.find_by_name_or_id(session.id)
+            if (
+                live is None
+                or live.status in TERMINAL_SESSION_STATUSES
+                or live.surface_ref != fresh.surface_ref
+            ):
+                msg = (
+                    f"session {session.id} state changed during respawn"
+                    " (vanished, went terminal, or was concurrently"
+                    " updated elsewhere); commit aborted"
                 )
-                advance_cursor(fresh.id, unconsumed[-1].id)
-            except OSError as exc:
-                logger.exception(
-                    "session %s resumed (surface %s) but the post-commit"
-                    " history event or mailbox cursor write failed --"
-                    " state is authoritative and the surface is genuinely"
-                    " live, so it was not stopped; the cursor may replay"
-                    " this message on a future resume (at-least-once)",
-                    session.id,
-                    new_short_id,
-                )
-                return ResumeTriggerResult(
-                    delivered=True,
-                    reason=(
-                        f"{_DELIVERED_REASON}; post-commit event/cursor"
-                        f" write failed, see logs: {exc}"
-                    ),
-                    surface_ref=new_short_id,
-                )
+                raise CwError(msg)
+            live.surface_ref = new_short_id
+            live.status = SessionStatus.ACTIVE
+            live.resumed_at = datetime.now(UTC)
+
+        try:
+            mutate_state(_update)
+        except (CwError, OSError):
+            # Nothing committed yet -- same compensation as a
+            # roster-verify failure above (#2212 review round 2, finding 3,
+            # pre-commit half): a spawned process with no committed state
+            # is exactly the orphan finding 3 already covers, so stop it
+            # before propagating.
+            self._stop_and_log(daemon, session.id, new_short_id, "commit failure")
+            raise
+
+    def _finalize_post_commit(
+        self,
+        session: Session,
+        fresh: Session,
+        unconsumed: list[SessionInboxMessage],
+        new_short_id: str,
+    ) -> ResumeTriggerResult:
+        """Record the history event and advance the cursor after a commit.
+
+        Past this point state IS committed: surface_ref/status/resumed_at
+        point at the new, genuinely-live process. A failure in the history
+        event or the mailbox cursor below must NOT stop the surface (#2212
+        review round 2, finding 3, post-commit half) -- that would leave
+        sessions.json asserting a live surface_ref for a process we just
+        killed, manufacturing exactly the phantom shape compute_drift
+        exists to detect, at the moment of failure. The operator-approved
+        choice (see docs/adr/0017-session-inbox-and-resume-trigger.md) is
+        to accept the write's own at-least-once/idempotent-replay invariant
+        and reconcile's safety net instead: log loudly and surface it in
+        the returned reason, but the session did genuinely resume.
+        """
+        try:
+            # The history-bus SESSION_RESUMED record every daemon respawn
+            # already emits (session.py:530-539). Distinct from
+            # cw.events.record_event, which the CLI layer emits for the
+            # inbox append -- same name, different module, different
+            # signature, neither substituting for the other.
+            record_event(
+                session.client,
+                HistoryEvent(
+                    event_type=EventType.SESSION_RESUMED,
+                    client=session.client,
+                    session_id=session.id,
+                    session_name=session.name,
+                    purpose=session.purpose,
+                ),
+            )
+            advance_cursor(fresh.id, unconsumed[-1].id)
+        except OSError as exc:
+            logger.exception(
+                "session %s resumed (surface %s) but the post-commit"
+                " history event or mailbox cursor write failed -- state is"
+                " authoritative and the surface is genuinely live, so it"
+                " was not stopped; the cursor may replay this message on a"
+                " future resume (at-least-once)",
+                session.id,
+                new_short_id,
+            )
+            return ResumeTriggerResult(
+                delivered=True,
+                reason=(
+                    f"{_DELIVERED_REASON}; post-commit event/cursor write"
+                    f" failed, see logs: {exc}"
+                ),
+                surface_ref=new_short_id,
+            )
 
         return ResumeTriggerResult(
             delivered=True, reason=_DELIVERED_REASON, surface_ref=new_short_id
