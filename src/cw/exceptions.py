@@ -108,6 +108,25 @@ class HookContextConflictError(CwError):
         self.conflicting_session_id = conflicting_session_id
 
 
+class RemoteRefUnresolvedError(CwError):
+    """No remote ref could be verified for a fix-loop branch (GitHub #2209).
+
+    Raised by :func:`cw.reconcile.review_recipes.fix_agent.dispatch_fix_agent`
+    when no candidate in its reported/upstream/templated ladder has a tip equal
+    to the worktree's HEAD — either because nothing resolves at all, or because
+    every ref that does resolve is stale.
+
+    A typed subclass so ``cw.reconcile.fix_dispatch`` can discriminate this one
+    class without matching message text: every other ``CwError`` keeps the
+    generic clear-the-handoff-and-revert path, while this one parks the row
+    BLOCKED_ON_USER with the action list retained. The split matters because
+    since #2075 the generic path charges no attempt, so a ref that can never
+    resolve would otherwise loop review -> failed dispatch -> review forever.
+    """
+
+    __slots__ = ()
+
+
 class DisclaimerNotAcceptedError(CwError):
     """Raised when ``claude --bg`` fails because the user has not accepted
     the bypass-permissions disclaimer.
