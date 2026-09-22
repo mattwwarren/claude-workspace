@@ -124,6 +124,84 @@ def _iter_tool_result_text(block: dict[str, object]) -> Iterator[str]:
                     yield text
 
 
+def _record_sentinel_texts(
+    record: dict[str, object],
+) -> Iterator[tuple[str | None, str]]:
+    """Yield ``(timestamp, text)`` for one transcript record's sentinel texts.
+
+    Extracted from :func:`_iter_sentinel_text_records` purely to keep that
+    function under the PLR0912 branch ceiling: the file-level concerns (open,
+    decode, strict re-raise) and the per-record ``isinstance`` chain are two
+    separable jobs and the walk was already at exactly 12 branches.
+
+    ``timestamp`` is the record's own ``"timestamp"`` when it is a string, else
+    ``None`` — callers that order records must treat ``None`` as unorderable
+    rather than as any particular instant.
+    """
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return
+    content = message.get("content")
+    if not isinstance(content, list):
+        return
+    raw_ts = record.get("timestamp")
+    timestamp = raw_ts if isinstance(raw_ts, str) else None
+    is_assistant = record.get("type") == "assistant"
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if is_assistant and block_type == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                yield timestamp, text
+        elif block_type == "tool_result":
+            for text in _iter_tool_result_text(block):
+                yield timestamp, text
+
+
+def _iter_sentinel_text_records(
+    transcript_path: Path, *, strict: bool = False
+) -> Iterator[tuple[str | None, str]]:
+    """Yield ``(timestamp, text)`` for every possible sentinel-bearing block.
+
+    The timestamped form of :func:`_iter_sentinel_text_blocks`, which delegates
+    to it. Same record set, same file order.
+
+    ``strict`` exists for negative-evidence callers. The default (lenient) mode
+    keeps the historical behaviour — a missing file, an I/O error, or a
+    malformed line yields nothing rather than raising — which is right for a
+    sentinel *search*: not finding the frame is the same answer either way.
+    It is wrong for a caller asking "is there definitely NO frame here?",
+    because it makes "could not read or parse" indistinguishable from "read
+    cleanly, found nothing". With ``strict=True`` an undecodable line
+    (``json.JSONDecodeError``, a ``ValueError``) and an I/O failure
+    (``OSError``) propagate, so such a caller can treat them as evidence.
+
+    A missing file yields nothing in BOTH modes: absence is the caller's own
+    decision to make, and it is knowable without reading anything.
+    """
+    if not transcript_path.is_file():
+        return
+    try:
+        with transcript_path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    if strict:
+                        raise
+                    continue
+                if isinstance(record, dict):
+                    yield from _record_sentinel_texts(record)
+    except OSError:
+        if strict:
+            raise
+        return
+
+
 def _iter_sentinel_text_blocks(transcript_path: Path) -> Iterator[str]:
     """Yield every text block that may carry an AUTO_DEV_RESULT sentinel.
 
@@ -138,36 +216,8 @@ def _iter_sentinel_text_blocks(transcript_path: Path) -> Iterator[str]:
     A missing file, an I/O error, or a malformed line/record yields nothing
     rather than raising. Blocks are yielded in file order.
     """
-    if not transcript_path.is_file():
-        return
-    try:
-        with transcript_path.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                message = record.get("message")
-                if not isinstance(message, dict):
-                    continue
-                content = message.get("content")
-                if not isinstance(content, list):
-                    continue
-                is_assistant = record.get("type") == "assistant"
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    block_type = block.get("type")
-                    if is_assistant and block_type == "text":
-                        text = block.get("text")
-                        if isinstance(text, str):
-                            yield text
-                    elif block_type == "tool_result":
-                        yield from _iter_tool_result_text(block)
-    except OSError:
-        return
+    for _timestamp, text in _iter_sentinel_text_records(transcript_path):
+        yield text
 
 
 def _last_content_entry_timestamp(transcript_path: Path) -> datetime | None:

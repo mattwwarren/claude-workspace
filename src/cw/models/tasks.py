@@ -167,7 +167,13 @@ from cw.review_finding_dispositions import FindingDisposition
 #      cannot describe an ordinary RUNNING row). Written by the reconcile
 #      session-id-mismatch sweep, cleared unconditionally by
 #      transition_task_status. Backfilled to None on every pre-v37 row.
-DEV_QUEUE_SCHEMA_VERSION = 37
+# v38: added TicketTask.park_on_abandoned_exit + LaneConfig.park_on_abandoned_exit
+#      (GitHub #2135) — the per-ticket / per-lane tiers of the Stop-hook
+#      abandoned-exit park's 3-tier resolution, mirroring v13's gate_recipes
+#      pair. A ``dict[str, bool] | None`` whose absence is indistinguishable
+#      from the ``None`` default, so no migration filler is needed (same as
+#      v13).
+DEV_QUEUE_SCHEMA_VERSION = 38
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -219,6 +225,30 @@ def _validate_review_recipe_keys(value: dict[str, bool]) -> dict[str, bool]:
     if unknown:
         msg = (
             f"review_recipes has unrecognized recipe key(s): {unknown}. "
+            f"Recognised keys: {sorted(recognized)}."
+        )
+        raise ValueError(msg)
+    return value
+
+
+def _validate_park_on_abandoned_exit_keys(value: dict[str, bool]) -> dict[str, bool]:
+    """Fail loud on an unrecognized abandoned-exit-park key (GitHub #2135).
+
+    Shared by the ``park_on_abandoned_exit`` field validators on both
+    :class:`TicketTask` and :class:`LaneConfig`, and keyed off
+    :data:`PARK_ON_ABANDONED_EXIT_KEY` below — the key's single definition,
+    which ``cw.reconcile.abandoned_exit`` imports from here (models sits below
+    reconcile in the import graph, so the dependency only runs this way). The
+    map holds exactly one recognised key; it is a map rather than a bare bool
+    so the per-lane / per-ticket tiers keep the same shape as their
+    gate_recipes and review_recipes siblings, and so a second park policy can
+    join it without a schema change.
+    """
+    recognized = {PARK_ON_ABANDONED_EXIT_KEY}
+    unknown = sorted(set(value) - recognized)
+    if unknown:
+        msg = (
+            f"park_on_abandoned_exit has unrecognized key(s): {unknown}. "
             f"Recognised keys: {sorted(recognized)}."
         )
         raise ValueError(msg)
@@ -279,6 +309,15 @@ class PendingFixDispatch(BaseModel):
 # instead of silently severing the transport.
 PLAN_DRAFT_FINGERPRINT_KEY = "plan_draft_fingerprint"
 PLAN_APPROVED_FINGERPRINT_KEY = "plan_approved_fingerprint"
+
+# The single recognised key of the per-lane / per-ticket
+# ``park_on_abandoned_exit`` maps (#2135). Defined HERE, not in
+# ``cw.reconcile.abandoned_exit`` where the resolver that reads it lives:
+# models sits below reconcile in the import graph, so reconcile can import
+# this and not the other way round. It was briefly defined in both places,
+# which is one rename away from a lane map that validates at config-load time
+# and then silently resolves to the default-off floor at Stop time.
+PARK_ON_ABANDONED_EXIT_KEY = "park_on_abandoned_exit"
 
 
 class TicketTask(BaseModel):
@@ -550,6 +589,13 @@ class TicketTask(BaseModel):
     # (changes_requested / ci_failing / no_reviewer / merge_blocked), a distinct
     # action class from the approval-gate recipes above.
     review_recipes: dict[str, bool] | None = None
+    # Ticket-level override for the Stop-hook abandoned-exit park (#2135,
+    # schema v38). Highest tier in resolve_park_on_abandoned_exit_enabled's
+    # 3-tier precedence: the key present here wins over
+    # LaneConfig.park_on_abandoned_exit and the hardcoded default-off. None (or
+    # the key absent from the map) defers to the lane map, then the default.
+    # Recognised key: PARK_ON_ABANDONED_EXIT_KEY.
+    park_on_abandoned_exit: dict[str, bool] | None = None
     # RFC 0008 capstone (#1015) — durable escalation latch. Stamped by
     # cw.reconcile.escalation.run_escalation_sweep when this task first enters
     # the escalation-eligible set (see that module's docstring for the
@@ -756,6 +802,15 @@ class TicketTask(BaseModel):
         if value is None:
             return None
         return _validate_review_recipe_keys(value)
+
+    @field_validator("park_on_abandoned_exit")
+    @classmethod
+    def _check_park_on_abandoned_exit(
+        cls, value: dict[str, bool] | None
+    ) -> dict[str, bool] | None:
+        if value is None:
+            return None
+        return _validate_park_on_abandoned_exit_keys(value)
 
     @field_validator("ticket_id")
     @classmethod

@@ -51,7 +51,8 @@ def _park_block() -> str:
     condition and the appendix pointer; every assertion below follows the
     content rather than being dropped.
     """
-    return _after(_appendix("plan"), PARK_ANCHOR, span=3600)
+    # 5000, not 3600: step 3a (#2135) lengthens the section past the old window.
+    return _after(_appendix("plan"), PARK_ANCHOR, span=5000)
 
 
 # ---------------------------------------------------------------------------

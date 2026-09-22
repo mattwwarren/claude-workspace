@@ -1118,6 +1118,22 @@ def _mock_push_notification(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _clear_park_config_cache() -> Iterator[None]:
+    """Reset the abandoned-exit park gate's per-process config memo (#2135).
+
+    ``cw.reconcile.abandoned_exit.park_gate_open`` memoizes the resolved
+    config for the life of the (short-lived) Stop-hook process. A test process
+    is long-lived and swaps ``tmp_config_dir`` per test, so a memo carried
+    across tests would answer for a config that no longer exists.
+    """
+    from cw.reconcile.abandoned_exit import clear_park_config_cache
+
+    clear_park_config_cache()
+    yield
+    clear_park_config_cache()
+
+
+@pytest.fixture(autouse=True)
 def _mock_gh_availability(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default the fleet-wide gh-availability probe to 'available' (RFC 0011 A5).
 
