@@ -1873,6 +1873,34 @@ class TestReviewDispositions:
             # No worktree given, so drift is unanswerable rather than "no".
             assert row["stale"] == "?"
 
+    def test_a_long_summary_is_visibly_truncated_in_the_table(
+        self, runner: CliRunner
+    ) -> None:
+        """#2232 round 4: a silent cut turned this column into a bug.
+
+        The table truncates SUMMARY to fit; a truncated cell must look
+        truncated, or an operator mistakes the shortened text for the whole
+        identity and pastes it into `cw review settle`, which matches on the
+        full verbatim summary and silently no-ops.
+        """
+        long_summary = "This finding summary runs well past the column width"
+        self._seed(("src/cw/a.py", long_summary, {}))
+        result = self._invoke(runner, "T-2232", "--client", "acme")
+
+        assert result.exit_code == 0, result.output
+        assert long_summary not in result.output
+        assert "…" in result.output
+
+    def test_a_long_summary_is_not_truncated_in_json(self, runner: CliRunner) -> None:
+        """The JSON surface is the documented payload source (#2232 round 4)."""
+        long_summary = "This finding summary runs well past the column width"
+        self._seed(("src/cw/a.py", long_summary, {}))
+        result = self._invoke(runner, "T-2232", "--client", "acme", "--json")
+
+        assert result.exit_code == 0, result.output
+        rows = json.loads(result.output)
+        assert rows[0]["summary"] == long_summary
+
     def test_json_for_an_empty_ledger_is_an_empty_array(
         self, runner: CliRunner
     ) -> None:
