@@ -30,17 +30,20 @@ safe: by definition the session is not concurrently mid-task.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
 
-from cw.config import get_client, mutate_state
+from cw.config import get_client, load_state, mutate_state
 from cw.dev_queue import list_tickets
 from cw.exceptions import CwError
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import CwState, QueueItemStatus, SessionStatus
 from cw.native_daemon import get_native_daemon_client
 from cw.session import _resolve_resume_cwd, _resume_spawn_args
+from cw.session_inbox import advance_cursor, read_unconsumed, session_inbox_dir
 from cw.spawn import (
     _ROSTER_POLL_INTERVAL_SECS,
     _ROSTER_POLL_TIMEOUT_SECS,
@@ -48,6 +51,9 @@ from cw.spawn import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
     from cw.models import Session, SessionInboxMessage
     from cw.native_daemon import NativeDaemonClient
 
@@ -61,6 +67,11 @@ _NO_TRANSCRIPT_REASON = (
     " into; the message stays queued for a future resume"
 )
 _DELIVERED_REASON = "session respawned with --resume; it will read its inbox"
+_ALREADY_RESUMED_REASON = (
+    "session was already resumed by a concurrent trigger; message stays"
+    " queued for its next pause"
+)
+_VANISHED_REASON = "session no longer exists; message stays queued"
 
 
 class ResumeTriggerResult(NamedTuple):
@@ -110,18 +121,63 @@ def _is_eligible(session: Session) -> bool:
     return task is not None and task.status is QueueItemStatus.BLOCKED_ON_USER
 
 
-def _build_resume_prompt(message: SessionInboxMessage) -> str:
+def _build_resume_prompt(messages: list[SessionInboxMessage]) -> str:
     """Compose the prompt the respawned session wakes up on.
 
-    The message body is inlined rather than merely referenced so the session
-    can act on it even if it never calls back into the inbox -- the inbox
+    Message bodies are inlined rather than merely referenced so the session
+    can act on them even if it never calls back into the inbox -- the inbox
     remains the durable record and the cursor the replay guard, but a woken
     session should not need a second round trip to learn what it was asked.
+
+    Takes every unconsumed message, not just the one that triggered this
+    respawn: a session can accumulate more than one queued message while
+    paused (a gate refusal, then a later successful trigger), and the reader
+    this function feeds is the *only* consumer of the mailbox in production
+    (#2212 review finding 1) -- skipping straight to the newest message
+    would silently drop any earlier ones still sitting unconsumed.
     """
-    return (
-        f"The operator ({message.author}) has answered the question you paused"
-        f" on:\n\n{message.body}\n\nContinue from where you left off."
+    if len(messages) == 1:
+        message = messages[0]
+        return (
+            f"The operator ({message.author}) has answered the question you"
+            f" paused on:\n\n{message.body}\n\nContinue from where you left off."
+        )
+    body = "\n\n".join(
+        f"[{m.created_at.isoformat()}] {m.author}:\n{m.body}" for m in messages
     )
+    return (
+        "The operator has sent the following queued messages while you were"
+        f" paused, oldest first:\n\n{body}\n\nContinue from where you left off."
+    )
+
+
+def _resume_trigger_lock_path(session_id: str) -> Path:
+    """Return the path to a session's resume-trigger claim lock."""
+    return session_inbox_dir(session_id) / ".resume-trigger.lock"
+
+
+@contextlib.contextmanager
+def _resume_trigger_lock(session_id: str) -> Iterator[None]:
+    """Serialize resume-trigger attempts for one session.
+
+    A per-session file lock, not the global ``sessions_lock()``: held across
+    the whole eligibility-recheck -> spawn -> state-commit sequence so two
+    concurrent ``cw session send`` calls on the same session cannot both
+    pass eligibility and double-spawn (#2212 review finding 3), while
+    leaving every *other* session's ``cw`` operations unblocked during the
+    (potentially multi-second) daemon spawn and roster-registration poll --
+    unlike ``sessions_lock()``, which is a single global file and would
+    stall the whole fleet for that window.
+    """
+    session_inbox_dir(session_id).mkdir(parents=True, exist_ok=True)
+    fd = _resume_trigger_lock_path(session_id).open("w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
 
 
 class NativeDaemonResumeTriggerAdapter:
@@ -141,7 +197,12 @@ class NativeDaemonResumeTriggerAdapter:
         roster_poll_timeout: float = _ROSTER_POLL_TIMEOUT_SECS,
         roster_poll_interval: float = _ROSTER_POLL_INTERVAL_SECS,
     ) -> None:
-        self._daemon = native_daemon or get_native_daemon_client()
+        # Resolved lazily in _respawn, not here: constructing
+        # RealNativeDaemonClient does no I/O and cannot fail (it only stores
+        # a path), so there was never a gate-bypass risk either way -- this
+        # is cleanliness only, reading better next to the rest of the lazy
+        # per-attempt state in _respawn (#2212 review finding 6).
+        self._native_daemon_override = native_daemon
         self._roster_poll_timeout = roster_poll_timeout
         self._roster_poll_interval = roster_poll_interval
 
@@ -166,47 +227,98 @@ class NativeDaemonResumeTriggerAdapter:
     def _respawn(
         self, session: Session, message: SessionInboxMessage
     ) -> ResumeTriggerResult:
-        """Run the dead-surface respawn composition. Raises CwError on failure."""
+        """Run the dead-surface respawn composition. Raises CwError on failure.
+
+        The whole body runs under a per-session lock (#2212 review finding
+        3): re-reads fresh state and re-checks daemon liveness before
+        spawning anything, so a second concurrent call for the same session
+        -- whether racing this one or arriving after it already committed --
+        finds the session already live and declines rather than
+        double-spawning. The task-status half of eligibility
+        (``BLOCKED_ON_USER``) is not itself refreshed here on the theory
+        that a daemon-liveness check is the decisive, race-proof signal: the
+        very first thing a successful respawn does is put the *new* surface
+        into the live set, so a second racing call always sees it there
+        regardless of which OR-branch made the first call eligible.
+        """
+        daemon = self._native_daemon_override or get_native_daemon_client()
         client = get_client(session.client)
-        session_cwd = _resolve_resume_cwd(session, client)
-        extra_args, permission_mode = _resume_spawn_args(session, client)
 
-        new_short_id = self._daemon.spawn_bg(
-            cwd=session_cwd,
-            prompt=_build_resume_prompt(message),
-            extra_args=extra_args or None,
-            permission_mode=permission_mode,
-        )
-        _verify_roster_registration(
-            self._daemon,
-            new_short_id,
-            timeout=self._roster_poll_timeout,
-            interval=self._roster_poll_interval,
-        )
+        with _resume_trigger_lock(session.id):
+            fresh = load_state().find_by_name_or_id(session.id)
+            if fresh is None:
+                return ResumeTriggerResult(delivered=False, reason=_VANISHED_REASON)
+            if not fresh.claude_session_id:
+                return ResumeTriggerResult(
+                    delivered=False, reason=_NO_TRANSCRIPT_REASON
+                )
+            if (
+                fresh.surface_ref
+                and fresh.surface_ref in daemon.list_live_session_short_ids()
+            ):
+                return ResumeTriggerResult(
+                    delivered=False,
+                    reason=_ALREADY_RESUMED_REASON,
+                    surface_ref=fresh.surface_ref,
+                )
 
-        def _update(state: CwState) -> None:
-            live = state.find_by_name_or_id(session.id)
-            if live is not None:
-                live.surface_ref = new_short_id
-                live.status = SessionStatus.ACTIVE
-                live.resumed_at = datetime.now(UTC)
+            session_cwd = _resolve_resume_cwd(fresh, client)
+            extra_args, permission_mode = _resume_spawn_args(fresh, client)
+            # Every message still unconsumed, not just the one that
+            # triggered this call -- at-least-once mailbox semantics
+            # (#2212 review finding 1). Falls back to the triggering
+            # message itself only if the inbox somehow shows nothing
+            # unconsumed (e.g. a caller that never durably queued it).
+            unconsumed = read_unconsumed(fresh.id) or [message]
 
-        mutate_state(_update)
-        # The history-bus SESSION_RESUMED record every daemon respawn already
-        # emits (session.py:530-539). Distinct from cw.events.record_event,
-        # which the CLI layer emits for the inbox append -- same name,
-        # different module, different signature, neither substituting for the
-        # other.
-        record_event(
-            session.client,
-            HistoryEvent(
-                event_type=EventType.SESSION_RESUMED,
-                client=session.client,
-                session_id=session.id,
-                session_name=session.name,
-                purpose=session.purpose,
-            ),
-        )
+            new_short_id = daemon.spawn_bg(
+                cwd=session_cwd,
+                prompt=_build_resume_prompt(unconsumed),
+                extra_args=extra_args or None,
+                permission_mode=permission_mode,
+            )
+            try:
+                _verify_roster_registration(
+                    daemon,
+                    new_short_id,
+                    timeout=self._roster_poll_timeout,
+                    interval=self._roster_poll_interval,
+                )
+            except CwError:
+                # Registration failed after the process was already spawned
+                # -- stop it rather than leaving an orphan the operator's
+                # `delivered=False` result gives no hint even exists (#2212
+                # review finding 3). Best-effort: a failed cleanup must not
+                # mask the original registration error.
+                with contextlib.suppress(Exception):
+                    daemon.stop(new_short_id)
+                raise
+
+            def _update(state: CwState) -> None:
+                live = state.find_by_name_or_id(session.id)
+                if live is not None:
+                    live.surface_ref = new_short_id
+                    live.status = SessionStatus.ACTIVE
+                    live.resumed_at = datetime.now(UTC)
+
+            mutate_state(_update)
+            # The history-bus SESSION_RESUMED record every daemon respawn
+            # already emits (session.py:530-539). Distinct from
+            # cw.events.record_event, which the CLI layer emits for the
+            # inbox append -- same name, different module, different
+            # signature, neither substituting for the other.
+            record_event(
+                session.client,
+                HistoryEvent(
+                    event_type=EventType.SESSION_RESUMED,
+                    client=session.client,
+                    session_id=session.id,
+                    session_name=session.name,
+                    purpose=session.purpose,
+                ),
+            )
+            advance_cursor(fresh.id, unconsumed[-1].id)
+
         return ResumeTriggerResult(
             delivered=True, reason=_DELIVERED_REASON, surface_ref=new_short_id
         )

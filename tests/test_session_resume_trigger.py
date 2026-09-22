@@ -358,12 +358,35 @@ class TestNativeDaemonResumeTriggerAdapter:
         assert result.reason
         assert load_state().sessions[0].surface_ref == "deadbeef"
 
-    def test_defaults_to_the_real_daemon_client(self) -> None:
+    def test_does_not_resolve_the_daemon_client_at_construction(self) -> None:
+        """Lazy: resolved inside _respawn, not __init__ (#2212 review finding 6)."""
         with patch(
             "cw.session_resume_trigger.get_native_daemon_client"
         ) as mock_factory:
             NativeDaemonResumeTriggerAdapter()
+        assert mock_factory.call_count == 0
+
+    def test_defaults_to_the_real_daemon_client_on_trigger(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(session)
+        adapter = NativeDaemonResumeTriggerAdapter()
+        with (
+            patch("cw.session_resume_trigger.list_tickets", return_value=[]),
+            patch(
+                "cw.session_resume_trigger.get_native_daemon_client",
+                return_value=mock_native_daemon,
+            ) as mock_factory,
+        ):
+            result = adapter.trigger(session, _MESSAGE)
+
         assert mock_factory.call_count == 1
+        assert result.delivered is True
 
     def test_corrupted_daemon_session_state_is_refused_not_raised(
         self,
@@ -382,6 +405,194 @@ class TestNativeDaemonResumeTriggerAdapter:
 
         assert result.delivered is False
         assert mock_native_daemon.spawn_calls == []
+
+
+# ---------------------------------------------------------------------------
+# The mailbox reader wiring (#2212 review finding 1): _respawn is the
+# production consumer of read_unconsumed/advance_cursor, and delivery is
+# proven without ever hand-calling advance_cursor -- that would just be
+# re-simulating the consumer this section exists to exercise for real.
+# ---------------------------------------------------------------------------
+
+
+class TestMailboxReaderWiring:
+    def test_a_queued_message_is_visible_to_the_session_after_respawn(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """End-to-end: append -> trigger -> the message is consumed.
+
+        No hand-advance of the cursor anywhere in this test -- delivery is
+        proven by ``_respawn`` alone.
+        """
+        from cw import session_inbox
+
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(session)
+        queued = session_inbox.append_message(
+            session.id, author="matt", body="use the second approach"
+        )
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        with patch("cw.session_resume_trigger.list_tickets", return_value=[]):
+            result = adapter.trigger(session, queued)
+
+        assert result.delivered is True
+        assert session_inbox.read_unconsumed(session.id) == []
+        _cwd, prompt = mock_native_daemon.spawn_calls[0]
+        assert "use the second approach" in prompt
+
+    def test_multiple_unconsumed_messages_are_all_delivered_in_one_respawn(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """A message queued before the session became eligible is not lost."""
+        from cw import session_inbox
+
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(session)
+        session_inbox.append_message(session.id, author="matt", body="first answer")
+        second = session_inbox.append_message(
+            session.id, author="matt", body="second answer"
+        )
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        with patch("cw.session_resume_trigger.list_tickets", return_value=[]):
+            result = adapter.trigger(session, second)
+
+        assert result.delivered is True
+        _cwd, prompt = mock_native_daemon.spawn_calls[0]
+        assert "first answer" in prompt
+        assert "second answer" in prompt
+        assert session_inbox.read_unconsumed(session.id) == []
+
+    def test_falls_back_to_the_triggering_message_when_inbox_is_empty(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """A caller that never durably queued the message still gets a prompt."""
+        session = _eligible_session(sample_client)
+        self._trigger(tmp_config_dir, sample_client, mock_native_daemon, session)
+        _cwd, prompt = mock_native_daemon.spawn_calls[0]
+        assert _MESSAGE.body in prompt
+
+    def _trigger(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        daemon: FakeNativeDaemonClient,
+        session: Session,
+    ) -> ResumeTriggerResult:
+        _write_clients_file(tmp_config_dir, sample_client)
+        _persist(session)
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=daemon)
+        with patch("cw.session_resume_trigger.list_tickets", return_value=[]):
+            return adapter.trigger(session, _MESSAGE)
+
+
+# ---------------------------------------------------------------------------
+# Concurrent-send guard (#2212 review finding 3): a second trigger for a
+# session already live in the daemon must decline, not double-spawn; a
+# roster-registration failure after spawn_bg must stop the orphan.
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentSendGuard:
+    def test_session_vanished_between_outer_check_and_the_lock_is_refused(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """The outer session object was resolved before the lock; if it is
+        gone from state by the time _respawn reloads it fresh, decline
+        rather than spawning against stale data."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        # Deliberately not persisted: `load_state()` inside `_respawn`
+        # therefore finds no matching session.
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        with patch("cw.session_resume_trigger.list_tickets", return_value=[]):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is False
+        assert mock_native_daemon.spawn_calls == []
+
+    def test_transcript_lost_between_outer_check_and_the_lock_is_refused(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(_eligible_session(sample_client, claude_session_id=None))
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        with patch("cw.session_resume_trigger.list_tickets", return_value=[]):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is False
+        assert mock_native_daemon.spawn_calls == []
+
+    def test_already_live_surface_declines_without_double_spawning(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """Simulates the race: a concurrent trigger already resumed this
+        session (its new surface is live in the daemon) by the time this
+        call reaches the per-session lock."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client, surface_ref="alreadylive")
+        _persist(session)
+        mock_native_daemon._live.add("alreadylive")
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        with patch("cw.session_resume_trigger.list_tickets", return_value=[]):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is False
+        assert result.surface_ref == "alreadylive"
+        assert mock_native_daemon.spawn_calls == []
+
+    def test_roster_registration_failure_stops_the_orphaned_process(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """spawn_bg succeeds but the worker never registers -- the orphan
+        must be stopped, not left running with delivered=False and no
+        indication anything was ever spawned (#2212 review finding 3)."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(session)
+        mock_native_daemon.raise_unregistered = True
+        adapter = NativeDaemonResumeTriggerAdapter(
+            native_daemon=mock_native_daemon, roster_poll_timeout=0.0
+        )
+
+        with patch("cw.session_resume_trigger.list_tickets", return_value=[]):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is False
+        assert len(mock_native_daemon.spawn_calls) == 1
+        spawned_short_id = f"{mock_native_daemon._counter:08x}"
+        assert mock_native_daemon.stop_calls == [spawned_short_id]
+        # State must not have been committed for a respawn that never
+        # actually registered.
+        assert load_state().sessions[0].surface_ref == "deadbeef"
 
 
 class TestResumeTriggerResult:
