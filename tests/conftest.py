@@ -657,6 +657,7 @@ def _write_hook_context_file(
     workspace_path: Path | None = None,
     lane: str | None = None,
     stamp: object = _STAMP_UNCHANGED,
+    headless: bool = False,
 ) -> None:
     """Materialize ``<worktree>/.claude/cw-context.json`` via the real writer.
 
@@ -675,6 +676,11 @@ def _write_hook_context_file(
     writer runs: ``_STAMP_ABSENT`` deletes the key, any other non-default
     value replaces it, so the Stop hook's stamp-shape edge cases are seeded
     through the same file the production writer produced.
+
+    *headless* (#2211) forwards to the real writer's ``headless`` parameter so
+    ``cw agent-spawn-pre``'s spawn-shape policy — which applies only to
+    headless dispatch workers — reads the same ``"headless"`` key production
+    stamps, for the same anti-drift reason as *lane* above.
     """
     from cw.spawn import _write_hook_context
 
@@ -686,6 +692,7 @@ def _write_hook_context_file(
         purpose="impl",
         ticket_id="940",
         origin=SessionOrigin.DAEMON,
+        headless=headless,
         workspace_path=workspace_path,
         lane=lane,
     )
