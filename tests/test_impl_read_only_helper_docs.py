@@ -317,6 +317,13 @@ _SPAWN_CALL_SITE_RE = re.compile(
 #: must be removed, not left to silently exempt whatever moved into its place.
 _SPAWN_SCAN_ALLOWLIST: tuple[tuple[str, str, str], ...] = (
     (
+        "auto-dev-finalize.md",
+        "1. Capture now — spawn an agent in the worktree to run playwright-cli",
+        "AskUserQuestion option-label text shown to a human, inside a fenced "
+        "options block -- the executable spawn is the `Capture now` bullet four "
+        'lines below, which carries subagent_type: "general-purpose"',
+    ),
+    (
         "auto-dev-impl.md",
         "before spawning Stage 2 agent, emit `stage.entered`",
         "descriptive lead-in, not a call site; the Stage 2 spawn shape and "
@@ -350,6 +357,14 @@ _SPAWN_SCAN_ALLOWLIST: tuple[tuple[str, str, str], ...] = (
         "This stage spawns review agents, adjudicates findings",
         "descriptive delegation note; the actual spawn sites are in "
         "auto-dev-review.md Step 3a, scanned separately",
+    ),
+    (
+        "review-monitor.md",
+        "background `Task` agent (sonnet) fixes the underlying problem",
+        "summary bullet naming the auto-fix side-effect channel, not the call "
+        "site -- the executable spawn is the `Dispatch one agent per PR` "
+        "instruction further down the same section, which carries "
+        'subagent_type: "general-purpose"',
     ),
     (
         "review-sweep.md",
