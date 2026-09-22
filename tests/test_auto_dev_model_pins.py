@@ -31,7 +31,10 @@ def test_plan_step1f2_plan_soundness_reviewer_pins_sonnet() -> None:
 def test_plan_step1f4_revision_agent_pins_sonnet() -> None:
     """Step 1f.4 plan-revision agent must pin sonnet (not opus like Step 1b)."""
     content = _cmd("auto-dev-plan.md")
-    assert 'Re-spawn the **Plan** agent (`model: "sonnet"`)' in content
+    assert (
+        'Re-spawn the **Plan** agent (`subagent_type: "Plan", model: "sonnet"`)'
+        in content
+    )
 
 
 def test_review_orientation_states_comments_are_live_not_cached() -> None:

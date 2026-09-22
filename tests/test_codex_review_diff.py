@@ -6,7 +6,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from cw.codex_review import _capture_delta_diff, _capture_diff, _parse_unified_diff
-from tests._codex_review_helpers import _git
+from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -143,10 +143,10 @@ class TestParseUnifiedDiff:
 class TestCaptureDiff:
     def test_captures_added_file(self, make_git_repo: Callable[[str], Path]) -> None:
         repo = make_git_repo("wt-capture")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "new.py").write_text("alpha = 1\nbeta = 2\n", encoding="utf-8")
-        _git(repo, "add", "new.py")
-        _git(repo, "commit", "-m", "add new.py")
+        git_in(repo, "add", "new.py")
+        git_in(repo, "commit", "-m", "add new.py")
 
         diff, reviewed_sha, changed_files = _capture_diff(repo, "main")
 
@@ -166,25 +166,19 @@ class TestCaptureDiff:
 class TestCaptureDeltaDiff:
     """``_capture_delta_diff`` — the two-SHA delta capture (#1837)."""
 
-    @staticmethod
-    def _rev(repo: Path, ref: str) -> str:
-        return subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", ref], text=True
-        ).strip()
-
     def test_captures_only_the_second_commit(
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
         repo = make_git_repo("wt-delta")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "first.py").write_text("alpha = 1\n", encoding="utf-8")
-        _git(repo, "add", "first.py")
-        _git(repo, "commit", "-m", "first")
-        from_sha = self._rev(repo, "HEAD")
+        git_in(repo, "add", "first.py")
+        git_in(repo, "commit", "-m", "first")
+        from_sha = git_in(repo, "rev-parse", "HEAD")
         (repo / "second.py").write_text("beta = 2\ngamma = 3\n", encoding="utf-8")
-        _git(repo, "add", "second.py")
-        _git(repo, "commit", "-m", "second")
-        to_sha = self._rev(repo, "HEAD")
+        git_in(repo, "add", "second.py")
+        git_in(repo, "commit", "-m", "second")
+        to_sha = git_in(repo, "rev-parse", "HEAD")
 
         diff, changed_files = _capture_delta_diff(repo, from_sha, to_sha)
 
@@ -199,11 +193,11 @@ class TestCaptureDeltaDiff:
 
     def test_no_op_delta_is_empty(self, make_git_repo: Callable[[str], Path]) -> None:
         repo = make_git_repo("wt-delta-noop")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "only.py").write_text("alpha = 1\n", encoding="utf-8")
-        _git(repo, "add", "only.py")
-        _git(repo, "commit", "-m", "only")
-        sha = self._rev(repo, "HEAD")
+        git_in(repo, "add", "only.py")
+        git_in(repo, "commit", "-m", "only")
+        sha = git_in(repo, "rev-parse", "HEAD")
 
         diff, changed_files = _capture_delta_diff(repo, sha, sha)
 
@@ -218,14 +212,14 @@ class TestCaptureDeltaDiff:
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
         repo = make_git_repo("wt-delta-delete")
-        _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "checkout", "-b", "feature")
         (repo / "doomed.py").write_text("alpha = 1\n", encoding="utf-8")
-        _git(repo, "add", "doomed.py")
-        _git(repo, "commit", "-m", "add doomed")
-        from_sha = self._rev(repo, "HEAD")
-        _git(repo, "rm", "doomed.py")
-        _git(repo, "commit", "-m", "remove doomed")
-        to_sha = self._rev(repo, "HEAD")
+        git_in(repo, "add", "doomed.py")
+        git_in(repo, "commit", "-m", "add doomed")
+        from_sha = git_in(repo, "rev-parse", "HEAD")
+        git_in(repo, "rm", "doomed.py")
+        git_in(repo, "commit", "-m", "remove doomed")
+        to_sha = git_in(repo, "rev-parse", "HEAD")
 
         diff, changed_files = _capture_delta_diff(repo, from_sha, to_sha)
 

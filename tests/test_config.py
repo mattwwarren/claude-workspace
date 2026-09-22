@@ -2276,6 +2276,124 @@ class TestBusyWaitGuardConfigFields:
 
 
 # ---------------------------------------------------------------------------
+# TestDispositionDriftCheckConfigFields
+# ---------------------------------------------------------------------------
+
+
+class TestDispositionDriftCheckConfigFields:
+    """#2232's drift-check gate: per-lane override over a default-ON global.
+
+    Shaped on ``busy_wait_guard_enabled``, not on
+    ``codex_claim_suppression_enabled``: this is a CHECK presumed wanted, not
+    a feature presumed unwanted, so there is no master kill switch and no
+    hardcoded-off floor — a lane override wins, otherwise the global.
+    """
+
+    def test_global_default_is_on(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        assert OrchestratorConfig().disposition_drift_check_enabled is True
+
+    def test_lane_override_defaults_to_none(self) -> None:
+        """None on a lane means "inherit", mirroring busy_wait_guard_enabled."""
+        from cw.models import LaneConfig
+
+        assert LaneConfig(name="fast").disposition_drift_check_enabled is None
+
+    def test_global_override_round_trips(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        config = OrchestratorConfig.model_validate(
+            {"disposition_drift_check_enabled": False}
+        )
+        assert config.disposition_drift_check_enabled is False
+
+    def test_lane_override_round_trips_via_clients_yaml(
+        self, tmp_config_dir: Path
+    ) -> None:
+        ws_dir = tmp_config_dir / "ws"
+        ws_dir.mkdir()
+        clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_path.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    lanes:\n"
+            "      - name: fast\n"
+            "        disposition_drift_check_enabled: false\n"
+        )
+
+        lane = load_clients()["acme"].lanes[0]
+        assert lane.disposition_drift_check_enabled is False
+
+    def test_wrong_type_raises_validation_error(self) -> None:
+        from pydantic import ValidationError
+
+        from cw.models import OrchestratorConfig
+
+        with pytest.raises(ValidationError):
+            OrchestratorConfig.model_validate(
+                {"disposition_drift_check_enabled": "sometimes"}
+            )
+
+
+# ---------------------------------------------------------------------------
+# TestSubagentSpawnGuardConfig
+# ---------------------------------------------------------------------------
+
+
+class TestSubagentSpawnGuardConfig:
+    """The #2211 spawn-shape guard's per-lane-with-global-default kill switch."""
+
+    def test_global_default_is_on(self) -> None:
+        """Default-on: an explicit fork is refused unless an operator opts out."""
+        from cw.models import OrchestratorConfig
+
+        assert OrchestratorConfig().subagent_spawn_guard_enabled is True
+
+    def test_lane_override_defaults_to_none(self) -> None:
+        """None on a lane means "inherit", mirroring busy_wait_guard_enabled."""
+        from cw.models import LaneConfig
+
+        assert LaneConfig(name="fast").subagent_spawn_guard_enabled is None
+
+    def test_global_override_round_trips(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        config = OrchestratorConfig.model_validate(
+            {"subagent_spawn_guard_enabled": False}
+        )
+
+        assert config.subagent_spawn_guard_enabled is False
+
+    def test_lane_override_round_trips_via_clients_yaml(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A lane block in clients.yaml loads the override independently."""
+        ws_dir = tmp_config_dir / "ws"
+        ws_dir.mkdir()
+        clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_path.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    lanes:\n"
+            "      - name: fast\n"
+            "        subagent_spawn_guard_enabled: false\n"
+        )
+
+        lane = load_clients()["acme"].lanes[0]
+
+        assert lane.subagent_spawn_guard_enabled is False
+
+    def test_default_template_documents_the_key(self) -> None:
+        """A fresh orchestrator.yaml names the kill switch inline."""
+        from cw.config import _DEFAULT_ORCHESTRATOR_YAML
+
+        assert "subagent_spawn_guard_enabled: true" in _DEFAULT_ORCHESTRATOR_YAML
+
+
+# ---------------------------------------------------------------------------
 # TestDispatchStateLock
 # ---------------------------------------------------------------------------
 

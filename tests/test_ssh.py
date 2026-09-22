@@ -15,6 +15,7 @@ from cw.ssh import (
     push_remote_scheme,
     remote_needs_ssh_probe,
 )
+from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -217,10 +218,6 @@ class TestResolveIdentityAgentSock:
 # ---------------------------------------------------------------------------
 
 
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
-
-
 @pytest.fixture
 def _isolated_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hide the host's global/system git config from the probe under test.
@@ -278,22 +275,22 @@ class TestPushRemoteScheme:
     """``push_remote_scheme`` against real git repos and failing subprocesses."""
 
     def test_https_origin_resolves_http(self, tmp_path: Path) -> None:
-        _git(tmp_path, "init", "-q")
-        _git(tmp_path, "remote", "add", "origin", "https://github.com/o/r.git")
+        git_in(tmp_path, "init", "-q")
+        git_in(tmp_path, "remote", "add", "origin", "https://github.com/o/r.git")
 
         assert push_remote_scheme(tmp_path) == "http"
 
     def test_ssh_origin_resolves_ssh(self, tmp_path: Path) -> None:
-        _git(tmp_path, "init", "-q")
-        _git(tmp_path, "remote", "add", "origin", "git@github.com:o/r.git")
+        git_in(tmp_path, "init", "-q")
+        git_in(tmp_path, "remote", "add", "origin", "git@github.com:o/r.git")
 
         assert push_remote_scheme(tmp_path) == "ssh"
 
     def test_push_url_wins_over_fetch_url(self, tmp_path: Path) -> None:
         """The effective *push* transport is what matters, not the fetch URL."""
-        _git(tmp_path, "init", "-q")
-        _git(tmp_path, "remote", "add", "origin", "https://github.com/o/r.git")
-        _git(
+        git_in(tmp_path, "init", "-q")
+        git_in(tmp_path, "remote", "add", "origin", "https://github.com/o/r.git")
+        git_in(
             tmp_path, "remote", "set-url", "--push", "origin", "git@github.com:o/r.git"
         )
 
@@ -301,9 +298,9 @@ class TestPushRemoteScheme:
 
     def test_push_insteadof_rewrite_is_applied(self, tmp_path: Path) -> None:
         """``pushInsteadOf`` rewrites are honoured, so config-level SSH shows up."""
-        _git(tmp_path, "init", "-q")
-        _git(tmp_path, "remote", "add", "origin", "https://github.com/o/r.git")
-        _git(
+        git_in(tmp_path, "init", "-q")
+        git_in(tmp_path, "remote", "add", "origin", "https://github.com/o/r.git")
+        git_in(
             tmp_path,
             "config",
             "url.git@github.com:.pushInsteadOf",
@@ -313,7 +310,7 @@ class TestPushRemoteScheme:
         assert push_remote_scheme(tmp_path) == "ssh"
 
     def test_no_origin_resolves_unknown(self, tmp_path: Path) -> None:
-        _git(tmp_path, "init", "-q")
+        git_in(tmp_path, "init", "-q")
 
         assert push_remote_scheme(tmp_path) == "unknown"
 

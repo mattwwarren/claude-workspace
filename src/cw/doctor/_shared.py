@@ -8,7 +8,56 @@ the ``cw.reconcile._shared`` precedent.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+@dataclass(frozen=True)
+class SettingsReadFailure:
+    """Why a user-level settings file could not be read as a JSON object.
+
+    ``reason`` is a short class label (``invalid UTF-8``, ``malformed JSON``,
+    ``not a JSON object``, ``unreadable: <ExcName>``), never exception text,
+    which can quote the file's contents. ``missing`` marks the ordinary
+    file-not-there case so each caller can decide whether that is silent (the
+    Stop-hook scan) or worth a note (the bypass-disclaimer check).
+    """
+
+    reason: str
+    missing: bool = False
+
+
+def _read_settings(path: Path) -> dict[str, object] | SettingsReadFailure:
+    """Read a user-level settings file defensively (#2226).
+
+    The one reader for every doctor check that opens a settings file. A check
+    whose purpose is to diagnose a broken install must survive that broken
+    install, so ``UnicodeDecodeError``, ``OSError`` (a directory, a permission
+    error), ``json.JSONDecodeError`` and valid JSON that is not an object all
+    come back as a :class:`SettingsReadFailure` for the caller to turn into a
+    WARN. Nothing here raises out of ``run_doctor``.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return SettingsReadFailure("not found", missing=True)
+    except UnicodeDecodeError:
+        return SettingsReadFailure("invalid UTF-8")
+    except OSError as exc:
+        return SettingsReadFailure(f"unreadable: {type(exc).__name__}")
+
+    try:
+        data: object = json.loads(raw)
+    except json.JSONDecodeError:
+        return SettingsReadFailure("malformed JSON")
+
+    if not isinstance(data, dict):
+        return SettingsReadFailure("not a JSON object")
+    return data
 
 
 @dataclass(frozen=True)

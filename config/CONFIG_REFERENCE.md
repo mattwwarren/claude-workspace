@@ -57,7 +57,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `operator_github_login` | string \| null | `null` | Override the runtime-resolved GitHub login used for counterparty/self-identity resolution (RFC 0011 S1). Rare multi-account case; the runtime `gh api user` login is authoritative when unset. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
-| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below), `attempt_ceiling: int | false | null = null` (#1751 — lane override for the global attempt ceiling; `null` defers to `global_attempt_ceiling` in `orchestrator.yaml`, `false` disables the ceiling for this lane; see [Per-Lane Attempt Ceiling](#per-lane-attempt-ceiling-1751) below), `busy_wait_guard_enabled: bool | null = null` / `busy_wait_guard_repeat_threshold: int | null = null` / `busy_wait_guard_window_seconds: int | null = null` (#1946 — lane overrides for the `cw guard-busy-wait` PreToolUse hook; `null` on any of the three defers to the matching global in `orchestrator.yaml`; see [Busy-Wait Guard](#busy-wait-guard-1946) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `park_on_abandoned_exit: dict[str,bool] | null = null` (#2135 — per-lane enablement of the Stop-hook abandoned-exit park; see [Abandoned-Exit Park Enablement](#abandoned-exit-park-enablement-github-2135) below), `codex_review_tiers: dict[str,bool] | null = null` (#2210 — per-lane enablement for the codex review ledger's optional matching tiers; the one recognised key is `claim_suppression`; an unrecognised key fails loud at config load; see [Codex Claim-Match Suppression Gate](#codex-claim-match-suppression-gate-2210) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below), `attempt_ceiling: int | false | null = null` (#1751 — lane override for the global attempt ceiling; `null` defers to `global_attempt_ceiling` in `orchestrator.yaml`, `false` disables the ceiling for this lane; see [Per-Lane Attempt Ceiling](#per-lane-attempt-ceiling-1751) below), `busy_wait_guard_enabled: bool | null = null` / `busy_wait_guard_repeat_threshold: int | null = null` / `busy_wait_guard_window_seconds: int | null = null` (#1946 — lane overrides for the `cw guard-busy-wait` PreToolUse hook; `null` on any of the three defers to the matching global in `orchestrator.yaml`; see [Busy-Wait Guard](#busy-wait-guard-1946) below), `subagent_spawn_guard_enabled: bool | null = null` (#2211 — lane override for the `cw agent-spawn-pre` spawn-shape policy; `null` defers to the global default in `orchestrator.yaml`; see [Subagent Spawn Guard](#subagent-spawn-guard-2211) below), `disposition_drift_check_enabled: bool | null = null` (#2232 — lane override for the review ledger's drift check; `null` defers to the global default in `orchestrator.yaml`; setting it `false` also refuses to arm this lane's claim tier; see [Disposition Drift Check Gate](#disposition-drift-check-gate-2232) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
 | `pipeline` | PipelineConfig | standard 4-stage pipeline, no per-stage models | Per-stage executor configuration (RFC 0005): `stages` (default `[plan, impl, review, finalize]`) and `executors` (default `{}`). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
@@ -397,6 +397,140 @@ could hard-stop the fix loop before it reaches the worst case above,
 independent of `_MAX_FIX_CYCLES`. No such field exists today — this is
 flagged as a possible follow-up, not a commitment.
 
+### Codex Claim-Match Suppression Gate (#2210)
+
+The codex review path carries a cross-round adjudication ledger (#1838): a
+finding an operator settled with a `REVIEW-FINDING-DISPOSITIONS` marker is
+suppressed mechanically on every later round. Its original identity is exact —
+the file plus a digest of the verbatim summary, so only a byte-identical
+re-raise matches — so a reviewer that re-raises the same defect in *different
+words* slips past it and re-parks the ticket.
+
+Neither tier applies a record that cannot account for itself. A disposition is
+honoured only when it carries the full provenance set — the finding's
+identity, an `actor`, a UTC `recorded_at`, a `reviewed_sha` and a non-empty
+rationale — which in practice means it was produced by `cw review settle`, the
+only supported producer. Hand-authoring the marker is unsupported; a record
+short of that set is ignored and reported on the review comment. No
+configuration turns this off.
+
+A second, fuzzy **claim tier** matches a same-file MUST_FIX against a ledger
+entry on shared code symbols plus content-word overlap. It is **off by
+default** and takes two switches, both of which must be true:
+
+```yaml
+# ~/.claude-workspace/orchestrator.yaml
+codex_claim_suppression_enabled: true
+```
+
+```yaml
+# ~/.config/cw/clients.yaml
+clients:
+  - name: acme
+    lanes:
+      - name: impl
+        codex_review_tiers:
+          claim_suppression: true
+```
+
+Resolution is most-specific-wins down to a hardcoded-off floor: master switch →
+the task's lane's `codex_review_tiers` → `false`. There is **no per-ticket
+tier** — that would be a persisted dev-queue schema change. A lane that names
+no tier lands on the floor, and a client with no declared lanes gets a
+synthesised `default` lane carrying no tier map, so arming a lane means
+declaring it first. Setting either switch back to `false` is the rollback; the
+master switch is a kill switch no lane can override.
+
+**Measure before arming.** Unlike the other default-off flags here, this one
+does *not* go fully inert while off: for any ticket that has a ledger, the tier
+still runs and records each finding it would have suppressed.
+
+```bash
+cw event tail --type review.finding_claim_shadowed --json
+```
+
+Read those events, judge each pair same-defect versus distinct-defect, and arm
+a lane only after roughly 20 clean events on that lane with no distinct-defect
+pair among them; one distinct-defect pair is a reason to tighten the thresholds
+rather than to arm. `cw event tail` reads only the live inbox — auto-prune
+*archives* older events to `events/inbox.<YYYY-MM-DD>.jsonl` under the events
+directory rather than deleting them, so read those files for older ones, or
+raise `event_inbox_retention_count`.
+
+**Know what is settled, and be able to undo it.** Before arming a lane, read
+the ledger the tier will be matching against:
+
+```bash
+cw review dispositions <ticket> --worktree <path>
+```
+
+That lists every record bound to the ticket with its outcome and, given a
+worktree, whether the code it was settled against has moved since. A settle
+you no longer stand behind is withdrawn by re-running `cw review settle` with
+the SAME `file` and `summary` and `"outcome": "REVERSED"` (#2232) — the
+newest-wins merge makes the withdrawal durable, and a reversed record matches
+neither tier and is never shown to the reviewer as a decision. Both are
+prerequisites, not niceties: a fuzzy tier that can suppress a finding you
+cannot inspect or undo is exactly the failure ADR-0016 refuses.
+
+**Drift-checking must be on to arm.** The claim tier refuses to run on a lane
+whose `disposition_drift_check_enabled` resolves `false` — see
+[Disposition Drift Check Gate](#disposition-drift-check-gate-2232) below.
+
+The exact tier is unaffected by these switches in either direction. Accepted
+trade-offs (the ledger is severity-blind) are recorded in ADR-0016; the
+"entries never expire, no rollback" trade-off recorded there was closed by
+#2232.
+
+### Disposition Drift Check Gate (#2232)
+
+The disposition ledger's identity is deliberately not evidence-anchored (that
+is the memory loss #1838 exists to remove), so a suppression outlives the code
+it was granted for. The drift check is what stops that from being silent: on
+every review pass, a record that matches a finding is compared at its own
+`reviewed_sha` against the sha being reviewed, for that finding's file. If the
+file changed, the record is **not applied** for that pass — the finding keeps
+blocking, the posted comment reports it under "Settled findings re-raised (the
+code moved)", and a `review.finding_disposition_stale` event records it.
+
+The ledger entry is **not expired**. It stays, and still applies on any pass
+where its file has not moved. Re-settle it against the current code, or
+withdraw it with `outcome: REVERSED`.
+
+```yaml
+# ~/.claude-workspace/orchestrator.yaml
+disposition_drift_check_enabled: true   # default
+```
+
+```yaml
+# ~/.config/cw/clients.yaml
+clients:
+  - name: acme
+    lanes:
+      - name: impl
+        disposition_drift_check_enabled: false   # null/omitted = inherit
+```
+
+Resolution is lane-then-global: a non-null lane value wins in either
+direction, otherwise the global. There is no master kill switch and no
+hardcoded floor, unlike the claim tier above — this is a *check* presumed
+wanted, not a *feature* presumed unwanted, so it defaults **on**.
+
+Turning it off has a consequence. A lane whose drift check resolves `false`
+**cannot arm the claim tier**: the review refuses with a `ClaimTierArmingError`
+naming both settings, because a fuzzy suppression without drift protection is
+the exact combination ADR-0016 calls out as failing invisibly. Either enable
+the drift check or disable the claim tier for that lane.
+
+The gate governs only the automatic check on the review path. `cw review
+dispositions --worktree` always computes staleness, whatever the gate says —
+an operator who turned it off to debug is the one who most needs the
+diagnostic.
+
+```bash
+cw event tail --type review.finding_disposition_stale --json
+```
+
 ### Per-Lane Attempt Ceiling (#1751)
 
 The attempt ceiling parks a dev-queue row `BLOCKED_ON_USER` once its
@@ -523,6 +657,53 @@ The guard fails open on every unexpected condition — unreadable stdin, a
 missing or malformed context, a contended lock, a config that will not load.
 A guard that crashed or blocked spuriously would wedge every Bash call in
 every worker, which is strictly worse than not guarding.
+
+#### Subagent Spawn Guard (#2211)
+
+`cw agent-spawn-pre` — the PreToolUse hook on the `^(Agent|Task)$` matcher,
+already present in every dispatched worktree for the unresolved-spawn stamp —
+also applies a spawn-shape policy. In a **headless** worker it refuses a
+spawn whose `subagent_type` is explicitly `fork` (any case) or blank, and
+equally one that names no `subagent_type` at all.
+
+A forked subagent inherits the parent's tools *and* its context, and takes no
+`cw` roster entry, so cw can neither observe it nor stop it (#2017). #2211 is
+the incident: a fork spawned for a read-only lookup inherited the
+implementation mandate and pushed to a live feature branch. An unnamed spawn
+is unrostered for the same reason, and additionally leaves no record of what
+it was permitted to do.
+
+Interactive sessions are never affected, and any cwd with no ancestor
+`.claude/cw-context.json` is structurally exempt.
+
+```yaml
+# ~/.claude-workspace/orchestrator.yaml
+subagent_spawn_guard_enabled: true     # default
+```
+
+```yaml
+# ~/.config/cw/clients.yaml
+clients:
+  my-project:
+    workspace_path: /home/user/projects/my-project
+    lanes:
+      # A lane whose workers legitimately fork.
+      - name: experiment
+        subagent_spawn_guard_enabled: false
+```
+
+The override is bidirectional and `null` (or an omitted key) means "inherit
+the global", exactly as for the busy-wait guard above. Config is re-read on
+every hook invocation, so an edit takes effect on the next spawn with no
+worker restart.
+
+The guard fails open on every unexpected condition. Refusing the omitted-type
+case was gated on every `.claude/commands/*.md` spawn site naming a type
+first — a refusal a caller has no correct retry for is an outage, not a
+guard — which is now the case. If a spawn site is ever missed, the symptom is
+an exit-2 refusal naming the shape, and the kill switch above is the
+immediate remedy. See `.claude/commands/auto-dev-impl-appendix.md`, section
+"Read-only helper spawns: capability, not instruction (#2211)".
 
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 
@@ -759,6 +940,26 @@ gate_recipes_enabled: false
 # enablement is still resolved per-lane / per-ticket -- see Review Recipe
 # Enablement below.
 review_recipes_enabled: false
+
+# Stop-hook abandoned-exit park master switch (GitHub #2135). Default false,
+# mirroring gate_recipes_enabled's fail-safe posture: when true, `cw
+# signal-stop` may move a dev-queue row RUNNING -> BLOCKED_ON_USER on the
+# worker's recorded park marker alone, with NO human in the loop. This is a
+# hard top-level short-circuit -- when false, a sentinel-less Stop defers
+# exactly as it did before #2135 and the marker is not even read. Per-lane /
+# per-ticket enablement is still resolved below -- see Abandoned-Exit Park
+# Enablement.
+park_on_abandoned_exit_enabled: false
+
+# Codex review claim-match suppression master switch (GitHub #2210). Default
+# false, mirroring gate_recipes_enabled's fail-safe posture. Must be paired
+# with `codex_review_tiers: {claim_suppression: true}` on the lane -- both, or
+# nothing suppresses. Unlike the flags above it does NOT make the feature
+# fully inert while off: for any ticket that has an adjudication ledger, the
+# tier still records what it would have suppressed as a
+# review.finding_claim_shadowed event. That is the measurement the default-off
+# period exists for -- see Codex Claim-Match Suppression Gate below.
+codex_claim_suppression_enabled: false
 
 # SSH-agent-key preflight gate operator escape hatch (GitHub #1437). Default
 # true (gate stays enforced) -- contrast concierge_enabled/gate_recipes_enabled/
@@ -1029,6 +1230,59 @@ clients:
 
 Unrecognized recipe keys fail loud at config-load time (a typo like
 `adress_review` raises rather than silently no-opping).
+
+## Abandoned-Exit Park Enablement (GitHub #2135)
+
+The Stop-hook **abandoned-exit park** moves a dev-queue row `RUNNING →
+BLOCKED_ON_USER` when `cw signal-stop` fires with no sentinel and the worker
+has recorded a `park_comment_marker` for the ticket — its own claim, written
+with `cw signal-park` after its park comment posted, that it is taking that
+exit (full contract: [`docs/session-disposition.md`](../docs/session-disposition.md)
+§6c). It is a state-mutating auto-actor driven by the worker's recorded
+marker, so it **ships dark** and is armed per-lane by an operator.
+
+Whether it fires for a given ticket is resolved with 3-tier precedence,
+highest first — the same shape as the gate and review recipes above:
+
+1. **Per-ticket** — a `park_on_abandoned_exit` map on the `TicketTask` (e.g.
+   `{park_on_abandoned_exit: true}`). There is **no CLI flag** for this tier;
+   it is a data-model surface only.
+2. **Per-lane** — a `park_on_abandoned_exit` map on a `LaneConfig` entry (see
+   the `lanes` field above).
+3. **Hardcoded default** — **OFF**. The key absent from the ticket map and the
+   lane map means disabled.
+
+Independently, the master switch `park_on_abandoned_exit_enabled` (in
+`orchestrator.yaml`, default `false`) is a hard top-level short-circuit: when
+`false` the park never fires regardless of any per-lane or per-ticket setting,
+and the Stop hook does not even read the marker — behaviour is identical
+to the pre-#2135 unconditional defer. The flag is only resolved after the
+Stop hook has found a `RUNNING` dev-queue row for the session, and the resolved
+config is memoized per `(client, lane)` for the life of that (short-lived)
+process.
+
+```yaml
+# clients.yaml — arm the park on one lane, leave the other off
+clients:
+  my-project:
+    workspace_path: /path/to/repo
+    lanes:
+      - name: fastlane
+        park_on_abandoned_exit:
+          park_on_abandoned_exit: true
+      - name: default   # stays off (hardcoded default)
+```
+
+Unrecognized keys fail loud at config-load time (a typo like
+`park_on_abandonned_exit` raises rather than silently no-opping). Resolution is
+fail-closed end to end: a `clients.yaml` or `orchestrator.yaml` that cannot be
+read or validated, an unreadable `dev_queue.json`, a ticket whose client is
+absent from `clients.yaml`, a row riding a lane that client never declares,
+and an absent lane entry all leave the park disabled, never enabled. The
+declared-lane check runs **ahead** of all three tiers above, so a per-ticket
+override cannot open a lane nobody armed. A failure is logged once per
+`(client, lane)` per process at WARNING with the names and the error class,
+and never raises out of the Stop hook.
 
 ## Review Strategy Config (RFC 0010 Phase 4)
 

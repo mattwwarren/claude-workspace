@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,12 +35,17 @@ from cw.codex_review import (
     run_review,
     synthesize_codex_review_result,
 )
+from cw.codex_review import core as codex_review_core
 from cw.codex_review._capability import _PROBE_ARGV
 from cw.codex_runner import CodexRunResult
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
-from cw.review_finding_dispositions import FindingDisposition, _disposition_key
+from cw.review_finding_dispositions import (
+    FindingDisposition,
+    _disposition_key,
+    render_finding_disposition_block,
+)
 from cw.review_findings import (
     AcceptedFinding,
     ReviewVerdict,
@@ -54,6 +58,7 @@ from tests.conftest import (
     _make_finding,
     _make_reviewer_doc,
     _make_ticket_task,
+    git_in,
 )
 from tests.test_review_adjudication import _make_voided_finding
 
@@ -73,13 +78,6 @@ if TYPE_CHECKING:
 _CONTENT = "def broken():\n    return 1\n"
 
 
-def _git(repo: Path, *args: str) -> None:
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, check=True, env=clean_env
-    )
-
-
 def _worktree(
     make_git_repo: Callable[..., Path],
     name: str,
@@ -92,21 +90,15 @@ def _worktree(
     if manifest is not None:
         for rel_path, text in manifest.items():
             _write(repo / rel_path, text)
-        _git(repo, "add", *manifest.keys())
-        _git(repo, "commit", "-m", "add manifest")
-    _git(repo, "checkout", "-b", "feature")
+        git_in(repo, "add", *manifest.keys())
+        git_in(repo, "commit", "-m", "add manifest")
+    git_in(repo, "checkout", "-b", "feature")
     files = feature_files if feature_files is not None else {"new.py": content}
     for rel_path, text in files.items():
         _write(repo / rel_path, text)
-    _git(repo, "add", *files.keys())
-    _git(repo, "commit", "-m", "add new.py")
+    git_in(repo, "add", *files.keys())
+    git_in(repo, "commit", "-m", "add new.py")
     return repo
-
-
-def _head(repo: Path) -> str:
-    return subprocess.check_output(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
-    ).strip()
 
 
 def _install_pre_commit_hook(repo: Path, script: str) -> None:
@@ -266,6 +258,8 @@ def _run_loop(
     fix_loop_enabled: bool = True,
     task: TicketTask | None = None,
     reasoning_effort: str | None = None,
+    claim_tier_enabled: bool = False,
+    disposition_drift_check_enabled: bool = True,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     return run_review_with_fix_loop(
         runner=runner,
@@ -277,6 +271,8 @@ def _run_loop(
         wall_clock_budget_seconds=budget,
         session_id=session_id,
         fix_loop_enabled=fix_loop_enabled,
+        claim_tier_enabled=claim_tier_enabled,
+        disposition_drift_check_enabled=disposition_drift_check_enabled,
     )
 
 
@@ -301,7 +297,7 @@ def _renamer(old: str, new: str) -> Callable[[Path, list[str]], CodexRunResult]:
 
     def _rename(worktree: Path, _argv: list[str]) -> CodexRunResult:
         (worktree / new).parent.mkdir(parents=True, exist_ok=True)
-        _git(worktree, "mv", old, new)
+        git_in(worktree, "mv", old, new)
         return CodexRunResult(returncode=0, stdout="", stderr="")
 
     return _rename
@@ -654,13 +650,13 @@ class TestFixInvocation:
             "exit 1\n",
         )
         _write(worktree / "fix.py", "patched = 1\n")
-        _git(worktree, "add", "fix.py")
+        git_in(worktree, "add", "fix.py")
 
         with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop"):
             sha = _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
 
         assert sha is not None
-        assert sha == _head(worktree)
+        assert sha == git_in(worktree, "rev-parse", "HEAD")
         assert any("retrying once" in r.message for r in caplog.records)
         # The hook's own rewrite (new.py) rode along in the retried commit.
         committed_files = subprocess.check_output(
@@ -693,7 +689,7 @@ class TestFixInvocation:
             "exit 1\n",
         )
         _write(worktree / "fix.py", "patched = 1\n")
-        _git(worktree, "add", "fix.py")
+        git_in(worktree, "add", "fix.py")
 
         with pytest.raises(subprocess.CalledProcessError):
             _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
@@ -1271,19 +1267,19 @@ class TestFixLoopReviewParity:
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-sha-advance")
-        orig = _head(worktree)
+        orig = git_in(worktree, "rev-parse", "HEAD")
         runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
         _out, verdict = _run_loop(runner, worktree, session_id="s-sha-advance")
 
         assert verdict is not None
         assert verdict.reviewed_sha != orig
-        assert verdict.reviewed_sha == _head(worktree)
+        assert verdict.reviewed_sha == git_in(worktree, "rev-parse", "HEAD")
 
     def test_reviewed_sha_unchanged_for_noop_cycle(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-sha-noop")
-        orig = _head(worktree)
+        orig = git_in(worktree, "rev-parse", "HEAD")
         runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])  # no-op fix
         _out, verdict = _run_loop(runner, worktree, session_id="s-sha-noop")
 
@@ -1404,7 +1400,7 @@ class TestFixLoopDisabledGate:
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-gate-blocking")
-        head_before = _head(worktree)
+        head_before = git_in(worktree, "rev-parse", "HEAD")
         loop_runner = _FixLoopRunner([_MF_DOC])
         loop_result, loop_verdict = _run_loop(
             loop_runner, worktree, session_id="s-gate", fix_loop_enabled=False
@@ -1443,7 +1439,7 @@ class TestFixLoopDisabledGate:
         assert loop_runner.review_calls == plain_runner.review_calls + 1
         assert loop_result.review.fix_cycles_used == 0
         # No commits landed — the disabled gate never invoked the fix loop.
-        assert _head(worktree) == head_before
+        assert git_in(worktree, "rev-parse", "HEAD") == head_before
 
     def test_disabled_gate_non_blocking_cycle0_unaffected(
         self, make_git_repo: Callable[..., Path]
@@ -2058,7 +2054,7 @@ class TestRereviewForwardsFindingDispositions:
     only one would let a settled finding re-park the run from the other.
     """
 
-    def _ledger(self) -> dict[str, FindingDisposition]:
+    def _ledger(self, reviewed_sha: str) -> dict[str, FindingDisposition]:
         key = _disposition_key("new.py", "MFA")
         assert key is not None
         return {
@@ -2066,6 +2062,15 @@ class TestRereviewForwardsFindingDispositions:
                 outcome="REJECTED",
                 rationale="settled by the operator in an earlier round",
                 recorded_at="2026-08-16T00:00:00Z",
+                # #2210 round 2: only a fully-provenanced record is applied,
+                # so the fixture carries what `cw review settle` writes.
+                actor="mattwwarren",
+                # #2232: the sha this pass reviews, i.e. "settled against
+                # exactly this code". This case is about the ledger reaching
+                # both call sites, not about drift, so the record has to say
+                # the code has not moved — which the drift check now reads.
+                reviewed_sha=reviewed_sha,
+                summary="MFA",
             )
         }
 
@@ -2073,7 +2078,7 @@ class TestRereviewForwardsFindingDispositions:
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-1838-rereview")
-        ledger = self._ledger()
+        ledger = self._ledger(git_in(worktree, "rev-parse", "HEAD"))
         task = _make_ticket_task(
             ticket_id="T-1838",
             client="test",
@@ -2136,3 +2141,171 @@ class TestRereviewForwardsFindingDispositions:
         assert verdict is not None
         assert verdict.blocking is False
         assert result.status == "stage_complete"
+
+    def test_refused_marker_records_reach_the_verdict_from_a_rereview(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2210 round 3: the refusal hop, the fix loop's copy of ``run_review``.
+
+        A record the marker carried but the write path refused never enters the
+        ledger, so it can only reach the verdict if ``_rereview`` threads
+        ``prepared.refused_dispositions`` into synthesis beside it. Forwarding
+        the ledger alone would leave every fix-loop cycle silent about it.
+        """
+        worktree = _worktree(make_git_repo, "wt-2210-rereview-refused")
+        # The comment thread is only read for a resolvable GitHub tracker.
+        _write(
+            worktree / ".claude" / "project-config.yaml",
+            "tracking:\n  primary:\n    system: github-issues\n",
+        )
+        ledger = self._ledger(git_in(worktree, "rev-parse", "HEAD"))
+        (key,) = ledger
+        forged = {key: ledger[key].model_copy(update={"actor": ""})}
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "op"},
+                    "body": render_finding_disposition_block(forged),
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kw: None,
+        )
+        base = subprocess.check_output(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD~1"], text=True
+        ).strip()
+        _, verdict, prepared = codex_fix_loop._rereview(
+            runner=_FixLoopRunner([_MF_DOC]),
+            task=_make_ticket_task(
+                ticket_id="T-2210", client="test", stage=Stage.REVIEW
+            ),
+            worktree=worktree,
+            default_branch="main",
+            model=None,
+            reasoning_effort=None,
+            remaining=None,
+            session_id="s-2210-rereview-refused",
+            previous_reviewed_sha=base,
+            prior_open_findings=[],
+        )
+
+        assert prepared.finding_dispositions == {}
+        assert [(r.key, r.missing) for r in prepared.refused_dispositions] == [
+            (key, ["actor"])
+        ]
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert [r.key for r in verdict.refused_dispositions] == [key]
+
+
+class TestClaimTierGateReachesBothSynthesisHops:
+    """#2210: the per-lane claim-tier gate must reach cycle 0 AND `_rereview`.
+
+    `run_review_with_fix_loop` calls `run_review` directly for cycle 0 and
+    `_rereview` for every later cycle, and each reaches
+    `synthesize_codex_review_result` through its own module. A gate threaded
+    into only one would arm (or disarm) half the loop.
+    """
+
+    @pytest.mark.parametrize("claim_tier_enabled", [True, False])
+    def test_both_hops_receive_the_flag(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        claim_tier_enabled: bool,
+    ) -> None:
+        worktree = _worktree(make_git_repo, f"wt-2210-gate-{claim_tier_enabled}")
+        seen: list[object] = []
+
+        real_core_synth: Callable[..., object] = (
+            codex_review_core.synthesize_codex_review_result
+        )
+        real_loop_synth: Callable[..., object] = (
+            codex_fix_loop.synthesize_codex_review_result
+        )
+
+        def _spy_core(**kwargs: object) -> object:
+            seen.append(kwargs.get("claim_tier_enabled"))
+            return real_core_synth(**kwargs)
+
+        def _spy_loop(**kwargs: object) -> object:
+            seen.append(kwargs.get("claim_tier_enabled"))
+            return real_loop_synth(**kwargs)
+
+        monkeypatch.setattr(
+            codex_review_core, "synthesize_codex_review_result", _spy_core
+        )
+        monkeypatch.setattr(codex_fix_loop, "synthesize_codex_review_result", _spy_loop)
+
+        _run_loop(
+            _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]),
+            worktree,
+            claim_tier_enabled=claim_tier_enabled,
+        )
+
+        assert len(seen) == 2
+        assert seen == [claim_tier_enabled, claim_tier_enabled]
+
+
+class TestDispositionDriftCheckGateReachesAllSynthesisHops:
+    """#2232: the drift-check gate must reach every forwarding hop.
+
+    Three of them, not two: ``run_review_with_fix_loop`` -> ``run_review``
+    (cycle 0), ``run_review_with_fix_loop`` -> ``_rereview`` (cycle 1+), and
+    ``_rereview`` -> ``synthesize_codex_review_result``. The middle one is the
+    easy miss — it is this module calling its own helper, not a hop into
+    another module — and a gate threaded into fewer than all three arms (or
+    disarms) half the loop, the failure its claim-tier sibling above already
+    warns about.
+    """
+
+    @pytest.mark.parametrize("drift_check_enabled", [True, False])
+    def test_all_hops_receive_the_flag(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        drift_check_enabled: bool,
+    ) -> None:
+        worktree = _worktree(make_git_repo, f"wt-2232-gate-{drift_check_enabled}")
+        seen: list[object] = []
+        rereview_seen: list[object] = []
+
+        real_core_synth: Callable[..., object] = (
+            codex_review_core.synthesize_codex_review_result
+        )
+        real_loop_synth: Callable[..., object] = (
+            codex_fix_loop.synthesize_codex_review_result
+        )
+        real_rereview: Callable[..., object] = codex_fix_loop._rereview
+
+        def _spy_core(**kwargs: object) -> object:
+            seen.append(kwargs.get("disposition_drift_check_enabled"))
+            return real_core_synth(**kwargs)
+
+        def _spy_loop(**kwargs: object) -> object:
+            seen.append(kwargs.get("disposition_drift_check_enabled"))
+            return real_loop_synth(**kwargs)
+
+        def _spy_rereview(**kwargs: object) -> object:
+            rereview_seen.append(kwargs.get("disposition_drift_check_enabled"))
+            return real_rereview(**kwargs)
+
+        monkeypatch.setattr(
+            codex_review_core, "synthesize_codex_review_result", _spy_core
+        )
+        monkeypatch.setattr(codex_fix_loop, "synthesize_codex_review_result", _spy_loop)
+        monkeypatch.setattr(codex_fix_loop, "_rereview", _spy_rereview)
+
+        _run_loop(
+            _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]),
+            worktree,
+            disposition_drift_check_enabled=drift_check_enabled,
+        )
+
+        # Hop 1 (cycle 0's run_review) and hop 3 (_rereview's own synthesis).
+        assert seen == [drift_check_enabled, drift_check_enabled]
+        # Hop 2: run_review_with_fix_loop's own call into _rereview.
+        assert rereview_seen == [drift_check_enabled]

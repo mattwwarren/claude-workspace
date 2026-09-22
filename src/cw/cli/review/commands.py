@@ -1,8 +1,8 @@
 """The ``cw review`` commands without a seam of their own (#2048).
 
-``register``, ``adjudicate``, ``check-voided``, and ``verify-fixes`` — the four
-commands left after ``consolidate`` and the diff-integrity guards were given
-their own submodules.
+``register``, ``adjudicate``, ``check-voided``, ``settle`` and
+``verify-fixes`` — the commands left after ``consolidate`` and the
+diff-integrity guards were given their own submodules.
 
 ``cw review register <pr-url>`` records a PR you were asked to review as a
 watched PR (``DevQueueStore.watched_prs``). No ``list``/``remove`` subcommand
@@ -23,6 +23,22 @@ settled, and renders the durable record of those decisions back out for
 posting to the ticket. It is the Claude-native half of a mechanism the codex
 backend reaches through ``cw.codex_review`` instead — same library function,
 same outcome, no coordinating session required on that side.
+
+``cw review settle <path>`` (#2210) is the cross-round adjudication ledger's
+first production writer. #1838 shipped that ledger's renderer, parser and
+mechanical backstop but nothing that ever CALLED the renderer, so the runbook
+told operators to compute the key by hand from a ``python -c`` one-liner. This
+turns a payload — the one every blocking codex review comment now prints — into
+the postable ``REVIEW-FINDING-DISPOSITIONS`` marker.
+
+``settle`` is the only command here that mints a durable, blocking
+SUPPRESSION rather than recording one pass's outcome, so it carries an audit
+contract the others do not: a mandatory ``--reason``, provenance
+(actor / CLI-stamped UTC timestamp / verbatim summary / reviewed sha) on every
+record, one ``review.finding_settled`` event per settled finding, and a flat
+refusal to run anywhere that is not provably an interactive session — a
+dispatch worker, or a directory whose dispatch context cannot be resolved at
+all. See ADR-0016.
 """
 
 from __future__ import annotations
@@ -31,7 +47,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import click
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors
@@ -59,6 +75,15 @@ from cw.review_adjudication import (
     render_deferred_findings_md,
     render_voided_findings_block,
     verify_fixed_dispositions,
+)
+from cw.review_finding_dispositions import (
+    FindingDisposition,
+    Outcome,
+    build_finding_disposition_ledger,
+    disposition_event_payload,
+    disposition_event_type,
+    render_finding_disposition_block,
+    split_disposition_key,
 )
 from cw.review_findings import ReviewVerdict
 
@@ -305,6 +330,15 @@ class _CheckVoidedOutput(BaseModel):
     adjudications: list[Adjudication]
 
 
+def _utc_now_iso() -> str:
+    """The ISO-8601 stamp both record-minting commands write (#2210).
+
+    One implementation, so ``check-voided``'s ``voided_at`` and ``settle``'s
+    ``recorded_at`` cannot come out in two shapes.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _stamp_voided_at(entry: VoidedFinding) -> VoidedFinding:
     """Fill a blank ``voided_at`` with now, leaving a supplied one alone.
 
@@ -314,8 +348,7 @@ def _stamp_voided_at(entry: VoidedFinding) -> VoidedFinding:
     """
     if entry.voided_at.strip():
         return entry
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return entry.model_copy(update={"voided_at": now})
+    return entry.model_copy(update={"voided_at": _utc_now_iso()})
 
 
 @review.command(name="check-voided")
@@ -375,6 +408,360 @@ def review_check_voided(path: str, voided_findings_out: Path | None) -> None:
 
     output = _CheckVoidedOutput(verdict=verdict, adjudications=adjudications)
     click.echo(output.model_dump_json(indent=2))
+
+
+class _SettleEntry(BaseModel):
+    """One operator decision to record in the ledger (#2210).
+
+    ``file`` and ``summary`` are the finding's identity, copied VERBATIM from
+    the blocking review comment's payload — normalization happens on ingest via
+    ``fingerprint_v1``, so a hand-normalized value here would key differently
+    from the re-derived finding it is meant to suppress.
+
+    ``file="N/A"`` is rejected rather than dropped: that is #1817's
+    no-diff-anchor case, which cannot be keyed at all, and silently omitting it
+    from the marker would leave an operator believing they settled something.
+
+    ``reviewed_sha`` is the commit the finding was raised against, so the
+    record can answer "against what code was this silenced". The rendered
+    payload fills it from the verdict; a hand-written payload may leave it
+    blank and pass ``--reviewed-sha`` instead. There is deliberately no
+    fallback to ``git rev-parse HEAD``: the sha of whatever directory the
+    operator happened to be standing in is not evidence.
+
+    ``extra="forbid"`` so a stale or mistyped key fails loudly rather than
+    being dropped. In particular ``recorded_at`` is NOT accepted: it is audit
+    data, stamped only by this command's own UTC clock.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    file: str
+    summary: str
+    outcome: Outcome
+    rationale: str = ""
+    reviewed_sha: str = ""
+
+    @field_validator("file")
+    @classmethod
+    def _keyable_file(cls, value: str) -> str:
+        if not value.strip():
+            msg = "file must be non-empty"
+            raise ValueError(msg)
+        if value == "N/A":
+            msg = "file 'N/A' has no path to key on; this finding cannot be settled"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("summary")
+    @classmethod
+    def _summary_nonempty(cls, value: str) -> str:
+        if not value.strip():
+            msg = "summary must be non-empty"
+            raise ValueError(msg)
+        return value
+
+
+class _SettleInput(BaseModel):
+    """Request envelope for ``cw review settle`` (#2210)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[_SettleEntry] = Field(min_length=1)
+
+
+_SETTLE_IN_WORKER_MSG = (
+    "Refusing to settle a review finding from inside a dispatch worker "
+    "(.claude/cw-context.json reports headless). A ledger entry silently "
+    "suppresses every future re-raise of that finding, so it must be "
+    "minted by an operator on their own machine. Save the payload, and "
+    "run `cw review settle` there."
+)
+
+_SETTLE_CONTEXT_UNRESOLVED_MSG = (
+    "Refusing to settle a review finding: this directory's dispatch context "
+    "could not be resolved, so there is nothing that says you are NOT inside "
+    "a worker. No `.claude/cw-context.json` was found in this directory or "
+    "any parent, or the one that was found is unreadable, is not a JSON "
+    "object, or carries no boolean `headless` field. Run `cw review settle` "
+    "from an interactive cw session worktree (or any directory beneath one) — "
+    "a directory whose `.claude/cw-context.json` reports `headless: false`. A "
+    "plain checkout of the repo has no such file. Nothing was written: no "
+    "marker, no --out file, no event."
+)
+
+
+def _refuse_settle_outside_an_interactive_session() -> None:
+    """Refuse to mint a suppression unless this is provably an operator (#2210).
+
+    A settle is the one act that can silence a real defect permanently and
+    invisibly. A worker settling findings raised by its own reviewer is the
+    pipeline adjudicating itself — the exact self-suppression this ticket
+    exists to guard against — so it is refused outright. There is no bypass
+    flag, env var or option: a control an agent can switch off is not a
+    control.
+
+    Keyed on the nearest ``.claude/cw-context.json`` (searched upward from cwd,
+    the way ``check_not_main_checkout.py`` does) reporting ``headless``, which
+    is what ``cw`` stamps for every session it spawns — ``True`` for a
+    DAEMON-origin ``/auto-dev`` worker, an explicit ``False`` for an
+    interactive one.
+
+    **Fails CLOSED** (#2210 round 4). The only state that proceeds is a
+    discovered context whose ``headless`` is the JSON boolean ``false``.
+    Everything else — no context file anywhere above cwd, an unreadable or
+    malformed one, one with no ``headless`` key, one whose ``headless`` is not
+    a bool — refuses. :func:`~cw.cli._hook_io.find_cw_context` cannot tell
+    "there is no dispatch context here" apart from "the dispatch context could
+    not be read", and an indeterminate answer used to read as "operator's own
+    machine": a worker whose context file was missing, truncated or written by
+    a future schema would have settled its own reviewer's findings. The guard
+    that decides whether a durable suppression may be minted is the wrong
+    place to be optimistic — same posture, for the same reason, as #2213.
+
+    The operational cost is that a settle must be run from inside a cw session
+    worktree rather than a plain checkout; the runbook says so.
+    """
+    from cw.cli._hook_io import find_cw_context
+
+    context = find_cw_context(Path.cwd())
+    headless = None if context is None else context.get("headless")
+    if headless is False:
+        return
+    raise CwError(
+        _SETTLE_IN_WORKER_MSG if headless is True else _SETTLE_CONTEXT_UNRESOLVED_MSG
+    )
+
+
+def _resolve_settle_actor() -> str:
+    """The gh login recorded as having settled these findings (#2210).
+
+    Same resolver ``cw review register`` uses. Refusing when it cannot be
+    resolved is the point: an anonymous suppression record answers none of the
+    three questions an audit record exists to answer.
+    """
+    from cw.operator_identity import cached_gh_login
+
+    actor = cached_gh_login()
+    if actor is None:
+        msg = (
+            "Could not resolve your GitHub identity (gh api user failed), so "
+            "this settle would be recorded anonymously. Ensure gh is installed"
+            " and authenticated (gh auth status)."
+        )
+        raise CwError(msg)
+    return actor
+
+
+def _settle_reviewed_sha(entry: _SettleEntry, fallback: str) -> str:
+    """The reviewed sha for *entry*, preferring the payload's own."""
+    resolved = entry.reviewed_sha.strip() or fallback
+    if not resolved:
+        msg = (
+            f"entry for {entry.file!r} has no reviewed_sha and none was given: "
+            "pass --reviewed-sha <sha> (the commit the finding was raised "
+            "against). A settle that cannot say which code it silenced is not "
+            "an audit record."
+        )
+        raise CwError(msg)
+    return resolved
+
+
+def _emit_settle_events(
+    ledger: dict[str, FindingDisposition], ticket: str | None
+) -> None:
+    """One audit event per settled finding (#2210, #2232).
+
+    The mirror of ``review.finding_disposition_suppressed``: that event records
+    a suppression firing, this one records it being created. Emitted over the
+    COLLAPSED ledger, so two payload entries that key alike are one settled
+    finding and one event — the same arithmetic the marker itself uses.
+
+    The event TYPE carries the semantic, not a field inside the payload — see
+    :func:`~cw.review_finding_dispositions.disposition_event_type`, which
+    makes that choice for every emitter. The payload is identical either way;
+    it already carries ``outcome``, so nothing is lost to a consumer that
+    wants both. Both the type choice and the payload shape moved to the ledger
+    module (#2232) once the review pass's comment-thread sync became a second
+    emitter of the same events: they now cannot drift apart, and neither site
+    carries a raw ``"REVERSED"`` literal.
+
+    **Raises rather than degrading** (#2210 round 2). ``record_event`` is file
+    I/O and can fail; the caller must not write a marker for a finding whose
+    audit did not record, so an emit failure aborts the whole settle with a
+    message naming the finding and the failure. ALL events are emitted before
+    the caller writes anything, so a failure part-way through leaves the
+    earlier findings with an audit record and no effect — see the ordering
+    comment at the call site for why that asymmetry is the right one.
+    """
+    from cw.events import record_event
+
+    for key, entry in sorted(ledger.items()):
+        file = split_disposition_key(key)[0]
+        event_type = disposition_event_type(entry)
+        try:
+            record_event(
+                event_type,
+                payload=disposition_event_payload(key, entry),
+                correlation_id=ticket,
+            )
+        except OSError as exc:
+            msg = (
+                f"Could not record the {event_type.value} audit event for "
+                f"{file} ({entry.summary!r}): {exc}. Nothing was written — no "
+                "marker, no --out file. A suppression with no audit record is "
+                "invisible, so the settle is refused rather than recorded "
+                "half-way. Fix the event store and re-run the same payload."
+            )
+            raise CwError(msg) from exc
+
+
+@review.command(name="settle")
+@click.argument("path")
+@click.option(
+    "--reason",
+    required=True,
+    type=str,
+    help=(
+        "Why these findings are settled. Required, and recorded on every "
+        "entry the payload does not give its own `rationale`."
+    ),
+)
+@click.option(
+    "--reviewed-sha",
+    default="",
+    type=str,
+    help=(
+        "The commit the findings were raised against, for entries whose "
+        "payload does not carry `reviewed_sha` (hand-written payloads). "
+        "Never inferred from the current checkout."
+    ),
+)
+@click.option(
+    "--ticket",
+    default=None,
+    type=str,
+    help="Ticket id to correlate the settle/reversal audit events to.",
+)
+@click.option(
+    "--out",
+    default=None,
+    type=click.Path(path_type=Path),
+    help=(
+        "Also write the rendered marker to this path, ready to post with "
+        "`gh issue comment --body-file`."
+    ),
+)
+@handle_errors
+def review_settle(
+    path: str,
+    reason: str,
+    reviewed_sha: str,
+    ticket: str | None,
+    out: Path | None,
+) -> None:
+    """Record operator-settled findings as a postable marker (#2210).
+
+    Run this on YOUR OWN MACHINE, from an interactive cw session worktree (or
+    any directory beneath one). It refuses inside a dispatch worker — a ledger
+    entry silently suppresses every future re-raise of that finding, so the
+    pipeline must not be able to settle its own reviewer's findings — and it
+    refuses just as flatly when it cannot tell: the nearest
+    `.claude/cw-context.json` must be readable and report `headless: false`.
+    A plain checkout of the repo has no such file, so run it from a session
+    worktree. There is no bypass flag.
+
+    PATH is a file path or '-' for stdin. Payload: {"entries": [{"file":
+    "<path>", "summary": "<verbatim finding summary>", "outcome":
+    "REJECTED"|"ACCEPTED"|"REVERSED", "rationale": "<why, optional>",
+    "reviewed_sha": "<sha>"}]}. Every blocking codex review comment prints one
+    such payload per finding under "### Settle a finding" — paste it unedited.
+
+    ROLLBACK (#2232): `outcome: "REVERSED"` withdraws a settle you already
+    made. Paste the SAME `file` and `summary` the earlier settle used — read
+    them off `cw review dispositions <ticket> --json` (its `summary` field is
+    always the full verbatim text) or the original settle marker; the human
+    table truncates long summaries for scanning and is not a payload source —
+    and post the marker this prints. The newest-`recorded_at`-wins merge is
+    what makes the withdrawal stick, so no new command and no new write path
+    is involved; a reversed record matches neither suppression tier and is not
+    shown to the reviewer as a decision. It stays visible in `cw review
+    dispositions`, because reversal history is part of the audit trail.
+
+    --reason is REQUIRED and must be non-blank; it is the rationale recorded
+    for every entry that does not carry its own. An entry's own `rationale`
+    wins when set, so several findings can be settled for different reasons in
+    one call.
+
+    Identity is the VERBATIM `file` and `summary`; the same normalizer the
+    reviewer's re-raise will hit is applied on ingest, so nothing needs
+    hand-normalizing. Two entries that key alike collapse, the later one in the
+    payload winning.
+
+    Every record carries provenance: your resolved gh login, a UTC timestamp
+    stamped by this command (never supplied in the payload — `recorded_at` is
+    rejected as an unknown key), the finding's verbatim summary, and the
+    reviewed sha it was raised against. An entry with no resolvable sha is
+    refused; pass --reviewed-sha for a hand-written payload.
+
+    The marker is ADDITIVE across comments: the reader unions every marker on
+    the thread, so post only what you are settling now rather than re-posting
+    the whole ledger. Only `REJECTED` suppresses a later re-raise; `ACCEPTED`
+    is a record-only annotation that reaches the reviewer's prompt.
+
+    Emits one audit event per settled finding — `review.finding_settled`, or
+    `review.finding_disposition_reverted` for a `REVERSED` entry (#2232) —
+    correlated to --ticket when given. The events are recorded BEFORE the
+    marker is written: if any of them cannot be recorded the settle is
+    refused outright — no marker, no --out file, non-zero exit — because a
+    durable suppression with no audit record is invisible.
+
+    On success: exits 0, prints the marker to stdout.
+    On failure: exits 1, prints 'field.path: message' lines to stderr.
+    """
+    _refuse_settle_outside_an_interactive_session()
+    settle_reason = reason.strip()
+    if not settle_reason:
+        msg = (
+            "--reason must be non-blank: a suppression with no recorded "
+            "rationale is exactly the silent silencing this record exists to "
+            "prevent."
+        )
+        raise CwError(msg)
+    actor = _resolve_settle_actor()
+    recorded_at = _utc_now_iso()
+
+    parsed = _parse_payload_or_exit(path, _SettleInput)
+    ledger = build_finding_disposition_ledger(
+        (
+            entry.file,
+            entry.summary,
+            FindingDisposition(
+                outcome=entry.outcome,
+                rationale=entry.rationale.strip() or settle_reason,
+                recorded_at=recorded_at,
+                actor=actor,
+                reviewed_sha=_settle_reviewed_sha(entry, reviewed_sha.strip()),
+                summary=entry.summary,
+            ),
+        )
+        for entry in parsed.entries
+    )
+    # The audit events go FIRST, and the marker is written only once every one
+    # of them has recorded. The two failure directions are not symmetric: an
+    # audit record with no effect is noise, a durable suppression with no audit
+    # record is invisible — which is the exact hole round 1 added this event to
+    # close. Do not "fix" this back to save-then-emit: #1617's precedent orders
+    # a STATE MUTATION before its event so the event cannot claim something
+    # that did not land, and here the record IS the safety mechanism, so it
+    # goes first. Atomicity is all-events-then-one-write for the same reason:
+    # if any event fails, no marker is written at all.
+    _emit_settle_events(ledger, ticket)
+    rendered = render_finding_disposition_block(ledger)
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(out, rendered)
+    click.echo(rendered)
 
 
 class _VerifyFixesInput(BaseModel):

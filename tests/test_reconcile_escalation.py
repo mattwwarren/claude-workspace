@@ -163,6 +163,30 @@ class TestEligibilityFormula:
 
         assert _UNRESOLVED_SUBAGENT_SPAWN_REASON in _ELIGIBLE_DISPOSITIONS
 
+    def test_fix_dispatch_ref_unresolved_park_is_escalation_eligible(self) -> None:
+        """#2209: the fix-dispatch unresolvable-ref park pages the operator.
+
+        Nobody chose to stop this ticket — the fix-loop dispatcher simply found
+        no remote ref whose tip matches the worktree's HEAD — so its escalation
+        clock starts immediately, on the same terms as #1646/#1702/#1823.
+
+        It is deliberately kept OUT of concierge's false-park requeue set and
+        out of the hold/drain sets: auto-requeueing a row whose branch cannot
+        be located would just re-run the same failing resolution forever.
+        """
+        from cw.dev_queue import DRAIN_DISPOSITIONS, HOLD_DISPOSITIONS
+        from cw.reconcile._shared import _FIX_DISPATCH_REF_UNRESOLVED_REASON
+        from cw.reconcile.concierge import _FALSE_PARK_ELIGIBLE_DISPOSITIONS
+        from cw.reconcile.escalation import _ELIGIBLE_DISPOSITIONS
+
+        assert _FIX_DISPATCH_REF_UNRESOLVED_REASON == "fix_dispatch_ref_unresolved"
+        assert _FIX_DISPATCH_REF_UNRESOLVED_REASON in _ELIGIBLE_DISPOSITIONS
+        assert (
+            _FIX_DISPATCH_REF_UNRESOLVED_REASON not in _FALSE_PARK_ELIGIBLE_DISPOSITIONS
+        )
+        assert _FIX_DISPATCH_REF_UNRESOLVED_REASON not in HOLD_DISPOSITIONS
+        assert _FIX_DISPATCH_REF_UNRESOLVED_REASON not in DRAIN_DISPOSITIONS
+
     def test_unresolved_subagent_spawn_not_false_park_requeueable(self) -> None:
         """#1646: concierge must NOT auto-requeue this class.
 

@@ -57,6 +57,9 @@ Expected output for a healthy setup:
 - `[WARN] daemon-reachable` — the Claude native daemon has not been started yet; this resolves automatically when `cw` first spawns a worker session.
 - `[OK/WARN] skills-commands-drift` — repo-tracked `.claude/skills`/`.claude/commands`/`.claude/scripts` files compared against `~/.claude`; `[WARN]` means at least one tracked file is missing, content differs, or its `~/.claude` counterpart is a symlink pointing somewhere other than this checkout. A `differ` on `.claude/scripts/prep_pr_state.py` is the #2090 shape: a stale copy of a cw-owned script at `~/.claude/scripts/` — re-run `scripts/install-skills.sh`.
 - `[OK/WARN] agent-spec-drift/<client>` — per-client reviewer agent-spec resolution (repo-local / global fallback / absent); `[WARN]` names any reviewer role with no usable spec.
+- `[OK/WARN] stop-hook-scope` — looks for a `cw signal-stop` Stop hook in `~/.claude/settings.json` or `~/.claude/settings.local.json`; `[WARN]` names the file, the `hooks.Stop` coordinates and the exact line to delete, or names a settings file it could not read or parse (invalid UTF-8, malformed JSON, not a JSON object, an unreadable path). `bypass-disclaimer` reads the same `~/.claude/settings.json` through the same defensive reader, so a broken settings file surfaces as two `[WARN]` lines naming it rather than a crash, and every other check still reports.
+
+cw's Stop hook is **worktree-scoped**: `cw` injects it into `<worktree>/.claude/settings.local.json` before each spawn, alongside the `cw-context.json` the hook reads. Never add it to `~/.claude/settings.json` — a user-level copy runs on every turn of every Claude session on the machine, cw-managed or not, and costs an interpreter start each time (#2226). No cw install path writes it there; `stop-hook-scope` exists to catch one that arrived some other way.
 
 ## Installation
 
@@ -80,7 +83,7 @@ cd claude-workspace
 ./scripts/install.sh
 ```
 
-The install script runs `uv tool install --from "$PROJECT_DIR" --force --reinstall --no-cache "claude-workspace[mcp]"`, making `cw` globally available, and then syncs cw's bundled skills, commands, and helper scripts into `~/.claude/` via `scripts/install-skills.sh`.
+The install script runs `uv tool install --force --reinstall --no-cache "claude-workspace[mcp] @ file://$PROJECT_DIR"`, making `cw` globally available, and then syncs cw's bundled skills, commands, and helper scripts into `~/.claude/` via `scripts/install-skills.sh`. It percent-encodes `$PROJECT_DIR` first, since a space (and `%`, `#`, `?`) is URL-significant inside a PEP 508 requirement; the older `--from "$PROJECT_DIR"` form is not used because uv >= 0.11 removed that flag (#2186).
 
 ### How skills/commands/scripts stay in sync
 

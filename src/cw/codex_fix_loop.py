@@ -788,6 +788,8 @@ def _rereview(
     session_id: str,
     previous_reviewed_sha: str,
     prior_open_findings: list[Finding],
+    claim_tier_enabled: bool = False,
+    disposition_drift_check_enabled: bool = True,
 ) -> tuple[AutoDevResult, ReviewVerdict | None, _ReviewPassInputs]:
     """Run a per-role review pass over the delta since the last cycle (#1837).
 
@@ -799,6 +801,13 @@ def _rereview(
     Returns the prepared inputs alongside the usual pair — the caller needs
     this cycle's ``delta_diff``/``delta_changed_files`` to run the admission
     gate, and they are captured here.
+
+    ``claim_tier_enabled`` (#2210) is forwarded untouched to
+    ``synthesize_codex_review_result``; this function makes no decision with
+    it. Cycles 1+ reach the ledger backstop only through here, so a gate
+    threaded into cycle 0 alone would arm half the loop.
+    ``disposition_drift_check_enabled`` (#2232) rides the same hop on the same
+    terms and for the same reason.
     """
     prepared = _prepare_review_pass(
         task,
@@ -843,6 +852,13 @@ def _rereview(
         # mid-loop. Re-merged every cycle for the same reason the voids are
         # re-fetched: an operator can settle a finding while the loop runs.
         finding_dispositions=prepared.finding_dispositions,
+        # #2210 round 3: marker records refused at parse time; not in the
+        # ledger above, so they ride beside it to reach the verdict.
+        refused_dispositions=prepared.refused_dispositions,
+        # #2210: the lane-resolved claim-tier gate, forwarded unchanged.
+        claim_tier_enabled=claim_tier_enabled,
+        # #2232: the lane-resolved drift-check gate, likewise unchanged.
+        disposition_drift_check_enabled=disposition_drift_check_enabled,
         # #2029: this cycle's own parse-time rescues. Per-cycle, not carried
         # over — each re-review re-runs the roles and re-parses their output.
         pre_validation_rejected=pre_validation_rejected,
@@ -877,13 +893,19 @@ def run_review_with_fix_loop(
     wall_clock_budget_seconds: int | None,
     session_id: str,
     fix_loop_enabled: bool,
+    claim_tier_enabled: bool = False,
+    disposition_drift_check_enabled: bool = True,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
     Drop-in replacement for :func:`cw.codex_review.run_review` (identical
-    signature and return shape — both now take ``fix_loop_enabled``, though
-    this function's own semantics extend beyond just threading it through to
-    the renderer: it also gates whether the fix loop itself engages). One
+    signature and return shape — both now take ``fix_loop_enabled`` and
+    ``claim_tier_enabled``, though this function's own semantics extend beyond
+    just threading them through: ``fix_loop_enabled`` also gates whether the
+    fix loop itself engages, while ``claim_tier_enabled`` (#2210) and
+    ``disposition_drift_check_enabled`` (#2232) are forwarded verbatim to
+    cycle 0's ``run_review`` and to every later cycle's
+    ``_rereview``, with no decision taken here). One
     shared wall-clock deadline spans the initial pass, every fix invocation,
     and every re-review. A non-blocking or unparseable cycle-0 verdict passes
     straight through with zero fix invocations attempted. When
@@ -905,6 +927,8 @@ def run_review_with_fix_loop(
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=session_id,
         fix_loop_enabled=fix_loop_enabled,
+        claim_tier_enabled=claim_tier_enabled,
+        disposition_drift_check_enabled=disposition_drift_check_enabled,
     )
     if verdict is None or not verdict.blocking or not fix_loop_enabled:
         return result, verdict
@@ -988,6 +1012,8 @@ def run_review_with_fix_loop(
             session_id=session_id,
             previous_reviewed_sha=previous_reviewed_sha,
             prior_open_findings=[af.finding for af in open_findings.values()],
+            claim_tier_enabled=claim_tier_enabled,
+            disposition_drift_check_enabled=disposition_drift_check_enabled,
         )
         if verdict is None:
             # No cycle-N snapshot was persisted (the persist call below is

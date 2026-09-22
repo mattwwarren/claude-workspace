@@ -256,6 +256,25 @@ class HookContextConflictError(CwError):
         self.conflicting_session_id = conflicting_session_id
 
 
+class RemoteRefUnresolvedError(CwError):
+    """No remote ref could be verified for a fix-loop branch (GitHub #2209).
+
+    Raised by :func:`cw.reconcile.review_recipes.fix_agent.dispatch_fix_agent`
+    when no candidate in its reported/upstream/templated ladder has a tip equal
+    to the worktree's HEAD — either because nothing resolves at all, or because
+    every ref that does resolve is stale.
+
+    A typed subclass so ``cw.reconcile.fix_dispatch`` can discriminate this one
+    class without matching message text: every other ``CwError`` keeps the
+    generic clear-the-handoff-and-revert path, while this one parks the row
+    BLOCKED_ON_USER with the action list retained. The split matters because
+    since #2075 the generic path charges no attempt, so a ref that can never
+    resolve would otherwise loop review -> failed dispatch -> review forever.
+    """
+
+    __slots__ = ()
+
+
 class DisclaimerNotAcceptedError(CwError):
     """Raised when ``claude --bg`` fails because the user has not accepted
     the bypass-permissions disclaimer.
@@ -560,6 +579,32 @@ class SessionsLockReentryError(CwError):
     ``_reconcile_usage_limited``) already catch ``CwError`` / broad
     ``Exception`` around the call that would otherwise re-enter, so no
     call-site changes are needed elsewhere.
+    """
+
+    __slots__ = ()
+
+
+class ClaimTierArmingError(CwError):
+    """Raised when the ledger's claim tier is armed with drift-checking off.
+
+    The codex review ledger's claim-match suppression tier resolved enabled
+    for a task whose ``disposition_drift_check_enabled`` resolved ``False``
+    (GitHub #2232). Drift-checking is what keeps a stale settle from silently
+    suppressing a re-raised finding; arming the fuzzy tier without it removes
+    that protection with no visible symptom, which is the exact failure mode
+    ADR-0016 named as the reason a rollback and a drift signal are
+    preconditions for ever arming the tier at all.
+
+    Raised by :func:`cw.codex_background._run_codex_review_and_complete`, at
+    the same point the claim tier's own enabling is resolved — the one place
+    both values are in hand for the same task and lane. It reaches the
+    operator through that daemon thread's existing ``_log.exception`` path
+    rather than a dedicated blocked reason, the same as every other
+    misconfiguration-shaped exception its broad ``except Exception:`` already
+    catches. Deliberately narrow: this is one cross-field refusal, not a
+    general config-validation framework. ``ConfigValidationError`` would be
+    the wrong type — that one wraps a ``pydantic.ValidationError`` at LOAD
+    time, and both config files loaded cleanly here.
     """
 
     __slots__ = ()

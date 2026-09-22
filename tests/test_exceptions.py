@@ -54,6 +54,23 @@ class TestExceptionHierarchy:
         err = DisclaimerNotAcceptedError("run interactively first")
         assert "interactively" in str(err)
 
+    def test_claim_tier_arming_error_is_cw_error(self) -> None:
+        """#2232: a flat CwError subclass, so the daemon's broad catch sees it."""
+        from cw.exceptions import ClaimTierArmingError
+
+        assert issubclass(ClaimTierArmingError, CwError)
+
+    def test_claim_tier_arming_message_names_both_settings(self) -> None:
+        """The refusal has to say what is wrong AND what to change (#2232)."""
+        from cw.exceptions import ClaimTierArmingError
+
+        err = ClaimTierArmingError(
+            "disposition_drift_check_enabled resolves to False, but "
+            "codex_claim_suppression_enabled arms the claim tier"
+        )
+        assert "disposition_drift_check_enabled" in str(err)
+        assert "codex_claim_suppression_enabled" in str(err)
+
     def test_duplicated_hunk_error_is_cw_error(self) -> None:
         """#1924: flat CwError subclass so `handle_errors` gives it exit 1."""
         from cw.exceptions import DuplicatedHunkError
@@ -130,6 +147,35 @@ class TestBranchHeldByWorktreeError:
 
         assert err.holder_path == Path("/x")
         assert str(err) == "msg"
+
+
+class TestRemoteRefUnresolvedError:
+    """#2209: a typed CwError subclass so fix_dispatch can discriminate the
+    unresolvable-remote-ref class without matching message text.
+
+    Every other dispatch failure keeps the generic clear-and-revert path; this
+    one parks the row BLOCKED_ON_USER instead, and that split is only safe if
+    the class is nameable.
+    """
+
+    def test_is_cw_error_subclass(self) -> None:
+        from cw.exceptions import RemoteRefUnresolvedError
+
+        assert issubclass(RemoteRefUnresolvedError, CwError)
+
+    def test_message_propagates(self) -> None:
+        from cw.exceptions import RemoteRefUnresolvedError
+
+        err = RemoteRefUnresolvedError("cannot determine remote ref for dev/2209")
+
+        assert str(err) == "cannot determine remote ref for dev/2209"
+
+    def test_caught_by_base_cw_error(self) -> None:
+        from cw.exceptions import RemoteRefUnresolvedError
+
+        msg = "no upstream configured"
+        with pytest.raises(CwError, match="no upstream configured"):
+            raise RemoteRefUnresolvedError(msg)
 
 
 class TestUsageLimitError:

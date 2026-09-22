@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.cli import main
 from cw.cli._hook_io import _LOCK_TIMEOUT_SECS_DEFAULT, _context_lock
 from cw.cli.agent_spawn_stamp import _last_stamped_at, _unresolved_count
 from cw.models import (
@@ -39,6 +40,7 @@ from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
 )
 from tests.conftest import (
+    _headless_worktree,
     _hold_context_lock,
     _invoke_hook_command,
     _write_hook_context_file,
@@ -145,8 +147,6 @@ def test_pre_hook_never_crashes_on_malformed_stdin() -> None:
     """Non-JSON stdin → silent exit 0 (a hook must never crash)."""
     from click.testing import CliRunner
 
-    from cw.cli import main
-
     result = CliRunner().invoke(main, ["agent-spawn-pre"], input="not json at all")
 
     assert result.exit_code == 0
@@ -222,7 +222,7 @@ def test_pre_hook_survives_unexpected_error(
 ) -> None:
     """A crash inside the stamp body is swallowed → exit 0 (hook never wedges)."""
 
-    def _boom(_delta: int) -> None:
+    def _boom(_delta: int, _payload: dict[str, object] | None) -> None:
         msg = "unexpected"
         raise RuntimeError(msg)
 
@@ -309,3 +309,117 @@ def test_last_stamped_at_tolerates_every_odd_shape() -> None:
 def test_lock_timeout_default_is_bounded() -> None:
     """The retry budget is small — this runs inside the worker's own turn."""
     assert 0 < _LOCK_TIMEOUT_SECS_DEFAULT <= 1.0
+
+
+def _pre_tool_input() -> dict[str, object]:
+    """Return a mutable copy of ``_PRE_PAYLOAD["tool_input"]``, narrowed.
+
+    The capture is annotated ``dict[str, object]`` so that it can hold the
+    payload's mixed value types, which makes indexing it yield ``object`` —
+    and every builder that wants to add or drop a ``tool_input`` key a type
+    error. Narrowing once, here, is what keeps the three builders free of
+    inline suppressions; the ``isinstance`` check also means a future edit
+    that reshapes the fixture fails loudly rather than at the use site.
+
+    Returns a copy so a builder cannot mutate the shared capture, which would
+    leak between tests in fixture-order-dependent ways.
+    """
+    tool_input = _PRE_PAYLOAD["tool_input"]
+    assert isinstance(tool_input, dict)
+    return dict(tool_input)
+
+
+def _fork_payload(cwd: Path) -> dict[str, object]:
+    """The real capture with ``subagent_type`` set to the refused value."""
+    tool_input = {**_pre_tool_input(), "subagent_type": "fork"}
+    return {**_PRE_PAYLOAD, "cwd": str(cwd), "tool_input": tool_input}
+
+
+def _untyped_payload(cwd: Path) -> dict[str, object]:
+    """The real capture with the ``subagent_type`` key removed entirely."""
+    tool_input = {k: v for k, v in _pre_tool_input().items() if k != "subagent_type"}
+    return {**_PRE_PAYLOAD, "cwd": str(cwd), "tool_input": tool_input}
+
+
+def test_pre_hook_refuses_an_explicit_fork_spawn(tmp_path: Path) -> None:
+    """#2211: a forked subagent is unrostered — exit 2, and no stamp is written.
+
+    The stamp must not advance on a refusal: the spawn never happens, so a
+    counter left at 1 would make the worker look like it died mid-spawn.
+    """
+    worktree = _headless_worktree(tmp_path)
+
+    result = _invoke_hook_command("agent-spawn-pre", _fork_payload(worktree))
+
+    assert result.exit_code == 2
+    assert "#2211" in result.output
+    assert _read_count(worktree) == 0
+
+
+def test_pre_hook_still_stamps_a_named_subagent_type(tmp_path: Path) -> None:
+    """The real capture (``subagent_type: "Explore"``) is unaffected by #2211."""
+    worktree = _headless_worktree(tmp_path)
+
+    result = _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree))
+
+    assert result.exit_code == 0
+    assert _read_count(worktree) == 1
+
+
+def test_pre_hook_refuses_an_omitted_subagent_type(tmp_path: Path) -> None:
+    """Refused since the spawn-site inventory closed (#2211, was R7).
+
+    Shares the fork case's contract exactly — exit 2, no stamp — because an
+    unnamed spawn is unrostered for the same reason a forked one is.
+    """
+    worktree = _headless_worktree(tmp_path)
+
+    result = _invoke_hook_command("agent-spawn-pre", _untyped_payload(worktree))
+
+    assert result.exit_code == 2
+    assert "#2211" in result.output
+    assert _read_count(worktree) == 0
+
+
+def test_pre_hook_allows_a_fork_in_a_non_headless_worker(tmp_path: Path) -> None:
+    """An operator's own interactive session keeps its fork, and its stamp."""
+    worktree = tmp_path / "interactive"
+    worktree.mkdir()
+    _write_hook_context_file(worktree, headless=False)
+
+    result = _invoke_hook_command("agent-spawn-pre", _fork_payload(worktree))
+
+    assert result.exit_code == 0
+    assert _read_count(worktree) == 1
+
+
+def test_pre_hook_reads_stdin_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The classifier and the stamp share ONE stdin read (#2211 MUST_FIX).
+
+    stdin is consumable exactly once per process. A second
+    ``sys.stdin.read()`` on this path would return an empty string in
+    production — the stamp would silently stop finding its ``cwd`` — so the
+    regression is invisible to an exit-code assertion alone. This stub makes
+    the second read loud instead: it raises, and the surrounding fail-open
+    ``except Exception`` would turn the refusal into a silent exit 0.
+    """
+    worktree = _headless_worktree(tmp_path)
+    reads: list[int] = []
+
+    class _OnceStdin:
+        def read(self) -> str:
+            reads.append(1)
+            if len(reads) > 1:
+                msg = "stdin read twice"
+                raise OSError(msg)
+            return json.dumps(_fork_payload(worktree))
+
+    monkeypatch.setattr("sys.stdin", _OnceStdin())
+
+    with pytest.raises(SystemExit) as excinfo:
+        main.main(["agent-spawn-pre"], standalone_mode=False)
+
+    assert excinfo.value.code == 2
+    assert reads == [1]

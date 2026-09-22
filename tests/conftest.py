@@ -20,6 +20,8 @@ import yaml
 from cw.config import save_state
 from cw.disk import DiskUsage
 from cw.models import (
+    AGENT_SPAWN_STAMP_KEY,
+    HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
     CwState,
     OrchestratorEventType,
@@ -643,10 +645,19 @@ def _write_project_config_yaml(root: Path, content: str) -> None:
     (config_dir / "project-config.yaml").write_text(content, encoding="utf-8")
 
 
+# ``_write_hook_context_file``'s ``stamp`` sentinels (#2229): keep the real
+# writer's seeded ``{0, None}`` stamp, or delete the key entirely (a legacy
+# pre-#1646 context). Any other value replaces the stamp verbatim.
+_STAMP_UNCHANGED: object = object()
+_STAMP_ABSENT: object = object()
+
+
 def _write_hook_context_file(
     worktree: Path,
     workspace_path: Path | None = None,
     lane: str | None = None,
+    stamp: object = _STAMP_UNCHANGED,
+    headless: bool = False,
 ) -> None:
     """Materialize ``<worktree>/.claude/cw-context.json`` via the real writer.
 
@@ -660,6 +671,16 @@ def _write_hook_context_file(
     ``cw guard-busy-wait``'s per-lane config tests read the same ``"lane"``
     key production stamps — an ad hoc parallel JSON writer in the test file
     is exactly the fixture drift this helper's hoist exists to prevent.
+
+    *stamp* (#2229) overrides the seeded ``agent_spawn_stamp`` after the real
+    writer runs: ``_STAMP_ABSENT`` deletes the key, any other non-default
+    value replaces it, so the Stop hook's stamp-shape edge cases are seeded
+    through the same file the production writer produced.
+
+    *headless* (#2211) forwards to the real writer's ``headless`` parameter so
+    ``cw agent-spawn-pre``'s spawn-shape policy — which applies only to
+    headless dispatch workers — reads the same ``"headless"`` key production
+    stamps, for the same anti-drift reason as *lane* above.
     """
     from cw.spawn import _write_hook_context
 
@@ -671,9 +692,34 @@ def _write_hook_context_file(
         purpose="impl",
         ticket_id="940",
         origin=SessionOrigin.DAEMON,
+        headless=headless,
         workspace_path=workspace_path,
         lane=lane,
     )
+    if stamp is _STAMP_UNCHANGED:
+        return
+    context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    if stamp is _STAMP_ABSENT:
+        del context[AGENT_SPAWN_STAMP_KEY]
+    else:
+        context[AGENT_SPAWN_STAMP_KEY] = stamp
+    context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
+
+
+def _headless_worktree(tmp_path: Path, name: str = "wt") -> Path:
+    """A worktree whose context marks it a headless dispatch worker (#2211).
+
+    The precondition for every ``cw agent-spawn-pre`` spawn-shape test, since
+    the policy applies to headless workers and nowhere else. Lives here rather
+    than in either test file because both ``test_cli_agent_spawn_stamp.py``
+    and ``test_cli_subagent_policy.py`` need it, and they had grown identical
+    private copies.
+    """
+    worktree = tmp_path / name
+    worktree.mkdir()
+    _write_hook_context_file(worktree, headless=True)
+    return worktree
 
 
 @contextlib.contextmanager
@@ -828,6 +874,7 @@ class _RawFindingKwargs(TypedDict, total=False):
     no_diff_anchor: object
     transitive_impact_evidence: object
     release_critical_exception: object
+    contests_adjudication: object
 
 
 def _finding_kwargs(**overrides: object) -> _RawFindingKwargs:
@@ -1049,6 +1096,13 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         tmp_path / ".claude" / "daemon" / "roster.json",
     )
 
+    # Redirect the #2226 user-level Stop-hook scan away from the operator's
+    # real ~/.claude, so `cw doctor` tests see a clean host regardless of what
+    # the machine running them has installed. (The sibling
+    # doctor.versions._CLAUDE_SETTINGS_PATH and doctor.skills_drift._CLAUDE_HOME
+    # seams are NOT patched here — a pre-existing gap, out of scope for #2226.)
+    monkeypatch.setattr("cw.doctor.user_level_hooks._CLAUDE_HOME", tmp_path / ".claude")
+
     # Stub _claude_agents_json so tests don't invoke the real ``claude``
     # binary. Tests that want specific liveness behaviour override this with
     # their own monkeypatch.setattr call; pytest patches stack and the
@@ -1083,6 +1137,22 @@ def _mock_push_notification(monkeypatch: pytest.MonkeyPatch) -> None:
         "cw.reconcile._deps.fire_push_notification",
         MagicMock(name="fire_push_notification"),
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_park_config_cache() -> Iterator[None]:
+    """Reset the abandoned-exit park gate's per-process config memo (#2135).
+
+    ``cw.reconcile.abandoned_exit.park_gate_open`` memoizes the resolved
+    config for the life of the (short-lived) Stop-hook process. A test process
+    is long-lived and swaps ``tmp_config_dir`` per test, so a memo carried
+    across tests would answer for a config that no longer exists.
+    """
+    from cw.reconcile.abandoned_exit import clear_park_config_cache
+
+    clear_park_config_cache()
+    yield
+    clear_park_config_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -1453,8 +1523,8 @@ def capture_events(
 def _clean_git_env() -> dict[str, str]:
     """``os.environ`` with ``GIT_*`` vars stripped.
 
-    Shared by ``make_git_repo`` and the live codex contract suite's own
-    ``git`` helper (``tests/test_codex_contract_live.py``) so a nested git
+    Shared by ``make_git_repo``, ``git_in``, and any test that needs a
+    ``GIT_*``-stripped env for a raw ``subprocess`` call, so a nested git
     invocation never inherits a wrapping git call's env (e.g. ``GIT_DIR``).
     """
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -1468,7 +1538,8 @@ def git_in(repo: Path, *args: str) -> str:
     (``test_branch_ahead.py``, ``test_dispatch_branch_freshness.py``,
     ``test_worktree.py``, and ``test_dispatch.py``'s ``_git_in_repo``) — the
     same "hoist a duplicated private test helper into conftest.py" pattern as
-    ``_cmd`` and ``commit_tracked_file``. The env strip matters because pytest
+    ``_cmd`` and ``commit_tracked_file``, and the further private copies
+    consolidated by #2195. The env strip matters because pytest
     may itself be running inside a git hook, whose ``GIT_DIR``/``GIT_INDEX_FILE``
     would otherwise redirect the nested invocation away from *repo*.
     """

@@ -423,6 +423,51 @@ class OrchestratorEventType(StrEnum):
     # and different payloads, so one event type would make an audit trail that
     # cannot say which mechanism fired.
     REVIEW_FINDING_DISPOSITION_SUPPRESSED = "review.finding_disposition_suppressed"
+    # GitHub #2210 -- the ledger's fuzzy CLAIM tier matched a re-derived finding
+    # against a REJECTED entry, but the per-lane gate was closed, so nothing was
+    # suppressed and the finding stayed blocking. Emitted by
+    # `suppress_adjudicated_findings` on the DEFAULT-OFF path, for any ticket
+    # that has a ledger at all.
+    # Deliberately distinct from REVIEW_FINDING_DISPOSITION_SUPPRESSED above
+    # rather than a reuse of it, for the same reason that one is distinct from
+    # REVIEW_FINDING_VOIDED: one type could not say whether a finding was
+    # actually suppressed or only WOULD have been, and the entire point of this
+    # event is that it records the counterfactual. Reading these is how an
+    # operator judges the matcher's thresholds before arming a lane (ADR-0016).
+    REVIEW_FINDING_CLAIM_SHADOWED = "review.finding_claim_shadowed"
+    # GitHub #2210 -- an operator ran `cw review settle` and minted a durable
+    # REJECTED (or ACCEPTED) ledger entry for one finding. The mirror of
+    # REVIEW_FINDING_DISPOSITION_SUPPRESSED above: that one records a
+    # suppression FIRING, this one records the suppression being CREATED.
+    # Mandatory for the same reason both of those are: a settle is the one act
+    # that can silence a real defect permanently and invisibly, so the record
+    # of who did it, when, and against which reviewed sha cannot live only in
+    # a ticket comment an operator may later edit. One event per settled
+    # finding. `correlation_id` is the ticket id when `--ticket` names one
+    # (the payload the blocking comment renders carries no ticket), else None.
+    REVIEW_FINDING_SETTLED = "review.finding_settled"
+    # GitHub #2232 -- an operator ran `cw review settle` with `outcome:
+    # REVERSED`, withdrawing a prior ledger entry for the same identity. The
+    # rollback ADR-0016 named as a precondition for ever arming the claim
+    # tier, produced by settle itself rather than by a second write path.
+    # Deliberately distinct from REVIEW_FINDING_SETTLED above rather than the
+    # same type with a different `outcome` in the payload: every other
+    # semantically distinct ledger act in this region already gets its own
+    # type (SUPPRESSED vs CLAIM_SHADOWED share one emitting function and are
+    # still two types) precisely so `cw event tail --type ...` answers "what
+    # was withdrawn" without a consumer branching on payload content.
+    REVIEW_FINDING_DISPOSITION_REVERTED = "review.finding_disposition_reverted"
+    # GitHub #2232 -- a ledger record matched a re-derived finding, but the
+    # file changed between the sha the record was settled against and the sha
+    # this pass reviewed, so the suppression was NOT applied and the finding
+    # kept blocking. Emitted by `suppress_adjudicated_findings`.
+    # Not mandatory in REVIEW_FINDING_DISPOSITION_SUPPRESSED's sense, and the
+    # emitter reflects that: the "effect" recorded here is declining to
+    # suppress, which is already the safe direction and already visible on the
+    # posted comment (`ReviewVerdict.stale_dispositions`), so a failed write
+    # warns rather than aborting the pass. Distinct from CLAIM_SHADOWED, whose
+    # counterfactual is "the gate was closed", not "the code moved".
+    REVIEW_FINDING_DISPOSITION_STALE = "review.finding_disposition_stale"
     # GitHub #1927 -- a stale_dispatch park's WatchedPr registration found an
     # active watch for the same (repo, pr_number) already owned by a
     # DIFFERENT, non-None client. register_or_adopt_watched_pr refuses to

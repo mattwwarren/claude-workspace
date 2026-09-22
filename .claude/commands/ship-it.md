@@ -227,6 +227,8 @@ HEAD_SHA=$(gh pr view --json headRefOid --jq .headRefOid)
   --sha "$HEAD_SHA"
 ```
 
+On success `register` prints one JSON line (`{"registered": true, "key": "<owner/repo>#<n>", "sha": "<sha>", "updated": <bool>}`); on failure it prints an `Error:` line to stderr and exits non-zero. The call is self-confirming — no separate command is needed to learn whether it worked.
+
 If registration fails, report the error but do not block — monitor is advisory. If `/prep-pr` Step 9 requires it via `--require-monitor`, it will catch the gap and retry.
 
 ## Step 6: Run finalize verification

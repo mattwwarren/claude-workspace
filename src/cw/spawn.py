@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -322,47 +323,104 @@ def _validate_worktree(path: Path) -> None:
 # the PreToolUse entry below.
 _AGENT_TOOL_MATCHER = "^(Agent|Task)$"
 
-_HOOK_SETTINGS_TEMPLATE = {
-    "hooks": {
-        "Stop": [
-            {
-                "matcher": "",
-                "hooks": [{"type": "command", "command": "cw signal-stop"}],
-            }
-        ],
-        # PreToolUse guard (#940 R5): blocks a Bash tool call when the worker's
-        # cwd resolves to the operator main checkout (workspace_path in
-        # cw-context.json), preventing the #925/#766 isolation breach. Fail-open
-        # (exit 0) on any missing/malformed context so it never blocks legit work.
-        # The second command on the Bash matcher is `cw guard-busy-wait`
-        # (#1946): it blocks a bare `true`/`:`/`sleep` no-op, and an identical
-        # command repeated past the configured threshold inside a rolling
-        # window. Appended to THIS entry's hooks list rather than declared as
-        # a second "Bash"-matched entry — one matcher, two commands, is the
-        # shape the template already uses for Stop and the shape whose
-        # dispatch behavior is exercised by the existing suite. Fail-open like
-        # its neighbour, and disable-able per lane or globally via
-        # busy_wait_guard_enabled in orchestrator.yaml.
-        "PreToolUse": [
-            {
-                "matcher": "Bash",
-                "hooks": [
-                    {"type": "command", "command": "cw guard-cwd"},
-                    {"type": "command", "command": "cw guard-busy-wait"},
-                ],
-            },
-            # #1646: stamp an unresolved-subagent-spawn marker before the
-            # spawn starts. Never blocks -- there is no failure mode in which
-            # refusing a subagent spawn is the right answer. The matching
-            # PostToolUse decrement was removed by #1947 -- see the
-            # re-verification note above _AGENT_TOOL_MATCHER.
-            {
-                "matcher": _AGENT_TOOL_MATCHER,
-                "hooks": [{"type": "command", "command": "cw agent-spawn-pre"}],
-            },
-        ],
+
+def _stop_hook_command(context_path: Path) -> str:
+    """Return the Stop hook command for a worktree whose context file is *context_path*.
+
+    #2226. ``cw signal-stop`` is a no-op in any session cw did not spawn -- it
+    reads the hook payload's ``cwd``, finds no ``.claude/cw-context.json`` and
+    returns -- but it pays a full Python interpreter start plus ``from cw.cli
+    import main`` to reach that conclusion: measured at ~250ms per invocation
+    against ~1.5ms for the shell guard below. On a user-level install (the
+    shape #2226 was filed for) that is ~250ms on every turn of every Claude
+    session on the machine.
+
+    The guard is one POSIX-sh existence test on the **absolute** path of the
+    context file this same code writes, in front of the unchanged call:
+    ``[ -f '<abs>/.claude/cw-context.json' ] || exit 0; cw signal-stop``.
+    cw writes the hook and the file together, per worktree, so the path is
+    known at injection time and is stable for the life of the worktree. That
+    makes the guard identity-free and unable to skip a dispatch worker: it
+    depends on no environment variable (ADR-0003 rejected env vars as the
+    identity channel -- ``claude --bg`` does not propagate the caller's
+    environment, #133) and on no ambient cwd (a worker's cwd legitimately
+    moves during a turn, e.g. into a detached gate worktree). An earlier
+    revision keyed the test on ``$CLAUDE_PROJECT_DIR`` with a hook-cwd
+    fallback; both are ambient, and when neither pointed at the session
+    worktree it skipped ``cw signal-stop`` and lost the completion signal.
+
+    The path is ``shlex.quote``-d so a worktree path with spaces or shell
+    metacharacters stays one word; ``json.dumps`` escapes the result when the
+    settings file is rendered. A hand-written or user-level copy of the hook
+    has no such path to bake in -- ``cw doctor``'s ``stop-hook-scope`` check
+    is what surfaces that shape.
+    """
+    return f"[ -f {shlex.quote(str(context_path))} ] || exit 0; cw signal-stop"
+
+
+def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]]]:
+    """Return the ``settings.local.json`` content for a worktree.
+
+    *context_path* is the absolute path of the worktree's ``cw-context.json``;
+    it is baked into the Stop hook's guard (see :func:`_stop_hook_command`).
+    Everything else is a per-worktree constant.
+    """
+    return {
+        "hooks": {
+            "Stop": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": _stop_hook_command(context_path),
+                        }
+                    ],
+                }
+            ],
+            # PreToolUse guard (#940 R5): blocks a Bash tool call when the
+            # worker's cwd resolves to the operator main checkout
+            # (workspace_path in cw-context.json), preventing the #925/#766
+            # isolation breach. Fail-open (exit 0) on any missing/malformed
+            # context so it never blocks legit work.
+            # The second command on the Bash matcher is `cw guard-busy-wait`
+            # (#1946): it blocks a bare `true`/`:`/`sleep` no-op, and an
+            # identical command repeated past the configured threshold inside a
+            # rolling window. Appended to THIS entry's hooks list rather than
+            # declared as a second "Bash"-matched entry — one matcher, two
+            # commands, is the shape the template already uses for Stop and the
+            # shape whose dispatch behavior is exercised by the existing suite.
+            # Fail-open like its neighbour, and disable-able per lane or
+            # globally via busy_wait_guard_enabled in orchestrator.yaml.
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {"type": "command", "command": "cw guard-cwd"},
+                        {"type": "command", "command": "cw guard-busy-wait"},
+                    ],
+                },
+                # #1646: stamp an unresolved-subagent-spawn marker before the
+                # spawn starts. The matching PostToolUse decrement was removed
+                # by #1947 -- see the re-verification note above
+                # _AGENT_TOOL_MATCHER.
+                # The stamp half still never blocks. #2211 folded a spawn-shape
+                # policy into the same command (no new hook, no new interpreter
+                # start, and already-provisioned worktrees pick it up on a cw
+                # upgrade since they reference the command by name): in a
+                # headless worker it refuses both an explicitly-forked subagent
+                # and one naming no subagent_type at all, since neither enters
+                # cw's roster (#2017) and a fork also inherits the parent's
+                # implementation mandate. Default-on, disable-able per lane or
+                # globally via subagent_spawn_guard_enabled in
+                # orchestrator.yaml. Every other spawn shape still allows.
+                {
+                    "matcher": _AGENT_TOOL_MATCHER,
+                    "hooks": [{"type": "command", "command": "cw agent-spawn-pre"}],
+                },
+            ],
+        }
     }
-}
 
 
 def _write_hook_context(
@@ -385,8 +443,12 @@ def _write_hook_context(
 
     Two files land under ``<worktree>/.claude/``:
 
-    - ``settings.local.json`` — configures a Stop hook that invokes
-      ``cw signal-stop`` after each agent turn.
+    - ``settings.local.json`` — configures a Stop hook that runs
+      ``cw signal-stop`` after each agent turn, behind a POSIX-sh guard that
+      tests the **absolute** path of the ``cw-context.json`` written below
+      (#2226, see :func:`_stop_hook_command`). The guard is identity-free: the
+      path it tests is written by this same function, so it cannot skip a
+      dispatch worker whatever the hook's environment or cwd.
     - ``cw-context.json`` — correlation metadata the hook reads to emit a
       ``SESSION_COMPLETED`` event keyed back to the cw session + dev_queue
       task. Bypasses the env-var injection limitation on ``claude --bg``
@@ -456,7 +518,7 @@ def _write_hook_context(
 
     atomic_write_text(
         settings_path,
-        json.dumps(_HOOK_SETTINGS_TEMPLATE, indent=2) + "\n",
+        json.dumps(_build_hook_settings(context_path.resolve()), indent=2) + "\n",
     )
     context: dict[str, object] = {
         "schema_version": CW_CONTEXT_SCHEMA_VERSION,

@@ -128,7 +128,7 @@ trusting `is_terminal_snapshot=true` on an old file at face value.
 | `no_op` | Done. Ticket already satisfied; close as completed. |
 | `ambiguities_pending_resolution` | Resolve ambiguities posted on the issue; re-dispatch. |
 | `premises_pending_verification` | Verify flagged premises, record on issue; re-dispatch. |
-| `plan_pending_approval` | Parks only for **large** (or unresolved) scope tier — small-tier plans advance unattended. Read the plan comment, then `cw dev-queue approve` (records `plan_approved_at` on the row — tracker-neutral; `--post-marker` additionally posts the `<!-- auto-dev-plan-approved -->` audit comment on GitHub). Advances to impl only once quality-reviewed, else re-queues at plan stage (#968). |
+| `plan_pending_approval` | Parks only for **large** (or unresolved) scope tier — small-tier plans advance unattended. Read the plan comment, then `cw dev-queue approve` (records `plan_approved_at` and the approved draft's fingerprint on the row — tracker-neutral; `--post-marker` additionally posts an audit-only `<!-- auto-dev-plan-approved: <sha> -->` comment on GitHub — a changed draft gets a fresh marker, the same draft does not duplicate, and nothing reads it back as approval evidence). Advances to impl only once quality-reviewed, else re-queues at plan stage (#968). |
 | `review_pending_approval` | Parks only for large (or unresolved) tier. Review the pushed branch diff, run gates, then `cw dev-queue approve` (advances to FINALIZE, which ships) — or ship manually (PR + auto-merge). With signoff configured, `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again to clear. |
 | `merge_pending` | PR created, CI/merge gate not yet cleared (#899). Not a failure — monitor/merge the PR (`pr_url` is preserved on the task); do not re-dispatch. |
 | `merge_gate_blocked` | Prior pipeline PR still open; merge or close it; re-dispatch. |
@@ -262,7 +262,10 @@ section of [`docs/headless-contract.md`](headless-contract.md) for the full
 > liveness veto described in older revisions of this document are gone; a
 > quiet-but-live worker now surfaces via the liveness distress signal
 > (`session.needs_attention` with `paused_status=session_unresponsive`)
-> and is never dispositioned automatically.
+> and is never dispositioned automatically. The Stop-hook abandoned-exit
+> park (#2135, §6c) joins that evidence-driven set: it fires on the park
+> marker the worker itself recorded, never on elapsed time, and mutates only
+> the dev-queue row.
 
 If you need to force reconcile to re-examine state:
 
@@ -322,10 +325,12 @@ where one already existed:
 | phantom-sweep SIGNAL_ONLY reroute (clean crash) | `ReapReason.PHANTOM_SURFACE` |
 | phantom-sweep unresolved-subagent-spawn reroute (#1646) | `_UNRESOLVED_SUBAGENT_SPAWN_REASON` ("unresolved_subagent_spawn") — a clean *or* dirty crash whose worktree still carries an unresolved spawn stamp. Takes precedence over both `PHANTOM_SURFACE` and `dirty_worktree`, and **overrides `reap_policy: auto`**. See §6b |
 | phantom gh-check-blocked route | `_GH_CHECK_BLOCKED_REASON` |
+| Stop-hook abandoned-exit park (#2135) | `_STOPPED_WITHOUT_SENTINEL_REASON` ("stopped_without_sentinel") — the Stop hook saw the worker's recorded `park_comment_marker` and no sentinel. See §6c |
 | salvage LOW-path flag *(historical, ADR-0014)* | `_NEEDS_SALVAGE_REASON` |
 | terminal-sibling park (`tasks.py`) | `ReapReason.TERMINAL_SIBLING` |
 | unknown client / invalid pipeline stage (`dispatch.py`) | `"unknown_client"` / `"invalid_stage_config"` (deliberately excluded from concierge/escalation eligibility — config errors, not recoverable states) |
 | mechanically-rejected MUST_FIX park (`dispatch/routing.py`, #1714) | `REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION` ("codex_must_fix_mechanically_rejected") — stamped directly by `_park_must_fix_mechanically_rejected`, Rule 5's only reason-keyed override, rather than derived via `_hold_aware_disposition`. Escalation-eligible and drain-eligible; deliberately excluded from `HOLD_DISPOSITIONS` and from concierge's false-park requeue |
+| fix-dispatch unresolvable-remote-ref park (`fix_dispatch.py`, #2209) | `_FIX_DISPATCH_REF_UNRESOLVED_REASON` ("fix_dispatch_ref_unresolved") — stamped by `_park_for_unresolved_ref` when no candidate in the reported/upstream/templated remote-ref ladder has a tip matching worktree HEAD. Escalation-eligible; excluded from `HOLD_DISPOSITIONS`, `DRAIN_DISPOSITIONS`, and concierge's false-park requeue — and, unlike every other row in this table, does NOT clear `pending_fix_dispatch` on park, retaining the REVIEW round's action list as evidence for the operator. That retention is not a resume point: `cw dev-queue requeue` sets the row PENDING, the retained handoff is then dropped by the #2142 stale-handoff sweep, and the ticket is claimed into a **fresh REVIEW session** (#2265 decides whether requeue should resume the handoff instead) |
 
 `cw.reconcile.escalation`'s `_ELIGIBLE_DISPOSITIONS` and
 `cw.reconcile.concierge`'s `_FALSE_PARK_ELIGIBLE_DISPOSITIONS` were updated
@@ -448,11 +453,128 @@ it. Related: #1630, #1625.
 
 ---
 
+### 6c. Stop-hook abandoned-exit park (#2135)
+
+A headless worker that posts its park/blocker comment to the tracker and then
+stops without emitting an `AUTO_DEV_RESULT` sentinel used to leave its row
+`RUNNING` until the liveness ladder noticed it 45 minutes later. `cw
+signal-stop` can now route that row itself.
+
+> **Ships dark — default off.** The park is a state-mutating auto-actor, so it
+> is gated by `park_on_abandoned_exit_enabled` in `orchestrator.yaml` (default
+> `false`) plus a per-lane / per-ticket `park_on_abandoned_exit` map whose
+> floor is `false`. With the park disabled, a sentinel-less Stop defers
+> exactly as it did before #2135 and the marker is not even read. The
+> Stop hook checks its preconditions cheapest-first — headless DAEMON session,
+> empty `background_tasks`, a `RUNNING` dev-queue row for the session — and
+> only then resolves the flag, so a session with no row to park never reads
+> config at all. The resolved config is memoized per `(client, lane)` for the
+> (short-lived) hook process, and every failure resolves to *disabled*: an
+> unreadable or invalid `orchestrator.yaml` / `clients.yaml`, an unreadable
+> `dev_queue.json`, a client absent from `clients.yaml`, a lane that client
+> never declares, and an absent lane entry all defer, log once at WARNING with
+> the names and error class, and never raise out of the hook. The undeclared-lane
+> gate runs *ahead* of all three resolver tiers, so a per-ticket
+> `park_on_abandoned_exit` override cannot open a lane nobody armed.
+> Arming it is an operator action — see
+> [`config/CONFIG_REFERENCE.md`](../config/CONFIG_REFERENCE.md)'s *Abandoned-Exit
+> Park Enablement*.
+
+Once armed, the park fires on four-part evidence:
+
+1. the Stop fired with **no pending background tasks** (the existing
+   `background_tasks` guard in `signal_stop` already establishes this);
+2. **no sentinel** was parsed from the transcript;
+3. the worktree's `.claude/cw-context.json` carries a `park_comment_marker`
+   matching the current cw session id, the ticket id, and the **`RUNNING`
+   row's stage** — written by the worker itself with `cw signal-park` after
+   its park comment posted; and
+4. **no** `AUTO_DEV_RESULT` framing text — not even an unpaired open marker, a
+   placeholder, or a #1692-discarded frame — appears in the transcript at or
+   after the marker's `posted_at`.
+
+This is **evidence-driven, not a timer** — the same family as ADR-0014's
+"What remains" (roster-absence phantoms, recorded terminal results,
+emitted-sentinel routing). `posted_at` is never compared to a wall clock: no
+age, no expiry, no threshold. Its only non-audit use is as the ordering pivot
+in conjunct 4, a comparison that can only ever *suppress* a park.
+
+It mutates the dev-queue row only: `RUNNING →
+BLOCKED_ON_USER`, `disposition="stopped_without_sentinel"`, no
+`blocked_reason`, and **no `unproductive_attempts` charge** (the park post is
+positive evidence the stage did its work).
+
+The **session is left ACTIVE** and the daemon worker is not stopped, so a
+late sentinel still routes through the #918 rescue in
+`_apply_sentinel_to_task` — the row keeps its `session_id` precisely so that
+rescue can re-find it. The park is therefore reversible.
+
+Like `gh_check_blocked`, the disposition is in **neither** concierge's
+`_REAP_ELIGIBLE_DISPOSITIONS_BASE` (auto-requeue would re-run a stage the
+operator was just asked to look at) **nor** escalation's eligibility set.
+
+The liveness sweep's `session_unresponsive` distress signal is **suppressed**
+for a row in this state whose `session_id` matches the session being
+classified — it already paged through its own `session.needs_attention`.
+Signal-only and per tick: bucket latching and `session.liveness_changed` are
+unaffected, every other disposition still pages, and once the row is requeued
+(its status leaves `BLOCKED_ON_USER`) the signal applies again.
+
+**Producer contract and limits.** The marker is a *recorded claim by the
+worker* that it posted its park comment and is taking that exit — not an
+observation by cw that any comment exists. cw never reads the tracker, which
+is what makes the evidence tracker-agnostic (GitHub and Linear alike). What
+follows from that:
+
+- **One wired stage.** Only the plan stage's consolidated park stamps today:
+  step 3a of `.claude/commands/auto-dev-plan-appendix.md`, after the single
+  `## Pending Verification Scan` comment that `ambiguities_pending_resolution`,
+  `premises_pending_verification`, `plan_pending_approval`,
+  `deferred_stub_unresolved` and `ambiguity_scan_unconverged` all share. The
+  impl and review park paths do not stamp yet (#2228); no impl exit posts a
+  tracker comment at all, so there is nothing there for the marker to mean.
+- **Crash window.** A worker that dies between deciding its exit and running
+  `cw signal-park` leaves no marker, and the Stop hook defers exactly as it did
+  before #2135 — the row then waits for the `stale_45m` liveness signal or an
+  operator.
+- **No marker means defer**, and so does a malformed one (treated as absent,
+  silently — the writer is cw code, so the only routes here are a hand edit or
+  corruption).
+- **A missing or unreadable transcript defers.** Conjunct 4 is negative
+  evidence: without a clean read, a late frame cannot be ruled out, so an
+  unreadable file and a torn final line both suppress the park.
+- **A `Read` of a stage doc after the stamp also defers**, because the quoted
+  frame literal lands in a `tool_result` the guard sees. That fails toward
+  pre-#2135 behavior.
+- **Stale markers do not count.** `cw.spawn` rewrites `cw-context.json`
+  wholesale on every dispatch, which is the *only* staleness guard — the
+  session-id and ticket-id checks compare that file with itself. A `cw bg`
+  followed by `cw resume` of the same daemon session re-enters under the same
+  session id **without** rewriting the file, so a marker stamped earlier in the
+  session can still cover the row. That path is a documented limit, not closed
+  in code.
+- **cwd mismatch defers.** A stamp run from a subdirectory, a gate worktree or
+  a nested agent worktree finds no `.claude/cw-context.json`, fails open, and
+  the hook reads no marker.
+
+**Operator recovery.** Requeue a parked row with `cw dev-queue requeue`. `cw
+dev-queue approve` **refuses** it (`_not_at_approval_gate`,
+`src/cw/dev_queue/approval.py`: the row has neither a scope-gated `last_result`
+nor an approval-gate disposition) — including when the parked comment was
+asking for plan approval, which is the common plan-stage case. The parked
+session stays ACTIVE, so a requeue may hit `HookContextConflictError` while it
+is still live; close it first with `cw spawn close --confirmed-dead`.
+
+---
+
 ## 7. Cross-references
 
 - [`docs/dispatch-runbook.md`](dispatch-runbook.md) — full end-to-end dispatch procedure.
 - [`docs/headless-contract.md`](headless-contract.md) — `AUTO_DEV_RESULT` schema, status enum, `ReapReason` taxonomy, `queue.session_reaped` event.
 - [`docs/events.md`](events.md) — `session.park_vetoed` and the full orchestrator event-bus reference.
 - `src/cw/cli/_sentinels.py:_parse_sentinel_from_transcript` — transcript sentinel reader.
+- `src/cw/cli/_sentinels.py:_sentinel_frame_after` — the §6c false-park guard (negative evidence only).
+- `src/cw/cli/signal_park.py` — `cw signal-park`, the §6c park-marker writer.
+- `src/cw/models/park_comment_marker.py` — the marker model and its reader.
 - `src/cw/reconcile/_shared.py:_locate_session_transcript` — transcript path resolver.
 - `src/cw/reconcile/_shared.py:_csid_from_transcript` — claude_session_id derivation.

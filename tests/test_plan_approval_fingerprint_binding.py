@@ -7,16 +7,54 @@ that closes that gap: a single named fingerprint rule, producer instructions
 citing it at every plan-stage sentinel emission, and Checkpoint 1's
 equality-gated consumption of the row-side evidence.
 
-Marker-comment language is deliberately absent throughout: the
-`<!-- auto-dev-plan-approved -->` comment is a write-only audit record that no
-Stage 1 decision logic reads, and this ticket does not make it an evidence
-source.
+Marker language stays out of every evidence site: the
+`<!-- auto-dev-plan-approved: <sha> -->` comment that `cw dev-queue approve
+--post-marker` posts (#2194) is a write-only, audit-only record that no Stage 1
+decision logic reads. It embeds the draft fingerprint for display, and the
+guards below pin that it is never an evidence source.
 """
 
-from tests.conftest import _appendix, _cmd
+import pytest
+
+from tests.conftest import _REPO_ROOT, _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 _FINGERPRINT_RULE_NAME = "Plan-draft fingerprint rule"
+
+_PLAN_APPROVED_MARKER_NAME = "auto-dev-plan-approved"
+
+# Docs that must state the marker is audit-only, at the one place each names
+# it. `.claude/commands/` prose is read through conftest's `_cmd`; the rest
+# are repo-root paths.
+_MARKER_DOCS = (
+    "README.md",
+    "docs/dispatch-runbook.md",
+    "docs/session-disposition.md",
+    ".claude/commands/auto-dev.md",
+)
+
+_COMMANDS_PREFIX = ".claude/commands/"
+
+
+def _doc_text(relative: str) -> str:
+    return (
+        _cmd(relative[len(_COMMANDS_PREFIX) :])
+        if relative.startswith(_COMMANDS_PREFIX)
+        else (_REPO_ROOT / relative).read_text(encoding="utf-8")
+    )
+
+
+def _window_around(
+    content: str, anchor: str, before: int = 400, after: int = 700
+) -> str:
+    """Text on BOTH sides of *anchor*.
+
+    The status-table rows put `audit-only` ahead of the marker string, so the
+    forward-only `_after` and backward-only `_nearby` windows imported above
+    each miss half of what these guards have to see.
+    """
+    idx = content.index(anchor)
+    return content[max(0, idx - before) : idx + after]
 
 
 def _plan_doc() -> str:
@@ -125,10 +163,36 @@ def test_chained_monolith_template_cites_named_fingerprint_rule() -> None:
     assert "null" in window
 
 
+@pytest.mark.parametrize("relative", _MARKER_DOCS)
+def test_marker_documented_audit_only(relative: str) -> None:
+    """Every doc that names the marker has to say, right there, that it is
+    audit-only -- an operator who reads one page and not the others must not
+    come away thinking the comment is what makes an approval real (#2194)."""
+    window = _window_around(_doc_text(relative), _PLAN_APPROVED_MARKER_NAME)
+    assert "audit-only" in window
+
+
+def test_provenance_rule_excludes_marker_from_evidence() -> None:
+    """The comment-provenance rule is where the exclusion has to live: the
+    marker is an unmarked operator-authored comment posted right after a park
+    comment, so Checkpoint 1's comment path could plausibly read it."""
+    window = _after(_cmd("auto-dev.md"), _PLAN_APPROVED_MARKER_NAME, span=900)
+    assert "never plan-approval evidence" in window
+
+
+def test_fingerprint_rule_names_audit_marker_display_only() -> None:
+    """The rule now has to account for the marker carrying the fingerprint
+    (#2194) without promoting it to a transport: display, never evidence."""
+    section = _fingerprint_rule_section()
+    assert "audit marker" in section
+    assert "display, never evidence" in section
+
+
 def test_fingerprint_rule_claims_no_comment_transport() -> None:
-    """The marker scope was cut (#2194): the only transport is sentinel ->
-    session -> dev-queue row -> `cw-context.json`. A rule still advertising a
-    comment channel points a producer at a path nothing reads."""
+    """The only evidence transport is sentinel -> session -> dev-queue row ->
+    `cw-context.json`. `--post-marker` (#2194) embeds the fingerprint in an
+    audit marker for display only; a rule advertising a comment channel as
+    evidence points a producer at a path nothing reads."""
     section = _fingerprint_rule_section()
     assert "tracker comment" not in section
     assert "marker comment" not in section

@@ -15,16 +15,19 @@ import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cw import codex_background
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_background import (
+    _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
     _default_background,
     _post_review_comment,
+    _resolve_claim_tier_enabled,
     _resolve_codex_fix_loop_enabled,
+    _resolve_disposition_drift_check_enabled,
     _run_codex_review_and_complete,
     _start_daemon_thread,
     _sync_finding_dispositions_to_running_task,
@@ -45,7 +48,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
-from cw.review_finding_dispositions import FindingDisposition
+from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from tests.conftest import _make_daemon_session
 
 if TYPE_CHECKING:
@@ -593,6 +596,341 @@ def test_resolve_codex_fix_loop_enabled_unmatched_lane_falls_through_to_global()
 
 
 # ---------------------------------------------------------------------------
+# _resolve_claim_tier_enabled precedence (#2210)
+# ---------------------------------------------------------------------------
+
+
+def _claim_client(*lanes: LaneConfig) -> ClientConfig:
+    return ClientConfig(name="test", workspace_path=Path("/tmp/x"), lanes=list(lanes))
+
+
+def _claim_task(lane: str = "trial") -> TicketTask:
+    return TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW, lane=lane)
+
+
+@pytest.mark.parametrize(
+    ("lanes", "task_lane", "master", "expected"),
+    [
+        # Master off is a kill switch: an armed lane cannot override it.
+        (
+            [LaneConfig(name="trial", codex_review_tiers={"claim_suppression": True})],
+            "trial",
+            False,
+            False,
+        ),
+        # Master on, lane silent on the key -> the hardcoded-off floor.
+        ([LaneConfig(name="trial")], "trial", True, False),
+        (
+            [LaneConfig(name="trial", codex_review_tiers={"claim_suppression": True})],
+            "trial",
+            True,
+            True,
+        ),
+        (
+            [LaneConfig(name="trial", codex_review_tiers={"claim_suppression": False})],
+            "trial",
+            True,
+            False,
+        ),
+        # The task's lane is not declared by the client -> floor.
+        (
+            [LaneConfig(name="trial", codex_review_tiers={"claim_suppression": True})],
+            "no-such-lane",
+            True,
+            False,
+        ),
+        # No declared lanes at all: a synthesised `default` lane carries no
+        # tier map, so arming requires declaring the lane.
+        ([], "default", True, False),
+    ],
+)
+def test_resolve_claim_tier_enabled_table(
+    lanes: list[LaneConfig], task_lane: str, master: bool, expected: bool
+) -> None:
+    config = OrchestratorConfig(codex_claim_suppression_enabled=master)
+    resolved = _resolve_claim_tier_enabled(
+        _claim_client(*lanes), _claim_task(task_lane), config
+    )
+    assert resolved is expected
+
+
+def test_resolve_claim_tier_enabled_arms_only_the_named_lane() -> None:
+    client = _claim_client(
+        LaneConfig(name="armed", codex_review_tiers={"claim_suppression": True}),
+        LaneConfig(name="quiet"),
+    )
+    config = OrchestratorConfig(codex_claim_suppression_enabled=True)
+    assert _resolve_claim_tier_enabled(client, _claim_task("armed"), config) is True
+    assert _resolve_claim_tier_enabled(client, _claim_task("quiet"), config) is False
+
+
+def test_default_codex_review_tier_floor_is_off() -> None:
+    assert _DEFAULT_CODEX_REVIEW_TIER_ENABLED == {"claim_suppression": False}
+
+
+@pytest.mark.parametrize(
+    ("lanes", "master", "expected"),
+    [
+        (
+            [LaneConfig(name="trial", codex_review_tiers={"claim_suppression": True})],
+            True,
+            True,
+        ),
+        ([LaneConfig(name="trial")], False, False),
+    ],
+)
+def test_run_codex_review_and_complete_forwards_claim_tier(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    lanes: list[LaneConfig],
+    master: bool,
+    expected: bool,
+) -> None:
+    worktree = make_git_repo(f"wt-bg-claim-{master}")
+    _seed_session("bg-claim")
+    task = TicketTask(
+        ticket_id="T-claim", client="test", stage=Stage.REVIEW, lane="trial"
+    )
+    result = make_blocked(
+        ticket_id="T-claim",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        lanes=list(lanes),
+    )
+    with (
+        patch(
+            "cw.codex_background.load_effective_config",
+            return_value=OrchestratorConfig(codex_claim_suppression_enabled=master),
+        ),
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, None),
+        ) as fix_loop_mock,
+    ):
+        _run(sid="bg-claim", task=task, worktree=worktree, client=client)
+
+    assert fix_loop_mock.call_args.kwargs["claim_tier_enabled"] is expected
+
+
+# ---------------------------------------------------------------------------
+# _resolve_disposition_drift_check_enabled + the claim-tier arming gate (#2232)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lanes", "task_lane", "global_default", "expected"),
+    [
+        # A lane override wins in BOTH directions — off against an on global…
+        (
+            [LaneConfig(name="trial", disposition_drift_check_enabled=False)],
+            "trial",
+            True,
+            False,
+        ),
+        # …and on against an off one. There is no master kill switch here.
+        (
+            [LaneConfig(name="trial", disposition_drift_check_enabled=True)],
+            "trial",
+            False,
+            True,
+        ),
+        # Lane silent on the key -> the global, which defaults ON.
+        ([LaneConfig(name="trial")], "trial", True, True),
+        ([LaneConfig(name="trial")], "trial", False, False),
+        # The task's lane is not declared by the client -> the global.
+        (
+            [LaneConfig(name="trial", disposition_drift_check_enabled=False)],
+            "no-such-lane",
+            True,
+            True,
+        ),
+        # No declared lanes at all: the synthesised `default` lane carries no
+        # override, so the global stands. Unlike the claim tier, that is ON.
+        ([], "default", True, True),
+    ],
+)
+def test_resolve_disposition_drift_check_enabled_table(
+    lanes: list[LaneConfig],
+    task_lane: str,
+    global_default: bool,
+    expected: bool,
+) -> None:
+    config = OrchestratorConfig(disposition_drift_check_enabled=global_default)
+    resolved = _resolve_disposition_drift_check_enabled(
+        _claim_client(*lanes), _claim_task(task_lane), config
+    )
+    assert resolved is expected
+
+
+def test_resolve_disposition_drift_check_enabled_scopes_to_the_named_lane() -> None:
+    client = _claim_client(
+        LaneConfig(name="off", disposition_drift_check_enabled=False),
+        LaneConfig(name="quiet"),
+    )
+    config = OrchestratorConfig()
+    assert (
+        _resolve_disposition_drift_check_enabled(client, _claim_task("off"), config)
+        is False
+    )
+    assert (
+        _resolve_disposition_drift_check_enabled(client, _claim_task("quiet"), config)
+        is True
+    )
+
+
+def _run_with_config(
+    tmp_worktree: Path,
+    *,
+    sid: str,
+    lanes: list[LaneConfig],
+    config: OrchestratorConfig,
+) -> MagicMock:
+    """Run the review unit of work under *config*, returning the loop mock."""
+    _seed_session(sid)
+    task = TicketTask(
+        ticket_id="T-arm", client="test", stage=Stage.REVIEW, lane="trial"
+    )
+    result = make_blocked(
+        ticket_id="T-arm",
+        worktree=tmp_worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_worktree,
+        default_branch="main",
+        lanes=list(lanes),
+    )
+    with (
+        patch("cw.codex_background.load_effective_config", return_value=config),
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, None),
+        ) as fix_loop_mock,
+    ):
+        _run(sid=sid, task=task, worktree=tmp_worktree, client=client)
+    return fix_loop_mock
+
+
+@pytest.mark.parametrize(
+    ("claim_tier", "drift_check"),
+    [(True, True), (False, True), (False, False)],
+)
+def test_arming_gate_lets_the_other_three_cells_through(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    claim_tier: bool,
+    drift_check: bool,
+) -> None:
+    """Only claim-tier-on + drift-check-off is refused (#2232)."""
+    worktree = make_git_repo(f"wt-bg-arm-{claim_tier}-{drift_check}")
+    fix_loop_mock = _run_with_config(
+        worktree,
+        sid=f"bg-arm-{claim_tier}-{drift_check}",
+        lanes=[
+            LaneConfig(
+                name="trial",
+                codex_review_tiers={"claim_suppression": claim_tier},
+                disposition_drift_check_enabled=drift_check,
+            )
+        ],
+        config=OrchestratorConfig(codex_claim_suppression_enabled=True),
+    )
+
+    fix_loop_mock.assert_called_once()
+    kwargs = fix_loop_mock.call_args.kwargs
+    assert kwargs["claim_tier_enabled"] is claim_tier
+    assert kwargs["disposition_drift_check_enabled"] is drift_check
+
+
+def test_arming_the_claim_tier_with_the_drift_check_off_is_refused(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2232: drift-checking is the claim tier's arming precondition.
+
+    The refusal reaches the operator through the daemon thread's existing
+    broad ``except Exception`` — session COMPLETED/blocked with
+    ``UNEXPECTED_ERROR``, task handed back to PENDING with backoff — the exact
+    contract ``test_run_codex_review_and_complete_exception_path`` already
+    pins for any exception raised inside that ``try``. Nothing new is plumbed;
+    the validator only has to raise.
+    """
+    worktree = make_git_repo("wt-bg-arm-refused")
+    add_ticket(
+        TicketTask(
+            ticket_id="T-arm",
+            client="test",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+            session_id="bg-arm-refused",
+        )
+    )
+    fix_loop_mock = _run_with_config(
+        worktree,
+        sid="bg-arm-refused",
+        lanes=[
+            LaneConfig(
+                name="trial",
+                codex_review_tiers={"claim_suppression": True},
+                disposition_drift_check_enabled=False,
+            )
+        ],
+        config=OrchestratorConfig(codex_claim_suppression_enabled=True),
+    )
+
+    # The review never ran: the refusal fires before the fix loop is entered.
+    fix_loop_mock.assert_not_called()
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    persisted = AutoDevResult.model_validate(session.last_result)
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == UNEXPECTED_ERROR
+    stored = load_dev_queue().tasks[0]
+    assert stored.status is QueueItemStatus.PENDING
+    assert stored.spawn_error_count == 1
+
+
+def test_the_arming_refusal_message_names_both_settings_and_the_fix(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The message IS the operator-facing surface, via ``_log.exception``."""
+    import logging
+
+    worktree = make_git_repo("wt-bg-arm-message")
+    with caplog.at_level(logging.ERROR, logger="cw.codex_background"):
+        _run_with_config(
+            worktree,
+            sid="bg-arm-message",
+            lanes=[
+                LaneConfig(
+                    name="trial",
+                    codex_review_tiers={"claim_suppression": True},
+                    disposition_drift_check_enabled=False,
+                )
+            ],
+            config=OrchestratorConfig(codex_claim_suppression_enabled=True),
+        )
+
+    logged = "\n".join(
+        record.getMessage()
+        + ("" if record.exc_info is None else str(record.exc_info[1]))
+        for record in caplog.records
+    )
+    assert "disposition_drift_check_enabled" in logged
+    assert "codex_claim_suppression_enabled" in logged
+
+
+# ---------------------------------------------------------------------------
 # _post_review_comment — Step 4b's best-effort GitHub write
 # ---------------------------------------------------------------------------
 
@@ -720,13 +1058,31 @@ def test_post_review_comment_logs_on_nonzero_returncode(
 
 
 def _disposition(**overrides: object) -> FindingDisposition:
+    """A record with the full provenance set the reader requires (#2210).
+
+    ``summary`` defaults to the one every ``_ledger_entry`` key below is minted
+    from, so the record's key binds to it.
+    """
     payload: dict[str, object] = {
         "outcome": "REJECTED",
         "rationale": "settled by the operator",
         "recorded_at": "2026-08-16T00:00:00Z",
+        "actor": "mattwwarren",
+        "reviewed_sha": "abc1234",
+        "summary": "Bug here",
     }
     payload.update(overrides)
     return FindingDisposition.model_validate(payload)
+
+
+def _ledger_entry(
+    file: str = "src/cw/foo.py", summary: str = "Bug here", **overrides: object
+) -> dict[str, FindingDisposition]:
+    """A one-entry ledger keyed through the real key function."""
+    key = _disposition_key(file, summary)
+    assert key is not None
+    overrides.setdefault("summary", summary)
+    return {key: _disposition(**overrides)}
 
 
 class TestSyncFindingDispositionsToRunningTask:
@@ -748,41 +1104,67 @@ class TestSyncFindingDispositionsToRunningTask:
 
     def test_merges_entries_onto_the_matching_running_row(self) -> None:
         add_ticket(self._running())
+        fresh = _ledger_entry()
+        _sync_finding_dispositions_to_running_task(
+            client_name="test", ticket_id="T-1838", dispositions=fresh
+        )
+        stored = load_dev_queue().tasks[0]
+        assert stored.finding_dispositions == fresh
+
+    def test_merge_is_additive_and_idempotent(self) -> None:
+        old = _ledger_entry("src/cw/old.py", "Old bug")
+        add_ticket(self._running(finding_dispositions=old))
+        fresh = _ledger_entry()
+        _sync_finding_dispositions_to_running_task(
+            client_name="test", ticket_id="T-1838", dispositions=fresh
+        )
+        _sync_finding_dispositions_to_running_task(
+            client_name="test", ticket_id="T-1838", dispositions=fresh
+        )
+        stored = load_dev_queue().tasks[0]
+        assert stored.finding_dispositions == {**old, **fresh}
+
+    def test_an_invalid_record_never_replaces_a_valid_row_entry(self) -> None:
+        """Validate first, write second (#2210 round 3), at the persistence hop.
+
+        The dev-queue row is the DURABLE ledger. A record that fails provenance
+        — here one with a LATER ``recorded_at`` that would win a newest-wins
+        merge — must leave the valid entry already on the row exactly as it
+        was, even if a caller forgets to filter it out first.
+        """
+        settled = _ledger_entry(rationale="the settled one")
+        add_ticket(self._running(finding_dispositions=settled))
+        hijack = _ledger_entry(
+            actor="", rationale="hijack", recorded_at="2099-01-01T00:00:00Z"
+        )
+        _sync_finding_dispositions_to_running_task(
+            client_name="test", ticket_id="T-1838", dispositions=hijack
+        )
+        assert load_dev_queue().tasks[0].finding_dispositions == settled
+
+    def test_an_invalid_record_is_not_persisted_as_a_new_entry(self) -> None:
+        add_ticket(self._running())
         _sync_finding_dispositions_to_running_task(
             client_name="test",
             ticket_id="T-1838",
-            dispositions={"src/cw/foo.py::bug here": _disposition()},
+            dispositions=_ledger_entry(reviewed_sha=""),
         )
-        stored = load_dev_queue().tasks[0]
-        assert stored.finding_dispositions["src/cw/foo.py::bug here"].outcome == (
-            "REJECTED"
-        )
+        assert load_dev_queue().tasks[0].finding_dispositions == {}
 
-    def test_merge_is_additive_and_idempotent(self) -> None:
-        add_ticket(
-            self._running(
-                finding_dispositions={"src/cw/old.py::old bug": _disposition()}
-            )
-        )
-        fresh = {"src/cw/foo.py::bug here": _disposition()}
+    def test_a_valid_newer_record_replaces_the_row_entry(self) -> None:
+        add_ticket(self._running(finding_dispositions=_ledger_entry(rationale="old")))
+        newer = _ledger_entry(rationale="new", recorded_at="2026-09-01T00:00:00Z")
         _sync_finding_dispositions_to_running_task(
-            client_name="test", ticket_id="T-1838", dispositions=fresh
+            client_name="test", ticket_id="T-1838", dispositions=newer
         )
-        _sync_finding_dispositions_to_running_task(
-            client_name="test", ticket_id="T-1838", dispositions=fresh
-        )
-        stored = load_dev_queue().tasks[0]
-        assert set(stored.finding_dispositions) == {
-            "src/cw/old.py::old bug",
-            "src/cw/foo.py::bug here",
-        }
+        assert load_dev_queue().tasks[0].finding_dispositions == newer
 
     def test_no_matching_running_row_is_a_no_op(self) -> None:
         add_ticket(self._running(status=QueueItemStatus.PENDING))
         _sync_finding_dispositions_to_running_task(
             client_name="test",
             ticket_id="T-1838",
-            dispositions={"src/cw/foo.py::bug here": _disposition()},
+            dispositions=_ledger_entry(),
         )
         assert load_dev_queue().tasks[0].finding_dispositions == {}
 

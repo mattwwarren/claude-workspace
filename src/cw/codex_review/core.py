@@ -35,6 +35,8 @@ def run_review(
     wall_clock_budget_seconds: int | None,
     session_id: str,
     fix_loop_enabled: bool,
+    claim_tier_enabled: bool = False,
+    disposition_drift_check_enabled: bool = True,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -50,7 +52,20 @@ def run_review(
     function, which applies them before deciding whether the pass blocks. Its
     ``finding_dispositions`` (#1838) ride the same hop, for the same reason —
     the prepared pass already merged the durable queue-row ledger with the
-    ticket thread's marker, so this only has to thread the result.
+    ticket thread's marker, so this only has to thread the result — along with
+    the marker records that merge refused (#2210 round 3), which are not in the
+    ledger and so must ride beside it to reach the review output.
+
+    ``claim_tier_enabled`` (#2210) is the lane-resolved gate for the ledger's
+    fuzzy claim-match tier, forwarded to the same function. Defaulted False so
+    this entry point — the whole fix-loop-disabled lane, and cycle 0 of the
+    enabled one — is off unless a caller deliberately arms it.
+
+    ``disposition_drift_check_enabled`` (#2232) rides the same hop and is
+    likewise only forwarded. Its default is True, the opposite of the gate
+    above, because the two fail in opposite directions: a claim tier that arms
+    by omission suppresses a finding nobody settled, while a drift check that
+    runs by omission costs one ``git diff``.
 
     ``run_codex_roles``' fourth return value (#2029) — the findings rescued out
     of their documents at parse time — rides the same hop as well, so a
@@ -85,5 +100,8 @@ def run_review(
         agent_spec_status=prepared.agent_spec_status,
         voided_findings=prepared.voided_findings,
         finding_dispositions=prepared.finding_dispositions,
+        refused_dispositions=prepared.refused_dispositions,
+        claim_tier_enabled=claim_tier_enabled,
+        disposition_drift_check_enabled=disposition_drift_check_enabled,
         pre_validation_rejected=pre_validation_rejected,
     )

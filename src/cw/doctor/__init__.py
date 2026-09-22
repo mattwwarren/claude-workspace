@@ -27,6 +27,9 @@ re-exports. Submodules:
   ``~/.claude`` drift detection.
 - ``agent_spec_drift`` — per-client reviewer agent-spec resolution (repo /
   global fallback / absent) drift detection.
+- ``user_level_hooks`` — detection of a ``cw signal-stop`` Stop hook installed
+  in ``~/.claude/settings{,.local}.json``, where it applies to every Claude
+  session instead of just cw's worktrees (#2226).
 - ``core`` — the ``run_doctor`` orchestrator that assembles the full report.
 - ``report`` — human-readable and JSON rendering.
 """
@@ -63,6 +66,7 @@ from cw.doctor.loop_health import (
 )
 from cw.doctor.report import format_report, format_report_json
 from cw.doctor.skills_drift import _check_skills_commands_drift
+from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
     _CW_DEPS_CHECK_NAME,
     _CW_PACKAGE_NAME,
@@ -111,6 +115,7 @@ __all__ = [
     "_check_skills_commands_drift",
     "_check_ssh_key_loaded",
     "_check_timed_out_merged",
+    "_check_user_level_stop_hook",
     "_check_wedge_repo_ahead",
     "_check_wedge_task_running_completed_session",
     "_check_wedge_task_running_no_session",

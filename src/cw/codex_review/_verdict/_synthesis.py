@@ -61,6 +61,7 @@ if TYPE_CHECKING:
         ReviewerRunMetrics,
         ReviewVerdict,
     )
+    from cw.review_markers import RefusedDisposition
 
 _log = logging.getLogger(__name__)
 
@@ -169,6 +170,9 @@ def synthesize_codex_review_result(
     agent_spec_status: list[AgentSpecStatus] | None = None,
     voided_findings: list[VoidedFinding] | None = None,
     finding_dispositions: dict[str, FindingDisposition] | None = None,
+    refused_dispositions: list[RefusedDisposition] | None = None,
+    claim_tier_enabled: bool = False,
+    disposition_drift_check_enabled: bool = True,
     pre_validation_rejected: list[RejectedFinding] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
@@ -255,6 +259,20 @@ def synthesize_codex_review_result(
     fingerprint-keyed and does not. Applied here for the identical reason —
     both call sites reach the blocking check through this function.
 
+    ``refused_dispositions`` (#2210 round 3) are the marker records the write
+    path refused for failing provenance. They never entered
+    ``finding_dispositions``, so they are forwarded to
+    ``suppress_adjudicated_findings`` to be reported on the verdict beside the
+    refusals it derives from the ledger itself.
+
+    ``claim_tier_enabled`` (#2210) arms that ledger's fuzzy second matching
+    tier for this pass. Default False — the fail-safe floor — so a call path
+    that never threads it is off. It is forwarded, along with this function's
+    own ``reviewed_sha``, straight into ``suppress_adjudicated_findings``:
+    with the gate closed the tier still measures itself, recording one
+    ``review.finding_claim_shadowed`` event per finding it would have
+    suppressed. See ADR-0016.
+
     ``pre_validation_rejected`` (#2029) is the findings ``run_codex_roles``
     rescued out of their documents at parse time, threaded straight into
     :func:`consolidate_verdict`. Like ``voided_findings`` and unlike the purely
@@ -321,8 +339,19 @@ def synthesize_codex_review_result(
     # the same reason. Ordered AFTER the void pass deliberately — it recomputes
     # must_fix from the stamped dispositions, so it composes with whatever the
     # void pass already suppressed rather than resurrecting it.
+    # #2232: `worktree` is what turns drift surfacing on — a match whose file
+    # moved since the record's own reviewed_sha is reported instead of applied.
+    # It costs nothing to thread: this function already takes the worktree the
+    # pass reviewed, which is the only repo the two shas are resolvable in.
     verdict = suppress_adjudicated_findings(
-        verdict, finding_dispositions or {}, ticket_id=task.ticket_id
+        verdict,
+        finding_dispositions or {},
+        ticket_id=task.ticket_id,
+        claim_tier_enabled=claim_tier_enabled,
+        reviewed_sha=reviewed_sha,
+        refused=refused_dispositions,
+        worktree=worktree,
+        disposition_drift_check_enabled=disposition_drift_check_enabled,
     )
     block_reason = _verdict_block_reason(verdict)
     if block_reason is not None:

@@ -6,6 +6,7 @@ itself install (the "foreign skill safety" guarantee).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -1142,3 +1143,50 @@ class TestScriptsInstalled:
         assert "WARNING:" in second.stderr
         assert str(gen2) in second.stderr
         assert str(gen1) not in second.stderr
+
+
+# ---------------------------------------------------------------------------
+# #2226 — the installer must never write a user-level Stop hook
+# ---------------------------------------------------------------------------
+
+
+class TestInstallSkillsNeverWritesHooks:
+    """Regression guard: no install path may add ``cw signal-stop`` to ~/.claude.
+
+    cw injects the Stop hook per-worktree (``<worktree>/.claude/
+    settings.local.json``); a user-level copy costs an interpreter start on
+    every turn of every Claude session, cw-managed or not. The installer is
+    already clean — these tests pin it that way.
+    """
+
+    def test_run_creates_no_user_level_settings_files(
+        self, script: Path, fake_home: Path
+    ) -> None:
+        """A normal install leaves ~/.claude/settings{,.local}.json absent."""
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        assert not (fake_home / ".claude" / "settings.json").exists()
+        assert not (fake_home / ".claude" / "settings.local.json").exists()
+
+    def test_script_text_never_mentions_hooks_or_settings(self, script: Path) -> None:
+        """Static guard: the script names no settings file and no Stop hook."""
+        text = script.read_text(encoding="utf-8")
+
+        assert "signal-stop" not in text
+        assert "settings.json" not in text
+        assert "settings.local.json" not in text
+
+    def test_preexisting_settings_json_is_byte_identical_after_run(
+        self, script: Path, fake_home: Path
+    ) -> None:
+        """An operator's own settings.json survives the install untouched."""
+        settings = fake_home / ".claude" / "settings.json"
+        original = json.dumps({"permissions": {"allow": ["Bash(cw:*)"]}}, indent=2)
+        settings.write_text(original, encoding="utf-8")
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        assert settings.read_text(encoding="utf-8") == original
+        assert "hooks" not in json.loads(settings.read_text(encoding="utf-8"))
