@@ -17,9 +17,15 @@ from freezegun import freeze_time
 
 import cw.events
 from cw.cli import main
-from cw.dev_queue import load_dev_queue
+from cw.cli.review.dispositions import _age_cell
+from cw.dev_queue import add_ticket, load_dev_queue
 from cw.events import read_events
-from cw.models import HOOK_CONTEXT_RELATIVE_PATH
+from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
+    OrchestratorConfig,
+    Stage,
+    TicketTask,
+)
 from cw.models.enums import OrchestratorEventType
 from cw.review_adjudication import (
     Adjudication,
@@ -30,6 +36,7 @@ from cw.review_adjudication import (
     render_voided_findings_block,
 )
 from cw.review_finding_dispositions import (
+    FindingDisposition,
     _disposition_key,
     parse_finding_disposition_block,
 )
@@ -46,6 +53,8 @@ from tests.conftest import (
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
+    commit_tracked_file,
+    git_in,
 )
 
 if TYPE_CHECKING:
@@ -53,8 +62,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from click.testing import Result
-
-    from cw.review_finding_dispositions import FindingDisposition
 
 
 @pytest.fixture
@@ -1379,6 +1386,109 @@ class TestReviewSettle:
         assert result.exit_code == 0, result.output
         assert "REVIEW-FINDING-DISPOSITIONS" in result.output
 
+    def test_a_reversed_outcome_renders_a_marker(self, runner: CliRunner) -> None:
+        """#2232: rollback is settle with a third outcome, not a new command."""
+        result = self._invoke(
+            runner, _settle_payload(_settle_entry(outcome="REVERSED"))
+        )
+
+        assert result.exit_code == 0, result.output
+        ledger, refused = parse_finding_disposition_block([result.output])
+        assert refused == []
+        assert list(ledger) == [_disposition_key("src/cw/foo.py", "Bug here")]
+        assert next(iter(ledger.values())).outcome == "REVERSED"
+
+    def test_a_reversal_emits_the_reverted_event_not_the_settled_one(
+        self, runner: CliRunner
+    ) -> None:
+        """The event TYPE carries the semantic, not an `outcome` field (#2232).
+
+        An operator asking "what have I withdrawn" must be able to answer it
+        with one `cw event tail --type review.finding_disposition_reverted`,
+        not by filtering settles on payload content — the convention every
+        other event in this region already follows.
+        """
+        result = self._invoke(
+            runner,
+            _settle_payload(_settle_entry(outcome="REVERSED")),
+            "--ticket",
+            "2232",
+        )
+
+        assert result.exit_code == 0, result.output
+        events = read_events()
+        assert [e.type for e in events] == [
+            OrchestratorEventType.REVIEW_FINDING_DISPOSITION_REVERTED
+        ]
+        assert events[0].correlation_id == "2232"
+        assert events[0].payload["outcome"] == "REVERSED"
+        assert events[0].payload["file"] == "src/cw/foo.py"
+        assert events[0].payload["summary"] == "Bug here"
+
+    def test_a_mixed_payload_emits_one_event_of_each_type(
+        self, runner: CliRunner
+    ) -> None:
+        result = self._invoke(
+            runner,
+            _settle_payload(
+                _settle_entry(),
+                _settle_entry(
+                    summary="Second bug", file="src/cw/bar.py", outcome="REVERSED"
+                ),
+            ),
+        )
+
+        assert result.exit_code == 0, result.output
+        by_type = {e.type: e.payload for e in read_events()}
+        assert set(by_type) == {
+            OrchestratorEventType.REVIEW_FINDING_SETTLED,
+            OrchestratorEventType.REVIEW_FINDING_DISPOSITION_REVERTED,
+        }
+        assert (
+            by_type[OrchestratorEventType.REVIEW_FINDING_SETTLED]["file"]
+            == "src/cw/foo.py"
+        )
+        assert (
+            by_type[OrchestratorEventType.REVIEW_FINDING_DISPOSITION_REVERTED]["file"]
+            == "src/cw/bar.py"
+        )
+
+    def test_a_failed_emit_for_a_reversal_names_the_reversal_event(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The error must not report the wrong event name (#2232)."""
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise OSError(_EVENT_STORE_FAILURE)
+
+        monkeypatch.setattr(cw.events, "record_event", _boom)
+        result = self._invoke(
+            runner, _settle_payload(_settle_entry(outcome="REVERSED"))
+        )
+
+        assert result.exit_code != 0
+        assert "review.finding_disposition_reverted" in result.output
+        assert "review.finding_settled" not in result.output
+
+    def test_the_worker_refusal_is_outcome_agnostic(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A REVERSED payload gets no special-case bypass of the guard (#2232).
+
+        A reversal is still a durable ledger write, and the guard exists
+        because the pipeline must not be able to edit its own suppressions in
+        either direction.
+        """
+        _write_session_context(tmp_path, headless=True)
+        monkeypatch.chdir(tmp_path)
+        result = self._invoke(
+            runner, _settle_payload(_settle_entry(outcome="REVERSED"))
+        )
+
+        assert result.exit_code != 0
+        assert "dispatch worker" in result.output
+        assert read_events() == []
+
     @pytest.mark.parametrize(
         ("label", "body"),
         [
@@ -1658,3 +1768,357 @@ class TestReviewVerifyFixesBaseFlag:
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert verdict["reviewed_sha"] == "different-sha"
+
+
+class TestReviewDispositions:
+    """#2232: the read-only "what is suppressing right now" view.
+
+    ADR-0016 named this as a precondition for ever arming the fuzzy claim
+    tier: the ledger silences findings durably and invisibly, and until this
+    command there was no way to ask a ticket what it currently holds.
+    """
+
+    def _seed(
+        self, *entries: tuple[str, str, dict[str, Any]], ticket_id: str = "T-2232"
+    ) -> None:
+        ledger: dict[str, FindingDisposition] = {}
+        for file, summary, overrides in entries:
+            key = _disposition_key(file, summary)
+            assert key is not None
+            payload: dict[str, Any] = {
+                "outcome": "REJECTED",
+                "rationale": "settled in an earlier round",
+                "recorded_at": "2026-08-16T00:00:00Z",
+                "actor": _OPERATOR,
+                "reviewed_sha": "abc1234",
+                "summary": summary,
+            }
+            payload.update(overrides)
+            ledger[key] = FindingDisposition.model_validate(payload)
+        add_ticket(
+            TicketTask(
+                ticket_id=ticket_id,
+                client="acme",
+                stage=Stage.REVIEW,
+                finding_dispositions=ledger,
+            )
+        )
+
+    def _invoke(self, runner: CliRunner, *args: str) -> Result:
+        return runner.invoke(main, ["review", "dispositions", *args])
+
+    def test_a_ticket_with_no_records_says_so(self, runner: CliRunner) -> None:
+        self._seed()
+        result = self._invoke(runner, "T-2232", "--client", "acme")
+
+        assert result.exit_code == 0, result.output
+        assert "No disposition records" in result.output
+
+    def test_one_record_renders_its_identity_and_provenance(
+        self, runner: CliRunner
+    ) -> None:
+        self._seed(("src/cw/foo.py", "Bug here", {}))
+        result = self._invoke(runner, "T-2232", "--client", "acme")
+
+        assert result.exit_code == 0, result.output
+        assert "src/cw/foo.py" in result.output
+        # #2232 round 3 fix: the table shows the verbatim summary, not the
+        # normalized key half — an operator copying it into `cw review
+        # settle` needs the text that actually matches the ledger key.
+        assert "Bug here" in result.output
+        assert "REJECTED" in result.output
+        assert _OPERATOR in result.output
+        assert "abc1234" in result.output
+
+    def test_every_outcome_is_listed_with_its_own_label(
+        self, runner: CliRunner
+    ) -> None:
+        """A withdrawal must never read as a live suppression (#2232).
+
+        This is the command's whole safety purpose. Filtering REVERSED out
+        would hide the record's existence entirely, which is worse than
+        showing one clearly labelled — an operator about to arm the claim
+        tier has to be able to tell the three apart at a glance.
+        """
+        self._seed(
+            ("src/cw/a.py", "Rejected bug", {"outcome": "REJECTED"}),
+            ("src/cw/b.py", "Accepted bug", {"outcome": "ACCEPTED"}),
+            ("src/cw/c.py", "Reversed bug", {"outcome": "REVERSED"}),
+        )
+        result = self._invoke(runner, "T-2232", "--client", "acme")
+
+        assert result.exit_code == 0, result.output
+        for file in ("src/cw/a.py", "src/cw/b.py", "src/cw/c.py"):
+            assert file in result.output
+        for outcome in ("REJECTED", "ACCEPTED", "REVERSED"):
+            assert outcome in result.output
+
+    def test_json_round_trips_the_full_record_plus_its_key(
+        self, runner: CliRunner
+    ) -> None:
+        self._seed(
+            ("src/cw/a.py", "Rejected bug", {}),
+            ("src/cw/c.py", "Reversed bug", {"outcome": "REVERSED"}),
+        )
+        result = self._invoke(runner, "T-2232", "--client", "acme", "--json")
+
+        assert result.exit_code == 0, result.output
+        rows = json.loads(result.output)
+        assert len(rows) == 2
+        assert {row["outcome"] for row in rows} == {"REJECTED", "REVERSED"}
+        assert {row["file"] for row in rows} == {"src/cw/a.py", "src/cw/c.py"}
+        for row in rows:
+            assert row["key"] == _disposition_key(row["file"], row["summary"])
+            assert row["actor"] == _OPERATOR
+            # No worktree given, so drift is unanswerable rather than "no".
+            assert row["stale"] == "?"
+
+    def test_a_long_summary_is_visibly_truncated_in_the_table(
+        self, runner: CliRunner
+    ) -> None:
+        """#2232 round 4: a silent cut turned this column into a bug.
+
+        The table truncates SUMMARY to fit; a truncated cell must look
+        truncated, or an operator mistakes the shortened text for the whole
+        identity and pastes it into `cw review settle`, which matches on the
+        full verbatim summary and silently no-ops.
+        """
+        long_summary = "This finding summary runs well past the column width"
+        self._seed(("src/cw/a.py", long_summary, {}))
+        result = self._invoke(runner, "T-2232", "--client", "acme")
+
+        assert result.exit_code == 0, result.output
+        assert long_summary not in result.output
+        assert "…" in result.output
+
+    def test_a_long_summary_is_not_truncated_in_json(self, runner: CliRunner) -> None:
+        """The JSON surface is the documented payload source (#2232 round 4)."""
+        long_summary = "This finding summary runs well past the column width"
+        self._seed(("src/cw/a.py", long_summary, {}))
+        result = self._invoke(runner, "T-2232", "--client", "acme", "--json")
+
+        assert result.exit_code == 0, result.output
+        rows = json.loads(result.output)
+        assert rows[0]["summary"] == long_summary
+
+    def test_json_for_an_empty_ledger_is_an_empty_array(
+        self, runner: CliRunner
+    ) -> None:
+        self._seed()
+        result = self._invoke(runner, "T-2232", "--client", "acme", "--json")
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == []
+
+    def test_an_unresolvable_client_is_a_clean_error(self, runner: CliRunner) -> None:
+        self._seed()
+        result = self._invoke(runner, "T-2232")
+
+        assert result.exit_code != 0
+        assert "Cannot resolve client" in result.output
+
+    def test_an_unknown_ticket_is_a_clean_error_not_a_crash(
+        self, runner: CliRunner
+    ) -> None:
+        self._seed()
+        result = self._invoke(runner, "T-nope", "--client", "acme")
+
+        assert result.exit_code != 0
+        assert "No dev-queue task found" in result.output
+
+    def test_a_drifted_record_is_flagged_stale_against_a_worktree(
+        self,
+        runner: CliRunner,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        worktree = make_git_repo("wt-2232-cli-drift")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        settled_at = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 2  # reworked\n")
+        self._seed(("src/cw/foo.py", "Bug here", {"reviewed_sha": settled_at}))
+
+        result = self._invoke(
+            runner, "T-2232", "--client", "acme", "--worktree", str(worktree), "--json"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert [row["stale"] for row in json.loads(result.output)] == ["yes"]
+
+    def test_an_undrifted_record_is_not_flagged_stale(
+        self,
+        runner: CliRunner,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        worktree = make_git_repo("wt-2232-cli-clean")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        settled_at = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/other.py", "b = 2\n")
+        self._seed(("src/cw/foo.py", "Bug here", {"reviewed_sha": settled_at}))
+
+        result = self._invoke(
+            runner, "T-2232", "--client", "acme", "--worktree", str(worktree), "--json"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert [row["stale"] for row in json.loads(result.output)] == ["no"]
+
+    def test_a_worktree_that_is_not_a_repo_degrades_to_unknown(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Showing the ledger matters more than answering the drift question."""
+        self._seed(("src/cw/foo.py", "Bug here", {}))
+        not_a_repo = tmp_path / "plain"
+        not_a_repo.mkdir()
+
+        result = self._invoke(
+            runner,
+            "T-2232",
+            "--client",
+            "acme",
+            "--worktree",
+            str(not_a_repo),
+            "--json",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert [row["stale"] for row in json.loads(result.output)] == ["?"]
+
+    def test_an_unrunnable_git_degrades_to_unknown(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No git on PATH must not cost the operator the ledger listing."""
+        self._seed(("src/cw/foo.py", "Bug here", {}))
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "git is gone"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw._git.subprocess.run", _raise)
+        result = self._invoke(
+            runner, "T-2232", "--client", "acme", "--worktree", str(tmp_path), "--json"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert [row["stale"] for row in json.loads(result.output)] == ["?"]
+
+    def test_a_record_with_no_reviewed_sha_reads_unknown_not_clean(
+        self,
+        runner: CliRunner,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """#2232 SHOULD_FIX 6: blank stored sha is 'cannot tell', not 'no'.
+
+        ``disposition_drifted`` answers ``False`` for a blank reviewed sha so
+        a missing field cannot manufacture drift on the suppression path. On
+        a surface whose whole job is surfacing staleness, rendering that as
+        "no" conflates "verified unchanged" with "nothing to compare against".
+        """
+        worktree = make_git_repo("wt-2232-cli-blank-sha")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        self._seed(("src/cw/foo.py", "Bug here", {"reviewed_sha": ""}))
+
+        result = self._invoke(
+            runner, "T-2232", "--client", "acme", "--worktree", str(worktree), "--json"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert [row["stale"] for row in json.loads(result.output)] == ["?"]
+
+    def test_an_inherited_git_dir_cannot_redirect_the_head_lookup(
+        self,
+        runner: CliRunner,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2232 MUST_FIX 1: --worktree decides the repo, not the ambient env.
+
+        Run from inside a git hook, an unsanitized ``git rev-parse HEAD``
+        answers for the HOOK's repository — so the drift comparison would be
+        against a sha from a tree the operator never named.
+        """
+        worktree = make_git_repo("wt-2232-cli-hook")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        settled_at = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 2  # reworked\n")
+        decoy = make_git_repo("wt-2232-cli-hook-decoy")
+        commit_tracked_file(decoy, "src/cw/foo.py", "a = 1\n")
+        monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+        self._seed(("src/cw/foo.py", "Bug here", {"reviewed_sha": settled_at}))
+
+        result = self._invoke(
+            runner, "T-2232", "--client", "acme", "--worktree", str(worktree), "--json"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert [row["stale"] for row in json.loads(result.output)] == ["yes"]
+
+    def test_the_table_carries_reason_and_age(self, runner: CliRunner) -> None:
+        """#2232 MUST_FIX 5: the acceptance text asks for actor, reason, age, sha."""
+        self._seed(
+            (
+                "src/cw/foo.py",
+                "Bug here",
+                {
+                    "rationale": "intentional tradeoff",
+                    "recorded_at": "2026-09-20T13:00:00Z",
+                },
+            )
+        )
+        with freeze_time("2026-09-22T13:00:00Z"):
+            result = self._invoke(runner, "T-2232", "--client", "acme")
+
+        assert result.exit_code == 0, result.output
+        header, _rule, row = result.output.splitlines()
+        assert "REASON" in header
+        assert "AGE" in header
+        assert "intentional tradeoff" in row
+        assert "2d" in row
+
+    @pytest.mark.parametrize(
+        ("recorded_at", "expected"),
+        [
+            ("", "?"),
+            ("not-a-timestamp", "?"),
+            ("2026-09-22T11:00:00+00:00", "2h"),
+            ("2026-09-22T13:00:00Z", "0m"),
+            ("2026-09-19T13:00:00+00:00", "3d"),
+            # A naive stamp is read as UTC, which is what `cw review settle`
+            # writes; a future stamp floors at zero rather than going negative.
+            ("2026-09-22T12:00:00", "1h"),
+            ("2026-09-23T13:00:00+00:00", "0m"),
+        ],
+    )
+    def test_age_is_computed_defensively(self, recorded_at: str, expected: str) -> None:
+        """A malformed or missing timestamp renders unknown, never raises."""
+        with freeze_time("2026-09-22T13:00:00Z"):
+            assert _age_cell(recorded_at) == expected
+
+    def test_the_drift_column_ignores_the_lane_gate(
+        self,
+        runner: CliRunner,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2232: this diagnostic is not gated by disposition_drift_check_enabled.
+
+        The gate scopes the automatic check on the shared suppression path.
+        An operator who turned it off to debug is precisely the one who still
+        needs to be able to see what is stale.
+        """
+        worktree = make_git_repo("wt-2232-cli-gated")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        settled_at = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 2  # reworked\n")
+        self._seed(("src/cw/foo.py", "Bug here", {"reviewed_sha": settled_at}))
+        monkeypatch.setattr(
+            "cw.cli.review.dispositions.load_effective_config",
+            lambda: OrchestratorConfig(disposition_drift_check_enabled=False),
+        )
+
+        result = self._invoke(
+            runner, "T-2232", "--client", "acme", "--worktree", str(worktree), "--json"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert [row["stale"] for row in json.loads(result.output)] == ["yes"]

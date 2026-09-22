@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.codex_review import _prepare_review_pass, run_review
+from cw.codex_review import core as codex_review_core
 from cw.codex_runner import FakeCodexRunner
 from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
@@ -195,7 +196,10 @@ class TestPrepareReviewPass:
                         # applied, so the fixture carries what the writer
                         # records.
                         actor="mattwwarren",
-                        reviewed_sha="abc1234",
+                        # #2232: the sha this pass reviews, i.e. "settled
+                        # against exactly this code". This case is about the
+                        # ledger reaching synthesis, not about drift.
+                        reviewed_sha=git_in(repo, "rev-parse", "HEAD"),
                         summary="Bug here",
                     )
                 },
@@ -296,6 +300,7 @@ class TestPrepareReviewPass:
         *,
         session_id: str,
         claim_tier_enabled: bool = False,
+        disposition_drift_check_enabled: bool = True,
     ) -> tuple[AutoDevResult, ReviewVerdict | None]:
         """One `run_review` over a MUST_FIX that REWORDS a ledgered finding."""
         key = _disposition_key("mod.py", CLAIM_ROW1_RECORDED)
@@ -309,7 +314,11 @@ class TestPrepareReviewPass:
                         rationale="settled in an earlier round",
                         recorded_at="2026-08-16T00:00:00Z",
                         actor="mattwwarren",
-                        reviewed_sha="abc1234",
+                        # #2232: the sha this pass reviews. These cases are
+                        # about the claim tier's gate, not drift, so the
+                        # record says the code has not moved and the drift
+                        # check short-circuits without shelling out.
+                        reviewed_sha=git_in(repo, "rev-parse", "HEAD"),
                         summary=CLAIM_ROW1_RECORDED,
                     )
                 },
@@ -342,6 +351,7 @@ class TestPrepareReviewPass:
             session_id=session_id,
             fix_loop_enabled=False,
             claim_tier_enabled=claim_tier_enabled,
+            disposition_drift_check_enabled=disposition_drift_check_enabled,
         )
 
     def _feature_repo(self, make_git_repo: Callable[[str], Path], name: str) -> Path:
@@ -383,6 +393,32 @@ class TestPrepareReviewPass:
             event_types=[OrchestratorEventType.REVIEW_FINDING_CLAIM_SHADOWED]
         )
         assert len(shadows) == 1
+
+    @pytest.mark.parametrize("drift_check_enabled", [True, False])
+    def test_run_review_threads_disposition_drift_check_gate_into_synthesis(
+        self,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        drift_check_enabled: bool,
+    ) -> None:
+        """#2232: cycle 0's hop carries the gate to the ledger backstop."""
+        repo = self._feature_repo(make_git_repo, f"wt-drift-{drift_check_enabled}")
+        seen: list[object] = []
+        real_synth = codex_review_core.synthesize_codex_review_result
+
+        def _spy(**kwargs: object) -> object:
+            seen.append(kwargs.get("disposition_drift_check_enabled"))
+            return real_synth(**kwargs)
+
+        monkeypatch.setattr(codex_review_core, "synthesize_codex_review_result", _spy)
+        self._reworded_run(
+            repo,
+            monkeypatch,
+            session_id=f"sess-drift-{drift_check_enabled}",
+            disposition_drift_check_enabled=drift_check_enabled,
+        )
+
+        assert seen == [drift_check_enabled]
 
 
 # ---------------------------------------------------------------------------

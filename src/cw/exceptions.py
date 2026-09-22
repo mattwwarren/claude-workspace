@@ -421,3 +421,29 @@ class SessionsLockReentryError(CwError):
     """
 
     __slots__ = ()
+
+
+class ClaimTierArmingError(CwError):
+    """Raised when the ledger's claim tier is armed with drift-checking off.
+
+    The codex review ledger's claim-match suppression tier resolved enabled
+    for a task whose ``disposition_drift_check_enabled`` resolved ``False``
+    (GitHub #2232). Drift-checking is what keeps a stale settle from silently
+    suppressing a re-raised finding; arming the fuzzy tier without it removes
+    that protection with no visible symptom, which is the exact failure mode
+    ADR-0016 named as the reason a rollback and a drift signal are
+    preconditions for ever arming the tier at all.
+
+    Raised by :func:`cw.codex_background._run_codex_review_and_complete`, at
+    the same point the claim tier's own enabling is resolved — the one place
+    both values are in hand for the same task and lane. It reaches the
+    operator through that daemon thread's existing ``_log.exception`` path
+    rather than a dedicated blocked reason, the same as every other
+    misconfiguration-shaped exception its broad ``except Exception:`` already
+    catches. Deliberately narrow: this is one cross-field refusal, not a
+    general config-validation framework. ``ConfigValidationError`` would be
+    the wrong type — that one wraps a ``pydantic.ValidationError`` at LOAD
+    time, and both config files loaded cleanly here.
+    """
+
+    __slots__ = ()

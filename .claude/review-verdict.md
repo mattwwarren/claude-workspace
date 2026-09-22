@@ -2,15 +2,20 @@
 
 **Non-blocking** — no MUST_FIX findings. Single-pass review (fix loop disabled for this lane).
 
-**DEGRADED COVERAGE** — 2 roles ran degraded: Code Quality Reviewer: degraded — Static diff review completed; targeted Ruff checks passed. The full CI quality-gate and test suite were not run in this read-only environment., SysAdmin Reviewer: degraded — Static review completed for scope, configuration duplication, secrets/debug artifacts, infrastructure concerns, and park/requeue behavior. Full CI quality gates and pytest/ruff/mypy were not run because the repository is read-only.
+**DEGRADED COVERAGE** — 3 roles ran degraded: Code Quality Reviewer: degraded — Static diff review completed. Full CI, coverage, integration tests, and pre-commit gates were not run in this read-only environment., SysAdmin Reviewer: degraded — Static review completed for scope, configuration duplication, infrastructure patterns, debug artifacts, and secrets. Full CI, coverage, integration, and pre-commit gates were not run because the workspace is read-only.
 
 ## Scope Assessment
 
-- **Intended scope**: Fix fix-dispatch remote branch resolution and park unresolvable refs.
-- **Actual scope**: Changes implementation, tests, operator documentation, changelog, and the required per-file lint exception.
+- **Intended scope**: Add rollback, drift detection, inspection, and claim-tier arming safeguards to the review disposition ledger.
+- **Actual scope**: Implements that feature across source, tests, shared helpers, configuration, and documentation.
 - **Verdict**: Focused
-- **Out-of-scope files**: None.
+- **Out-of-scope files**: None, Data Safety Reviewer: degraded — Reviewed changed ledger mutation, reversal audit, drift suppression, and inspection paths from the supplied diff. Full repository test execution and external tracker verification were not performed in this read-only environment..
 
 _Reviewed with repo filesystem access (capable)._
 
 _Agent specs loaded for all 3 reviewer role(s)._
+
+### SHOULD_FIX
+
+- **src/cw/cli/review/dispositions.py:258** — Human disposition output renders untrusted marker text without control-character sanitization
+- **src/cw/cli/review/dispositions.py:258** — Human disposition output renders untrusted marker text without control-character sanitization

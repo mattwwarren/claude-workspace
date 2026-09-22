@@ -175,3 +175,30 @@ class RefusedDisposition(BaseModel):
 
     key: str
     missing: list[str] = Field(default_factory=list)
+
+
+class StaleDisposition(BaseModel):
+    """One ledger record whose code moved since it was settled (#2232).
+
+    The drift twin of :class:`RefusedDisposition`, and carried the same way:
+    on ``ReviewVerdict.stale_dispositions``, rendered onto the posted review
+    comment. A refusal says "this record was never applicable"; this says "it
+    was, and the code underneath it has changed since". The ledger entry is
+    NOT expired — ADR-0016 rejects silent expiry outright — it simply is not
+    applied for this pass, and the finding keeps blocking until an operator
+    re-settles it against the current code.
+
+    ``key`` is the ledger key (``file::normalized summary::digest``),
+    ``reviewed_sha`` the commit the record was settled against, and
+    ``current_sha`` the commit this pass reviewed. Both shas ride along so a
+    reader of the comment or the ``review.finding_disposition_stale`` event can
+    run the diff themselves rather than take the pipeline's word for it.
+
+    Lives here for the identical reason :class:`RefusedDisposition` does: this
+    is the leaf module with no ``cw`` dependency, and ``cw.review_findings``
+    must not depend on one executor's ledger implementation.
+    """
+
+    key: str
+    reviewed_sha: str = ""
+    current_sha: str = ""

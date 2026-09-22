@@ -272,6 +272,16 @@ class LaneConfig(BaseModel):
     busy_wait_guard_enabled: bool | None = None
     busy_wait_guard_repeat_threshold: int | None = Field(default=None, ge=2)
     busy_wait_guard_window_seconds: int | None = Field(default=None, ge=1)
+    # Lane-level override for the disposition ledger's drift check (#2232).
+    # Same bidirectional shape and reasoning as busy_wait_guard_enabled above:
+    # None = inherit the OrchestratorConfig default. Resolved by
+    # cw.codex_background._resolve_disposition_drift_check_enabled, which
+    # mirrors guard_busy_wait._resolve_settings' lane-then-global fallthrough
+    # rather than _resolve_claim_tier_enabled's master-switch-then-floor shape
+    # -- there is no kill switch and no floor for a check that defaults on.
+    # Turning it off for a lane REFUSES to arm that lane's claim tier; see
+    # cw.exceptions.ClaimTierArmingError.
+    disposition_drift_check_enabled: bool | None = None
     # Lane-level override for the `cw agent-spawn-pre` spawn-shape policy
     # (#2211). Same bidirectional shape and reasoning as
     # busy_wait_guard_enabled above: None = inherit the OrchestratorConfig
@@ -716,6 +726,16 @@ class OrchestratorConfig(BaseModel):
     # occurrence -- the opposite of the fail-open design goal.
     busy_wait_guard_repeat_threshold: int = Field(default=3, ge=2)
     busy_wait_guard_window_seconds: int = Field(default=300, ge=1)
+    # Global default for the disposition ledger's drift check (#2232),
+    # overridable per lane (LaneConfig.disposition_drift_check_enabled).
+    # Default-ON for the same reason busy_wait_guard_enabled is, and for the
+    # opposite reason to codex_claim_suppression_enabled two fields below: a
+    # CHECK is presumed wanted, a FEATURE is presumed unwanted. Turning it off
+    # is a deliberate act with a consequence -- the claim tier refuses to arm
+    # on any lane where this resolves False (ClaimTierArmingError), because
+    # drift-checking is what keeps a stale settle from silently suppressing a
+    # re-raised finding once the fuzzy tier is live (ADR-0016).
+    disposition_drift_check_enabled: bool = True
     # Global default for the `cw agent-spawn-pre` spawn-shape policy (#2211),
     # overridable per lane (LaneConfig.subagent_spawn_guard_enabled).
     # Default-ON for the same reason as busy_wait_guard_enabled: the failure

@@ -257,17 +257,40 @@ not amended or superseded; the two seams stay independent.
   matcher. Bounded by the tier being MUST_FIX-only, same-file and default-off;
   measured by shadow events that carry the candidate's severity; fixed durably
   by follow-up F7 (a schema bump recording severity and an expiry).
-- **Entries never expire, and there is no per-record rollback command.** Unlike
-  voids, no evidence anchor lapses them. The only mitigations today are
-  visibility (the suppression annotation, `review.finding_settled` and the
-  shadow events) and the marker's newest-wins merge, which lets an operator
-  re-post the same key as `ACCEPTED` to reverse a settle by hand. Expiry and a
-  real per-record rollback are a **precondition for ever arming the claim
-  tier**, not for landing it, and are tracked in a separate follow-up ticket
-  the operator filed. What #2210 does now, cheaply, is make that rollback
-  *possible later*: every record carries enough identity — the ledger key,
-  the verbatim `summary`, `reviewed_sha`, `actor` and `recorded_at` — to target
-  exactly one entry rather than a key's worth of them.
+- **Entries never expire, and there is no per-record rollback command.**
+  ~~Unlike voids, no evidence anchor lapses them.~~ **Closed by #2232**, which
+  was the follow-up ticket this paragraph anticipated. What #2210 did cheaply
+  was make the rollback *possible later*: every record carries enough identity
+  — the ledger key, the verbatim `summary`, `reviewed_sha`, `actor` and
+  `recorded_at` — to target exactly one entry rather than a key's worth of
+  them. #2232 spent that, in three parts:
+
+  - **Rollback** is a third `Outcome` value, `REVERSED`, produced by
+    `cw review settle` itself. No new command and no second write path: the
+    marker's newest-`recorded_at`-wins merge makes the withdrawal durable
+    through `merge_finding_dispositions`, the one chokepoint invariant 11
+    names. A reversed record matches neither tier, is not rendered into the
+    reviewer's binding "previously adjudicated" block (a withdrawal is the
+    absence of a decision, so asserting one would be backwards), and emits
+    `review.finding_disposition_reverted` rather than `review.finding_settled`
+    so an operator can query withdrawals by event type.
+  - **Staleness is surfaced, never expired.** `disposition_drifted()` compares
+    the record's `reviewed_sha` against the pass's for that finding's file; on
+    drift the record is NOT applied for that pass, the finding keeps blocking,
+    a `StaleDisposition` reaches the posted comment via
+    `ReviewVerdict.stale_dispositions`, and `review.finding_disposition_stale`
+    records it. The entry stays in the ledger and still applies to any pass
+    where its file has not moved — expiry would be the silent act this ADR
+    exists to refuse. The check fails toward surfacing: an unresolvable ref or
+    an unreadable repository reads as drift.
+  - **Inspection** is `cw review dispositions <ticket>`, read-only, listing
+    every record with its outcome and (given `--worktree`) its staleness.
+
+  The arming precondition is now **enforced, not merely documented**:
+  `disposition_drift_check_enabled` (global default `true`, per-lane override)
+  gates the automatic check, and resolving it `False` on a lane whose claim
+  tier resolves `True` raises `ClaimTierArmingError` rather than running a
+  fuzzy suppression with its drift protection removed.
 - **ADR-0015's rationale is reversed for this seam.** "A spurious re-park costs
   one operator comment; a spurious suppression silently ships a real defect"
   applies with *more* force here, which is exactly why the tier is default-off
@@ -427,4 +450,4 @@ not amended or superseded; the two seams stay independent.
 
 ## Referenced by
 
-- #2210, #1838, #1814, ADR-0015
+- #2232, #2210, #1838, #1814, ADR-0015
