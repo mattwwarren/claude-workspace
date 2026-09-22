@@ -22,9 +22,7 @@ from cw.codex_review._context._prompt_text import (
 )
 from cw.codex_review._context._sensitive_files import _render_sensitive_block
 from cw.review_finding_dispositions import (
-    REVERSED as _REVERSED_OUTCOME,
-)
-from cw.review_finding_dispositions import (
+    REVERSED,
     partition_enforceable_dispositions,
     split_disposition_key,
 )
@@ -107,9 +105,7 @@ def _render_adjudicated_findings_block(
     """
     enforceable, _refused = partition_enforceable_dispositions(ledger)
     live = {
-        key: entry
-        for key, entry in enforceable.items()
-        if entry.outcome != _REVERSED_OUTCOME
+        key: entry for key, entry in enforceable.items() if entry.outcome != REVERSED
     }
     if not live:
         return None
