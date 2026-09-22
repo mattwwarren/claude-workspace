@@ -2137,6 +2137,7 @@ class TestPackageExportCompleteness:
             "ReapReason",
             "ReasoningEffort",
             "Session",
+            "SessionInboxMessage",
             "SessionOrigin",
             "SessionPurpose",
             "SessionStatus",
