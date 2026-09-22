@@ -30,8 +30,6 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from pydantic import ValidationError
-
 from cw.atomic import atomic_write_text
 from cw.config import state_dir
 from cw.exceptions import CwError
@@ -113,12 +111,21 @@ def append_message(session_id: str, *, author: str, body: str) -> SessionInboxMe
 
 
 def _parse_lines(lines: list[str]) -> list[SessionInboxMessage]:
-    """Parse JSONL lines into messages, tolerating a torn trailing line.
+    """Parse JSONL lines into messages, tolerating only a torn trailing write.
 
-    Interior corrupt lines re-raise so real corruption stays loud -- the same
-    contract as ``events._parse_lines``. Unlike that function there is no
-    unknown-enum tolerance to add: this model carries no enum field, so a
-    forward-compatibility skip would have nothing to skip on.
+    A torn write truncates mid-record, so the trailing line fails to
+    *parse* as JSON at all -- that specific, syntactic failure is tolerated
+    on the last line only. Interior JSON corruption re-raises so real
+    corruption stays loud -- the same contract as ``events._parse_lines``.
+
+    A trailing line that parses as JSON but fails *schema* validation is a
+    different failure: the write was not torn, the record is simply invalid
+    (or from an incompatible future version). Tolerating that too would
+    silently discard a complete, corrupt operator answer, so
+    ``ValidationError`` always re-raises regardless of position (#2212
+    review finding 5). Unlike ``events._parse_lines`` there is no
+    unknown-enum tolerance to add either: this model carries no enum field,
+    so a forward-compatibility skip would have nothing to skip on.
     """
     last_nonempty_idx = max(
         (i for i, line in enumerate(lines) if line.strip()), default=-1
@@ -137,13 +144,7 @@ def _parse_lines(lines: list[str]) -> list[SessionInboxMessage]:
                 )
                 continue
             raise
-        try:
-            messages.append(SessionInboxMessage.model_validate(raw))
-        except ValidationError:
-            if i == last_nonempty_idx:
-                logger.warning("skipping malformed trailing record in session inbox")
-                continue
-            raise
+        messages.append(SessionInboxMessage.model_validate(raw))
     return messages
 
 

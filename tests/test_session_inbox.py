@@ -119,16 +119,22 @@ class TestAppendAndRead:
         with pytest.raises(json.JSONDecodeError):
             session_inbox.read_messages(_SESSION)
 
-    def test_tolerates_a_trailing_record_that_fails_validation(
+    def test_a_complete_but_schema_invalid_trailing_record_raises(
         self, tmp_config_dir: Path
     ) -> None:
-        """Well-formed JSON, wrong shape — a torn write that landed a whole
-        line. Same tolerance as a syntactically torn one."""
+        """Well-formed JSON, wrong shape -- not a torn write, real corruption.
+
+        A torn write fails to *parse*; this line parses fine and fails
+        *validation*, so it must not be silently dropped the way a truncated
+        line is (#2212 review finding 5) -- a corrupt operator answer must
+        stay loud, not vanish with a log line.
+        """
         session_inbox.append_message(_SESSION, author="matt", body="good")
         path = session_inbox.inbox_path(_SESSION)
         with path.open("a") as f:
             f.write(json.dumps({"id": "partial"}) + "\n")
-        assert [m.body for m in session_inbox.read_messages(_SESSION)] == ["good"]
+        with pytest.raises(ValidationError):
+            session_inbox.read_messages(_SESSION)
 
     def test_interior_record_that_fails_validation_raises(
         self, tmp_config_dir: Path
