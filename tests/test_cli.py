@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     import click
 
     from cw.models import QueueItemStatus
+    from cw.native_daemon import FakeNativeDaemonClient
 
 
 def _frame_tool_result_record(
@@ -3505,7 +3506,7 @@ class TestSignalStop:
         marker: object = _CURRENT_MARKER,
         marker_overrides: dict[str, object] | None = None,
         stage: Stage = _PARK_ROW_STAGE,
-    ) -> tuple[Session, Path, object]:
+    ) -> tuple[Session, Path, FakeNativeDaemonClient]:
         """Seed a headless session + RUNNING task + a hand-built transcript.
 
         Returns ``(session, worktree, daemon)``. *records* is written under the
@@ -3806,7 +3807,7 @@ class TestSignalStop:
             "## Pending Verification Scan\n\nPremises pending verification."
             "\n\n<!-- cw-agent-authored -->"
         )
-        records = [
+        records: list[dict[str, object]] = [
             {
                 "type": "assistant",
                 "timestamp": "2026-01-01T00:02:00+00:00",
@@ -4059,7 +4060,7 @@ class TestSignalStop:
         _session, worktree, _daemon = self._seed_park_case(
             tmp_path, monkeypatch, "unreadable", _PARK_BENIGN_RECORDS
         )
-        real_open = Path.open
+        real_open: Callable[..., object] = Path.open
         target = f"{self._PARK_CSID}.jsonl"
 
         def _scoped_open(self: Path, *args: object, **kwargs: object) -> object:
