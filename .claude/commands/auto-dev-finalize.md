@@ -163,8 +163,9 @@ from a normal checkout.
 #### Step 4c.2 — spawn the agent, `isolation` flag SET BY the gate
 
 Only now, with `IN_DISPATCH_WORKTREE` decided by Step 4c.1, spawn the agent.
-Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr`, and set its
-`isolation` flag from the gate result per the two cases below:
+Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr` — pass
+`subagent_type: "general-purpose"` (#2211) — and set its `isolation` flag from the gate
+result per the two cases below:
 
 - **`IN_DISPATCH_WORKTREE=true` (default for every headless/cw-spawned run): OMIT
   `isolation: "worktree"` entirely.** Spawn scoped to the session cwd (`worktree_path` in
