@@ -25,6 +25,7 @@ any of the six as real agents is #2253's question, not this file's.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,7 @@ import yaml
 from tests.conftest import _appendix, _cmd
 
 _AGENTS_ROOT = Path(__file__).resolve().parents[1] / ".claude" / "agents"
+_COMMANDS_ROOT = Path(__file__).resolve().parents[1] / ".claude" / "commands"
 
 _GENERAL_PURPOSE = 'subagent_type: "general-purpose"'
 
@@ -289,3 +291,135 @@ class TestReviewMdWasAlreadyClean:
         ):
             assert f"`{reviewer}`" in content
             assert reviewer in registered
+
+
+# A spawn call site in this corpus consistently reads "spawn/dispatch ... agent(s)
+# ... (`<params>`)" -- the noun is followed, within a short span, by a parenthetical
+# that contains at least one backtick-quoted token (model:/subagent_type:/isolation:).
+# That shape is what a hand-enumerated site list cannot keep up with (#2211 round 3:
+# the same four finalize.md sites were re-enumerated twice while the fifth,
+# Step 4c.2, was missed both times) -- so this derives the site list by scanning
+# instead, and requires an explicit, reasoned exception for anything that matches
+# the shape but genuinely cannot carry a literal subagent_type.
+_SPAWN_CALL_SITE_RE = re.compile(
+    r"\b(?:spawn|dispatch)\w*\b(?!\.\w)(?:(?!\b(?:spawn|dispatch)\b)[\s\S]){0,100}?"
+    r"\b(?:task\s+)?(?:sub)?agents?\b"
+    r"(?:(?!\().){0,45}"
+    r"\((?:[^()]*`[^()]*)\)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+#: (file name, distinctive substring of the matched paragraph, reason).
+#: A scanned site lands here only when it structurally cannot carry a literal
+#: ``subagent_type: "..."`` -- never as a shortcut around typing a real spawn.
+#: ``test_allowlist_entries_still_match_something`` keeps every entry honest:
+#: once its substring no longer occurs in the file, the entry is stale and
+#: must be removed, not left to silently exempt whatever moved into its place.
+_SPAWN_SCAN_ALLOWLIST: tuple[tuple[str, str, str], ...] = (
+    (
+        "auto-dev-impl.md",
+        "before spawning Stage 2 agent, emit `stage.entered`",
+        "descriptive lead-in, not a call site; the Stage 2 spawn shape and "
+        "its subagent_type are pinned separately by TestImplDocSpawnRules",
+    ),
+    (
+        "auto-dev-intake-appendix.md",
+        "On a family match, EXIT before spawning any agent",
+        "describes exiting BEFORE any spawn happens (abandon-ticket path) -- "
+        "no agent is spawned, so there is no subagent_type to name",
+    ),
+    (
+        "auto-dev-intake-appendix.md",
+        "The EXIT must happen before spawning any agent",
+        "describes exiting BEFORE any spawn happens -- no agent is spawned",
+    ),
+    (
+        "auto-dev-intake.md",
+        "before spawning any agent",
+        "describes exiting BEFORE any spawn happens -- no agent is spawned",
+    ),
+    (
+        "auto-dev-review.md",
+        "cw.reconcile.fix_dispatch",
+        "a cw DAEMON session dispatch (SessionPurpose.FIX), not an Agent-tool "
+        "spawn -- the worker's model comes from --model in spawn.py, and "
+        "subagent_type does not apply to a cw --bg session",
+    ),
+    (
+        "auto-dev.md",
+        "This stage spawns review agents, adjudicates findings",
+        "descriptive delegation note; the actual spawn sites are in "
+        "auto-dev-review.md Step 3a, scanned separately",
+    ),
+    (
+        "review-sweep.md",
+        "Spawn all 3 as parallel agents in a single message",
+        "the 3 per-role types are declared in the Light Review table above "
+        "this line, pinned per-row by TestReviewSweepSitesAreTyped",
+    ),
+)
+
+
+def _paragraphs(text: str) -> list[tuple[int, str]]:
+    """Return (1-indexed start line, text) for each blank-line-delimited block."""
+    paragraphs: list[tuple[int, str]] = []
+    current: list[str] = []
+    current_start = 0
+    for line_number, line in enumerate(text.split("\n"), start=1):
+        if line.strip() == "":
+            if current:
+                paragraphs.append((current_start, "\n".join(current)))
+                current = []
+            continue
+        if not current:
+            current_start = line_number
+        current.append(line)
+    if current:
+        paragraphs.append((current_start, "\n".join(current)))
+    return paragraphs
+
+
+def _spawn_paragraphs_missing_a_type(path: Path) -> list[tuple[int, str]]:
+    """Paragraphs matching the spawn-call-site shape with no ``subagent_type``."""
+    text = path.read_text(encoding="utf-8")
+    return [
+        (start_line, para)
+        for start_line, para in _paragraphs(text)
+        if _SPAWN_CALL_SITE_RE.search(para) and "subagent_type" not in para
+    ]
+
+
+class TestSpawnSiteInventoryIsScanned:
+    """#2211 round 3: derive the untyped-spawn check by scanning rather than by
+    a hand-enumerated site list, which missed the same site twice running."""
+
+    @pytest.mark.parametrize(
+        "name", sorted(p.name for p in _COMMANDS_ROOT.glob("*.md"))
+    )
+    def test_every_spawn_call_site_names_a_subagent_type(self, name: str) -> None:
+        missing = _spawn_paragraphs_missing_a_type(_COMMANDS_ROOT / name)
+        for start_line, para in missing:
+            allowed = any(
+                allow_name == name and substring in para
+                for allow_name, substring, _reason in _SPAWN_SCAN_ALLOWLIST
+            )
+            assert allowed, (
+                f"{name}:{start_line} reads like a spawn call site with no "
+                f"subagent_type, and is not in _SPAWN_SCAN_ALLOWLIST:\n{para[:300]}"
+            )
+
+    @pytest.mark.parametrize("name", sorted(p.name for p in _AGENTS_ROOT.glob("*.md")))
+    def test_agent_definitions_have_no_untyped_spawn_sites(self, name: str) -> None:
+        """Agent bodies describe when *they* get invoked, not calls of their
+        own today -- this asserts that stays true rather than assuming it."""
+        missing = _spawn_paragraphs_missing_a_type(_AGENTS_ROOT / name)
+        assert missing == []
+
+    def test_allowlist_entries_still_match_something(self) -> None:
+        """A substring that no longer appears is a stale exception -- the doc
+        moved on, and something else may now be silently exempted by it."""
+        for name, substring, _reason in _SPAWN_SCAN_ALLOWLIST:
+            content = _cmd(name)
+            assert substring in content, (
+                f"stale allowlist entry: {substring!r} not in {name}"
+            )
