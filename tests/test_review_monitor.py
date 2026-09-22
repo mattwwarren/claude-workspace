@@ -596,6 +596,44 @@ def test_load_state_strict_raises_on_unreadable_state_file(
         _mod.load_state(_REPO, strict=True)
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        _register_argv("def456"),
+        ["drop", "42", "--repo", _REPO],
+        ["complete", "42", "--repo", _REPO],
+    ],
+    ids=["register", "drop", "complete"],
+)
+def test_mutation_cli_exits_nonzero_when_legacy_state_unreadable(
+    argv: list[str],
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Central file absent, legacy file present and unreadable — same contract.
+
+    Round 1 only gated the central-file read (#2189); an unreadable legacy
+    file reached the same silent-success outcome through the other door.
+    """
+    legacy_file = _mod.LEGACY_STATE_FILE
+    legacy_file.write_text(json.dumps({"monitored": {}, "completed": {}}))
+    assert not _mod.state_path_for_repo(_REPO).exists()
+
+    _fail_reading(monkeypatch, legacy_file)
+    code, out, err = _run_cli(monkeypatch, capsys, *argv)
+
+    assert code == 1
+    assert out == ""
+    assert "Error:" in err
+    assert argv[0] in err
+    assert _KEY in err
+    assert _UNREADABLE_MESSAGE in err
+    # The unreadable legacy file is left exactly as it was — never migrated
+    # (which would delete it) or silently skipped as a successful mutation.
+    assert legacy_file.exists()
+
+
 def test_load_state_default_degrades_to_empty_on_unreadable_state_file(
     state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
