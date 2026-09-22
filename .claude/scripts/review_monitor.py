@@ -584,6 +584,27 @@ def _merge_states(central: MonitorState, legacy: MonitorState) -> MonitorState:
     return central
 
 
+def _load_json_state(path: Path, *, strict: bool, label: str) -> MonitorState | None:
+    """Read and parse one state file, honoring the ``strict`` OSError contract.
+
+    Returns ``None`` when *path* does not exist. Corrupt-but-readable content
+    always degrades to ``None`` with a warning; an unreadable file re-raises
+    under ``strict`` and degrades to ``None`` otherwise. Shared by both state
+    files ``load_state`` reads (central and legacy) so the strict guard covers
+    each identically — see #2189 round 2, where a copy of this check lived
+    only on the central-file read and the legacy read stayed silent.
+    """
+    if not path.exists():
+        return None
+    try:
+        return MonitorState.from_dict(json.loads(path.read_text()))
+    except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
+        if strict and isinstance(e, OSError):
+            raise
+        logger.warning("Corrupt %s state file %s, starting fresh: %s", label, path, e)
+        return None
+
+
 def load_state(repo: str, *, strict: bool = False) -> MonitorState:
     """Load monitor state for a specific repo from the central directory.
 
@@ -592,58 +613,34 @@ def load_state(repo: str, *, strict: bool = False) -> MonitorState:
     automatically: it is merged into central (newer ``last_checked_at`` wins
     per PR), saved to the central location, and the legacy file is deleted.
 
-    An unreadable central file degrades to empty state with a warning, which
-    suits read-only callers. A caller that goes on to *write* the state passes
-    ``strict=True`` so an ``OSError`` reading the file propagates instead —
-    otherwise the write would replace whatever the unreadable file held. Corrupt
-    but readable content starts fresh either way.
+    An unreadable central or legacy file degrades to empty state with a
+    warning, which suits read-only callers. A caller that goes on to *write*
+    the state passes ``strict=True`` so an ``OSError`` reading either file
+    propagates instead — otherwise the write would replace whatever the
+    unreadable file held. Corrupt but readable content starts fresh either way.
     """
     state_file = state_path_for_repo(repo)
-    central_state: MonitorState | None = None
+    central_state = _load_json_state(state_file, strict=strict, label="monitor")
 
-    if state_file.exists():
+    legacy_state = _load_json_state(LEGACY_STATE_FILE, strict=strict, label="legacy")
+    if legacy_state is not None:
+        central_state = (
+            legacy_state
+            if central_state is None
+            else _merge_states(central_state, legacy_state)
+        )
+        # Persist merged state and remove legacy file
+        save_state(central_state, repo)
         try:
-            data = json.loads(state_file.read_text())
-            central_state = MonitorState.from_dict(data)
-        except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
-            if strict and isinstance(e, OSError):
-                raise
-            logger.warning(
-                "Corrupt monitor state file %s, starting fresh: %s", state_file, e
-            )
-            central_state = MonitorState(monitored={}, completed={})
-
-    # Legacy migration: check for old per-project state file
-    if LEGACY_STATE_FILE.exists():
-        try:
-            legacy_data = json.loads(LEGACY_STATE_FILE.read_text())
-            legacy_state = MonitorState.from_dict(legacy_data)
-        except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
-            logger.warning(
-                "Corrupt legacy state file %s, skipping migration: %s",
+            LEGACY_STATE_FILE.unlink()
+            logger.info(
+                "Migrated legacy state from %s to central directory",
                 LEGACY_STATE_FILE,
-                e,
             )
-            legacy_state = None
-
-        if legacy_state is not None:
-            central_state = (
-                legacy_state
-                if central_state is None
-                else _merge_states(central_state, legacy_state)
+        except OSError as e:
+            logger.warning(
+                "Could not delete legacy state file %s: %s", LEGACY_STATE_FILE, e
             )
-            # Persist merged state and remove legacy file
-            save_state(central_state, repo)
-            try:
-                LEGACY_STATE_FILE.unlink()
-                logger.info(
-                    "Migrated legacy state from %s to central directory",
-                    LEGACY_STATE_FILE,
-                )
-            except OSError as e:
-                logger.warning(
-                    "Could not delete legacy state file %s: %s", LEGACY_STATE_FILE, e
-                )
 
     if central_state is None:
         return MonitorState(monitored={}, completed={})
