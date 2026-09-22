@@ -25,6 +25,7 @@ from cw.cli import (
     review,
     session_inspect,
     session_prune,
+    session_send,
     signal_park,
     sprint,
     statusline,
