@@ -227,7 +227,7 @@ def refuse_real_state_write(path: Path) -> None:
 
     Belt-and-suspenders guard against GitHub #1017 (a live dev_queue.json
     clobbered by GEN-A/GEN-B test-fixture data): ``save_state``,
-    ``save_usage_limited_until``, ``_save_concurrency_overrides``,
+    ``merge_and_save_usage_limited_until``, ``_save_concurrency_overrides``,
     ``save_dev_queue``, and ``init_client`` call this immediately before
     their atomic write, so a write that somehow escapes the autouse
     ``tmp_config_dir`` fixture (a stale module-level path binding, or a

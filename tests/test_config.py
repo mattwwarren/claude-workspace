@@ -2301,21 +2301,27 @@ class TestDispatchStateLock:
 
 
 class TestUsageLimitedUntilPersistence:
-    """Unit tests for load_usage_limited_until / save_usage_limited_until (#804).
+    """Unit tests for load/merge_and_save of usage_limited_until (#804).
 
     #1409: the key holds a per-client ``{client: expiry}`` mapping (it was a
     single fleet-wide scalar), so every load returns a ``dict`` — ``{}`` when
-    there is nothing usable — and every save takes a mapping.
+    there is nothing usable — and every save takes a mapping. Round 5
+    collapsed the parallel exact-overwrite ``save_usage_limited_until``
+    primitive into ``merge_and_save_usage_limited_until``, which is now the
+    sole writer.
     """
 
     def test_save_and_load_roundtrip(self, tmp_config_dir: Path) -> None:
         """save then load returns the same per-client mapping (#1409)."""
         from datetime import UTC, datetime, timedelta
 
-        from cw.dispatch_state import load_usage_limited_until, save_usage_limited_until
+        from cw.dispatch_state import (
+            load_usage_limited_until,
+            merge_and_save_usage_limited_until,
+        )
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until({"test-client": future})
+        merge_and_save_usage_limited_until({"test-client": future})
         assert load_usage_limited_until() == {"test-client": future}
 
     def test_load_returns_empty_when_file_absent(self, tmp_config_dir: Path) -> None:
@@ -2331,22 +2337,36 @@ class TestUsageLimitedUntilPersistence:
         """A persisted timestamp in the past is treated as expired → {} (#1409)."""
         from datetime import UTC, datetime, timedelta
 
-        from cw.dispatch_state import load_usage_limited_until, save_usage_limited_until
+        from cw.dispatch_state import (
+            load_usage_limited_until,
+            merge_and_save_usage_limited_until,
+        )
 
         past = datetime.now(UTC) - timedelta(hours=1)
-        save_usage_limited_until({"test-client": past})
+        merge_and_save_usage_limited_until({"test-client": past})
         assert load_usage_limited_until() == {}
 
-    def test_save_empty_mapping_clears_backoff(self, tmp_config_dir: Path) -> None:
-        """save_usage_limited_until({}) clears every window → {} (#1409)."""
+    def test_merge_and_save_empty_mapping_is_a_no_op(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """An empty-mapping merge is a no-op, not a clear (#1409 round 5).
+
+        The pre-round-5 exact-overwrite ``save_usage_limited_until({})``
+        cleared every window. That primitive is gone; the sole surviving
+        writer merges, so an empty mapping merges nothing new in and an
+        existing window is left standing.
+        """
         from datetime import UTC, datetime, timedelta
 
-        from cw.dispatch_state import load_usage_limited_until, save_usage_limited_until
+        from cw.dispatch_state import (
+            load_usage_limited_until,
+            merge_and_save_usage_limited_until,
+        )
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until({"test-client": future})
-        save_usage_limited_until({})
-        assert load_usage_limited_until() == {}
+        merge_and_save_usage_limited_until({"test-client": future})
+        merge_and_save_usage_limited_until({})
+        assert load_usage_limited_until() == {"test-client": future}
 
     def test_load_returns_empty_on_corrupt_json(self, tmp_config_dir: Path) -> None:
         """Corrupt JSON in DISPATCH_STATE_FILE → {} (silent, no exception)."""
@@ -2388,31 +2408,32 @@ class TestUsageLimitedUntilPersistence:
         tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """save_usage_limited_until swallows OSError and emits a warning (#804)."""
+        """merge_and_save_usage_limited_until swallows OSError and warns (#804)."""
         from datetime import UTC, datetime, timedelta
         from unittest.mock import patch
 
-        from cw.dispatch_state import save_usage_limited_until
+        from cw.dispatch_state import merge_and_save_usage_limited_until
 
         future = datetime.now(UTC) + timedelta(hours=1)
         with patch(
             "cw.dispatch_state.atomic_write_text", side_effect=OSError("disk full")
         ):
-            save_usage_limited_until({"test-client": future})
+            merge_and_save_usage_limited_until({"test-client": future})
 
-    def test_save_usage_limited_until_refuses_real_path_and_does_not_swallow(
+    def test_merge_and_save_usage_limited_until_refuses_real_path_and_does_not_swallow(
         self,
         tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The #1017 CwError guard must propagate, unlike the OSError above.
 
-        save_usage_limited_until wraps its body in `except OSError`; CwError
-        is a distinct exception type and must NOT be swallowed by that guard.
+        merge_and_save_usage_limited_until wraps its body in `except
+        OSError`; CwError is a distinct exception type and must NOT be
+        swallowed by that guard.
         """
         from datetime import UTC, datetime, timedelta
 
-        from cw.dispatch_state import save_usage_limited_until
+        from cw.dispatch_state import merge_and_save_usage_limited_until
 
         real_dispatch_state_file = _REAL_STATE_DIR / "dispatch_state.json"
         monkeypatch.setattr(
@@ -2423,7 +2444,7 @@ class TestUsageLimitedUntilPersistence:
 
         future = datetime.now(UTC) + timedelta(hours=1)
         with pytest.raises(CwError, match="refusing real-state write"):
-            save_usage_limited_until({"test-client": future})
+            merge_and_save_usage_limited_until({"test-client": future})
 
         mock_write.assert_not_called()
 
@@ -2494,16 +2515,16 @@ class TestUsageLimitArmedAt:
 
         from cw.dispatch_state import (
             load_usage_limited_until,
+            merge_and_save_usage_limited_until,
             save_usage_limit_armed_at,
-            save_usage_limited_until,
         )
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until({"test-client": future})
+        merge_and_save_usage_limited_until({"test-client": future})
         save_usage_limit_armed_at(datetime.now(UTC))
         assert load_usage_limited_until() == {"test-client": future}
 
-    def test_save_usage_limited_until_preserves_usage_limit_armed_at(
+    def test_merge_and_save_usage_limited_until_preserves_usage_limit_armed_at(
         self, tmp_config_dir: Path
     ) -> None:
         """Writing usage_limited_until must not clobber the armed_at key."""
@@ -2511,13 +2532,13 @@ class TestUsageLimitArmedAt:
 
         from cw.dispatch_state import (
             load_usage_limit_armed_at,
+            merge_and_save_usage_limited_until,
             save_usage_limit_armed_at,
-            save_usage_limited_until,
         )
 
         armed_at = datetime.now(UTC)
         save_usage_limit_armed_at(armed_at)
-        save_usage_limited_until(
+        merge_and_save_usage_limited_until(
             {"test-client": datetime.now(UTC) + timedelta(hours=1)}
         )
         loaded = load_usage_limit_armed_at()
@@ -2591,7 +2612,7 @@ class TestAvailabilityProbeCachePersistence:
     Sibling of TestUsageLimitedUntilPersistence: the cache is persisted in the
     same DISPATCH_STATE_FILE sidecar under the ``"availability_probe"`` key.
     The two clobber-regression tests pin the read-merge-write contract that
-    keeps save_usage_limited_until and save_availability_probe_cache from
+    keeps merge_and_save_usage_limited_until and save_availability_probe_cache from
     overwriting each other's key (#1157).
     """
 
@@ -2741,12 +2762,12 @@ class TestAvailabilityProbeCachePersistence:
         from cw.dispatch_state import (
             AvailabilityProbeCache,
             load_usage_limited_until,
+            merge_and_save_usage_limited_until,
             save_availability_probe_cache,
-            save_usage_limited_until,
         )
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until({"test-client": future})
+        merge_and_save_usage_limited_until({"test-client": future})
         save_availability_probe_cache(
             AvailabilityProbeCache(
                 probed_at=datetime.now(UTC), available=False, latched=True
@@ -2754,7 +2775,7 @@ class TestAvailabilityProbeCachePersistence:
         )
         assert load_usage_limited_until() == {"test-client": future}
 
-    def test_save_usage_limited_until_preserves_availability_probe_cache(
+    def test_merge_and_save_usage_limited_until_preserves_availability_probe_cache(
         self, tmp_config_dir: Path
     ) -> None:
         """Writing the usage-limit key must not clobber the probe cache."""
@@ -2763,8 +2784,8 @@ class TestAvailabilityProbeCachePersistence:
         from cw.dispatch_state import (
             AvailabilityProbeCache,
             load_availability_probe_cache,
+            merge_and_save_usage_limited_until,
             save_availability_probe_cache,
-            save_usage_limited_until,
         )
 
         save_availability_probe_cache(
@@ -2772,7 +2793,7 @@ class TestAvailabilityProbeCachePersistence:
                 probed_at=datetime.now(UTC), available=False, latched=True
             )
         )
-        save_usage_limited_until(
+        merge_and_save_usage_limited_until(
             {"test-client": datetime.now(UTC) + timedelta(hours=1)}
         )
         loaded = load_availability_probe_cache()
@@ -2804,19 +2825,22 @@ class TestAvailabilityProbeCachePersistence:
         assert loaded is not None
         assert loaded.available is True
 
-    def test_save_usage_limited_until_swallows_corrupt_existing_sidecar(
+    def test_merge_and_save_usage_limited_until_swallows_corrupt_existing_sidecar(
         self, tmp_config_dir: Path
     ) -> None:
-        """save_usage_limited_until also tolerates a corrupt existing sidecar."""
+        """merge_and_save_usage_limited_until tolerates a corrupt existing sidecar."""
         from datetime import UTC, datetime, timedelta
 
         import cw.dispatch_state
-        from cw.dispatch_state import load_usage_limited_until, save_usage_limited_until
+        from cw.dispatch_state import (
+            load_usage_limited_until,
+            merge_and_save_usage_limited_until,
+        )
 
         cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         cw.dispatch_state.DISPATCH_STATE_FILE.write_text("not-json")
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until({"test-client": future})
+        merge_and_save_usage_limited_until({"test-client": future})
         assert load_usage_limited_until() == {"test-client": future}
 
 
@@ -3001,12 +3025,12 @@ class TestExecutorBlockedMarkerPersistence:
 
         from cw.dispatch_state import (
             load_usage_limited_until,
+            merge_and_save_usage_limited_until,
             save_executor_blocked_marker,
-            save_usage_limited_until,
         )
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until({"test-client": future})
+        merge_and_save_usage_limited_until({"test-client": future})
         save_executor_blocked_marker(self._marker())
 
         assert load_usage_limited_until() == {"test-client": future}
@@ -3105,12 +3129,12 @@ class TestExecutorBlockedMarkerPersistence:
             clear_all_executor_blocked_markers,
             load_executor_blocked_markers,
             load_usage_limited_until,
+            merge_and_save_usage_limited_until,
             save_executor_blocked_marker,
-            save_usage_limited_until,
         )
 
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until({"test-client": future})
+        merge_and_save_usage_limited_until({"test-client": future})
         save_executor_blocked_marker(self._marker(client="client-a", ticket_id="1"))
         save_executor_blocked_marker(self._marker(client="client-b", ticket_id="2"))
 

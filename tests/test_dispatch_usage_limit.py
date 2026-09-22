@@ -30,7 +30,10 @@ import cw.dispatch.loop
 from cw.dev_queue import add_ticket
 from cw.dispatch import DispatchTickResult, dispatch_tick
 from cw.dispatch.loop import run_dispatch_loop
-from cw.dispatch_state import load_usage_limited_until, save_usage_limited_until
+from cw.dispatch_state import (
+    load_usage_limited_until,
+    merge_and_save_usage_limited_until,
+)
 from cw.events import read_events
 from cw.models import (
     ClientConfig,
@@ -217,7 +220,7 @@ class TestSidecarShape:
         future = datetime.now(UTC) + timedelta(hours=1)
         later = datetime.now(UTC) + timedelta(hours=5)
 
-        save_usage_limited_until({"client-a": future, "client-b": later})
+        merge_and_save_usage_limited_until({"client-a": future, "client-b": later})
 
         assert load_usage_limited_until() == {"client-a": future, "client-b": later}
 
@@ -225,15 +228,25 @@ class TestSidecarShape:
         future = datetime.now(UTC) + timedelta(hours=1)
         past = datetime.now(UTC) - timedelta(hours=1)
 
-        save_usage_limited_until({"client-a": past, "client-b": future})
+        merge_and_save_usage_limited_until({"client-a": past, "client-b": future})
 
         assert load_usage_limited_until() == {"client-b": future}
 
-    def test_empty_mapping_clears_every_window(self, tmp_config_dir: Path) -> None:
-        save_usage_limited_until({"client-a": datetime.now(UTC) + timedelta(hours=1)})
-        save_usage_limited_until({})
+    def test_empty_mapping_is_a_merge_no_op_not_a_clear(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#1409 round 5: the collapsed writer merges, it does not overwrite.
 
-        assert load_usage_limited_until() == {}
+        The pre-round-5 ``save_usage_limited_until({})`` cleared every window
+        by exact-overwrite. That primitive is gone -- the sole surviving
+        writer merges, and an empty mapping merges nothing new in, so an
+        existing window is left standing rather than cleared.
+        """
+        future = datetime.now(UTC) + timedelta(hours=1)
+        merge_and_save_usage_limited_until({"client-a": future})
+        merge_and_save_usage_limited_until({})
+
+        assert load_usage_limited_until() == {"client-a": future}
 
     def test_legacy_scalar_on_disk_loads_without_crashing(
         self, tmp_config_dir: Path
@@ -295,7 +308,7 @@ class TestMergeAndArm:
         from cw.dispatch.loop import _merge_persisted_usage_limited_until
 
         now = datetime.now(UTC)
-        save_usage_limited_until(
+        merge_and_save_usage_limited_until(
             {"client-a": now + timedelta(hours=5), "client-c": now + timedelta(hours=2)}
         )
 
@@ -389,8 +402,9 @@ class TestConcurrentWriterSurvivesTheSave:
     ``run_dispatch_loop`` only merges the on-disk sidecar once, at the TOP of
     each tick (#1346). The arm-and-save block runs AFTER the tick, so a
     second writer (``--force``, #1362) landing a different client's window in
-    that gap used to be erased outright: ``save_usage_limited_until`` persists
-    the whole in-memory mapping, which never saw the concurrent write.
+    that gap used to be erased outright before this fix: the pre-fix save
+    persisted the whole in-memory mapping, which never saw the concurrent
+    write.
     """
 
     def test_second_writer_window_is_not_erased(
@@ -420,7 +434,7 @@ class TestConcurrentWriterSurvivesTheSave:
                 # A second `cw --force` process arms client-b's window
                 # AFTER this loop's tick-start merge already ran, but
                 # BEFORE this loop's own post-tick save below.
-                save_usage_limited_until({"client-b": concurrent_until})
+                merge_and_save_usage_limited_until({"client-b": concurrent_until})
                 daemon.raise_usage_limit = False
                 return result
             raise KeyboardInterrupt
@@ -473,7 +487,7 @@ class TestConcurrentWriterSurvivesTheSave:
         monkeypatch.setattr(dispatch_state, "_load_dispatch_state_raw", spying_raw)
 
         now = datetime.now(UTC)
-        save_usage_limited_until({"client-a": now + timedelta(hours=1)})
+        merge_and_save_usage_limited_until({"client-a": now + timedelta(hours=1)})
         observed_lock_state_during_read.clear()
 
         merged = dispatch_state.merge_and_save_usage_limited_until(

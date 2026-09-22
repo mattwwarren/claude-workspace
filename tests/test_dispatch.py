@@ -62,7 +62,6 @@ from cw.dispatch_state import (
     merge_and_save_usage_limited_until,
     save_availability_probe_cache,
     save_usage_limit_armed_at,
-    save_usage_limited_until,
 )
 from cw.events import read_events, record_event
 from cw.exceptions import (
@@ -5412,8 +5411,6 @@ class TestDispatchUsageLimitBackoff:
         active, spawning is suppressed without requiring a fresh detection (#804)."""
         from datetime import timedelta
 
-        from cw.dispatch_state import save_usage_limited_until
-
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-LOAD", client="test-client"))
 
@@ -5421,7 +5418,7 @@ class TestDispatchUsageLimitBackoff:
 
         # Pre-write a backoff window that hasn't expired yet.
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until({"test-client": future})
+        merge_and_save_usage_limited_until({"test-client": future})
 
         run_dispatch_loop(once=True, native_daemon=daemon)
 
@@ -5463,7 +5460,7 @@ class TestDispatchUsageLimitBackoff:
                 # Simulate a SECOND, unrelated dispatch process detecting a
                 # usage limit and persisting it -- this process never calls
                 # its own _reconcile_usage_limited/UsageLimitError path.
-                save_usage_limited_until({"test-client": future})
+                merge_and_save_usage_limited_until({"test-client": future})
             return result
 
         monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", observing_tick)
@@ -5525,7 +5522,7 @@ class TestDispatchUsageLimitBackoff:
             if call_count == 1:
                 # Simulate another process writing the backoff between
                 # tick 1 and tick 2 (same idiom as the cross-process test).
-                save_usage_limited_until({"test-client": future})
+                merge_and_save_usage_limited_until({"test-client": future})
             elif call_count == 2:
                 # Corrupt the sidecar between tick 2 and tick 3 -- mirrors
                 # test_config.py's corrupt-json input, which proves
@@ -5577,7 +5574,7 @@ class TestDispatchUsageLimitBackoff:
             # Both in-memory (via pre-loop load) and on-disk start with the
             # SAME short-lived window.
             expiring = datetime.now(UTC) + timedelta(seconds=30)
-            save_usage_limited_until({"test-client": expiring})
+            merge_and_save_usage_limited_until({"test-client": expiring})
 
             call_count = 0
             captured: list[Mapping[str, datetime]] = []
@@ -5633,7 +5630,7 @@ class TestDispatchUsageLimitBackoff:
             armed_at = datetime.now(UTC) - timedelta(minutes=5)
             expiring = datetime.now(UTC) + timedelta(seconds=30)
             save_usage_limit_armed_at(armed_at)
-            save_usage_limited_until({"test-client": expiring})
+            merge_and_save_usage_limited_until({"test-client": expiring})
 
             call_count = 0
             real_tick = cw.dispatch.loop.dispatch_tick
@@ -5723,7 +5720,7 @@ class TestDispatchUsageLimitBackoff:
             armed_at = datetime.now(UTC) - timedelta(minutes=20)
             expiring = datetime.now(UTC) + timedelta(seconds=30)
             save_usage_limit_armed_at(armed_at)
-            save_usage_limited_until({"test-client": expiring})
+            merge_and_save_usage_limited_until({"test-client": expiring})
 
             call_count = 0
             real_tick = cw.dispatch.loop.dispatch_tick
@@ -5793,7 +5790,7 @@ class TestDispatchUsageLimitBackoff:
         daemon = FakeNativeDaemonClient()
 
         future = datetime.now(UTC) + timedelta(seconds=1)
-        save_usage_limited_until({"test-client": future})
+        merge_and_save_usage_limited_until({"test-client": future})
         save_usage_limit_armed_at(datetime.now(UTC) - timedelta(minutes=5))
 
         calls: list[object] = []

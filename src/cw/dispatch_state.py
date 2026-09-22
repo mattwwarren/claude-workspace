@@ -142,7 +142,7 @@ def dispatch_state_lock() -> Iterator[None]:
     """Acquire an exclusive file lock over the DISPATCH_STATE_FILE write window.
 
     Mirror of ``concurrency_override_lock()``/``clients_lock()``. Hold this
-    across every load→mutate→write sequence in ``save_usage_limited_until``,
+    across every load→mutate→write sequence in
     ``merge_and_save_usage_limited_until``, ``save_availability_probe_cache``,
     and ``save_main_drift_latches`` so concurrent ``cw`` processes cannot
     clobber each other's edits (lost update, #1256). The lock is advisory
@@ -176,8 +176,8 @@ def _load_dispatch_state_raw() -> dict[str, Any]:
     """Read DISPATCH_STATE_FILE as a dict, or ``{}`` if absent/corrupt/unreadable.
 
     Shared read-side of the read-merge-write save helpers
-    (``save_usage_limited_until`` / ``save_availability_probe_cache``) so that
-    neither clobbers the other's key in the shared sidecar (#1157). A corrupt
+    (``merge_and_save_usage_limited_until`` / ``save_availability_probe_cache``)
+    so that neither clobbers the other's key in the shared sidecar (#1157). A corrupt
     or non-object existing file is treated as empty rather than raising.
     """
     path = DISPATCH_STATE_FILE
@@ -272,50 +272,26 @@ def merge_usage_limited_until(
     return merged
 
 
-def save_usage_limited_until(windows: Mapping[str, datetime]) -> None:
-    """Persist the per-client usage-limit back-off windows (#1409).
-
-    Writes ``{"usage_limited_until": {"<client>": "<iso>", ...}}``; an empty
-    mapping clears every window (the pre-#1409 ``save(None)`` call shape).
-    Read-merge-writes the shared sidecar so the ``availability_probe`` key
-    (RFC 0011 A5) is preserved rather than clobbered (#1157). Creates
-    STATE_DIR if needed. Silently swallows write errors — a failed persist
-    just means the next loop start won't honour the backoff (acceptable
-    degradation).
-
-    The whole mapping is written, not merged per client: the caller
-    already holds the view of every live window it wants persisted — this
-    is the exact-overwrite primitive; :func:`merge_and_save_usage_limited_until`
-    is the read-merge-write one for a caller that must not silently erase a
-    concurrent writer's entry.
-    """
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            payload["usage_limited_until"] = {
-                name: dt.isoformat() for name, dt in windows.items()
-            }
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning("dispatch_state: failed to persist usage_limited_until")
-
-
 def merge_and_save_usage_limited_until(
     windows: Mapping[str, datetime],
 ) -> dict[str, datetime]:
     """Read-merge-write ``usage_limited_until`` atomically, one lock (#1409 round 4).
 
-    Round 3's fix re-merged the on-disk sidecar into *windows* right before
-    calling :func:`save_usage_limited_until` — but that re-merge was an
-    UNLOCKED read, so a second writer (``--force``, #1362) landing between
-    that read and ``save_usage_limited_until``'s own lock acquisition was
-    still silently erased by the whole-mapping write. This folds the read,
-    the merge, and the write into a SINGLE :func:`dispatch_state_lock`
-    acquisition, so no writer can land in between — the window is closed,
-    not shortened. Returns the merged mapping so the caller's in-memory view
-    stays consistent with what was just persisted.
+    The sole persistence path for this sidecar key (round 5 collapsed the
+    parallel exact-overwrite ``save_usage_limited_until`` primitive into this
+    one — a caller nobody had). Round 3's fix re-merged the on-disk sidecar
+    into *windows* right before saving — but that re-merge was an UNLOCKED
+    read, so a second writer (``--force``, #1362) landing between that read
+    and the save's own lock acquisition was still silently erased by the
+    whole-mapping write. This folds the read, the merge, and the write into a
+    SINGLE :func:`dispatch_state_lock` acquisition, so no writer can land in
+    between — the window is closed, not shortened. Returns the merged mapping
+    so the caller's in-memory view stays consistent with what was just
+    persisted. Read-merge-writes the shared sidecar so the
+    ``availability_probe`` key (RFC 0011 A5) is preserved rather than
+    clobbered (#1157). Creates STATE_DIR if needed. Silently swallows write
+    errors — a failed persist just means the next loop start won't honour the
+    backoff (acceptable degradation).
     """
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
