@@ -59,7 +59,8 @@ _SPAWN_BLOCK_EXIT = 2
 # The refused values, compared case-insensitively after stripping. A blank
 # string is grouped with "fork" rather than with an omitted key: a caller that
 # sent the field and left it empty named a type and named nothing, which is
-# the fork shape with extra steps.
+# the fork shape with extra steps. Both groups deny; the split survives only
+# because the two reasons say different things about what went wrong.
 _FORK_SUBAGENT_TYPES = frozenset({"", "fork"})
 
 # The tools this hook is wired to (cw.spawn._AGENT_TOOL_MATCHER). Re-checked
@@ -68,11 +69,6 @@ _FORK_SUBAGENT_TYPES = frozenset({"", "fork"})
 _AGENT_TOOL_NAMES = frozenset({"Agent", "Task"})
 
 _SUBAGENT_TYPE_KEY = "subagent_type"
-
-# Distinguishes "the key was not sent" from "the key was sent as null". Both
-# end up allowed, but only via this sentinel can the blank-string case stay
-# separable from them.
-_KEY_ABSENT = object()
 
 _DENY_REASON = (
     "BLOCKED (#2211): cw agent-spawn-pre refused a subagent spawn with "
@@ -168,8 +164,15 @@ def _resolve_spawn_guard_enabled(client: str | None, lane: str | None) -> bool:
 
 
 def _classify_subagent_type(raw: object) -> str | None:
-    """Return the refusal reason for this ``subagent_type``, or None to allow."""
-    if raw is _KEY_ABSENT or raw is None:
+    """Return the refusal reason for this ``subagent_type``, or None to allow.
+
+    A key that was never sent and one sent as JSON ``null`` are the same
+    thing here — no type was named — so both arrive as None and refuse
+    together. A blank string is *not* one of them: it goes to the fork branch
+    below, because a caller that sent the field and left it empty said
+    something, and what it said is the fork shape with extra steps.
+    """
+    if raw is None:
         return _OMITTED_DENY_REASON
     if not isinstance(raw, str):
         _warn_unexpected_shape(
@@ -205,7 +208,7 @@ def classify_spawn(payload: dict[str, object] | None) -> str | None:
             f"tool_input is {type(tool_input).__name__}, expected dict"
         )
         return None
-    return _classify_subagent_type(tool_input.get(_SUBAGENT_TYPE_KEY, _KEY_ABSENT))
+    return _classify_subagent_type(tool_input.get(_SUBAGENT_TYPE_KEY))
 
 
 def enforce(reason: str | None) -> None:
