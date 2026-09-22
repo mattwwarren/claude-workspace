@@ -144,16 +144,26 @@ _PARK_BENIGN_RECORDS: list[dict[str, object]] = [
 
 
 def _park_marker_extra(
-    session_id: str, marker: object, overrides: dict[str, object] | None
+    session_id: str,
+    marker: object,
+    overrides: dict[str, object] | None,
+    stage: Stage = _PARK_ROW_STAGE,
 ) -> dict[str, object] | None:
-    """Build the ``extra`` context keys for a seeded park marker (#2135)."""
+    """Build the ``extra`` context keys for a seeded park marker (#2135).
+
+    *stage* defaults to :data:`_PARK_ROW_STAGE` (the plan-stage row every
+    existing case seeds); a caller seeding a different stage's RUNNING row
+    (#2228 -- ``Stage.REVIEW``) passes it explicitly so the marker's own
+    ``stage`` still covers the row, since ``_park_if_abandoned`` checks the
+    two for equality.
+    """
     if marker is _NO_MARKER:
         return None
     if marker is not _CURRENT_MARKER:
         return {PARK_COMMENT_MARKER_KEY: marker}
     payload: dict[str, object] = ParkCommentMarker(
         ticket_id=TestSignalStop.SEED_TICKET_ID,
-        stage=_PARK_ROW_STAGE,
+        stage=stage,
         session_id=session_id,
         posted_at=datetime.fromisoformat(_PARK_POSTED_AT),
     ).model_dump(mode="json")
@@ -3494,6 +3504,7 @@ class TestSignalStop:
         ticket_override: bool | None = True,
         marker: object = _CURRENT_MARKER,
         marker_overrides: dict[str, object] | None = None,
+        stage: Stage = _PARK_ROW_STAGE,
     ) -> tuple[Session, Path, object]:
         """Seed a headless session + RUNNING task + a hand-built transcript.
 
@@ -3508,6 +3519,11 @@ class TestSignalStop:
         session, ticket and row stage; :data:`_NO_MARKER` omits the key; any
         other value is written verbatim (the malformed cases). Field-level
         tweaks of the well-formed marker go through *marker_overrides*.
+
+        *stage* is the RUNNING row's stage (default :data:`_PARK_ROW_STAGE`,
+        i.e. ``Stage.PLAN``), threaded into both the seeded ``TicketTask`` and
+        the default :data:`_CURRENT_MARKER`'s own ``stage`` -- a #2228 case
+        seeding ``Stage.REVIEW`` passes it here so the two stay equal.
 
         The #2135 park ships dark, so every case that expects it to fire must
         arm it: *master_switch* writes ``park_on_abandoned_exit_enabled`` into
@@ -3543,7 +3559,7 @@ class TestSignalStop:
                         status=QueueItemStatus.RUNNING,
                         session_id=session.id,
                         attempts=1,
-                        stage=_PARK_ROW_STAGE,
+                        stage=stage,
                         park_on_abandoned_exit=park_map,
                     )
                 ]
@@ -3563,7 +3579,7 @@ class TestSignalStop:
             worktree,
             session_id=session.id,
             ticket_id=context_ticket_id,
-            extra=_park_marker_extra(session.id, marker, marker_overrides),
+            extra=_park_marker_extra(session.id, marker, marker_overrides, stage=stage),
         )
         fake_home = tmp_path / f"fake-home-2135-{name}"
         if records is not None:
@@ -3651,6 +3667,53 @@ class TestSignalStop:
         ):
             events = read_events(
                 consumer=f"t2135-terminal-{event_type}", event_types=[event_type]
+            )
+            assert not any(e.payload.get("session_id") == session.id for e in events)
+        assert daemon.stop_calls == []
+
+    def test_signal_stop_parks_row_on_abandoned_exit_evidence_review_stage(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The same #2135 park, on a REVIEW-stage row (#2228 wiring).
+
+        Mirrors ``test_signal_stop_parks_row_on_abandoned_exit_evidence``
+        exactly, parametrized onto ``Stage.REVIEW`` -- the row this ticket's
+        new review-stage park-marker clauses (blocking-findings,
+        operator-actionable) stamp for.
+        """
+        from cw.models import QueueItemStatus
+
+        session, worktree, daemon = self._seed_park_case(
+            tmp_path,
+            monkeypatch,
+            "park-review",
+            _PARK_BENIGN_RECORDS,
+            stage=Stage.REVIEW,
+        )
+
+        self._invoke_stop(worktree)
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.ACTIVE
+        task = self._reload_task()
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "stopped_without_sentinel"
+        assert task.session_id == session.id
+        assert self._park_event_counts("park-review") == (1, 1)
+        attention = read_events(
+            consumer="t2135-lane-review",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert [e.payload["lane"] for e in attention] == [session.lane]
+        for event_type in (
+            OrchestratorEventType.SESSION_COMPLETED,
+            OrchestratorEventType.SESSION_TIMED_OUT,
+        ):
+            events = read_events(
+                consumer=f"t2135-terminal-review-{event_type}", event_types=[event_type]
             )
             assert not any(e.payload.get("session_id") == session.id for e in events)
         assert daemon.stop_calls == []
