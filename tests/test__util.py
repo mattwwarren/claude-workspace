@@ -776,3 +776,10 @@ class TestMcpExtraMsg:
 
         assert "channel server requires [mcp] extra" in MCP_EXTRA_MSG
         assert "uv tool install" in MCP_EXTRA_MSG
+
+    def test_does_not_advise_removed_from_flag(self) -> None:
+        """The local-clone hint points at install.sh, not uv's removed --from."""
+        from cw._util import MCP_EXTRA_MSG
+
+        assert "--from" not in MCP_EXTRA_MSG
+        assert "install.sh" in MCP_EXTRA_MSG

@@ -272,6 +272,12 @@ class LaneConfig(BaseModel):
     busy_wait_guard_enabled: bool | None = None
     busy_wait_guard_repeat_threshold: int | None = Field(default=None, ge=2)
     busy_wait_guard_window_seconds: int | None = Field(default=None, ge=1)
+    # Lane-level override for the `cw agent-spawn-pre` spawn-shape policy
+    # (#2211). Same bidirectional shape and reasoning as
+    # busy_wait_guard_enabled above: None = inherit the OrchestratorConfig
+    # default. Resolved by
+    # cw.cli._subagent_policy._resolve_spawn_guard_enabled.
+    subagent_spawn_guard_enabled: bool | None = None
     pipeline: StagePipelineConfig | None = None
     # Lane-level operator-signoff override (RFC 0007 Phase 3). None defers to
     # OrchestratorConfig.default_signoff. See GitHub #990.
@@ -710,6 +716,16 @@ class OrchestratorConfig(BaseModel):
     # occurrence -- the opposite of the fail-open design goal.
     busy_wait_guard_repeat_threshold: int = Field(default=3, ge=2)
     busy_wait_guard_window_seconds: int = Field(default=300, ge=1)
+    # Global default for the `cw agent-spawn-pre` spawn-shape policy (#2211),
+    # overridable per lane (LaneConfig.subagent_spawn_guard_enabled).
+    # Default-ON for the same reason as busy_wait_guard_enabled: the failure
+    # it prevents is a forked (or unnamed) subagent doing unrostered work cw
+    # can neither see nor stop (#2017), and the guard's own failure mode is
+    # bounded the other way -- it fails open on every shape it cannot
+    # classify, and refuses only an explicitly-named fork or an omitted
+    # subagent_type (deny-on-omission shipped in #2211 round 2, once the
+    # spawn-site inventory closed).
+    subagent_spawn_guard_enabled: bool = True
     # Elapsed seconds before reconcile attempts to route an emitted-but-unrouted
     # sentinel (signal_stop never fired). A re-check delay, not a disposition
     # timer: an emitted sentinel is positive evidence the worker completed.
