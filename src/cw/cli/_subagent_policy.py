@@ -49,7 +49,7 @@ from pathlib import Path
 
 import click
 
-from cw.cli._hook_io import find_cw_context
+from cw.cli._hook_io import _context_str, find_cw_context
 from cw.config import load_clients, load_orchestrator_config
 
 # PreToolUse contract: exit 2 blocks the tool call and feeds stderr back to
@@ -116,12 +116,6 @@ def _warn_unexpected_shape(detail: str) -> None:
         "classified).",
         err=True,
     )
-
-
-def _context_str(context: dict[str, object], key: str) -> str | None:
-    """Return ``context[key]`` when it is a non-empty string, else None."""
-    value = context.get(key)
-    return value if isinstance(value, str) and value else None
 
 
 def active_headless_context(payload: dict[str, object]) -> dict[str, object] | None:
