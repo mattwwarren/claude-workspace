@@ -2024,7 +2024,8 @@ entry for one finding. The **mirror** of
 
 Mandatory for the same reason both of its siblings are. A settle is the one act
 that can silence a real defect permanently and invisibly — the ledger has no
-expiry and, today, no per-record rollback — so the record of who did it, when,
+expiry, and rollback (#2232) is itself an operator act with its own event — so
+the record of who did it, when,
 and against which reviewed sha cannot live only in a ticket comment that can be
 edited afterwards. The same four facts are also written onto the durable
 `FindingDisposition` itself (`actor`, `recorded_at`, `summary`,
@@ -2072,6 +2073,106 @@ one, and `null` otherwise. The payload the blocking comment renders carries no
 ticket id — `ReviewVerdict` has no such field and the comment renderer is not
 given one — so the command cannot infer it, and inventing a correlation id
 would be worse than an honest null. Pass `--ticket` to get grouping.
+
+An entry whose `outcome` is `REVERSED` emits
+`review.finding_disposition_reverted` below **instead of** this event, so a
+count of `review.finding_settled` is a count of decisions recorded, never of
+decisions withdrawn.
+
+### `review.finding_disposition_reverted`
+
+**Emitter:** `cw review settle` (`cw.cli.review.commands`), for a payload entry
+whose `outcome` is `REVERSED`.
+**Payload:**
+```json
+{
+  "key": "<file>::<normalized summary>::<sha256 of the verbatim summary>",
+  "file": "<str>",
+  "summary": "<str>",
+  "outcome": "REVERSED",
+  "reason": "<str>",
+  "actor": "<gh login>",
+  "recorded_at": "<ISO-8601 UTC>",
+  "reviewed_sha": "<str>"
+}
+```
+**Semantics:** GitHub #2232. An operator **withdrew** a ledger entry they had
+previously settled. ADR-0016 named a per-record rollback as a precondition for
+ever arming the ledger's fuzzy claim tier; this is that rollback's audit
+record.
+
+Rollback reuses `cw review settle` rather than adding a command, so there is no
+second write path into the ledger: the marker's newest-`recorded_at`-wins merge
+resolves the same key to the reversal. Every guard the settle path already has
+applies unchanged — the dispatch-worker refusal, the resolved `actor`, the
+audit-before-effect ordering, and the all-events-then-one-write atomicity.
+
+**Its own type rather than a `review.finding_settled` with a different
+`outcome`.** That is this region's convention (`..._disposition_suppressed` and
+`..._claim_shadowed` share one emitting function and are still two types): an
+operator asking "what have I withdrawn" runs one `--type` query instead of
+filtering settles on payload content. The payload is byte-identically shaped,
+and carries `outcome` anyway, so a consumer that wants both loses nothing.
+
+**Querying:** `cw event tail --type review.finding_disposition_reverted --json`.
+Same archive caveat as `review.finding_claim_shadowed` above.
+
+Deliberately **not** in `_DEFAULT_OPERATOR_EVENT_TYPES`, for the same reason
+`review.finding_settled` is not: the operator who ran the command already knows.
+
+`correlation_id` follows `review.finding_settled`'s rule exactly — the
+`ticket_id` when `--ticket` names one, else `null`.
+
+### `review.finding_disposition_stale`
+
+**Emitter:** `suppress_adjudicated_findings`
+(`cw.review_finding_dispositions`).
+**Payload:**
+```json
+{
+  "key": "<file>::<normalized summary>::<sha256 of the verbatim summary>",
+  "file": "<str>",
+  "summary": "<str>",
+  "reviewed_sha": "<the sha the RECORD was settled against>",
+  "current_sha": "<the sha THIS pass reviewed>"
+}
+```
+**Semantics:** GitHub #2232. A ledger record matched a re-derived finding, and
+was **not applied**, because the file changed between the sha the record was
+settled against and the sha this pass reviewed. The finding kept blocking.
+
+The ledger's identity is deliberately not evidence-anchored (an evidence anchor
+lapses the moment code moves, which is the memory loss #1838 exists to remove),
+so the accepted cost is a suppression that can outlive the code it was granted
+for. This event is how that cost stops being silent.
+
+**Surfacing, not expiry.** The record is not deleted, not rewritten, and not
+marked spent: it still applies on any later pass where that file has not moved.
+The operator decides whether to re-settle it against the current code or
+withdraw it with `review.finding_disposition_reverted` above. Silent expiry is
+precisely the invisible mechanical act ADR-0016 exists to refuse.
+
+**Advisory, so a failed write warns rather than aborting** — the asymmetry with
+`review.finding_settled`, which refuses the whole settle on a failed emit, is
+deliberate and runs the same direction both times. There the audited act
+*creates* a durable suppression, so an unrecorded one is invisible; here the
+act is *declining* to suppress, which is already the safe outcome and is
+already visible twice over — on the posted comment under "Settled findings
+re-raised (the code moved)", and in the finding that kept blocking.
+
+Fails toward surfacing: an unresolvable ref (a rebase or force-push orphaning
+the settled sha) or an unreadable worktree is reported as drift rather than
+assumed clean.
+
+**Querying:** `cw event tail --type review.finding_disposition_stale --json`.
+Same archive caveat as `review.finding_claim_shadowed` above.
+
+Deliberately **not** in `_DEFAULT_OPERATOR_EVENT_TYPES`: per-finding, per-pass
+volume, in the same class as `review.finding_claim_shadowed`, and the posted
+comment already carries the operator-facing version.
+
+`correlation_id` is the ticket id, always — this event is emitted from inside a
+review pass, which has one.
 
 ### `watched_pr.collision`
 
