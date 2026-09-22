@@ -178,6 +178,14 @@ sentinel: no session is running when an asynchronous dispatch fails, so there is
 nothing to carry a `blocker.reason`. Slower than delegation but guaranteed to
 work; it is a last resort, not a shortcut past the fix loop.
 
+One failure class does not reach this fallback. When no remote ref can be found
+whose tip matches the worktree's HEAD, the row is parked `BLOCKED_ON_USER` with
+`disposition: fix_dispatch_ref_unresolved` and a single `session.needs_attention`
+(no `stage.errored`, and no repeat per tick). `pending_fix_dispatch` is
+**retained**, so recovery is `cw dev-queue requeue`, which clears the handoff and
+re-runs review — there is nothing to execute by hand here, because the branch the
+fix would land on is exactly what could not be located (#2209).
+
 ```bash
 # From the main session's worktree
 git fetch origin <branch-name>

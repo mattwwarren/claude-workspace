@@ -330,6 +330,7 @@ where one already existed:
 | terminal-sibling park (`tasks.py`) | `ReapReason.TERMINAL_SIBLING` |
 | unknown client / invalid pipeline stage (`dispatch.py`) | `"unknown_client"` / `"invalid_stage_config"` (deliberately excluded from concierge/escalation eligibility — config errors, not recoverable states) |
 | mechanically-rejected MUST_FIX park (`dispatch/routing.py`, #1714) | `REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION` ("codex_must_fix_mechanically_rejected") — stamped directly by `_park_must_fix_mechanically_rejected`, Rule 5's only reason-keyed override, rather than derived via `_hold_aware_disposition`. Escalation-eligible and drain-eligible; deliberately excluded from `HOLD_DISPOSITIONS` and from concierge's false-park requeue |
+| fix-dispatch unresolvable-remote-ref park (`fix_dispatch.py`, #2209) | `_FIX_DISPATCH_REF_UNRESOLVED_REASON` ("fix_dispatch_ref_unresolved") — stamped by `_park_for_unresolved_ref` when no candidate in the reported/upstream/templated remote-ref ladder has a tip matching worktree HEAD. Escalation-eligible; excluded from `HOLD_DISPOSITIONS`, `DRAIN_DISPOSITIONS`, and concierge's false-park requeue — and, unlike every other row in this table, does NOT clear `pending_fix_dispatch` on park, so `cw dev-queue requeue` resumes the same fix cycle instead of restarting REVIEW from scratch |
 
 `cw.reconcile.escalation`'s `_ELIGIBLE_DISPOSITIONS` and
 `cw.reconcile.concierge`'s `_FALSE_PARK_ELIGIBLE_DISPOSITIONS` were updated

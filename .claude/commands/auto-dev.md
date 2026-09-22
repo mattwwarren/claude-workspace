@@ -1151,7 +1151,7 @@ When `status: "blocked"`, the `blocker.reason` field carries one of:
 
 Other `blocker.reason` values are reserved for future use; consumers should treat unknown reasons as opaque strings and surface them to the user verbatim.
 
-**Fix-dispatch failures carry no `blocker.reason` at all** (#2017). Since the fix agent is dispatched asynchronously by a reconcile tick, no session is running when a dispatch fails — there is no sentinel to put a reason in. Those failures surface as events instead: `stage.errored` with `error_kind: "fix_dispatch_failed"` and `session.needs_attention` with `paused_status: "fix_dispatch_failed"` (the error text in `breadcrumbs`). See `docs/events.md`.
+**Fix-dispatch failures carry no `blocker.reason` at all** (#2017). Since the fix agent is dispatched asynchronously by a reconcile tick, no session is running when a dispatch fails — there is no sentinel to put a reason in. Those failures surface as events instead: `stage.errored` with `error_kind: "fix_dispatch_failed"` and `session.needs_attention` with `paused_status: "fix_dispatch_failed"` (the error text in `breadcrumbs`). See `docs/events.md`. One class is an exception: when no remote ref's tip matches the worktree's HEAD, the row parks `BLOCKED_ON_USER` with `disposition: fix_dispatch_ref_unresolved` and emits only `session.needs_attention` (no `stage.errored`), keeping `pending_fix_dispatch` so `cw dev-queue requeue` resumes the same fix cycle (#2209).
 
 ### Field Notes
 
