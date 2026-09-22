@@ -970,8 +970,8 @@ Two things #2210 left open, and ADR-0016 named as preconditions for ever
 arming the claim tier, are closed.
 
 **See what is settled.** `cw review dispositions <ticket>` lists every record
-currently bound to a ticket — file, summary, outcome, who settled it, when,
-and against which sha:
+currently bound to a ticket — file, summary, outcome, who settled it, their
+stated reason, when, how long ago, and against which sha:
 
 ```bash
 cw review dispositions GEN-123 --client acme
@@ -982,7 +982,11 @@ Every record is listed whatever its outcome, with an explicit OUTCOME column:
 a withdrawn settle must never read as a live suppression. Only `REJECTED`
 suppresses; `ACCEPTED` is a record-only annotation and `REVERSED` is a
 withdrawal. With `--worktree`, the STALE column says whether each record's
-file has moved since the record was settled; without one it reads `?`.
+file has moved since the record was settled. It reads `?` whenever the
+question cannot be answered — no `--worktree`, an unreadable one, or a record
+carrying no reviewed sha to compare against; `?` is never "not stale". AGE is
+rendered `?` the same way for a record whose `recorded_at` is missing or
+unparseable.
 
 This reads the **dev-queue row's** last-synced copy of the ledger, refreshed
 after each review pass — not a live fetch of the ticket thread. A settle you
@@ -1010,6 +1014,16 @@ reviewer's "previously adjudicated" block: a withdrawal is the absence of a
 decision, so telling the model one stands would be backwards. It stays visible
 in `cw review dispositions`, because reversal history is part of the audit
 trail.
+
+A withdrawal is audited wherever it lands. `cw review settle` emits
+`review.finding_disposition_reverted` for the record it writes, and the review
+pass emits the same event when a `REVERSED` record first reaches the durable
+ledger through the ticket thread's marker — so one query answers "what has
+been withdrawn" regardless of which path recorded it:
+
+```bash
+cw event tail --type review.finding_disposition_reverted --json
+```
 
 **Drift is surfaced, not silently suppressed.** On every review pass, a record
 that matches a finding is checked for drift: did that file change between the

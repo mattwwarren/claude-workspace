@@ -2081,8 +2081,12 @@ decisions withdrawn.
 
 ### `review.finding_disposition_reverted`
 
-**Emitter:** `cw review settle` (`cw.cli.review.commands`), for a payload entry
-whose `outcome` is `REVERSED`.
+**Emitters:** `cw review settle` (`cw.cli.review.commands`), for a payload
+entry whose `outcome` is `REVERSED`; and the review pass itself
+(`cw.codex_review._context.core._emit_thread_reversal_events`) for a `REVERSED`
+record arriving through the ticket thread's marker. Both go through
+`cw.review_finding_dispositions.disposition_event_type` /
+`disposition_event_payload`, so the type and payload cannot drift apart.
 **Payload:**
 ```json
 {
@@ -2121,7 +2125,19 @@ Deliberately **not** in `_DEFAULT_OPERATOR_EVENT_TYPES`, for the same reason
 `review.finding_settled` is not: the operator who ran the command already knows.
 
 `correlation_id` follows `review.finding_settled`'s rule exactly — the
-`ticket_id` when `--ticket` names one, else `null`.
+`ticket_id` when `--ticket` names one, else `null`. From the review-pass
+emitter it is always the ticket id, which that path always has.
+
+**The review-pass emitter fires only on a state change** — a `REVERSED` record
+absent from the durable ledger before the merge, or replacing a different
+record under the same key. The marker is re-parsed on every pass, so a
+withdrawal already on the row produces no further events. Unlike the command,
+it **warns rather than raising** on a failed write: the operator's decision
+already exists durably on the ticket thread, so there is nothing to hold back,
+and parking a review run over an event-store `OSError` would trade a safe
+outcome for a stalled one. Only `REVERSED` is emitted from that path; an
+`ACCEPTED`/`REJECTED` record synced in from the thread is #2210's unchanged
+behaviour and produces no event.
 
 ### `review.finding_disposition_stale`
 
@@ -2133,10 +2149,21 @@ Deliberately **not** in `_DEFAULT_OPERATOR_EVENT_TYPES`, for the same reason
   "key": "<file>::<normalized summary>::<sha256 of the verbatim summary>",
   "file": "<str>",
   "summary": "<str>",
+  "outcome": "<str>",
+  "reason": "<str>",
+  "actor": "<gh login>",
+  "recorded_at": "<ISO-8601 UTC>",
   "reviewed_sha": "<the sha the RECORD was settled against>",
   "current_sha": "<the sha THIS pass reviewed>"
 }
 ```
+The settle/revert payload above plus `current_sha`. Full parity is the point:
+someone triaging a drifted suppression is asking who silenced this finding and
+why, and the two shas alone answer neither. `file` and `summary` are the
+finding as it came back THIS round rather than the record's stored copy — on a
+claim-tier match those differ, and the live text is what the reader is looking
+at.
+
 **Semantics:** GitHub #2232. A ledger record matched a re-derived finding, and
 was **not applied**, because the file changed between the sha the record was
 settled against and the sha this pass reviewed. The finding kept blocking.
