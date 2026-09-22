@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import ANY, MagicMock, patch
 
+import click
 import pytest
 from click.testing import CliRunner, Result
 from freezegun import freeze_time
@@ -30,6 +31,7 @@ from cw.cli import (
     _display_status,
     main,
 )
+from cw.cli._base import print_fixed_width_table
 from cw.cli._sentinels import _sentinel_frame_after
 from cw.cli.sprint import _resolve_version
 from cw.config import (
@@ -13221,3 +13223,28 @@ class TestSprintApplyCli:
         assert "#7" in result.output
         assert "#8" in result.output
         assert "Skipped" in result.output
+
+
+class TestPrintFixedWidthTable:
+    """#2232: one fixed-width table printer for every CLI listing.
+
+    ``cw dev-queue tasks`` and ``cw review dispositions`` carried
+    byte-identical copies of the header/rule/row triple before this was
+    factored out.
+    """
+
+    def test_it_renders_a_header_a_rule_and_each_row(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        print_fixed_width_table(["A", "BB"], [4, 6], [["1", "two"], ["3", "four"]])
+
+        header, rule, first, second = capsys.readouterr().out.splitlines()
+        assert header == "A     BB    "
+        assert rule == "-" * len(header)
+        assert first == "1     two   "
+        assert second == "3     four  "
+
+    def test_a_row_that_does_not_match_the_columns_raises(self) -> None:
+        """A short row would print a misaligned table that still reads as data."""
+        with pytest.raises(ValueError, match=r"zip\(\) argument 2 is longer"):
+            print_fixed_width_table(["A", "BB"], [4, 6], [["only-one"]])

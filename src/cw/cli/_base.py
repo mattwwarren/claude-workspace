@@ -32,7 +32,7 @@ from cw.exceptions import CwError
 from cw.models import ClientConfig, SessionStatus
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,32 @@ def handle_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
             raise click.ClickException(str(e)) from e
 
     return wrapper
+
+
+def print_fixed_width_table(
+    headers: Sequence[str],
+    col_widths: Sequence[int],
+    rows: Iterable[Sequence[str]],
+) -> None:
+    """Echo a left-aligned fixed-width table: header, rule, then *rows*.
+
+    Two spaces between columns, a rule as wide as the rendered header, and no
+    truncation — every caller already truncates each cell to its own column's
+    width, because what to cut and how to flag it is a per-column decision
+    (see ``dev_queue.tasks._reason_cell``'s ``?`` prefix, which must survive
+    the cut). Extracted (#2232) after ``cw dev-queue tasks`` and ``cw review
+    dispositions`` carried byte-identical copies of the zip/format/echo
+    triple.
+
+    ``strict=True`` on both zips: a row or header that does not match
+    ``col_widths`` is a programming error in the caller's column list, and a
+    silently short row would print a misaligned table that reads as data.
+    """
+    header = "  ".join(f"{h:<{w}}" for h, w in zip(headers, col_widths, strict=True))
+    click.echo(header)
+    click.echo("-" * len(header))
+    for row in rows:
+        click.echo("  ".join(f"{v:<{w}}" for v, w in zip(row, col_widths, strict=True)))
 
 
 def parse_iso_before(before: str) -> datetime:

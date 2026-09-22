@@ -17,6 +17,7 @@ from freezegun import freeze_time
 
 import cw.events
 from cw.cli import main
+from cw.cli.review.dispositions import _age_cell
 from cw.dev_queue import add_ticket, load_dev_queue
 from cw.events import read_events
 from cw.models import (
@@ -1961,13 +1962,106 @@ class TestReviewDispositions:
             msg = "git is gone"
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.cli.review.dispositions.subprocess.run", _raise)
+        monkeypatch.setattr("cw._git.subprocess.run", _raise)
         result = self._invoke(
             runner, "T-2232", "--client", "acme", "--worktree", str(tmp_path), "--json"
         )
 
         assert result.exit_code == 0, result.output
         assert [row["stale"] for row in json.loads(result.output)] == ["?"]
+
+    def test_a_record_with_no_reviewed_sha_reads_unknown_not_clean(
+        self,
+        runner: CliRunner,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """#2232 SHOULD_FIX 6: blank stored sha is 'cannot tell', not 'no'.
+
+        ``disposition_drifted`` answers ``False`` for a blank reviewed sha so
+        a missing field cannot manufacture drift on the suppression path. On
+        a surface whose whole job is surfacing staleness, rendering that as
+        "no" conflates "verified unchanged" with "nothing to compare against".
+        """
+        worktree = make_git_repo("wt-2232-cli-blank-sha")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        self._seed(("src/cw/foo.py", "Bug here", {"reviewed_sha": ""}))
+
+        result = self._invoke(
+            runner, "T-2232", "--client", "acme", "--worktree", str(worktree), "--json"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert [row["stale"] for row in json.loads(result.output)] == ["?"]
+
+    def test_an_inherited_git_dir_cannot_redirect_the_head_lookup(
+        self,
+        runner: CliRunner,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2232 MUST_FIX 1: --worktree decides the repo, not the ambient env.
+
+        Run from inside a git hook, an unsanitized ``git rev-parse HEAD``
+        answers for the HOOK's repository — so the drift comparison would be
+        against a sha from a tree the operator never named.
+        """
+        worktree = make_git_repo("wt-2232-cli-hook")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        settled_at = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 2  # reworked\n")
+        decoy = make_git_repo("wt-2232-cli-hook-decoy")
+        commit_tracked_file(decoy, "src/cw/foo.py", "a = 1\n")
+        monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+        self._seed(("src/cw/foo.py", "Bug here", {"reviewed_sha": settled_at}))
+
+        result = self._invoke(
+            runner, "T-2232", "--client", "acme", "--worktree", str(worktree), "--json"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert [row["stale"] for row in json.loads(result.output)] == ["yes"]
+
+    def test_the_table_carries_reason_and_age(self, runner: CliRunner) -> None:
+        """#2232 MUST_FIX 5: the acceptance text asks for actor, reason, age, sha."""
+        self._seed(
+            (
+                "src/cw/foo.py",
+                "Bug here",
+                {
+                    "rationale": "intentional tradeoff",
+                    "recorded_at": "2026-09-20T13:00:00Z",
+                },
+            )
+        )
+        with freeze_time("2026-09-22T13:00:00Z"):
+            result = self._invoke(runner, "T-2232", "--client", "acme")
+
+        assert result.exit_code == 0, result.output
+        header, _rule, row = result.output.splitlines()
+        assert "REASON" in header
+        assert "AGE" in header
+        assert "intentional tradeoff" in row
+        assert "2d" in row
+
+    @pytest.mark.parametrize(
+        ("recorded_at", "expected"),
+        [
+            ("", "?"),
+            ("not-a-timestamp", "?"),
+            ("2026-09-22T11:00:00+00:00", "2h"),
+            ("2026-09-22T13:00:00Z", "0m"),
+            ("2026-09-19T13:00:00+00:00", "3d"),
+            # A naive stamp is read as UTC, which is what `cw review settle`
+            # writes; a future stamp floors at zero rather than going negative.
+            ("2026-09-22T12:00:00", "1h"),
+            ("2026-09-23T13:00:00+00:00", "0m"),
+        ],
+    )
+    def test_age_is_computed_defensively(self, recorded_at: str, expected: str) -> None:
+        """A malformed or missing timestamp renders unknown, never raises."""
+        with freeze_time("2026-09-22T13:00:00Z"):
+            assert _age_cell(recorded_at) == expected
 
     def test_the_drift_column_ignores_the_lane_gate(
         self,
