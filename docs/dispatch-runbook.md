@@ -1239,8 +1239,13 @@ reason. Wait for the annotation to clear; only a tick line still reading
   `@{u}`, and the templated `origin/<prefix>/<ticket>` guess. Either nothing
   was pushed, or everything that was pushed is behind the worktree.
   `pending_fix_dispatch` is **retained** on this park — uniquely among the
-  dispositions here — so `cw dev-queue requeue` resumes the same fix cycle
-  rather than paying for a fresh REVIEW round. **Check before requeueing:** the
+  dispositions here — preserving the REVIEW round's action list so you can read
+  what the fix agent was going to be told. It is **not** a resume point:
+  `cw dev-queue requeue` sets the row back to PENDING, which stops matching the
+  parked-row exemption (that check gates on `BLOCKED_ON_USER`), so the #2142
+  stale-handoff sweep drops the retained handoff and the ticket is claimed into
+  a **fresh REVIEW session**. Whether requeue should resume the handoff instead
+  is #2265. **Check before requeueing:** the
   worktree's HEAD versus what `origin` actually holds, and the impl session's
   reported branch name. If the work was never pushed, push it before requeuing;
   a requeue alone will re-derive the same failure. The reason is

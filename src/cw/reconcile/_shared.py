@@ -222,8 +222,10 @@ _UNRESOLVED_SUBAGENT_SPAWN_REASON = "unresolved_subagent_spawn"
 # cannot locate is not a false park to auto-requeue -- the requeue would just
 # re-run the same failing resolution. It is not a hold or drain disposition
 # either. Uniquely among the park dispositions, the row keeps its
-# ``pending_fix_dispatch``, so an operator requeue resumes the same fix cycle
-# instead of restarting REVIEW.
+# ``pending_fix_dispatch`` -- as evidence for the operator, not as a resume
+# point: a requeue sets the row PENDING, the retained handoff is dropped by the
+# #2142 stale-handoff sweep, and the ticket is claimed into a fresh REVIEW
+# session (#2265 decides whether requeue should resume it instead).
 _FIX_DISPATCH_REF_UNRESOLVED_REASON = "fix_dispatch_ref_unresolved"
 # paused_status written to SESSION_NEEDS_ATTENTION events when
 # complete_timed_out_merged_tasks refuses a COMPLETED transition for a
