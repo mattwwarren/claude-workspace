@@ -566,6 +566,43 @@ class TestConcurrentSendGuard:
         assert result.surface_ref == "alreadylive"
         assert mock_native_daemon.spawn_calls == []
 
+    def test_task_no_longer_blocked_between_outer_check_and_lock_is_refused(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """The outer gate in trigger() and the recheck inside the lock must
+        both see BLOCKED_ON_USER -- a task that moved on between them (e.g.
+        an operator requeue racing a send) must not let a stale outer pass
+        smuggle a respawn through (#2212 review round 2, finding 1/2)."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client, status=SessionStatus.ACTIVE)
+        _persist(session)
+        blocked_task = _make_ticket_task(
+            ticket_id="2212",
+            client="test-client",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id=session.id,
+        )
+        running_task = _make_ticket_task(
+            ticket_id="2212",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session.id,
+        )
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        with patch(
+            "cw.session_resume_trigger.list_tickets",
+            side_effect=[[blocked_task], [running_task]],
+        ):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is False
+        assert result.reason == DEFERRED_LIVE_DELIVERY_REASON
+        assert mock_native_daemon.spawn_calls == []
+
     def test_roster_registration_failure_stops_the_orphaned_process(
         self,
         tmp_config_dir: Path,
@@ -593,6 +630,105 @@ class TestConcurrentSendGuard:
         # State must not have been committed for a respawn that never
         # actually registered.
         assert load_state().sessions[0].surface_ref == "deadbeef"
+
+
+# ---------------------------------------------------------------------------
+# Scoped post-spawn compensation (#2212 review round 2, finding 3): a
+# pre-commit failure (roster registration above, or mutate_state itself)
+# stops the orphaned process; a post-commit failure (the history event or
+# the mailbox cursor) must NOT stop a surface that is now the authoritative,
+# genuinely-live state -- see docs/adr/0017-session-inbox-and-resume-trigger.md.
+# ---------------------------------------------------------------------------
+
+
+class TestPostSpawnCompensation:
+    def test_mutate_state_failure_before_commit_stops_the_orphaned_process(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """mutate_state failing means nothing committed -- the same
+        orphan-stop compensation as a roster-verify failure applies."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(session)
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        with (
+            patch("cw.session_resume_trigger.list_tickets", return_value=[]),
+            patch(
+                "cw.session_resume_trigger.mutate_state",
+                side_effect=OSError("disk full"),
+            ),
+        ):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is False
+        assert "disk full" in result.reason
+        spawned_short_id = f"{mock_native_daemon._counter:08x}"
+        assert mock_native_daemon.stop_calls == [spawned_short_id]
+        # mutate_state was replaced entirely, so the real save never ran.
+        assert load_state().sessions[0].surface_ref == "deadbeef"
+
+    def test_post_commit_event_write_failure_does_not_stop_the_surface(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """Once mutate_state commits, the surface is genuinely live -- a
+        failure recording SESSION_RESUMED or advancing the cursor must not
+        stop it (that would manufacture a phantom): accept it, log it, and
+        surface it in the reason, but still report delivered=True."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(session)
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        with (
+            patch("cw.session_resume_trigger.list_tickets", return_value=[]),
+            patch(
+                "cw.session_resume_trigger.record_event",
+                side_effect=OSError("history disk full"),
+            ),
+        ):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is True
+        assert "post-commit" in result.reason
+        assert mock_native_daemon.stop_calls == []
+        updated = load_state().sessions[0]
+        assert updated.status == SessionStatus.ACTIVE
+        assert updated.surface_ref == result.surface_ref
+
+    def test_post_commit_cursor_write_failure_does_not_stop_the_surface(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """Same as the history-event case, but the failure is in the
+        mailbox cursor write instead -- both live in the same try block and
+        must both be tolerated post-commit."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(session)
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        with (
+            patch("cw.session_resume_trigger.list_tickets", return_value=[]),
+            patch(
+                "cw.session_resume_trigger.advance_cursor",
+                side_effect=OSError("cursor disk full"),
+            ),
+        ):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is True
+        assert "post-commit" in result.reason
+        assert mock_native_daemon.stop_calls == []
+        assert load_state().sessions[0].status == SessionStatus.ACTIVE
 
 
 class TestResumeTriggerResult:

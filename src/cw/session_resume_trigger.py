@@ -218,7 +218,12 @@ class NativeDaemonResumeTriggerAdapter:
             return ResumeTriggerResult(delivered=False, reason=_NO_TRANSCRIPT_REASON)
         try:
             return self._respawn(session, message)
-        except CwError as exc:
+        except (CwError, OSError) as exc:
+            # OSError alongside CwError: a pre-commit mutate_state failure
+            # (disk full, permission error writing sessions.json) is a real
+            # respawn failure that must be reported like any other, not
+            # left to propagate out of this Protocol's "never raises"
+            # contract (#2212 review round 2, finding 3, pre-commit half).
             logger.warning("resume trigger for session %s failed: %s", session.id, exc)
             return ResumeTriggerResult(
                 delivered=False, reason=f"daemon respawn failed: {exc}"
@@ -230,16 +235,15 @@ class NativeDaemonResumeTriggerAdapter:
         """Run the dead-surface respawn composition. Raises CwError on failure.
 
         The whole body runs under a per-session lock (#2212 review finding
-        3): re-reads fresh state and re-checks daemon liveness before
-        spawning anything, so a second concurrent call for the same session
-        -- whether racing this one or arriving after it already committed --
-        finds the session already live and declines rather than
-        double-spawning. The task-status half of eligibility
-        (``BLOCKED_ON_USER``) is not itself refreshed here on the theory
-        that a daemon-liveness check is the decisive, race-proof signal: the
-        very first thing a successful respawn does is put the *new* surface
-        into the live set, so a second racing call always sees it there
-        regardless of which OR-branch made the first call eligible.
+        3): re-reads fresh state and re-checks the full eligibility gate --
+        both the task-status half and daemon liveness -- before spawning
+        anything, so a second concurrent call for the same session, whether
+        racing this one or arriving after it already committed, either finds
+        the task no longer ``BLOCKED_ON_USER`` and declines, or finds the
+        session already live and declines, rather than double-spawning
+        (#2212 review round 2, finding 1/2: a liveness-only recheck let a
+        task that moved out of BLOCKED_ON_USER between the outer gate and
+        this lock still get respawned).
         """
         daemon = self._native_daemon_override or get_native_daemon_client()
         client = get_client(session.client)
@@ -251,6 +255,18 @@ class NativeDaemonResumeTriggerAdapter:
             if not fresh.claude_session_id:
                 return ResumeTriggerResult(
                     delivered=False, reason=_NO_TRANSCRIPT_REASON
+                )
+            if not _is_eligible(fresh):
+                # The outer gate in trigger() checked eligibility against
+                # whatever Session the caller happened to pass in; a second
+                # racing call that reaches the lock later must recheck the
+                # task-status half too, not just daemon liveness below --
+                # otherwise a task that moved out of BLOCKED_ON_USER between
+                # the outer check and this lock still gets respawned (#2212
+                # review round 2, finding 1/2). Mechanical reuse of the same
+                # gate, just against freshly reloaded state.
+                return ResumeTriggerResult(
+                    delivered=False, reason=DEFERRED_LIVE_DELIVERY_REASON
                 )
             if (
                 fresh.surface_ref
@@ -301,23 +317,66 @@ class NativeDaemonResumeTriggerAdapter:
                     live.status = SessionStatus.ACTIVE
                     live.resumed_at = datetime.now(UTC)
 
-            mutate_state(_update)
-            # The history-bus SESSION_RESUMED record every daemon respawn
-            # already emits (session.py:530-539). Distinct from
-            # cw.events.record_event, which the CLI layer emits for the
-            # inbox append -- same name, different module, different
-            # signature, neither substituting for the other.
-            record_event(
-                session.client,
-                HistoryEvent(
-                    event_type=EventType.SESSION_RESUMED,
-                    client=session.client,
-                    session_id=session.id,
-                    session_name=session.name,
-                    purpose=session.purpose,
-                ),
-            )
-            advance_cursor(fresh.id, unconsumed[-1].id)
+            try:
+                mutate_state(_update)
+            except (CwError, OSError):
+                # Nothing committed yet -- same compensation as a
+                # roster-verify failure above (#2212 review round 2,
+                # finding 3, pre-commit half): a spawned process with no
+                # committed state is exactly the orphan finding 3 already
+                # covers, so stop it before propagating.
+                with contextlib.suppress(Exception):
+                    daemon.stop(new_short_id)
+                raise
+
+            # Past this point state IS committed: surface_ref/status/
+            # resumed_at point at the new, genuinely-live process. A
+            # failure in the history event or the mailbox cursor below must
+            # NOT stop the surface (#2212 review round 2, finding 3,
+            # post-commit half) -- that would leave sessions.json asserting
+            # a live surface_ref for a process we just killed, manufacturing
+            # exactly the phantom shape compute_drift exists to detect, at
+            # the moment of failure. The operator-approved choice (see
+            # docs/adr/0017-session-inbox-and-resume-trigger.md) is to
+            # accept the write's own at-least-once/idempotent-replay
+            # invariant and reconcile's safety net instead: log loudly and
+            # surface it in the returned reason, but the session did
+            # genuinely resume.
+            try:
+                # The history-bus SESSION_RESUMED record every daemon
+                # respawn already emits (session.py:530-539). Distinct from
+                # cw.events.record_event, which the CLI layer emits for the
+                # inbox append -- same name, different module, different
+                # signature, neither substituting for the other.
+                record_event(
+                    session.client,
+                    HistoryEvent(
+                        event_type=EventType.SESSION_RESUMED,
+                        client=session.client,
+                        session_id=session.id,
+                        session_name=session.name,
+                        purpose=session.purpose,
+                    ),
+                )
+                advance_cursor(fresh.id, unconsumed[-1].id)
+            except OSError as exc:
+                logger.exception(
+                    "session %s resumed (surface %s) but the post-commit"
+                    " history event or mailbox cursor write failed --"
+                    " state is authoritative and the surface is genuinely"
+                    " live, so it was not stopped; the cursor may replay"
+                    " this message on a future resume (at-least-once)",
+                    session.id,
+                    new_short_id,
+                )
+                return ResumeTriggerResult(
+                    delivered=True,
+                    reason=(
+                        f"{_DELIVERED_REASON}; post-commit event/cursor"
+                        f" write failed, see logs: {exc}"
+                    ),
+                    surface_ref=new_short_id,
+                )
 
         return ResumeTriggerResult(
             delivered=True, reason=_DELIVERED_REASON, surface_ref=new_short_id

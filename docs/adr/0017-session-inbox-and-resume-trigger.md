@@ -37,6 +37,20 @@ genuinely live, mid-task session is **not implemented** and is deferred to
 6. **The mailbox is not session state.** It has its own lock and its own
    files, and `cw session send`'s append path mutates no `Session` field, so
    it never contends with the ADR-0005 state lock.
+7. **The per-session resume-trigger lock re-checks the full eligibility
+   gate, not just daemon liveness.** A second concurrent call that reaches
+   the lock after the first one's outer check must be refused if the task
+   has moved out of `BLOCKED_ON_USER` in the meantime, exactly as if it had
+   never passed the outer gate at all -- not just refused because the
+   surface is already live.
+8. **A failure after the daemon commits state is not compensated by
+   stopping the surface.** Compensation (`daemon.stop()`) applies only to a
+   failure *before* `mutate_state` commits -- a spawned process with nothing
+   committed is an orphan, and stopping it is correct. Once `mutate_state`
+   commits `surface_ref`/`status`/`resumed_at`, the surface is genuinely
+   live and authoritative; stopping it afterward would make `sessions.json`
+   assert a live surface for a process just killed, manufacturing the exact
+   phantom shape `compute_drift` exists to detect. See Consequences.
 
 ## What this means for callers
 
@@ -84,6 +98,20 @@ genuinely live, mid-task session is **not implemented** and is deferred to
   repo only as a one-shot review subprocess, not a resumable worker session, so
   a second real adapter would mean inventing worker-spawn machinery that does
   not exist. The boundary makes that a follow-up rather than a rewrite.
+- **A post-commit history/cursor write failure is accepted, not reverted or
+  compensated by a stop.** Two remedies were considered once `mutate_state`
+  has committed the new `surface_ref`: revert the state change, or accept
+  the mailbox's own at-least-once/idempotent-replay invariant and
+  reconcile's phantom-detection safety net. Reverting was rejected -- the
+  new surface is a real, live process, so reverting `surface_ref` back to
+  the old one would point state at a process that, pre-#2212, was already
+  why the operator needed to send a message in the first place (paused or
+  dead). The trigger instead logs the failure loudly
+  (`session_resume_trigger.py`'s `_respawn`) and surfaces it in
+  `ResumeTriggerResult.reason`, but reports `delivered=True`: the resume
+  itself succeeded, and a missed `SESSION_RESUMED` history event or a
+  cursor that replays one already-delivered message on the next trigger are
+  both within the invariants this ADR already commits to (Invariant 2).
 - **Disk cost is negligible and unbounded in principle.** The mailbox is never
   pruned. A session's inbox holds only operator-typed messages, so growth is
   human-rate; if that ever stops being true it needs the retention treatment
