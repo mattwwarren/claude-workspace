@@ -34,15 +34,15 @@ silent exit 0. The stamp itself never blocks a tool call — a missed stamp
 costs only disposition precision on a crash that may not happen.
 
 #2211 added the one exception to "this hook never blocks". The same hook now
-also applies :mod:`cw.cli._subagent_policy`'s spawn-shape policy, which
-refuses an explicitly-forked subagent in a headless worker — a shape that
-inherits the parent's implementation mandate and never enters cw's session
-roster, so cw can neither see it nor stop it (#2017). That refusal is
-default-on but gated by ``subagent_spawn_guard_enabled``; every other shape,
-including a spawn that names no ``subagent_type`` at all, still allows. The
-policy runs *before* the stamp so a refused spawn leaves no unresolved count
-behind — the spawn never happens, and a count left at 1 would make the worker
-look like it died mid-spawn.
+also applies :mod:`cw.cli._subagent_policy`'s spawn-shape policy, which in a
+headless worker refuses both an explicitly-forked subagent and one that names
+no ``subagent_type`` at all — neither enters cw's session roster, so cw can
+neither see it nor stop it (#2017), and a fork additionally inherits the
+parent's implementation mandate. Those refusals are default-on but gated by
+``subagent_spawn_guard_enabled``; every other shape allows. The policy runs
+*before* the stamp so a refused spawn leaves no unresolved count behind — the
+spawn never happens, and a count left at 1 would make the worker look like it
+died mid-spawn.
 
 The hook payload is read from stdin exactly once, in
 :func:`agent_spawn_pre`, and passed by value to both the policy and the
@@ -150,8 +150,8 @@ def agent_spawn_pre() -> None:
 
     Reads the PreToolUse hook JSON from stdin **once** and hands it to both
     :func:`cw.cli._subagent_policy.classify_spawn` and the stamp. Exits 0 in
-    every case except a refused explicit-fork spawn, which exits 2 — see
-    module docstring.
+    every case except a refused spawn shape — an explicit fork, or no
+    ``subagent_type`` named at all — which exits 2; see module docstring.
 
     :func:`~cw.cli._subagent_policy.enforce` signals that refusal with
     ``sys.exit(2)``, i.e. ``SystemExit``, which is not an ``Exception`` and

@@ -407,10 +407,11 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
                 # The stamp half still never blocks. #2211 folded a spawn-shape
                 # policy into the same command (no new hook, no new interpreter
                 # start, and already-provisioned worktrees pick it up on a cw
-                # upgrade since they reference the command by name): it refuses
-                # an explicitly-forked subagent in a headless worker, which
-                # inherits the parent's implementation mandate and never enters
-                # cw's roster (#2017). Default-on, disable-able per lane or
+                # upgrade since they reference the command by name): in a
+                # headless worker it refuses both an explicitly-forked subagent
+                # and one naming no subagent_type at all, since neither enters
+                # cw's roster (#2017) and a fork also inherits the parent's
+                # implementation mandate. Default-on, disable-able per lane or
                 # globally via subagent_spawn_guard_enabled in
                 # orchestrator.yaml. Every other spawn shape still allows.
                 {

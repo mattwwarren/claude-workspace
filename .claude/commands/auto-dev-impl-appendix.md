@@ -341,22 +341,33 @@ with the guard enabled:
 
 - `subagent_type` explicitly `fork` (any case) or blank → **refused**, exit 2.
   The spawn does not happen and no stamp is written.
-- `subagent_type` **not named at all** → **allowed**, with a `WARN` line on
-  stderr. This is **record-only**, not enforcement.
+- `subagent_type` **not named at all** → **refused**, exit 2, same as a fork.
 - any named type → allowed silently.
 - anything it cannot classify, any non-headless session, any cwd with no
   ancestor cw-context.json → allowed, no verdict.
 
-**Why the omitted case is record-only rather than refused.** The spawn-site
-inventory needed to make denial safe is incomplete. `review-sweep.md` names
-six roles — `Bug Hunter`, `CLAUDE.md Auditor`, `Context Checker`,
-`silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer` — that are
-not registered agent types, so there is no correct `subagent_type` for a
-refused caller to retry with. Denying on omission before those six have a home
-would break working spawn sites and teach workers to route around the guard.
-Flipping that case to deny is gated on finishing the inventory: either
-register real agent types for those roles, or state explicitly that they run
-as `general-purpose`.
+**Why the omitted case was gated behind an inventory.** Refusing a caller that
+has nothing correct to retry with is an outage, not a guard — so denial waited
+until every `.claude/commands/*.md` spawn site named a type. Round 1 stalled on
+`review-sweep.md`, which lists six roles — `Bug Hunter`, `CLAUDE.md Auditor`,
+`Context Checker`, `silent-failure-hunter`, `pr-test-analyzer`,
+`type-design-analyzer` — that are not registered agent types, and read that as
+"no correct type exists yet".
+
+The resolution was that they are not types at all. They are prompt-defined
+roles, and every one already ran as an implicitly-general-purpose agent, so
+naming `general-purpose` explicitly is behavior-preserving and mints no new
+agent definitions. A seventh site in the same file, the confidence-scoring
+Haiku agent, was bare too and is typed now. Whether any of the six deserves to
+become a real, distinct agent is **#2253**, ordered behind this ticket — the
+kebab-case three are written in registered-agent naming style, which is exactly
+what makes them look real, so that question gets its own answer rather than a
+drive-by.
+
+`review.md` needed no edit: its Step 3 table already names a concrete
+registered `Agent Type` for all nine reviewers. With the inventory closed, the
+refusal is actionable and ships. If a site is ever missed, the symptom is an
+exit-2 refusal naming the shape, and the config gate below is the remedy.
 
 ### The config gate
 
@@ -394,8 +405,13 @@ See `config/CONFIG_REFERENCE.md`, section "Subagent Spawn Guard (#2211)".
   `cd`s into a directory with no ancestor `.claude/cw-context.json` (a
   detached `$TMPWT` gate worktree, a nested `isolation: "worktree"` spawn)
   fails open. Same limitation `cw guard-cwd` has today, carried forward.
-- **R7 — the spawn-site inventory is incomplete**, which is why the
-  omitted-`subagent_type` case ships record-only. See above.
+- **R7 — CLOSED.** The spawn-site inventory was incomplete in round 1, which
+  is why the omitted-`subagent_type` case originally shipped record-only
+  (allowed with a `WARN`). It is complete now, and that case refuses. Kept
+  listed rather than deleted so the record shows what unblocked the flip —
+  see "Why the omitted case was gated behind an inventory" above. The
+  inventory covers `.claude/commands/*.md`; a spawn written ad hoc by a worker
+  is covered by the guard at runtime, not by this sweep.
 
 ### The deferred half — #2248
 

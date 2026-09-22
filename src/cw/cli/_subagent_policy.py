@@ -9,37 +9,43 @@ implementation mandate, and it edited, committed and pushed to the live
 feature branch before the parent's stop message won the race.
 
 A fork is the worst shape available: it inherits the parent's full tool set
-*and* its context, so neither capability nor prompt constrains it. This
-module refuses that one shape, in headless dispatch workers only:
+*and* its context, so neither capability nor prompt constrains it. A spawn
+that names no type at all is the same problem one step removed — it takes no
+roster entry either, and nothing on the record says what it was allowed to
+do. This module refuses both, in headless dispatch workers only:
 
 - an explicit ``fork`` (any case) or blank ``subagent_type`` → **deny**;
-- ``subagent_type`` named but absent from the payload → **warn, allow**;
+- ``subagent_type`` absent from the payload entirely → **deny**;
 - anything else, or any shape it cannot classify → no verdict.
 
-The omitted case is record-only rather than denied because the spawn-site
-inventory needed to make denial safe is incomplete: ``review-sweep.md`` names
-six roles (``Bug Hunter``, ``CLAUDE.md Auditor``, ...) that are not registered
-agent types, so there is no correct ``subagent_type`` to retry with yet
-(residual gap R7). Flipping that case to deny is gated on finishing that
-inventory.
+Denying the omitted case was gated on a complete spawn-site inventory, for a
+concrete reason: refusing a caller that has nothing correct to retry with is
+not a guard, it is an outage. ``review-sweep.md`` was the last gap, and it
+closed by resolution rather than by registration — its six role names
+(``Bug Hunter``, ``CLAUDE.md Auditor``, ...) were never agent types at all,
+just prompt-defined roles already running as implicitly-general-purpose
+agents, so stating ``general-purpose`` explicitly changed no behavior.
+Whether any of them should become real agent definitions is #2253. With every
+``.claude/commands/*.md`` spawn site typed, the refusal is actionable and
+ships.
 
 The deferred half of #2211 — refusing a *git mutation* from a non-writer
 subagent, and the durable ``guard.subagent_action`` event that would record
-one — is #2248. Nothing here records an event; the WARN line exists so the
-record-only path is at least visible in the worker's own transcript.
+one — is #2248. Nothing here records an event: a refusal is visible in the
+worker's own transcript via the stderr reason, and nothing is allowed-but-
+noteworthy any more now that the omitted case denies.
 
 Fail-open throughout, like every other cw hook: a missing or malformed
 context, an unreadable config, or any unexpected shape yields no verdict.
-The one deliberate exception is the explicit-fork deny, and even that ships
+The two denials above are the only deliberate exceptions, and both ship
 behind :attr:`~cw.models.OrchestratorConfig.subagent_spawn_guard_enabled` so
-an operator can switch it off per-lane or globally without a code release.
+an operator can switch them off per-lane or globally without a code release.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import NamedTuple
 
 import click
 
@@ -81,19 +87,18 @@ _DENY_REASON = (
     "(per-lane or global) in orchestrator.yaml -- see CONFIG_REFERENCE.md."
 )
 
-_OMITTED_REASON = (
-    "cw agent-spawn-pre (#2211): subagent spawn with no subagent_type named. "
-    "Allowed (record-only) pending a complete spawn-site inventory, but an "
-    "unnamed spawn is unrostered -- cw cannot see or stop it (#2017). Name an "
-    "explicit subagent_type."
+_OMITTED_DENY_REASON = (
+    "BLOCKED (#2211): cw agent-spawn-pre refused a subagent spawn that named "
+    "no subagent_type at all. An unnamed spawn never enters cw's session "
+    "roster -- cw cannot see it start, observe what it does, or stop it "
+    "(#2017) -- and leaves no record of what it was permitted to do.\n"
+    "Retry with an explicitly named subagent_type: "
+    '"general-purpose" for real work, or "Read Only Helper" '
+    "(tools: Read/Grep/Glob, no Bash) for an extraction or lookup that must "
+    "not be able to write.\n"
+    "False positive? Disable via subagent_spawn_guard_enabled: false "
+    "(per-lane or global) in orchestrator.yaml -- see CONFIG_REFERENCE.md."
 )
-
-
-class _SpawnVerdict(NamedTuple):
-    """A decided spawn outcome: refused, or allowed-but-worth-recording."""
-
-    denied: bool
-    reason: str
 
 
 def _warn_unexpected_shape(detail: str) -> None:
@@ -168,22 +173,27 @@ def _resolve_spawn_guard_enabled(client: str | None, lane: str | None) -> bool:
     return enabled
 
 
-def _classify_subagent_type(raw: object) -> _SpawnVerdict | None:
-    """Turn the payload's ``subagent_type`` value into a verdict, or None."""
+def _classify_subagent_type(raw: object) -> str | None:
+    """Return the refusal reason for this ``subagent_type``, or None to allow."""
     if raw is _KEY_ABSENT or raw is None:
-        return _SpawnVerdict(denied=False, reason=_OMITTED_REASON)
+        return _OMITTED_DENY_REASON
     if not isinstance(raw, str):
         _warn_unexpected_shape(
             f"tool_input.subagent_type is {type(raw).__name__}, expected str"
         )
         return None
     if raw.strip().lower() in _FORK_SUBAGENT_TYPES:
-        return _SpawnVerdict(denied=True, reason=_DENY_REASON.format(value=raw))
+        return _DENY_REASON.format(value=raw)
     return None
 
 
-def classify_spawn(payload: dict[str, object] | None) -> _SpawnVerdict | None:
-    """Return this spawn's verdict, or None to allow it silently."""
+def classify_spawn(payload: dict[str, object] | None) -> str | None:
+    """Return this spawn's refusal reason, or None to allow it silently.
+
+    A reason is always a refusal: since the spawn-site inventory closed there
+    is no allowed-but-noteworthy shape left to report, so the return type is
+    the message itself rather than a verdict record with a constant flag.
+    """
     if payload is None:
         return None
     context = active_headless_context(payload)
@@ -204,16 +214,14 @@ def classify_spawn(payload: dict[str, object] | None) -> _SpawnVerdict | None:
     return _classify_subagent_type(tool_input.get(_SUBAGENT_TYPE_KEY, _KEY_ABSENT))
 
 
-def enforce(verdict: _SpawnVerdict | None) -> None:
-    """Apply *verdict* to the PreToolUse exit-code contract.
+def enforce(reason: str | None) -> None:
+    """Apply *reason* to the PreToolUse exit-code contract.
 
-    Exits 2 on a denial (the spawn never runs, and the agent reads the reason
-    back from stderr); prints and returns on a record-only warning; does
-    nothing at all for no verdict.
+    Exits 2 when there is a reason — the spawn never runs, and the agent reads
+    the reason back from stderr, which is how it learns what to retry with.
+    Does nothing at all for None.
     """
-    if verdict is None:
+    if reason is None:
         return
-    if verdict.denied:
-        click.echo(verdict.reason, err=True)
-        sys.exit(_SPAWN_BLOCK_EXIT)
-    click.echo(f"WARN: {verdict.reason}", err=True)
+    click.echo(reason, err=True)
+    sys.exit(_SPAWN_BLOCK_EXIT)

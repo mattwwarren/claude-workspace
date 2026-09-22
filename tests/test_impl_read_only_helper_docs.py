@@ -98,12 +98,19 @@ class TestImplDocSpawnRules:
 
         assert "Read-only helper spawns: capability, not instruction (#2211)" in content
 
-    def test_appendix_states_the_record_only_caveat(self) -> None:
-        """An omitted type is warned about, not refused — say so, or it reads
-        as a guarantee the guard does not make."""
+    def test_appendix_states_the_omitted_type_refusal(self) -> None:
+        """Round 1 shipped this case record-only; the appendix must not still
+        say so, or it understates what the guard now refuses."""
         content = _appendix("impl")
 
-        assert "record-only" in content
+        assert "`subagent_type` **not named at all** → **refused**" in content
+
+    def test_appendix_explains_what_unblocked_the_refusal(self) -> None:
+        """The inventory is the whole argument for denying — keep it on record."""
+        content = _appendix("impl")
+
+        assert "Why the omitted case was gated behind an inventory" in content
+        assert "#2253" in content
 
     def test_appendix_documents_the_config_kill_switch(self) -> None:
         assert "subagent_spawn_guard_enabled" in _appendix("impl")
@@ -147,9 +154,13 @@ class TestAgentSpawnRule:
         assert "Never fork" in rule
         assert "refuses an explicit fork" in rule
 
-    def test_spawn_rule_does_not_claim_deny_on_omission(self) -> None:
-        """An omitted type only WARNs — promising a refusal would be a lie."""
-        assert "warns on an omitted type" in self._rule()
+    def test_spawn_rule_states_deny_on_omission(self) -> None:
+        """Round 1 could only promise a WARN here; the rule now promises a
+        refusal, and must not be left describing the weaker behavior."""
+        rule = self._rule()
+
+        assert "refuses an omitted type" in rule
+        assert "warns on an omitted type" not in rule
 
 
 class TestBareSpawnSitesAreTyped:

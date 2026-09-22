@@ -594,12 +594,14 @@ every worker, which is strictly worse than not guarding.
 already present in every dispatched worktree for the unresolved-spawn stamp —
 also applies a spawn-shape policy. In a **headless** worker it refuses a
 spawn whose `subagent_type` is explicitly `fork` (any case) or blank, and
-warns (but allows) when no `subagent_type` is named at all.
+equally one that names no `subagent_type` at all.
 
 A forked subagent inherits the parent's tools *and* its context, and takes no
 `cw` roster entry, so cw can neither observe it nor stop it (#2017). #2211 is
 the incident: a fork spawned for a read-only lookup inherited the
-implementation mandate and pushed to a live feature branch.
+implementation mandate and pushed to a live feature branch. An unnamed spawn
+is unrostered for the same reason, and additionally leaves no record of what
+it was permitted to do.
 
 Interactive sessions are never affected, and any cwd with no ancestor
 `.claude/cw-context.json` is structurally exempt.
@@ -625,11 +627,13 @@ the global", exactly as for the busy-wait guard above. Config is re-read on
 every hook invocation, so an edit takes effect on the next spawn with no
 worker restart.
 
-The guard fails open on every unexpected condition, and the omitted-type case
-is deliberately record-only rather than a refusal — the spawn-site inventory
-needed to make that denial safe is not yet complete. See
-`.claude/commands/auto-dev-impl-appendix.md`, section "Read-only helper
-spawns: capability, not instruction (#2211)".
+The guard fails open on every unexpected condition. Refusing the omitted-type
+case was gated on every `.claude/commands/*.md` spawn site naming a type
+first — a refusal a caller has no correct retry for is an outage, not a
+guard — which is now the case. If a spawn site is ever missed, the symptom is
+an exit-2 refusal naming the shape, and the kill switch above is the
+immediate remedy. See `.claude/commands/auto-dev-impl-appendix.md`, section
+"Read-only helper spawns: capability, not instruction (#2211)".
 
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 

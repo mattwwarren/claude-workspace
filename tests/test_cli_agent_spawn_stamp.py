@@ -359,16 +359,19 @@ def test_pre_hook_still_stamps_a_named_subagent_type(tmp_path: Path) -> None:
     assert _read_count(worktree) == 1
 
 
-def test_pre_hook_warns_but_allows_an_omitted_subagent_type(tmp_path: Path) -> None:
-    """Record-only pending a complete spawn-site inventory (#2211 R7)."""
+def test_pre_hook_refuses_an_omitted_subagent_type(tmp_path: Path) -> None:
+    """Refused since the spawn-site inventory closed (#2211, was R7).
+
+    Shares the fork case's contract exactly — exit 2, no stamp — because an
+    unnamed spawn is unrostered for the same reason a forked one is.
+    """
     worktree = _headless_worktree(tmp_path)
 
     result = _invoke_hook_command("agent-spawn-pre", _untyped_payload(worktree))
 
-    assert result.exit_code == 0
-    assert "WARN" in result.output
+    assert result.exit_code == 2
     assert "#2211" in result.output
-    assert _read_count(worktree) == 1
+    assert _read_count(worktree) == 0
 
 
 def test_pre_hook_allows_a_fork_in_a_non_headless_worker(tmp_path: Path) -> None:

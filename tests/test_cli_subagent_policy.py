@@ -7,12 +7,13 @@ worker forked a subagent for a read-only lookup, the fork inherited the
 implementation mandate, and it committed and pushed before the parent's
 stop message won the race.
 
-:mod:`cw.cli._subagent_policy` is the enforcement surface. It refuses an
-explicit ``fork``/blank ``subagent_type`` in a headless dispatch worker, and
-merely *records* (WARN, allow) a spawn that names no type at all — the
-spawn-site inventory needed to safely deny that case is incomplete (residual
-gap R7: ``review-sweep.md`` names six roles that are not registered agent
-types). Everything else fails open.
+:mod:`cw.cli._subagent_policy` is the enforcement surface. In a headless
+dispatch worker it refuses an explicit ``fork``/blank ``subagent_type`` and,
+on the same terms, a spawn that names no type at all. Denying that second case
+waited on a complete spawn-site inventory (residual gap R7) — a refusal a
+caller cannot correctly retry is an outage, not a guard — and shipped once
+``review-sweep.md``'s six roles resolved to ``general-purpose``. Everything
+else fails open.
 
 Payload fixtures here are derived from the **real** captured ``PreToolUse``
 payload in ``tests/test_cli_agent_spawn_stamp.py`` by mutating only
@@ -29,7 +30,6 @@ import pytest
 
 from cw.cli._subagent_policy import (
     _resolve_spawn_guard_enabled,
-    _SpawnVerdict,
     active_headless_context,
     classify_spawn,
     enforce,
@@ -179,39 +179,48 @@ class TestClassifySpawn:
     ) -> None:
         worktree = _headless_worktree(tmp_path)
 
-        verdict = classify_spawn(_spawn_payload(worktree, subagent_type))
+        reason = classify_spawn(_spawn_payload(worktree, subagent_type))
 
-        assert verdict is not None
-        assert verdict.denied is True
-        assert "#2211" in verdict.reason
+        assert reason is not None
+        assert "#2211" in reason
 
     def test_blank_subagent_type_is_denied(self, tmp_path: Path) -> None:
         """A present-but-blank value is a fork by another name, not an omission."""
         worktree = _headless_worktree(tmp_path)
 
-        verdict = classify_spawn(_spawn_payload(worktree, ""))
+        assert classify_spawn(_spawn_payload(worktree, "")) is not None
 
-        assert verdict is not None
-        assert verdict.denied is True
-
-    def test_omitted_subagent_type_warns_but_allows(self, tmp_path: Path) -> None:
-        """Record-only until the spawn-site inventory is complete (R7)."""
+    def test_omitted_subagent_type_is_denied(self, tmp_path: Path) -> None:
+        """Refused since the spawn-site inventory closed (was record-only, R7)."""
         worktree = _headless_worktree(tmp_path)
 
-        verdict = classify_spawn(_spawn_payload(worktree))
+        reason = classify_spawn(_spawn_payload(worktree))
 
-        assert verdict is not None
-        assert verdict.denied is False
-        assert "#2211" in verdict.reason
+        assert reason is not None
+        assert "#2211" in reason
 
-    def test_null_subagent_type_warns_but_allows(self, tmp_path: Path) -> None:
+    def test_omitted_type_refusal_names_what_to_retry_with(
+        self, tmp_path: Path
+    ) -> None:
+        """The reason is the only channel the refused caller has.
+
+        Denial is only defensible because a correct retry exists — the
+        inventory made sure of that — so the message has to say what it is.
+        """
+        worktree = _headless_worktree(tmp_path)
+
+        reason = classify_spawn(_spawn_payload(worktree))
+
+        assert reason is not None
+        assert "general-purpose" in reason
+        assert "Read Only Helper" in reason
+        assert "subagent_spawn_guard_enabled" in reason
+
+    def test_null_subagent_type_is_denied(self, tmp_path: Path) -> None:
         """JSON ``null`` reads as "no type named", not as a blank string."""
         worktree = _headless_worktree(tmp_path)
 
-        verdict = classify_spawn(_spawn_payload(worktree, None))
-
-        assert verdict is not None
-        assert verdict.denied is False
+        assert classify_spawn(_spawn_payload(worktree, None)) is not None
 
     @pytest.mark.parametrize(
         "subagent_type", ["general-purpose", "Explore", "Read Only Helper"]
@@ -234,10 +243,7 @@ class TestClassifySpawn:
         worktree = _headless_worktree(tmp_path)
         payload = {**_spawn_payload(worktree, "fork"), "tool_name": "Task"}
 
-        verdict = classify_spawn(payload)
-
-        assert verdict is not None
-        assert verdict.denied is True
+        assert classify_spawn(payload) is not None
 
     def test_malformed_tool_input_warns_and_allows(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -289,25 +295,16 @@ class TestClassifySpawn:
 
 
 class TestEnforce:
-    """Turning a verdict into the PreToolUse exit-code contract."""
+    """Turning a classification into the PreToolUse exit-code contract."""
 
-    def test_denied_verdict_exits_2_with_reason_on_stderr(
+    def test_a_reason_exits_2_with_it_on_stderr(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit) as excinfo:
-            enforce(_SpawnVerdict(denied=True, reason="nope"))
+            enforce("nope")
 
         assert excinfo.value.code == 2
         assert "nope" in capsys.readouterr().err
-
-    def test_warn_verdict_prints_and_returns(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        enforce(_SpawnVerdict(denied=False, reason="heads up"))
-
-        captured = capsys.readouterr()
-        assert captured.err.startswith("WARN: ")
-        assert "heads up" in captured.err
 
     def test_none_verdict_is_a_pure_noop(
         self, capsys: pytest.CaptureFixture[str]
