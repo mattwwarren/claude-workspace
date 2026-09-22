@@ -42,7 +42,7 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 _CLIENTS = ("client-a", "client-b", "client-c")
 
@@ -434,3 +434,57 @@ class TestConcurrentWriterSurvivesTheSave:
         on_disk = load_usage_limited_until()
         assert on_disk["client-a"] == reset_at
         assert on_disk["client-b"] == concurrent_until
+
+    def test_persisted_read_happens_while_the_lock_is_held(
+        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1409 review round 4: round 3's re-merge was itself unlocked.
+
+        Round 3 closed the sequential gap ``test_second_writer_window_is_not_erased``
+        exercises, but the fix was still a two-step ``unlocked re-merge`` then
+        ``separately-locked save`` -- a writer landing in the gap between
+        those two steps was still silently erased. This asserts the sidecar
+        read that feeds the merge now happens INSIDE the same
+        ``dispatch_state_lock()`` acquisition as the write, not before it.
+        """
+        from cw import dispatch_state
+
+        lock_held = False
+        real_lock = dispatch_state.dispatch_state_lock
+
+        @contextlib.contextmanager
+        def tracking_lock() -> Iterator[None]:
+            nonlocal lock_held
+            with real_lock():
+                lock_held = True
+                try:
+                    yield
+                finally:
+                    lock_held = False
+
+        observed_lock_state_during_read = []
+        real_raw = dispatch_state._load_dispatch_state_raw
+
+        def spying_raw() -> dict[str, object]:
+            observed_lock_state_during_read.append(lock_held)
+            return real_raw()
+
+        monkeypatch.setattr(dispatch_state, "dispatch_state_lock", tracking_lock)
+        monkeypatch.setattr(dispatch_state, "_load_dispatch_state_raw", spying_raw)
+
+        now = datetime.now(UTC)
+        save_usage_limited_until({"client-a": now + timedelta(hours=1)})
+        observed_lock_state_during_read.clear()
+
+        merged = dispatch_state.merge_and_save_usage_limited_until(
+            {"client-b": now + timedelta(hours=2)}
+        )
+
+        assert observed_lock_state_during_read, "expected the sidecar to be read"
+        assert all(observed_lock_state_during_read), (
+            "persisted read for the merge must happen while the lock is held"
+        )
+        assert merged == {
+            "client-a": now + timedelta(hours=1),
+            "client-b": now + timedelta(hours=2),
+        }

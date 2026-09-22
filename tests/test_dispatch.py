@@ -59,6 +59,7 @@ from cw.dispatch.loop import _run_stale_client_watchdog_guarded
 from cw.dispatch_state import (
     AvailabilityProbeCache,
     load_availability_probe_cache,
+    merge_and_save_usage_limited_until,
     save_availability_probe_cache,
     save_usage_limit_armed_at,
     save_usage_limited_until,
@@ -5345,9 +5346,10 @@ class TestDispatchUsageLimitBackoff:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """run_dispatch_loop calls save_usage_limited_until when usage limit is
-        detected in multi-tick mode (once=False). Verified by monkeypatching
-        save_usage_limited_until and checking the captured argument (#804).
+        """run_dispatch_loop calls merge_and_save_usage_limited_until when usage
+        limit is detected in multi-tick mode (once=False). Verified by
+        monkeypatching merge_and_save_usage_limited_until and checking the
+        captured argument (#804, atomicity fixed #1409 review round 4).
 
         The saved value is a per-client mapping since #1409, keyed by the
         client that actually hit the limit."""
@@ -5359,13 +5361,18 @@ class TestDispatchUsageLimitBackoff:
         daemon = FakeNativeDaemonClient()
         saved: list[Mapping[str, datetime]] = []
 
-        real_save = save_usage_limited_until
+        real_merge_and_save = merge_and_save_usage_limited_until
 
-        def capturing_save(windows: Mapping[str, datetime]) -> None:
+        def capturing_merge_and_save(
+            windows: Mapping[str, datetime],
+        ) -> dict[str, datetime]:
             saved.append(windows)
-            real_save(windows)
+            return real_merge_and_save(windows)
 
-        monkeypatch.setattr("cw.dispatch.loop.save_usage_limited_until", capturing_save)
+        monkeypatch.setattr(
+            "cw.dispatch.loop.merge_and_save_usage_limited_until",
+            capturing_merge_and_save,
+        )
 
         # Patch time.sleep so the loop exits on the second tick.
         call_count = 0
@@ -6032,13 +6039,18 @@ class TestUsageLimitResetThreading:
 
         daemon = FakeNativeDaemonClient()
         saved: list[Mapping[str, datetime]] = []
-        real_save = save_usage_limited_until
+        real_merge_and_save = merge_and_save_usage_limited_until
 
-        def capturing_save(windows: Mapping[str, datetime]) -> None:
+        def capturing_merge_and_save(
+            windows: Mapping[str, datetime],
+        ) -> dict[str, datetime]:
             saved.append(windows)
-            real_save(windows)
+            return real_merge_and_save(windows)
 
-        monkeypatch.setattr("cw.dispatch.loop.save_usage_limited_until", capturing_save)
+        monkeypatch.setattr(
+            "cw.dispatch.loop.merge_and_save_usage_limited_until",
+            capturing_merge_and_save,
+        )
         monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
 
         with freeze_time("2026-07-16 12:00:00"):
