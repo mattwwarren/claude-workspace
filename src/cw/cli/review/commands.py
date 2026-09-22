@@ -80,6 +80,8 @@ from cw.review_finding_dispositions import (
     FindingDisposition,
     Outcome,
     build_finding_disposition_ledger,
+    disposition_event_payload,
+    disposition_event_type,
     render_finding_disposition_block,
     split_disposition_key,
 )
@@ -575,13 +577,14 @@ def _emit_settle_events(
     COLLAPSED ledger, so two payload entries that key alike are one settled
     finding and one event — the same arithmetic the marker itself uses.
 
-    The event TYPE carries the semantic, not a field inside the payload: a
-    ``REVERSED`` entry (#2232) emits ``review.finding_disposition_reverted``
-    and everything else emits ``review.finding_settled``. That is this enum
-    region's own convention — an operator asking "what has been withdrawn"
-    runs one ``cw event tail --type ...`` rather than filtering settles by
-    their ``outcome``. The payload is identical either way; it already carries
-    ``outcome``, so nothing is lost to a consumer that wants both.
+    The event TYPE carries the semantic, not a field inside the payload — see
+    :func:`~cw.review_finding_dispositions.disposition_event_type`, which
+    makes that choice for every emitter. The payload is identical either way;
+    it already carries ``outcome``, so nothing is lost to a consumer that
+    wants both. Both the type choice and the payload shape moved to the ledger
+    module (#2232) once the review pass's comment-thread sync became a second
+    emitter of the same events: they now cannot drift apart, and neither site
+    carries a raw ``"REVERSED"`` literal.
 
     **Raises rather than degrading** (#2210 round 2). ``record_event`` is file
     I/O and can fail; the caller must not write a marker for a finding whose
@@ -592,28 +595,14 @@ def _emit_settle_events(
     comment at the call site for why that asymmetry is the right one.
     """
     from cw.events import record_event
-    from cw.models.enums import OrchestratorEventType
 
     for key, entry in sorted(ledger.items()):
         file = split_disposition_key(key)[0]
-        event_type = (
-            OrchestratorEventType.REVIEW_FINDING_DISPOSITION_REVERTED
-            if entry.outcome == "REVERSED"
-            else OrchestratorEventType.REVIEW_FINDING_SETTLED
-        )
+        event_type = disposition_event_type(entry)
         try:
             record_event(
                 event_type,
-                payload={
-                    "key": key,
-                    "file": file,
-                    "summary": entry.summary,
-                    "outcome": entry.outcome,
-                    "reason": entry.rationale,
-                    "actor": entry.actor,
-                    "recorded_at": entry.recorded_at,
-                    "reviewed_sha": entry.reviewed_sha,
-                },
+                payload=disposition_event_payload(key, entry),
                 correlation_id=ticket,
             )
         except OSError as exc:

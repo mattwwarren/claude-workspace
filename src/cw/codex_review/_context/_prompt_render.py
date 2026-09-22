@@ -22,7 +22,7 @@ from cw.codex_review._context._prompt_text import (
 )
 from cw.codex_review._context._sensitive_files import _render_sensitive_block
 from cw.review_finding_dispositions import (
-    _REVERSED as _REVERSED_OUTCOME,
+    REVERSED as _REVERSED_OUTCOME,
 )
 from cw.review_finding_dispositions import (
     partition_enforceable_dispositions,

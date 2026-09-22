@@ -131,6 +131,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
+    from cw.models.enums import OrchestratorEventType
     from cw.review_findings import AcceptedFinding, ReviewVerdict
 
 _log = logging.getLogger(__name__)
@@ -149,7 +150,15 @@ Outcome = Literal["ACCEPTED", "REJECTED", "REVERSED"]
 _REJECTED: Outcome = "REJECTED"
 #: Withdrawn, so it is never rendered into the reviewer's binding "previously
 #: adjudicated" block — see ``codex_review._context._prompt_render``.
-_REVERSED: Outcome = "REVERSED"
+#:
+#: PUBLIC, unlike its siblings (#2232). Three modules outside this one have to
+#: recognise a withdrawal — the prompt renderer that must not show it, the
+#: settle command that routes it to a distinct audit event, and the review
+#: pass that audits one arriving through the comment thread — and the choice
+#: is between one exported constant and either a raw ``"REVERSED"`` literal or
+#: an underscore-prefixed cross-module import. ``_REJECTED`` stays private
+#: because nothing outside this module tests for it.
+REVERSED: Outcome = "REVERSED"
 _MUST_FIX = "MUST_FIX"
 #: ``AcceptedFinding.disposition``'s post-consolidate default — "nothing has
 #: decided anything about this finding yet". The claim tier below refuses to
@@ -1031,15 +1040,26 @@ def disposition_drifted(
     fail toward the finding staying visible. That is the same direction
     :func:`_ledger_matches` already takes for a contested finding.
 
-    Pure stdlib by construction: this module may import nothing from ``cw`` at
-    module scope (see the module docstring), and the nearest existing
-    ``git diff`` runner (``cw.cli.review._diff_integrity``) is CLI-scoped, so
-    importing it would invert the dependency direction the split maintains.
+    Pure stdlib at module scope by construction: this module may import
+    nothing from ``cw`` there (see the module docstring), and the nearest
+    existing ``git diff`` runner (``cw.cli.review._diff_integrity``) is
+    CLI-scoped, so importing it would invert the dependency direction the
+    split maintains. The one ``cw`` helper it does use —
+    :func:`cw._git.git_clean_env` — is a leaf module imported inside this
+    function body, the same shape as the deferred ``cw.events`` import below.
+
+    That environment is **load-bearing, not hygiene** (#2232). ``cw`` can run
+    inside a git hook, where an inherited ``GIT_DIR``/``GIT_WORK_TREE`` points
+    at the hook's repository: the diff would then be taken in a DIFFERENT tree
+    than *worktree*, silently, and its answer decides whether a settled
+    finding stays suppressed.
     """
     if worktree is None or not entry_reviewed_sha or not current_sha:
         return False
     if entry_reviewed_sha == current_sha:
         return False
+    from cw._git import git_clean_env
+
     try:
         completed = subprocess.run(
             [
@@ -1054,6 +1074,7 @@ def disposition_drifted(
             cwd=worktree,
             capture_output=True,
             check=False,
+            env=git_clean_env(),
         )
     except OSError:
         _log.warning(
@@ -1076,6 +1097,54 @@ def disposition_drifted(
     return True
 
 
+def disposition_event_type(entry: FindingDisposition) -> OrchestratorEventType:
+    """The audit event type one settled *entry* is recorded under (#2210, #2232).
+
+    The event TYPE carries the semantic, not a field inside the payload: a
+    ``REVERSED`` entry emits ``review.finding_disposition_reverted`` and
+    everything else emits ``review.finding_settled``, so an operator asking
+    "what has been withdrawn" runs one ``cw event tail --type ...`` rather
+    than filtering settles by their ``outcome``.
+
+    Shared (#2232) by the two paths a disposition can reach the durable ledger
+    through — ``cw review settle`` and the review pass's own comment-thread
+    sync — so the type choice cannot drift between them, and so neither site
+    needs a raw ``"REVERSED"`` literal.
+    """
+    from cw.models.enums import OrchestratorEventType
+
+    return (
+        OrchestratorEventType.REVIEW_FINDING_DISPOSITION_REVERTED
+        if entry.outcome == REVERSED
+        else OrchestratorEventType.REVIEW_FINDING_SETTLED
+    )
+
+
+def disposition_event_payload(key: str, entry: FindingDisposition) -> dict[str, object]:
+    """The audit payload for one settled *entry*, keyed by its ledger *key*.
+
+    The full provenance set — who, why, when, and against what code — plus the
+    identity the record was minted for. Enumerated field by field rather than
+    ``{**entry.model_dump()}`` so adding a field to
+    :class:`FindingDisposition` is a deliberate decision about what an audit
+    consumer sees, not an automatic one.
+
+    Shared by every emitter so the shape a consumer parses is the same
+    whichever path recorded it (#2232). :func:`_emit_stale`'s payload is
+    deliberately this shape PLUS ``current_sha``.
+    """
+    return {
+        "key": key,
+        "file": split_disposition_key(key)[0],
+        "summary": entry.summary,
+        "outcome": entry.outcome,
+        "reason": entry.rationale,
+        "actor": entry.actor,
+        "recorded_at": entry.recorded_at,
+        "reviewed_sha": entry.reviewed_sha,
+    }
+
+
 def _emit_stale(
     af: AcceptedFinding, match: _LedgerMatch, ticket_id: str, current_sha: str
 ) -> None:
@@ -1093,6 +1162,14 @@ def _emit_stale(
     the verdict (``stale_dispositions``) and in the finding that kept
     blocking. Aborting a review pass over an advisory record would trade a
     safe outcome for a parked run.
+
+    The payload is :func:`disposition_event_payload`'s shape plus
+    ``current_sha`` (#2232). Full parity with the settle/revert events is the
+    point: someone triaging a drifted suppression is asking WHO silenced this
+    finding and WHY, and a payload carrying only the two shas cannot answer
+    either. ``file``/``summary`` are overridden with the finding as it came
+    back this round rather than the record's stored copy — on a claim-tier
+    match those differ, and the live text is what the reader is looking at.
     """
     from cw.events import record_event
     from cw.models.enums import OrchestratorEventType
@@ -1110,10 +1187,16 @@ def _emit_stale(
         record_event(
             OrchestratorEventType.REVIEW_FINDING_DISPOSITION_STALE,
             payload={
-                "key": match.key,
+                **disposition_event_payload(match.key, match.entry),
+                # The finding the ledger matched, not the record's own stored
+                # copy: on a claim-tier match the two differ, and a consumer
+                # triaging a drifted suppression needs the text that actually
+                # came back this round.
                 "file": af.finding.file,
                 "summary": af.finding.summary,
-                "reviewed_sha": match.entry.reviewed_sha,
+                # Drift-specific, and the only field this payload adds to the
+                # settle/revert shape: which commit the record was measured
+                # against when it was declined.
                 "current_sha": current_sha,
             },
             correlation_id=ticket_id,
