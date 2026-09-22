@@ -16,6 +16,12 @@ from ``cw signal-stop`` driven by the hook payload's own ``background_tasks``
 list. Two independent hook commands now need the identical
 lock-then-read-then-mutate-then-atomic-write discipline against the same
 file, so it lives here rather than in either caller.
+
+``_context_str`` (#2211) is here for the same reason one level down: the
+readers return ``dict[str, object]``, so every guard that pulls a scalar
+(``client``, ``lane``, ``session_id``) out of a context needs the identical
+narrowing. ``cw guard-busy-wait`` and ``cw agent-spawn-pre`` had independently
+grown byte-identical copies of it before this module took ownership.
 """
 
 from __future__ import annotations
@@ -143,6 +149,20 @@ def _read_cw_context(cwd: str) -> dict[str, object] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return context if isinstance(context, dict) else None
+
+
+def _context_str(context: dict[str, object], key: str) -> str | None:
+    """Return ``context[key]`` when it is a non-empty string, else None.
+
+    The readers above hand back ``dict[str, object]`` because the file is
+    only known to be a JSON object, so every guard that wants a scalar out of
+    it — ``client``, ``lane``, ``session_id`` — needs the same
+    isinstance-and-non-empty narrowing. Collapsing the empty string to None
+    matters: an empty ``client`` must not resolve a lane override, and it is
+    the shape a partially-written context actually produces.
+    """
+    value = context.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def find_cw_context(start: Path) -> dict[str, object] | None:
