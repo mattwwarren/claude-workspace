@@ -21,17 +21,28 @@ import logging
 import os
 import re
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from cw._text import _bounded, redact
 from cw.exceptions import (
     USAGE_LIMIT_RE,
     CwError,
     DisclaimerNotAcceptedError,
     UsageLimitError,
+    parse_usage_limit_reset,
 )
 
+if TYPE_CHECKING:
+    from datetime import tzinfo
+
 _log = logging.getLogger(__name__)
+
+# System timezone database entry, consulted by :func:`_host_timezone` when
+# ``TZ`` is unset or does not name an IANA zone.
+_LOCALTIME_PATH = Path("/etc/localtime")
 
 # Length of the short Claude session id printed by ``claude --bg`` and
 # used as the worker key in roster.json (first 8 hex chars of the UUID).
@@ -144,6 +155,108 @@ _ANSI_CSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 # "--bg with bypassPermissions requires accepting the disclaimer first.
 #  Run `claude --dangerously-skip-permissions` once interactively."
 _DISCLAIMER_REJECTION_PATTERN = "requires accepting the disclaimer first"
+
+
+def _host_timezone() -> tzinfo:
+    """Return the dispatch host's timezone WITH its DST rules (#1409).
+
+    ``datetime.now(UTC).astimezone()`` flattens the host zone to the single
+    fixed offset in effect right now. Applying that frozen offset to a wall
+    clock on the far side of a DST transition is wrong by an hour, and for a
+    spring-forward it is wrong in the UNSAFE direction: the reset instant lands
+    an hour LATE, so dispatch stays parked past the moment the limit lifts. A
+    :class:`~zoneinfo.ZoneInfo` keeps the transition table, so
+    ``datetime.replace(hour=…)`` resolves the offset at the candidate's own
+    date (review round 1).
+
+    Resolution order, stdlib only, following ``orchestrator_config.py``'s
+    ``attention_digest_window_tz`` ZoneInfo precedent: the ``TZ`` environment
+    variable when it names an IANA zone, then the ``/etc/localtime`` database
+    entry, then — only if both fail — the flattened fixed offset, which is no
+    worse than the pre-#1409 behavior. ``TZ`` is read here rather than through
+    libc so a test can pin a zone with ``monkeypatch.setenv`` and stay
+    deterministic on any host, with no ``tzset`` fixture.
+    """
+    key = os.environ.get("TZ", "").strip().lstrip(":")
+    if key:
+        try:
+            return ZoneInfo(key)
+        except (ZoneInfoNotFoundError, ValueError):
+            _log.debug("native_daemon: TZ=%r is not an IANA zone key", key)
+    try:
+        with _LOCALTIME_PATH.open("rb") as handle:
+            return ZoneInfo.from_file(handle)
+    except (OSError, ValueError):
+        _log.debug(
+            "native_daemon: %s unreadable; using the flat host offset", _LOCALTIME_PATH
+        )
+    flattened = datetime.now(UTC).astimezone().tzinfo
+    return flattened if flattened is not None else UTC
+
+
+def _local_now() -> datetime:
+    """Return the current instant in the dispatch host's local timezone.
+
+    A bare ``3:45pm`` in a Claude usage-limit message is read in the host's own
+    zone (#1344 R1), so :func:`~cw.exceptions.parse_usage_limit_reset` resolves
+    the candidate in whatever zone this instant carries — hence
+    :func:`_host_timezone` rather than ``astimezone()``, which would hand the
+    parser a fixed offset and mis-resolve any reset across a DST boundary.
+
+    Kept as a module-level function rather than inlined so tests have an
+    injectable clock seam — ``_usage_limit_error`` must call it as a module
+    global for a ``monkeypatch.setattr("cw.native_daemon._local_now", ...)``
+    to take effect. ``freeze_time`` alone is NOT a substitute for pinning the
+    ZONE: freezegun fixes the instant but the host zone still decides the
+    offset, so a freeze-only test asserts a different UTC instant on a dev box
+    than on a UTC CI runner (the #671/#1727 green-locally/red-in-CI class).
+    Tests that need a zone as well as an instant set ``TZ`` (see
+    ``TestHostTimezoneDst``).
+    """
+    return datetime.now(_host_timezone())
+
+
+def _usage_limit_error(message: str, raw_text: str) -> UsageLimitError:
+    """Build the spawn-path :class:`UsageLimitError`, parsing *raw_text* (#1409).
+
+    *raw_text* is the UNMODIFIED subprocess text — ``exc.stderr``/``exc.stdout``
+    on the ``CalledProcessError`` branch, ``proc.stdout`` on the stdout branch.
+    Never the caller's *message*: the stdout branch embeds a ``repr()`` of the
+    output, whose escaped quotes and literal ``\\n`` the parser would have to
+    undo. ANSI CSI sequences are stripped here (the stderr branch does not strip
+    them itself) so both branches parse identically.
+
+    Emits the ONE log line that carries the raw spawn-time message. It is logged
+    here and nowhere else — ``claim.py`` deliberately does not log ``str(exc)``
+    — so there is exactly one record per raise, whether or not a reset parsed.
+    WARNING, not INFO: ``cw.cli._base._configure_logging`` uses ``basicConfig``
+    at WARNING unless ``-v`` is passed, and the dispatch runbook never says to
+    pass it, so an INFO line would be dropped on the first real occurrence —
+    which is the sample this parser needs to be tuned against, the spawn-time
+    wording being unverified.
+
+    The logged excerpt is secret-scrubbed and length-bounded before it goes out
+    (review round 1): ``exc.stderr``/``exc.stdout`` are captured subprocess
+    output with no size bound and no guarantee about their contents, and the
+    original binding ("log the raw message") never authorized dumping either
+    one wholesale. Both helpers live in :mod:`cw._text` — a leaf module that
+    imports nothing from ``cw``, so this module can import them at module
+    scope without closing the ``cw.config`` -> ``cw._config_migrate`` ->
+    ``cw.native_daemon`` cycle a module-level ``cw.executor_diagnostics``
+    import would (that module imports ``cw.config``). ``cw.executor_diagnostics``
+    re-exports both under the same names for its own callers. The excerpt is
+    still taken PRE-ANSI-strip, so an escape sequence sitting between
+    ``resets`` and the time stays visible in the sample.
+    """
+    reset_at = parse_usage_limit_reset(
+        _ANSI_CSI_PATTERN.sub("", raw_text), now=_local_now()
+    )
+    _log.warning(
+        "claude --bg usage limit: reset_at=%s raw=%r",
+        reset_at,
+        _bounded(redact(raw_text)),
+    )
+    return UsageLimitError(message, reset_at=reset_at)
 
 
 def _spawn_clean_env(cwd: Path) -> dict[str, str]:
@@ -297,7 +410,7 @@ class RealNativeDaemonClient:
             stderr_text = (exc.stderr or exc.stdout or "").strip()
             if USAGE_LIMIT_RE.search(stderr_text):
                 msg = f"claude --bg failed: usage limit active. {stderr_text}"
-                raise UsageLimitError(msg) from exc
+                raise _usage_limit_error(msg, exc.stderr or exc.stdout or "") from exc
             if _DISCLAIMER_REJECTION_PATTERN in stderr_text:
                 msg = (
                     "claude --bg failed: bypassPermissions disclaimer not accepted."
@@ -319,7 +432,7 @@ class RealNativeDaemonClient:
                     "claude --bg succeeded but usage limit detected"
                     f" in output: {proc.stdout!r}"
                 )
-                raise UsageLimitError(msg)
+                raise _usage_limit_error(msg, proc.stdout or "")
             msg = (
                 "claude --bg succeeded but stdout did not contain a "
                 f"recognizable session id: {proc.stdout!r}"
@@ -375,6 +488,7 @@ class FakeNativeDaemonClient:
         self.stop_calls: list[str] = []
         self._live: set[str] = set()
         self.raise_usage_limit: bool = False
+        self.usage_limit_reset_at: datetime | None = None
         self.raise_unregistered: bool = False
 
     def spawn_bg(
@@ -388,7 +502,10 @@ class FakeNativeDaemonClient:
         """Record call, register a deterministic short id, return it.
 
         When ``raise_usage_limit`` is True, raises :class:`UsageLimitError`
-        before incrementing the counter — so no slot is consumed.
+        before incrementing the counter — so no slot is consumed. The raised
+        error carries ``usage_limit_reset_at`` (default None) as its
+        ``reset_at``, so threading tests can inject a reset instant directly
+        instead of crafting a parseable usage-limit message (#1409).
 
         When ``raise_unregistered`` is True, returns the short id without
         adding it to the live set — simulating the intermittent flake where
@@ -397,7 +514,7 @@ class FakeNativeDaemonClient:
         """
         if self.raise_usage_limit:
             msg = "fake: usage limit"
-            raise UsageLimitError(msg)
+            raise UsageLimitError(msg, reset_at=self.usage_limit_reset_at)
         self._counter += 1
         short_id = f"{self._counter:08x}"
         self.spawn_calls.append((cwd, prompt))

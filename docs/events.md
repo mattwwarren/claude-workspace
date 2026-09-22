@@ -403,6 +403,38 @@ Operator-relevant: if you see this without having stopped the loop yourself,
 dispatch is down and pending tickets will not be claimed until it is
 restarted.
 
+### `dispatch.usage_limit_armed`
+
+**Emitter:** `run_dispatch_loop` in `cw.dispatch.loop` (via
+`_arm_usage_limit_windows`)
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "until": "<iso8601>",
+  "source": "parsed_reset | flat_backoff"
+}
+```
+**Semantics:** Fires once per client whose usage-limit back-off window is
+opened, on the tick that opens it — the set-side counterpart to
+`dispatch.usage_limit_cleared` below, which only ever fired on the way out.
+Per client, not per fleet: since #1409 the back-off window is keyed by client
+name, so a limit one client hit no longer parks the rest. A tick that arms
+three clients emits three events.
+
+`until` is the deadline that was persisted for that client. `source` says
+where it came from: `parsed_reset` when the spawn-time message named a reset
+time that parsed (and survived the 7-day clamp), `flat_backoff` when it did
+not and the window fell back to `usage_limit_backoff_seconds`. A
+transcript-derived (reconcile) detection names no client at all, so it arms
+every known client with `source: "flat_backoff"`.
+
+Operator-relevant: this is how you find out a window is open and how long it
+runs, without reading the dispatch log. Nothing clears a window early —
+`_merge_persisted_usage_limited_until` never shortens one — so a
+`parsed_reset` far in the future is the line to check when dispatch looks
+idle. `--once` mode never arms a window and so never emits this.
+
 ### `dispatch.usage_limit_cleared`
 
 **Emitter:** `run_dispatch_loop` in `cw.dispatch.loop` (via
