@@ -77,7 +77,8 @@ uv run diff-cover coverage.xml --compare-branch=origin/main \
 ```
 
 (CI additionally runs a separate `package-smoke` job — wheel build +
-`cw --version` / `cw guide` — that has no local equivalent in this list.)
+`cw --version` / `cw guide` / a local-clone `scripts/install.sh` smoke test —
+that has no local equivalent in this list.)
 
 Gate 1 must run **standalone and first**, exactly as in CI. `uv run` locks-and-
 syncs implicitly, so any later gate silently repairs a stale `uv.lock` on disk —
