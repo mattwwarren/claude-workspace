@@ -1,14 +1,18 @@
 ## Codex Review Verdict
 
-**Non-blocking** — no MUST_FIX findings. Single-pass review (fix loop disabled for this lane).
+**BLOCKING** — 4 MUST_FIX finding(s) must be addressed before this branch can proceed.
+_Single-pass review — fix loop disabled for this lane._
 
-**DEGRADED COVERAGE** — 1 role ran degraded: SysAdmin Reviewer: degraded — Checked scope alignment, configuration duplication, secrets/debug artifacts, infrastructure changes, shell syntax, and changed-symbol consumers. Full pytest, ruff, mypy, and hosted package-smoke checks could not be run because this runtime has no Python executable..
+
+**DEGRADED COVERAGE** — 3 roles ran degraded: Code Quality Reviewer: degraded — Static diff review completed; full CI, coverage, integration tests, and pre-commit gates were not run in the read-only environment., SysAdmin Reviewer: degraded — Static review completed; the full CI/test gate suite was not run because the workspace is read-only., Data Safety Reviewer: degraded — Targeted diff and ledger write-path review completed; full CI, integration tests, and external tracker verification were not performed in this read-only environment..
 
 _Reviewed with repo filesystem access (capable)._
 
 _Agent specs loaded for all 3 reviewer role(s)._
 
-### SHOULD_FIX
+### MUST_FIX
 
-- **tests/test_install_sh.py:126** _(LOW confidence)_ — Percent-encoding regression test does not verify percent signs
-- **tests/test_install_sh.py:126** — The special-character regression test does not assert that percent signs are encoded.
+- **src/cw/cli/review/dispositions.py:87** — New _age_cell duplicates existing compact age-formatting logic
+- **src/cw/cli/review/dispositions.py:225** — Human inspection output displays a normalized summary instead of the verbatim ledger summary
+- **src/cw/codex_review/_context/core.py:515** — Thread-derived reversal audit can be recorded without the ledger mutation succeeding
+- **tests/test_review_finding_dispositions.py:1863** — Adds a prohibited file-local git fixture helper

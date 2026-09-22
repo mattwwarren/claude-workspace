@@ -1860,26 +1860,6 @@ def test_module_imports_cleanly_whichever_module_loads_first(first: str) -> None
 # ---------------------------------------------------------------------------
 
 
-def _drift_repo(
-    make_git_repo: Callable[..., Path], name: str, *, changed: bool
-) -> tuple[Path, str, str]:
-    """A repo with two real commits either side of ``src/cw/foo.py``.
-
-    Returns ``(worktree, first_sha, second_sha)``. When *changed* is False the
-    second commit touches a DIFFERENT file, so the two shas still differ while
-    ``src/cw/foo.py`` does not — the case a same-sha fixture could not tell
-    apart from the equal-sha short circuit.
-    """
-    worktree = make_git_repo(name)
-    commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
-    first = git_in(worktree, "rev-parse", "HEAD")
-    if changed:
-        commit_tracked_file(worktree, "src/cw/foo.py", "a = 2  # reworked\n")
-    else:
-        commit_tracked_file(worktree, "src/cw/other.py", "b = 2\n")
-    return worktree, first, git_in(worktree, "rev-parse", "HEAD")
-
-
 class TestDispositionDrifted:
     """#2232: has the code a settle was granted against moved since?
 
@@ -1893,18 +1873,22 @@ class TestDispositionDrifted:
     def test_unchanged_file_across_two_commits_is_not_drift(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        worktree, first, second = _drift_repo(
-            make_git_repo, "wt-2232-same", changed=False
-        )
+        worktree = make_git_repo("wt-2232-same")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        first = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/other.py", "b = 2\n")
+        second = git_in(worktree, "rev-parse", "HEAD")
         assert first != second
         assert disposition_drifted(worktree, first, second, "src/cw/foo.py") is False
 
     def test_changed_file_across_two_commits_is_drift(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        worktree, first, second = _drift_repo(
-            make_git_repo, "wt-2232-changed", changed=True
-        )
+        worktree = make_git_repo("wt-2232-changed")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        first = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 2  # reworked\n")
+        second = git_in(worktree, "rev-parse", "HEAD")
         assert disposition_drifted(worktree, first, second, "src/cw/foo.py") is True
 
     def test_identical_shas_short_circuit_without_running_git(
@@ -1981,9 +1965,11 @@ class TestDispositionDrifted:
         repository entirely, and that is what decides whether a settled
         finding stays suppressed.
         """
-        worktree, first, second = _drift_repo(
-            make_git_repo, "wt-2232-hostile-gitdir", changed=False
-        )
+        worktree = make_git_repo("wt-2232-hostile-gitdir")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        first = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/other.py", "b = 2\n")
+        second = git_in(worktree, "rev-parse", "HEAD")
         decoy = make_git_repo("wt-2232-hostile-decoy")
         monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
         monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
@@ -2056,7 +2042,11 @@ class TestSuppressAdjudicatedFindingsDriftSurfacing:
     def _drifted(
         self, make_git_repo: Callable[..., Path], name: str
     ) -> tuple[Path, Finding, dict[str, FindingDisposition], str]:
-        worktree, first, second = _drift_repo(make_git_repo, name, changed=True)
+        worktree = make_git_repo(name)
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        first = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 2  # reworked\n")
+        second = git_in(worktree, "rev-parse", "HEAD")
         finding = _make_finding(severity="MUST_FIX", file="src/cw/foo.py")
         ledger = _ledger(finding, reviewed_sha=first)
         return worktree, finding, ledger, second
@@ -2145,9 +2135,11 @@ class TestSuppressAdjudicatedFindingsDriftSurfacing:
     def test_an_undrifted_match_still_suppresses_with_a_worktree(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        worktree, first, second = _drift_repo(
-            make_git_repo, "wt-2232-undrifted", changed=False
-        )
+        worktree = make_git_repo("wt-2232-undrifted")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        first = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/other.py", "b = 2\n")
+        second = git_in(worktree, "rev-parse", "HEAD")
         finding = _make_finding(severity="MUST_FIX", file="src/cw/foo.py")
         result = suppress_adjudicated_findings(
             _verdict(_accepted(finding)),
