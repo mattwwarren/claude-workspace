@@ -679,7 +679,9 @@ def review_settle(
 
     ROLLBACK (#2232): `outcome: "REVERSED"` withdraws a settle you already
     made. Paste the SAME `file` and `summary` the earlier settle used — read
-    them off `cw review dispositions <ticket>` or the original settle marker —
+    them off `cw review dispositions <ticket> --json` (its `summary` field is
+    always the full verbatim text) or the original settle marker; the human
+    table truncates long summaries for scanning and is not a payload source —
     and post the marker this prints. The newest-`recorded_at`-wins merge is
     what makes the withdrawal stick, so no new command and no new write path
     is involved; a reversed record matches neither suppression tier and is not

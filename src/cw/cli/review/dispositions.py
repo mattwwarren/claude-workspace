@@ -48,6 +48,13 @@ _UNKNOWN = "?"
 #: Rendered for a field that is simply empty — no actor, no rationale. Distinct
 #: from ``_UNKNOWN``: "nobody wrote one" is an answer, "cannot tell" is not.
 _EMPTY = "—"
+#: Appended when the SUMMARY column cuts a verbatim summary short (#2232
+#: round 4). A silent truncation is what turned this column into a
+#: correctness bug: an operator copies the cell into `cw review settle`,
+#: which matches on the FULL verbatim summary, and a shortened copy silently
+#: fails to match. The marker eats one character of the column so the
+#: rendered width still equals ``_COL_WIDTHS[1]``.
+_TRUNCATED = "…"
 
 _HEADERS = [
     "FILE",
@@ -82,6 +89,26 @@ def _head_sha(worktree: Path) -> str:
     about the wrong tree.
     """
     return capture_head_sha(worktree, strict=False)
+
+
+def _summary_cell(summary: str) -> str:
+    """SUMMARY column text, marked when it is cut to fit (#2232 round 4).
+
+    ``entry.summary`` is verbatim and, unlike every other column here, is an
+    identity field: `cw review settle`'s ROLLBACK path matches on the full
+    verbatim summary, so a display surface that quietly shortens it hands out
+    text that looks copyable but no longer matches the ledger. Building a
+    settle payload should read `cw review dispositions <ticket> --json`
+    instead (see that command's docstring), which carries ``entry.summary``
+    in full via ``model_dump`` — this human table is for scanning. A cell
+    that IS cut still needs to visibly read as cut, so a reader does not
+    mistake the shortened text for the whole thing.
+    """
+    text = summary or _EMPTY
+    width = _COL_WIDTHS[1]
+    if len(text) <= width:
+        return text
+    return text[: width - len(_TRUNCATED)] + _TRUNCATED
 
 
 def _age_cell(recorded_at: str) -> str:
@@ -226,7 +253,7 @@ def review_dispositions(
         rows.append(
             (
                 file[: _COL_WIDTHS[0]],
-                (entry.summary or _EMPTY)[: _COL_WIDTHS[1]],
+                _summary_cell(entry.summary),
                 entry.outcome[: _COL_WIDTHS[2]],
                 (entry.actor or _EMPTY)[: _COL_WIDTHS[3]],
                 (entry.rationale or _EMPTY)[: _COL_WIDTHS[4]],
