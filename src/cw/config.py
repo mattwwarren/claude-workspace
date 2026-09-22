@@ -107,6 +107,7 @@ reap_policy: signal_only  # default: signal only; set to auto to restore self-he
 busy_wait_guard_enabled: true  # default: true; false disables cw guard-busy-wait
 busy_wait_guard_repeat_threshold: 3  # default: 3; identical Bash calls before a block
 busy_wait_guard_window_seconds: 300  # default: 300; rolling window for the count above
+subagent_spawn_guard_enabled: true  # default: true; false allows forked subagents
 # disallowed_mcp_tools: []  # patterns denied to every DAEMON worker, e.g.
 #   ["mcp__plugin_linear_linear__*"] to block Linear MCP in headless workers.
 #   MIGRATION: github-issues clients that relied on the old automatic Linear

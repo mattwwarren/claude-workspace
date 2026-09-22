@@ -401,10 +401,18 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
                     ],
                 },
                 # #1646: stamp an unresolved-subagent-spawn marker before the
-                # spawn starts. Never blocks -- there is no failure mode in
-                # which refusing a subagent spawn is the right answer. The
-                # matching PostToolUse decrement was removed by #1947 -- see the
-                # re-verification note above _AGENT_TOOL_MATCHER.
+                # spawn starts. The matching PostToolUse decrement was removed
+                # by #1947 -- see the re-verification note above
+                # _AGENT_TOOL_MATCHER.
+                # The stamp half still never blocks. #2211 folded a spawn-shape
+                # policy into the same command (no new hook, no new interpreter
+                # start, and already-provisioned worktrees pick it up on a cw
+                # upgrade since they reference the command by name): it refuses
+                # an explicitly-forked subagent in a headless worker, which
+                # inherits the parent's implementation mandate and never enters
+                # cw's roster (#2017). Default-on, disable-able per lane or
+                # globally via subagent_spawn_guard_enabled in
+                # orchestrator.yaml. Every other spawn shape still allows.
                 {
                     "matcher": _AGENT_TOOL_MATCHER,
                     "hooks": [{"type": "command", "command": "cw agent-spawn-pre"}],

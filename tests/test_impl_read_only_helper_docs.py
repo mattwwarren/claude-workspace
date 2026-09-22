@@ -131,7 +131,7 @@ class TestBareSpawnSitesAreTyped:
     def test_auto_dev_ci_failure_spawn_is_typed(self) -> None:
         content = _cmd("auto-dev.md")
 
-        assert f"Spawn agent ({_GENERAL_PURPOSE}) in that PR's branch" in content
+        assert f"Spawn agent (`{_GENERAL_PURPOSE}`) in that PR's branch" in content
 
     def test_finalize_spawns_are_all_typed(self) -> None:
         """Four sites: fix-branch, UI capture, CI failure, review feedback."""

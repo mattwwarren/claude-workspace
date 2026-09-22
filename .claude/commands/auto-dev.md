@@ -86,6 +86,8 @@ Everything else runs to completion or exits with a structured error.
 - Large path is unchanged (already exits at S3), but include the full health summary in the result payload.
 - When this rule downgrades the status, set `health.downgrade_applied: true` in the structured output. (Distinct from `health.fix_loop_escalated` which signals fix-loop escalation events — see Step 3b.5.)
 
+**Agent spawn typing rule (#2211):** every spawn at every stage MUST name an explicit `subagent_type` (`"general-purpose"` for real work, `"Read Only Helper"` for an extraction or lookup that must not be able to write). **Never fork.** An unnamed or forked subagent takes no `cw` roster entry, so cw can neither see it start nor stop it (#2017); a fork additionally inherits the parent's tools and its mandate, which is how #2211's read-only helper ended up committing and pushing to a live branch. In a headless worker `cw agent-spawn-pre` refuses an explicit fork outright (exit 2) and warns on an omitted type.
+
 **Agent spawn rule:** every agent prompt in headless mode MUST include BOTH the Friction Protocol block AND the Health Check block. Implementation and fix-loop agents MUST additionally include the Completion Artifacts block (see Subagent Reliability Mitigations section). Every spawn MUST set a wall-clock timeout per Mitigation 4 (recommended: 30m for impl, 15m for fix/review, 10m for lightweight); a non-returning task is treated as `agent_block`, not a hang.
 
 **Out of scope in headless mode:**
@@ -537,7 +539,7 @@ Options:
 ```
 
 - **Fix all / Fix critical / Cherry-pick** → For each PR being fixed:
-  - **CI failure:** Spawn agent in that PR's branch to investigate and fix. Push. Wait 10m for CI (per Stage 5 protocol).
+  - **CI failure:** Spawn agent (`subagent_type: "general-purpose"`) in that PR's branch to investigate and fix. Push. Wait 10m for CI (per Stage 5 protocol).
   - **Changes requested:** Surface full feedback, apply fixes, push, reply to comments. Wait 10m for CI.
   - **Merge conflicts:** Fetch main, merge, resolve conflicts, re-run quality gates, push. Wait 10m for CI.
   - After all fixes: re-scan to confirm health, then proceed to Stage 1.

@@ -30,9 +30,24 @@ that never ran".
 
 Fail-open throughout, mirroring ``cw guard-cwd``: unreadable stdin, a missing
 or malformed context, a contended lock, or any unexpected error all yield a
-silent exit 0. This never blocks a tool call under any circumstances —
-refusing a subagent spawn is never the right answer, and a missed stamp costs
-only disposition precision on a crash that may not happen.
+silent exit 0. The stamp itself never blocks a tool call — a missed stamp
+costs only disposition precision on a crash that may not happen.
+
+#2211 added the one exception to "this hook never blocks". The same hook now
+also applies :mod:`cw.cli._subagent_policy`'s spawn-shape policy, which
+refuses an explicitly-forked subagent in a headless worker — a shape that
+inherits the parent's implementation mandate and never enters cw's session
+roster, so cw can neither see it nor stop it (#2017). That refusal is
+default-on but gated by ``subagent_spawn_guard_enabled``; every other shape,
+including a spawn that names no ``subagent_type`` at all, still allows. The
+policy runs *before* the stamp so a refused spawn leaves no unresolved count
+behind — the spawn never happens, and a count left at 1 would make the worker
+look like it died mid-spawn.
+
+The hook payload is read from stdin exactly once, in
+:func:`agent_spawn_pre`, and passed by value to both the policy and the
+stamp: stdin is consumable once per process, so a second read would return
+empty and silently break whichever caller ran second.
 """
 
 from __future__ import annotations
@@ -46,6 +61,7 @@ from cw.cli._hook_io import (
     _read_hook_stdin_json,
     _write_cw_context_locked,
 )
+from cw.cli._subagent_policy import classify_spawn, enforce
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
     AGENT_SPAWN_STAMP_KEY,
@@ -81,14 +97,18 @@ def _last_stamped_at(context: dict[str, object]) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _hook_cwd() -> str | None:
-    """Return the hook payload's ``cwd`` string, or None on any read failure."""
-    payload = _read_hook_stdin_json()
+def _hook_cwd(payload: dict[str, object] | None) -> str | None:
+    """Return *payload*'s ``cwd`` string, or None when it is absent/unusable.
+
+    Takes the already-parsed payload rather than reading stdin itself
+    (#2211): the spawn-shape policy needs the same payload, and stdin can
+    only be consumed once per process.
+    """
     cwd_value = payload.get("cwd") if payload is not None else None
     return cwd_value if isinstance(cwd_value, str) and cwd_value else None
 
 
-def _adjust_unresolved_count(delta: int) -> None:
+def _adjust_unresolved_count(delta: int, payload: dict[str, object] | None) -> None:
     """Apply *delta* to the unresolved-spawn counter for the hook's worktree.
 
     Read-modify-write via :func:`cw.cli._hook_io._write_cw_context_locked`,
@@ -105,7 +125,7 @@ def _adjust_unresolved_count(delta: int) -> None:
     "when did the oldest unresolved spawn begin", which is what an operator
     reading a parked row wants; refreshing it on a decrease would erase that.
     """
-    cwd_value = _hook_cwd()
+    cwd_value = _hook_cwd(payload)
     if cwd_value is None:
         return
 
@@ -126,12 +146,21 @@ def _adjust_unresolved_count(delta: int) -> None:
 
 @main.command(name="agent-spawn-pre")
 def agent_spawn_pre() -> None:
-    """Mark a subagent spawn as unresolved before the tool call runs.
+    """Apply the spawn-shape policy, then mark the spawn unresolved.
 
-    Reads the PreToolUse hook JSON from stdin and increments the counter in
-    ``<cwd>/.claude/cw-context.json``. Always exits 0 — see module docstring.
+    Reads the PreToolUse hook JSON from stdin **once** and hands it to both
+    :func:`cw.cli._subagent_policy.classify_spawn` and the stamp. Exits 0 in
+    every case except a refused explicit-fork spawn, which exits 2 — see
+    module docstring.
+
+    :func:`~cw.cli._subagent_policy.enforce` signals that refusal with
+    ``sys.exit(2)``, i.e. ``SystemExit``, which is not an ``Exception`` and
+    so passes through the fail-open guard below rather than being swallowed
+    by it.
     """
     try:
-        _adjust_unresolved_count(1)
+        payload = _read_hook_stdin_json()
+        enforce(classify_spawn(payload))
+        _adjust_unresolved_count(1, payload)
     except Exception:  # noqa: BLE001 — a hook must never crash; fail open.
         return

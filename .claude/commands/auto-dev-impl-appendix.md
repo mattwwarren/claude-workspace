@@ -277,3 +277,139 @@ Squash-merge to main hides the trailer from main's history but it remains on the
 branch's commits, which is where the detector reads. On resume, a branch with
 this trailer and no PR resolves to `s3_review_pending`; a branch without it
 resolves to `s2_implementing` (resume in-flight).
+
+---
+
+## Read-only helper spawns: capability, not instruction (#2211)
+
+### The incident
+
+An impl-stage worker needed the text of a tracker comment whose thread was too
+large to read directly. It forked a harness subagent for that narrow,
+read-only extraction.
+
+The subagent ignored that scope. It inherited the implementation mandate from
+the surrounding context and did real work on the live branch: edited a source
+file and a test file, ran tests, lint and type checks, committed, and **pushed
+to the ticket's feature branch**. It self-reported afterwards. The parent's
+mid-flight instruction to stop arrived after the push had landed.
+
+Two failures, and the second is the one #2017 was about:
+
+1. **Scope inheritance.** A fork inherits the parent's tools *and* its
+   context, so the read-only remit was carried only by the prompt — and the
+   prompt lost to the mandate sitting in the inherited context.
+2. **No roster entry.** A harness subagent never enters cw's session roster.
+   cw could not see it start, could not observe what it was doing, and had no
+   channel to stop it. The parent's own message was the only control channel,
+   and it lost the race.
+
+The content of the push happened to be correct. That is luck, not a
+mitigation: the same failure with a wrong diff puts unreviewed work on a
+branch with no cw record of where it came from.
+
+The detection cost was its own problem. From outside, a correctly-escalating
+parent presented as a session idle ~19 minutes with no PR — `STOP-OR-PEEK` on
+the peek ladder, indistinguishable from a wedge. Only a manual peek showed a
+healthy session waiting.
+
+### Why the fix is a tool allowlist
+
+`Read Only Helper` (`.claude/agents/read-only-helper.md`) carries
+`tools: [Read, Grep, Glob]` — no `Bash`, no `Edit`, no `Write`. It cannot
+edit, commit or push because it has no tool that does those things. No
+phrasing of a task and no inherited context can restore the capability.
+
+Every other registered agent type, including every reviewer, carries `Bash`.
+`Bash` alone restores file writes, commits and pushes, so "read-only by
+convention" is not read-only. `general-purpose` is not a safe substitute for a
+lookup either.
+
+Because the helper has no `Bash`, it cannot fetch its own input. **The parent
+fetches first** (`gh issue view <n> --json comments > .cw/<name>.json`) and
+hands over a file path. That asymmetry is the design, not a limitation to work
+around: the fetch is the parent's authority, the extraction is the helper's.
+
+### What `cw agent-spawn-pre` now refuses
+
+The hook already ran on the `^(Agent|Task)$` matcher in every dispatched
+worktree, so the policy folded into it at zero additional interpreter cost,
+and already-provisioned worktrees pick it up on a `cw` upgrade.
+
+In a **headless** worker (`.claude/cw-context.json` with `headless: true`),
+with the guard enabled:
+
+- `subagent_type` explicitly `fork` (any case) or blank → **refused**, exit 2.
+  The spawn does not happen and no stamp is written.
+- `subagent_type` **not named at all** → **allowed**, with a `WARN` line on
+  stderr. This is **record-only**, not enforcement.
+- any named type → allowed silently.
+- anything it cannot classify, any non-headless session, any cwd with no
+  ancestor cw-context.json → allowed, no verdict.
+
+**Why the omitted case is record-only rather than refused.** The spawn-site
+inventory needed to make denial safe is incomplete. `review-sweep.md` names
+six roles — `Bug Hunter`, `CLAUDE.md Auditor`, `Context Checker`,
+`silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer` — that are
+not registered agent types, so there is no correct `subagent_type` for a
+refused caller to retry with. Denying on omission before those six have a home
+would break working spawn sites and teach workers to route around the guard.
+Flipping that case to deny is gated on finishing the inventory: either
+register real agent types for those roles, or state explicitly that they run
+as `general-purpose`.
+
+### The config gate
+
+`subagent_spawn_guard_enabled` is a global default-on bool in
+`orchestrator.yaml`, with a bidirectional per-lane override in
+`clients.yaml` — the same shape as `busy_wait_guard_enabled` (#1946). A
+guard that can refuse work on a seam every dispatched worktree crosses needs
+a kill switch that does not require a code release.
+
+```yaml
+# ~/.claude-workspace/orchestrator.yaml — disable everywhere
+subagent_spawn_guard_enabled: false
+```
+
+```yaml
+# ~/.config/cw/clients.yaml — disable for one lane only
+clients:
+  acme:
+    lanes:
+      - name: fast
+        subagent_spawn_guard_enabled: false
+```
+
+See `config/CONFIG_REFERENCE.md`, section "Subagent Spawn Guard (#2211)".
+
+### Residual gaps
+
+- **R1 — the impl and finalize agents are still unrostered.** Stage 2's impl
+  agent and Stage 4's finalize/prep-pr agents are harness subagents with no
+  roster entry. They now name `subagent_type: "general-purpose"` explicitly,
+  which is an improvement in legibility, not in observability: cw still cannot
+  see or stop them. Closing this needs the `dispatch_fix_agent` migration
+  #2017 applied to the review fix loop, applied here — a separate ticket.
+- **R4 — a cwd outside any cw context escapes the policy.** A subagent that
+  `cd`s into a directory with no ancestor `.claude/cw-context.json` (a
+  detached `$TMPWT` gate worktree, a nested `isolation: "worktree"` spawn)
+  fails open. Same limitation `cw guard-cwd` has today, carried forward.
+- **R7 — the spawn-site inventory is incomplete**, which is why the
+  omitted-`subagent_type` case ships record-only. See above.
+
+### The deferred half — #2248
+
+The other half of #2211 is **not** implemented: `classify_git_mutation` (a
+classifier refusing `git commit`/`git push` from a non-writer subagent), its
+enforcement in `cw guard-cwd`, and the durable `guard.subagent_action` event
+that would record every subagent push.
+
+That half is a fail-closed guard on the seam every headless `Bash` call
+crosses, with unresolved regex false positives (`echo git push`,
+`grep "git push"`), and it rests on an "`agent_id` is subagent-only"
+assumption never empirically captured in this repo. #2248 owns it, and
+requires its own Phase-0 capture and toggle before it ships.
+
+Until then, the ticket's third acceptance bullet — *a push from an unrostered
+agent is refused, or at minimum recorded* — is **not satisfied**. Nothing in
+the shipped scope refuses or records a subagent's push.

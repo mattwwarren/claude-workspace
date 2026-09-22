@@ -143,9 +143,7 @@ class TestResolveSpawnGuardEnabled:
 
         assert _resolve_spawn_guard_enabled("acme", "fast") is True
 
-    def test_unknown_client_falls_through_to_global(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_unknown_client_falls_through_to_global(self, tmp_config_dir: Path) -> None:
         _write_clients_yaml(tmp_config_dir, lane_value="false")
 
         assert _resolve_spawn_guard_enabled("not-a-client", "fast") is True

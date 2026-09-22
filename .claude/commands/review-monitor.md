@@ -308,8 +308,8 @@ pass does, after verifying.
 
 1. Fetch the originating review comment for each touched thread (the body of the first comment
    in the thread) via `gh api graphql` against the PR's `reviewThreads`.
-2. Spawn ONE confirmation Task agent (sonnet model) covering all touched threads. Use this
-   prompt verbatim:
+2. Spawn ONE confirmation Task agent (`subagent_type: "general-purpose"`, sonnet model)
+   covering all touched threads. Use this prompt verbatim:
 
 ```
 You are verifying whether new commits on a pull request addressed specific review comments.
@@ -350,7 +350,8 @@ OUTPUT RULES — follow these exactly:
 
 #### Step 3b: Regression Scan
 
-Spawn a bug-hunter Task agent (sonnet model) with the delta diff. Use this prompt verbatim:
+Spawn a bug-hunter Task agent (`subagent_type: "general-purpose"`, sonnet model) with the
+delta diff. Use this prompt verbatim:
 
 ```
 You are a focused bug-hunter checking whether an incremental push to a pull request BROKE or
