@@ -1822,7 +1822,10 @@ class TestReviewDispositions:
 
         assert result.exit_code == 0, result.output
         assert "src/cw/foo.py" in result.output
-        assert "bug here" in result.output
+        # #2232 round 3 fix: the table shows the verbatim summary, not the
+        # normalized key half — an operator copying it into `cw review
+        # settle` needs the text that actually matches the ledger key.
+        assert "Bug here" in result.output
         assert "REJECTED" in result.output
         assert _OPERATOR in result.output
         assert "abc1234" in result.output

@@ -222,11 +222,11 @@ def review_dispositions(
 
     rows: list[tuple[str, ...]] = []
     for key, entry in entries:
-        file, summary = split_disposition_key(key)
+        file = split_disposition_key(key)[0]
         rows.append(
             (
                 file[: _COL_WIDTHS[0]],
-                summary[: _COL_WIDTHS[1]],
+                (entry.summary or _EMPTY)[: _COL_WIDTHS[1]],
                 entry.outcome[: _COL_WIDTHS[2]],
                 (entry.actor or _EMPTY)[: _COL_WIDTHS[3]],
                 (entry.rationale or _EMPTY)[: _COL_WIDTHS[4]],
