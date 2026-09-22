@@ -34,8 +34,9 @@ from cw.dispatch_state import (
     clear_all_executor_blocked_markers,
     load_usage_limit_armed_at,
     load_usage_limited_until,
+    merge_and_save_usage_limited_until,
+    merge_usage_limited_until,
     save_usage_limit_armed_at,
-    save_usage_limited_until,
 )
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
@@ -275,19 +276,17 @@ def _merge_persisted_usage_limited_until(
     protects a fresh restart (#804) -- it is never revisited, so this
     process's in-memory windows silently diverge from what any OTHER
     dispatch process (or this same process's own earlier tick) has
-    persisted. Merge rather than overwrite, and merge PER CLIENT (#1409):
-    take the later of {in-memory, on-disk} for each client name, and keep a
-    client the other side has never heard of. ``load_usage_limited_until()``
-    omits an entry that is malformed or merely expired (dispatch_state.py) --
-    a bare assignment would let a transient disk-read failure silently reopen
-    the spawn gate mid-backoff. A read must never shorten an active window.
+    persisted. Merge rather than overwrite, and merge PER CLIENT (#1409) via
+    :func:`~cw.dispatch_state.merge_usage_limited_until`: take the later of
+    {in-memory, on-disk} for each client name, and keep a client the other
+    side has never heard of. This is a read-only refresh -- unlike the
+    post-tick arm-and-save path, nothing is persisted here, so an unlocked
+    read is fine. ``load_usage_limited_until()`` omits an entry that is
+    malformed or merely expired (dispatch_state.py) -- a bare assignment
+    would let a transient disk-read failure silently reopen the spawn gate
+    mid-backoff. A read must never shorten an active window.
     """
-    merged = dict(usage_limited_until)
-    for client, persisted in load_usage_limited_until().items():
-        current = merged.get(client)
-        if current is None or persisted > current:
-            merged[client] = persisted
-    return merged
+    return merge_usage_limited_until(usage_limited_until, load_usage_limited_until())
 
 
 # Hard ceiling on a window derived from a PARSED reset instant (#1409). The
@@ -886,15 +885,19 @@ def _run_dispatch_loop_body(
                     result.usage_limit_clients,
                     backoff_seconds=config.usage_limit_backoff_seconds,
                 )
-                # Re-merge immediately before the write (#1409 review round 3):
-                # closes the window between the tick-start merge and this save
-                # in which a second writer (--force, #1362) could have armed a
-                # DIFFERENT client -- without this, the whole-mapping write
-                # below would silently erase that client's window.
-                usage_limited_until = _merge_persisted_usage_limited_until(
+                # Read-merge-write under ONE lock (#1409 review round 4): a
+                # second writer (--force, #1362) arming a DIFFERENT client
+                # between the tick-start merge and this save used to be
+                # silently erased by the whole-mapping write -- round 3
+                # narrowed that to an unlocked re-merge immediately before a
+                # separately-locked save, which still left a gap between the
+                # two. merge_and_save_usage_limited_until folds the read, the
+                # merge, and the write into a single dispatch_state_lock()
+                # acquisition, so no writer can land in between: the window
+                # is closed, not shortened.
+                usage_limited_until = merge_and_save_usage_limited_until(
                     usage_limited_until
                 )
-                save_usage_limited_until(usage_limited_until)
                 # #1343 R2: stamp the arm timestamp on every fresh detection
                 # (this block already only fires when the detecting client's
                 # window was NOT already active this tick -- see tick.py,

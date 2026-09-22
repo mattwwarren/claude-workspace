@@ -143,9 +143,10 @@ def dispatch_state_lock() -> Iterator[None]:
 
     Mirror of ``concurrency_override_lock()``/``clients_lock()``. Hold this
     across every load→mutate→write sequence in ``save_usage_limited_until``,
-    ``save_availability_probe_cache``, and ``save_main_drift_latches`` so
-    concurrent ``cw`` processes cannot clobber each other's edits (lost
-    update, #1256). The lock is advisory (``fcntl.flock``) and per-open-fd,
+    ``merge_and_save_usage_limited_until``, ``save_availability_probe_cache``,
+    and ``save_main_drift_latches`` so concurrent ``cw`` processes cannot
+    clobber each other's edits (lost update, #1256). The lock is advisory
+    (``fcntl.flock``) and per-open-fd,
     so sequential re-acquisitions in the same process are safe.
     Do NOT nest: acquiring while already holding will deadlock.
 
@@ -227,7 +228,20 @@ def load_usage_limited_until() -> dict[str, datetime]:
     the client that actually hit it, which is the value the fan-out would only
     be approximating.
     """
-    raw = _load_dispatch_state_raw().get("usage_limited_until")
+    return _usage_limited_until_from_payload(_load_dispatch_state_raw())
+
+
+def _usage_limited_until_from_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, datetime]:
+    """Parse the ``usage_limited_until`` entries out of a raw sidecar payload (#1409).
+
+    Shared read-side logic for :func:`load_usage_limited_until` and
+    :func:`merge_and_save_usage_limited_until` — the latter already has a raw
+    payload in hand under the lock and must parse that exact snapshot rather
+    than issuing a second, separately-timed read.
+    """
+    raw = payload.get("usage_limited_until")
     if not isinstance(raw, dict):
         return {}
     now = datetime.now(UTC)
@@ -237,6 +251,25 @@ def load_usage_limited_until() -> dict[str, datetime]:
         if parsed is not None:
             windows[str(name)] = parsed
     return windows
+
+
+def merge_usage_limited_until(
+    current: Mapping[str, datetime], persisted: Mapping[str, datetime]
+) -> dict[str, datetime]:
+    """Per-client later-of merge of two usage-limit window maps (#1409).
+
+    Keeps whichever side has each client's LATER deadline, and keeps a
+    client either side alone knows about. A read must never shorten an
+    active window. Pure — no I/O, no lock — so it is safe to call both
+    outside a lock (a read-only refresh) and inside one (an atomic
+    read-merge-write).
+    """
+    merged = dict(current)
+    for client, persisted_at in persisted.items():
+        existing = merged.get(client)
+        if existing is None or persisted_at > existing:
+            merged[client] = persisted_at
+    return merged
 
 
 def save_usage_limited_until(windows: Mapping[str, datetime]) -> None:
@@ -251,8 +284,10 @@ def save_usage_limited_until(windows: Mapping[str, datetime]) -> None:
     degradation).
 
     The whole mapping is written, not merged per client: the caller
-    (``dispatch.loop``) already holds the merged view of every live window,
-    and a per-key merge here would make an intentional clear impossible.
+    already holds the view of every live window it wants persisted — this
+    is the exact-overwrite primitive; :func:`merge_and_save_usage_limited_until`
+    is the read-merge-write one for a caller that must not silently erase a
+    concurrent writer's entry.
     """
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
@@ -265,6 +300,38 @@ def save_usage_limited_until(windows: Mapping[str, datetime]) -> None:
             atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
     except OSError:
         logger.warning("dispatch_state: failed to persist usage_limited_until")
+
+
+def merge_and_save_usage_limited_until(
+    windows: Mapping[str, datetime],
+) -> dict[str, datetime]:
+    """Read-merge-write ``usage_limited_until`` atomically, one lock (#1409 round 4).
+
+    Round 3's fix re-merged the on-disk sidecar into *windows* right before
+    calling :func:`save_usage_limited_until` — but that re-merge was an
+    UNLOCKED read, so a second writer (``--force``, #1362) landing between
+    that read and ``save_usage_limited_until``'s own lock acquisition was
+    still silently erased by the whole-mapping write. This folds the read,
+    the merge, and the write into a SINGLE :func:`dispatch_state_lock`
+    acquisition, so no writer can land in between — the window is closed,
+    not shortened. Returns the merged mapping so the caller's in-memory view
+    stays consistent with what was just persisted.
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with dispatch_state_lock():
+            payload = _load_dispatch_state_raw()
+            persisted = _usage_limited_until_from_payload(payload)
+            merged = merge_usage_limited_until(windows, persisted)
+            payload["usage_limited_until"] = {
+                name: dt.isoformat() for name, dt in merged.items()
+            }
+            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning("dispatch_state: failed to persist usage_limited_until")
+        return dict(windows)
+    return merged
 
 
 def load_usage_limit_armed_at() -> datetime | None:
