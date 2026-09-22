@@ -92,9 +92,7 @@ def _run(
         timeout=30,
     )
     argv = (
-        argv_file.read_text(encoding="utf-8").splitlines()
-        if argv_file.exists()
-        else []
+        argv_file.read_text(encoding="utf-8").splitlines() if argv_file.exists() else []
     )
     return proc, argv
 

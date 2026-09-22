@@ -22,7 +22,7 @@ MCP_EXTRA_MSG = (
     "If you installed with 'uv tool install', reinstall with the extra: "
     'uv tool install "claude-workspace[mcp] @ '
     'git+https://github.com/mattwwarren/claude-workspace.git" '
-    '(or --from ".[mcp]" from a local clone).'
+    "(or run ./scripts/install.sh from a local clone)."
 )
 
 
