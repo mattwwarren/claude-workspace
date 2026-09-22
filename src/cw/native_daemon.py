@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from cw._text import _bounded, redact
 from cw.exceptions import (
     USAGE_LIMIT_RE,
     CwError,
@@ -238,21 +239,15 @@ def _usage_limit_error(message: str, raw_text: str) -> UsageLimitError:
     (review round 1): ``exc.stderr``/``exc.stdout`` are captured subprocess
     output with no size bound and no guarantee about their contents, and the
     original binding ("log the raw message") never authorized dumping either
-    one wholesale. Both helpers are the ones ``executor_diagnostics`` already
-    uses for exactly this — :func:`~cw.executor_diagnostics.redact` for secret
-    shapes and :func:`~cw.executor_diagnostics._bounded` for the 4000-char
-    tail-kept cap — rather than a second pair written here. The excerpt is
+    one wholesale. Both helpers live in :mod:`cw._text` — a leaf module that
+    imports nothing from ``cw``, so this module can import them at module
+    scope without closing the ``cw.config`` -> ``cw._config_migrate`` ->
+    ``cw.native_daemon`` cycle a module-level ``cw.executor_diagnostics``
+    import would (that module imports ``cw.config``). ``cw.executor_diagnostics``
+    re-exports both under the same names for its own callers. The excerpt is
     still taken PRE-ANSI-strip, so an escape sequence sitting between
     ``resets`` and the time stays visible in the sample.
-
-    The two helpers are imported at call time, not module scope: ``cw.config``
-    imports ``cw._config_migrate``, which imports this module, and
-    ``cw.executor_diagnostics`` imports ``cw.config`` — a module-level import
-    closes that loop and breaks ``import cw.config`` outright. Same deferral
-    (and same reason) as ``dev_queue.lifecycle.consume_completed_sessions``.
     """
-    from cw.executor_diagnostics import _bounded, redact
-
     reset_at = parse_usage_limit_reset(
         _ANSI_CSI_PATTERN.sub("", raw_text), now=_local_now()
     )

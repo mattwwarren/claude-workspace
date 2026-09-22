@@ -302,13 +302,6 @@ ignore = [
 # loop_health at module top, so loop_health's reach back into wedge must be
 # function-level. Inline import is the sanctioned mechanism, not a workaround.
 "src/cw/doctor/loop_health.py" = ["PLC0415"]
-# native_daemon defers cw.executor_diagnostics' redact/_bounded inside
-# _usage_limit_error (#1409) to break the cw.config ↔ cw.native_daemon cycle:
-# cw.config imports cw._config_migrate, which imports this module at module
-# top, and cw.executor_diagnostics imports cw.config — a module-level import
-# here makes `import cw.config` fail outright. Same shape as the claim.py entry
-# above. Inline import is the sanctioned mechanism, not a workaround.
-"src/cw/native_daemon.py" = ["PLC0415"]
 # review_recipes.address_review defers the cw.spawn import inside
 # _dispatch_address_review to break the cw.spawn ↔ cw.reconcile circular
 # dependency (spawn.py imports cw.reconcile at module top). Inline import at

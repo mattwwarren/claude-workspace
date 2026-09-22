@@ -635,8 +635,8 @@ class TestRealNativeDaemonClientSpawn:
     ) -> None:
         """Review round 1: `exc.stderr` has no size bound; the log line does.
 
-        Reuses ``executor_diagnostics._bounded`` (tail-kept, 4000 chars), the
-        same convention ``codex_runner`` logs excerpts under.
+        Reuses ``cw._text._bounded`` (tail-kept, 4000 chars), the same
+        convention ``codex_runner`` logs excerpts under.
         """
         from cw.exceptions import UsageLimitError
         from cw.executor_diagnostics import _EXCERPT_LIMIT
