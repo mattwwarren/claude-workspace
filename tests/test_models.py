@@ -667,6 +667,30 @@ class TestOrchestratorEventTypeSessionNeedsAttention:
         )
 
 
+class TestOrchestratorEventTypeSessionMessageSent:
+    """``cw session send``'s inbox-append event (#2212)."""
+
+    def test_session_message_sent_value(self) -> None:
+        assert (
+            OrchestratorEventType.SESSION_MESSAGE_SENT.value == "session.message_sent"
+        )
+
+    def test_round_trips_with_its_payload(self) -> None:
+        payload = {
+            "session_id": "abc12345",
+            "session_name": "c/auto-dev/2212",
+            "client": "c",
+            "message_id": "msg00001",
+            "author": "matt",
+        }
+        event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_MESSAGE_SENT, payload=payload
+        )
+        restored = OrchestratorEvent.model_validate_json(event.model_dump_json())
+        assert restored.type is OrchestratorEventType.SESSION_MESSAGE_SENT
+        assert restored.payload == payload
+
+
 class TestCostFields:
     def test_cost_fields_default_none(self) -> None:
         sess = Session(
