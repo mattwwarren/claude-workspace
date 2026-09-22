@@ -22,7 +22,7 @@ Parse `$ARGUMENTS` before doing anything else:
 |-------|--------|
 | Empty | Run the full poll cycle (Steps 1–5 below) |
 | `status` | Run `scripts/review_monitor.py status` (or the installed `~/.claude/...` path) and display output, then stop |
-| `drop <N>` | Run `scripts/review_monitor.py drop <N>` (or the installed `~/.claude/...` path) and confirm removal, then stop |
+| `drop <N>` | Run `scripts/review_monitor.py drop <N>` (or the installed `~/.claude/...` path) and confirm removal (it prints `{"dropped": true, ...}`), then stop |
 | Anything else | Load state via `scripts/review_monitor.py status --json` (or the installed `~/.claude/...` path), then answer the query conversationally using that data |
 
 **Natural language query examples:**

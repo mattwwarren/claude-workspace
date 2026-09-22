@@ -584,58 +584,63 @@ def _merge_states(central: MonitorState, legacy: MonitorState) -> MonitorState:
     return central
 
 
-def load_state(repo: str) -> MonitorState:
+def _load_json_state(path: Path, *, strict: bool, label: str) -> MonitorState | None:
+    """Read and parse one state file, honoring the ``strict`` OSError contract.
+
+    Returns ``None`` when *path* does not exist. Corrupt-but-readable content
+    always degrades to ``None`` with a warning; an unreadable file re-raises
+    under ``strict`` and degrades to ``None`` otherwise. Shared by both state
+    files ``load_state`` reads (central and legacy) so the strict guard covers
+    each identically — see #2189 round 2, where a copy of this check lived
+    only on the central-file read and the legacy read stayed silent.
+    """
+    if not path.exists():
+        return None
+    try:
+        return MonitorState.from_dict(json.loads(path.read_text()))
+    except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
+        if strict and isinstance(e, OSError):
+            raise
+        logger.warning("Corrupt %s state file %s, starting fresh: %s", label, path, e)
+        return None
+
+
+def load_state(repo: str, *, strict: bool = False) -> MonitorState:
     """Load monitor state for a specific repo from the central directory.
 
     If no central file exists but a legacy ``.claude/review-monitor-state.json``
     is present in the current directory, the legacy data is migrated
     automatically: it is merged into central (newer ``last_checked_at`` wins
     per PR), saved to the central location, and the legacy file is deleted.
+
+    An unreadable central or legacy file degrades to empty state with a
+    warning, which suits read-only callers. A caller that goes on to *write*
+    the state passes ``strict=True`` so an ``OSError`` reading either file
+    propagates instead — otherwise the write would replace whatever the
+    unreadable file held. Corrupt but readable content starts fresh either way.
     """
     state_file = state_path_for_repo(repo)
-    central_state: MonitorState | None = None
+    central_state = _load_json_state(state_file, strict=strict, label="monitor")
 
-    if state_file.exists():
+    legacy_state = _load_json_state(LEGACY_STATE_FILE, strict=strict, label="legacy")
+    if legacy_state is not None:
+        central_state = (
+            legacy_state
+            if central_state is None
+            else _merge_states(central_state, legacy_state)
+        )
+        # Persist merged state and remove legacy file
+        save_state(central_state, repo)
         try:
-            data = json.loads(state_file.read_text())
-            central_state = MonitorState.from_dict(data)
-        except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
-            logger.warning(
-                "Corrupt monitor state file %s, starting fresh: %s", state_file, e
-            )
-            central_state = MonitorState(monitored={}, completed={})
-
-    # Legacy migration: check for old per-project state file
-    if LEGACY_STATE_FILE.exists():
-        try:
-            legacy_data = json.loads(LEGACY_STATE_FILE.read_text())
-            legacy_state = MonitorState.from_dict(legacy_data)
-        except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
-            logger.warning(
-                "Corrupt legacy state file %s, skipping migration: %s",
+            LEGACY_STATE_FILE.unlink()
+            logger.info(
+                "Migrated legacy state from %s to central directory",
                 LEGACY_STATE_FILE,
-                e,
             )
-            legacy_state = None
-
-        if legacy_state is not None:
-            central_state = (
-                legacy_state
-                if central_state is None
-                else _merge_states(central_state, legacy_state)
+        except OSError as e:
+            logger.warning(
+                "Could not delete legacy state file %s: %s", LEGACY_STATE_FILE, e
             )
-            # Persist merged state and remove legacy file
-            save_state(central_state, repo)
-            try:
-                LEGACY_STATE_FILE.unlink()
-                logger.info(
-                    "Migrated legacy state from %s to central directory",
-                    LEGACY_STATE_FILE,
-                )
-            except OSError as e:
-                logger.warning(
-                    "Could not delete legacy state file %s: %s", LEGACY_STATE_FILE, e
-                )
 
     if central_state is None:
         return MonitorState(monitored={}, completed={})
@@ -817,7 +822,7 @@ def cmd_register(
     thread_details: list[dict[str, Any]] | None = None,
     slack_channel: str | None = None,
     slack_ts: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     """Register or update a PR for monitoring.
 
     For updates: merges new threads (no duplicates), updates SHA.
@@ -826,13 +831,18 @@ def cmd_register(
 
     *repo_path* is normalized to the canonical clone — a PR registered against
     an ephemeral agent worktree would break once that worktree is cleaned up.
+
+    Returns ``{"registered": True, "key": ..., "sha": ..., "updated": bool}``
+    once the state is saved; ``updated`` is True when the PR was already
+    monitored (a re-anchor). A state read or write failure raises ``OSError``.
     """
     threads = _normalize_thread_ids(threads)
     repo_path = _canonical_repo_path(repo, repo_path)
-    state = load_state(repo)
+    state = load_state(repo, strict=True)
     key = f"{repo}#{pr_number}"
+    updated = key in state.monitored
 
-    if key in state.monitored:
+    if updated:
         pr = state.monitored[key]
         # An older registration may still point at a stale worktree — heal it.
         pr.repo_path = repo_path
@@ -880,6 +890,7 @@ def cmd_register(
         state.monitored[key] = pr
 
     save_state(state, repo)
+    return {"registered": True, "key": key, "sha": sha, "updated": updated}
 
 
 def cmd_ack_delta(pr_number: int, repo: str, sha: str) -> dict[str, Any]:
@@ -906,27 +917,35 @@ def cmd_ack_delta(pr_number: int, repo: str, sha: str) -> dict[str, Any]:
     return {"pr_number": pr_number, "delta_base_sha": sha, "acked": True}
 
 
-def cmd_drop(pr_number: int, repo: str) -> None:
-    """Remove a PR from monitoring. No-op if not found."""
-    state = load_state(repo)
+def cmd_drop(pr_number: int, repo: str) -> dict[str, Any]:
+    """Remove a PR from monitoring. No-op if not found.
+
+    Returns ``{"dropped": bool, "key": ...}``; ``dropped`` is False (not an
+    error) when the PR was not monitored.
+    """
+    state = load_state(repo, strict=True)
     key = f"{repo}#{pr_number}"
-    if key in state.monitored:
+    dropped = key in state.monitored
+    if dropped:
         del state.monitored[key]
         save_state(state, repo)
+    return {"dropped": dropped, "key": key}
 
 
-def cmd_complete(pr_number: int, repo: str, reason: str) -> None:
+def cmd_complete(pr_number: int, repo: str, reason: str) -> dict[str, Any]:
     """Mark a PR as complete and move it out of active monitoring.
 
-    No-op if not found.
+    No-op if not found. Returns ``{"completed": bool, "key": ..., "reason": ...}``;
+    ``completed`` is False (not an error) when the PR was not monitored.
     """
-    state = load_state(repo)
+    state = load_state(repo, strict=True)
     key = f"{repo}#{pr_number}"
     if key not in state.monitored:
         logger.info("cmd_complete: %r not found in monitored, ignoring", key)
-        return
+        return {"completed": False, "key": key, "reason": reason}
     state.complete_pr(key, reason)
     save_state(state, repo)
+    return {"completed": True, "key": key, "reason": reason}
 
 
 def _nudge_activity_check(pr_number: int, repo: str) -> dict[str, Any] | None:
@@ -3021,27 +3040,55 @@ def _dispatch_discovery(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2))
 
 
+def _emit_mutation_result(label: str, run: Callable[[], dict[str, Any]]) -> None:
+    """Run a state-mutating command and print its one-line JSON result.
+
+    A state read/write failure (``OSError``) or malformed JSON in an argument
+    (``json.JSONDecodeError``) becomes an ``Error:`` line on stderr and exit 1 —
+    never a silent success or a traceback — so the caller learns from the
+    command itself whether the mutation landed.
+    """
+    try:
+        result = run()
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Error: {label} failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(result))
+
+
 def _dispatch_mutation(args: argparse.Namespace) -> None:
     """Dispatch register/drop/complete/nudge-ok/record-nudge/set-status/
     confirm-thread commands."""
+    label = f"{args.command} {args.repo}#{args.pr_number}"
     if args.command == "register":
-        td = json.loads(args.thread_details) if args.thread_details else None
-        cmd_register(
-            pr_number=args.pr_number,
-            role=args.role,
-            repo=args.repo,
-            repo_path=args.repo_path,
-            sha=args.sha,
-            review_id=args.review_id,
-            threads=args.threads,
-            thread_details=td,
-            slack_channel=args.slack_channel,
-            slack_ts=args.slack_ts,
+        _emit_mutation_result(
+            label,
+            lambda: cmd_register(
+                pr_number=args.pr_number,
+                role=args.role,
+                repo=args.repo,
+                repo_path=args.repo_path,
+                sha=args.sha,
+                review_id=args.review_id,
+                threads=args.threads,
+                thread_details=(
+                    json.loads(args.thread_details) if args.thread_details else None
+                ),
+                slack_channel=args.slack_channel,
+                slack_ts=args.slack_ts,
+            ),
         )
     elif args.command == "drop":
-        cmd_drop(pr_number=args.pr_number, repo=args.repo)
+        _emit_mutation_result(
+            label, lambda: cmd_drop(pr_number=args.pr_number, repo=args.repo)
+        )
     elif args.command == "complete":
-        cmd_complete(pr_number=args.pr_number, repo=args.repo, reason=args.reason)
+        _emit_mutation_result(
+            label,
+            lambda: cmd_complete(
+                pr_number=args.pr_number, repo=args.repo, reason=args.reason
+            ),
+        )
     elif args.command == "nudge-ok":
         print(
             json.dumps(cmd_nudge_ok(pr_number=args.pr_number, repo=args.repo), indent=2)
