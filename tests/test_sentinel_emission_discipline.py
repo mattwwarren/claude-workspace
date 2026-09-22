@@ -212,7 +212,14 @@ PARK_STAMP_COMMAND = "cw signal-park"
 PARK_STAMP_RULE_REF = "*Park-comment stamp rule* in `.claude/commands/auto-dev.md`"
 # The stage docs this ticket wires. An INVENTORY, deliberately not a
 # completeness scan -- see test_park_stamp_is_wired_only_where_registered.
-PARK_STAMP_WIRED_DOCS = frozenset({"auto-dev-plan.md", "auto-dev-plan-appendix.md"})
+PARK_STAMP_WIRED_DOCS = frozenset(
+    {
+        "auto-dev-plan.md",
+        "auto-dev-plan-appendix.md",
+        "auto-dev-review.md",
+        "auto-dev-review-appendix.md",
+    }
+)
 
 
 def _paragraph_containing(content: str, anchor: str) -> str:
@@ -333,6 +340,17 @@ def test_gate_collapse_row_carries_the_signal_park_parenthetical() -> None:
             "**Post to Linear:** Comment on the issue with PR link",
             id="finalize-pr-link",
         ),
+        pytest.param(
+            "auto-dev-review.md",
+            "Clean/SHOULD_FIX + large → EXIT `review_pending_approval`",
+            id="review-pending-approval",
+        ),
+        pytest.param(
+            "auto-dev-review.md",
+            "A Stage 3 pass whose diff against the base measures empty must exit"
+            " `empty_diff_blocked`",
+            id="empty-diff-blocked",
+        ),
     ],
 )
 def test_allowlisted_posts_are_never_stamped(doc: str, anchor: str) -> None:
@@ -348,11 +366,12 @@ def test_park_stamp_is_wired_only_where_registered() -> None:
     """F4: an INVENTORY pin, not a completeness scan.
 
     It proves this ticket wired exactly the plan stage's consolidated park and
-    nothing else. It does NOT prove every park path is stamped: a new park path
-    added to another stage doc is not caught, and it does not scan
-    ``.claude/skills/**``, ``.claude/agents/**`` or sibling command docs such as
-    ``prep-pr.md``. Each follow-up wiring ticket (#2228) extends the registry in
-    the same commit as its doc edit.
+    (per #2228) the review stage's blocking-findings and operator-actionable
+    comment rules -- nothing else. It does NOT prove every park path is
+    stamped: a new park path added to another stage doc is not caught, and it
+    does not scan ``.claude/skills/**``, ``.claude/agents/**`` or sibling
+    command docs such as ``prep-pr.md``. A future wiring ticket extends the
+    registry in the same commit as its doc edit.
     """
     wired = {
         path.name
@@ -398,3 +417,105 @@ def test_plan_core_pointer_names_the_stamp() -> None:
 
     assert PARK_STAMP_COMMAND in pointer
     assert PARK_STAMP_RULE_REF in pointer
+
+
+# ---------------------------------------------------------------------------
+# #2228: the review-stage wiring of the #2135 park-comment stamp into the
+# blocking-findings and operator-actionable comment rules.
+# ---------------------------------------------------------------------------
+
+
+def _blocking_findings_rule_section() -> str:
+    return _section(
+        _appendix("review"),
+        "**Blocking-findings comment rule (#1815).**",
+        "**Third trigger (#1817):",
+    )
+
+
+def _operator_actionable_rule_section() -> str:
+    return _section(
+        _appendix("review"),
+        "**Operator-actionable findings comment rule (#1817).**",
+        "**Its trigger is `ADJUDICATIONS`",
+    )
+
+
+def test_review_blocking_findings_rule_stamps_after_the_post() -> None:
+    """F5 (#2228): review_blocked / plan_deviation share one comment-posting
+    rule, and this clause is the shared stamp both exits rely on."""
+    section = _blocking_findings_rule_section()
+
+    assert PARK_STAMP_COMMAND in section
+    assert PARK_STAMP_RULE_REF in section
+    assert "once this comment has posted successfully" in section
+    assert "ignore that and emit the exit sentinel unchanged" in section
+    assert "Never run it for a `tool_denied` exit" in section
+    assert "review_blocked" in section
+    assert "plan_deviation" in section
+
+
+def test_review_operator_actionable_rule_stamps_after_the_post() -> None:
+    """F5 (#2228): the operator-actionable checklist comment's stamp, plus the
+    timing note that the exit itself fires later, at Step 3c."""
+    section = _operator_actionable_rule_section()
+
+    assert PARK_STAMP_COMMAND in section
+    assert PARK_STAMP_RULE_REF in section
+    assert "once this checklist comment has posted successfully" in section
+    assert "Never run it for a `tool_denied` exit" in section
+    assert "Timing note" in section
+    assert "does not fire until Step 3c" in section
+    assert "Stamp now, exit later" in section
+
+
+def test_review_core_blocking_pointer_names_the_stamp() -> None:
+    """F5 (#2228): the core doc's Checkpoint 3a pointer to the blocking-
+    findings comment rule names the stamp that follows the post."""
+    pointer = _paragraph_containing(
+        _cmd("auto-dev-review.md"),
+        "Blocking-findings comment rule: header, body shape, and the three triggers",
+    )
+
+    assert PARK_STAMP_COMMAND in pointer
+    assert PARK_STAMP_RULE_REF in pointer
+
+
+def test_review_core_operator_actionable_pointer_names_the_stamp() -> None:
+    """F5 (#2228): the core doc's pointer to the operator-actionable comment
+    rule names the stamp that follows the post."""
+    pointer = _paragraph_containing(
+        _cmd("auto-dev-review.md"),
+        "Operator-actionable findings comment rule: header, checklist format,"
+        " and trigger",
+    )
+
+    assert PARK_STAMP_COMMAND in pointer
+    assert PARK_STAMP_RULE_REF in pointer
+
+
+def test_review_plan_deviation_exit_rule_names_the_stamp_inline() -> None:
+    """F5 (#2228): the 4a Exit rule is inline prose, not a deferral -- the
+    stamp reference must live directly in its own sentence."""
+    exit_rule = _paragraph_containing(
+        _cmd("auto-dev-review.md"), "Once that comment has posted successfully"
+    )
+
+    assert PARK_STAMP_COMMAND in exit_rule
+    assert PARK_STAMP_RULE_REF in exit_rule
+    assert '"plan_deviation"' in exit_rule
+
+
+def test_review_operator_action_override_notes_the_prior_stamp() -> None:
+    """F5 (#2228): Step 3c's override does not re-run the stamp -- it only
+    needs the pin to see the reference to where it already ran."""
+    override = _paragraph_containing(
+        _cmd("auto-dev-review.md"),
+        "The checklist comment already posted per the operator-actionable"
+        " findings comment rule at Checkpoint 3a",
+    )
+
+    assert PARK_STAMP_COMMAND in override
+    assert PARK_STAMP_RULE_REF in override
+    assert "already ran at Checkpoint 3a" in override
+    assert "does not run it again" in override
