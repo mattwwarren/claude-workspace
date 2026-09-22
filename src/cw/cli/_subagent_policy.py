@@ -70,11 +70,10 @@ _AGENT_TOOL_NAMES = frozenset({"Agent", "Task"})
 
 _SUBAGENT_TYPE_KEY = "subagent_type"
 
-_DENY_REASON = (
-    "BLOCKED (#2211): cw agent-spawn-pre refused a subagent spawn with "
-    "subagent_type={value!r}. A forked subagent inherits this worker's tools "
-    "AND its implementation mandate, and never enters cw's session roster -- "
-    "cw cannot see it start, observe what it does, or stop it (#2017).\n"
+# Shared by both denial reasons below: what to do about it. Kept as one
+# constant so the two messages cannot drift apart the way the rest of this
+# paragraph already did once (#2211 round 3).
+_RETRY_GUIDANCE = (
     "Retry with an explicitly named subagent_type: "
     '"general-purpose" for real work, or "Read Only Helper" '
     "(tools: Read/Grep/Glob, no Bash) for an extraction or lookup that must "
@@ -83,17 +82,20 @@ _DENY_REASON = (
     "(per-lane or global) in orchestrator.yaml -- see CONFIG_REFERENCE.md."
 )
 
+_DENY_REASON = (
+    "BLOCKED (#2211): cw agent-spawn-pre refused a subagent spawn with "
+    "subagent_type={value!r}. A forked subagent inherits this worker's tools "
+    "AND its implementation mandate, and never enters cw's session roster -- "
+    "cw cannot see it start, observe what it does, or stop it (#2017).\n"
+    f"{_RETRY_GUIDANCE}"
+)
+
 _OMITTED_DENY_REASON = (
     "BLOCKED (#2211): cw agent-spawn-pre refused a subagent spawn that named "
     "no subagent_type at all. An unnamed spawn never enters cw's session "
     "roster -- cw cannot see it start, observe what it does, or stop it "
     "(#2017) -- and leaves no record of what it was permitted to do.\n"
-    "Retry with an explicitly named subagent_type: "
-    '"general-purpose" for real work, or "Read Only Helper" '
-    "(tools: Read/Grep/Glob, no Bash) for an extraction or lookup that must "
-    "not be able to write.\n"
-    "False positive? Disable via subagent_spawn_guard_enabled: false "
-    "(per-lane or global) in orchestrator.yaml -- see CONFIG_REFERENCE.md."
+    f"{_RETRY_GUIDANCE}"
 )
 
 

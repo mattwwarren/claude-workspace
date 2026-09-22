@@ -47,8 +47,10 @@ def _spawn_payload(cwd: Path, subagent_type: object = _ABSENT) -> dict[str, obje
     """Return the real capture rebased on *cwd*, with *subagent_type* applied.
 
     ``_ABSENT`` deletes the key entirely — the "spawned with no type named at
-    all" shape, which is distinct from a present-but-blank value and is the
-    only one of the two that this policy allows.
+    all" shape, which is distinct from a present-but-blank value. Both are
+    refused now (deny-on-omission shipped in #2211 round 2); the split
+    survives only because ``_classify_subagent_type`` gives each shape its
+    own reason string.
     """
     tool_input = _pre_tool_input()
     if subagent_type is _ABSENT:

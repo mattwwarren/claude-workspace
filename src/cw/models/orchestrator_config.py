@@ -719,10 +719,12 @@ class OrchestratorConfig(BaseModel):
     # Global default for the `cw agent-spawn-pre` spawn-shape policy (#2211),
     # overridable per lane (LaneConfig.subagent_spawn_guard_enabled).
     # Default-ON for the same reason as busy_wait_guard_enabled: the failure
-    # it prevents is a forked subagent doing unrostered work cw can neither
-    # see nor stop (#2017), and the guard's own failure mode is bounded the
-    # other way -- it fails open on every shape it cannot classify, and
-    # refuses only an explicitly-named fork.
+    # it prevents is a forked (or unnamed) subagent doing unrostered work cw
+    # can neither see nor stop (#2017), and the guard's own failure mode is
+    # bounded the other way -- it fails open on every shape it cannot
+    # classify, and refuses only an explicitly-named fork or an omitted
+    # subagent_type (deny-on-omission shipped in #2211 round 2, once the
+    # spawn-site inventory closed).
     subagent_spawn_guard_enabled: bool = True
     # Elapsed seconds before reconcile attempts to route an emitted-but-unrouted
     # sentinel (signal_stop never fired). A re-check delay, not a disposition

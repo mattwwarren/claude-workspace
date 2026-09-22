@@ -113,7 +113,10 @@ def test_plan_step1f4_format_only_cycle_capped_at_one() -> None:
 def test_plan_step1f4_sonnet_pin_preserved() -> None:
     """Regression guard: the sonnet pin substring test_auto_dev_model_pins.py checks."""
     content = _cmd("auto-dev-plan.md")
-    assert 'Re-spawn the **Plan** agent (`model: "sonnet"`)' in content
+    assert (
+        'Re-spawn the **Plan** agent (`subagent_type: "Plan", model: "sonnet"`)'
+        in content
+    )
 
 
 def test_plan_substantive_must_fix_branches_unchanged() -> None:
