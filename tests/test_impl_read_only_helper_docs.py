@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tests.conftest import _appendix, _cmd
@@ -171,20 +172,47 @@ class TestBareSpawnSitesAreTyped:
 
         assert f"Spawn agent (`{_GENERAL_PURPOSE}`) in that PR's branch" in content
 
-    def test_finalize_spawns_are_all_typed(self) -> None:
-        """Four sites: fix-branch, UI capture, CI failure, review feedback."""
-        content = _cmd("auto-dev-finalize.md")
-
-        assert content.count(_GENERAL_PURPOSE) >= 4
+    #: Each finalize spawn site, anchored on enough surrounding prose to
+    #: identify *which* site it is. An occurrence count cannot do that: it
+    #: passes whichever four of the five carry the type, so the one site that
+    #: lost it is exactly the one the test does not notice.
+    @pytest.mark.parametrize(
+        "site",
+        [
+            # Step 5a, Fix branch — the CI-failing prior PR.
+            f"to fix and push — pass `{_GENERAL_PURPOSE}` (#2211)",
+            # Step 4c.2 Capture-now, inside a dispatch worktree (#766/#1047).
+            f'(`{_GENERAL_PURPOSE}`, `model: "haiku"`, no `isolation` key)',
+            # Step 4c.2 Capture-now, outside one.
+            f'(`{_GENERAL_PURPOSE}`, `isolation: "worktree"`, `model: "haiku"`)',
+            # Step 5a, CI-failure investigation.
+            f"apply fix, push to branch. Pass `{_GENERAL_PURPOSE}` (#2211).",
+            # Step 5b, addressing review feedback.
+            f"summarizing the fix. Pass `{_GENERAL_PURPOSE}` (#2211).",
+        ],
+    )
+    def test_finalize_spawns_are_all_typed(self, site: str) -> None:
+        assert site in _cmd("auto-dev-finalize.md")
 
     def test_prep_pr_parallel_spawn_is_typed(self) -> None:
-        assert _GENERAL_PURPOSE in _cmd("prep-pr.md")
+        assert f"Spawn parallel subagents via the Task tool (`{_GENERAL_PURPOSE}`)" in (
+            _cmd("prep-pr.md")
+        )
 
-    def test_review_monitor_spawns_are_all_typed(self) -> None:
-        """Two newly-typed sites plus the three that already complied."""
-        content = _cmd("review-monitor.md")
-
-        assert content.count(_GENERAL_PURPOSE) >= 5
+    @pytest.mark.parametrize(
+        "site",
+        [
+            # Newly typed by #2211.
+            f"Spawn ONE confirmation Task agent (`{_GENERAL_PURPOSE}`, sonnet model)",
+            f"Spawn a bug-hunter Task agent (`{_GENERAL_PURPOSE}`, sonnet model)",
+            # Already compliant before #2211 — pinned so they stay that way.
+            f"Spawn ONE classifier Task agent per PR (`{_GENERAL_PURPOSE}`,",
+            f"Use the Agent tool with `{_GENERAL_PURPOSE}`,",
+            f"(Bash + Agent tool, `{_GENERAL_PURPOSE}`,",
+        ],
+    )
+    def test_review_monitor_spawns_are_all_typed(self, site: str) -> None:
+        assert site in _cmd("review-monitor.md")
 
 
 #: The six ``review-sweep.md`` reviewer roles, each of which resolved to
