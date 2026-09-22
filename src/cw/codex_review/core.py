@@ -36,6 +36,7 @@ def run_review(
     session_id: str,
     fix_loop_enabled: bool,
     claim_tier_enabled: bool = False,
+    disposition_drift_check_enabled: bool = True,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -59,6 +60,12 @@ def run_review(
     fuzzy claim-match tier, forwarded to the same function. Defaulted False so
     this entry point — the whole fix-loop-disabled lane, and cycle 0 of the
     enabled one — is off unless a caller deliberately arms it.
+
+    ``disposition_drift_check_enabled`` (#2232) rides the same hop and is
+    likewise only forwarded. Its default is True, the opposite of the gate
+    above, because the two fail in opposite directions: a claim tier that arms
+    by omission suppresses a finding nobody settled, while a drift check that
+    runs by omission costs one ``git diff``.
 
     ``run_codex_roles``' fourth return value (#2029) — the findings rescued out
     of their documents at parse time — rides the same hop as well, so a
@@ -95,5 +102,6 @@ def run_review(
         finding_dispositions=prepared.finding_dispositions,
         refused_dispositions=prepared.refused_dispositions,
         claim_tier_enabled=claim_tier_enabled,
+        disposition_drift_check_enabled=disposition_drift_check_enabled,
         pre_validation_rejected=pre_validation_rejected,
     )

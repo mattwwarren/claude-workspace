@@ -42,6 +42,7 @@ from cw.dispatch_state import (
     save_executor_blocked_marker,
 )
 from cw.events import record_event as _record_orchestrator_event
+from cw.exceptions import ClaimTierArmingError
 from cw.gh import post_issue_comment
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import OrchestratorEventType, QueueItemStatus
@@ -285,6 +286,63 @@ def _resolve_claim_tier_enabled(
     return _DEFAULT_CODEX_REVIEW_TIER_ENABLED[CODEX_TIER_CLAIM_SUPPRESSION]
 
 
+def _resolve_disposition_drift_check_enabled(
+    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
+) -> bool:
+    """Resolve the ledger's drift check for *task* (#2232, ADR-0016).
+
+    Two levels, not three: a non-``None``
+    ``LaneConfig.disposition_drift_check_enabled`` for the task's lane wins,
+    otherwise ``OrchestratorConfig.disposition_drift_check_enabled``, which
+    defaults ``True``. Shaped on
+    ``cw.cli.guard_busy_wait._resolve_settings``' lane-then-global
+    fallthrough rather than on :func:`_resolve_claim_tier_enabled`'s
+    master-switch-then-lane-then-floor shape, because there is neither a
+    separate kill switch nor a hardcoded floor for a check that defaults on —
+    a floor would be the opposite of fail-safe here.
+
+    Resolved beside the claim tier, from the same three already-loaded
+    objects, so the two are in hand together at the one point a refusal can
+    compare them.
+    """
+    for lane_cfg in client.effective_lanes:
+        if lane_cfg.name != task.lane:
+            continue
+        if lane_cfg.disposition_drift_check_enabled is not None:
+            return lane_cfg.disposition_drift_check_enabled
+    return config.disposition_drift_check_enabled
+
+
+#: The arming refusal's message. Spelled once, here, because it is the ONLY
+#: operator-facing surface the refusal has (it reaches them through
+#: ``_log.exception``'s traceback, not a dedicated blocked reason), and it has
+#: to name both settings and the fix rather than just the symptom.
+_CLAIM_TIER_ARMING_REFUSAL = (
+    "Cannot run the codex review ledger's claim-match suppression tier for "
+    "lane {lane!r}: disposition_drift_check_enabled resolves to False, but "
+    "the claim tier (codex_claim_suppression_enabled / "
+    "codex_review_tiers['claim_suppression']) resolves to True for this task. "
+    "Drift-checking is what keeps a settle whose code has moved from silently "
+    "suppressing a re-raised finding, which is the protection the fuzzy tier "
+    "depends on (ADR-0016, #2232). Enable disposition_drift_check_enabled — "
+    "globally in orchestrator.yaml, or for this lane in clients.yaml — before "
+    "arming the claim tier, or disable the claim tier until it is."
+)
+
+
+def _refuse_unguarded_claim_tier(
+    *, lane: str, claim_tier_enabled: bool, drift_check_enabled: bool
+) -> None:
+    """Refuse to arm the claim tier while the drift check is off (#2232).
+
+    Exactly one cell of the 2x2 refuses; the other three proceed untouched.
+    Deliberately not a general cross-field config validator — the operator
+    scoped this to the single precondition ADR-0016 names.
+    """
+    if claim_tier_enabled and not drift_check_enabled:
+        raise ClaimTierArmingError(_CLAIM_TIER_ARMING_REFUSAL.format(lane=lane))
+
+
 # Durable copy of the rendered review verdict, written into the worktree's
 # ``.claude/`` beside ``cw-context.json`` before any tracker post is attempted
 # (#2095). On a tracker the daemon cannot write to (Linear -- ADR-0013 keeps
@@ -447,6 +505,18 @@ def _run_codex_review_and_complete(
         # already-loaded objects, on the same hop, and is threaded as one
         # keyword defaulting to False all the way down to the backstop.
         claim_tier_enabled = _resolve_claim_tier_enabled(client, task, config)
+        # #2232: resolved on the same hop, from the same three objects, so
+        # this is the one point in the codebase where both gates are in hand
+        # for the SAME task and lane — the earliest a refusal can compare
+        # them, and before either reaches the review.
+        disposition_drift_check_enabled = _resolve_disposition_drift_check_enabled(
+            client, task, config
+        )
+        _refuse_unguarded_claim_tier(
+            lane=task.lane,
+            claim_tier_enabled=claim_tier_enabled,
+            drift_check_enabled=disposition_drift_check_enabled,
+        )
         result, verdict = run_review_with_fix_loop(
             runner=runner,
             task=task,
@@ -458,6 +528,7 @@ def _run_codex_review_and_complete(
             session_id=sid,
             fix_loop_enabled=fix_loop_enabled,
             claim_tier_enabled=claim_tier_enabled,
+            disposition_drift_check_enabled=disposition_drift_check_enabled,
         )
 
         # Step 4: persist result under sessions_lock.

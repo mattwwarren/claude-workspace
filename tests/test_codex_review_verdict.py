@@ -43,6 +43,9 @@ from cw.codex_review._verdict._render import (
     _SETTLE_MAX_COMPACT_ROWS,
     _SETTLE_MAX_PAYLOADS,
     _SETTLE_OVERFLOW_NOTE,
+    _STALE_DISPOSITION_HEADING,
+    _STALE_DISPOSITION_NOTE,
+    _STALE_MAX_ROWS,
     _render_rejected_finding_text,
 )
 from cw.events import read_events
@@ -70,6 +73,7 @@ from cw.review_markers import (
     DISPOSITION_SENTINEL,
     SETTLE_SECTION_HEADING,
     RefusedDisposition,
+    StaleDisposition,
 )
 from tests._cli_review_helpers import (
     CLAIM_ROW1_CANDIDATE,
@@ -91,6 +95,8 @@ from tests.conftest import (
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
+    commit_tracked_file,
+    git_in,
 )
 from tests.test_review_adjudication import _make_voided_finding
 
@@ -1390,7 +1396,13 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
             # #2210 round 2: the reader applies only fully-provenanced
             # records, so the fixture carries what `cw review settle` writes.
             "actor": "mattwwarren",
-            "reviewed_sha": "abc1234",
+            # #2232: the same sha every case below passes as the pass's own,
+            # i.e. "settled against exactly this code". These cases are about
+            # suppression, not drift, so the record has to say the code has
+            # not moved — which is now a thing a fixture must express rather
+            # than get for free. The equal-sha short circuit means no `git
+            # diff` runs, so they stay hermetic.
+            "reviewed_sha": "sha",
             "summary": finding.summary,
         }
         payload.update(overrides)
@@ -1550,7 +1562,10 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
                 rationale="settled by the operator in an earlier round",
                 recorded_at="2026-08-16T00:00:00Z",
                 actor="mattwwarren",
-                reviewed_sha="abc1234",
+                # #2232: matches the pass's own sha below — this case is about
+                # the claim tier's gate, not drift, so the record says the
+                # code has not moved and the drift check short-circuits.
+                reviewed_sha="sha",
                 summary=CLAIM_ROW1_RECORDED,
             )
         }
@@ -1627,6 +1642,76 @@ class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
         assert verdict.blocking is True
         assert result.blocker is not None
         assert "contests prior adjudication" in result.blocker.details
+
+    def test_a_drifted_record_is_surfaced_not_suppressed_end_to_end(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#2232: synthesis threads the worktree, so drift reaches the verdict.
+
+        The one place the whole seam is exercised together: a real repo, a
+        record settled against an earlier commit, the file changed since, and
+        a verdict that still blocks with the record reported rather than
+        applied.
+        """
+        worktree = make_git_repo("wt-synth-drift")
+        finding = _make_finding(severity="MUST_FIX", file="src/cw/foo.py")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        settled_at = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 2  # reworked\n")
+        head = git_in(worktree, "rev-parse", "HEAD")
+
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(finding)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha=head,
+            session_id="s-drift",
+            default_branch="main",
+            fix_loop_enabled=False,
+            finding_dispositions=self._ledger(finding, reviewed_sha=settled_at),
+        )
+
+        assert result.status == "blocked"
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert [record.key for record in verdict.stale_dispositions] == [
+            _disposition_key(finding.file, finding.summary)
+        ]
+        assert verdict.stale_dispositions[0].reviewed_sha == settled_at
+        assert verdict.stale_dispositions[0].current_sha == head
+        # The operator reads about it on the comment, not only in the log.
+        assert result.blocker is not None
+        assert _STALE_DISPOSITION_HEADING in result.blocker.details
+
+    def test_the_drift_gate_off_restores_suppression_end_to_end(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """The lane gate reaches the backstop through synthesis too (#2232)."""
+        worktree = make_git_repo("wt-synth-drift-off")
+        finding = _make_finding(severity="MUST_FIX", file="src/cw/foo.py")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        settled_at = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 2  # reworked\n")
+
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(finding)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha=git_in(worktree, "rev-parse", "HEAD"),
+            session_id="s-drift-off",
+            default_branch="main",
+            fix_loop_enabled=False,
+            finding_dispositions=self._ledger(finding, reviewed_sha=settled_at),
+            disposition_drift_check_enabled=False,
+        )
+
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert verdict.stale_dispositions == []
 
     def test_bare_reraise_with_contest_blank_is_suppressed(
         self, make_git_repo: Callable[[str], Path]
@@ -1718,6 +1803,70 @@ class TestRenderRefusedDispositions:
         assert "src/cw/mod0.py" in body
         assert f"src/cw/mod{_REFUSED_MAX_ROWS}.py" not in body
         assert "and 3 more refused" in body
+
+
+class TestRenderStaleDispositions:
+    """#2232: a suppression declined for drift is reported, never silent.
+
+    The sibling of ``TestRenderRefusedDispositions`` above, and it exists for
+    the same reason: an operator who settled a finding and sees it come back
+    must be told WHY here, on the comment, rather than have to go read an
+    event log to discover the code moved.
+    """
+
+    def _verdict(self, *stale: StaleDisposition) -> ReviewVerdict:
+        return ReviewVerdict(
+            blocking=False,
+            must_fix=[],
+            reviewed_sha="sha",
+            review=Review(
+                must_fix_initial=0,
+                should_fix=0,
+                fix_cycles_used=0,
+                deferred=0,
+                agents_run=1,
+            ),
+            stale_dispositions=list(stale),
+        )
+
+    def _body(self, *stale: StaleDisposition) -> str:
+        return render_verdict_comment(self._verdict(*stale), fix_loop_enabled=False)
+
+    def test_nothing_stale_renders_nothing(self) -> None:
+        assert _STALE_DISPOSITION_HEADING not in self._body()
+
+    def test_a_stale_record_names_its_finding_and_both_shas(self) -> None:
+        key = _disposition_key("src/cw/foo.py", "Bug here")
+        assert key is not None
+        body = self._body(
+            StaleDisposition(key=key, reviewed_sha="aaaaaaa", current_sha="bbbbbbb")
+        )
+
+        assert _STALE_DISPOSITION_HEADING in body
+        assert "src/cw/foo.py" in body
+        assert "bug here" in body
+        assert "aaaaaaa" in body
+        assert "bbbbbbb" in body
+        # It must say what the operator is supposed to do about it.
+        assert "cw review settle" in body
+
+    def test_the_note_says_the_record_was_not_expired(self) -> None:
+        """ADR-0016 rejects silent expiry, so the text must not imply one."""
+        assert "not been expired" in _STALE_DISPOSITION_NOTE
+
+    def test_the_section_is_capped_with_a_counted_residue(self) -> None:
+        stale = []
+        for index in range(_STALE_MAX_ROWS + 3):
+            key = _disposition_key(f"src/cw/mod{index}.py", "Bug here")
+            assert key is not None
+            stale.append(
+                StaleDisposition(key=key, reviewed_sha="aaa", current_sha="bbb")
+            )
+        body = self._body(*stale)
+
+        assert "src/cw/mod0.py" in body
+        assert f"src/cw/mod{_STALE_MAX_ROWS}.py" not in body
+        assert "and 3 more stale" in body
 
 
 class TestRenderSettlePayloads:

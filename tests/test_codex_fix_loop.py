@@ -259,6 +259,7 @@ def _run_loop(
     task: TicketTask | None = None,
     reasoning_effort: str | None = None,
     claim_tier_enabled: bool = False,
+    disposition_drift_check_enabled: bool = True,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     return run_review_with_fix_loop(
         runner=runner,
@@ -271,6 +272,7 @@ def _run_loop(
         session_id=session_id,
         fix_loop_enabled=fix_loop_enabled,
         claim_tier_enabled=claim_tier_enabled,
+        disposition_drift_check_enabled=disposition_drift_check_enabled,
     )
 
 
@@ -2052,7 +2054,7 @@ class TestRereviewForwardsFindingDispositions:
     only one would let a settled finding re-park the run from the other.
     """
 
-    def _ledger(self) -> dict[str, FindingDisposition]:
+    def _ledger(self, reviewed_sha: str) -> dict[str, FindingDisposition]:
         key = _disposition_key("new.py", "MFA")
         assert key is not None
         return {
@@ -2063,7 +2065,11 @@ class TestRereviewForwardsFindingDispositions:
                 # #2210 round 2: only a fully-provenanced record is applied,
                 # so the fixture carries what `cw review settle` writes.
                 actor="mattwwarren",
-                reviewed_sha="abc1234",
+                # #2232: the sha this pass reviews, i.e. "settled against
+                # exactly this code". This case is about the ledger reaching
+                # both call sites, not about drift, so the record has to say
+                # the code has not moved — which the drift check now reads.
+                reviewed_sha=reviewed_sha,
                 summary="MFA",
             )
         }
@@ -2072,7 +2078,7 @@ class TestRereviewForwardsFindingDispositions:
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-1838-rereview")
-        ledger = self._ledger()
+        ledger = self._ledger(git_in(worktree, "rev-parse", "HEAD"))
         task = _make_ticket_task(
             ticket_id="T-1838",
             client="test",
@@ -2152,7 +2158,7 @@ class TestRereviewForwardsFindingDispositions:
             worktree / ".claude" / "project-config.yaml",
             "tracking:\n  primary:\n    system: github-issues\n",
         )
-        ledger = self._ledger()
+        ledger = self._ledger(git_in(worktree, "rev-parse", "HEAD"))
         (key,) = ledger
         forged = {key: ledger[key].model_copy(update={"actor": ""})}
         monkeypatch.setattr(
@@ -2242,3 +2248,64 @@ class TestClaimTierGateReachesBothSynthesisHops:
 
         assert len(seen) == 2
         assert seen == [claim_tier_enabled, claim_tier_enabled]
+
+
+class TestDispositionDriftCheckGateReachesAllSynthesisHops:
+    """#2232: the drift-check gate must reach every forwarding hop.
+
+    Three of them, not two: ``run_review_with_fix_loop`` -> ``run_review``
+    (cycle 0), ``run_review_with_fix_loop`` -> ``_rereview`` (cycle 1+), and
+    ``_rereview`` -> ``synthesize_codex_review_result``. The middle one is the
+    easy miss — it is this module calling its own helper, not a hop into
+    another module — and a gate threaded into fewer than all three arms (or
+    disarms) half the loop, the failure its claim-tier sibling above already
+    warns about.
+    """
+
+    @pytest.mark.parametrize("drift_check_enabled", [True, False])
+    def test_all_hops_receive_the_flag(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        drift_check_enabled: bool,
+    ) -> None:
+        worktree = _worktree(make_git_repo, f"wt-2232-gate-{drift_check_enabled}")
+        seen: list[object] = []
+        rereview_seen: list[object] = []
+
+        real_core_synth: Callable[..., object] = (
+            codex_review_core.synthesize_codex_review_result
+        )
+        real_loop_synth: Callable[..., object] = (
+            codex_fix_loop.synthesize_codex_review_result
+        )
+        real_rereview: Callable[..., object] = codex_fix_loop._rereview
+
+        def _spy_core(**kwargs: object) -> object:
+            seen.append(kwargs.get("disposition_drift_check_enabled"))
+            return real_core_synth(**kwargs)
+
+        def _spy_loop(**kwargs: object) -> object:
+            seen.append(kwargs.get("disposition_drift_check_enabled"))
+            return real_loop_synth(**kwargs)
+
+        def _spy_rereview(**kwargs: object) -> object:
+            rereview_seen.append(kwargs.get("disposition_drift_check_enabled"))
+            return real_rereview(**kwargs)
+
+        monkeypatch.setattr(
+            codex_review_core, "synthesize_codex_review_result", _spy_core
+        )
+        monkeypatch.setattr(codex_fix_loop, "synthesize_codex_review_result", _spy_loop)
+        monkeypatch.setattr(codex_fix_loop, "_rereview", _spy_rereview)
+
+        _run_loop(
+            _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]),
+            worktree,
+            disposition_drift_check_enabled=drift_check_enabled,
+        )
+
+        # Hop 1 (cycle 0's run_review) and hop 3 (_rereview's own synthesis).
+        assert seen == [drift_check_enabled, drift_check_enabled]
+        # Hop 2: run_review_with_fix_loop's own call into _rereview.
+        assert rereview_seen == [drift_check_enabled]

@@ -2269,6 +2269,32 @@ class TestRenderAdjudicatedFindingsBlock:
         assert block is not None
         assert "ACCEPTED" in block
 
+    def test_a_reversed_entry_is_never_told_to_the_reviewer(self) -> None:
+        """#2232: a withdrawal is the absence of a decision, not one.
+
+        This block is BINDING — it tells the model the finding is decided —
+        so rendering a ``REVERSED`` line would assert the opposite of what a
+        reversal means. A ledger whose only entry is reversed has nothing to
+        say, so the whole block is elided.
+        """
+        assert (
+            _render_adjudicated_findings_block(_disposition_ledger(outcome="REVERSED"))
+            is None
+        )
+
+    def test_a_reversed_entry_is_dropped_beside_a_live_one(self) -> None:
+        ledger = {
+            **_disposition_ledger(),
+            **_disposition_ledger(file="src/cw/bar.py", outcome="REVERSED"),
+        }
+        block = _render_adjudicated_findings_block(ledger)
+
+        assert block is not None
+        assert "REVERSED" not in block
+        assert "src/cw/bar.py" not in block
+        assert "src/cw/foo.py" in block
+        assert block.count("\n- ") == 1
+
     def test_the_hand_authored_block_warning_is_built_from_the_shared_sentinel(
         self,
     ) -> None:

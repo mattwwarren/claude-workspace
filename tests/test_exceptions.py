@@ -38,6 +38,23 @@ class TestExceptionHierarchy:
         err = DisclaimerNotAcceptedError("run interactively first")
         assert "interactively" in str(err)
 
+    def test_claim_tier_arming_error_is_cw_error(self) -> None:
+        """#2232: a flat CwError subclass, so the daemon's broad catch sees it."""
+        from cw.exceptions import ClaimTierArmingError
+
+        assert issubclass(ClaimTierArmingError, CwError)
+
+    def test_claim_tier_arming_message_names_both_settings(self) -> None:
+        """The refusal has to say what is wrong AND what to change (#2232)."""
+        from cw.exceptions import ClaimTierArmingError
+
+        err = ClaimTierArmingError(
+            "disposition_drift_check_enabled resolves to False, but "
+            "codex_claim_suppression_enabled arms the claim tier"
+        )
+        assert "disposition_drift_check_enabled" in str(err)
+        assert "codex_claim_suppression_enabled" in str(err)
+
     def test_duplicated_hunk_error_is_cw_error(self) -> None:
         """#1924: flat CwError subclass so `handle_errors` gives it exit 1."""
         from cw.exceptions import DuplicatedHunkError

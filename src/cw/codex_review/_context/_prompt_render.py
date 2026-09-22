@@ -22,6 +22,9 @@ from cw.codex_review._context._prompt_text import (
 )
 from cw.codex_review._context._sensitive_files import _render_sensitive_block
 from cw.review_finding_dispositions import (
+    _REVERSED as _REVERSED_OUTCOME,
+)
+from cw.review_finding_dispositions import (
     partition_enforceable_dispositions,
     split_disposition_key,
 )
@@ -72,10 +75,19 @@ def _render_adjudicated_findings_block(
     two would tell a reviewer to re-report a settled finding, which is the bug
     this ticket exists to fix.
 
-    Both outcomes render: an ``ACCEPTED`` entry tells the reviewer the finding
-    was upheld and needs no restating, which is as useful as knowing one was
-    rejected. Only ``REJECTED`` reaches the mechanical backstop in
+    Both LIVE outcomes render: an ``ACCEPTED`` entry tells the reviewer the
+    finding was upheld and needs no restating, which is as useful as knowing
+    one was rejected. Only ``REJECTED`` reaches the mechanical backstop in
     ``review_finding_dispositions.suppress_adjudicated_findings``.
+
+    A ``REVERSED`` entry (#2232) renders NOTHING, and this is the one place
+    that distinction is load-bearing rather than incidental. The two matchers
+    already ignore a non-``REJECTED`` record, so a reversal costs them no
+    code; this block does not match, it TELLS — a rendered ``REVERSED`` line
+    would read to the model as "previously adjudicated: REVERSED, do not
+    re-raise", asserting a decision stands at the exact moment its whole
+    point is that it no longer does. A withdrawal is the absence of a
+    decision, so the reviewer hears nothing about it.
 
     The intro (:data:`_ADJUDICATED_INSTRUCTIONS`) names #2210's typed contest
     hatch, ``Finding.contests_adjudication``. That hatch is honoured by the
@@ -94,10 +106,15 @@ def _render_adjudicated_findings_block(
     ``suppress_adjudicated_findings``, not here.
     """
     enforceable, _refused = partition_enforceable_dispositions(ledger)
-    if not enforceable:
+    live = {
+        key: entry
+        for key, entry in enforceable.items()
+        if entry.outcome != _REVERSED_OUTCOME
+    }
+    if not live:
         return None
     lines = [_ADJUDICATED_HEADER, _ADJUDICATED_INSTRUCTIONS]
-    for key, entry in sorted(enforceable.items()):
+    for key, entry in sorted(live.items()):
         file, summary = split_disposition_key(key)
         rationale = f" ({entry.rationale})" if entry.rationale else ""
         lines.append(

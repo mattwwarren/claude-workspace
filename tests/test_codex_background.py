@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -27,6 +27,7 @@ from cw.codex_background import (
     _post_review_comment,
     _resolve_claim_tier_enabled,
     _resolve_codex_fix_loop_enabled,
+    _resolve_disposition_drift_check_enabled,
     _run_codex_review_and_complete,
     _start_daemon_thread,
     _sync_finding_dispositions_to_running_task,
@@ -715,6 +716,218 @@ def test_run_codex_review_and_complete_forwards_claim_tier(
         _run(sid="bg-claim", task=task, worktree=worktree, client=client)
 
     assert fix_loop_mock.call_args.kwargs["claim_tier_enabled"] is expected
+
+
+# ---------------------------------------------------------------------------
+# _resolve_disposition_drift_check_enabled + the claim-tier arming gate (#2232)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lanes", "task_lane", "global_default", "expected"),
+    [
+        # A lane override wins in BOTH directions — off against an on global…
+        (
+            [LaneConfig(name="trial", disposition_drift_check_enabled=False)],
+            "trial",
+            True,
+            False,
+        ),
+        # …and on against an off one. There is no master kill switch here.
+        (
+            [LaneConfig(name="trial", disposition_drift_check_enabled=True)],
+            "trial",
+            False,
+            True,
+        ),
+        # Lane silent on the key -> the global, which defaults ON.
+        ([LaneConfig(name="trial")], "trial", True, True),
+        ([LaneConfig(name="trial")], "trial", False, False),
+        # The task's lane is not declared by the client -> the global.
+        (
+            [LaneConfig(name="trial", disposition_drift_check_enabled=False)],
+            "no-such-lane",
+            True,
+            True,
+        ),
+        # No declared lanes at all: the synthesised `default` lane carries no
+        # override, so the global stands. Unlike the claim tier, that is ON.
+        ([], "default", True, True),
+    ],
+)
+def test_resolve_disposition_drift_check_enabled_table(
+    lanes: list[LaneConfig],
+    task_lane: str,
+    global_default: bool,
+    expected: bool,
+) -> None:
+    config = OrchestratorConfig(disposition_drift_check_enabled=global_default)
+    resolved = _resolve_disposition_drift_check_enabled(
+        _claim_client(*lanes), _claim_task(task_lane), config
+    )
+    assert resolved is expected
+
+
+def test_resolve_disposition_drift_check_enabled_scopes_to_the_named_lane() -> None:
+    client = _claim_client(
+        LaneConfig(name="off", disposition_drift_check_enabled=False),
+        LaneConfig(name="quiet"),
+    )
+    config = OrchestratorConfig()
+    assert (
+        _resolve_disposition_drift_check_enabled(client, _claim_task("off"), config)
+        is False
+    )
+    assert (
+        _resolve_disposition_drift_check_enabled(client, _claim_task("quiet"), config)
+        is True
+    )
+
+
+def _run_with_config(
+    tmp_worktree: Path,
+    *,
+    sid: str,
+    lanes: list[LaneConfig],
+    config: OrchestratorConfig,
+) -> MagicMock:
+    """Run the review unit of work under *config*, returning the loop mock."""
+    _seed_session(sid)
+    task = TicketTask(
+        ticket_id="T-arm", client="test", stage=Stage.REVIEW, lane="trial"
+    )
+    result = make_blocked(
+        ticket_id="T-arm",
+        worktree=tmp_worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_worktree,
+        default_branch="main",
+        lanes=list(lanes),
+    )
+    with (
+        patch("cw.codex_background.load_effective_config", return_value=config),
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, None),
+        ) as fix_loop_mock,
+    ):
+        _run(sid=sid, task=task, worktree=tmp_worktree, client=client)
+    return fix_loop_mock
+
+
+@pytest.mark.parametrize(
+    ("claim_tier", "drift_check"),
+    [(True, True), (False, True), (False, False)],
+)
+def test_arming_gate_lets_the_other_three_cells_through(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    claim_tier: bool,
+    drift_check: bool,
+) -> None:
+    """Only claim-tier-on + drift-check-off is refused (#2232)."""
+    worktree = make_git_repo(f"wt-bg-arm-{claim_tier}-{drift_check}")
+    fix_loop_mock = _run_with_config(
+        worktree,
+        sid=f"bg-arm-{claim_tier}-{drift_check}",
+        lanes=[
+            LaneConfig(
+                name="trial",
+                codex_review_tiers={"claim_suppression": claim_tier},
+                disposition_drift_check_enabled=drift_check,
+            )
+        ],
+        config=OrchestratorConfig(codex_claim_suppression_enabled=True),
+    )
+
+    fix_loop_mock.assert_called_once()
+    kwargs = fix_loop_mock.call_args.kwargs
+    assert kwargs["claim_tier_enabled"] is claim_tier
+    assert kwargs["disposition_drift_check_enabled"] is drift_check
+
+
+def test_arming_the_claim_tier_with_the_drift_check_off_is_refused(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2232: drift-checking is the claim tier's arming precondition.
+
+    The refusal reaches the operator through the daemon thread's existing
+    broad ``except Exception`` — session COMPLETED/blocked with
+    ``UNEXPECTED_ERROR``, task handed back to PENDING with backoff — the exact
+    contract ``test_run_codex_review_and_complete_exception_path`` already
+    pins for any exception raised inside that ``try``. Nothing new is plumbed;
+    the validator only has to raise.
+    """
+    worktree = make_git_repo("wt-bg-arm-refused")
+    add_ticket(
+        TicketTask(
+            ticket_id="T-arm",
+            client="test",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+            session_id="bg-arm-refused",
+        )
+    )
+    fix_loop_mock = _run_with_config(
+        worktree,
+        sid="bg-arm-refused",
+        lanes=[
+            LaneConfig(
+                name="trial",
+                codex_review_tiers={"claim_suppression": True},
+                disposition_drift_check_enabled=False,
+            )
+        ],
+        config=OrchestratorConfig(codex_claim_suppression_enabled=True),
+    )
+
+    # The review never ran: the refusal fires before the fix loop is entered.
+    fix_loop_mock.assert_not_called()
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    persisted = AutoDevResult.model_validate(session.last_result)
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == UNEXPECTED_ERROR
+    stored = load_dev_queue().tasks[0]
+    assert stored.status is QueueItemStatus.PENDING
+    assert stored.spawn_error_count == 1
+
+
+def test_the_arming_refusal_message_names_both_settings_and_the_fix(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The message IS the operator-facing surface, via ``_log.exception``."""
+    import logging
+
+    worktree = make_git_repo("wt-bg-arm-message")
+    with caplog.at_level(logging.ERROR, logger="cw.codex_background"):
+        _run_with_config(
+            worktree,
+            sid="bg-arm-message",
+            lanes=[
+                LaneConfig(
+                    name="trial",
+                    codex_review_tiers={"claim_suppression": True},
+                    disposition_drift_check_enabled=False,
+                )
+            ],
+            config=OrchestratorConfig(codex_claim_suppression_enabled=True),
+        )
+
+    logged = "\n".join(
+        record.getMessage()
+        + ("" if record.exc_info is None else str(record.exc_info[1]))
+        for record in caplog.records
+    )
+    assert "disposition_drift_check_enabled" in logged
+    assert "codex_claim_suppression_enabled" in logged
 
 
 # ---------------------------------------------------------------------------
