@@ -17,13 +17,18 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
-from cw.session_resume_trigger import FakeResumeTriggerAdapter, ResumeTriggerResult
+from cw.session_resume_trigger import (
+    FakeResumeTriggerAdapter,
+    NativeDaemonResumeTriggerAdapter,
+    ResumeTriggerResult,
+)
 from tests.conftest import _make_daemon_session
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig, Session
+    from cw.native_daemon import FakeNativeDaemonClient
 
 _SESSION_ID = "sess2212"
 
@@ -54,6 +59,21 @@ def _persist(session: Session) -> None:
     from cw.config import save_state
 
     save_state(CwState(sessions=[session]))
+
+
+def _persist_multiple(sessions: list[Session]) -> None:
+    from cw.config import save_state
+
+    save_state(CwState(sessions=sessions))
+
+
+def _write_clients_file(tmp_config_dir: Path, sample_client: ClientConfig) -> None:
+    clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+    clients_file.write_text(
+        "clients:\n"
+        "  test-client:\n"
+        f"    workspace_path: {sample_client.workspace_path}\n"
+    )
 
 
 def _invoke(
@@ -271,3 +291,98 @@ class TestRefusals:
         )
         assert code != 0
         assert session_inbox.read_messages(_SESSION_ID) == []
+
+    def test_ambiguous_session_prefix_is_refused_before_mutating_anything(
+        self, sample_client: ClientConfig, runner: CliRunner
+    ) -> None:
+        """A mutating command must not silently pick whichever session
+        sorts first on a colliding prefix (#2212 review finding 2)."""
+        _persist_multiple(
+            [
+                _session(sample_client, id="sess2212a", name="test-client/a/2212"),
+                _session(sample_client, id="sess2212b", name="test-client/b/2212"),
+            ]
+        )
+
+        code, output, fake = _invoke(runner, ["sess2212", "--message", "hi"])
+
+        assert code == 1
+        assert "ambiguous" in output.lower()
+        assert "sess2212a" in output
+        assert "sess2212b" in output
+        assert fake.trigger_calls == []
+        assert session_inbox.read_messages("sess2212a") == []
+        assert session_inbox.read_messages("sess2212b") == []
+
+    def test_unambiguous_longer_prefix_still_resolves(
+        self, sample_client: ClientConfig, runner: CliRunner
+    ) -> None:
+        _persist_multiple(
+            [
+                _session(sample_client, id="sess2212a", name="test-client/a/2212"),
+                _session(sample_client, id="sess2212b", name="test-client/b/2212"),
+            ]
+        )
+
+        code, _output, fake = _invoke(runner, ["sess2212a", "--message", "hi"])
+
+        assert code == 0
+        assert len(fake.trigger_calls) == 1
+
+
+class TestEventBusResilience:
+    def test_event_write_failure_does_not_fail_an_already_queued_message(
+        self, sample_client: ClientConfig, runner: CliRunner
+    ) -> None:
+        """OSError from record_event must not turn a durably-queued message
+        into a command failure (#2212 review finding 4)."""
+        _persist(_session(sample_client))
+
+        with patch(
+            "cw.cli.session_send.record_event", side_effect=OSError("disk full")
+        ):
+            code, output, fake = _invoke(runner, [_SESSION_ID, "--message", "hi"])
+
+        assert code == 0
+        assert [m.body for m in session_inbox.read_messages(_SESSION_ID)] == ["hi"]
+        assert len(fake.trigger_calls) == 1
+        assert "queued" in output.lower()
+
+
+class TestMailboxDeliveryEndToEnd:
+    def test_send_to_a_parked_session_is_visible_after_respawn(
+        self,
+        sample_client: ClientConfig,
+        runner: CliRunner,
+        tmp_config_dir: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """The real adapter, not the Fake -- proves the send -> queue ->
+        respawn -> consume path end-to-end with no hand-called
+        advance_cursor anywhere in this test (#2212 review finding 1)."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _session(sample_client)
+        _persist(session)
+        real_adapter = NativeDaemonResumeTriggerAdapter(
+            native_daemon=mock_native_daemon
+        )
+
+        with patch(
+            "cw.cli.session_send.get_resume_trigger_adapter",
+            return_value=real_adapter,
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "session",
+                    "send",
+                    _SESSION_ID,
+                    "--message",
+                    "use the second approach",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert session_inbox.read_unconsumed(_SESSION_ID) == []
+        _cwd, prompt = mock_native_daemon.spawn_calls[0]
+        assert "use the second approach" in prompt

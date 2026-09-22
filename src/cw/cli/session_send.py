@@ -16,17 +16,25 @@ flags, inbox write failure.
 
 from __future__ import annotations
 
+import logging
 from getpass import getuser
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
 from cw import session_inbox
 from cw.cli._base import handle_errors
 from cw.cli.session_inspect import _resolve_session, session_group
+from cw.config import load_state
 from cw.events import record_event
 from cw.models import TERMINAL_SESSION_STATUSES, OrchestratorEventType
 from cw.session_resume_trigger import get_resume_trigger_adapter
+
+if TYPE_CHECKING:
+    from cw.models import Session
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_body(message: str | None, message_file: Path | None) -> str:
@@ -46,6 +54,38 @@ def _resolve_body(message: str | None, message_file: Path | None) -> str:
         msg = "Message body is empty."
         raise click.UsageError(msg)
     return body
+
+
+def _ambiguous_matches(prefix: str) -> list[Session]:
+    """Return every session an id-or-claude_session_id prefix resolves to.
+
+    ``_resolve_session`` -> ``find_session_by_id`` -> ``_find_by_prefix``
+    (``session_retention.py:173-189``) returns only the *first* match, with
+    no ambiguity check -- fine for its existing read/spawn-resolution
+    consumers, but ``send`` is the first *mutating* one, and a colliding
+    prefix would silently deliver to whichever session sorts first. Mirrors
+    ``_find_by_prefix``'s own two-pass, id-then-claude_session_id field
+    priority so ambiguity is judged within the same field that would decide
+    the match, but returns every hit instead of stopping at one.
+
+    Deliberately reimplemented here rather than extending the shared
+    helper: ``_find_by_prefix`` has consumers outside this ticket's approved
+    blast radius (``session_inspect.py`` show/list/wait/result, ``cw.spawn``,
+    ``fix_agent``'s parent resolution) and changing its first-match
+    semantics under them is its own ticket, not this one (GitHub #2212
+    review). Scoped to the hot ``sessions.json`` state only -- unlike
+    ``find_session_by_id`` this does not fall back to scanning archives,
+    since a mutating command's targets are live sessions, not archived ones.
+    """
+    sessions = load_state().sessions
+    id_matches = [s for s in sessions if s.id.startswith(prefix)]
+    if id_matches:
+        return id_matches
+    return [
+        s
+        for s in sessions
+        if s.claude_session_id and s.claude_session_id.startswith(prefix)
+    ]
 
 
 @session_group.command(name="send")
@@ -80,6 +120,16 @@ def session_send(
     """
     body = _resolve_body(message, message_file)
 
+    candidates = _ambiguous_matches(session_ref)
+    if len(candidates) > 1:
+        ids = ", ".join(sorted(s.id for s in candidates))
+        click.echo(
+            f"Ambiguous session reference {session_ref!r} matches: {ids}."
+            " Use a longer prefix.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
     session = _resolve_session(session_ref)
     if session is None:
         click.echo(f"Session not found: {session_ref}", err=True)
@@ -95,16 +145,29 @@ def session_send(
     queued = session_inbox.append_message(
         session.id, author=author or getuser(), body=body
     )
-    record_event(
-        OrchestratorEventType.SESSION_MESSAGE_SENT,
-        {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "message_id": queued.id,
-            "author": queued.author,
-        },
-    )
+    # The message is already durably queued at this point (exit-code contract
+    # above): a failure recording the observability event must not turn a
+    # successfully queued message into a command failure (#2212 review
+    # finding 4). handle_errors only translates CwError, so an OSError from
+    # the event write would otherwise propagate uncaught.
+    try:
+        record_event(
+            OrchestratorEventType.SESSION_MESSAGE_SENT,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "message_id": queued.id,
+                "author": queued.author,
+            },
+        )
+    except OSError as exc:
+        logger.warning(
+            "session send: failed to record SESSION_MESSAGE_SENT event for"
+            " message %s: %s",
+            queued.id,
+            exc,
+        )
     click.echo(f"Message {queued.id} queued for session {session.id}.")
 
     result = get_resume_trigger_adapter().trigger(session, queued)
