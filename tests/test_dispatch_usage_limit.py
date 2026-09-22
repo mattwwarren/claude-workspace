@@ -19,14 +19,17 @@ made the same split for the same reason.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
+import cw.dispatch.loop
 from cw.dev_queue import add_ticket
-from cw.dispatch import dispatch_tick
+from cw.dispatch import DispatchTickResult, dispatch_tick
+from cw.dispatch.loop import run_dispatch_loop
 from cw.dispatch_state import load_usage_limited_until, save_usage_limited_until
 from cw.events import read_events
 from cw.models import (
@@ -378,3 +381,56 @@ class TestUsageLimitArmedEvent:
         assert (
             f"### `{OrchestratorEventType.USAGE_LIMIT_ARMED.value}`" in docs.read_text()
         )
+
+
+class TestConcurrentWriterSurvivesTheSave:
+    """#1409 review round 3: closes the merge-before-save gap.
+
+    ``run_dispatch_loop`` only merges the on-disk sidecar once, at the TOP of
+    each tick (#1346). The arm-and-save block runs AFTER the tick, so a
+    second writer (``--force``, #1362) landing a different client's window in
+    that gap used to be erased outright: ``save_usage_limited_until`` persists
+    the whole in-memory mapping, which never saw the concurrent write.
+    """
+
+    def test_second_writer_window_is_not_erased(
+        self,
+        tmp_dispatch_dirs: Path,
+        fleet: dict[str, ClientConfig],
+        fleet_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, *fleet.values())
+        add_ticket(TicketTask(ticket_id="GEN-race", client="client-a"))
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_usage_limit = True
+        reset_at = datetime.now(UTC) + timedelta(hours=2)
+        daemon.usage_limit_reset_at = reset_at
+        concurrent_until = datetime.now(UTC) + timedelta(hours=5)
+
+        call_count = 0
+        original_tick = cw.dispatch.loop.dispatch_tick
+
+        def racing_tick(*args: object, **kwargs: object) -> DispatchTickResult:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                result = original_tick(*args, **kwargs)
+                # A second `cw --force` process arms client-b's window
+                # AFTER this loop's tick-start merge already ran, but
+                # BEFORE this loop's own post-tick save below.
+                save_usage_limited_until({"client-b": concurrent_until})
+                daemon.raise_usage_limit = False
+                return result
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", racing_tick)
+        monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
+
+        with contextlib.suppress(KeyboardInterrupt):
+            run_dispatch_loop(native_daemon=daemon)
+
+        on_disk = load_usage_limited_until()
+        assert on_disk["client-a"] == reset_at
+        assert on_disk["client-b"] == concurrent_until

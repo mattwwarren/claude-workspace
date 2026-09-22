@@ -886,6 +886,14 @@ def _run_dispatch_loop_body(
                     result.usage_limit_clients,
                     backoff_seconds=config.usage_limit_backoff_seconds,
                 )
+                # Re-merge immediately before the write (#1409 review round 3):
+                # closes the window between the tick-start merge and this save
+                # in which a second writer (--force, #1362) could have armed a
+                # DIFFERENT client -- without this, the whole-mapping write
+                # below would silently erase that client's window.
+                usage_limited_until = _merge_persisted_usage_limited_until(
+                    usage_limited_until
+                )
                 save_usage_limited_until(usage_limited_until)
                 # #1343 R2: stamp the arm timestamp on every fresh detection
                 # (this block already only fires when the detecting client's
