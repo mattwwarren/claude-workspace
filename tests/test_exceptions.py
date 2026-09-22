@@ -116,6 +116,35 @@ class TestBranchHeldByWorktreeError:
         assert str(err) == "msg"
 
 
+class TestRemoteRefUnresolvedError:
+    """#2209: a typed CwError subclass so fix_dispatch can discriminate the
+    unresolvable-remote-ref class without matching message text.
+
+    Every other dispatch failure keeps the generic clear-and-revert path; this
+    one parks the row BLOCKED_ON_USER instead, and that split is only safe if
+    the class is nameable.
+    """
+
+    def test_is_cw_error_subclass(self) -> None:
+        from cw.exceptions import RemoteRefUnresolvedError
+
+        assert issubclass(RemoteRefUnresolvedError, CwError)
+
+    def test_message_propagates(self) -> None:
+        from cw.exceptions import RemoteRefUnresolvedError
+
+        err = RemoteRefUnresolvedError("cannot determine remote ref for dev/2209")
+
+        assert str(err) == "cannot determine remote ref for dev/2209"
+
+    def test_caught_by_base_cw_error(self) -> None:
+        from cw.exceptions import RemoteRefUnresolvedError
+
+        msg = "no upstream configured"
+        with pytest.raises(CwError, match="no upstream configured"):
+            raise RemoteRefUnresolvedError(msg)
+
+
 class TestUsageLimitError:
     def test_usage_limit_error_is_cw_error(self) -> None:
         from cw.exceptions import UsageLimitError

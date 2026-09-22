@@ -22,7 +22,7 @@ from cw.config import load_state, save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.events import record_event as _real_record_event
-from cw.exceptions import CwError, HookContextConflictError
+from cw.exceptions import CwError, HookContextConflictError, RemoteRefUnresolvedError
 from cw.models import (
     ClientConfig,
     CwState,
@@ -37,8 +37,12 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import fix_dispatch, reconcile
-from tests.conftest import _make_daemon_session, _make_ticket_task
-from tests.test_reconcile_review_recipes import _make_fix_client, _seed_origin
+from tests.conftest import _make_daemon_session, _make_ticket_task, git_in
+from tests.test_reconcile_review_recipes import (
+    _make_fix_client,
+    _seed_origin,
+    _seed_worktree_with_unpushed_commit,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1169,3 +1173,368 @@ def test_act_on_pending_fix_dispatches_caps_spawns_per_tick(
     assert elided.status == QueueItemStatus.RUNNING
 
     assert any("cap" in rec.message for rec in caplog.records)
+
+
+# --- impl-reported remote branch (#2209) -------------------------------------
+
+
+def _save_sessions(*sessions: Any) -> None:
+    save_state(CwState(sessions=list(sessions)))
+
+
+def _impl_session(
+    *,
+    session_id: str,
+    ticket_id: str = _TICKET,
+    client: str = _CLIENT,
+    branch: Any = "dev/2017-short-description",
+    started_at: datetime = datetime(2026, 1, 1, tzinfo=UTC),
+) -> Any:
+    """A terminal IMPL session whose sentinel reports *branch* for *ticket_id*."""
+    return _make_daemon_session(
+        id=session_id,
+        name=f"{client}/auto-dev/{ticket_id}",
+        client=client,
+        status=SessionStatus.COMPLETED,
+        started_at=started_at,
+        last_result={"branch": branch},
+    )
+
+
+def test_run_fix_dispatch_passes_impl_reported_branch_to_dispatch(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+) -> None:
+    """The templated name stays the worktree key; the reported name rides along."""
+    _save_sessions(_impl_session(session_id="impl-sess"))
+    _seed_task(pending_fix_dispatch=_pending())
+
+    fix_dispatch.run_fix_dispatch(config=OrchestratorConfig())
+
+    assert len(stub_dispatch.calls) == 1
+    call = stub_dispatch.calls[0]
+    assert call["branch"] == "dev/2017"
+    assert call["remote_branch"] == "dev/2017-short-description"
+
+
+def test_run_fix_dispatch_reported_branch_skips_blank_and_non_str_and_picks_newest(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+) -> None:
+    """ "Newest session with a non-blank ``str`` branch", not simply "newest".
+
+    The scan is tie-broken on ``started_at`` — the same field
+    ``concierge._find_session_for_ticket`` sorts on. A ``None``, a blank string
+    and a non-``str`` value are each skipped cleanly, so the oldest-but-only-
+    valid session is the one that wins. Sessions for another client, another
+    ticket, and a non-``auto-dev/`` name must not contribute at all.
+    """
+    _save_sessions(
+        _impl_session(
+            session_id="non-str",
+            branch=123,
+            started_at=datetime(2026, 3, 4, tzinfo=UTC),
+        ),
+        _impl_session(
+            session_id="null-branch",
+            branch=None,
+            started_at=datetime(2026, 3, 3, tzinfo=UTC),
+        ),
+        _impl_session(
+            session_id="blank-branch",
+            branch="",
+            started_at=datetime(2026, 3, 2, tzinfo=UTC),
+        ),
+        _impl_session(
+            session_id="valid-branch",
+            branch="dev/2017-slug",
+            started_at=datetime(2026, 3, 1, tzinfo=UTC),
+        ),
+        _impl_session(
+            session_id="other-client",
+            client="globex",
+            branch="dev/2017-wrong-client",
+            started_at=datetime(2026, 3, 5, tzinfo=UTC),
+        ),
+        _impl_session(
+            session_id="other-ticket",
+            ticket_id="9999",
+            branch="dev/9999-wrong-ticket",
+            started_at=datetime(2026, 3, 5, tzinfo=UTC),
+        ),
+        _make_daemon_session(
+            id="fix-session",
+            name=f"{_CLIENT}/fix/{_TICKET}",
+            client=_CLIENT,
+            status=SessionStatus.COMPLETED,
+            started_at=datetime(2026, 3, 6, tzinfo=UTC),
+            last_result={"branch": "dev/2017-wrong-name-prefix"},
+        ),
+    )
+    _seed_task(pending_fix_dispatch=_pending())
+
+    fix_dispatch.run_fix_dispatch(config=OrchestratorConfig())
+
+    assert stub_dispatch.calls[0]["remote_branch"] == "dev/2017-slug"
+
+
+def test_run_fix_dispatch_remote_branch_none_without_sentinel_branch(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+) -> None:
+    """No session reports a branch: the ladder falls back to today's behaviour."""
+    _seed_task(pending_fix_dispatch=_pending())
+
+    fix_dispatch.run_fix_dispatch(config=OrchestratorConfig())
+
+    assert stub_dispatch.calls[0]["remote_branch"] is None
+
+
+def _seed_e2e_fix_row(ticket_id: str, *, with_impl_session: bool) -> None:
+    """A RUNNING row with a handoff, plus the sessions reconcile() will resolve.
+
+    Both sessions are terminal so neither enters phantom detection
+    (``_LIVE_STATUSES``-only), matching the sibling sessions_lock e2e test.
+    """
+    sessions = [
+        _make_daemon_session(
+            id="review-sess",
+            name=f"{_CLIENT}/review/{ticket_id}",
+            client=_CLIENT,
+            status=SessionStatus.COMPLETED,
+        )
+    ]
+    if with_impl_session:
+        sessions.append(
+            _impl_session(
+                session_id="impl-sess",
+                ticket_id=ticket_id,
+                branch=f"dev/{ticket_id}-short-description",
+            )
+        )
+    save_state(CwState(sessions=sessions))
+    task = _make_ticket_task(
+        ticket_id=ticket_id,
+        client=_CLIENT,
+        status=QueueItemStatus.RUNNING,
+    )
+    task.pending_fix_dispatch = _pending(label=f"fix-{ticket_id}")
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+
+def test_reconcile_dispatches_fix_against_impl_reported_slug_branch(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2209 end-to-end, through the REAL ``dispatch_fix_agent`` and real git.
+
+    The impl pushed under a slug name and set no upstream, so ``origin/dev/2020``
+    never existed. Pre-#2209 this failed resolution every tick; now the
+    sentinel-reported name carries the dispatch.
+    """
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2020"
+    worktree = _seed_worktree_with_unpushed_commit(
+        client, branch, auto_setup_merge=False
+    )
+    git_in(worktree, "push", "origin", "HEAD:refs/heads/dev/2020-short-description")
+    monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: mock_native_daemon)
+    monkeypatch.setattr(
+        fix_dispatch, "load_effective_clients", lambda: {_CLIENT: client}
+    )
+    _seed_e2e_fix_row("2020", with_impl_session=True)
+
+    reconcile()
+
+    fix_sessions = [s for s in load_state().sessions if s.purpose == SessionPurpose.FIX]
+    assert len(fix_sessions) == 1
+    updated = _only_task()
+    assert updated.pending_fix_dispatch is None
+    assert updated.fix_dispatch_session_id == fix_sessions[0].id
+    assert read_events(event_types=[OrchestratorEventType.STAGE_ERRORED]) == []
+
+
+def test_reconcile_parks_row_when_no_impl_branch_and_templated_ref_missing(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing usable resolves: the row parks for the operator, handoff retained.
+
+    ``branch.autoSetupMerge=false`` makes "nothing resolves" deterministic
+    rather than resting on the coincidence that the local branch outruns
+    ``origin/main``. With no IMPL session there is no reported name either, so
+    only the never-pushed ``origin/dev/2020`` guess is in play.
+    """
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2020"
+    worktree = _seed_worktree_with_unpushed_commit(
+        client, branch, auto_setup_merge=False
+    )
+    git_in(worktree, "push", "origin", "HEAD:refs/heads/dev/2020-short-description")
+    monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: mock_native_daemon)
+    monkeypatch.setattr(
+        fix_dispatch, "load_effective_clients", lambda: {_CLIENT: client}
+    )
+    _seed_e2e_fix_row("2020", with_impl_session=False)
+
+    reconcile()
+
+    assert [s for s in load_state().sessions if s.purpose == SessionPurpose.FIX] == []
+    task = _only_task()
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == "fix_dispatch_ref_unresolved"
+    assert task.pending_fix_dispatch is not None
+
+
+# --- unresolvable-ref park (#2209) -------------------------------------------
+
+
+def _raise_unresolved(**_kwargs: Any) -> None:
+    msg = (
+        "dispatch_fix_agent: cannot determine remote ref for dev/2017 -- "
+        "no upstream configured, and origin/dev/2017 does not resolve either."
+    )
+    raise RemoteRefUnresolvedError(msg)
+
+
+def test_act_on_pending_fix_dispatches_parks_row_on_unresolved_remote_ref(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The one failure class that parks instead of clearing and reverting.
+
+    Since #2075 the generic path charges no attempt, so a ref that can never
+    resolve looped review -> failed dispatch -> review without bound. Parking
+    BLOCKED_ON_USER ends the loop, keeps the action list for the requeue, and
+    pages the operator exactly once.
+    """
+    stub_dispatch.side_effect = _raise_unresolved
+    _seed_task(pending_fix_dispatch=_pending(), session_id="fix-sess-1")
+
+    with caplog.at_level(logging.WARNING, logger="cw.reconcile.fix_dispatch"):
+        acted = fix_dispatch._act_on_pending_fix_dispatches(
+            [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+            clients={_CLIENT: acme_client},
+        )
+
+    assert acted == []
+    task = _only_task()
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == "fix_dispatch_ref_unresolved"
+    assert task.pending_fix_dispatch is not None
+    assert task.pending_fix_dispatch.prompt == "fix the MUST_FIX items\n"
+    assert task.unproductive_attempts == 0
+    assert task.session_id is None
+
+    assert read_events(event_types=[OrchestratorEventType.STAGE_ERRORED]) == []
+    attention = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    assert len(attention) == 1
+    assert attention[0].payload["paused_status"] == "fix_dispatch_ref_unresolved"
+    assert "cannot determine remote ref" in attention[0].payload["breadcrumbs"]
+    # The row's own session_id, read before the park cleared it — NOT the
+    # peer-failure path's pending.requested_by_session_id ("review-sess").
+    assert attention[0].payload["session_id"] == "fix-sess-1"
+
+    assert any(
+        rec.message.startswith("fix_dispatch_ref_unresolved ticket=")
+        and rec.exc_info is not None
+        for rec in caplog.records
+    )
+
+
+def test_parked_unresolved_ref_row_is_not_a_pending_dispatch_candidate() -> None:
+    """A parked row must not hold a per-tick cap slot forever.
+
+    Detect runs before the ``_MAX_FIX_DISPATCHES_PER_TICK`` slice, so leaving
+    the parked row in the candidate list would starve healthy rows behind it.
+    """
+    parked = _make_ticket_task(
+        ticket_id="2017",
+        client=_CLIENT,
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="fix_dispatch_ref_unresolved",
+        pending_fix_dispatch=_pending(),
+    )
+    healthy = [
+        _make_ticket_task(
+            ticket_id=ticket_id,
+            client=_CLIENT,
+            status=QueueItemStatus.RUNNING,
+            pending_fix_dispatch=_pending(),
+        )
+        for ticket_id in ("2020", "2021", "2022")
+    ]
+
+    candidates = fix_dispatch._detect_pending_fix_dispatches([parked, *healthy])
+
+    assert [c.ticket_id for c in candidates] == ["2020", "2021", "2022"]
+
+
+def test_parked_unresolved_ref_row_survives_stale_handoff_drop(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+) -> None:
+    """#2142 interplay: the retained handoff is exempt from the stale drop.
+
+    Every other non-RUNNING row carrying a handoff gets it cleared and paged.
+    This one keeps it, so ``cw dev-queue requeue`` resumes the same fix cycle
+    instead of restarting REVIEW from scratch.
+    """
+    _seed_task(
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="fix_dispatch_ref_unresolved",
+        pending_fix_dispatch=_pending(),
+    )
+
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+        clients={_CLIENT: acme_client},
+    )
+
+    assert acted == []
+    assert stub_dispatch.calls == []
+    task = _only_task()
+    assert task.pending_fix_dispatch is not None
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == "fix_dispatch_ref_unresolved"
+    assert read_events() == []
+
+
+def test_park_is_noop_when_row_no_longer_running(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+) -> None:
+    """The shared park helper matches RUNNING rows only.
+
+    A row already reverted to PENDING is left to the ordinary stale-handoff
+    drop rather than being retro-parked out from under it.
+    """
+    _seed_task(status=QueueItemStatus.PENDING, pending_fix_dispatch=_pending())
+    job = fix_dispatch._DispatchJob(
+        client_cfg=acme_client,
+        branch="dev/2017",
+        pending=_pending(),
+        ticket_id=_TICKET,
+        client=_CLIENT,
+        lane="default",
+        stage=Stage.REVIEW,
+    )
+
+    fix_dispatch._park_for_unresolved_ref(job, RemoteRefUnresolvedError("no ref"))
+
+    task = _only_task()
+    assert task.status == QueueItemStatus.PENDING
+    assert task.disposition is None
+    assert task.pending_fix_dispatch is not None
