@@ -59,6 +59,7 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 | [0014](0014-timers-never-destroy-work.md) | Timers never destroy work — elapsed time is a signal, not a trigger | Accepted |
 | [0015](0015-voided-finding-suppression-is-content-anchored.md) | Voided-finding suppression is content-anchored, never positional | Accepted |
 | [0016](0016-ledger-claim-matching-is-gated-and-measured.md) | Ledger claim matching ships gated and measured, never on by default | Accepted |
+| [0017](0017-session-inbox-and-resume-trigger.md) | A session's inbound channel is a durable mailbox plus a paused-only resume trigger | Accepted |
 
 ADR-0000 is the foundational record — the trajectory it captures is
 assumed as ground truth by every subsequent ADR.

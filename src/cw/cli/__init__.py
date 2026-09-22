@@ -112,6 +112,7 @@ __all__ = [
     "session_group",
     "session_inspect",
     "session_prune",
+    "session_send",
     "signal_park",
     "sprint",
     "statusline",

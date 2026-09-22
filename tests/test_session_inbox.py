@@ -7,6 +7,7 @@ import threading
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
 from cw import session_inbox
 from cw.exceptions import CwError
@@ -118,6 +119,36 @@ class TestAppendAndRead:
         with pytest.raises(json.JSONDecodeError):
             session_inbox.read_messages(_SESSION)
 
+    def test_tolerates_a_trailing_record_that_fails_validation(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Well-formed JSON, wrong shape — a torn write that landed a whole
+        line. Same tolerance as a syntactically torn one."""
+        session_inbox.append_message(_SESSION, author="matt", body="good")
+        path = session_inbox.inbox_path(_SESSION)
+        with path.open("a") as f:
+            f.write(json.dumps({"id": "partial"}) + "\n")
+        assert [m.body for m in session_inbox.read_messages(_SESSION)] == ["good"]
+
+    def test_interior_record_that_fails_validation_raises(
+        self, tmp_config_dir: Path
+    ) -> None:
+        session_inbox.append_message(_SESSION, author="matt", body="good")
+        path = session_inbox.inbox_path(_SESSION)
+        line = path.read_text().splitlines()[0]
+        path.write_text(json.dumps({"id": "partial"}) + "\n" + line + "\n")
+        with pytest.raises(ValidationError):
+            session_inbox.read_messages(_SESSION)
+
+    def test_blank_lines_are_skipped(self, tmp_config_dir: Path) -> None:
+        session_inbox.append_message(_SESSION, author="matt", body="good")
+        path = session_inbox.inbox_path(_SESSION)
+        path.write_text("\n" + path.read_text() + "\n\n")
+        assert [m.body for m in session_inbox.read_messages(_SESSION)] == ["good"]
+
+    def test_read_unconsumed_on_an_empty_inbox(self, tmp_config_dir: Path) -> None:
+        assert session_inbox.read_unconsumed("nosuchid") == []
+
 
 class TestCursor:
     def test_no_cursor_reads_everything(self, tmp_config_dir: Path) -> None:
@@ -128,9 +159,7 @@ class TestCursor:
             "two",
         ]
 
-    def test_advance_cursor_hides_consumed_messages(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_advance_cursor_hides_consumed_messages(self, tmp_config_dir: Path) -> None:
         first = session_inbox.append_message(_SESSION, author="m", body="one")
         session_inbox.append_message(_SESSION, author="m", body="two")
         session_inbox.advance_cursor(_SESSION, first.id)
@@ -171,8 +200,6 @@ class TestCursor:
 
 class TestSessionInboxMessageModel:
     def test_extra_fields_forbidden(self) -> None:
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             SessionInboxMessage.model_validate(
                 {
@@ -185,8 +212,6 @@ class TestSessionInboxMessageModel:
             )
 
     def test_naive_datetime_rejected(self) -> None:
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             SessionInboxMessage.model_validate(
                 {
@@ -198,8 +223,6 @@ class TestSessionInboxMessageModel:
             )
 
     def test_empty_body_rejected(self) -> None:
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             SessionInboxMessage.model_validate(
                 {
@@ -211,8 +234,6 @@ class TestSessionInboxMessageModel:
             )
 
     def test_is_frozen(self) -> None:
-        from pydantic import ValidationError
-
         msg = SessionInboxMessage.model_validate(
             {
                 "id": "x",

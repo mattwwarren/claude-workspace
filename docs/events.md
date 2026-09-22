@@ -925,6 +925,36 @@ namespace). Every other `paused_status` still forwards immediately,
 unbatched. See `docs/operator-channel.md`'s "Digest coalescing" section for
 the full buffer/window/flush contract.
 
+### `session.message_sent`
+
+**Emitter:** `cw session send` (`cw.cli.session_send`)
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "session_name": "<str>",
+  "client": "<str>",
+  "message_id": "<str>",
+  "author": "<str>"
+}
+```
+**Semantics:** An operator queued a message into a session's inbound mailbox
+(#2212). Emitted for the durable **append**, not for delivery: it fires
+whether or not the resume trigger could wake the session, because queuing —
+not delivery — is `cw session send`'s reliability bar. A successful respawn
+additionally writes a `session_resumed` record to the *history* bus
+(`cw.history`), which is a different bus with a different record type; seeing
+this event without that one means the message is queued and still waiting.
+
+`author` is audit-only — it is never compared for authorization, and defaults
+to the local OS username rather than a resolved GitHub login. The message
+body is deliberately **not** in the payload: the event bus is a fleet-wide
+coordination stream, and the body lives in the session's own
+`inboxes/<session_id>/inbox.jsonl`. No `correlation_id` is set.
+
+Until #2255 lands, the common outcome for a session that is genuinely live
+and mid-task is queued-but-not-delivered; see ADR-0017.
+
 ### `session.salvage_skipped` — historical (ADR-0014)
 
 **Emitter:** none since the process-kill-timeout removal (was the stalled

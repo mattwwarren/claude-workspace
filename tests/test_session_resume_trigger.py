@@ -99,7 +99,9 @@ class TestFakeResumeTriggerAdapter:
 
 class TestFactory:
     def test_returns_the_native_daemon_adapter(self) -> None:
-        assert isinstance(get_resume_trigger_adapter(), NativeDaemonResumeTriggerAdapter)
+        assert isinstance(
+            get_resume_trigger_adapter(), NativeDaemonResumeTriggerAdapter
+        )
 
     def test_factory_result_satisfies_the_protocol(self) -> None:
         assert isinstance(get_resume_trigger_adapter(), ResumeTriggerAdapter)
