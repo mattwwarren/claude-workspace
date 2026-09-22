@@ -34,8 +34,8 @@ from cw.cli._subagent_policy import (
     classify_spawn,
     enforce,
 )
-from tests.conftest import _write_hook_context_file
-from tests.test_cli_agent_spawn_stamp import _PRE_PAYLOAD
+from tests.conftest import _headless_worktree, _write_hook_context_file
+from tests.test_cli_agent_spawn_stamp import _PRE_PAYLOAD, _pre_tool_input
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -50,20 +50,12 @@ def _spawn_payload(cwd: Path, subagent_type: object = _ABSENT) -> dict[str, obje
     all" shape, which is distinct from a present-but-blank value and is the
     only one of the two that this policy allows.
     """
-    tool_input = dict(_PRE_PAYLOAD["tool_input"])  # type: ignore[call-overload]
+    tool_input = _pre_tool_input()
     if subagent_type is _ABSENT:
         del tool_input["subagent_type"]
     else:
         tool_input["subagent_type"] = subagent_type
     return {**_PRE_PAYLOAD, "cwd": str(cwd), "tool_input": tool_input}
-
-
-def _headless_worktree(tmp_path: Path, name: str = "wt") -> Path:
-    """Create a worktree whose cw-context.json marks it a headless worker."""
-    worktree = tmp_path / name
-    worktree.mkdir()
-    _write_hook_context_file(worktree, headless=True)
-    return worktree
 
 
 class TestActiveHeadlessContext:

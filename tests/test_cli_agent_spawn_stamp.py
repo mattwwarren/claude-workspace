@@ -40,6 +40,7 @@ from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
 )
 from tests.conftest import (
+    _headless_worktree,
     _hold_context_lock,
     _invoke_hook_command,
     _write_hook_context_file,
@@ -310,27 +311,33 @@ def test_lock_timeout_default_is_bounded() -> None:
     assert 0 < _LOCK_TIMEOUT_SECS_DEFAULT <= 1.0
 
 
-def _headless_worktree(tmp_path: Path, name: str = "wt") -> Path:
-    """A worktree whose context marks it a headless dispatch worker (#2211)."""
-    worktree = tmp_path / name
-    worktree.mkdir()
-    _write_hook_context_file(worktree, headless=True)
-    return worktree
+def _pre_tool_input() -> dict[str, object]:
+    """Return a mutable copy of ``_PRE_PAYLOAD["tool_input"]``, narrowed.
+
+    The capture is annotated ``dict[str, object]`` so that it can hold the
+    payload's mixed value types, which makes indexing it yield ``object`` —
+    and every builder that wants to add or drop a ``tool_input`` key a type
+    error. Narrowing once, here, is what keeps the three builders free of
+    inline suppressions; the ``isinstance`` check also means a future edit
+    that reshapes the fixture fails loudly rather than at the use site.
+
+    Returns a copy so a builder cannot mutate the shared capture, which would
+    leak between tests in fixture-order-dependent ways.
+    """
+    tool_input = _PRE_PAYLOAD["tool_input"]
+    assert isinstance(tool_input, dict)
+    return dict(tool_input)
 
 
 def _fork_payload(cwd: Path) -> dict[str, object]:
     """The real capture with ``subagent_type`` set to the refused value."""
-    tool_input = {**_PRE_PAYLOAD["tool_input"], "subagent_type": "fork"}  # type: ignore[dict-item]
+    tool_input = {**_pre_tool_input(), "subagent_type": "fork"}
     return {**_PRE_PAYLOAD, "cwd": str(cwd), "tool_input": tool_input}
 
 
 def _untyped_payload(cwd: Path) -> dict[str, object]:
     """The real capture with the ``subagent_type`` key removed entirely."""
-    tool_input = {
-        k: v
-        for k, v in _PRE_PAYLOAD["tool_input"].items()  # type: ignore[union-attr]
-        if k != "subagent_type"
-    }
+    tool_input = {k: v for k, v in _pre_tool_input().items() if k != "subagent_type"}
     return {**_PRE_PAYLOAD, "cwd": str(cwd), "tool_input": tool_input}
 
 

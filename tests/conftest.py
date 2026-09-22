@@ -707,6 +707,21 @@ def _write_hook_context_file(
     context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
 
 
+def _headless_worktree(tmp_path: Path, name: str = "wt") -> Path:
+    """A worktree whose context marks it a headless dispatch worker (#2211).
+
+    The precondition for every ``cw agent-spawn-pre`` spawn-shape test, since
+    the policy applies to headless workers and nowhere else. Lives here rather
+    than in either test file because both ``test_cli_agent_spawn_stamp.py``
+    and ``test_cli_subagent_policy.py`` need it, and they had grown identical
+    private copies.
+    """
+    worktree = tmp_path / name
+    worktree.mkdir()
+    _write_hook_context_file(worktree, headless=True)
+    return worktree
+
+
 @contextlib.contextmanager
 def _hold_context_lock(worktree: Path) -> Iterator[None]:
     """Hold ``<worktree>/.claude/cw-context.json.lock`` exclusively (#1946).
