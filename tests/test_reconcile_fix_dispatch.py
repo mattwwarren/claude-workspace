@@ -1226,12 +1226,22 @@ def test_run_fix_dispatch_reported_branch_skips_blank_and_non_str_and_picks_newe
     """ "Newest session with a non-blank ``str`` branch", not simply "newest".
 
     The scan is tie-broken on ``started_at`` — the same field
-    ``concierge._find_session_for_ticket`` sorts on. A ``None``, a blank string
-    and a non-``str`` value are each skipped cleanly, so the oldest-but-only-
-    valid session is the one that wins. Sessions for another client, another
-    ticket, and a non-``auto-dev/`` name must not contribute at all.
+    ``concierge._find_session_for_ticket`` sorts on. A missing sentinel, a
+    ``None``, a blank string and a non-``str`` value are each skipped cleanly,
+    so the oldest-but-only-valid session is the one that wins. Sessions for
+    another client, another ticket, and a non-``auto-dev/`` name must not
+    contribute at all.
     """
     _save_sessions(
+        # The common real case: the newest session for a ticket is often the
+        # REVIEW session, which has emitted no sentinel yet.
+        _make_daemon_session(
+            id="no-sentinel",
+            name=f"{_CLIENT}/auto-dev/{_TICKET}",
+            client=_CLIENT,
+            status=SessionStatus.ACTIVE,
+            started_at=datetime(2026, 3, 7, tzinfo=UTC),
+        ),
         _impl_session(
             session_id="non-str",
             branch=123,
