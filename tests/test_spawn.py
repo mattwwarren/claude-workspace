@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 import pytest
 from click.testing import CliRunner
 
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION, Status
 from cw.cli import main
+from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, orchestrator_config_file, save_state
 from cw.exceptions import CwError
 from cw.models import (
@@ -27,7 +28,11 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.spawn import _stop_hook_command, build_disallowed_tools_arg
-from tests.conftest import _make_ticket_task, _seed_daemon_session
+from tests.conftest import (
+    _make_ticket_task,
+    _seed_completed_session,
+    _seed_daemon_session,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -921,6 +926,27 @@ class TestValidateWorktree:
         assert daemon.spawn_calls == []
 
 
+def _hook_entries(
+    built: dict[str, dict[str, list[object]]], event: str
+) -> list[dict[str, object]]:
+    """Narrow one ``_build_hook_settings()["hooks"][event]`` list to dicts.
+
+    ``_build_hook_settings``'s return type is ``dict[str, dict[str,
+    list[object]]]`` -- accurate for what it builds, a heterogeneous
+    settings.local.json blob -- but every entry this test class reads back
+    out of it is in fact a dict. Narrow once here instead of an
+    ``entry["..."]`` cast at every call site below.
+    """
+    return [cast("dict[str, object]", entry) for entry in built["hooks"][event]]
+
+
+def _entry_hooks(entry: dict[str, object]) -> list[dict[str, object]]:
+    """Narrow one hook entry's own ``"hooks"`` list the same way."""
+    return [
+        cast("dict[str, object]", hook) for hook in cast("list[object]", entry["hooks"])
+    ]
+
+
 class TestHookSettingsTemplate:
     """The settings.local.json template wires both hooks (#940 R5 + #147)."""
 
@@ -928,18 +954,18 @@ class TestHookSettingsTemplate:
         """PreToolUse/Bash/cw guard-cwd is present; Stop/cw signal-stop preserved."""
         from cw.spawn import _build_hook_settings
 
-        hooks = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]
+        built = _build_hook_settings(_FAKE_CONTEXT_PATH)
 
-        stop_entries = hooks["Stop"]
+        stop_entries = _hook_entries(built, "Stop")
         assert any(
-            entry["hooks"][0]["command"] == _stop_hook_command(_FAKE_CONTEXT_PATH)
+            _entry_hooks(entry)[0]["command"] == _stop_hook_command(_FAKE_CONTEXT_PATH)
             for entry in stop_entries
         )
 
-        pretooluse_entries = hooks["PreToolUse"]
+        pretooluse_entries = _hook_entries(built, "PreToolUse")
         assert any(
             entry.get("matcher") == "Bash"
-            and entry["hooks"][0]["command"] == "cw guard-cwd"
+            and _entry_hooks(entry)[0]["command"] == "cw guard-cwd"
             for entry in pretooluse_entries
         )
 
@@ -953,11 +979,11 @@ class TestHookSettingsTemplate:
         """
         from cw.spawn import _build_hook_settings
 
-        entries = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]["PreToolUse"]
+        entries = _hook_entries(_build_hook_settings(_FAKE_CONTEXT_PATH), "PreToolUse")
         bash_entries = [e for e in entries if e.get("matcher") == "Bash"]
         assert len(bash_entries) == 1
 
-        commands = [hook["command"] for hook in bash_entries[0]["hooks"]]
+        commands = [hook["command"] for hook in _entry_hooks(bash_entries[0])]
         assert commands == ["cw guard-cwd", "cw guard-busy-wait"]
 
     def test_pretooluse_commands_stay_unguarded_literals(self) -> None:
@@ -970,18 +996,20 @@ class TestHookSettingsTemplate:
         """
         from cw.spawn import _build_hook_settings
 
-        entries = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]["PreToolUse"]
-        commands = [hook["command"] for entry in entries for hook in entry["hooks"]]
+        entries = _hook_entries(_build_hook_settings(_FAKE_CONTEXT_PATH), "PreToolUse")
+        commands = [
+            hook["command"] for entry in entries for hook in _entry_hooks(entry)
+        ]
         assert commands == ["cw guard-cwd", "cw guard-busy-wait", "cw agent-spawn-pre"]
 
     def test_hook_settings_template_includes_agent_spawn_pretooluse(self) -> None:
         """#1646: a subagent-tool PreToolUse entry sits alongside the Bash guard."""
         from cw.spawn import _AGENT_TOOL_MATCHER, _build_hook_settings
 
-        entries = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]["PreToolUse"]
+        entries = _hook_entries(_build_hook_settings(_FAKE_CONTEXT_PATH), "PreToolUse")
         assert any(
             entry.get("matcher") == _AGENT_TOOL_MATCHER
-            and entry["hooks"][0]["command"] == "cw agent-spawn-pre"
+            and _entry_hooks(entry)[0]["command"] == "cw agent-spawn-pre"
             for entry in entries
         )
         # Must not regress the pre-existing Bash guard entry.
@@ -1267,6 +1295,127 @@ class TestWriteHookContext:
         assert "$" not in command
         # Correlation file should still be written.
         assert context_path.exists()
+
+    def test_write_hook_context_skips_settings_local_json_when_write_stop_hook_false(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2280: write_stop_hook=False skips settings.local.json entirely.
+
+        ``CodexExecutor.spawn()`` never involves a Claude session, so there is
+        no Stop hook to install — only cw-context.json's correlation metadata
+        (including ``prior_attempts_summary``) is wanted on that path.
+        """
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+
+        _write_hook_context(
+            worktree,
+            session_id="sess-codex",
+            session_name="test-client/auto-dev/137",
+            client="test-client",
+            purpose="impl",
+            ticket_id="137",
+            origin=SessionOrigin.DAEMON,
+            write_stop_hook=False,
+        )
+
+        assert not (worktree / ".claude" / "settings.local.json").exists()
+        assert (worktree / HOOK_CONTEXT_RELATIVE_PATH).exists()
+
+    def test_write_hook_context_default_write_stop_hook_true_is_byte_identical(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2280: adding write_stop_hook must not change existing callers.
+
+        Same worktree, same params, called twice — once with the parameter
+        omitted (existing callers' shape) and once with it passed explicitly
+        as ``True`` — must produce byte-identical settings.local.json.
+        """
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+        settings_path = worktree / ".claude" / "settings.local.json"
+
+        _write_hook_context(
+            worktree,
+            session_id="sess-a",
+            session_name="test-client/auto-dev/137",
+            client="test-client",
+            purpose="impl",
+            ticket_id="137",
+            origin=SessionOrigin.DAEMON,
+        )
+        without_param = settings_path.read_text()
+
+        _write_hook_context(
+            worktree,
+            session_id="sess-a",
+            session_name="test-client/auto-dev/137",
+            client="test-client",
+            purpose="impl",
+            ticket_id="137",
+            origin=SessionOrigin.DAEMON,
+            write_stop_hook=True,
+        )
+        with_param = settings_path.read_text()
+
+        assert without_param == with_param
+
+    def test_write_hook_context_prior_attempts_summary_with_write_stop_hook_false(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """#2280: the write_stop_hook=False path still collects prior_attempts_summary.
+
+        A prior terminal codex-review park (COMPLETED, blocker.reason=
+        codex_review_unparseable) is a TERMINAL_SESSION_STATUSES member, so
+        ``_collect_prior_attempts_summary`` picks it up the same way it would
+        for a Claude-native attempt — this is the CodexExecutor call shape.
+        """
+        worktree = make_git_repo("wt-codex-prior-attempts")
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="838-C",
+            client="test-client",
+            status=SessionStatus.COMPLETED,
+            last_result={
+                "status": "blocked",
+                "stage_reached": "stage3_review",
+                "blocker": {
+                    "stage": "stage3_review",
+                    "reason": CODEX_REVIEW_UNPARSEABLE,
+                    "details": "reviewer (codex_timeout)",
+                },
+            },
+        )
+        task = _make_pending_task(ticket_id="838-C", attempts=1)
+
+        # _call doesn't thread task through — reach _write_hook_context
+        # directly so world_state_snapshot.prior_attempts_summary is built.
+        from cw.spawn import _write_hook_context
+
+        _write_hook_context(
+            worktree,
+            session_id="sess-codex-2",
+            session_name="test-client/auto-dev/838-C",
+            client="test-client",
+            purpose="impl",
+            ticket_id="838-C",
+            origin=SessionOrigin.DAEMON,
+            task=task,
+            write_stop_hook=False,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        summary = context["world_state_snapshot"]["prior_attempts_summary"]
+        assert len(summary) == 1
+        assert summary[0]["blocker_reason"] == CODEX_REVIEW_UNPARSEABLE
 
 
 class TestWriteHookContextAtomicAndLiveSession:
@@ -3750,34 +3899,6 @@ class TestRosterRegistrationVerification:
 # ---------------------------------------------------------------------------
 # Tests for #838: prior_attempts_summary populated on retry
 # ---------------------------------------------------------------------------
-
-
-def _seed_completed_session(
-    tmp_path: Path,
-    tmp_config_dir: Path,
-    ticket_id: str,
-    client: str = "test-client",
-    status: SessionStatus = SessionStatus.TIMED_OUT,
-    last_result: dict[str, object] | None = None,
-    completed_at: datetime | None = None,
-) -> Session:
-    """Seed a TIMED_OUT or COMPLETED session for a given ticket in state."""
-    workspace = tmp_path / "workspace" / client
-    workspace.mkdir(parents=True, exist_ok=True)
-    sess = Session(
-        name=f"{client}/auto-dev/{ticket_id}",
-        client=client,
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=status,
-        workspace_path=workspace,
-        last_result=last_result,
-        completed_at=completed_at or datetime.now(UTC),
-    )
-    state = load_state()
-    state.sessions.append(sess)
-    save_state(state)
-    return sess
 
 
 class TestPriorAttemptsSummary:

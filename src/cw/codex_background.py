@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw._git import capture_head_sha
 from cw.atomic import atomic_write_text
 from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_review import make_codex_blocked, render_verdict_comment
@@ -54,6 +55,7 @@ from cw.worktree import _git_dir
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.auto_dev_result import Blocker
     from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
     from cw.review_finding_dispositions import FindingDisposition
@@ -360,10 +362,20 @@ REVIEW_VERDICT_OWNER_STAMP_FORMAT = (
 
 
 def _persist_review_verdict(
-    worktree: Path, review_text: str, *, ticket_id: str, reviewed_sha: str
+    worktree: Path,
+    review_text: str,
+    *,
+    ticket_id: str,
+    reviewed_sha: str,
+    relative_path: Path = REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
 ) -> Path | None:
     """Write *review_text* to the worktree's durable verdict file, best-effort,
     prefixed with an ownership stamp (``ticket_id``/``reviewed_sha``) (#2279).
+
+    *relative_path* defaults to the rendered-verdict destination but is
+    overridable so :func:`_persist_unparseable_artifact` (#2280) can reuse
+    this same write path for its blocker-shaped artifact rather than keeping
+    a second mkdir/atomic-write/log implementation.
 
     Returns the path written, or None when the write failed (logged). Never
     raises: this runs on the daemon thread's success path after the sentinel
@@ -376,7 +388,7 @@ def _persist_review_verdict(
         )
         + review_text
     )
-    path = worktree / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
+    path = worktree / relative_path
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(path, stamped_text)
@@ -384,6 +396,38 @@ def _persist_review_verdict(
         _log.warning("review_verdict_persist_failed path=%s: %s", path, exc)
         return None
     return path
+
+
+# Durable copy of a zero-documents park's blocker, written beside
+# review-verdict.md (#2280). ``verdict`` is None on this path -- every
+# reviewer failed, so there is no ReviewVerdict to render -- so this carries
+# the blocker's reason/details instead of a rendered verdict comment.
+REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH = (
+    Path(".claude") / "review-verdict-unparseable.md"
+)
+
+
+def _persist_unparseable_artifact(
+    worktree: Path, blocker: Blocker, *, ticket_id: str, reviewed_sha: str
+) -> Path | None:
+    """Write *blocker*'s reason/details to the worktree, best-effort (#2280).
+
+    Renders the blocker-shaped text this path carries (there is no
+    ReviewVerdict to hand to :func:`render_verdict_comment`) and delegates
+    the actual write -- mkdir, ownership stamp, atomic write, never-raises
+    logging -- to :func:`_persist_review_verdict`, pointed at this artifact's
+    own path, so the two callers share one writer instead of two.
+    """
+    text = (
+        f"# Codex review unparseable\n\nreason: {blocker.reason}\n\n{blocker.details}\n"
+    )
+    return _persist_review_verdict(
+        worktree,
+        text,
+        ticket_id=ticket_id,
+        reviewed_sha=reviewed_sha,
+        relative_path=REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
+    )
 
 
 def _post_review_comment(
@@ -571,6 +615,26 @@ def _run_codex_review_and_complete(
             _post_review_comment(
                 task.ticket_id,
                 review_text,
+                cwd=_git_dir(client),
+                tracker=resolve_tracker(client.workspace_path),
+                artifact_path=artifact_path,
+            )
+        elif result.blocker is not None:
+            # #2280: verdict is None because every reviewer failed -- there is
+            # no ReviewVerdict to render, but result.blocker.details already
+            # carries the per-role "role (reason)" summary
+            # (_format_failures_detail) plus a diagnostics-bundle pointer.
+            # Reused verbatim as both the worktree artifact and the ticket
+            # comment text, mirroring the verdict-present branch's shape.
+            artifact_path = _persist_unparseable_artifact(
+                worktree,
+                result.blocker,
+                ticket_id=task.ticket_id,
+                reviewed_sha=capture_head_sha(worktree, strict=False),
+            )
+            _post_review_comment(
+                task.ticket_id,
+                result.blocker.details,
                 cwd=_git_dir(client),
                 tracker=resolve_tracker(client.workspace_path),
                 artifact_path=artifact_path,
