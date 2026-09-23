@@ -44,6 +44,7 @@ if TYPE_CHECKING:
         OrchestratorConfig,
     )
     from cw.native_daemon import NativeDaemonClient
+    from cw.worktree import FetchWarningKey
 from cw.dispatch.gating import (
     _apply_disk_pressure_gate,
     _apply_ssh_key_gate,
@@ -462,7 +463,7 @@ def dispatch_tick(
     native_daemon: NativeDaemonClient | None = None,
     emit: Callable[[str], None] | None = None,
     warned_stale: set[tuple[str, str]] | None = None,
-    warned_fetch_fail: set[str] | None = None,
+    warned_fetch_fail: set[FetchWarningKey] | None = None,
     warned_collision: set[frozenset[str]] | None = None,
     warned_ssh_key: set[str] | None = None,
     warned_disk_pressure: set[str] | None = None,
@@ -492,10 +493,12 @@ def dispatch_tick(
             have already received a "main behind origin" warning during
             this dispatcher run.  Prevents repeated spam across ticks.
             Caller owns the set; mutated in-place.
-        warned_fetch_fail: Mutable set of client names that have already
-            received a fetch-failure WARNING during this dispatcher run.
-            Suppresses repeated WARNINGs for persistently unreachable
-            remotes.  Caller owns the set; mutated in-place.
+        warned_fetch_fail: Mutable set of ``(client, outcome, reason)``
+            fetch-failure keys (:data:`cw.worktree.FetchWarningKey`) that have
+            already received a WARNING during this dispatcher run.
+            Suppresses repeats of the SAME failure for a persistently
+            unreachable remote; a different failure for the same client still
+            warns.  Caller owns the set; mutated in-place.
         warned_collision: Mutable set of ``frozenset({ticket_id_a,
             ticket_id_b})`` pairs already warned this loop run. Prevents
             duplicate WAVE_COLLISION events for persistent in-flight

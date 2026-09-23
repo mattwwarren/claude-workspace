@@ -1684,3 +1684,129 @@ def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") 
         check=True,
         env=clean_env,
     )
+
+
+def push_commit_to_origin(
+    origin: Path,
+    branch: str,
+    work_dir: Path,
+    filename: str,
+    content: str = "out-of-band\n",
+) -> str:
+    """Push one new commit to *branch* on the bare *origin* from a side clone.
+
+    Simulates an out-of-band push (another machine, a sibling session, a fix
+    agent's isolation worktree) that advances ``origin/<branch>`` without
+    touching the workspace under test. *branch* must already exist on *origin*.
+
+    The clone at *work_dir* is created only when *work_dir* does not yet exist;
+    a second call in the same test reuses it, re-syncing to the current remote
+    tip first so the new commit lands on top of whatever was pushed since.
+    Writes *content* to *filename* so a test can make upstream set a value that
+    differs from a local commit. Returns the pushed commit's SHA.
+    """
+    if not work_dir.exists():
+        subprocess.run(
+            ["git", "clone", str(origin), str(work_dir)],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_clean_git_env(),
+        )
+    git_in(work_dir, "fetch", "origin")
+    git_in(work_dir, "checkout", "-B", branch, f"origin/{branch}")
+    (work_dir / filename).write_text(content, encoding="utf-8")
+    git_in(work_dir, "add", filename)
+    git_in(
+        work_dir,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=cw test",
+        "commit",
+        "-m",
+        f"out-of-band {filename}",
+    )
+    git_in(work_dir, "push", "origin", branch)
+    return git_in(work_dir, "rev-parse", "HEAD")
+
+
+def tree_fingerprint(worktree: Path) -> tuple[str, str, str]:
+    """``(HEAD sha, porcelain status, digest of every working-tree file)``.
+
+    Byte-level: two equal fingerprints mean nothing moved HEAD, the index or a
+    single file's content in the worktree. Hoisted (#2213 round 5) from
+    ``test_reconcile_review_recipes.py`` once the dispatch claim tests needed
+    the same "nothing touched the occupied worktree" proof.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    for path in sorted(worktree.rglob("*")):
+        rel = path.relative_to(worktree)
+        if rel.parts[0] == ".git" or not path.is_file():
+            continue
+        digest.update(str(rel).encode())
+        digest.update(path.read_bytes())
+    return (
+        git_in(worktree, "rev-parse", "HEAD"),
+        git_in(worktree, "status", "--porcelain=v1", "--untracked-files=all"),
+        digest.hexdigest(),
+    )
+
+
+def occupy_worktree(
+    client: ClientConfig,
+    worktree: Path,
+    source: str,
+    *,
+    daemon: FakeNativeDaemonClient | None = None,
+) -> None:
+    """Make a live occupant appear for *worktree* through the named source.
+
+    ``state`` (a non-terminal cw session homed there) and ``roster`` (a live
+    daemon worker with that ``cwd``) are positive matches; ``unreadable-roster``
+    is the fail-closed case (occupancy cannot be ruled out). Shared by the
+    fix-agent and dispatch-claim refusal tests (#2213 round 5).
+
+    *daemon* (#2213 round 7): pass the SAME :class:`FakeNativeDaemonClient`
+    instance the caller is about to inject into ``create_worktree`` /
+    ``dispatch_tick`` / ``_spawn_claimed_task``. Occupancy checks now consult
+    the caller's own resolved daemon rather than defaulting to the real one, so
+    a ``roster``/``unreadable-roster`` occupant written to the real (tmp-
+    isolated) roster file would go unseen by an injected fake -- writing to the
+    fake directly is what makes those sources observable again. Omit it (the
+    ``state`` source is unaffected either way) only when the caller relies on
+    ``create_worktree``'s own default (no injected daemon).
+    """
+    from cw import native_daemon
+    from cw.config import load_state
+
+    if source == "state":
+        state = load_state()
+        state.sessions.append(
+            Session(
+                name=f"{client.name}/impl/occupant",
+                client=client.name,
+                purpose=SessionPurpose.IMPL,
+                origin=SessionOrigin.USER,
+                workspace_path=client.workspace_path,
+                worktree_path=worktree,
+                status=SessionStatus.ACTIVE,
+            )
+        )
+        save_state(state)
+        return
+    if daemon is not None:
+        if source == "roster":
+            daemon.seed_live_worker(worktree)
+        else:
+            daemon.roster_unreadable = True
+        return
+    roster = native_daemon._ROSTER_PATH
+    roster.parent.mkdir(parents=True, exist_ok=True)
+    if source == "roster":
+        payload = {"workers": {"aaaa1111": {"pid": 1, "cwd": str(worktree)}}}
+        roster.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        roster.write_text("{not json", encoding="utf-8")
