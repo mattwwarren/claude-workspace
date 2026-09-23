@@ -1272,6 +1272,127 @@ class TestWriteHookContext:
         # Correlation file should still be written.
         assert context_path.exists()
 
+    def test_write_hook_context_skips_settings_local_json_when_write_stop_hook_false(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2280: write_stop_hook=False skips settings.local.json entirely.
+
+        ``CodexExecutor.spawn()`` never involves a Claude session, so there is
+        no Stop hook to install — only cw-context.json's correlation metadata
+        (including ``prior_attempts_summary``) is wanted on that path.
+        """
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+
+        _write_hook_context(
+            worktree,
+            session_id="sess-codex",
+            session_name="test-client/auto-dev/137",
+            client="test-client",
+            purpose="impl",
+            ticket_id="137",
+            origin=SessionOrigin.DAEMON,
+            write_stop_hook=False,
+        )
+
+        assert not (worktree / ".claude" / "settings.local.json").exists()
+        assert (worktree / HOOK_CONTEXT_RELATIVE_PATH).exists()
+
+    def test_write_hook_context_default_write_stop_hook_true_is_byte_identical(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2280: adding write_stop_hook must not change existing callers.
+
+        Same worktree, same params, called twice — once with the parameter
+        omitted (existing callers' shape) and once with it passed explicitly
+        as ``True`` — must produce byte-identical settings.local.json.
+        """
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+        settings_path = worktree / ".claude" / "settings.local.json"
+
+        _write_hook_context(
+            worktree,
+            session_id="sess-a",
+            session_name="test-client/auto-dev/137",
+            client="test-client",
+            purpose="impl",
+            ticket_id="137",
+            origin=SessionOrigin.DAEMON,
+        )
+        without_param = settings_path.read_text()
+
+        _write_hook_context(
+            worktree,
+            session_id="sess-a",
+            session_name="test-client/auto-dev/137",
+            client="test-client",
+            purpose="impl",
+            ticket_id="137",
+            origin=SessionOrigin.DAEMON,
+            write_stop_hook=True,
+        )
+        with_param = settings_path.read_text()
+
+        assert without_param == with_param
+
+    def test_write_hook_context_prior_attempts_summary_with_write_stop_hook_false(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """#2280: the write_stop_hook=False path still collects prior_attempts_summary.
+
+        A prior terminal codex-review park (COMPLETED, blocker.reason=
+        codex_review_unparseable) is a TERMINAL_SESSION_STATUSES member, so
+        ``_collect_prior_attempts_summary`` picks it up the same way it would
+        for a Claude-native attempt — this is the CodexExecutor call shape.
+        """
+        worktree = make_git_repo("wt-codex-prior-attempts")
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="838-C",
+            client="test-client",
+            status=SessionStatus.COMPLETED,
+            last_result={
+                "status": "blocked",
+                "stage_reached": "stage3_review",
+                "blocker": {
+                    "stage": "stage3_review",
+                    "reason": "codex_review_unparseable",
+                    "details": "reviewer (codex_timeout)",
+                },
+            },
+        )
+        task = _make_pending_task(ticket_id="838-C", attempts=1)
+
+        # _call doesn't thread task through — reach _write_hook_context
+        # directly so world_state_snapshot.prior_attempts_summary is built.
+        from cw.spawn import _write_hook_context
+
+        _write_hook_context(
+            worktree,
+            session_id="sess-codex-2",
+            session_name="test-client/auto-dev/838-C",
+            client="test-client",
+            purpose="impl",
+            ticket_id="838-C",
+            origin=SessionOrigin.DAEMON,
+            task=task,
+            write_stop_hook=False,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        summary = context["world_state_snapshot"]["prior_attempts_summary"]
+        assert len(summary) == 1
+        assert summary[0]["blocker_reason"] == "codex_review_unparseable"
+
 
 class TestWriteHookContextAtomicAndLiveSession:
     """Tests for issue #427 fixes: atomic writes + DAEMON live-session guard.
