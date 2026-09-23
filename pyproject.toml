@@ -1,6 +1,6 @@
 [project]
 name = "claude-workspace"
-version = "1.49.0"
+version = "1.50.0"
 description = "Multi-session workspace orchestrator for Claude Code"
 readme = "README.md"
 authors = [
