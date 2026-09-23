@@ -46,12 +46,15 @@ from cw.codex_review._context import (
 )
 from cw.codex_review._context._prompt_text import _ADJUDICATED_INSTRUCTIONS
 from cw.codex_runner import FakeCodexRunner
+from cw.events import read_events
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, SessionOrigin
+from cw.models.enums import OrchestratorEventType
 from cw.review_adjudication import render_voided_findings_block
 from cw.review_finding_dispositions import (
     FindingDisposition,
     _disposition_key,
+    disposition_event_payload,
     render_finding_disposition_block,
 )
 from cw.review_markers import DISPOSITION_SENTINEL, SETTLE_SECTION_HEADING
@@ -2269,6 +2272,32 @@ class TestRenderAdjudicatedFindingsBlock:
         assert block is not None
         assert "ACCEPTED" in block
 
+    def test_a_reversed_entry_is_never_told_to_the_reviewer(self) -> None:
+        """#2232: a withdrawal is the absence of a decision, not one.
+
+        This block is BINDING — it tells the model the finding is decided —
+        so rendering a ``REVERSED`` line would assert the opposite of what a
+        reversal means. A ledger whose only entry is reversed has nothing to
+        say, so the whole block is elided.
+        """
+        assert (
+            _render_adjudicated_findings_block(_disposition_ledger(outcome="REVERSED"))
+            is None
+        )
+
+    def test_a_reversed_entry_is_dropped_beside_a_live_one(self) -> None:
+        ledger = {
+            **_disposition_ledger(),
+            **_disposition_ledger(file="src/cw/bar.py", outcome="REVERSED"),
+        }
+        block = _render_adjudicated_findings_block(ledger)
+
+        assert block is not None
+        assert "REVERSED" not in block
+        assert "src/cw/bar.py" not in block
+        assert "src/cw/foo.py" in block
+        assert block.count("\n- ") == 1
+
     def test_the_hand_authored_block_warning_is_built_from_the_shared_sentinel(
         self,
     ) -> None:
@@ -2501,6 +2530,148 @@ class TestPrepareReviewPassFindingDispositions:
                 for ledger in ledgers
             ],
         )
+
+    def _reverted_events(self) -> list[object]:
+        return [
+            event.payload
+            for event in read_events(
+                event_types=[OrchestratorEventType.REVIEW_FINDING_DISPOSITION_REVERTED]
+            )
+        ]
+
+    def test_a_withdrawal_arriving_from_the_thread_is_audited(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2232 MUST_FIX 3: the sync path emits the reversal audit event.
+
+        ``cw review settle`` records one event per record it writes; this path
+        — the review pass folding the ticket thread's marker into the durable
+        ledger — recorded nothing. #2232 is what makes a withdrawal of a
+        load-bearing suppression reachable through it.
+        """
+        repo = self._repo(make_git_repo, "wt-2232-thread-revert")
+        stored = _disposition_ledger(rationale="settled in round 1")
+        key = next(iter(stored))
+        withdrawal = _disposition_ledger(
+            outcome="REVERSED",
+            rationale="the code moved, withdraw it",
+            recorded_at="2026-09-01T00:00:00Z",
+        )
+        self._thread(monkeypatch, withdrawal)
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+
+        _prepare_review_pass(
+            _make_ticket_task(
+                ticket_id="T-1", client="test", finding_dispositions=stored
+            ),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2232-thread-revert",
+        )
+
+        assert self._reverted_events() == [
+            disposition_event_payload(key, withdrawal[key])
+        ]
+
+    def test_a_settle_arriving_from_the_thread_emits_no_reversal(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only REVERSED is audited here; #2210's other two outcomes are unchanged."""
+        repo = self._repo(make_git_repo, "wt-2232-thread-settle")
+        self._thread(monkeypatch, _disposition_ledger())
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+
+        _prepare_review_pass(
+            _make_ticket_task(ticket_id="T-1", client="test"),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2232-thread-settle",
+        )
+
+        assert self._reverted_events() == []
+
+    def test_a_withdrawal_already_on_the_row_is_not_re_audited(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The marker is re-parsed every pass; the audited act happened once."""
+        repo = self._repo(make_git_repo, "wt-2232-thread-idempotent")
+        withdrawal = _disposition_ledger(
+            outcome="REVERSED", recorded_at="2026-09-01T00:00:00Z"
+        )
+        self._thread(monkeypatch, withdrawal)
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+
+        _prepare_review_pass(
+            _make_ticket_task(
+                ticket_id="T-1", client="test", finding_dispositions=withdrawal
+            ),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2232-thread-idempotent",
+        )
+
+        assert self._reverted_events() == []
+
+    def test_a_failed_audit_write_does_not_abort_the_review_pass(
+        self,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Degrades where the settle command raises, for a documented reason.
+
+        There the caller can still refuse to write the marker; here the
+        operator's decision already exists durably on the ticket thread and
+        there is nothing to hold back. Parking a run over an event-store
+        OSError would trade a safe outcome for a stalled one.
+        """
+        repo = self._repo(make_git_repo, "wt-2232-thread-emit-fails")
+        withdrawal = _disposition_ledger(
+            outcome="REVERSED", recorded_at="2026-09-01T00:00:00Z"
+        )
+        key = next(iter(withdrawal))
+        self._thread(monkeypatch, withdrawal)
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "event store is gone"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.events.record_event", _raise)
+        with caplog.at_level(logging.WARNING, logger="cw.codex_review._context.core"):
+            prepared = _prepare_review_pass(
+                _make_ticket_task(ticket_id="T-1", client="test"),
+                repo,
+                "main",
+                runner=FakeCodexRunner(),
+                session_id="s-2232-thread-emit-fails",
+            )
+
+        assert prepared.finding_dispositions == withdrawal
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and r.name == "cw.codex_review._context.core"
+        ]
+        assert len(warnings) == 1
+        assert "T-1" in warnings[0]
+        assert key in warnings[0]
 
     def test_an_invalid_marker_record_never_evicts_the_stored_entry(
         self,

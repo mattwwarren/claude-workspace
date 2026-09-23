@@ -40,6 +40,7 @@ import click
 
 from cw.cli._base import main
 from cw.cli._hook_io import (
+    _context_str,
     _read_cw_context,
     _read_hook_stdin_json,
     _write_cw_context_locked,
@@ -220,12 +221,6 @@ def _resolve_settings(client: str | None, lane: str | None) -> _GuardSettings:
     return _GuardSettings(enabled, repeat_threshold, window_seconds)
 
 
-def _str_or_none(context: dict[str, object], key: str) -> str | None:
-    """Return ``context[key]`` when it is a non-empty string, else None."""
-    value = context.get(key)
-    return value if isinstance(value, str) and value else None
-
-
 def _entry_within(entry: object, cutoff: datetime) -> bool:
     """Return True iff *entry* is a well-formed record newer than *cutoff*."""
     if not isinstance(entry, dict):
@@ -325,9 +320,9 @@ def _classify_command(
         return _BlockDecision(
             reason=reason,
             command_hash=command_hash,
-            client=_str_or_none(context, "client"),
-            lane=_str_or_none(context, "lane"),
-            session_id=_str_or_none(context, "session_id"),
+            client=_context_str(context, "client"),
+            lane=_context_str(context, "lane"),
+            session_id=_context_str(context, "session_id"),
             repeat_threshold=repeat_threshold,
             window_seconds=window_seconds,
         )
@@ -378,7 +373,7 @@ def _classify() -> _BlockDecision | None:
 
     context = _read_cw_context(cwd_value) or {}
     settings = _resolve_settings(
-        _str_or_none(context, "client"), _str_or_none(context, "lane")
+        _context_str(context, "client"), _context_str(context, "lane")
     )
     # Gate before touching state: a disabled guard must leave no trace in
     # cw-context.json at all, not merely decline to block.

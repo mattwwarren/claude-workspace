@@ -91,7 +91,18 @@ Public surface: :class:`FindingDisposition`, :data:`Outcome`,
 :func:`parse_finding_disposition_block`,
 :func:`partition_enforceable_dispositions`, :func:`log_refused_dispositions`,
 :func:`merge_finding_dispositions`, :func:`split_disposition_key`,
-:func:`suppress_adjudicated_findings`. The marker's own vocabulary —
+:func:`suppress_adjudicated_findings`, :func:`disposition_drifted`.
+
+#2232 closes the two gaps ADR-0016's Consequences section named as
+preconditions for ever arming the claim tier. Rollback is a third ``Outcome``
+value, ``"REVERSED"``, reusing ``cw review settle`` as its producer so the
+ledger keeps its one write chokepoint. Staleness is
+:func:`disposition_drifted` plus ``ReviewVerdict.stale_dispositions``: a record
+whose code moved since it was settled stops being APPLIED and is reported,
+rather than being expired — the same "make it visible instead of adding an
+expiry" choice this module's identity design already made.
+
+The marker's own vocabulary —
 :data:`~cw.review_markers.DISPOSITION_SENTINEL`,
 :data:`~cw.review_markers.SETTLE_SECTION_HEADING` and
 :class:`~cw.review_markers.RefusedDisposition` — belongs to
@@ -104,26 +115,50 @@ import hashlib
 import json
 import logging
 import re
+import subprocess
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel
 
-from cw.review_markers import DISPOSITION_SENTINEL, RefusedDisposition
+from cw.review_markers import (
+    DISPOSITION_SENTINEL,
+    RefusedDisposition,
+    StaleDisposition,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from pathlib import Path
 
+    from cw.models.enums import OrchestratorEventType
     from cw.review_findings import AcceptedFinding, ReviewVerdict
 
 _log = logging.getLogger(__name__)
 
-#: The two decisions an operator can record about a finding (#1838 R2). Only
-#: ``"REJECTED"`` participates in mechanical suppression; ``"ACCEPTED"`` is a
-#: record-only annotation that reaches the prompt and changes no gate.
-Outcome = Literal["ACCEPTED", "REJECTED"]
+#: The three decisions an operator can record about a finding (#1838 R2,
+#: #2232). Only ``"REJECTED"`` participates in mechanical suppression;
+#: ``"ACCEPTED"`` is a record-only annotation that reaches the prompt and
+#: changes no gate. ``"REVERSED"`` (#2232) WITHDRAWS a prior ``cw review
+#: settle`` entry for the same identity: it matches neither the exact nor the
+#: claim tier, and — unlike ``"ACCEPTED"`` — is not shown to the reviewer as a
+#: decision, because it is the absence of one. The newest-``recorded_at``-wins
+#: merge in :func:`merge_finding_dispositions` is what makes it durable, so
+#: rollback needs no second write path.
+Outcome = Literal["ACCEPTED", "REJECTED", "REVERSED"]
 
 _REJECTED: Outcome = "REJECTED"
+#: Withdrawn, so it is never rendered into the reviewer's binding "previously
+#: adjudicated" block — see ``codex_review._context._prompt_render``.
+#:
+#: PUBLIC, unlike its siblings (#2232). Three modules outside this one have to
+#: recognise a withdrawal — the prompt renderer that must not show it, the
+#: settle command that routes it to a distinct audit event, and the review
+#: pass that audits one arriving through the comment thread — and the choice
+#: is between one exported constant and either a raw ``"REVERSED"`` literal or
+#: an underscore-prefixed cross-module import. ``_REJECTED`` stays private
+#: because nothing outside this module tests for it.
+REVERSED: Outcome = "REVERSED"
 _MUST_FIX = "MUST_FIX"
 #: ``AcceptedFinding.disposition``'s post-consolidate default — "nothing has
 #: decided anything about this finding yet". The claim tier below refuses to
@@ -966,6 +1001,214 @@ def _emit_shadow(
         )
 
 
+#: ``git diff --quiet``'s two answerable exit codes. Anything else — ``128``
+#: for an unresolvable ref or a directory that is not a repository, and any
+#: future code git adds — is an unanswered question, and this module answers
+#: those toward surfacing.
+_GIT_DIFF_UNCHANGED = 0
+_GIT_DIFF_CHANGED = 1
+
+
+def disposition_drifted(
+    worktree: Path | None,
+    entry_reviewed_sha: str,
+    current_sha: str,
+    file: str,
+) -> bool:
+    """Has *file* changed between the two shas in *worktree* (#2232)?
+
+    The predicate the ledger's drift surfacing rests on. ADR-0016 accepted, as
+    the price of an identity that is deliberately NOT evidence-anchored, that
+    a suppression outlives the code it was granted for; this is how that cost
+    stops being silent. It does not expire anything — the caller uses a
+    ``True`` here to decline to apply a record for one pass and say so.
+
+    ``False`` — do not surface — for the three cases where there is no
+    question to answer: no worktree threaded (the inert default every caller
+    that predates this ticket gets), either sha blank (a pre-#2210 record
+    carries none, and a missing field must not manufacture drift), or the two
+    shas equal (the record was settled against exactly this code). The
+    equal-sha case short-circuits before any subprocess, so the common
+    settled-this-round path costs nothing.
+
+    Otherwise ``git diff --quiet <a> <b> -- <file>``, whose exit code is the
+    whole contract: ``0`` unchanged, ``1`` changed, ``128`` for a ref this
+    worktree cannot resolve. Only ``0`` returns ``False``. Everything else —
+    an unresolvable ref, a worktree that is not a repository, an ``OSError``
+    from a missing git or a vanished directory — returns ``True``, because an
+    unanswerable question about whether a suppression is still warranted must
+    fail toward the finding staying visible. That is the same direction
+    :func:`_ledger_matches` already takes for a contested finding.
+
+    Pure stdlib at module scope by construction: this module may import
+    nothing from ``cw`` there (see the module docstring), and the nearest
+    existing ``git diff`` runner (``cw.cli.review._diff_integrity``) is
+    CLI-scoped, so importing it would invert the dependency direction the
+    split maintains. The one ``cw`` helper it does use —
+    :func:`cw._git.git_clean_env` — is a leaf module imported inside this
+    function body, the same shape as the deferred ``cw.events`` import below.
+
+    That environment is **load-bearing, not hygiene** (#2232). ``cw`` can run
+    inside a git hook, where an inherited ``GIT_DIR``/``GIT_WORK_TREE`` points
+    at the hook's repository: the diff would then be taken in a DIFFERENT tree
+    than *worktree*, silently, and its answer decides whether a settled
+    finding stays suppressed.
+    """
+    if worktree is None or not entry_reviewed_sha or not current_sha:
+        return False
+    if entry_reviewed_sha == current_sha:
+        return False
+    from cw._git import git_clean_env
+
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--quiet",
+                entry_reviewed_sha,
+                current_sha,
+                "--",
+                file,
+            ],
+            cwd=worktree,
+            capture_output=True,
+            check=False,
+            env=git_clean_env(),
+        )
+    except OSError:
+        _log.warning(
+            "auto-dev: could not run git diff for drift check (file=%s)",
+            file,
+            exc_info=True,
+        )
+        return True
+    if completed.returncode == _GIT_DIFF_UNCHANGED:
+        return False
+    if completed.returncode != _GIT_DIFF_CHANGED:
+        _log.warning(
+            "auto-dev: git diff drift check returned %d for file=%s "
+            "(%s..%s); treating the record as stale",
+            completed.returncode,
+            file,
+            entry_reviewed_sha,
+            current_sha,
+        )
+    return True
+
+
+def disposition_event_type(entry: FindingDisposition) -> OrchestratorEventType:
+    """The audit event type one settled *entry* is recorded under (#2210, #2232).
+
+    The event TYPE carries the semantic, not a field inside the payload: a
+    ``REVERSED`` entry emits ``review.finding_disposition_reverted`` and
+    everything else emits ``review.finding_settled``, so an operator asking
+    "what has been withdrawn" runs one ``cw event tail --type ...`` rather
+    than filtering settles by their ``outcome``.
+
+    Shared (#2232) by the two paths a disposition can reach the durable ledger
+    through — ``cw review settle`` and the review pass's own comment-thread
+    sync — so the type choice cannot drift between them, and so neither site
+    needs a raw ``"REVERSED"`` literal.
+    """
+    from cw.models.enums import OrchestratorEventType
+
+    return (
+        OrchestratorEventType.REVIEW_FINDING_DISPOSITION_REVERTED
+        if entry.outcome == REVERSED
+        else OrchestratorEventType.REVIEW_FINDING_SETTLED
+    )
+
+
+def disposition_event_payload(key: str, entry: FindingDisposition) -> dict[str, object]:
+    """The audit payload for one settled *entry*, keyed by its ledger *key*.
+
+    The full provenance set — who, why, when, and against what code — plus the
+    identity the record was minted for. Enumerated field by field rather than
+    ``{**entry.model_dump()}`` so adding a field to
+    :class:`FindingDisposition` is a deliberate decision about what an audit
+    consumer sees, not an automatic one.
+
+    Shared by every emitter so the shape a consumer parses is the same
+    whichever path recorded it (#2232). :func:`_emit_stale`'s payload is
+    deliberately this shape PLUS ``current_sha``.
+    """
+    return {
+        "key": key,
+        "file": split_disposition_key(key)[0],
+        "summary": entry.summary,
+        "outcome": entry.outcome,
+        "reason": entry.rationale,
+        "actor": entry.actor,
+        "recorded_at": entry.recorded_at,
+        "reviewed_sha": entry.reviewed_sha,
+    }
+
+
+def _emit_stale(
+    af: AcceptedFinding, match: _LedgerMatch, ticket_id: str, current_sha: str
+) -> None:
+    """Record a ledger match the drift check declined to apply (#2232).
+
+    Structurally :func:`_emit_shadow`'s twin — INFO line first so a failed
+    write still leaves the measurement in the log, then the event, with an
+    ``OSError`` warned rather than raised.
+
+    The asymmetry with :func:`cw.cli.review.commands._emit_settle_events`,
+    which aborts the whole settle on a failed emit, is deliberate and runs the
+    same direction both times: there the audited act CREATES a durable
+    suppression, so an unrecorded one is invisible; here the act is DECLINING
+    to suppress, which is already the safe outcome and is already visible on
+    the verdict (``stale_dispositions``) and in the finding that kept
+    blocking. Aborting a review pass over an advisory record would trade a
+    safe outcome for a parked run.
+
+    The payload is :func:`disposition_event_payload`'s shape plus
+    ``current_sha`` (#2232). Full parity with the settle/revert events is the
+    point: someone triaging a drifted suppression is asking WHO silenced this
+    finding and WHY, and a payload carrying only the two shas cannot answer
+    either. ``file``/``summary`` are overridden with the finding as it came
+    back this round rather than the record's stored copy — on a claim-tier
+    match those differ, and the live text is what the reader is looking at.
+    """
+    from cw.events import record_event
+    from cw.models.enums import OrchestratorEventType
+
+    _log.info(
+        "auto-dev: ledger match NOT suppressed, code drifted since the settle "
+        "(ticket=%s, file=%s, match=%s, reviewed_sha=%s, current_sha=%s)",
+        ticket_id,
+        af.finding.file,
+        match.kind,
+        match.entry.reviewed_sha,
+        current_sha,
+    )
+    try:
+        record_event(
+            OrchestratorEventType.REVIEW_FINDING_DISPOSITION_STALE,
+            payload={
+                **disposition_event_payload(match.key, match.entry),
+                # The finding the ledger matched, not the record's own stored
+                # copy: on a claim-tier match the two differ, and a consumer
+                # triaging a drifted suppression needs the text that actually
+                # came back this round.
+                "file": af.finding.file,
+                "summary": af.finding.summary,
+                # Drift-specific, and the only field this payload adds to the
+                # settle/revert shape: which commit the record was measured
+                # against when it was declined.
+                "current_sha": current_sha,
+            },
+            correlation_id=ticket_id,
+        )
+    except OSError:
+        _log.warning(
+            "auto-dev: could not record disposition-stale event (ticket=%s)",
+            ticket_id,
+            exc_info=True,
+        )
+
+
 def suppress_adjudicated_findings(
     verdict: ReviewVerdict,
     ledger: dict[str, FindingDisposition],
@@ -974,6 +1217,8 @@ def suppress_adjudicated_findings(
     claim_tier_enabled: bool = False,
     reviewed_sha: str = "",
     refused: list[RefusedDisposition] | None = None,
+    worktree: Path | None = None,
+    disposition_drift_check_enabled: bool = True,
 ) -> ReviewVerdict:
     """Suppress every accepted finding a prior round already REJECTED (#1838).
 
@@ -1037,6 +1282,34 @@ def suppress_adjudicated_findings(
     and ADR-0016. ``reviewed_sha`` rides onto that shadow payload only, so a
     consumer can group a re-derived finding's events by ticket, file and
     summary and count the distinct reviewed commits behind them.
+
+    ``worktree`` (#2232) turns on drift surfacing, the gap ADR-0016 named as a
+    precondition for ever arming the claim tier. When it is supplied, a match
+    whose file has changed between the record's own ``reviewed_sha`` and this
+    pass's is NOT enforced: the finding keeps blocking, a
+    :class:`~cw.review_markers.StaleDisposition` is stamped onto
+    ``stale_dispositions``, and a ``review.finding_disposition_stale`` event
+    records it. The ledger entry is left untouched — surfacing, never silent
+    expiry. ``reviewed_sha`` is this pass's side of that comparison, so a
+    caller threading ``worktree`` must thread it too; without it every
+    comparison short-circuits to "no drift" and the check is inert.
+
+    ``None`` is the fail-safe floor, the same convention
+    ``claim_tier_enabled: bool = False`` follows: a call path that never
+    threads a worktree behaves byte-for-byte as it did before this ticket.
+    The direction differs on purpose, because the risks do. A claim tier that
+    arms by accident suppresses a finding nobody settled; a drift check that
+    fails to run merely leaves the pre-#2232 behaviour in place.
+
+    ``disposition_drift_check_enabled`` (#2232) is the lane-resolved gate for
+    that check, and governs ONLY this automatic call site. It defaults ``True``
+    — a check is presumed wanted, unlike a feature — so the failure direction
+    of a threading mistake is "the check ran when it could have been skipped",
+    which costs one ``git diff``. ``False`` enforces a match exactly as if the
+    check did not exist, whatever ``worktree`` says. ``cw review dispositions
+    --worktree`` calls :func:`disposition_drifted` directly and is deliberately
+    not gated by this, so an operator who turned the gate off to debug can
+    still see what is stale.
     """
     enforceable, ledger_refused = partition_enforceable_dispositions(ledger)
     reported = {record.key: record for record in refused or []}
@@ -1053,12 +1326,36 @@ def suppress_adjudicated_findings(
     if not matches:
         return verdict
 
+    drift_check_on = worktree is not None and disposition_drift_check_enabled
     enforced: dict[int, _LedgerMatch] = {}
+    stale: list[StaleDisposition] = []
     for index, match in matches.items():
-        if match.kind == _MATCH_EXACT or claim_tier_enabled:
-            enforced[index] = match
-        else:
-            _emit_shadow(verdict.accepted[index], match, ticket_id, reviewed_sha)
+        af = verdict.accepted[index]
+        if match.kind != _MATCH_EXACT and not claim_tier_enabled:
+            _emit_shadow(af, match, ticket_id, reviewed_sha)
+            continue
+        if drift_check_on and disposition_drifted(
+            worktree, match.entry.reviewed_sha, reviewed_sha, af.finding.file
+        ):
+            stale.append(
+                StaleDisposition(
+                    key=match.key,
+                    reviewed_sha=match.entry.reviewed_sha,
+                    current_sha=reviewed_sha,
+                )
+            )
+            _emit_stale(af, match, ticket_id, reviewed_sha)
+            continue
+        enforced[index] = match
+    if stale:
+        verdict = verdict.model_copy(
+            update={
+                "stale_dispositions": [
+                    *verdict.stale_dispositions,
+                    *sorted(stale, key=lambda record: record.key),
+                ]
+            }
+        )
     if not enforced:
         return verdict
 

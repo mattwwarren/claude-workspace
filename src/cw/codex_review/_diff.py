@@ -12,6 +12,7 @@ import re
 import subprocess
 from typing import TYPE_CHECKING
 
+from cw._git import capture_head_sha
 from cw.review_findings import CapturedDiff
 
 if TYPE_CHECKING:
@@ -128,10 +129,14 @@ def _capture_head_sha(worktree: Path) -> str:
     that only needs the head SHA — the fix loop's delta-mode review pass —
     doesn't also pay for a full ``git diff`` subprocess call and unified-diff
     parse it has no use for.
+
+    Now a thin alias over :func:`cw._git.capture_head_sha` (#2232), which
+    ``cw review dispositions`` shares with an explicit best-effort error
+    policy. Keeping the name here keeps this package's import sites and its
+    ``__init__`` re-export stable; ``strict=True`` preserves the raise-on-
+    failure behaviour every existing caller was written against.
     """
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
-    ).strip()
+    return capture_head_sha(worktree, strict=True)
 
 
 def _build_captured_diff(diff_text: str) -> tuple[CapturedDiff, list[str]]:

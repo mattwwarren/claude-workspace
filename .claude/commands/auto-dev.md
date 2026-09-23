@@ -86,6 +86,8 @@ Everything else runs to completion or exits with a structured error.
 - Large path is unchanged (already exits at S3), but include the full health summary in the result payload.
 - When this rule downgrades the status, set `health.downgrade_applied: true` in the structured output. (Distinct from `health.fix_loop_escalated` which signals fix-loop escalation events — see Step 3b.5.)
 
+**Agent spawn typing rule (#2211):** every spawn at every stage MUST name an explicit `subagent_type` (`"general-purpose"` for real work, `"Read Only Helper"` for an extraction or lookup that must not be able to write). **Never fork.** An unnamed or forked subagent takes no `cw` roster entry, so cw can neither see it start nor stop it (#2017); a fork additionally inherits the parent's tools and its mandate, which is how #2211's read-only helper ended up committing and pushing to a live branch. In a headless worker `cw agent-spawn-pre` refuses an explicit fork outright (exit 2), and refuses an omitted type on the same terms now that every command file's spawn sites are typed (#2253 tracks whether `review-sweep.md`'s six roles should become real agents).
+
 **Agent spawn rule:** every agent prompt in headless mode MUST include BOTH the Friction Protocol block AND the Health Check block. Implementation and fix-loop agents MUST additionally include the Completion Artifacts block (see Subagent Reliability Mitigations section). Every spawn MUST set a wall-clock timeout per Mitigation 4 (recommended: 30m for impl, 15m for fix/review, 10m for lightweight); a non-returning task is treated as `agent_block`, not a hang.
 
 **Out of scope in headless mode:**
@@ -537,7 +539,7 @@ Options:
 ```
 
 - **Fix all / Fix critical / Cherry-pick** → For each PR being fixed:
-  - **CI failure:** Spawn agent in that PR's branch to investigate and fix. Push. Wait 10m for CI (per Stage 5 protocol).
+  - **CI failure:** Spawn agent (`subagent_type: "general-purpose"`) in that PR's branch to investigate and fix. Push. Wait 10m for CI (per Stage 5 protocol).
   - **Changes requested:** Surface full feedback, apply fixes, push, reply to comments. Wait 10m for CI.
   - **Merge conflicts:** Fetch main, merge, resolve conflicts, re-run quality gates, push. Wait 10m for CI.
   - After all fixes: re-scan to confirm health, then proceed to Stage 1.
@@ -1149,7 +1151,7 @@ When `status: "blocked"`, the `blocker.reason` field carries one of:
 
 Other `blocker.reason` values are reserved for future use; consumers should treat unknown reasons as opaque strings and surface them to the user verbatim.
 
-**Fix-dispatch failures carry no `blocker.reason` at all** (#2017). Since the fix agent is dispatched asynchronously by a reconcile tick, no session is running when a dispatch fails — there is no sentinel to put a reason in. Those failures surface as events instead: `stage.errored` with `error_kind: "fix_dispatch_failed"` and `session.needs_attention` with `paused_status: "fix_dispatch_failed"` (the error text in `breadcrumbs`). See `docs/events.md`.
+**Fix-dispatch failures carry no `blocker.reason` at all** (#2017). Since the fix agent is dispatched asynchronously by a reconcile tick, no session is running when a dispatch fails — there is no sentinel to put a reason in. Those failures surface as events instead: `stage.errored` with `error_kind: "fix_dispatch_failed"` and `session.needs_attention` with `paused_status: "fix_dispatch_failed"` (the error text in `breadcrumbs`). See `docs/events.md`. One class is an exception: when no remote ref's tip matches the worktree's HEAD, the row parks `BLOCKED_ON_USER` with `disposition: fix_dispatch_ref_unresolved` and emits only `session.needs_attention` (no `stage.errored`), keeping `pending_fix_dispatch` as evidence of the action list the REVIEW round derived (#2209). That retention is not a resume point — `cw dev-queue requeue` sets the row PENDING, the handoff is dropped by the #2142 stale-handoff sweep, and the ticket is claimed into a fresh REVIEW session (#2265).
 
 ### Field Notes
 

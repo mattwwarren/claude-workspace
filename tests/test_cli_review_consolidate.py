@@ -387,6 +387,10 @@ class TestReviewConsolidateCommand:
             # want of provenance. Always emitted, empty here — this command
             # applies no disposition ledger at all.
             "refused_dispositions",
+            # #2232: ledger records whose code drifted since they were settled,
+            # so the suppression was not applied. Always emitted, empty here
+            # for the same reason `refused_dispositions` is.
+            "stale_dispositions",
         }
         assert verdict["unmatched_adjudication_count"] == 0
         assert verdict["capability_mode"] is None

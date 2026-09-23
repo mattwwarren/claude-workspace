@@ -218,6 +218,12 @@ class OrchestratorEventType(StrEnum):
     # docs/events.md for the payload shape and the --once / single-loop-
     # invariant caveats.
     USAGE_LIMIT_CLEARED = "dispatch.usage_limit_cleared"
+    # #1409 -- the set-side counterpart to USAGE_LIMIT_CLEARED: fires once per
+    # client whose usage-limit back-off window is opened, carrying the deadline
+    # and whether it came from a parsed reset or the flat fallback. Without it
+    # a multi-hour per-client lockout left no durable record, only a log line.
+    # See docs/events.md for the payload shape.
+    USAGE_LIMIT_ARMED = "dispatch.usage_limit_armed"
     SESSION_PHANTOM_REVERTED = "session.phantom_reverted"
     SESSION_SALVAGE_SKIPPED = "session.salvage_skipped"
     SESSION_REAP_PROPOSED = "session.reap_proposed"
@@ -447,6 +453,28 @@ class OrchestratorEventType(StrEnum):
     # finding. `correlation_id` is the ticket id when `--ticket` names one
     # (the payload the blocking comment renders carries no ticket), else None.
     REVIEW_FINDING_SETTLED = "review.finding_settled"
+    # GitHub #2232 -- an operator ran `cw review settle` with `outcome:
+    # REVERSED`, withdrawing a prior ledger entry for the same identity. The
+    # rollback ADR-0016 named as a precondition for ever arming the claim
+    # tier, produced by settle itself rather than by a second write path.
+    # Deliberately distinct from REVIEW_FINDING_SETTLED above rather than the
+    # same type with a different `outcome` in the payload: every other
+    # semantically distinct ledger act in this region already gets its own
+    # type (SUPPRESSED vs CLAIM_SHADOWED share one emitting function and are
+    # still two types) precisely so `cw event tail --type ...` answers "what
+    # was withdrawn" without a consumer branching on payload content.
+    REVIEW_FINDING_DISPOSITION_REVERTED = "review.finding_disposition_reverted"
+    # GitHub #2232 -- a ledger record matched a re-derived finding, but the
+    # file changed between the sha the record was settled against and the sha
+    # this pass reviewed, so the suppression was NOT applied and the finding
+    # kept blocking. Emitted by `suppress_adjudicated_findings`.
+    # Not mandatory in REVIEW_FINDING_DISPOSITION_SUPPRESSED's sense, and the
+    # emitter reflects that: the "effect" recorded here is declining to
+    # suppress, which is already the safe direction and already visible on the
+    # posted comment (`ReviewVerdict.stale_dispositions`), so a failed write
+    # warns rather than aborting the pass. Distinct from CLAIM_SHADOWED, whose
+    # counterfactual is "the gate was closed", not "the code moved".
+    REVIEW_FINDING_DISPOSITION_STALE = "review.finding_disposition_stale"
     # GitHub #1927 -- a stale_dispatch park's WatchedPr registration found an
     # active watch for the same (repo, pr_number) already owned by a
     # DIFFERENT, non-None client. register_or_adopt_watched_pr refuses to

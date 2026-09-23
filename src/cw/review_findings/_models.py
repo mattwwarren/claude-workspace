@@ -19,14 +19,15 @@ from pydantic.json_schema import SkipJsonSchema
 
 from cw.auto_dev_result import Review
 
-# #2210: the one model group member NOT declared here. RefusedDisposition is
-# owned by cw.review_markers, beside the marker vocabulary whose refusals it
-# records. Round 4 moved it there out of cw.review_finding_dispositions: this
-# package is the EXECUTOR-NEUTRAL finding contract, so a dependency on one
-# executor's ledger implementation inverted the direction the split exists to
-# keep. cw.review_markers imports nothing from ``cw`` at all, so this is a leaf
+# #2210/#2232: the two model group members NOT declared here.
+# RefusedDisposition and StaleDisposition are owned by cw.review_markers,
+# beside the marker vocabulary whose refusals and staleness they record. Round
+# 4 moved the first there out of cw.review_finding_dispositions: this package
+# is the EXECUTOR-NEUTRAL finding contract, so a dependency on one executor's
+# ledger implementation inverted the direction the split exists to keep.
+# cw.review_markers imports nothing from ``cw`` at all, so this is a leaf
 # edge that can never close a cycle.
-from cw.review_markers import RefusedDisposition
+from cw.review_markers import RefusedDisposition, StaleDisposition
 
 # "DEBT" (#1837) is the non-blocking severity for a real problem the reviewer
 # found on code this diff did not cause: it is tracked in the verdict's debt
@@ -681,6 +682,14 @@ class ReviewVerdict(BaseModel):
     the findings sections already show; this list is what makes the attempt
     visible rather than silent.
 
+    ``stale_dispositions`` (#2232) is the same channel for the other way a
+    record stops applying: the code at the finding's location changed between
+    the sha the record was settled against and the sha this pass reviewed, so
+    the suppression was NOT applied and the finding kept blocking. Recorded,
+    never a gate, for the identical reason ``refused_dispositions`` is — and
+    the ledger entry itself is left intact, because ADR-0016 rejects silent
+    expiry: an operator re-settles it against the current code, or does not.
+
     ``unmatched_adjudication_count`` (#1805) is written solely by
     :func:`cw.review_adjudication.apply_adjudication`: the number of
     adjudication entries that matched no accepted finding (stale anchor,
@@ -754,6 +763,14 @@ class ReviewVerdict(BaseModel):
     # a finding keep blocking, which is already the visible consequence — this
     # field is what stops the attempt itself from being invisible.
     refused_dispositions: list[RefusedDisposition] = Field(default_factory=list)
+    # #2232: disposition-ledger records the reader DID key onto a finding but
+    # declined to apply, because the file changed between the record's
+    # `reviewed_sha` and this pass's. Stamped exclusively by
+    # `cw.review_finding_dispositions.suppress_adjudicated_findings`, on the
+    # same additive/default-empty/reporting-only terms as
+    # `refused_dispositions` above. Surfacing, not expiry: the entry stays in
+    # the durable ledger, so re-settling is an operator's decision to make.
+    stale_dispositions: list[StaleDisposition] = Field(default_factory=list)
 
 
 class CapturedDiff(BaseModel):

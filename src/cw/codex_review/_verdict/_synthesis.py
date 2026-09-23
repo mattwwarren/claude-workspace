@@ -172,6 +172,7 @@ def synthesize_codex_review_result(
     finding_dispositions: dict[str, FindingDisposition] | None = None,
     refused_dispositions: list[RefusedDisposition] | None = None,
     claim_tier_enabled: bool = False,
+    disposition_drift_check_enabled: bool = True,
     pre_validation_rejected: list[RejectedFinding] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
@@ -338,6 +339,10 @@ def synthesize_codex_review_result(
     # the same reason. Ordered AFTER the void pass deliberately — it recomputes
     # must_fix from the stamped dispositions, so it composes with whatever the
     # void pass already suppressed rather than resurrecting it.
+    # #2232: `worktree` is what turns drift surfacing on — a match whose file
+    # moved since the record's own reviewed_sha is reported instead of applied.
+    # It costs nothing to thread: this function already takes the worktree the
+    # pass reviewed, which is the only repo the two shas are resolvable in.
     verdict = suppress_adjudicated_findings(
         verdict,
         finding_dispositions or {},
@@ -345,6 +350,8 @@ def synthesize_codex_review_result(
         claim_tier_enabled=claim_tier_enabled,
         reviewed_sha=reviewed_sha,
         refused=refused_dispositions,
+        worktree=worktree,
+        disposition_drift_check_enabled=disposition_drift_check_enabled,
     )
     block_reason = _verdict_block_reason(verdict)
     if block_reason is not None:

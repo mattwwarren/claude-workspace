@@ -211,7 +211,7 @@ Fix directly in the current session. For each finding:
 
 ### Large number of findings (4+):
 
-Spawn parallel subagents via the Task tool, grouped by file for exclusive ownership. Each agent receives:
+Spawn parallel subagents via the Task tool (`subagent_type: "general-purpose"`), grouped by file for exclusive ownership. Each agent receives:
 - The findings for its assigned files
 - The project's CLAUDE.md (if present)
 - Instruction to fix and commit each change
@@ -411,7 +411,9 @@ HEAD_SHA=$(gh pr view --json headRefOid --jq .headRefOid)
   --sha "$HEAD_SHA"
 ```
 
-Then re-run finalize with `--require-monitor` to confirm.
+`register` reports its own outcome: one JSON line on success (`{"registered": true, "key": "<owner/repo>#<n>", "sha": "<sha>", "updated": <bool>}`), or an `Error:` line on stderr and a non-zero exit on failure — no separate command is needed to learn whether it worked.
+
+Then re-run finalize with `--require-monitor` as the final contract check.
 
 ## Step 10: Clean Up
 

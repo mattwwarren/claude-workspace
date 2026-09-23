@@ -62,6 +62,11 @@ Impl is a fanned-out subagent, and Sonnet is the CLAUDE.md implementation defaul
 unresolvable case defaults to `small`/Sonnet, and the operator can re-dispatch with
 `--scope large` to force Opus.
 
+**Every variant below also passes `subagent_type: "general-purpose"`** — never omitted,
+and never a fork. An unnamed or forked spawn takes no `cw` roster entry, so the
+orchestrator can neither see it start nor stop it (#2017/#2211); in a headless worker
+`cw agent-spawn-pre` refuses an explicit fork outright.
+
 **Spawn shape depends on mode AND dispatch context** (all variants pass `model: $IMPL_MODEL`
 resolved above — Sonnet for Small scope, Opus for Large):
 
@@ -79,6 +84,17 @@ with no-op `Bash` calls (`true`, `sleep`, repeated polls). This async-dispatch e
 scoped to the Agent tool's subagent spawn only — it does not extend to a raw Bash call; see
 `auto-dev.md`'s Worker Execution Discipline section for the no-backgrounding rule that
 applies there.
+
+**Read-only helper spawns (#2211).** When a tracker thread (or any other source) is too
+large to read directly, do NOT fork a subagent to go and get it. Fetch it yourself first —
+e.g. `gh issue view <n> --json comments > .cw/<name>.json` — then spawn
+`subagent_type: "Read Only Helper"` (`model: "haiku"`) and hand it the file path. That
+agent's `tools: [Read, Grep, Glob]` allowlist makes it structurally unable to edit, commit
+or push; the guarantee is the allowlist, not the prompt. **Never fork**, and never hand a
+read-only lookup to `general-purpose` — both inherit write capability, and a fork inherits
+this stage's implementation mandate on top of it. The incident and the reasoning are in
+`.claude/commands/auto-dev-impl-appendix.md`, section "Read-only helper spawns: capability,
+not instruction (#2211)".
 
 **A subagent's turn-end is a *return*, not a pause: the impl agent must finish
 its build/test commands inside its own turn rather than backgrounding them and

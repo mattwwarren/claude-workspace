@@ -17,6 +17,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -27,6 +28,7 @@ from cw.gh import AGENT_COMMENT_MARKER
 from cw.models.enums import OrchestratorEventType
 from cw.review_debt import fingerprint_v1
 from cw.review_finding_dispositions import (
+    REVERSED,
     FindingDisposition,
     _claim_similarity,
     _claim_symbols,
@@ -34,6 +36,9 @@ from cw.review_finding_dispositions import (
     _disposition_key,
     _render_suppression_signal,
     build_finding_disposition_ledger,
+    disposition_drifted,
+    disposition_event_payload,
+    disposition_event_type,
     log_refused_dispositions,
     merge_finding_dispositions,
     parse_finding_disposition_block,
@@ -46,7 +51,10 @@ from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
 from cw.review_markers import DISPOSITION_SENTINEL, RefusedDisposition
 from tests._cli_review_helpers import CLAIM_ROW1_CANDIDATE, CLAIM_ROW1_RECORDED
 
-from .conftest import _make_finding
+from .conftest import _make_finding, commit_tracked_file, git_in
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-1838"
@@ -1845,3 +1853,464 @@ def test_module_imports_cleanly_whichever_module_loads_first(first: str) -> None
         "assert TicketTask(ticket_id='T-1', client='c').finding_dispositions == {}\n"
     )
     subprocess.run([sys.executable, "-c", script], check=True)
+
+
+# ---------------------------------------------------------------------------
+# disposition_drifted / drift surfacing (#2232)
+# ---------------------------------------------------------------------------
+
+
+class TestDispositionDrifted:
+    """#2232: has the code a settle was granted against moved since?
+
+    The predicate the ledger's "surface, don't silently suppress" behaviour
+    rests on. It fails toward SURFACING — an unanswerable question reads as
+    drift — matching this module's own "a contest fails toward blocking"
+    posture: the safe direction is a finding that keeps blocking and can be
+    re-settled, never a suppression nobody can account for.
+    """
+
+    def test_unchanged_file_across_two_commits_is_not_drift(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = make_git_repo("wt-2232-same")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        first = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/other.py", "b = 2\n")
+        second = git_in(worktree, "rev-parse", "HEAD")
+        assert first != second
+        assert disposition_drifted(worktree, first, second, "src/cw/foo.py") is False
+
+    def test_changed_file_across_two_commits_is_drift(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = make_git_repo("wt-2232-changed")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        first = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 2  # reworked\n")
+        second = git_in(worktree, "rev-parse", "HEAD")
+        assert disposition_drifted(worktree, first, second, "src/cw/foo.py") is True
+
+    def test_identical_shas_short_circuit_without_running_git(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        worktree = make_git_repo("wt-2232-samesha")
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            msg = "equal shas must not shell out to git"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(subprocess, "run", _boom)
+        assert disposition_drifted(worktree, "abc1234", "abc1234", "f.py") is False
+
+    @pytest.mark.parametrize(
+        ("entry_sha", "current_sha"),
+        [("", "abc1234"), ("abc1234", ""), ("", "")],
+    )
+    def test_a_blank_sha_is_not_drift(
+        self,
+        make_git_repo: Callable[..., Path],
+        entry_sha: str,
+        current_sha: str,
+    ) -> None:
+        """A pre-#2210 record carries no reviewed sha; that is not drift.
+
+        There is nothing to compare against, so the conservative direction is
+        the one that preserves the suppression the operator already recorded
+        rather than manufacturing drift out of a missing field.
+        """
+        worktree = make_git_repo(f"wt-2232-blank-{entry_sha}-{current_sha}")
+        assert disposition_drifted(worktree, entry_sha, current_sha, "f.py") is False
+
+    def test_no_worktree_is_the_inert_default(self) -> None:
+        """``worktree=None`` is the fail-safe floor every unthreaded caller gets."""
+        assert disposition_drifted(None, "abc1234", "def5678", "f.py") is False
+
+    def test_an_unresolvable_sha_fails_toward_surfacing(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = make_git_repo("wt-2232-badsha")
+        assert (
+            disposition_drifted(worktree, "0" * 40, "1" * 40, "src/cw/foo.py") is True
+        )
+
+    def test_a_failed_git_invocation_fails_toward_surfacing(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An OSError (no git on PATH, vanished worktree) reads as drift too."""
+        worktree = make_git_repo("wt-2232-oserror")
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "git is gone"
+            raise OSError(msg)
+
+        monkeypatch.setattr(subprocess, "run", _raise)
+        assert disposition_drifted(worktree, "aaa", "bbb", "src/cw/foo.py") is True
+
+    def test_an_inherited_git_dir_cannot_redirect_the_diff(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2232 MUST_FIX 1: the hook hazard, on the drift path.
+
+        Under a hook-set ``GIT_DIR`` an unsanitized ``git diff`` runs against
+        the HOOK's repository, which cannot resolve either of these shas — so
+        it exits 128 and the record reads as drifted. The answer would be
+        wrong in the *safe* direction, but it would be wrong about a different
+        repository entirely, and that is what decides whether a settled
+        finding stays suppressed.
+        """
+        worktree = make_git_repo("wt-2232-hostile-gitdir")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        first = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/other.py", "b = 2\n")
+        second = git_in(worktree, "rev-parse", "HEAD")
+        decoy = make_git_repo("wt-2232-hostile-decoy")
+        monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+
+        assert disposition_drifted(worktree, first, second, "src/cw/foo.py") is False
+
+
+class TestDispositionEventShape:
+    """#2232 MUST_FIX 2/4: one type choice and one payload for every emitter.
+
+    A settle recorded by ``cw review settle`` and one synced in from the
+    ticket thread must be indistinguishable to a consumer, and neither site
+    may carry a raw ``"REVERSED"`` literal.
+    """
+
+    def test_a_reversed_entry_gets_the_reverted_type(self) -> None:
+        entry = FindingDisposition(outcome=REVERSED, summary="Bug here")
+
+        assert (
+            disposition_event_type(entry)
+            == OrchestratorEventType.REVIEW_FINDING_DISPOSITION_REVERTED
+        )
+
+    @pytest.mark.parametrize("outcome", ["REJECTED", "ACCEPTED"])
+    def test_every_other_outcome_gets_the_settled_type(self, outcome: str) -> None:
+        entry = FindingDisposition.model_validate(
+            {"outcome": outcome, "summary": "Bug here"}
+        )
+
+        assert (
+            disposition_event_type(entry)
+            == OrchestratorEventType.REVIEW_FINDING_SETTLED
+        )
+
+    def test_the_payload_carries_the_full_provenance_set(self) -> None:
+        key = _disposition_key("src/cw/foo.py", "Bug here")
+        assert key is not None
+        entry = FindingDisposition(
+            outcome="REJECTED",
+            rationale="intentional, see ADR-0016",
+            recorded_at="2026-09-01T00:00:00Z",
+            actor="matt",
+            reviewed_sha="abc1234",
+            summary="Bug here",
+        )
+
+        payload = disposition_event_payload(key, entry)
+
+        assert payload == {
+            "key": key,
+            "file": "src/cw/foo.py",
+            "summary": "Bug here",
+            "outcome": "REJECTED",
+            "reason": "intentional, see ADR-0016",
+            "actor": "matt",
+            "recorded_at": "2026-09-01T00:00:00Z",
+            "reviewed_sha": "abc1234",
+        }
+
+
+class TestSuppressAdjudicatedFindingsDriftSurfacing:
+    """#2232: a settle whose code moved re-raises instead of suppressing.
+
+    ADR-0016 named the gap: the exact tier's identity is deliberately NOT
+    evidence-anchored, so a suppression outlives the code it was granted for.
+    This does not expire the ledger entry — it stops applying it for this pass
+    and says so, on the verdict and in the event log.
+    """
+
+    def _drifted(
+        self, make_git_repo: Callable[..., Path], name: str
+    ) -> tuple[Path, Finding, dict[str, FindingDisposition], str]:
+        worktree = make_git_repo(name)
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        first = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 2  # reworked\n")
+        second = git_in(worktree, "rev-parse", "HEAD")
+        finding = _make_finding(severity="MUST_FIX", file="src/cw/foo.py")
+        ledger = _ledger(finding, reviewed_sha=first)
+        return worktree, finding, ledger, second
+
+    def test_a_drifted_match_is_not_suppressed(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree, finding, ledger, head = self._drifted(
+            make_git_repo, "wt-2232-notsuppressed"
+        )
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            ledger,
+            ticket_id=_TICKET,
+            reviewed_sha=head,
+            worktree=worktree,
+        )
+
+        assert result.blocking is True
+        assert [f.summary for f in result.must_fix] == [finding.summary]
+        assert result.accepted[0].disposition == "fixed"
+
+    def test_the_drifted_record_is_reported_on_the_verdict(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree, finding, ledger, head = self._drifted(
+            make_git_repo, "wt-2232-reported"
+        )
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            ledger,
+            ticket_id=_TICKET,
+            reviewed_sha=head,
+            worktree=worktree,
+        )
+
+        ((key, entry),) = ledger.items()
+        assert [r.key for r in result.stale_dispositions] == [key]
+        assert result.stale_dispositions[0].reviewed_sha == entry.reviewed_sha
+        assert result.stale_dispositions[0].current_sha == head
+
+    def test_the_drift_emits_a_stale_event(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree, finding, ledger, head = self._drifted(make_git_repo, "wt-2232-event")
+        suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            ledger,
+            ticket_id=_TICKET,
+            reviewed_sha=head,
+            worktree=worktree,
+        )
+
+        events = read_events(
+            event_types=[OrchestratorEventType.REVIEW_FINDING_DISPOSITION_STALE]
+        )
+        assert len(events) == 1
+        assert events[0].correlation_id == _TICKET
+        ((key, entry),) = ledger.items()
+        assert events[0].payload["key"] == key
+        assert events[0].payload["file"] == finding.file
+        assert events[0].payload["summary"] == finding.summary
+        assert events[0].payload["reviewed_sha"] == entry.reviewed_sha
+        assert events[0].payload["current_sha"] == head
+        # #2232 MUST_FIX 2: consumer parity with the settle/revert events.
+        # Someone triaging a drifted suppression is asking WHO silenced this
+        # finding and WHY; two shas cannot answer either.
+        assert events[0].payload["outcome"] == entry.outcome
+        assert events[0].payload["reason"] == entry.rationale
+        assert events[0].payload["actor"] == entry.actor
+        assert events[0].payload["recorded_at"] == entry.recorded_at
+        assert set(events[0].payload) == {
+            *disposition_event_payload(key, entry),
+            "current_sha",
+        }
+        # Nothing was suppressed, so no suppression event fired for it.
+        assert (
+            read_events(
+                event_types=[
+                    OrchestratorEventType.REVIEW_FINDING_DISPOSITION_SUPPRESSED
+                ]
+            )
+            == []
+        )
+
+    def test_an_undrifted_match_still_suppresses_with_a_worktree(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = make_git_repo("wt-2232-undrifted")
+        commit_tracked_file(worktree, "src/cw/foo.py", "a = 1\n")
+        first = git_in(worktree, "rev-parse", "HEAD")
+        commit_tracked_file(worktree, "src/cw/other.py", "b = 2\n")
+        second = git_in(worktree, "rev-parse", "HEAD")
+        finding = _make_finding(severity="MUST_FIX", file="src/cw/foo.py")
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            _ledger(finding, reviewed_sha=first),
+            ticket_id=_TICKET,
+            reviewed_sha=second,
+            worktree=worktree,
+        )
+
+        assert result.blocking is False
+        assert result.stale_dispositions == []
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.REVIEW_FINDING_DISPOSITION_STALE]
+            )
+            == []
+        )
+
+    def test_the_default_worktree_is_inert(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """A caller that threads no worktree suppresses exactly as before.
+
+        The regression guard for every pre-#2232 call path: the new parameter
+        must not change one byte of behaviour when it is not supplied.
+        """
+        _worktree, finding, ledger, head = self._drifted(make_git_repo, "wt-2232-inert")
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            ledger,
+            ticket_id=_TICKET,
+            reviewed_sha=head,
+        )
+
+        assert result.blocking is False
+        assert result.stale_dispositions == []
+
+    def test_the_gate_off_suppresses_a_drifted_match(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#2232: the gate, not merely the worktree, controls the drift check."""
+        worktree, finding, ledger, head = self._drifted(make_git_repo, "wt-2232-gated")
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            ledger,
+            ticket_id=_TICKET,
+            reviewed_sha=head,
+            worktree=worktree,
+            disposition_drift_check_enabled=False,
+        )
+
+        assert result.blocking is False
+        assert result.stale_dispositions == []
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.REVIEW_FINDING_DISPOSITION_STALE]
+            )
+            == []
+        )
+
+    def test_a_stale_event_write_failure_does_not_abort_the_pass(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Advisory record: NOT suppressing is already safe without the event."""
+        worktree, finding, ledger, head = self._drifted(
+            make_git_repo, "wt-2232-emitfail"
+        )
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "event inbox is read-only"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.events.record_event", _raise)
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            result = suppress_adjudicated_findings(
+                _verdict(_accepted(finding)),
+                ledger,
+                ticket_id=_TICKET,
+                reviewed_sha=head,
+                worktree=worktree,
+            )
+
+        assert result.blocking is True
+        assert [r.key for r in result.stale_dispositions] == list(ledger)
+        assert any(_TICKET in record.getMessage() for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# The REVERSED outcome (#2232)
+# ---------------------------------------------------------------------------
+
+
+class TestReversedOutcome:
+    """#2232: a third outcome that withdraws a prior settle.
+
+    ``cw review settle`` is reused as the rollback producer, so the matchers
+    need no new code — a ``REVERSED`` entry simply is not a decision, and both
+    tiers already treat anything that is not ``REJECTED`` that way. These pin
+    that, so a later change to either matcher cannot quietly make a withdrawn
+    settle start suppressing again.
+    """
+
+    @pytest.mark.parametrize("outcome", ["ACCEPTED", "REVERSED"])
+    def test_a_non_rejected_exact_entry_never_suppresses(self, outcome: str) -> None:
+        finding = _make_finding(severity="MUST_FIX")
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            _ledger(finding, outcome=outcome),
+            ticket_id=_TICKET,
+        )
+
+        assert result.blocking is True
+        assert [f.summary for f in result.must_fix] == [finding.summary]
+        assert result.accepted[0].disposition == "fixed"
+
+    def test_a_reversed_entry_never_wins_the_claim_tier(self) -> None:
+        """Armed or not, the fuzzy tier's best match must not be a reversal."""
+        finding = _make_finding(severity="MUST_FIX", summary=CLAIM_ROW1_CANDIDATE)
+        ledger = _ledger_for(finding.file, CLAIM_ROW1_RECORDED, outcome="REVERSED")
+        result = suppress_adjudicated_findings(
+            _verdict(_accepted(finding)),
+            ledger,
+            ticket_id=_TICKET,
+            claim_tier_enabled=True,
+        )
+
+        assert result.blocking is True
+        assert read_events() == []
+
+    def test_a_reversal_overrides_an_earlier_rejection_newest_wins(self) -> None:
+        """Merge is outcome-agnostic, so the reversal is durable (#2232).
+
+        This is the whole rollback mechanism: a second ``cw review settle``
+        for the same identity with a newer ``recorded_at`` replaces the record
+        rather than sitting beside it, because ``merge_finding_dispositions``
+        resolves a duplicate key newest-wins without reading ``outcome``.
+        """
+        key = _key()
+        rejected = {key: _entry(recorded_at="2026-08-16T00:00:00Z")}
+        reversed_entry = {
+            key: _entry(outcome="REVERSED", recorded_at="2026-09-22T00:00:00Z")
+        }
+
+        merged = merge_finding_dispositions(rejected, reversed_entry)
+
+        assert merged[key].outcome == "REVERSED"
+
+    def test_a_reversal_older_than_the_rejection_does_not_win(self) -> None:
+        key = _key()
+        rejected = {key: _entry(recorded_at="2026-09-22T00:00:00Z")}
+        stale_reversal = {
+            key: _entry(outcome="REVERSED", recorded_at="2026-08-16T00:00:00Z")
+        }
+
+        merged = merge_finding_dispositions(rejected, stale_reversal)
+
+        assert merged[key].outcome == "REJECTED"
+
+    def test_a_reversal_is_a_writable_ledger_entry(self) -> None:
+        """``build_finding_disposition_ledger`` mints one like any other."""
+        ledger = build_finding_disposition_ledger(
+            [
+                (
+                    "src/cw/foo.py",
+                    "Bug here",
+                    _entry(outcome="REVERSED"),
+                )
+            ]
+        )
+        assert list(ledger) == [_key()]
+        assert ledger[_key()].outcome == "REVERSED"

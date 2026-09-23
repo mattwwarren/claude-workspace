@@ -32,7 +32,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ValidationInfo, field_validator
 
+from cw._text import _EXCERPT_LIMIT, _bounded, redact
 from cw.config import diagnostics_dir, state_dir
+
+# mypy --strict's no-implicit-reexport requires an imported name to appear
+# here (or be aliased `as` itself, which ruff's PLC0414 rejects as a no-op
+# alias) before another module's `from cw.executor_diagnostics import redact`
+# type-checks; `_bounded`/`redact` are already used below for their own sake,
+# and `_EXCERPT_LIMIT` has an existing test call site importing it from this
+# module — this only affects whether the three are checked as *re-exported*.
+__all__ = ["_EXCERPT_LIMIT", "_bounded", "redact"]
 
 _log = logging.getLogger(__name__)
 
@@ -58,51 +67,13 @@ ExecutorFailureCategory = Literal[
 # convention for closed string taxonomies.
 ExecutorName = Literal["codex", "aider", "claude", "opencode"]
 
-# Every bounded excerpt field is capped at this many characters. Matches
-# codex_runner.py's stderr[-4000:] and local_runner's _AIDER_LOG_TAIL_CHARS
-# conventions so the three never drift onto different caps.
-_EXCERPT_LIMIT = 4000
-
-_REDACTION_PLACEHOLDER = "<redacted>"
-
-# Common secret shapes. Conservative and false-positive-tolerant: over-redacting
-# a local diagnostics artifact is cheaper than leaking a token. The generic
-# high-entropy rule only fires for a 32+ char run immediately preceded by ``=``
-# or ``:`` (an assignment/header shape), so ordinary file paths are left alone.
-_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),
-    re.compile(r"ghp_[A-Za-z0-9]{36}"),
-    re.compile(r"Bearer\s+[A-Za-z0-9._-]+"),
-    re.compile(r"(?<=[=:])[A-Za-z0-9_-]{32,}"),
-    # Closes a gap the generic rule above misses (#1482): its lookbehind
-    # requires no space between "="/":" and the secret run, and has no
-    # length-floor exemption for a literal "Authorization"/"token" marker,
-    # so "Authorization: <token>" (colon-space, no "Bearer") and a short
-    # "token=<value>" both pass through unredacted.
-    re.compile(r"(?i)\b(?:Authorization|token)\s*[:=]\s*\S+"),
-)
-
-
-def _bounded(text: str) -> str:
-    """Return *text* capped at :data:`_EXCERPT_LIMIT`, keeping the tail.
-
-    When *text* exceeds the cap, the newest ``_EXCERPT_LIMIT`` characters are
-    kept and a ``...[truncated, N chars omitted]...\\n`` marker is prepended so
-    a reader knows the head was dropped (the tail carries the failure's last
-    output, which is the diagnostically useful part).
-    """
-    if len(text) <= _EXCERPT_LIMIT:
-        return text
-    omitted = len(text) - _EXCERPT_LIMIT
-    return f"...[truncated, {omitted} chars omitted]...\n{text[-_EXCERPT_LIMIT:]}"
-
-
-def redact(text: str) -> str:
-    """Replace known secret shapes in *text* with a redaction placeholder."""
-    for pattern in _SECRET_PATTERNS:
-        text = pattern.sub(_REDACTION_PLACEHOLDER, text)
-    return text
-
+# _bounded and redact live in cw._text (#1409): that module imports nothing
+# from cw, so cw.native_daemon can import them at module scope without
+# closing the cw.config -> cw._config_migrate -> cw.native_daemon ->
+# cw.executor_diagnostics -> cw.config cycle a module-level import here would
+# create. Imported (not redefined) here too, so this module's own callers
+# below and any existing `from cw.executor_diagnostics import redact` /
+# `._bounded` call site are unaffected.
 
 _REDACTED_MESSAGE_RE = re.compile(r"^<redacted: \d+ chars>$")
 

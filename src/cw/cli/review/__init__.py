@@ -11,7 +11,11 @@ grown to 951 lines. Four focused modules:
 - ``consolidate`` — the ``cw review consolidate`` command and its
   ``--documents-from`` loading helpers.
 - ``commands`` — ``register``, ``adjudicate``, ``check-voided``, ``settle``
-  (#2210), and ``verify-fixes``.
+  (#2210, plus #2232's ``REVERSED`` rollback outcome), and ``verify-fixes``.
+- ``dispositions`` — the read-only ``cw review dispositions`` ledger
+  inspection view (#2232). Its own submodule rather than a fifth command in
+  ``commands``: everything there parses an operator-supplied payload and
+  writes something, while this one only reads the dev-queue row.
 
 The per-command behavioral prose the flat module's docstring carried now lives
 on the submodule that owns that command. Importing the command submodules below
@@ -25,6 +29,7 @@ from cw.cli.review import (  # noqa: F401  (command registration side effects)
     _diff_integrity,
     commands,
     consolidate,
+    dispositions,
 )
 from cw.cli.review._group import _build_captured_diff
 

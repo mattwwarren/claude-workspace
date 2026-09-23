@@ -15,6 +15,7 @@ pipeline's own prompt as evidence — see :func:`_elide_settle_section`.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -51,6 +52,9 @@ from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
 from cw.review_adjudication import parse_voided_findings_block
 from cw.review_finding_dispositions import (
+    REVERSED,
+    disposition_event_payload,
+    disposition_event_type,
     log_refused_dispositions,
     merge_finding_dispositions,
     parse_finding_disposition_block,
@@ -72,6 +76,8 @@ if TYPE_CHECKING:
         Finding,
     )
     from cw.review_markers import RefusedDisposition
+
+_log = logging.getLogger(__name__)
 
 
 def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:
@@ -403,6 +409,71 @@ class _ReviewPassInputs(NamedTuple):
     delta_changed_files: frozenset[str] | None = None
 
 
+def _emit_thread_reversal_events(
+    task: TicketTask,
+    merged: dict[str, FindingDisposition],
+) -> None:
+    """Audit every withdrawal this pass's comment thread brought in (#2232).
+
+    The settle COMMAND emits one audit event per record it writes
+    (``cw.cli.review.commands._emit_settle_events``); this path — the review
+    pass folding the ticket thread's marker into the durable ledger — wrote
+    nothing to the audit log at all. That predates this ticket (#2210's
+    architecture), but #2232 is what makes a ``REVERSED`` record reachable
+    through it, and a withdrawal of a load-bearing suppression is materially
+    higher stakes than a hand-authored ``ACCEPTED``/``REJECTED``: it un-does a
+    decision someone made, through a surface with no command invocation to
+    point at afterwards. Same event type and same payload as the command
+    (:func:`~cw.review_finding_dispositions.disposition_event_type` /
+    :func:`~cw.review_finding_dispositions.disposition_event_payload`), so one
+    ``cw event tail --type review.finding_disposition_reverted`` sees both.
+
+    Emitted for a withdrawal that is NEW to the ledger — absent before this
+    merge, or replacing a different record under the same key. The marker is
+    re-parsed on every review pass, so emitting over ``parsed`` wholesale
+    would re-record the same withdrawal every round; what is audited is the
+    state change, which is what happened once.
+
+    Only ``REVERSED`` is emitted here, deliberately. The other two outcomes
+    reaching the ledger through this path is #2210's existing, unchanged
+    behaviour, and auditing them is its own question with its own blast
+    radius — not one to settle inside this ticket.
+
+    **Degrades rather than raising**, unlike the command. There the audited act
+    CREATES a durable suppression and the caller can refuse to write the
+    marker; here the operator's decision already exists — durably, on the
+    ticket thread — and there is nothing to hold back. Aborting a review pass
+    over an event-store ``OSError`` would park a run to protect a record that
+    the next pass re-reads and re-emits anyway. Same direction, and the same
+    reasoning, as ``review_finding_dispositions._emit_stale``.
+    """
+    reversals = [
+        (key, entry)
+        for key, entry in sorted(merged.items())
+        if entry.outcome == REVERSED and task.finding_dispositions.get(key) != entry
+    ]
+    if not reversals:
+        return
+    # Deferred import: same cycle-avoidance as the sync import below.
+    from cw.events import record_event
+
+    for key, entry in reversals:
+        try:
+            record_event(
+                disposition_event_type(entry),
+                payload=disposition_event_payload(key, entry),
+                correlation_id=task.ticket_id,
+            )
+        except OSError:
+            _log.warning(
+                "auto-dev: could not record the disposition-reverted audit "
+                "event (ticket=%s, key=%s)",
+                task.ticket_id,
+                key,
+                exc_info=True,
+            )
+
+
 def _merge_and_persist_finding_dispositions(
     task: TicketTask,
     worktree: Path,
@@ -441,6 +512,10 @@ def _merge_and_persist_finding_dispositions(
     )
     log_refused_dispositions(refused, task.ticket_id)
     merged = merge_finding_dispositions(task.finding_dispositions, parsed)
+    # Audit BEFORE the write, for the same reason the settle command does
+    # (#2232): the record of a withdrawal must not be able to lag the
+    # withdrawal itself.
+    _emit_thread_reversal_events(task, merged)
     if parsed:
         # Deferred import: cw.codex_background imports cw.codex_fix_loop, which
         # imports this package — a module-level import here would close that

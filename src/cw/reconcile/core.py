@@ -259,15 +259,19 @@ def reconcile() -> ReconcileReport:
     #
     # This hoist also moves run_fix_dispatch to AFTER run_escalation_sweep
     # (called inside _reconcile_locked above, line ~106) instead of before it
-    # as in the old _run_terminal_backstops_and_sweeps ordering. Safe: the two
-    # touch disjoint TicketTask status sets. run_fix_dispatch only ever acts on
-    # RUNNING rows and transitions them RUNNING->PENDING (fix_dispatch.py's
-    # module docstring: status stays RUNNING for the whole handoff); escalation
-    # eligibility requires BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF/FAILED
-    # (escalation.py's _is_escalation_eligible). Neither RUNNING nor PENDING is
-    # ever escalation-eligible, so run_fix_dispatch cannot flip a row into or
-    # out of the set run_escalation_sweep scans -- the reorder changes nothing
-    # escalation observes on this tick or any other.
+    # as in the old _run_terminal_backstops_and_sweeps ordering. Still safe,
+    # but not because the two touch disjoint status sets. run_fix_dispatch's
+    # ordinary path acts on RUNNING rows and transitions them RUNNING->PENDING
+    # (fix_dispatch.py's module docstring: status stays RUNNING for the whole
+    # handoff), and escalation eligibility requires
+    # BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF/FAILED (escalation.py's
+    # _is_escalation_eligible), so that path really is invisible to the sweep.
+    # Its unresolvable-remote-ref park (#2209) is NOT: it moves a row
+    # RUNNING->BLOCKED_ON_USER with an escalation-eligible disposition. The
+    # reorder is safe anyway, because the only consequence is that such a row
+    # is first seen by run_escalation_sweep on the NEXT tick -- and the sweep
+    # pages nothing until ESCALATION_PARK_MINUTES (45) have elapsed since that
+    # first sighting, so a one-tick delay is not observable.
     run_fix_dispatch(config=_orchestrator_config)
 
     if not completed_ticket_ids:

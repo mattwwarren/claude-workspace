@@ -1,7 +1,7 @@
 """Concurrency-safety tests for DISPATCH_STATE_FILE writes (#1256).
 
 Regression tests proving the lost-update race on the shared dispatch-state
-sidecar (read-merge-write across ``save_usage_limited_until``,
+sidecar (read-merge-write across ``merge_and_save_usage_limited_until``,
 ``save_availability_probe_cache``, and ``save_main_drift_latches``) is fixed
 by ``dispatch_state_lock()``. Modeled on ``tests/test_clients_lock.py``.
 
@@ -30,12 +30,12 @@ from cw.dispatch_state import (
     load_executor_blocked_markers,
     load_open_pr_probe_cache,
     load_usage_limited_until,
+    merge_and_save_usage_limited_until,
     save_availability_probe_cache,
     save_executor_blocked_marker,
     save_main_drift_latches,
     save_open_pr_probe_entries,
     save_open_pr_probe_entry,
-    save_usage_limited_until,
 )
 
 if TYPE_CHECKING:
@@ -51,7 +51,8 @@ class TestDispatchStateLockConcurrency:
         Barrier-synchronized so both threads race on the read-merge-write
         window; both keys must survive (neither write may clobber the
         other's key, per #1157's contract — now additionally serialized by
-        dispatch_state_lock()).
+        dispatch_state_lock()). ``usage_limited_until`` is a per-client
+        mapping (#1409).
         """
         barrier = threading.Barrier(2)
         errors: list[Exception] = []
@@ -61,7 +62,7 @@ class TestDispatchStateLockConcurrency:
         def write_usage_limit() -> None:
             barrier.wait()
             try:
-                save_usage_limited_until(future)
+                merge_and_save_usage_limited_until({"acme": future})
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
 
@@ -86,8 +87,8 @@ class TestDispatchStateLockConcurrency:
         assert not errors, f"save_* raised: {errors}"
 
         loaded_limit = load_usage_limited_until()
-        assert loaded_limit is not None
-        assert abs((loaded_limit - future).total_seconds()) < 1
+        assert set(loaded_limit) == {"acme"}
+        assert abs((loaded_limit["acme"] - future).total_seconds()) < 1
 
         loaded_cache = load_availability_probe_cache()
         assert loaded_cache is not None
@@ -107,7 +108,7 @@ class TestDispatchStateLockConcurrency:
         def write_usage_limit() -> None:
             barrier.wait()
             try:
-                save_usage_limited_until(future)
+                merge_and_save_usage_limited_until({"acme": future})
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
 
@@ -142,8 +143,8 @@ class TestDispatchStateLockConcurrency:
         assert not errors, f"save_* raised: {errors}"
 
         loaded_limit = load_usage_limited_until()
-        assert loaded_limit is not None
-        assert abs((loaded_limit - future).total_seconds()) < 1
+        assert set(loaded_limit) == {"acme"}
+        assert abs((loaded_limit["acme"] - future).total_seconds()) < 1
 
         loaded_cache = load_availability_probe_cache()
         assert loaded_cache is not None
@@ -178,7 +179,7 @@ class TestDispatchStateLockConcurrency:
         def write_usage_limit() -> None:
             barrier.wait()
             try:
-                save_usage_limited_until(future)
+                merge_and_save_usage_limited_until({"acme": future})
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
 
@@ -199,8 +200,8 @@ class TestDispatchStateLockConcurrency:
         assert not errors, f"save_* raised: {errors}"
 
         loaded_limit = load_usage_limited_until()
-        assert loaded_limit is not None
-        assert abs((loaded_limit - future).total_seconds()) < 1
+        assert set(loaded_limit) == {"acme"}
+        assert abs((loaded_limit["acme"] - future).total_seconds()) < 1
 
         markers = load_executor_blocked_markers()
         assert "acme/1723" in markers
@@ -213,19 +214,27 @@ class TestDispatchStateLockConcurrency:
         """N threads round-robin across the three save_* functions.
 
         Survival is checked at the file level (valid JSON, no torn/truncated
-        write) rather than per-thread value equality, since threads targeting
-        the same key legitimately race — last-write-wins per key is expected
-        and acceptable under N-way contention.
+        write). The availability-probe and main-drift-latches writers target
+        one shared key each, so those legitimately race -- last-write-wins is
+        expected and acceptable under N-way contention.
+
+        ``merge_and_save_usage_limited_until`` (#1409 round 5) is a
+        read-merge-write per client, and each usage-limit writer here uses
+        its own distinct client key, so none of them race each other for the
+        same key -- every one of their windows must survive the concurrent
+        writes, not just one winner.
         """
         barrier = threading.Barrier(n_threads)
         errors: list[Exception] = []
+        usage_limit_writes: dict[str, datetime] = {}
 
         def worker(i: int) -> None:
             barrier.wait()
             try:
                 if i % 3 == 0:
                     dt = datetime.now(UTC) + timedelta(hours=1, seconds=i)
-                    save_usage_limited_until(dt)
+                    usage_limit_writes[f"client-{i}"] = dt
+                    merge_and_save_usage_limited_until({f"client-{i}": dt})
                 elif i % 3 == 1:
                     save_availability_probe_cache(
                         AvailabilityProbeCache(
@@ -254,6 +263,11 @@ class TestDispatchStateLockConcurrency:
         assert "usage_limited_until" in raw
         assert "availability_probe" in raw
         assert "main_drift_latches" in raw
+
+        loaded_limit = load_usage_limited_until()
+        assert set(loaded_limit) == set(usage_limit_writes)
+        for client, expected in usage_limit_writes.items():
+            assert abs((loaded_limit[client] - expected).total_seconds()) < 1
 
 
 class TestOpenPrProbeCacheSidecar:
@@ -293,7 +307,8 @@ class TestOpenPrProbeCacheSidecar:
         assert load_open_pr_probe_cache() == {}
 
     def test_missing_key_returns_empty(self, tmp_config_dir: Path) -> None:
-        save_usage_limited_until(datetime.now(UTC) + timedelta(hours=1))
+        future = datetime.now(UTC) + timedelta(hours=1)
+        merge_and_save_usage_limited_until({"acme": future})
 
         assert load_open_pr_probe_cache() == {}
 
@@ -340,7 +355,7 @@ class TestOpenPrProbeCacheSidecar:
     def test_write_preserves_sibling_keys(self, tmp_config_dir: Path) -> None:
         """Read-merge-write, per the #1157 shared-sidecar contract."""
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until(future)
+        merge_and_save_usage_limited_until({"acme": future})
         save_availability_probe_cache(
             AvailabilityProbeCache(
                 probed_at=datetime.now(UTC), available=True, latched=False
@@ -352,8 +367,8 @@ class TestOpenPrProbeCacheSidecar:
         )
 
         loaded_limit = load_usage_limited_until()
-        assert loaded_limit is not None
-        assert abs((loaded_limit - future).total_seconds()) < 1
+        assert set(loaded_limit) == {"acme"}
+        assert abs((loaded_limit["acme"] - future).total_seconds()) < 1
         assert load_availability_probe_cache() is not None
         assert "acme/1862" in load_open_pr_probe_cache()
 
@@ -441,7 +456,7 @@ class TestOpenPrProbeEntriesBatch:
     def test_batch_write_preserves_sibling_keys(self, tmp_config_dir: Path) -> None:
         """Read-merge-write, per the #1157 shared-sidecar contract."""
         future = datetime.now(UTC) + timedelta(hours=1)
-        save_usage_limited_until(future)
+        merge_and_save_usage_limited_until({"acme": future})
 
         save_open_pr_probe_entries(
             "acme",
@@ -449,8 +464,8 @@ class TestOpenPrProbeEntriesBatch:
         )
 
         loaded_limit = load_usage_limited_until()
-        assert loaded_limit is not None
-        assert abs((loaded_limit - future).total_seconds()) < 1
+        assert set(loaded_limit) == {"acme"}
+        assert abs((loaded_limit["acme"] - future).total_seconds()) < 1
         assert "acme/1862" in load_open_pr_probe_cache()
 
     def test_single_entry_helper_and_batch_helper_agree(

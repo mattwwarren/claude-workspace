@@ -12,7 +12,7 @@ import json
 import click
 
 from cw.auto_dev_result import is_known_blocker_reason
-from cw.cli._base import handle_errors
+from cw.cli._base import handle_errors, print_fixed_width_table
 from cw.config import load_clients
 from cw.dev_queue import load_dev_queue, task_attention_state
 from cw.exceptions import MissingWorkspaceError, WorktreeError
@@ -87,9 +87,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
         "STALE_GATE",
     ]
     col_widths = [12, 16, 16, 12, 8, 12, 12, 20, 10, 20, 20, 10, 18, 10]
-    header = "  ".join(f"{h:<{w}}" for h, w in zip(headers, col_widths, strict=True))
-    click.echo(header)
-    click.echo("-" * len(header))
+    rows: list[list[str]] = []
     for t in tasks:
         attention = task_attention_state(t) or "—"
         row = [
@@ -108,7 +106,8 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
             attention[:18],
             ("yes" if t.stale_gate_detected_at else "—")[:10],
         ]
-        click.echo("  ".join(f"{v:<{w}}" for v, w in zip(row, col_widths, strict=True)))
+        rows.append(row)
+    print_fixed_width_table(headers, col_widths, rows)
 
 
 @dev_queue.command(name="tasks")

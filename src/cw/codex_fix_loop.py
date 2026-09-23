@@ -789,6 +789,7 @@ def _rereview(
     previous_reviewed_sha: str,
     prior_open_findings: list[Finding],
     claim_tier_enabled: bool = False,
+    disposition_drift_check_enabled: bool = True,
 ) -> tuple[AutoDevResult, ReviewVerdict | None, _ReviewPassInputs]:
     """Run a per-role review pass over the delta since the last cycle (#1837).
 
@@ -805,6 +806,8 @@ def _rereview(
     ``synthesize_codex_review_result``; this function makes no decision with
     it. Cycles 1+ reach the ledger backstop only through here, so a gate
     threaded into cycle 0 alone would arm half the loop.
+    ``disposition_drift_check_enabled`` (#2232) rides the same hop on the same
+    terms and for the same reason.
     """
     prepared = _prepare_review_pass(
         task,
@@ -854,6 +857,8 @@ def _rereview(
         refused_dispositions=prepared.refused_dispositions,
         # #2210: the lane-resolved claim-tier gate, forwarded unchanged.
         claim_tier_enabled=claim_tier_enabled,
+        # #2232: the lane-resolved drift-check gate, likewise unchanged.
+        disposition_drift_check_enabled=disposition_drift_check_enabled,
         # #2029: this cycle's own parse-time rescues. Per-cycle, not carried
         # over — each re-review re-runs the roles and re-parses their output.
         pre_validation_rejected=pre_validation_rejected,
@@ -889,6 +894,7 @@ def run_review_with_fix_loop(
     session_id: str,
     fix_loop_enabled: bool,
     claim_tier_enabled: bool = False,
+    disposition_drift_check_enabled: bool = True,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -896,8 +902,9 @@ def run_review_with_fix_loop(
     signature and return shape — both now take ``fix_loop_enabled`` and
     ``claim_tier_enabled``, though this function's own semantics extend beyond
     just threading them through: ``fix_loop_enabled`` also gates whether the
-    fix loop itself engages, while ``claim_tier_enabled`` (#2210) is forwarded
-    verbatim to cycle 0's ``run_review`` and to every later cycle's
+    fix loop itself engages, while ``claim_tier_enabled`` (#2210) and
+    ``disposition_drift_check_enabled`` (#2232) are forwarded verbatim to
+    cycle 0's ``run_review`` and to every later cycle's
     ``_rereview``, with no decision taken here). One
     shared wall-clock deadline spans the initial pass, every fix invocation,
     and every re-review. A non-blocking or unparseable cycle-0 verdict passes
@@ -921,6 +928,7 @@ def run_review_with_fix_loop(
         session_id=session_id,
         fix_loop_enabled=fix_loop_enabled,
         claim_tier_enabled=claim_tier_enabled,
+        disposition_drift_check_enabled=disposition_drift_check_enabled,
     )
     if verdict is None or not verdict.blocking or not fix_loop_enabled:
         return result, verdict
@@ -1005,6 +1013,7 @@ def run_review_with_fix_loop(
             previous_reviewed_sha=previous_reviewed_sha,
             prior_open_findings=[af.finding for af in open_findings.values()],
             claim_tier_enabled=claim_tier_enabled,
+            disposition_drift_check_enabled=disposition_drift_check_enabled,
         )
         if verdict is None:
             # No cycle-N snapshot was persisted (the persist call below is

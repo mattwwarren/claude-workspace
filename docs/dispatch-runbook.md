@@ -849,9 +849,12 @@ sha. An entry with no resolvable sha is refused; pass `--reviewed-sha <sha>`
 for a hand-written payload. The command exits non-zero rather than recording an
 anonymous settle if `gh api user` cannot resolve your identity.
 
-Each settled finding emits one `review.finding_settled` audit event,
-correlated to `--ticket` when you pass it (`cw event tail --type
-review.finding_settled --json`). Duplicate keys collapse newest-wins, so two
+Each settled finding emits one audit event, correlated to `--ticket` when you
+pass it: `review.finding_settled` for an `ACCEPTED`/`REJECTED` entry, or
+`review.finding_disposition_reverted` for a `REVERSED` one (#2232) — the type
+carries the semantic, so `cw event tail --type
+review.finding_disposition_reverted --json` answers "what have I withdrawn"
+without filtering settles by payload. Duplicate keys collapse newest-wins, so two
 payload entries with the same file and byte-identical summary are one entry
 and one event. `-` reads the
 payload from stdin.
@@ -985,8 +988,13 @@ distinct-defect pair is a reason to tighten the thresholds, not to arm.
 `cw event tail` reads only the live inbox; auto-prune **archives** older events
 to `events/inbox.<YYYY-MM-DD>.jsonl` rather than deleting them, so read those
 files for older ones (or raise `event_inbox_retention_count`). Known accepted
-trade-offs — the ledger is severity-blind and entries never expire — are
-recorded in ADR-0016.
+trade-offs — the ledger is severity-blind — are recorded in ADR-0016. Before
+arming, also read [Rolling back a settle, and spotting
+drift](#rolling-back-a-settle-and-spotting-drift-2232) below: being able to
+inspect and undo what is settled, and having drift surfaced rather than
+silently suppressed, are **arming preconditions** ADR-0016 names, and the
+second of them is now enforced — a lane whose `disposition_drift_check_enabled`
+resolves `false` refuses to arm its claim tier at all.
 
 #### Contesting a settled finding (#2210)
 
@@ -1011,6 +1019,90 @@ section of a *pipeline-authored* comment (one carrying `<!-- cw-agent-authored
 -->`) is stripped before the next reviewer sees the thread — a pre-filled
 `"outcome": "REJECTED"` payload must not read to the next reviewer as an
 operator decision. A payload **you** paste yourself is not stripped, by design.
+
+#### Rolling back a settle, and spotting drift (#2232)
+
+Two things #2210 left open, and ADR-0016 named as preconditions for ever
+arming the claim tier, are closed.
+
+**See what is settled.** `cw review dispositions <ticket>` lists every record
+currently bound to a ticket — file, summary, outcome, who settled it, their
+stated reason, when, how long ago, and against which sha:
+
+```bash
+cw review dispositions GEN-123 --client acme
+cw review dispositions GEN-123 --client acme --worktree ~/work/acme --json
+```
+
+Every record is listed whatever its outcome, with an explicit OUTCOME column:
+a withdrawn settle must never read as a live suppression. Only `REJECTED`
+suppresses; `ACCEPTED` is a record-only annotation and `REVERSED` is a
+withdrawal. With `--worktree`, the STALE column says whether each record's
+file has moved since the record was settled. It reads `?` whenever the
+question cannot be answered — no `--worktree`, an unreadable one, or a record
+carrying no reviewed sha to compare against; `?` is never "not stale". AGE is
+rendered `?` the same way for a record whose `recorded_at` is missing or
+unparseable.
+
+This reads the **dev-queue row's** last-synced copy of the ledger, refreshed
+after each review pass — not a live fetch of the ticket thread. A settle you
+posted since the last pass will not show up until the next one runs. Same
+snapshot convention as `cw dev-queue tasks`.
+
+**Undo one.** Rollback is `cw review settle` with a third outcome, not a new
+command. Paste the SAME `file` and `summary` the original settle used (read
+them off `cw review dispositions`, or the original marker) with `"outcome":
+"REVERSED"`, then post the marker it prints:
+
+```bash
+cw review settle --reason "the tradeoff no longer holds: X changed" \
+  --ticket GEN-123 --reviewed-sha "$(git rev-parse HEAD)" --out /tmp/reverse.md -
+# {"entries": [{"file": "src/cw/foo.py", "summary": "<verbatim>",
+#               "outcome": "REVERSED", "reviewed_sha": "<sha>"}]}
+gh issue comment 123 --body-file /tmp/reverse.md
+```
+
+The newest-`recorded_at`-wins merge is what makes it durable, so no second
+write path exists and every guard `settle` already has — the worker refusal,
+the identity resolution, the audit-before-effect ordering — applies unchanged.
+A reversed record matches neither tier and is never rendered into the
+reviewer's "previously adjudicated" block: a withdrawal is the absence of a
+decision, so telling the model one stands would be backwards. It stays visible
+in `cw review dispositions`, because reversal history is part of the audit
+trail.
+
+A withdrawal is audited wherever it lands. `cw review settle` emits
+`review.finding_disposition_reverted` for the record it writes, and the review
+pass emits the same event when a `REVERSED` record first reaches the durable
+ledger through the ticket thread's marker — so one query answers "what has
+been withdrawn" regardless of which path recorded it:
+
+```bash
+cw event tail --type review.finding_disposition_reverted --json
+```
+
+**Drift is surfaced, not silently suppressed.** On every review pass, a record
+that matches a finding is checked for drift: did that file change between the
+sha the record was settled against and the sha being reviewed? If it did, the
+record is **not applied** for that pass. The finding keeps blocking, the
+posted comment reports it under "Settled findings re-raised (the code moved)"
+with both shas, and an event records it:
+
+```bash
+cw event tail --type review.finding_disposition_stale --json
+```
+
+The ledger entry is **not expired** — silent expiry is the invisible act this
+whole seam exists to avoid. It stays, and still applies on any pass where its
+file has not moved. Diff the two shas, then either re-settle against the
+current code or reverse the record.
+
+The check fails toward surfacing: an unresolvable ref (a rebased or
+force-pushed branch orphaning the settled sha) or an unreadable repository
+reads as drift, so you re-settle rather than suppress against code nobody
+adjudicated. It is gated by `disposition_drift_check_enabled` — global default
+`true`, per-lane override — and turning it off for a lane refuses to arm that
+lane's claim tier. `cw review dispositions --worktree` is not gated by it.
 
 ### Spec-driven subagent escape hatch
 
@@ -1288,6 +1380,27 @@ reason. Wait for the annotation to clear; only a tick line still reading
   left parked here still pages after 45 minutes; it is deliberately excluded
   from concierge's auto-requeue (§11.1) for the same reason the override
   exists.
+- `disposition: fix_dispatch_ref_unresolved` (#2209) means the fix-loop
+  dispatcher found **no remote ref whose tip matches the worktree's HEAD**,
+  across all three rungs of its ladder: the branch the impl session's sentinel
+  reported pushing (`last_result.branch`), the local branch's configured
+  `@{u}`, and the templated `origin/<prefix>/<ticket>` guess. Either nothing
+  was pushed, or everything that was pushed is behind the worktree.
+  `pending_fix_dispatch` is **retained** on this park — uniquely among the
+  dispositions here — preserving the REVIEW round's action list so you can read
+  what the fix agent was going to be told. It is **not** a resume point:
+  `cw dev-queue requeue` sets the row back to PENDING, which stops matching the
+  parked-row exemption (that check gates on `BLOCKED_ON_USER`), so the #2142
+  stale-handoff sweep drops the retained handoff and the ticket is claimed into
+  a **fresh REVIEW session**. Whether requeue should resume the handoff instead
+  is #2265. **Check before requeueing:** the
+  worktree's HEAD versus what `origin` actually holds, and the impl session's
+  reported branch name. If the work was never pushed, push it before requeuing;
+  a requeue alone will re-derive the same failure. The reason is
+  escalation-eligible (§11.2) and deliberately excluded from concierge's
+  auto-requeue (§11.1), on the same reasoning as `unresolved_subagent_spawn`
+  above: an agent-authored branch name is not automatically safe to keep
+  retrying against.
 
 ### Dispatch-loop staleness page (`dispatch_loop_stale`)
 

@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+# ``datetime`` is deliberately imported at RUNTIME above rather than listed here
+# (#1409 review round 1): ``parse_usage_limit_reset`` and
+# ``UsageLimitError.__init__`` both annotate it, and ``from __future__ import
+# annotations`` turns those annotations into strings — so a TYPE_CHECKING-only
+# import makes ``typing.get_type_hints()`` on either one raise NameError.
+# Sibling modules (``native_daemon``, ``dispatch/loop``) import it
+# unconditionally for the same reason.
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -18,7 +26,147 @@ if TYPE_CHECKING:
 # (e.g. "5-hour limit") are also detected. Replaces the narrower
 # r"hit (?:your )?(?:session|usage) limit" from reconcile.py:126 which missed
 # weekly and Opus variants.
+#
+# DELIBERATELY UNCHANGED by #1409: four consumers (native_daemon, queue_peek,
+# reconcile/_shared, tests) depend on this broad "detect anything" match, so the
+# reset-time fragment is parsed by the separate anchored companion below rather
+# than by adding capture groups here.
 USAGE_LIMIT_RE = re.compile(r"hit (?:your )?\S+ limit", re.IGNORECASE)
+
+# Anchored companion to USAGE_LIMIT_RE: the "· resets <time>" fragment that
+# follows a matched usage-limit phrase (#1409). Applied with .match() to a short
+# window immediately after the detector's match, never searched over whole text.
+#
+# Hardening notes:
+# - Only bounded quantifiers, and none nested, so there is no catastrophic
+#   backtracking on adversarial input.
+# - Explicit [0-9] rather than \d: int() accepts non-ASCII digits (e.g.
+#   Arabic-Indic "٣"), and a reset time written in them is not something we want
+#   to guess at.
+# - Unicode \s is kept so the NNBSP/NBSP separators Claude renders still match.
+USAGE_LIMIT_RESET_RE = re.compile(
+    r"\W{0,8}resets\s{1,4}"
+    r"(?:(?P<day>mon|tue|wed|thu|fri|sat|sun)[a-z]{0,6}\s{1,4})?"
+    r"(?P<hour>[0-9]{1,2})(?::(?P<minute>[0-9]{2}))?\s?(?P<mer>[ap])\.?m\b",
+    re.IGNORECASE,
+)
+
+# Weekday abbreviations in datetime.weekday() order (Monday == 0).
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_DAYS_PER_WEEK = 7
+_HOURS_PER_MERIDIEM = 12
+# Valid 12-hour-clock components. Kept as ranges so the membership tests read as
+# domain checks rather than PLR2004 magic-number comparisons.
+_MERIDIEM_HOURS = range(1, 13)
+_MINUTES = range(60)
+# How far past the detector's match the reset fragment may start. Long enough for
+# the separator Claude renders ("·", " -- ", a newline) plus the fragment itself;
+# short enough that an unrelated later "resets" cannot be picked up.
+_USAGE_LIMIT_RESET_SCAN_CHARS = 96
+# Only the tail of the input is scanned. Keeps the whole parse linear in a bounded
+# amount of work no matter how much output the subprocess produced, and preserves
+# last-occurrence-wins (the currently-active limit is the last one printed).
+_USAGE_LIMIT_PARSE_MAX_CHARS = 65_536
+
+
+def parse_usage_limit_reset(text: str, *, now: datetime) -> datetime | None:
+    """Return the instant a Claude usage limit resets, or None (#1409).
+
+    **The spawn-time wording is UNVERIFIED against a real capture.** No
+    captured ``claude --bg`` usage-limit message exists, and a usage limit
+    cannot be induced on demand. The recognised forms and every test fixture
+    are derived from *interactive* Claude transcript wording — ``resets
+    3:45pm``, ``resets Mon 12:00am``, ``resets 11pm (America/New_York)``. If
+    the real spawn-time text differs, this returns None and dispatch keeps
+    today's flat ``usage_limit_backoff_seconds`` back-off.
+
+    *now* MUST be timezone-aware; production passes the host-local clock via
+    ``native_daemon._local_now()`` (``datetime.now(_host_timezone())``), a real
+    :class:`~zoneinfo.ZoneInfo` rather than a frozen offset, so the DST
+    transition table is consulted at resolution time (review round 2). A naive
+    *now* yields None rather than raising — this function is total by
+    construction, since it runs on untrusted subprocess output at a spawn
+    failure.
+
+    Resolution rules (from the #1344 comment history, as narrowed for the
+    spawn path):
+
+    - **R1** — a bare wall-clock time is read in *now*'s own timezone and any
+      trailing annotation (``(America/New_York)``, ``ET``) is ignored. The
+      offset is resolved at the CANDIDATE's date, not at *now*'s, so pass a
+      *now* whose ``tzinfo`` carries the zone's DST rules (a
+      :class:`~zoneinfo.ZoneInfo`, as ``native_daemon._local_now`` supplies) —
+      a fixed-offset *now* silently freezes today's offset onto a reset that
+      may sit on the other side of a transition.
+    - **R2** — a time-only form that has already passed yields None; it never
+      rolls forward to tomorrow.
+    - **R3, deliberately inverted** — a weekday form naming *today* at a time
+      that has already passed also yields None. The literal R3 reading
+      (~zero back-off) would make every 30s tick re-claim and re-revert the
+      task, charging ``unproductive_attempts`` until the attempt ceiling
+      parks it minutes later.
+    - **R5** — the LAST usage-limit phrase in *text* is the anchor.
+
+    The result is always strictly future, structurally under 7 days out, and
+    returned as an aware UTC instant (the ``usage_limited_until`` sidecar
+    compares against ``datetime.now(UTC)``, and a naive value would be
+    silently dropped there).
+    """
+    if now.utcoffset() is None:
+        return None
+    tail = text[-_USAGE_LIMIT_PARSE_MAX_CHARS:]
+    # R5: the last limit phrase is the currently-active one. finditer over the
+    # capped tail is linear, and the window handed to the anchored companion
+    # regex below is a fixed 96 characters.
+    anchors = list(USAGE_LIMIT_RE.finditer(tail))
+    if not anchors:
+        return None
+    end = anchors[-1].end()
+    fragment = USAGE_LIMIT_RESET_RE.match(
+        tail[end : end + _USAGE_LIMIT_RESET_SCAN_CHARS]
+    )
+    if fragment is None:
+        return None
+    return _resolve_reset_candidate(fragment, now=now)
+
+
+def _resolve_reset_candidate(
+    fragment: re.Match[str], *, now: datetime
+) -> datetime | None:
+    """Turn a matched ``resets <time>`` fragment into an aware UTC instant.
+
+    Split out of :func:`parse_usage_limit_reset` to keep both functions inside
+    the PLR0911 return budget. Returns None for any component out of range and
+    for any candidate that is not strictly in the future.
+    """
+    hour = int(fragment["hour"])
+    minute = int(fragment["minute"]) if fragment["minute"] else 0
+    if hour not in _MERIDIEM_HOURS or minute not in _MINUTES:
+        return None
+    hour24 = hour % _HOURS_PER_MERIDIEM
+    if fragment["mer"].lower() == "p":
+        hour24 += _HOURS_PER_MERIDIEM
+
+    candidate = now.replace(hour=hour24, minute=minute, second=0, microsecond=0)
+    day = fragment["day"]
+    if day is not None:
+        delta = (_WEEKDAYS.index(day.lower()) - now.weekday()) % _DAYS_PER_WEEK
+        candidate += timedelta(days=delta)
+    # fold is applied AFTER the weekday shift because timedelta arithmetic
+    # resets it to 0. fold=1 selects the SECOND pass through an ambiguous wall
+    # clock (the repeated hour on a fall-back day) -- the later instant, so the
+    # spawn gate never reopens before the limit actually lifts. It has no
+    # effect on an unambiguous time. On the other transition a named wall clock
+    # inside the spring-forward gap does not exist at all; fold=1 then resolves
+    # it with the post-transition offset, i.e. the EARLIER of the two readings,
+    # which can only shorten the window (safe, and self-correcting on re-hit).
+    candidate = candidate.replace(fold=1)
+    # One check covers both the time-only already-passed case (R2) and the
+    # weekday-names-today already-passed case (inverted R3); a positive weekday
+    # delta is always in the future, so nothing else can reach here past.
+    if candidate <= now:
+        return None
+    return candidate.astimezone(UTC)
 
 
 class CwError(Exception):
@@ -108,6 +256,25 @@ class HookContextConflictError(CwError):
         self.conflicting_session_id = conflicting_session_id
 
 
+class RemoteRefUnresolvedError(CwError):
+    """No remote ref could be verified for a fix-loop branch (GitHub #2209).
+
+    Raised by :func:`cw.reconcile.review_recipes.fix_agent.dispatch_fix_agent`
+    when no candidate in its reported/upstream/templated ladder has a tip equal
+    to the worktree's HEAD — either because nothing resolves at all, or because
+    every ref that does resolve is stale.
+
+    A typed subclass so ``cw.reconcile.fix_dispatch`` can discriminate this one
+    class without matching message text: every other ``CwError`` keeps the
+    generic clear-the-handoff-and-revert path, while this one parks the row
+    BLOCKED_ON_USER with the action list retained. The split matters because
+    since #2075 the generic path charges no attempt, so a ref that can never
+    resolve would otherwise loop review -> failed dispatch -> review forever.
+    """
+
+    __slots__ = ()
+
+
 class DisclaimerNotAcceptedError(CwError):
     """Raised when ``claude --bg`` fails because the user has not accepted
     the bypass-permissions disclaimer.
@@ -168,9 +335,22 @@ class UsageLimitError(CwError):
 
     Back-off: callers (dispatch loop) set a ``usage_limited_until`` window and skip
     further spawns until it elapses. See :func:`cw.dispatch.run_dispatch_loop`.
+
+    ``reset_at`` carries the instant the limit lifts, when the spawn-time output
+    named one that :func:`parse_usage_limit_reset` could resolve (#1409). It is
+    parsed once at the raise site in ``cw.native_daemon``, from the RAW
+    subprocess text rather than from ``message`` (the stdout branch embeds a
+    ``repr()``). It stays None whenever the text carried no resolvable reset,
+    which is the signal for the dispatch loop to fall back to the flat
+    ``usage_limit_backoff_seconds`` window. Keyword-only and defaulted, so every
+    pre-existing message-only raiser stays valid.
     """
 
-    __slots__ = ()
+    __slots__ = ("reset_at",)
+
+    def __init__(self, message: str, *, reset_at: datetime | None = None) -> None:
+        super().__init__(message)
+        self.reset_at = reset_at
 
 
 class SpawnUnregisteredError(CwError):
@@ -399,6 +579,32 @@ class SessionsLockReentryError(CwError):
     ``_reconcile_usage_limited``) already catch ``CwError`` / broad
     ``Exception`` around the call that would otherwise re-enter, so no
     call-site changes are needed elsewhere.
+    """
+
+    __slots__ = ()
+
+
+class ClaimTierArmingError(CwError):
+    """Raised when the ledger's claim tier is armed with drift-checking off.
+
+    The codex review ledger's claim-match suppression tier resolved enabled
+    for a task whose ``disposition_drift_check_enabled`` resolved ``False``
+    (GitHub #2232). Drift-checking is what keeps a stale settle from silently
+    suppressing a re-raised finding; arming the fuzzy tier without it removes
+    that protection with no visible symptom, which is the exact failure mode
+    ADR-0016 named as the reason a rollback and a drift signal are
+    preconditions for ever arming the tier at all.
+
+    Raised by :func:`cw.codex_background._run_codex_review_and_complete`, at
+    the same point the claim tier's own enabling is resolved — the one place
+    both values are in hand for the same task and lane. It reaches the
+    operator through that daemon thread's existing ``_log.exception`` path
+    rather than a dedicated blocked reason, the same as every other
+    misconfiguration-shaped exception its broad ``except Exception:`` already
+    catches. Deliberately narrow: this is one cross-field refusal, not a
+    general config-validation framework. ``ConfigValidationError`` would be
+    the wrong type — that one wraps a ``pydantic.ValidationError`` at LOAD
+    time, and both config files loaded cleanly here.
     """
 
     __slots__ = ()

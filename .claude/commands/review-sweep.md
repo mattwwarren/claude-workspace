@@ -110,11 +110,11 @@ OUTPUT RULES — follow these exactly:
 
 Use the code-review plugin approach — 3 focused Sonnet agents running in parallel:
 
-| Agent | Focus |
-|-------|-------|
-| **Bug Hunter** | Scan for correctness bugs, logic errors, off-by-ones, null derefs. Ignore style. |
-| **CLAUDE.md Auditor** | Check changes against CLAUDE.md rules. Only flag violations explicitly called out. |
-| **Context Checker** | Read git blame/history of modified lines. Flag regressions or patterns that contradict prior fixes. |
+| Agent | Subagent Type | Focus (spawn prompt) |
+|-------|---------------|----------------------|
+| **Bug Hunter** | `subagent_type: "general-purpose"` | Scan for correctness bugs, logic errors, off-by-ones, null derefs. Ignore style. |
+| **CLAUDE.md Auditor** | `subagent_type: "general-purpose"` | Check changes against CLAUDE.md rules. Only flag violations explicitly called out. |
+| **Context Checker** | `subagent_type: "general-purpose"` | Read git blame/history of modified lines. Flag regressions or patterns that contradict prior fixes. |
 
 Spawn all 3 as parallel agents in a single message (sonnet model; Agent-tool spawns are async unconditionally — `run_in_background` is no longer a parameter, see #1944). Each gets: the diff, changed file list, CLAUDE.md content, and the output rules above.
 
@@ -122,19 +122,30 @@ Spawn all 3 as parallel agents in a single message (sonnet model; Agent-tool spa
 
 Run all 3 Light Review agents, PLUS spawn additional agents:
 
-| Agent | When to Spawn |
-|-------|--------------|
-| **silent-failure-hunter** | Always for deep reviews |
-| **pr-test-analyzer** | Always for deep reviews |
-| **type-design-analyzer** | Only if new types/models added (check diff for `class`, `TypedDict`, `BaseModel`, `dataclass`) |
+| Agent | Subagent Type | When to Spawn |
+|-------|---------------|---------------|
+| **silent-failure-hunter** | `subagent_type: "general-purpose"` | Always for deep reviews |
+| **pr-test-analyzer** | `subagent_type: "general-purpose"` | Always for deep reviews |
+| **type-design-analyzer** | `subagent_type: "general-purpose"` | Only if new types/models added (check diff for `class`, `TypedDict`, `BaseModel`, `dataclass`) |
 
 **Do NOT** spawn `code-simplifier` or `comment-analyzer` — those aren't actionable review feedback.
 
 Each additional agent gets the same diff and output rules.
 
+**The Agent column is a role, not a registered type (#2211).** None of the six
+names above exists in `.claude/agents/` — they are prompt-defined roles, and
+every one of them already ran as an implicitly-general-purpose agent. Naming
+`general-purpose` explicitly is therefore behavior-preserving, and it is what
+makes this file's spawn sites legible to `cw agent-spawn-pre`, which refuses an
+unnamed spawn in a headless worker. The **Focus**/**When to Spawn** cell stays
+the spawn prompt; the role name goes in the prompt too, not in `subagent_type`.
+Whether any of these six should become real, distinct agent definitions is a
+separate question, tracked in #2253 — do not mint agent files for them here.
+
 ### Confidence Filtering
 
-After all agents return, for each finding, spawn a parallel Haiku agent to score confidence (0-100):
+After all agents return, for each finding, spawn a parallel Haiku agent
+(`subagent_type: "general-purpose"`, `model: "haiku"`) to score confidence (0-100):
 
 - **0**: False positive, doesn't hold up to scrutiny, or pre-existing issue
 - **25**: Might be real, but likely a nitpick or not verifiable
