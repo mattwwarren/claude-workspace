@@ -25,9 +25,11 @@ from cw.auto_dev_result import AutoDevResult, Blocker
 from cw.codex_background import (
     _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
     REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
+    REVIEW_VERDICT_JSON_RELATIVE_PATH,
     REVIEW_VERDICT_OWNER_STAMP_FORMAT,
     _default_background,
     _persist_review_verdict,
+    _persist_structured_review_verdict,
     _post_review_comment,
     _resolve_claim_tier_enabled,
     _resolve_codex_fix_loop_enabled,
@@ -37,7 +39,11 @@ from cw.codex_background import (
     _sync_finding_dispositions_to_running_task,
     join_outstanding_codex_threads,
 )
-from cw.codex_review import _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS, CODEX_REVIEW_UNPARSEABLE
+from cw.codex_review import (
+    _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
+    CODEX_MUST_FIX_FINDINGS,
+    CODEX_REVIEW_UNPARSEABLE,
+)
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue
 from cw.local_runner import UNEXPECTED_ERROR, make_blocked
@@ -53,7 +59,8 @@ from cw.models import (
     TicketTask,
 )
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
-from tests.conftest import _make_daemon_session
+from cw.review_findings import ReviewVerdictEnvelope, consolidate_verdict
+from tests.conftest import _make_daemon_session, _make_diff, _make_finding, _make_reviewer_doc
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -340,11 +347,16 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
         reason=CODEX_REVIEW_UNPARSEABLE,
         stage_reached="stage3_review",
     )
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+        _make_diff(),
+        reviewed_sha="deadbeef",
+    )
 
     with (
         patch(
             "cw.codex_background.run_review_with_fix_loop",
-            return_value=(result, SimpleNamespace(reviewed_sha="deadbeef")),
+            return_value=(result, verdict),
         ),
         patch("cw.codex_background.render_verdict_comment", return_value="rendered"),
         patch("cw.codex_background._post_review_comment") as post_mock,
@@ -368,6 +380,12 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
         ).splitlines()[0]
     )
     assert written.endswith("rendered")
+    # #2223: the structured verdict envelope lands beside the rendered .md.
+    envelope = ReviewVerdictEnvelope.model_validate_json(
+        (worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH).read_text(encoding="utf-8")
+    )
+    assert envelope.ticket_id == "T-v"
+    assert envelope.verdict.reviewed_sha == "deadbeef"
 
 
 def test_run_codex_review_and_complete_posts_one_line_comment_when_verdict_is_none(
@@ -469,6 +487,86 @@ def test_run_codex_review_and_complete_skips_render_when_verdict_is_none(
         reviewed_sha=ANY,
         relative_path=REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
     )
+
+
+def test_run_codex_review_and_complete_skips_structured_verdict_when_verdict_is_none(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2223: no ReviewVerdict means no structured JSON artifact to write —
+    only the unparseable-park .md artifact lands."""
+    worktree = make_git_repo("wt-bg-no-json")
+    _seed_session("bg-no-json")
+    task = TicketTask(ticket_id="T-nj", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="T-nj",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        details="reviewer (invalid_json)",
+        stage_reached="stage3_review",
+    )
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, None),
+        ),
+        patch("cw.codex_background._post_review_comment"),
+    ):
+        _run(
+            sid="bg-no-json",
+            task=task,
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    assert not (worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH).exists()
+    assert (worktree / REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH).exists()
+
+
+def test_run_codex_review_and_complete_writes_structured_verdict_json_on_must_fix_park(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2223 repro: fix loop disabled, cycle-0 verdict blocking, park on
+    CODEX_MUST_FIX_FINDINGS — the structured verdict must still land so an
+    operator adjudicating the park has ``check-voided``'s evidence anchor."""
+    worktree = make_git_repo("wt-bg-must-fix-json")
+    _seed_session("bg-must-fix-json")
+    task = TicketTask(ticket_id="T-mf", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="T-mf",
+        worktree=worktree,
+        reason=CODEX_MUST_FIX_FINDINGS,
+        stage_reached="stage3_review",
+    )
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+        _make_diff(),
+        reviewed_sha="deadbeef",
+    )
+    assert verdict.blocking is True
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, verdict),
+        ),
+        patch("cw.codex_background._post_review_comment"),
+    ):
+        _run(
+            sid="bg-must-fix-json",
+            task=task,
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    envelope = ReviewVerdictEnvelope.model_validate_json(
+        (worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH).read_text(encoding="utf-8")
+    )
+    assert envelope.ticket_id == "T-mf"
+    assert envelope.verdict.must_fix[0].evidence == "def broken():"
+    assert envelope.verdict.accepted[0].finding.evidence == "def broken():"
 
 
 def test_run_codex_review_and_complete_exception_path(
@@ -1175,6 +1273,22 @@ def test_review_verdict_file_is_git_ignored() -> None:
     assert tracked.returncode != 0, "review-verdict.md is still tracked"
 
 
+def test_review_verdict_json_file_is_git_ignored() -> None:
+    """#2223: the structured verdict envelope is a per-ticket artifact too —
+    same never-committed contract as its .md sibling (#2279/#2205)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    ignored = (repo_root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".claude/review-verdict.json" in ignored
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", ".claude/review-verdict.json"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tracked.returncode != 0, "review-verdict.json is still tracked"
+
+
 def test_persist_review_verdict_stamp_handles_hyphenated_ticket_id(
     tmp_path: Path,
 ) -> None:
@@ -1207,6 +1321,42 @@ def test_persist_review_verdict_degrades_on_oserror(
             _persist_review_verdict(
                 tmp_path, "x", ticket_id="T-1", reviewed_sha="deadbeef"
             )
+            is None
+        )
+    assert any("review_verdict_persist_failed" in r.message for r in caplog.records)
+
+
+def test_persist_structured_review_verdict_writes_durable_copy(tmp_path: Path) -> None:
+    """#2223: the structured verdict envelope lands at
+    ``.claude/review-verdict.json``, round-tripping ticket provenance and the
+    per-finding evidence ``check-voided`` needs."""
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+        _make_diff(),
+        reviewed_sha="deadbeef",
+    )
+    path = _persist_structured_review_verdict(tmp_path, verdict, ticket_id="T-1")
+    assert path == tmp_path / ".claude" / "review-verdict.json"
+    assert path is not None
+    envelope = ReviewVerdictEnvelope.model_validate_json(path.read_text(encoding="utf-8"))
+    assert envelope.ticket_id == "T-1"
+    assert envelope.verdict.accepted[0].finding.evidence == "def broken():"
+
+
+def test_persist_structured_review_verdict_degrades_on_oserror(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A write failure is logged and returns None; it never raises into the
+    daemon thread's success path."""
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+        _make_diff(),
+        reviewed_sha="deadbeef",
+    )
+    (tmp_path / ".claude").write_text("not a directory", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert (
+            _persist_structured_review_verdict(tmp_path, verdict, ticket_id="T-1")
             is None
         )
     assert any("review_verdict_persist_failed" in r.message for r in caplog.records)

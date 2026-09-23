@@ -29,6 +29,7 @@ from cw.review_findings import (
     ReviewerRunFailure,
     ReviewerRunRecord,
     ReviewVerdict,
+    ReviewVerdictEnvelope,
     StrippedEscalation,
     _anchor_in_enclosing_def,
     _best_effort_discarded_tally,
@@ -55,6 +56,7 @@ from cw.review_findings import (
     parse_reviewer_document,
     validate_reviewer_document,
     write_review_verdict,
+    write_review_verdict_envelope,
 )
 from tests.conftest import (
     FindingKwargs,
@@ -4722,6 +4724,30 @@ class TestWriteReviewVerdictArtifact:
             ReviewVerdict.model_validate_json(path.read_text()).is_terminal_snapshot
             is False
         )
+
+
+class TestWriteReviewVerdictEnvelope:
+    def test_atomic_write_round_trips(self, tmp_path: Path) -> None:
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"), reviewer_role="R1")
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="deadbeef")
+        path = tmp_path / "review-verdict.json"
+        write_review_verdict_envelope(verdict, ticket_id="T-1", path=path)
+        envelope = ReviewVerdictEnvelope.model_validate_json(path.read_text())
+        assert envelope.ticket_id == "T-1"
+        assert envelope.verdict.reviewed_sha == "deadbeef"
+        assert envelope.verdict.accepted[0].finding.evidence == "def broken():"
+
+    def test_full_replace_semantics(self, tmp_path: Path) -> None:
+        path = tmp_path / "review-verdict.json"
+        path.write_text('{"stale": true}')
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        write_review_verdict_envelope(verdict, ticket_id="T-1", path=path)
+        data = json.loads(path.read_text())
+        assert "stale" not in data
 
 
 class TestExecutorNeutralContract:
