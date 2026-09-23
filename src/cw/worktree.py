@@ -787,20 +787,26 @@ def _ff_reused_worktree(
     *,
     ticket_id: str | None,
 ) -> RefreshResult:
-    """Fast-forward *wt_path* to *target* with ``merge --ff-only``, never raising.
+    """Fast-forward *wt_path* to *target* with ``merge --ff-only``.
 
     First re-runs the FULL occupancy predicate (:func:`_reuse_occupancy`:
     expected branch, unsaved work, cw state, daemon roster), immediately before
     the first mutating git call. The caller's occupancy gate ran before a
     network fetch that can take a while, so a session or worker may have
-    started, or the tree been dirtied, in the meantime. If anything changed the
-    fast-forward is abandoned: ``OCCUPIED_BY_LIVE_SESSION`` when a live occupant
-    appeared, ``NOT_REFRESHED`` when the tree merely changed. This narrows the
-    window but does not eliminate it: a session can still start between this
-    check and the merge. That remaining window is accepted because the only
-    alternative -- holding a lock across the network fetch (or across the
-    check-then-merge) -- is worse: it would stall every other claim behind a slow
-    remote.
+    started, the tree been dirtied, or the checked-out branch changed, in the
+    meantime. If anything changed the fast-forward is abandoned:
+    ``OCCUPIED_BY_LIVE_SESSION`` when a live occupant appeared, ``NOT_REFRESHED``
+    when the tree was merely dirtied. A branch switch RAISES
+    :exc:`~cw.exceptions.StaleWorktreeError` instead of returning
+    ``NOT_REFRESHED`` (``raise_on_branch_mismatch=True`` below): it is the same
+    stale-worktree condition :func:`create_worktree`'s own identity guard
+    refuses up front, just observed after the fetch instead of before it, and
+    the tree is no longer safe to fast-forward or use as-is. This narrows the
+    window but does not eliminate it: a session can still start, or the branch
+    change again, between this check and the merge. That remaining window is
+    accepted because the only alternative -- holding a lock across the network
+    fetch (or across the check-then-merge) -- is worse: it would stall every
+    other claim behind a slow remote.
 
     ``--ff-only`` cannot destroy work: it refuses (rc != 0, worktree untouched)
     when local uncommitted changes overlap files the merge must update, and
@@ -823,6 +829,7 @@ def _ff_reused_worktree(
             "reused worktree occupied after the fetch; fast-forward abandoned, "
             "using worktree as-is"
         ),
+        raise_on_branch_mismatch=True,
     )
     if verdict is not None:
         return verdict
@@ -1005,22 +1012,31 @@ class _Occupancy(NamedTuple):
     - ``live``: a live session or daemon worker may be homed on the worktree
       (:func:`live_home_reason`), or the state or roster could not be read
       (fail closed). Nothing may touch the tree.
-    - ``local``: an unexpected checked-out branch, or unsaved work. The refresh
-      must not move HEAD, but the worktree is still the caller's to use: the
-      staged pipeline reuses one per-ticket worktree that legitimately carries
-      churn (e.g. ``uv.lock``) from a prior stage.
+    - ``branch_mismatch``: the checked-out branch is not the expected one (or
+      HEAD is detached). Same refusal as :func:`create_worktree`'s own
+      identity guard, just observed later -- see :func:`_occupancy_verdict`'s
+      *raise_on_branch_mismatch*.
+    - ``local``: unsaved work. The refresh must not move HEAD, but the
+      worktree is still the caller's to use: the staged pipeline reuses one
+      per-ticket worktree that legitimately carries churn (e.g. ``uv.lock``)
+      from a prior stage.
 
-    Both halves are always evaluated. Unsaved work is exactly what a live worker
+    All three are always evaluated. Unsaved work is exactly what a live worker
     leaves behind, so it must never mask ``live``.
     """
 
     live: str | None
+    branch_mismatch: str | None
     local: str | None
 
     @property
     def reason(self) -> str | None:
         """The most serious reason the refresh is refused, or None if free."""
-        return self.live if self.live is not None else self.local
+        if self.live is not None:
+            return self.live
+        if self.branch_mismatch is not None:
+            return self.branch_mismatch
+        return self.local
 
 
 def _reuse_occupancy(client: ClientConfig, branch: str, wt_path: Path) -> _Occupancy:
@@ -1030,10 +1046,12 @@ def _reuse_occupancy(client: ClientConfig, branch: str, wt_path: Path) -> _Occup
     immediately before it mutates (see :func:`_ff_reused_worktree`). Local
     reads only -- no network. Occupied means any of:
 
-    - ``local``: the checked-out branch is not *branch* (or HEAD is detached);
-      or :func:`unsaved_work_reason` reports uncommitted, untracked or unpushed
-      work (checked regardless of the caller's ``allow_dirty_reuse``, which
-      only tolerates such work, it does not license moving HEAD under it); or
+    - ``branch_mismatch``: the checked-out branch is not *branch* (or HEAD is
+      detached); or
+    - ``local``: :func:`unsaved_work_reason` reports uncommitted, untracked or
+      unpushed work (checked regardless of the caller's ``allow_dirty_reuse``,
+      which only tolerates such work, it does not license moving HEAD under
+      it); or
     - ``live``: :func:`live_home_reason` -- a live session in cw state or a
       live worker in the daemon roster is homed on *wt_path*, or either could
       not be read (fail closed: this gates a mutation). The dev-queue RUNNING
@@ -1043,15 +1061,18 @@ def _reuse_occupancy(client: ClientConfig, branch: str, wt_path: Path) -> _Occup
       the state half.
     """
     current = _checked_out_branch(wt_path)
+    branch_mismatch: str | None = None
     local: str | None = None
     if current != branch:
         found = current or "(none / detached HEAD / not a worktree)"
-        local = f"expected branch {branch!r} but found {found}"
+        branch_mismatch = f"expected branch {branch!r} but found {found}"
     else:
         unsaved = unsaved_work_reason(client, branch, wt_path=wt_path)
         if unsaved is not None:
             local = f"unsaved work ({unsaved})"
-    return _Occupancy(live=live_home_reason(wt_path), local=local)
+    return _Occupancy(
+        live=live_home_reason(wt_path), branch_mismatch=branch_mismatch, local=local
+    )
 
 
 def _occupancy_verdict(
@@ -1060,15 +1081,28 @@ def _occupancy_verdict(
     wt_path: Path,
     *,
     action: str,
+    raise_on_branch_mismatch: bool = False,
 ) -> RefreshResult | None:
     """Return the stopping result when the refresh must not go on, else ``None``.
 
     Logs *action* at DEBUG naming the path and reason. The verdict keeps the two
     kinds of refusal apart (see :class:`_Occupancy`): a live occupant is
-    ``OCCUPIED_BY_LIVE_SESSION`` (the caller must abort), while an unexpected
-    branch or unsaved work is ``NOT_REFRESHED`` (the tree is still the caller's
-    to use). A live occupant wins when both hold, because unsaved work is exactly
-    what a live worker leaves behind.
+    ``OCCUPIED_BY_LIVE_SESSION`` (the caller must abort), while unsaved work is
+    ``NOT_REFRESHED`` (the tree is still the caller's to use). A live occupant
+    wins when both hold, because unsaved work is exactly what a live worker
+    leaves behind.
+
+    *raise_on_branch_mismatch* (set only by :func:`_ff_reused_worktree`'s
+    pre-merge re-check) makes a branch switch that appeared since the initial
+    gate raise :exc:`~cw.exceptions.StaleWorktreeError`, mirroring
+    :func:`create_worktree`'s own identity guard, instead of returning
+    ``NOT_REFRESHED``: the caller's own branch-identity guard already refused
+    this worktree once before the refresh started; a branch that changed out
+    from under a slow fetch is the same stale-worktree condition, not a
+    "tree merely changed" case that is still safe to use as-is. A live
+    occupant still wins over a branch mismatch (checked first, via
+    ``occupancy.live``), since only :exc:`WorktreeOccupiedError` may report an
+    occupant.
     """
     occupancy = _reuse_occupancy(client, branch, wt_path)
     reason = occupancy.reason
@@ -1081,6 +1115,18 @@ def _occupancy_verdict(
         wt_path,
         reason,
     )
+    if (
+        raise_on_branch_mismatch
+        and occupancy.live is None
+        and occupancy.branch_mismatch is not None
+    ):
+        msg = (
+            f"Refusing to reuse worktree at {wt_path}: it switched off branch "
+            f"{branch!r} during the reuse refresh ({occupancy.branch_mismatch}). "
+            f"Remove it with `git worktree remove --force {wt_path}`, then "
+            "re-dispatch."
+        )
+        raise StaleWorktreeError(msg)
     outcome = (
         RefreshOutcome.OCCUPIED_BY_LIVE_SESSION
         if occupancy.live is not None
@@ -1240,6 +1286,11 @@ def _refresh_reused_worktree(
       :func:`create_worktree` turns this into
       :exc:`~cw.exceptions.WorktreeOccupiedError`; this helper only reports it.
 
+    A branch switch discovered at the step-4 re-check does not appear as a
+    :class:`RefreshResult` at all: :func:`_ff_reused_worktree` raises
+    :exc:`~cw.exceptions.StaleWorktreeError` directly (see below), the same
+    exception :func:`create_worktree`'s own identity guard raises up front.
+
     Order of operations:
 
     1. **Occupancy gate, local reads only, no network**
@@ -1257,19 +1308,24 @@ def _refresh_reused_worktree(
        failed fetch is ``NOT_REFRESHED`` and reported with git's reason.
     3. Target and relation: see :func:`_refresh_from_tracking_ref`.
     4. Behind: the full occupancy predicate is re-run immediately before
-       ``merge --ff-only`` (a session may have started during the fetch; see
-       :func:`_ff_reused_worktree`), then the fast-forward. A fast-forward that
-       moved HEAD records one ``worktree.fast_forwarded`` audit event carrying
-       *ticket_id*; no other path records anything.
+       ``merge --ff-only`` (a session may have started, or the branch changed,
+       during the fetch; see :func:`_ff_reused_worktree`). A branch switch here
+       RAISES ``StaleWorktreeError`` instead of returning ``NOT_REFRESHED`` --
+       the tree is stale, not merely unrefreshed. Otherwise, the fast-forward. A
+       fast-forward that moved HEAD records one ``worktree.fast_forwarded``
+       audit event carrying *ticket_id*; no other path records anything.
 
     *report* is the caller-supplied surface (see :class:`ReuseRefreshReport`).
     Every FAILURE the caller cannot otherwise see -- a failed fetch, a diverged
     branch, a fast-forward git refused, an ``OSError`` -- appends exactly one
     note naming the worktree and the reason. Designed non-actions (occupied,
-    branch absent, equal or ahead) add none.
+    branch absent, equal or ahead) add none. A step-4 branch-switch raise adds
+    no note either: it never reaches *report*, the same as the occupancy raise.
 
     Never raises for a git or OS failure and never resets, ``checkout -f``s or
-    deletes. Anything that is not an ``OSError`` is a bug and propagates.
+    deletes. Can raise :exc:`~cw.exceptions.StaleWorktreeError` for a branch
+    switch discovered at the step-4 re-check (see above). Anything else that is
+    not an ``OSError`` is a bug and propagates.
     """
     try:
         result = _refresh_reused_worktree_steps(
@@ -1374,7 +1430,9 @@ def create_worktree(
       matches origin. This function returns the path; the reason is on
       *refresh_report* and, for failures, in a note. A wrong branch is
       stricter still: the identity guard above raises :exc:`StaleWorktreeError`
-      before any refresh.
+      before any refresh, and the pre-merge re-check raises the same error if
+      the branch changed during the fetch (see :func:`_ff_reused_worktree`) --
+      neither is returned as ``NOT_REFRESHED``.
 
     *refresh_report* (#2213) is an out-parameter (:class:`ReuseRefreshReport`)
     for callers that want more than the path. Its ``notes`` receive one line per

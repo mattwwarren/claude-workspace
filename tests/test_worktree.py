@@ -1885,7 +1885,9 @@ class TestCreateWorktreeReuseRefresh:
         )
         monkeypatch.setattr(
             "cw.worktree._reuse_occupancy",
-            lambda *_args, **_kw: _Occupancy(live=None, local=None),
+            lambda *_args, **_kw: _Occupancy(
+                live=None, branch_mismatch=None, local=None
+            ),
         )
 
         result = _refresh_reused_worktree(
@@ -2595,6 +2597,23 @@ def _refresh_occupied_with_debug(
     return error
 
 
+def _refresh_stale_with_debug(
+    client: ClientConfig, caplog: pytest.LogCaptureFixture
+) -> StaleWorktreeError:
+    """Reuse ``_REUSE_BRANCH`` with the refresh on, expecting the pre-merge
+    re-check's branch-mismatch refusal (:exc:`StaleWorktreeError`, not the
+    occupancy path -- see :func:`_refresh_occupied_with_debug`)."""
+    caplog.clear()  # drop seed-phase records
+    with (
+        caplog.at_level(logging.DEBUG, logger="cw.worktree"),
+        pytest.raises(StaleWorktreeError) as excinfo,
+    ):
+        create_worktree(
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+        )
+    return excinfo.value
+
+
 def _debug_reasons(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
@@ -2789,9 +2808,11 @@ class TestReuseOccupancyRosterAndPaths:
         expected_reason: str,
     ) -> None:
         """The occupancy gate runs before the (slow) fetch; the whole predicate
-        runs again immediately before ``merge --ff-only``. Anything that flips
-        in between -- a session or worker appearing, the tree being dirtied, a
-        branch switch -- aborts to use-as-is with HEAD untouched."""
+        runs again immediately before ``merge --ff-only``. A session or worker
+        appearing raises the occupancy error; the tree being dirtied aborts to
+        use-as-is; a branch switch raises ``StaleWorktreeError`` (the same
+        refusal ``create_worktree``'s own identity guard gives up front). HEAD
+        stays untouched in every case."""
         client, wt, workspace, old_sha, new_sha = _seed_behind(tmp_path, make_git_repo)
         assert old_sha != new_sha
         real_fetch = fetch_feature_branch
@@ -2820,12 +2841,16 @@ class TestReuseOccupancyRosterAndPaths:
         monkeypatch.setattr("cw.worktree.fetch_feature_branch", fetch_then_change)
         monkeypatch.setattr("cw.worktree._run_git", spy)
 
-        # A live occupant (session/roster) refuses with the typed error; a tree
-        # that merely changed (dirty, branch switch) is the caller's to use.
+        # A live occupant (session/roster) refuses with the occupancy error; a
+        # branch switch refuses with the stale-worktree error; a merely dirtied
+        # tree is the caller's to use.
         if change in {"session", "roster"}:
             error = _refresh_occupied_with_debug(client, caplog)
             assert error.path == wt
             assert expected_reason in error.reason
+        elif change == "branch":
+            stale = _refresh_stale_with_debug(client, caplog)
+            assert expected_reason in str(stale)
         else:
             result = _refresh_with_debug(client, caplog)
             assert result == wt
