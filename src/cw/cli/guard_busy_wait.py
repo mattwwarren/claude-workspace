@@ -41,11 +41,13 @@ import click
 from cw.cli._base import main
 from cw.cli._hook_io import (
     _context_str,
+    _extract_bash_command,
     _read_cw_context,
     _read_hook_stdin_json,
     _write_cw_context_locked,
+    find_lane_config,
 )
-from cw.config import load_clients, load_orchestrator_config
+from cw.config import load_orchestrator_config
 from cw.events import record_event
 from cw.models import OrchestratorEventType
 
@@ -136,38 +138,6 @@ def _warn_unexpected_shape(detail: str) -> None:
     )
 
 
-def _extract_bash_command(payload: dict[str, object]) -> tuple[str | None, bool]:
-    """Return ``(command, run_in_background)`` from a Bash PreToolUse payload.
-
-    Defensive by design (see :func:`_warn_unexpected_shape`): every read is
-    ``.get()``-based and type-checked, and a missing or wrong-type
-    ``command`` is the routine "cannot classify this call, allow it" case,
-    never a crash.
-    """
-    tool_input = payload.get("tool_input")
-    if not isinstance(tool_input, dict):
-        _warn_unexpected_shape(
-            f"tool_input is {type(tool_input).__name__}, expected dict"
-        )
-        return None, False
-    run_in_background_raw = tool_input.get("run_in_background", False)
-    if isinstance(run_in_background_raw, bool):
-        run_in_background = run_in_background_raw
-    else:
-        _warn_unexpected_shape(
-            f"tool_input.run_in_background is "
-            f"{type(run_in_background_raw).__name__}, expected bool"
-        )
-        run_in_background = False
-    command = tool_input.get("command")
-    if not isinstance(command, str):
-        _warn_unexpected_shape(
-            f"tool_input.command is {type(command).__name__}, expected str"
-        )
-        return None, run_in_background
-    return command, run_in_background
-
-
 def _hash_command(command: str) -> str:
     """Return a stable, truncated hash of the whitespace-normalized command.
 
@@ -198,25 +168,25 @@ def _resolve_settings(client: str | None, lane: str | None) -> _GuardSettings:
     Reloaded from disk on every invocation (each hook call is its own
     subprocess), so an operator's edit takes effect on the next Bash call
     with no worker restart.
+
+    The lane lookup is the shared :func:`cw.cli._hook_io.find_lane_config`.
+    The toggle is not routed through
+    :func:`~cw.cli._hook_io.resolve_guard_enabled` like the other guards':
+    it resolves alongside two numeric knobs from the same lane, in one read.
     """
     global_cfg = load_orchestrator_config()
     enabled = global_cfg.busy_wait_guard_enabled
     repeat_threshold = global_cfg.busy_wait_guard_repeat_threshold
     window_seconds = global_cfg.busy_wait_guard_window_seconds
 
-    if client and lane:
-        client_cfg = load_clients().get(client)
-        if client_cfg is not None:
-            for lane_cfg in client_cfg.effective_lanes:
-                if lane_cfg.name != lane:
-                    continue
-                if lane_cfg.busy_wait_guard_enabled is not None:
-                    enabled = lane_cfg.busy_wait_guard_enabled
-                if lane_cfg.busy_wait_guard_repeat_threshold is not None:
-                    repeat_threshold = lane_cfg.busy_wait_guard_repeat_threshold
-                if lane_cfg.busy_wait_guard_window_seconds is not None:
-                    window_seconds = lane_cfg.busy_wait_guard_window_seconds
-                break
+    lane_cfg = find_lane_config(client, lane)
+    if lane_cfg is not None:
+        if lane_cfg.busy_wait_guard_enabled is not None:
+            enabled = lane_cfg.busy_wait_guard_enabled
+        if lane_cfg.busy_wait_guard_repeat_threshold is not None:
+            repeat_threshold = lane_cfg.busy_wait_guard_repeat_threshold
+        if lane_cfg.busy_wait_guard_window_seconds is not None:
+            window_seconds = lane_cfg.busy_wait_guard_window_seconds
 
     return _GuardSettings(enabled, repeat_threshold, window_seconds)
 
@@ -344,11 +314,12 @@ def _is_settled_background_call(payload: dict[str, object]) -> bool:
     """True for a well-formed backgrounded Bash call: ``tool_input`` a dict,
     ``run_in_background`` exactly ``True`` and ``command`` a ``str`` (#2229).
 
-    Side-effect free, unlike :func:`_extract_bash_command`, so it can run
-    before the enabled gate without emitting shape warnings from a disabled
-    guard. In exactly this shape the extractor returns ``(command, True)``
-    with no warning and :func:`_classify` returns None whether or not the
-    guard is enabled -- so the config reads it would trigger are pure cost.
+    Side-effect free, unlike :func:`~cw.cli._hook_io._extract_bash_command`,
+    so it can run before the enabled gate without emitting shape warnings
+    from a disabled guard. In exactly this shape the extractor returns
+    ``(command, True)`` with no warning and :func:`_classify` returns None
+    whether or not the guard is enabled -- so the config reads it would
+    trigger are pure cost.
     """
     tool_input = payload.get("tool_input")
     return (
@@ -380,7 +351,7 @@ def _classify() -> _BlockDecision | None:
     if not settings.enabled:
         return None
 
-    command, run_in_background = _extract_bash_command(payload)
+    command, run_in_background = _extract_bash_command(payload, _warn_unexpected_shape)
     # An unclassifiable payload (already warned about) allows. So does a
     # backgrounded call: it returns immediately and cannot hold the turn
     # open, which is the shape this guard exists to stop — even when the

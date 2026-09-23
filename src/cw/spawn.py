@@ -30,7 +30,9 @@ from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
+    BASH_TOOL_NAME,
     HOOK_CONTEXT_RELATIVE_PATH,
+    MONITOR_TOOL_NAME,
     PLAN_APPROVED_FINGERPRINT_KEY,
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
@@ -323,6 +325,12 @@ def _validate_worktree(path: Path) -> None:
 # the PreToolUse entry below.
 _AGENT_TOOL_MATCHER = "^(Agent|Task)$"
 
+# One command backs both the Bash and the Monitor PreToolUse entries (#2303),
+# so the two refusals share a single classifier and cannot drift apart. The
+# matchers themselves are cw.models.BASH_TOOL_NAME / MONITOR_TOOL_NAME, the same
+# constants that classifier branches on.
+_BACKGROUND_TOOL_GUARD_COMMAND = "cw background-tool-guard-pre"
+
 
 def _stop_hook_command(context_path: Path) -> str:
     """Return the Stop hook command for a worktree whose context file is *context_path*.
@@ -392,12 +400,26 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
             # shape whose dispatch behavior is exercised by the existing suite.
             # Fail-open like its neighbour, and disable-able per lane or
             # globally via busy_wait_guard_enabled in orchestrator.yaml.
+            # The third is `cw background-tool-guard-pre` (#2303): in a
+            # headless worker it refuses `run_in_background: true`, which has
+            # no completion-notification path for a headless DAEMON session
+            # (#2250/#2280/#2275). The same command also backs the "Monitor"
+            # entry below — one classifier branching on tool_name, so the two
+            # refusals cannot drift. Disable-able per lane or globally via
+            # background_tool_guard_enabled in orchestrator.yaml. The
+            # harness's PreToolUse chain runs for a subagent's own tool calls
+            # in the same worktree cwd (#2275 transcript evidence), so this
+            # covers the impl-subagent path the wedges actually took.
             "PreToolUse": [
                 {
-                    "matcher": "Bash",
+                    "matcher": BASH_TOOL_NAME,
                     "hooks": [
                         {"type": "command", "command": "cw guard-cwd"},
                         {"type": "command", "command": "cw guard-busy-wait"},
+                        {
+                            "type": "command",
+                            "command": _BACKGROUND_TOOL_GUARD_COMMAND,
+                        },
                     ],
                 },
                 # #1646: stamp an unresolved-subagent-spawn marker before the
@@ -417,6 +439,16 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
                 {
                     "matcher": _AGENT_TOOL_MATCHER,
                     "hooks": [{"type": "command", "command": "cw agent-spawn-pre"}],
+                },
+                # #2303: refuse the Monitor tool in a headless worker — it
+                # watches a background task for an interactive operator, and
+                # a headless turn that ends waiting on it never resumes. See
+                # the Bash entry above for the shared command and toggle.
+                {
+                    "matcher": MONITOR_TOOL_NAME,
+                    "hooks": [
+                        {"type": "command", "command": _BACKGROUND_TOOL_GUARD_COMMAND}
+                    ],
                 },
             ],
         }

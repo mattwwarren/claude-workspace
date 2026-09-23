@@ -44,17 +44,9 @@ an operator can switch them off per-lane or globally without a code release.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import click
 
-from cw.cli._hook_io import _context_str, find_cw_context
-from cw.config import load_clients, load_orchestrator_config
-
-# PreToolUse contract: exit 2 blocks the tool call and feeds stderr back to
-# the agent. Same convention as cw guard-cwd and cw guard-busy-wait.
-_SPAWN_BLOCK_EXIT = 2
+from cw.cli._hook_io import _context_str, active_headless_context, resolve_guard_enabled
 
 # The refused values, compared case-insensitively after stripping. A blank
 # string is grouped with "fork" rather than with an omitted key: a caller that
@@ -116,55 +108,6 @@ def _warn_unexpected_shape(detail: str) -> None:
     )
 
 
-def active_headless_context(payload: dict[str, object]) -> dict[str, object] | None:
-    """Return the cw context iff this spawn is inside a headless worker.
-
-    Scoped deliberately: an operator's interactive session may fork a
-    subagent for whatever they like, and a caller outside any cw worktree
-    (``orchestrate-phase.md``, a detached gate worktree) is structurally
-    exempt because no ancestor carries a context file.
-
-    Uses the upward-walking :func:`~cw.cli._hook_io.find_cw_context` rather
-    than an exact-path read so a worker whose cwd has moved into a
-    subdirectory is still covered — the same reason #2210 introduced it.
-    """
-    cwd_value = payload.get("cwd")
-    if not isinstance(cwd_value, str) or not cwd_value:
-        return None
-    context = find_cw_context(Path(cwd_value))
-    if context is None:
-        return None
-    return context if context.get("headless") is True else None
-
-
-def _resolve_spawn_guard_enabled(client: str | None, lane: str | None) -> bool:
-    """Resolve the guard's kill switch for *client*/*lane*.
-
-    Precedence mirrors :func:`cw.cli.guard_busy_wait._resolve_settings`
-    exactly: a non-None lane-level override wins in either direction, else
-    the global default. A client absent from ``clients.yaml``, or a lane name
-    it does not declare, falls through to the global value.
-
-    Reloaded from disk on every invocation (each hook call is its own
-    subprocess), so an operator's edit takes effect on the next spawn with no
-    worker restart — which is the whole point of having a kill switch on a
-    guard that can refuse work.
-    """
-    enabled = load_orchestrator_config().subagent_spawn_guard_enabled
-
-    if client and lane:
-        client_cfg = load_clients().get(client)
-        if client_cfg is not None:
-            for lane_cfg in client_cfg.effective_lanes:
-                if lane_cfg.name != lane:
-                    continue
-                if lane_cfg.subagent_spawn_guard_enabled is not None:
-                    enabled = lane_cfg.subagent_spawn_guard_enabled
-                break
-
-    return enabled
-
-
 def _classify_subagent_type(raw: object) -> str | None:
     """Return the refusal reason for this ``subagent_type``, or None to allow.
 
@@ -198,8 +141,10 @@ def classify_spawn(payload: dict[str, object] | None) -> str | None:
     context = active_headless_context(payload)
     if context is None:
         return None
-    if not _resolve_spawn_guard_enabled(
-        _context_str(context, "client"), _context_str(context, "lane")
+    if not resolve_guard_enabled(
+        _context_str(context, "client"),
+        _context_str(context, "lane"),
+        "subagent_spawn_guard_enabled",
     ):
         return None
     if payload.get("tool_name") not in _AGENT_TOOL_NAMES:
@@ -211,16 +156,3 @@ def classify_spawn(payload: dict[str, object] | None) -> str | None:
         )
         return None
     return _classify_subagent_type(tool_input.get(_SUBAGENT_TYPE_KEY))
-
-
-def enforce(reason: str | None) -> None:
-    """Apply *reason* to the PreToolUse exit-code contract.
-
-    Exits 2 when there is a reason — the spawn never runs, and the agent reads
-    the reason back from stderr, which is how it learns what to retry with.
-    Does nothing at all for None.
-    """
-    if reason is None:
-        return
-    click.echo(reason, err=True)
-    sys.exit(_SPAWN_BLOCK_EXIT)

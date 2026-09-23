@@ -57,7 +57,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `operator_github_login` | string \| null | `null` | Override the runtime-resolved GitHub login used for counterparty/self-identity resolution (RFC 0011 S1). Rare multi-account case; the runtime `gh api user` login is authoritative when unset. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
-| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `park_on_abandoned_exit: dict[str,bool] | null = null` (#2135 — per-lane enablement of the Stop-hook abandoned-exit park; see [Abandoned-Exit Park Enablement](#abandoned-exit-park-enablement-github-2135) below), `codex_review_tiers: dict[str,bool] | null = null` (#2210 — per-lane enablement for the codex review ledger's optional matching tiers; the one recognised key is `claim_suppression`; an unrecognised key fails loud at config load; see [Codex Claim-Match Suppression Gate](#codex-claim-match-suppression-gate-2210) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below), `attempt_ceiling: int | false | null = null` (#1751 — lane override for the global attempt ceiling; `null` defers to `global_attempt_ceiling` in `orchestrator.yaml`, `false` disables the ceiling for this lane; see [Per-Lane Attempt Ceiling](#per-lane-attempt-ceiling-1751) below), `busy_wait_guard_enabled: bool | null = null` / `busy_wait_guard_repeat_threshold: int | null = null` / `busy_wait_guard_window_seconds: int | null = null` (#1946 — lane overrides for the `cw guard-busy-wait` PreToolUse hook; `null` on any of the three defers to the matching global in `orchestrator.yaml`; see [Busy-Wait Guard](#busy-wait-guard-1946) below), `subagent_spawn_guard_enabled: bool | null = null` (#2211 — lane override for the `cw agent-spawn-pre` spawn-shape policy; `null` defers to the global default in `orchestrator.yaml`; see [Subagent Spawn Guard](#subagent-spawn-guard-2211) below), `disposition_drift_check_enabled: bool | null = null` (#2232 — lane override for the review ledger's drift check; `null` defers to the global default in `orchestrator.yaml`; setting it `false` also refuses to arm this lane's claim tier; see [Disposition Drift Check Gate](#disposition-drift-check-gate-2232) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `park_on_abandoned_exit: dict[str,bool] | null = null` (#2135 — per-lane enablement of the Stop-hook abandoned-exit park; see [Abandoned-Exit Park Enablement](#abandoned-exit-park-enablement-github-2135) below), `codex_review_tiers: dict[str,bool] | null = null` (#2210 — per-lane enablement for the codex review ledger's optional matching tiers; the one recognised key is `claim_suppression`; an unrecognised key fails loud at config load; see [Codex Claim-Match Suppression Gate](#codex-claim-match-suppression-gate-2210) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below), `attempt_ceiling: int | false | null = null` (#1751 — lane override for the global attempt ceiling; `null` defers to `global_attempt_ceiling` in `orchestrator.yaml`, `false` disables the ceiling for this lane; see [Per-Lane Attempt Ceiling](#per-lane-attempt-ceiling-1751) below), `busy_wait_guard_enabled: bool | null = null` / `busy_wait_guard_repeat_threshold: int | null = null` / `busy_wait_guard_window_seconds: int | null = null` (#1946 — lane overrides for the `cw guard-busy-wait` PreToolUse hook; `null` on any of the three defers to the matching global in `orchestrator.yaml`; see [Busy-Wait Guard](#busy-wait-guard-1946) below), `subagent_spawn_guard_enabled: bool | null = null` (#2211 — lane override for the `cw agent-spawn-pre` spawn-shape policy; `null` defers to the global default in `orchestrator.yaml`; see [Subagent Spawn Guard](#subagent-spawn-guard-2211) below), `background_tool_guard_enabled: bool | null = null` (#2303 — lane override for the `cw background-tool-guard-pre` guard; `null` defers to the global default in `orchestrator.yaml`; see [Background Tool Guard](#background-tool-guard-2303) below), `disposition_drift_check_enabled: bool | null = null` (#2232 — lane override for the review ledger's drift check; `null` defers to the global default in `orchestrator.yaml`; setting it `false` also refuses to arm this lane's claim tier; see [Disposition Drift Check Gate](#disposition-drift-check-gate-2232) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
 | `pipeline` | PipelineConfig | standard 4-stage pipeline, no per-stage models | Per-stage executor configuration (RFC 0005): `stages` (default `[plan, impl, review, finalize]`) and `executors` (default `{}`). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
@@ -704,6 +704,67 @@ guard — which is now the case. If a spawn site is ever missed, the symptom is
 an exit-2 refusal naming the shape, and the kill switch above is the
 immediate remedy. See `.claude/commands/auto-dev-impl-appendix.md`, section
 "Read-only helper spawns: capability, not instruction (#2211)".
+
+#### Background Tool Guard (#2303)
+
+`cw background-tool-guard-pre` — a PreToolUse hook wired as the third command
+on the `"Bash"` matcher (after `cw guard-cwd` and `cw guard-busy-wait`) and as
+the sole command on a `"Monitor"` matcher. In a **headless** worker it refuses:
+
+- a Bash call made with `run_in_background: true`;
+- any call to the Monitor tool.
+
+Why it exists: a headless DAEMON session has exactly one completion-
+notification path back into its own turn — the Stop hook's `background_tasks`
+list, which tracks the Agent tool's subagent spawns (ADR-0003). A backgrounded
+raw Bash call, or a task handed to Monitor, has no such path, so a turn that
+ends waiting on one never resumes and the worker wedges. Three Stage-2 impl
+subagents hit exactly that (#2250, #2280, #2275) after #2251 fixed the one
+`/prep-pr` instance in prose. The same hooks fire for a subagent's own tool
+calls in the worktree, which is the path those wedges took.
+
+Interactive sessions are never affected — the Monitor/background guidance for
+interactive orchestrators still applies there — and any cwd with no ancestor
+`.claude/cw-context.json` is structurally exempt.
+
+The refusal text names the sanctioned retry: run the command in the
+foreground under a shell-level `timeout <N> <cmd>` with the Bash tool's own
+`timeout` parameter set to at least `N * 1000` ms (up to 600000ms). Work that
+genuinely exceeds 600s uses the #2291 pattern instead — a shell-level detached
+launch (`setsid nohup <cmd> > <log> 2>&1; echo $? > <rc>`) followed by bounded
+foreground polls (`timeout <N> bash -c 'until [ -f <rc> ]; do sleep 5; done'`)
+— which never ends a turn waiting on a notification and is not refused.
+
+Every refusal records a `guard.background_tool_refused` event (see
+[docs/events.md](../docs/events.md)) carrying the tool name, client, lane,
+ticket, and — when the PreToolUse payload carries one — the calling agent's
+`agent_id`.
+
+```yaml
+# ~/.claude-workspace/orchestrator.yaml
+background_tool_guard_enabled: true    # default
+```
+
+```yaml
+# ~/.config/cw/clients.yaml
+clients:
+  my-project:
+    workspace_path: /home/user/projects/my-project
+    lanes:
+      # A lane whose workers legitimately need a backgrounded call.
+      - name: experiment
+        background_tool_guard_enabled: false
+```
+
+The override is bidirectional and `null` (or an omitted key) means "inherit
+the global", exactly as for the guards above. Config is re-read on every hook
+invocation, so an edit takes effect on the next tool call with no worker
+restart.
+
+The guard fails open on every unexpected condition — unreadable stdin, a
+missing or malformed context, an unexpected payload shape (which also prints a
+`WARN (cw background-tool-guard-pre, #2303)` line), or a config that will not
+load.
 
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 

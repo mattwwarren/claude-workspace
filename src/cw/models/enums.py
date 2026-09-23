@@ -264,6 +264,14 @@ class OrchestratorEventType(StrEnum):
     # `cw signal-stop` (cli/stop_hook.py), which already records from a hook
     # subprocess. See docs/events.md.
     GUARD_BUSY_WAIT_BLOCKED = "guard.busy_wait_blocked"
+    # #2303 -- emitted by the `cw background-tool-guard-pre` PreToolUse hook
+    # subprocess every time it refuses a backgrounded Bash call
+    # (run_in_background: true) or the Monitor tool in a headless worker. Same
+    # emitter class and observability rationale as GUARD_BUSY_WAIT_BLOCKED
+    # immediately above: a refusal is visible to the worker only as its own
+    # stderr, so without a durable record it is indistinguishable from a call
+    # the worker never made. See docs/events.md.
+    GUARD_BACKGROUND_TOOL_REFUSED = "guard.background_tool_refused"
     # RFC 0008 capstone (#1015) — daemon-side gate concierge. CONCIERGE_RECOVERED
     # is the mechanical-recovery-reactor's audit trail (emitted before every
     # recipe's mutation); OPERATOR_ESCALATION is the durable-escalation-latch's

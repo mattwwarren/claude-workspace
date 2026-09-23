@@ -28,13 +28,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.cli._subagent_policy import (
-    _resolve_spawn_guard_enabled,
-    active_headless_context,
-    classify_spawn,
-    enforce,
+from cw.cli._subagent_policy import classify_spawn
+from tests.conftest import (
+    _headless_worktree,
+    _write_global_toggle,
+    _write_hook_context_file,
 )
-from tests.conftest import _headless_worktree, _write_hook_context_file
 from tests.test_cli_agent_spawn_stamp import _PRE_PAYLOAD, _pre_tool_input
 
 if TYPE_CHECKING:
@@ -58,110 +57,6 @@ def _spawn_payload(cwd: Path, subagent_type: object = _ABSENT) -> dict[str, obje
     else:
         tool_input["subagent_type"] = subagent_type
     return {**_PRE_PAYLOAD, "cwd": str(cwd), "tool_input": tool_input}
-
-
-class TestActiveHeadlessContext:
-    """The policy applies to headless dispatch workers and nowhere else."""
-
-    def test_no_context_anywhere_yields_none(self, tmp_path: Path) -> None:
-        """A cwd with no ancestor cw-context.json is not a dispatch worker."""
-        bare = tmp_path / "bare"
-        bare.mkdir()
-
-        assert active_headless_context(_spawn_payload(bare)) is None
-
-    def test_interactive_context_yields_none(self, tmp_path: Path) -> None:
-        """``headless: false`` is an operator's own session — never guarded."""
-        worktree = tmp_path / "interactive"
-        worktree.mkdir()
-        _write_hook_context_file(worktree, headless=False)
-
-        assert active_headless_context(_spawn_payload(worktree)) is None
-
-    def test_headless_context_is_returned(self, tmp_path: Path) -> None:
-        worktree = _headless_worktree(tmp_path)
-
-        context = active_headless_context(_spawn_payload(worktree))
-
-        assert context is not None
-        assert context["headless"] is True
-
-    def test_subdirectory_cwd_still_resolves(self, tmp_path: Path) -> None:
-        """A subagent that ``cd``s inside the worktree is still covered.
-
-        ``find_cw_context`` walks upward, so the policy does not evaporate the
-        moment a worker's cwd moves into ``src/``.
-        """
-        worktree = _headless_worktree(tmp_path)
-        nested = worktree / "src" / "cw"
-        nested.mkdir(parents=True)
-
-        assert active_headless_context(_spawn_payload(nested)) is not None
-
-    def test_missing_cwd_yields_none(self, tmp_path: Path) -> None:
-        payload = {k: v for k, v in _spawn_payload(tmp_path).items() if k != "cwd"}
-
-        assert active_headless_context(payload) is None
-
-
-class TestResolveSpawnGuardEnabled:
-    """Lane-then-global fallthrough, mirroring the #1946 busy-wait precedent."""
-
-    def test_defaults_on_with_no_client_or_lane(self) -> None:
-        assert _resolve_spawn_guard_enabled(None, None) is True
-
-    def test_global_disable_wins_with_no_lane_override(
-        self, tmp_config_dir: Path
-    ) -> None:
-        orchestrator_path = tmp_config_dir / ".claude-workspace" / "orchestrator.yaml"
-        orchestrator_path.parent.mkdir(parents=True, exist_ok=True)
-        orchestrator_path.write_text("subagent_spawn_guard_enabled: false\n")
-
-        assert _resolve_spawn_guard_enabled(None, None) is False
-
-    def test_lane_override_disables_against_enabled_global(
-        self, tmp_config_dir: Path
-    ) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false")
-
-        assert _resolve_spawn_guard_enabled("acme", "fast") is False
-
-    def test_lane_override_enables_against_disabled_global(
-        self, tmp_config_dir: Path
-    ) -> None:
-        """The override is bidirectional — a lane can turn the guard back ON."""
-        orchestrator_path = tmp_config_dir / ".claude-workspace" / "orchestrator.yaml"
-        orchestrator_path.parent.mkdir(parents=True, exist_ok=True)
-        orchestrator_path.write_text("subagent_spawn_guard_enabled: false\n")
-        _write_clients_yaml(tmp_config_dir, lane_value="true")
-
-        assert _resolve_spawn_guard_enabled("acme", "fast") is True
-
-    def test_unknown_client_falls_through_to_global(self, tmp_config_dir: Path) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false")
-
-        assert _resolve_spawn_guard_enabled("not-a-client", "fast") is True
-
-    def test_unknown_lane_falls_through_to_global(self, tmp_config_dir: Path) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false")
-
-        assert _resolve_spawn_guard_enabled("acme", "not-a-lane") is True
-
-
-def _write_clients_yaml(tmp_config_dir: Path, lane_value: str) -> None:
-    """Write a one-client, one-lane clients.yaml carrying the lane override."""
-    ws_dir = tmp_config_dir / "ws"
-    ws_dir.mkdir(exist_ok=True)
-    clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-    clients_path.parent.mkdir(parents=True, exist_ok=True)
-    clients_path.write_text(
-        "clients:\n"
-        "  acme:\n"
-        f"    workspace_path: {ws_dir}\n"
-        "    lanes:\n"
-        "      - name: fast\n"
-        f"        subagent_spawn_guard_enabled: {lane_value}\n"
-    )
 
 
 class TestClassifySpawn:
@@ -262,13 +157,14 @@ class TestClassifySpawn:
         assert classify_spawn(None) is None
 
     def test_disabled_guard_allows_an_explicit_fork(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, tmp_config_dir: Path
     ) -> None:
-        """The config gate is a real kill switch, not just a softener."""
-        monkeypatch.setattr(
-            "cw.cli._subagent_policy._resolve_spawn_guard_enabled",
-            lambda _client, _lane: False,
-        )
+        """The config gate is a real kill switch, not just a softener.
+
+        Driven through the real config file rather than a patched resolver, so
+        it also pins which toggle this classifier reads.
+        """
+        _write_global_toggle(tmp_config_dir, "subagent_spawn_guard_enabled", "false")
         worktree = _headless_worktree(tmp_path)
 
         assert classify_spawn(_spawn_payload(worktree, "fork")) is None
@@ -286,25 +182,3 @@ class TestClassifySpawn:
         bare.mkdir()
 
         assert classify_spawn(_spawn_payload(bare, "fork")) is None
-
-
-class TestEnforce:
-    """Turning a classification into the PreToolUse exit-code contract."""
-
-    def test_a_reason_exits_2_with_it_on_stderr(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        with pytest.raises(SystemExit) as excinfo:
-            enforce("nope")
-
-        assert excinfo.value.code == 2
-        assert "nope" in capsys.readouterr().err
-
-    def test_none_verdict_is_a_pure_noop(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        enforce(None)
-
-        captured = capsys.readouterr()
-        assert captured.err == ""
-        assert captured.out == ""

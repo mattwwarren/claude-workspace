@@ -1296,6 +1296,49 @@ and for `cw event tail`.
 `correlation_id` is the worker's cw `session_id` from its
 `.claude/cw-context.json`, or `null` when the context is unreadable.
 
+### `guard.background_tool_refused`
+
+**Emitter:** the `cw background-tool-guard-pre` PreToolUse hook subprocess
+(`cw.cli.background_tool_guard_pre`), running inside the dispatched
+worker — same emitter class as `guard.busy_wait_blocked` and
+`cw signal-stop`'s `session.completed`.
+**Payload:**
+```json
+{
+  "tool_name": "Bash | Monitor",
+  "client": "<str | null>",
+  "lane": "<str | null>",
+  "ticket_id": "<str | null>",
+  "agent_id": "<str>"
+}
+```
+**Semantics:** Emitted every time the guard refuses a backgrounded Bash
+call (`run_in_background: true`) or the Monitor tool in a headless
+worker (exit 2). `tool_name` names which of the two tripped. `agent_id`
+is present only when the PreToolUse payload's own `agent_id` field is a
+non-empty string — the identifier of the calling agent/subagent, a real
+field observed in the Agent-tool capture in
+`tests/test_cli_agent_spawn_stamp.py`'s `_PRE_PAYLOAD`
+(`"agent_id": "0000000000000000a"`) — and omitted entirely otherwise.
+
+Same observability rationale as `guard.busy_wait_blocked`: the refusal
+is enforced via the PreToolUse exit code and reaches the worker only as
+its own stderr, so without this record a refusal (or a false positive)
+is invisible to the operator. Recorded best-effort in its own isolated
+`try`/`except` — a failure to write the event must never suppress the
+refusal.
+
+This event is #2303's production-observability commitment standing in
+for a live-subagent integration test (see the round-3 operator note):
+the operator watches for this event, and for any recurrence of the
+#2250/#2280/#2275 wedge signature with **no** matching refusal event,
+after release. A recurrence with no refusal event means the premise —
+that injected PreToolUse hooks intercept a subagent's own tool calls —
+failed, and a follow-up ticket gets filed then.
+
+`correlation_id` is the worker's cw `session_id` from its
+`.claude/cw-context.json`, or `null` when the context is unreadable.
+
 ### `concierge.recovered`
 
 **Emitter:** `run_concierge_recoveries` (`cw.reconcile.concierge`)

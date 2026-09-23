@@ -60,8 +60,9 @@ from cw.cli._hook_io import (
     _context_lock,
     _read_hook_stdin_json,
     _write_cw_context_locked,
+    enforce,
 )
-from cw.cli._subagent_policy import classify_spawn, enforce
+from cw.cli._subagent_policy import classify_spawn
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
     AGENT_SPAWN_STAMP_KEY,
@@ -153,7 +154,7 @@ def agent_spawn_pre() -> None:
     every case except a refused spawn shape — an explicit fork, or no
     ``subagent_type`` named at all — which exits 2; see module docstring.
 
-    :func:`~cw.cli._subagent_policy.enforce` signals that refusal with
+    :func:`~cw.cli._hook_io.enforce` signals that refusal with
     ``sys.exit(2)``, i.e. ``SystemExit``, which is not an ``Exception`` and
     so passes through the fail-open guard below rather than being swallowed
     by it.
