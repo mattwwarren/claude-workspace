@@ -350,18 +350,25 @@ def _refuse_unguarded_claim_tier(
 REVIEW_VERDICT_COMMENT_RELATIVE_PATH = Path(".claude") / "review-verdict.md"
 
 
-def _persist_review_verdict(worktree: Path, review_text: str) -> Path | None:
-    """Write *review_text* to the worktree's durable verdict file, best-effort.
+def _persist_review_verdict(
+    worktree: Path, review_text: str, *, ticket_id: str, reviewed_sha: str
+) -> Path | None:
+    """Write *review_text* to the worktree's durable verdict file, best-effort,
+    prefixed with an ownership stamp (``ticket_id``/``reviewed_sha``) (#2279).
 
     Returns the path written, or None when the write failed (logged). Never
     raises: this runs on the daemon thread's success path after the sentinel
     has already been persisted, and a filesystem hiccup must not turn a
     completed review into an unexpected-error completion.
     """
+    stamped_text = (
+        f"<!-- cw-review-verdict-owner ticket_id={ticket_id} "
+        f"reviewed_sha={reviewed_sha} -->\n{review_text}"
+    )
     path = worktree / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, review_text)
+        atomic_write_text(path, stamped_text)
     except OSError as exc:
         _log.warning("review_verdict_persist_failed path=%s: %s", path, exc)
         return None
@@ -544,7 +551,12 @@ def _run_codex_review_and_complete(
             )
             # #2095: the durable copy is written first, unconditionally, so a
             # tracker the daemon cannot post to still leaves a record.
-            artifact_path = _persist_review_verdict(worktree, review_text)
+            artifact_path = _persist_review_verdict(
+                worktree,
+                review_text,
+                ticket_id=task.ticket_id,
+                reviewed_sha=verdict.reviewed_sha,
+            )
             _post_review_comment(
                 task.ticket_id,
                 review_text,

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`.claude/review-verdict.md` is no longer git-tracked, and its persisted copy now carries an ownership stamp (#2279):** the durable verdict file #2095 introduced was committed and merged to `main` like any other file, so a fresh worktree cut from `main` (or from a sibling ticket's branch) inherited whatever verdict text that ancestor commit happened to carry — a finalize agent reading the file for context could pick up another ticket's review as if it were its own (observed via #1409/#2232, both of which merged the file's then-current contents to `main`). ADR-0016's F10 follow-up flagged this exact route as the ledger's one remaining leak: "the same rendered review text... is written to the git-tracked `.claude/review-verdict.md`... strip the section from the persisted artifact, or stop tracking the file." This closes it via the second option — `.gitignore` now excludes the path and the previously-tracked copy was removed from the index (the on-disk file in existing worktrees is untouched). `_persist_review_verdict` also now prepends a one-line ownership stamp, `<!-- cw-review-verdict-owner ticket_id=<id> reviewed_sha=<sha> -->`, ahead of the rendered verdict, and `auto-dev-finalize.md` instructs the finalize agent to check that stamp against the current ticket before treating the file's content as informative — a mismatched, missing, or malformed stamp means the file is stale or foreign and its content is disregarded. The file was never authoritative for the halt/ship decision either way; the dev-queue disposition and the stage's own review-completeness checks remain the only authority.
+
 ## [1.49.0] - 2026-09-22
 
 ### Added
