@@ -1289,6 +1289,65 @@ class TestSelectOutputInstructions:
                 "`detail` is REQUIRED and MUST be non-empty whenever `status` "
                 'is "degraded" or "failed"' in variant
             )
+            # #2292: sandbox baseline, non-degradation, and degraded/failed
+            # boundary clarifications -- must appear in both variants.
+            assert (
+                "This is a read-only sandbox: running the test suite, `uv`, a "
+                "linter, or a type-checker is not expected of you unless the "
+                "reviewer role's own rubric explicitly mandates that check."
+                in variant
+            )
+            assert (
+                "Being unable to run a gate the rubric does not mandate is not "
+                'degradation — report `status="ok"` for that gate and, if useful, '
+                "note the sandbox limitation in `detail`."
+                in variant
+            )
+            assert (
+                "Total inability to execute a mandated gate is still `degraded`, never `failed`."
+                in variant
+            )
+            assert (
+                '`status="failed"` is reserved for being unable to evaluate the '
+                "diff itself — the diff is missing or unreadable, a required file "
+                "is inaccessible, or your own output would be malformed."
+                in variant
+            )
+
+
+class TestOutputSchemaRulesSandboxClarification:
+    """Locks #2292's sandbox-baseline/degraded/failed clarification onto the
+    shared schema-rules constant itself, not only its two derived variants."""
+
+    def test_states_sandbox_baseline_non_degradation_and_failed_boundary(
+        self,
+    ) -> None:
+        from cw.codex_review._context._prompt_text import _OUTPUT_SCHEMA_RULES
+
+        assert (
+            "This is a read-only sandbox: running the test suite, `uv`, a "
+            "linter, or a type-checker is not expected of you unless the "
+            "reviewer role's own rubric explicitly mandates that check."
+            in _OUTPUT_SCHEMA_RULES
+        )
+        assert (
+            "Being unable to run a gate the rubric does not mandate is "
+            'not degradation — report `status="ok"` for that gate and, '
+            "if useful, note the sandbox limitation in `detail`."
+            in _OUTPUT_SCHEMA_RULES
+        )
+        assert (
+            "Total inability to execute a mandated gate is still "
+            "`degraded`, never `failed`."
+            in _OUTPUT_SCHEMA_RULES
+        )
+        assert (
+            '`status="failed"` is reserved for being unable to evaluate '
+            "the diff itself — the diff is missing or unreadable, a "
+            "required file is inaccessible, or your own output would be "
+            "malformed."
+            in _OUTPUT_SCHEMA_RULES
+        )
 
 
 class TestBuildReviewerPromptCapability:

@@ -764,6 +764,44 @@ class TestSynthesizeCodexReviewResultHealth:
         ]
         assert verdict is not None
 
+    def test_non_exempt_role_ok_with_sandbox_note_proceeds(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # #2292: locks the downstream effect of the prompt fix -- a non-exempt
+        # role that follows the new sandbox-baseline guidance and reports
+        # "ok" (instead of "degraded") for a gate its own rubric does not
+        # mandate no longer parks the review. No code change is required for
+        # this to pass; it locks existing `_derive_health` behavior against
+        # this new prompt-driven scenario.
+        worktree = make_git_repo("wt-2292-non-exempt-ok")
+        doc = _make_reviewer_doc(
+            status="ok",
+            reviewer_role="Data Safety Reviewer",
+            detail=(
+                "Reviewed changed worktree mutations for destructive defaults "
+                "and audit-trail coverage. Full test execution was not "
+                "performed in this read-only runtime; no additional "
+                "actionable data-safety findings identified."
+            ),
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-2292-non-exempt-ok",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.status == "stage_complete"
+        assert result.health.lowest_agent_confidence == "HIGH"
+        assert result.health.any_incomplete_risk is False
+        assert result.health.recommendation == "PROCEED"
+        assert result.friction_highlights == []
+        assert verdict is not None
+
 
 class TestReadOnlySandboxDegradedCarveOut:
     """#1856 (Test Reviewer), widened by #2174 to Code Quality Reviewer and
