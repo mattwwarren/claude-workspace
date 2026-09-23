@@ -2216,6 +2216,73 @@ class TestBuildPeekRowsSubagents:
 # ---------------------------------------------------------------------------
 
 
+def _make_blocked_task(
+    ticket_id: str = "T-9",
+    disposition: str | None = "codex_must_fix_findings",
+    completed_at: dt.datetime | None = _NOW - dt.timedelta(minutes=390),
+) -> TicketTask:
+    return _cw_make_ticket_task(
+        ticket_id=ticket_id,
+        client="test",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        session_id="blk12345",
+        attempts=3,
+        disposition=disposition,
+        completed_at=completed_at,
+        stage=Stage.REVIEW,
+    )
+
+
+class TestBlockedOnUserRows:
+    """#2250: a parked row has no running session, but a checkpoint peek must
+    still show it -- otherwise peek reports all-clear while a ticket sits
+    BLOCKED_ON_USER for hours."""
+
+    def test_load_blocked_tasks_filters_to_blocked_on_user(self) -> None:
+        running = _make_ticket_task("T-1")
+        blocked = _make_blocked_task("T-2")
+        with patch("cw.queue_peek.list_tickets", return_value=[running, blocked]):
+            result = queue_peek.load_blocked_tasks(None)
+        assert [t.ticket_id for t in result] == ["T-2"]
+
+    def test_peek_rows_include_blocked_on_user(self) -> None:
+        running = _make_ticket_task("T-1")
+        blocked = _make_blocked_task("T-2")
+        pending = _cw_make_ticket_task(ticket_id="T-3", client="test")
+        with (
+            patch(
+                "cw.queue_peek.list_tickets", return_value=[running, blocked, pending]
+            ),
+            patch("cw.queue_peek.find_transcript_for_ticket", return_value=None),
+        ):
+            rows = queue_peek.build_peek_rows(None, _NOW)
+        assert [r["ticket"] for r in rows] == ["T-1", "T-2"]
+        blocked_row = rows[1]
+        assert blocked_row["recommend"] == queue_peek.RECOMMEND_BLOCKED
+        assert blocked_row["status"] == "codex_must_fix_findings"
+
+    def test_blocked_row_shape(self) -> None:
+        row = queue_peek.format_blocked_row(_make_blocked_task(), _NOW)
+        assert row["recommend"] == "BLOCKED"
+        assert row["age_min"] == 390.0
+        assert row["idle_min"] is None
+        assert row["stage"] == "review"
+        assert row["pipeline_stage"] == Stage.REVIEW
+        assert row["session"] == "blk12345"
+        assert "BLOCKED_ON_USER" in row["reason"]
+        assert "codex_must_fix_findings" in row["reason"]
+        # Same keys as a RUNNING row, so --json consumers see one row shape.
+        running = queue_peek.format_row(_make_ticket_task(), _make_blind_info(), _NOW)
+        assert row.keys() == running.keys()
+
+    def test_blocked_row_without_disposition_or_timestamp(self) -> None:
+        task = _make_blocked_task(disposition=None, completed_at=None)
+        row = queue_peek.format_blocked_row(task, _NOW)
+        assert row["age_min"] is None
+        assert row["status"] is None
+        assert "unknown" in row["reason"]
+
+
 class TestLoadRunningTasks:
     def test_filters_out_non_running_tasks(self) -> None:
         pending = TicketTask(
@@ -2416,7 +2483,18 @@ class TestPrintTable:
     ) -> None:
         queue_peek.print_table([])
         captured = capsys.readouterr()
-        assert "No RUNNING tasks found." in captured.out
+        assert "No RUNNING or BLOCKED_ON_USER tasks found." in captured.out
+
+    def test_print_table_labels_blocked_on_user_distinctly(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        blocked = queue_peek.format_blocked_row(_make_blocked_task(), _NOW)
+        queue_peek.print_table([_WAIT_ROW, blocked])
+        out = capsys.readouterr().out
+        assert "BLOCKED" in out
+        assert "codex_must_fix_findings" in out
+        assert "└─ BLOCKED_ON_USER" in out
+        assert "Suggested stops:" not in out
 
     def test_wait_row_printed_without_reason_line(
         self, capsys: pytest.CaptureFixture[str]
