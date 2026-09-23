@@ -1912,14 +1912,14 @@ class TestSubagentIdleBlend:
 
 class TestBuildPeekRows:
     def test_returns_empty_list_when_no_running_tasks(self) -> None:
-        with patch("cw.queue_peek.load_running_tasks", return_value=[]):
+        with patch("cw.queue_peek.load_attention_tasks", return_value=[]):
             rows = queue_peek.build_peek_rows(None, _NOW)
         assert rows == []
 
     def test_builds_one_row_per_task(self) -> None:
         tasks = [_make_ticket_task("T-1"), _make_ticket_task("T-2")]
         with (
-            patch("cw.queue_peek.load_running_tasks", return_value=tasks),
+            patch("cw.queue_peek.load_attention_tasks", return_value=tasks),
             patch("cw.queue_peek.find_transcript_for_ticket", return_value=None),
             patch("cw.queue_peek.gh_pr_state", return_value="UNKNOWN"),
         ):
@@ -1940,7 +1940,7 @@ class TestBuildPeekRows:
             captured_wt.append(worktree_path)
 
         with (
-            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch("cw.queue_peek.load_attention_tasks", return_value=[task]),
             patch("cw.queue_peek.find_transcript_for_ticket", side_effect=_capture),
             patch("cw.queue_peek.gh_pr_state", return_value="UNKNOWN"),
         ):
@@ -1950,7 +1950,7 @@ class TestBuildPeekRows:
 
     def test_client_filter_passed_to_load(self) -> None:
         with (
-            patch("cw.queue_peek.load_running_tasks", return_value=[]) as mock_load,
+            patch("cw.queue_peek.load_attention_tasks", return_value=[]) as mock_load,
         ):
             queue_peek.build_peek_rows("my-client", _NOW)
         mock_load.assert_called_once_with("my-client")
@@ -1972,7 +1972,7 @@ class TestBuildPeekRows:
             + "\n"
         )
         with (
-            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch("cw.queue_peek.load_attention_tasks", return_value=[task]),
             patch(
                 "cw.queue_peek.find_transcript_for_ticket",
                 return_value=transcript_path,
@@ -2012,7 +2012,7 @@ class TestBuildPeekRows:
             ],
         )
         with (
-            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch("cw.queue_peek.load_attention_tasks", return_value=[task]),
             patch(
                 "cw.queue_peek.find_transcript_for_ticket",
                 return_value=transcript_path,
@@ -2057,7 +2057,7 @@ class TestBuildPeekRows:
             ],
         )
         with (
-            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch("cw.queue_peek.load_attention_tasks", return_value=[task]),
             patch(
                 "cw.queue_peek.find_transcript_for_ticket",
                 return_value=transcript_path,
@@ -2088,7 +2088,7 @@ class TestBuildPeekRows:
             + "\n"
         )
         with (
-            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch("cw.queue_peek.load_attention_tasks", return_value=[task]),
             patch(
                 "cw.queue_peek.find_transcript_for_ticket",
                 return_value=transcript_path,
@@ -2097,6 +2097,104 @@ class TestBuildPeekRows:
         ):
             rows = queue_peek.build_peek_rows(None, _NOW)
         assert rows[0]["recommend"] != "STOP"
+
+
+class TestAwaitingOperatorRows:
+    """#2212: a BLOCKED_ON_USER row is 'awaiting operator', not 'wedged'."""
+
+    def _blocked_task(self, **overrides: object) -> TicketTask:
+        kwargs: dict[str, object] = {
+            "ticket_id": "2212",
+            "client": "c",
+            "status": QueueItemStatus.BLOCKED_ON_USER,
+            "session_id": "abc12345",
+            "attempts": 1,
+        }
+        kwargs.update(overrides)
+        return TicketTask.model_validate(kwargs)
+
+    def test_recommendation_is_awaiting_operator(self) -> None:
+        row = queue_peek.format_row(self._blocked_task(), {}, _NOW)
+        assert row["recommend"] == queue_peek.RECOMMEND_AWAITING_OPERATOR
+        assert row["recommend"] == "AWAITING_OPERATOR"
+
+    def test_age_and_idle_ladder_is_skipped(self) -> None:
+        """A parked row is *supposed* to be idle — no false-precision scores."""
+        row = queue_peek.format_row(self._blocked_task(), {}, _NOW)
+        assert row["age_min"] is None
+        assert row["idle_min"] is None
+
+    def test_reason_prefers_disposition(self) -> None:
+        """The primary park path (_route_stopped_without_sentinel) stamps
+        ``disposition``, not ``blocked_reason``."""
+        task = self._blocked_task(
+            disposition="stopped_without_sentinel",
+            blocked_reason="secondary",
+            advisory_note="tertiary",
+        )
+        assert (
+            "stopped_without_sentinel"
+            in queue_peek.format_row(task, {}, _NOW)["reason"]
+        )
+
+    def test_reason_falls_back_to_blocked_reason(self) -> None:
+        task = self._blocked_task(
+            blocked_reason="needs a product decision", advisory_note="tertiary"
+        )
+        assert (
+            "needs a product decision"
+            in queue_peek.format_row(task, {}, _NOW)["reason"]
+        )
+
+    def test_reason_falls_back_to_advisory_note(self) -> None:
+        task = self._blocked_task(advisory_note="session id mismatch")
+        assert "session id mismatch" in queue_peek.format_row(task, {}, _NOW)["reason"]
+
+    def test_reason_falls_back_to_a_generic_string(self) -> None:
+        reason = queue_peek.format_row(self._blocked_task(), {}, _NOW)["reason"]
+        assert reason
+        assert "parked" in reason.lower()
+
+    def test_blind_signal_source_does_not_shadow_the_parked_branch(self) -> None:
+        row = queue_peek.format_row(
+            self._blocked_task(), {"signal_source": "blind"}, _NOW
+        )
+        assert row["recommend"] == queue_peek.RECOMMEND_AWAITING_OPERATOR
+
+    def test_running_rows_are_unaffected(self) -> None:
+        """Regression guard: the STOP-OR-PEEK bucket keeps its RUNNING rows."""
+        task = _make_ticket_task("T-1", unproductive_attempts=0)
+        info = {
+            "first_user_ts": "2026-06-20T11:30:00Z",
+            "last_asst_ts": "2026-06-20T11:40:00Z",  # 20 min idle at _NOW
+            "last_sentinel_status": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        assert queue_peek.format_row(task, info, _NOW)["recommend"] == "STOP-OR-PEEK"
+
+    def test_build_peek_rows_reports_a_parked_row(self) -> None:
+        with (
+            patch(
+                "cw.queue_peek.load_attention_tasks",
+                return_value=[self._blocked_task()],
+            ),
+            patch("cw.queue_peek.find_transcript_for_ticket", return_value=None),
+        ):
+            rows = queue_peek.build_peek_rows(None, _NOW)
+        assert len(rows) == 1
+        assert rows[0]["recommend"] == queue_peek.RECOMMEND_AWAITING_OPERATOR
+
+    def test_build_peek_rows_skips_transcript_lookup_for_a_parked_row(self) -> None:
+        with (
+            patch(
+                "cw.queue_peek.load_attention_tasks",
+                return_value=[self._blocked_task()],
+            ),
+            patch("cw.queue_peek.find_transcript_for_ticket") as mock_find,
+        ):
+            queue_peek.build_peek_rows(None, _NOW)
+        assert mock_find.call_count == 0
 
 
 class TestBuildPeekRowsSubagents:
@@ -2155,7 +2253,7 @@ class TestBuildPeekRowsSubagents:
             ],
         )
         with (
-            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch("cw.queue_peek.load_attention_tasks", return_value=[task]),
             patch(
                 "cw.queue_peek.find_transcript_for_ticket",
                 return_value=transcript_path,
@@ -2200,7 +2298,7 @@ class TestBuildPeekRowsSubagents:
             ],
         )
         with (
-            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch("cw.queue_peek.load_attention_tasks", return_value=[task]),
             patch(
                 "cw.queue_peek.find_transcript_for_ticket",
                 return_value=transcript_path,
@@ -2212,79 +2310,12 @@ class TestBuildPeekRowsSubagents:
 
 
 # ---------------------------------------------------------------------------
-# load_running_tasks
+# load_attention_tasks
 # ---------------------------------------------------------------------------
 
 
-def _make_blocked_task(
-    ticket_id: str = "T-9",
-    disposition: str | None = "codex_must_fix_findings",
-    completed_at: dt.datetime | None = _NOW - dt.timedelta(minutes=390),
-) -> TicketTask:
-    return _cw_make_ticket_task(
-        ticket_id=ticket_id,
-        client="test",
-        status=QueueItemStatus.BLOCKED_ON_USER,
-        session_id="blk12345",
-        attempts=3,
-        disposition=disposition,
-        completed_at=completed_at,
-        stage=Stage.REVIEW,
-    )
-
-
-class TestBlockedOnUserRows:
-    """#2250: a parked row has no running session, but a checkpoint peek must
-    still show it -- otherwise peek reports all-clear while a ticket sits
-    BLOCKED_ON_USER for hours."""
-
-    def test_load_blocked_tasks_filters_to_blocked_on_user(self) -> None:
-        running = _make_ticket_task("T-1")
-        blocked = _make_blocked_task("T-2")
-        with patch("cw.queue_peek.list_tickets", return_value=[running, blocked]):
-            result = queue_peek.load_blocked_tasks(None)
-        assert [t.ticket_id for t in result] == ["T-2"]
-
-    def test_peek_rows_include_blocked_on_user(self) -> None:
-        running = _make_ticket_task("T-1")
-        blocked = _make_blocked_task("T-2")
-        pending = _cw_make_ticket_task(ticket_id="T-3", client="test")
-        with (
-            patch(
-                "cw.queue_peek.list_tickets", return_value=[running, blocked, pending]
-            ),
-            patch("cw.queue_peek.find_transcript_for_ticket", return_value=None),
-        ):
-            rows = queue_peek.build_peek_rows(None, _NOW)
-        assert [r["ticket"] for r in rows] == ["T-1", "T-2"]
-        blocked_row = rows[1]
-        assert blocked_row["recommend"] == queue_peek.RECOMMEND_BLOCKED
-        assert blocked_row["status"] == "codex_must_fix_findings"
-
-    def test_blocked_row_shape(self) -> None:
-        row = queue_peek.format_blocked_row(_make_blocked_task(), _NOW)
-        assert row["recommend"] == "BLOCKED"
-        assert row["age_min"] == 390.0
-        assert row["idle_min"] is None
-        assert row["stage"] == "review"
-        assert row["pipeline_stage"] == Stage.REVIEW
-        assert row["session"] == "blk12345"
-        assert "BLOCKED_ON_USER" in row["reason"]
-        assert "codex_must_fix_findings" in row["reason"]
-        # Same keys as a RUNNING row, so --json consumers see one row shape.
-        running = queue_peek.format_row(_make_ticket_task(), _make_blind_info(), _NOW)
-        assert row.keys() == running.keys()
-
-    def test_blocked_row_without_disposition_or_timestamp(self) -> None:
-        task = _make_blocked_task(disposition=None, completed_at=None)
-        row = queue_peek.format_blocked_row(task, _NOW)
-        assert row["age_min"] is None
-        assert row["status"] is None
-        assert "unknown" in row["reason"]
-
-
-class TestLoadRunningTasks:
-    def test_filters_out_non_running_tasks(self) -> None:
+class TestLoadAttentionTasks:
+    def test_filters_out_pending_tasks(self) -> None:
         pending = TicketTask(
             ticket_id="T-1",
             client="c",
@@ -2300,9 +2331,36 @@ class TestLoadRunningTasks:
             attempts=1,
         )
         with patch("cw.queue_peek.list_tickets", return_value=[pending, running]):
-            result = queue_peek.load_running_tasks(None)
+            result = queue_peek.load_attention_tasks(None)
         assert len(result) == 1
         assert result[0].ticket_id == "T-2"
+
+    def test_enumerates_blocked_on_user_alongside_running(self) -> None:
+        """#2212: a parked row was invisible to ``cw queue peek`` before this."""
+        running = TicketTask(
+            ticket_id="T-2", client="c", status=QueueItemStatus.RUNNING, attempts=1
+        )
+        blocked = TicketTask(
+            ticket_id="T-3",
+            client="c",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            attempts=1,
+        )
+        with patch("cw.queue_peek.list_tickets", return_value=[running, blocked]):
+            result = queue_peek.load_attention_tasks(None)
+        assert {t.ticket_id for t in result} == {"T-2", "T-3"}
+
+    def test_signoff_parked_rows_are_not_included(self) -> None:
+        """AWAITING_OPERATOR_SIGNOFF is a distinct RFC 0007 concept (#990) —
+        a ticket parked pending ship-signoff, not an unanswered question."""
+        signoff = TicketTask(
+            ticket_id="T-4",
+            client="c",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            attempts=1,
+        )
+        with patch("cw.queue_peek.list_tickets", return_value=[signoff]):
+            assert queue_peek.load_attention_tasks(None) == []
 
 
 # ---------------------------------------------------------------------------
@@ -2476,6 +2534,16 @@ _STOP_ROW = {
     "ticket": "T-2",
 }
 
+_AWAITING_OPERATOR_ROW = {
+    **_WAIT_ROW,
+    "recommend": "AWAITING_OPERATOR",
+    "reason": "parked, no answer yet",
+    "age_min": None,
+    "idle_min": None,
+    "session": "parkedabc123",
+    "ticket": "2212",
+}
+
 
 class TestPrintTable:
     def test_empty_rows_prints_no_running(
@@ -2483,18 +2551,7 @@ class TestPrintTable:
     ) -> None:
         queue_peek.print_table([])
         captured = capsys.readouterr()
-        assert "No RUNNING or BLOCKED_ON_USER tasks found." in captured.out
-
-    def test_print_table_labels_blocked_on_user_distinctly(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        blocked = queue_peek.format_blocked_row(_make_blocked_task(), _NOW)
-        queue_peek.print_table([_WAIT_ROW, blocked])
-        out = capsys.readouterr().out
-        assert "BLOCKED" in out
-        assert "codex_must_fix_findings" in out
-        assert "└─ BLOCKED_ON_USER" in out
-        assert "Suggested stops:" not in out
+        assert "No RUNNING tasks found." in captured.out
 
     def test_wait_row_printed_without_reason_line(
         self, capsys: pytest.CaptureFixture[str]
@@ -2524,6 +2581,22 @@ class TestPrintTable:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         queue_peek.print_table([_WAIT_ROW])
+        captured = capsys.readouterr()
+        assert "Suggested stops:" not in captured.out
+
+    def test_awaiting_operator_row_renders(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        queue_peek.print_table([_AWAITING_OPERATOR_ROW])
+        captured = capsys.readouterr()
+        assert "AWAITING_OPERATOR" in captured.out
+        assert "no answer yet" in captured.out
+
+    def test_awaiting_operator_row_is_not_a_suggested_stop(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A parked row is an answer candidate, not a stop candidate (#2212)."""
+        queue_peek.print_table([_AWAITING_OPERATOR_ROW])
         captured = capsys.readouterr()
         assert "Suggested stops:" not in captured.out
 
@@ -2636,7 +2709,7 @@ class TestBlindRow:
         """When find_transcript_for_ticket returns None, row is blind."""
         task = _make_ticket_task("999")
         with (
-            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch("cw.queue_peek.load_attention_tasks", return_value=[task]),
             patch("cw.queue_peek.find_transcript_for_ticket", return_value=None),
             patch("cw.queue_peek._compute_jsonl_idle_min", return_value=5.0),
         ):
@@ -2834,7 +2907,7 @@ def test_build_peek_rows_uses_opencode_parser(
     )
 
     task = _make_ticket_task("T-1", worktree_path=worktree)
-    with patch("cw.queue_peek.load_running_tasks", return_value=[task]):
+    with patch("cw.queue_peek.load_attention_tasks", return_value=[task]):
         rows = queue_peek.build_peek_rows(None, _NOW)
 
     assert len(rows) == 1

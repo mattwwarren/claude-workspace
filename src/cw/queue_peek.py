@@ -1,6 +1,9 @@
-"""In-flight inspection of RUNNING dev-queue sessions (``cw queue peek``).
+"""In-flight inspection of live dev-queue sessions (``cw queue peek``).
 
-For each RUNNING task in the dev-queue (one client or all), look up:
+A BLOCKED_ON_USER row short-circuits to the ``AWAITING_OPERATOR``
+recommendation (#2212) before any of the below is computed -- it is waiting
+on a human, not wedged, and scoring an intentionally-idle row would report
+false precision. For each RUNNING task (one client or all), look up:
 
 - session age (primarily the session's claim time — ``Session.started_at``
   in CW_STATE — falling back to the first user message in the worker's
@@ -14,11 +17,6 @@ For each RUNNING task in the dev-queue (one client or all), look up:
 
 Then compute a WAIT / PEEK / STOP recommendation per row so the operator can
 decide whether to keep a session alive or close it via ``cw spawn close``.
-
-BLOCKED_ON_USER tasks are listed too, after the RUNNING rows, with a
-``BLOCKED`` recommendation and their park disposition: they have no session
-to inspect, but a checkpoint peek that omitted them could report all-clear
-while a ticket sat parked for hours (#2250).
 
 Reports only — never stops sessions itself.
 """
@@ -105,23 +103,29 @@ def _reached_deep_stage(high_water: Stage | None) -> bool:
 
 
 RECOMMEND_BLIND = "PEEK-BLIND"
-RECOMMEND_BLOCKED = "BLOCKED"
+# A row parked awaiting an operator answer (#2212). Like RECOMMEND_BLIND this
+# is produced outside the WAIT/PEEK/STOP ladder -- a dedicated branch that
+# returns before recommend() is called at all, with no numeric thresholds.
+RECOMMEND_AWAITING_OPERATOR = "AWAITING_OPERATOR"
+_AWAITING_OPERATOR_FALLBACK_REASON = "parked, no answer yet"
 _SIGNAL_SOURCE_BLIND = "blind"
 _SIGNAL_SOURCE_TRANSCRIPT = "transcript"
-_SIGNAL_SOURCE_QUEUE = "queue"
+_SIGNAL_SOURCE_PARKED = "parked"
 _EPOCH = dt.datetime.fromtimestamp(0, tz=dt.UTC)
 
+# The statuses `cw queue peek` reports on. BLOCKED_ON_USER joined RUNNING in
+# #2212: the park path already recorded "awaiting operator," but peek only
+# ever queried RUNNING, so an operator had to know to check `cw dev-queue
+# tasks` instead. AWAITING_OPERATOR_SIGNOFF is deliberately NOT here -- that
+# is RFC 0007's distinct ship-signoff park (#990), not an unanswered question.
+_PEEK_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    {QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER}
+)
 
-def load_running_tasks(client: str | None) -> list[TicketTask]:
-    """Return RUNNING TicketTask entries, optionally filtered by client."""
-    return [t for t in list_tickets(client) if t.status == QueueItemStatus.RUNNING]
 
-
-def load_blocked_tasks(client: str | None) -> list[TicketTask]:
-    """Return BLOCKED_ON_USER TicketTask entries, optionally filtered by client."""
-    return [
-        t for t in list_tickets(client) if t.status == QueueItemStatus.BLOCKED_ON_USER
-    ]
+def load_attention_tasks(client: str | None) -> list[TicketTask]:
+    """Return RUNNING and BLOCKED_ON_USER tasks, optionally filtered by client."""
+    return [t for t in list_tickets(client) if t.status in _PEEK_STATUSES]
 
 
 def _load_session_refs(session_id: str | None) -> dict[str, Any]:
@@ -709,8 +713,58 @@ def recommend(
     return _gate_stop_on_liveness(rec, reason, idle_min)
 
 
+def _awaiting_operator_reason(t: TicketTask) -> str:
+    """Return the reason a parked row is waiting, in source-priority order.
+
+    ``disposition`` first because the primary park path -- the worker's own
+    ``cw signal-park`` marker routed through ``_route_stopped_without_sentinel``
+    -- stamps only that field: ``transition_task_status`` is called there
+    without a ``blocked_reason=`` kwarg and unconditionally clears
+    ``advisory_note`` on every call. ``blocked_reason`` and ``advisory_note``
+    are stamped by the dispatch claim/routing call sites instead, so they stay
+    in the chain but cannot lead it.
+    """
+    return (
+        t.disposition
+        or t.blocked_reason
+        or t.advisory_note
+        or _AWAITING_OPERATOR_FALLBACK_REASON
+    )
+
+
+def _awaiting_operator_row(t: TicketTask) -> dict[str, Any]:
+    """Build the report dict for a BLOCKED_ON_USER row (#2212).
+
+    Returns before the age/idle ladder runs: a parked row is *supposed* to be
+    idle, so scoring it would report false precision and could recommend a
+    STOP for a session that is behaving correctly.
+    """
+    return {
+        "ticket": t.ticket_id,
+        "session": (t.session_id or "-")[:12],
+        "client": t.client,
+        "attempts": t.attempts,
+        "unproductive_attempts": t.unproductive_attempts,
+        "age_min": None,
+        "idle_min": None,
+        "stage": None,
+        "status": None,
+        "pr": None,
+        "pr_state": None,
+        "recommend": RECOMMEND_AWAITING_OPERATOR,
+        "reason": _awaiting_operator_reason(t),
+        "signal_source": _SIGNAL_SOURCE_PARKED,
+        "jsonl_idle_min": None,
+        "stage_high_water": t.stage_high_water,
+        "pipeline_stage": t.stage,
+    }
+
+
 def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
-    """Build a report dict for one RUNNING task."""
+    """Build a report dict for one RUNNING or BLOCKED_ON_USER task."""
+    if t.status is QueueItemStatus.BLOCKED_ON_USER:
+        return _awaiting_operator_row(t)
+
     signal_source: str = info.get("signal_source", _SIGNAL_SOURCE_TRANSCRIPT)
     jsonl_idle_min: float | None = info.get("jsonl_idle_min")
 
@@ -794,45 +848,16 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
     }
 
 
-def format_blocked_row(t: TicketTask, now: dt.datetime) -> dict[str, Any]:
-    """Build a report dict for one BLOCKED_ON_USER task.
-
-    A parked row has no running session to inspect, so it carries only
-    dev-queue state: ``status`` is the park disposition and ``age_min`` is
-    how long it has been parked. Same keys as a RUNNING row, so a checkpoint
-    peek can never report all-clear while a ticket sits parked (#2250).
-    """
-    parked_min = (
-        minutes_since(t.completed_at.isoformat(), now) if t.completed_at else None
-    )
-    return {
-        "ticket": t.ticket_id,
-        "session": (t.session_id or "-")[:12],
-        "client": t.client,
-        "attempts": t.attempts,
-        "unproductive_attempts": t.unproductive_attempts,
-        "age_min": round(parked_min, 1) if parked_min is not None else None,
-        "idle_min": None,
-        "stage": t.stage.value,
-        "status": t.disposition,
-        "pr": None,
-        "pr_state": None,
-        "recommend": RECOMMEND_BLOCKED,
-        "reason": (
-            f"BLOCKED_ON_USER ({t.disposition or 'unknown'}) — parked, no running "
-            "session; needs operator action"
-        ),
-        "signal_source": _SIGNAL_SOURCE_QUEUE,
-        "jsonl_idle_min": None,
-        "stage_high_water": t.stage_high_water,
-        "pipeline_stage": t.stage,
-    }
-
-
 def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]]:
-    """Build one report row per RUNNING task, then one per BLOCKED_ON_USER task."""
+    """Enumerate RUNNING and BLOCKED_ON_USER tasks, one report row per task."""
     rows = []
-    for t in load_running_tasks(client):
+    for t in load_attention_tasks(client):
+        if t.status is QueueItemStatus.BLOCKED_ON_USER:
+            # No transcript lookup: the row's verdict comes from the queue
+            # row itself, and a parked session's transcript timestamps carry
+            # no signal the AWAITING_OPERATOR branch would read.
+            rows.append(_awaiting_operator_row(t))
+            continue
         transcript = find_transcript_for_ticket(
             str(t.ticket_id), t.session_id, t.worktree_path
         )
@@ -854,7 +879,6 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
                 "jsonl_idle_min": _compute_jsonl_idle_min(t, now),
             }
         rows.append(format_row(t, info, now))
-    rows.extend(format_blocked_row(t, now) for t in load_blocked_tasks(client))
     return rows
 
 
@@ -862,7 +886,7 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
     """Print rows as a formatted text table with a suggested-stops footer."""
     rows = list(rows)
     if not rows:
-        click.echo("No RUNNING or BLOCKED_ON_USER tasks found.")
+        click.echo("No RUNNING tasks found.")
         return
     cols = [
         ("ticket", 7),
@@ -892,6 +916,8 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
         click.echo("  ".join(cells))
         if r.get("recommend") != "WAIT":
             click.echo(f"    └─ {r.get('reason')}")
+    # AWAITING_OPERATOR rows are excluded by construction: a parked row is an
+    # answer candidate (`cw session send`), not a stop candidate (#2212).
     actionable = [r for r in rows if r["recommend"].startswith("STOP")]
     if actionable:
         click.echo()

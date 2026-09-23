@@ -44,7 +44,6 @@ def queue_peek(client: str | None, as_json: bool) -> None:
 
     For each RUNNING task, reports age, idle gap, last sentinel status, PR
     state, and a WAIT / PEEK / STOP recommendation from the peek-stop ladder.
-    BLOCKED_ON_USER tasks follow as BLOCKED rows with their park disposition.
     Reports only — never stops sessions itself.
 
     To stop a session after reviewing:
