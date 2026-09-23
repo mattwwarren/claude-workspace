@@ -187,6 +187,26 @@ def test_save_stamp_creates_parent_dir(aw: ModuleType, tmp_path: Path) -> None:
     assert stamp.is_file()
 
 
+def test_save_stamp_failed_replace_keeps_previous_stamp(
+    aw: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that dies before the rename leaves the old stamp readable, so a
+    re-arm resumes from it instead of falling back to "now" (#2250)."""
+    stamp = tmp_path / "stamp.json"
+    aw.save_stamp(stamp_path=stamp, created_at="2026-09-22T01:12:30Z", ids={"a"})
+
+    msg = "disk full"
+
+    def _boom(*_args: object) -> None:
+        raise OSError(msg)
+
+    monkeypatch.setattr(Path, "replace", _boom)
+    with pytest.raises(OSError, match="disk full"):
+        aw.save_stamp(stamp_path=stamp, created_at="2026-09-22T09:00:00Z", ids={"b"})
+
+    assert aw.load_stamp(stamp_path=stamp) == ("2026-09-22T01:12:30Z", {"a"})
+
+
 def test_default_stamp_path_uses_client_name(aw: ModuleType) -> None:
     base = Path.home() / ".claude-workspace"
     assert aw.default_stamp_path("acme") == base / "attention-stamp-acme.json"

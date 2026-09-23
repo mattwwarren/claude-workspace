@@ -74,6 +74,8 @@ UPSTREAM_STOP_TIMEOUT_S = 5.0
 # len("YYYY-MM-DDTHH:MM:SS") -- the second-granularity prefix of created_at.
 SECOND_PREFIX_LEN = 19
 
+LIVENESS_EVENT_TYPE = "session.liveness_changed"
+
 TYPES = [
     "session.needs_attention",
     "operator.escalation",
@@ -81,7 +83,7 @@ TYPES = [
     "session.reap_proposed",
     "session.stage_timed_out_retried",
     "session.phantom_reverted",
-    "session.liveness_changed",
+    LIVENESS_EVENT_TYPE,
 ]
 
 # Only these LivenessBucket values page (#2004). "live"/"stale_15m" flap during
@@ -130,8 +132,16 @@ def load_stamp(stamp_path: Path) -> tuple[str, set[str]]:
 
 
 def save_stamp(stamp_path: Path, created_at: str, ids: set[str]) -> None:
+    """Write the stamp atomically (temp file + rename).
+
+    A torn write would make :func:`load_stamp` fall back to "now" and silently
+    drop every event between the last delivery and the re-arm -- the exact gap
+    this script exists to close (#2250).
+    """
     stamp_path.parent.mkdir(parents=True, exist_ok=True)
-    stamp_path.write_text(json.dumps({"created_at": created_at, "ids": sorted(ids)}))
+    tmp = stamp_path.with_name(f"{stamp_path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({"created_at": created_at, "ids": sorted(ids)}))
+    tmp.replace(stamp_path)
 
 
 class ResumeState:
@@ -182,7 +192,7 @@ def fmt(event: dict[str, Any], latch: dict[str, str]) -> str | None:
     """Render one event as an ``ATTENTION |`` line, or None to suppress it."""
     p: dict[str, Any] = event.get("payload") or {}
     etype = event.get("type", "?")
-    if etype == "session.liveness_changed" and _suppress_liveness(p, latch):
+    if etype == LIVENESS_EVENT_TYPE and _suppress_liveness(p, latch):
         return None
     why = (
         p.get("paused_status")
