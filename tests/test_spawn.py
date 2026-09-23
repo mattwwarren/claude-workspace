@@ -985,12 +985,16 @@ class TestHookSettingsTemplate:
         assert len(bash_entries) == 1
 
         commands = [hook["command"] for hook in _entry_hooks(bash_entries[0])]
-        assert commands == ["cw guard-cwd", "cw guard-busy-wait"]
+        assert commands == [
+            "cw guard-cwd",
+            "cw guard-busy-wait",
+            "cw background-tool-guard-pre",
+        ]
 
     def test_pretooluse_commands_stay_unguarded_literals(self) -> None:
         """#2226 guarded the Stop hook ONLY — PreToolUse commands are untouched.
 
-        The three PreToolUse commands still pay an interpreter start per
+        The PreToolUse commands still pay an interpreter start per
         invocation; wrapping them is a separate (unfiled) question. Pinning
         the bare literals here makes any future guard an explicit decision
         rather than a copy-paste side effect.
@@ -1001,7 +1005,13 @@ class TestHookSettingsTemplate:
         commands = [
             hook["command"] for entry in entries for hook in _entry_hooks(entry)
         ]
-        assert commands == ["cw guard-cwd", "cw guard-busy-wait", "cw agent-spawn-pre"]
+        assert commands == [
+            "cw guard-cwd",
+            "cw guard-busy-wait",
+            "cw background-tool-guard-pre",
+            "cw agent-spawn-pre",
+            "cw background-tool-guard-pre",
+        ]
 
     def test_hook_settings_template_includes_agent_spawn_pretooluse(self) -> None:
         """#1646: a subagent-tool PreToolUse entry sits alongside the Bash guard."""
@@ -1015,6 +1025,25 @@ class TestHookSettingsTemplate:
         )
         # Must not regress the pre-existing Bash guard entry.
         assert any(entry.get("matcher") == "Bash" for entry in entries)
+
+    def test_hook_settings_template_includes_monitor_pretooluse(self) -> None:
+        """#2303: a Monitor-matched entry runs the background-tool guard.
+
+        Written into the same worktree-level PreToolUse block as the Bash and
+        Agent/Task entries, which is the settings surface every headless
+        worker (and its subagents, which share the worktree cwd) loads.
+        """
+        from cw.spawn import _AGENT_TOOL_MATCHER, _build_hook_settings
+
+        entries = _hook_entries(_build_hook_settings(_FAKE_CONTEXT_PATH), "PreToolUse")
+        monitor_entries = [e for e in entries if e.get("matcher") == "Monitor"]
+        assert len(monitor_entries) == 1
+        assert _entry_hooks(monitor_entries[0]) == [
+            {"type": "command", "command": "cw background-tool-guard-pre"}
+        ]
+        # Alongside, not replacing, the pre-existing entries.
+        assert any(entry.get("matcher") == "Bash" for entry in entries)
+        assert any(entry.get("matcher") == _AGENT_TOOL_MATCHER for entry in entries)
 
     def test_hook_settings_template_has_no_posttooluse_agent_spawn_entry(self) -> None:
         """#1947: the PostToolUse:Agent decrement wiring is removed.

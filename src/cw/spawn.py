@@ -392,12 +392,26 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
             # shape whose dispatch behavior is exercised by the existing suite.
             # Fail-open like its neighbour, and disable-able per lane or
             # globally via busy_wait_guard_enabled in orchestrator.yaml.
+            # The third is `cw background-tool-guard-pre` (#2303): in a
+            # headless worker it refuses `run_in_background: true`, which has
+            # no completion-notification path for a headless DAEMON session
+            # (#2250/#2280/#2275). The same command also backs the "Monitor"
+            # entry below — one classifier branching on tool_name, so the two
+            # refusals cannot drift. Disable-able per lane or globally via
+            # background_tool_guard_enabled in orchestrator.yaml. The
+            # harness's PreToolUse chain runs for a subagent's own tool calls
+            # in the same worktree cwd (#2275 transcript evidence), so this
+            # covers the impl-subagent path the wedges actually took.
             "PreToolUse": [
                 {
                     "matcher": "Bash",
                     "hooks": [
                         {"type": "command", "command": "cw guard-cwd"},
                         {"type": "command", "command": "cw guard-busy-wait"},
+                        {
+                            "type": "command",
+                            "command": "cw background-tool-guard-pre",
+                        },
                     ],
                 },
                 # #1646: stamp an unresolved-subagent-spawn marker before the
@@ -417,6 +431,16 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
                 {
                     "matcher": _AGENT_TOOL_MATCHER,
                     "hooks": [{"type": "command", "command": "cw agent-spawn-pre"}],
+                },
+                # #2303: refuse the Monitor tool in a headless worker — it
+                # watches a background task for an interactive operator, and
+                # a headless turn that ends waiting on it never resumes. See
+                # the Bash entry above for the shared command and toggle.
+                {
+                    "matcher": "Monitor",
+                    "hooks": [
+                        {"type": "command", "command": "cw background-tool-guard-pre"}
+                    ],
                 },
             ],
         }
