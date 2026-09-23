@@ -35,7 +35,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
 )
-from tests.conftest import _make_daemon_session
+from tests.conftest import _make_daemon_session, _write_clients_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2421,17 +2421,7 @@ class TestBackgroundToolGuardConfig:
         self, tmp_config_dir: Path
     ) -> None:
         """A lane block in clients.yaml loads the override independently."""
-        ws_dir = tmp_config_dir / "ws"
-        ws_dir.mkdir()
-        clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_path.write_text(
-            "clients:\n"
-            "  acme:\n"
-            f"    workspace_path: {ws_dir}\n"
-            "    lanes:\n"
-            "      - name: fast\n"
-            "        background_tool_guard_enabled: false\n"
-        )
+        _write_clients_yaml(tmp_config_dir, "false", "background_tool_guard_enabled")
 
         lane = load_clients()["acme"].lanes[0]
 
