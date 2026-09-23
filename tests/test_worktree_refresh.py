@@ -46,12 +46,13 @@ from cw.worktree import (
 )
 from cw.worktree_gc import _live_worktree_paths
 from tests._worktree_helpers import patch_worktree
-from tests.conftest import git_in, push_commit_to_origin
+from tests.conftest import _symlink_loop, git_in, push_commit_to_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.models import OrchestratorEvent
+    from cw.worktree import UnresolvablePathWarningKey
 
 _REUSE_BRANCH = "dev/2213"
 
@@ -1485,20 +1486,12 @@ def _seed_roster(cwd: Path | None = None, *, raw: str | None = None) -> Path:
     return roster
 
 
-def _make_symlink_loop(base: Path) -> Path:
-    """Create two symlinks pointing at each other and return one of them."""
-    first, second = base / "loop-a", base / "loop-b"
-    first.symlink_to(second)
-    second.symlink_to(first)
-    return first
-
-
 def _unnormalizable_path(
     kind: str, base: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Path:
     """Return a path under *base* whose ``stat()`` fails with the given errno."""
     if kind == "eloop":
-        return _make_symlink_loop(base)
+        return _symlink_loop(base)
     if kind == "enotdir":
         blocker = base / "a-file"
         blocker.write_text("not a directory\n", encoding="utf-8")
@@ -1991,7 +1984,7 @@ class TestReuseOccupancyRosterAndPaths:
         missing = tmp_path / "gone"
         assert _normalize_path(missing) == missing.resolve()
         with pytest.raises(OSError, match=r"\[Errno") as excinfo:
-            _normalize_path(_make_symlink_loop(tmp_path))
+            _normalize_path(_symlink_loop(tmp_path))
         assert excinfo.value.errno == errno.ELOOP
 
     def test_permission_denied_session_path_refuses_the_fast_forward(
@@ -2034,7 +2027,7 @@ class TestReuseOccupancyRosterAndPaths:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
-        _seed_session(workspace, _make_symlink_loop(tmp_path), SessionStatus.ACTIVE)
+        _seed_session(workspace, _symlink_loop(tmp_path), SessionStatus.ACTIVE)
         fetched = _spy_fetch(monkeypatch)
 
         error = _refresh_occupied_with_debug(client, caplog)
@@ -2043,6 +2036,174 @@ class TestReuseOccupancyRosterAndPaths:
         assert fetched == []
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
         assert any("cannot be resolved" in m for m in _debug_reasons(caplog))
+
+    @pytest.mark.parametrize("kind", ["eloop", "enotdir", "eacces", "enametoolong"])
+    @pytest.mark.parametrize("side", ["session", "worker"])
+    def test_poisoned_record_is_skipped_not_vetoing_but_target_still_fails_closed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        kind: str,
+        side: str,
+    ) -> None:
+        """A single poisoned record must not veto an unrelated target -- but a
+        skip still means the answer is not "definitely free" (#2240)."""
+        bad = _unnormalizable_path(kind, tmp_path, monkeypatch)
+        good = tmp_path / "wt"
+        good.mkdir()
+        if side == "session":
+            monkeypatch.setattr(
+                "cw.worktree._refresh.live_session_worktree_paths",
+                lambda: frozenset({bad}),
+            )
+        else:
+            _seed_roster(bad)
+
+        reason = live_home_reason(good, daemon=native_daemon.get_native_daemon_client())
+
+        assert reason is not None
+        assert "cannot be resolved" in reason
+        records = _cw_worktree_records(caplog, logging.WARNING)
+        assert len(records) == 1
+        message = records[0].getMessage()
+        assert str(bad) in message
+        assert side in message
+
+    def test_bad_record_does_not_mask_a_genuine_match_on_a_different_record(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A poisoned record on one side must not corrupt attribution for a
+        genuine match reported by the other, unrelated record (#2240)."""
+        target = tmp_path / "wt"
+        target.mkdir()
+        bad_worker = _unnormalizable_path("eloop", tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "cw.worktree._refresh.live_session_worktree_paths",
+            lambda: frozenset({target}),
+        )
+        _seed_roster(bad_worker)
+
+        reason = live_home_reason(target, daemon=native_daemon.get_native_daemon_client())
+
+        assert reason == "a live session is homed on this worktree"
+        assert len(_cw_worktree_records(caplog, logging.WARNING)) == 1
+
+        caplog.clear()
+        (tmp_path / "b").mkdir()
+        bad_session = _unnormalizable_path("eloop", tmp_path / "b", monkeypatch)
+        monkeypatch.setattr(
+            "cw.worktree._refresh.live_session_worktree_paths",
+            lambda: frozenset({bad_session}),
+        )
+        _seed_roster(target)
+
+        reason = live_home_reason(target, daemon=native_daemon.get_native_daemon_client())
+
+        assert reason == "a live daemon worker is homed on this worktree"
+        assert len(_cw_worktree_records(caplog, logging.WARNING)) == 1
+
+    def test_multiple_skipped_records_are_each_counted_and_logged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Both a bad session record and a bad worker record must be counted
+        and logged -- the old blanket ``try`` raised on the first one and
+        never even attempted the second."""
+        good = tmp_path / "wt"
+        good.mkdir()
+        (tmp_path / "s").mkdir()
+        bad_session = _unnormalizable_path("eloop", tmp_path / "s", monkeypatch)
+        monkeypatch.setattr(
+            "cw.worktree._refresh.live_session_worktree_paths",
+            lambda: frozenset({bad_session}),
+        )
+        (tmp_path / "w").mkdir()
+        bad_worker = _unnormalizable_path("eacces", tmp_path / "w", monkeypatch)
+
+        reason = live_home_reason(good, daemon=native_daemon.get_native_daemon_client())
+
+        assert reason is not None
+        assert "2" in reason
+        records = _cw_worktree_records(caplog, logging.WARNING)
+        assert len(records) == 2
+        messages = [r.getMessage() for r in records]
+        assert any(str(bad_session) in m for m in messages)
+        assert any(str(bad_worker) in m for m in messages)
+
+    def test_unresolvable_warning_deduped_when_caller_owns_the_set(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        good = tmp_path / "wt"
+        good.mkdir()
+        bad = _unnormalizable_path("eloop", tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "cw.worktree._refresh.live_session_worktree_paths",
+            lambda: frozenset({bad}),
+        )
+        warned: set[UnresolvablePathWarningKey] = set()
+        daemon = native_daemon.get_native_daemon_client()
+
+        first = live_home_reason(good, daemon=daemon, warned_unresolvable=warned)
+        second = live_home_reason(good, daemon=daemon, warned_unresolvable=warned)
+
+        assert first is not None
+        assert first == second
+        assert len(_cw_worktree_records(caplog, logging.WARNING)) == 1
+
+    def test_unresolvable_warning_not_deduped_by_default(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        good = tmp_path / "wt"
+        good.mkdir()
+        bad = _unnormalizable_path("eloop", tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "cw.worktree._refresh.live_session_worktree_paths",
+            lambda: frozenset({bad}),
+        )
+        daemon = native_daemon.get_native_daemon_client()
+
+        live_home_reason(good, daemon=daemon)
+        live_home_reason(good, daemon=daemon)
+
+        assert len(_cw_worktree_records(caplog, logging.WARNING)) == 2
+
+    def test_unresolvable_warning_key_distinguishes_session_from_worker(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The SAME raw bad path, recorded on both sides, must warn twice --
+        the dedup key includes ``kind``, not just ``(path, error)``."""
+        good = tmp_path / "wt"
+        good.mkdir()
+        bad = _unnormalizable_path("eloop", tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "cw.worktree._refresh.live_session_worktree_paths",
+            lambda: frozenset({bad}),
+        )
+        _seed_roster(bad)
+        warned: set[UnresolvablePathWarningKey] = set()
+
+        live_home_reason(
+            good,
+            daemon=native_daemon.get_native_daemon_client(),
+            warned_unresolvable=warned,
+        )
+
+        assert len(_cw_worktree_records(caplog, logging.WARNING)) == 2
 
 
 _FULL_SHA_CHARS = 40
