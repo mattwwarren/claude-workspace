@@ -323,6 +323,10 @@ def _validate_worktree(path: Path) -> None:
 # the PreToolUse entry below.
 _AGENT_TOOL_MATCHER = "^(Agent|Task)$"
 
+# One command backs both the Bash and the Monitor PreToolUse entries (#2303),
+# so the two refusals share a single classifier and cannot drift apart.
+_BACKGROUND_TOOL_GUARD_COMMAND = "cw background-tool-guard-pre"
+
 
 def _stop_hook_command(context_path: Path) -> str:
     """Return the Stop hook command for a worktree whose context file is *context_path*.
@@ -410,7 +414,7 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
                         {"type": "command", "command": "cw guard-busy-wait"},
                         {
                             "type": "command",
-                            "command": "cw background-tool-guard-pre",
+                            "command": _BACKGROUND_TOOL_GUARD_COMMAND,
                         },
                     ],
                 },
@@ -439,7 +443,7 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
                 {
                     "matcher": "Monitor",
                     "hooks": [
-                        {"type": "command", "command": "cw background-tool-guard-pre"}
+                        {"type": "command", "command": _BACKGROUND_TOOL_GUARD_COMMAND}
                     ],
                 },
             ],
