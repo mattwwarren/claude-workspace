@@ -143,6 +143,16 @@ AGENT_SPAWN_STAMP_KEY = "agent_spawn_stamp"
 AGENT_SPAWN_UNRESOLVED_COUNT_KEY = "unresolved_count"
 AGENT_SPAWN_LAST_STAMPED_AT_KEY = "last_stamped_at"
 
+# Tool names the ``cw background-tool-guard-pre`` hook (#2303) is both wired to
+# and branches on: ``cw.spawn._build_hook_settings`` writes them as PreToolUse
+# matchers, and ``cw.cli._background_tool_policy`` compares the payload's
+# ``tool_name`` against them. One spelling for both sides, so a matcher the
+# classifier does not recognise cannot ship as a silent no-op. Here rather than
+# in the policy module for the reason the keys above give: ``cw.spawn`` cannot
+# import ``cw.cli`` (``cw.cli`` imports ``cw.spawn``).
+BASH_TOOL_NAME = "Bash"
+MONITOR_TOOL_NAME = "Monitor"
+
 
 def extract_unresolved_spawn_count(context: dict[str, object]) -> int:
     """Return the ``agent_spawn_stamp`` counter in *context*, or 0 for any odd shape.

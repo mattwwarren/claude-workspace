@@ -30,7 +30,9 @@ from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
+    BASH_TOOL_NAME,
     HOOK_CONTEXT_RELATIVE_PATH,
+    MONITOR_TOOL_NAME,
     PLAN_APPROVED_FINGERPRINT_KEY,
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
@@ -324,7 +326,9 @@ def _validate_worktree(path: Path) -> None:
 _AGENT_TOOL_MATCHER = "^(Agent|Task)$"
 
 # One command backs both the Bash and the Monitor PreToolUse entries (#2303),
-# so the two refusals share a single classifier and cannot drift apart.
+# so the two refusals share a single classifier and cannot drift apart. The
+# matchers themselves are cw.models.BASH_TOOL_NAME / MONITOR_TOOL_NAME, the same
+# constants that classifier branches on.
 _BACKGROUND_TOOL_GUARD_COMMAND = "cw background-tool-guard-pre"
 
 
@@ -408,7 +412,7 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
             # covers the impl-subagent path the wedges actually took.
             "PreToolUse": [
                 {
-                    "matcher": "Bash",
+                    "matcher": BASH_TOOL_NAME,
                     "hooks": [
                         {"type": "command", "command": "cw guard-cwd"},
                         {"type": "command", "command": "cw guard-busy-wait"},
@@ -441,7 +445,7 @@ def _build_hook_settings(context_path: Path) -> dict[str, dict[str, list[object]
                 # a headless turn that ends waiting on it never resumes. See
                 # the Bash entry above for the shared command and toggle.
                 {
-                    "matcher": "Monitor",
+                    "matcher": MONITOR_TOOL_NAME,
                     "hooks": [
                         {"type": "command", "command": _BACKGROUND_TOOL_GUARD_COMMAND}
                     ],

@@ -43,6 +43,7 @@ from cw.cli._hook_io import (
     enforce,
 )
 from cw.config import load_clients, load_orchestrator_config
+from cw.models import BASH_TOOL_NAME, MONITOR_TOOL_NAME
 
 __all__ = [
     "_RefusalDecision",
@@ -155,17 +156,19 @@ def _warn_unexpected_shape(detail: str) -> None:
 def _refusal_reason(payload: dict[str, object]) -> tuple[str, str] | None:
     """Return ``(reason, tool_name)`` for a refused call, or None to allow.
 
-    Branches on ``tool_name`` because one command backs both the ``"Bash"``
-    and ``"Monitor"`` matchers. The Bash ``command`` itself is discarded —
-    the decision depends only on ``run_in_background``.
+    Branches on ``tool_name`` because one command backs both the
+    :data:`~cw.models.BASH_TOOL_NAME` and :data:`~cw.models.MONITOR_TOOL_NAME`
+    matchers — the same constants ``cw.spawn`` writes as those matchers. The
+    Bash ``command`` itself is discarded — the decision depends only on
+    ``run_in_background``.
     """
     tool_name = payload.get("tool_name")
-    if tool_name == "Monitor":
-        return _MONITOR_DENY_REASON, "Monitor"
-    if tool_name != "Bash":
+    if tool_name == MONITOR_TOOL_NAME:
+        return _MONITOR_DENY_REASON, MONITOR_TOOL_NAME
+    if tool_name != BASH_TOOL_NAME:
         return None
     _command, run_in_background = _extract_bash_command(payload, _warn_unexpected_shape)
-    return (_BASH_DENY_REASON, "Bash") if run_in_background else None
+    return (_BASH_DENY_REASON, BASH_TOOL_NAME) if run_in_background else None
 
 
 def classify_background_tool(
