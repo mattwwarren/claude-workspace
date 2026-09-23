@@ -158,17 +158,25 @@ def _refusal_reason(payload: dict[str, object]) -> tuple[str, str] | None:
 
     Branches on ``tool_name`` because one command backs both the
     :data:`~cw.models.BASH_TOOL_NAME` and :data:`~cw.models.MONITOR_TOOL_NAME`
-    matchers — the same constants ``cw.spawn`` writes as those matchers. The
-    Bash ``command`` itself is discarded — the decision depends only on
-    ``run_in_background``.
+    matchers — the same constants ``cw.spawn`` writes as those matchers.
+
+    A Bash call is refused only when the extractor parsed it cleanly and
+    ``run_in_background`` is exactly ``True``. Everything else fails open, as
+    every sibling guard does: a missing or non-bool flag is already coerced
+    to False (with a warning for the non-bool case), and an unparseable
+    ``command`` comes back None after the extractor has told the worker this
+    call was "NOT classified" — refusing it anyway would contradict that
+    warning and block a call the guard never understood.
     """
     tool_name = payload.get("tool_name")
     if tool_name == MONITOR_TOOL_NAME:
         return _MONITOR_DENY_REASON, MONITOR_TOOL_NAME
     if tool_name != BASH_TOOL_NAME:
         return None
-    _command, run_in_background = _extract_bash_command(payload, _warn_unexpected_shape)
-    return (_BASH_DENY_REASON, BASH_TOOL_NAME) if run_in_background else None
+    command, run_in_background = _extract_bash_command(payload, _warn_unexpected_shape)
+    if command is None or run_in_background is not True:
+        return None
+    return _BASH_DENY_REASON, BASH_TOOL_NAME
 
 
 def classify_background_tool(

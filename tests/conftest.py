@@ -828,6 +828,17 @@ def _write_clients_yaml(
     )
 
 
+def _write_global_toggle(tmp_config_dir: Path, toggle: str, value: str) -> None:
+    """Write an orchestrator.yaml setting one guard's global *toggle* to *value*.
+
+    The global half of :func:`_write_clients_yaml`'s lane override: the shared
+    guard-toggle resolver's tests and both guards' kill-switch tests need it.
+    """
+    orchestrator_path = tmp_config_dir / ".claude-workspace" / "orchestrator.yaml"
+    orchestrator_path.parent.mkdir(parents=True, exist_ok=True)
+    orchestrator_path.write_text(f"{toggle}: {value}\n")
+
+
 @contextlib.contextmanager
 def _hold_context_lock(worktree: Path) -> Iterator[None]:
     """Hold ``<worktree>/.claude/cw-context.json.lock`` exclusively (#1946).

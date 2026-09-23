@@ -22,18 +22,19 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw import models
 from cw.cli import _background_tool_policy, _hook_io
 from cw.cli._background_tool_policy import (
     _RefusalDecision,
-    _resolve_background_tool_guard_enabled,
     classify_background_tool,
 )
 from cw.events import read_events
 from cw.models import OrchestratorEventType
+from cw.spawn import _BACKGROUND_TOOL_GUARD_COMMAND, _build_hook_settings
 from tests.conftest import (
     _headless_worktree,
     _invoke_hook_command,
-    _write_clients_yaml,
+    _write_global_toggle,
     _write_hook_context_file,
 )
 from tests.test_cli_guard_busy_wait import _BASH_PRE_PAYLOAD
@@ -81,63 +82,10 @@ def _bare_dir(tmp_path: Path) -> Path:
     return bare
 
 
-def _disable_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "cw.cli._background_tool_policy._resolve_background_tool_guard_enabled",
-        lambda _client, _lane: False,
-    )
-
-
 def _refused_events() -> list[object]:
     return list(
         read_events(event_types=[OrchestratorEventType.GUARD_BACKGROUND_TOOL_REFUSED])
     )
-
-
-def _write_global_disable(tmp_config_dir: Path) -> None:
-    orchestrator_path = tmp_config_dir / ".claude-workspace" / "orchestrator.yaml"
-    orchestrator_path.parent.mkdir(parents=True, exist_ok=True)
-    orchestrator_path.write_text(f"{_FIELD}: false\n")
-
-
-class TestResolveBackgroundToolGuardEnabled:
-    """Lane-then-global fallthrough, mirroring the #2211 spawn guard."""
-
-    def test_defaults_on_with_no_client_or_lane(self) -> None:
-        assert _resolve_background_tool_guard_enabled(None, None) is True
-
-    def test_global_disable_wins_with_no_lane_override(
-        self, tmp_config_dir: Path
-    ) -> None:
-        _write_global_disable(tmp_config_dir)
-
-        assert _resolve_background_tool_guard_enabled(None, None) is False
-
-    def test_lane_override_disables_against_enabled_global(
-        self, tmp_config_dir: Path
-    ) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false", field_name=_FIELD)
-
-        assert _resolve_background_tool_guard_enabled("acme", "fast") is False
-
-    def test_lane_override_enables_against_disabled_global(
-        self, tmp_config_dir: Path
-    ) -> None:
-        """The override is bidirectional — a lane can turn the guard back ON."""
-        _write_global_disable(tmp_config_dir)
-        _write_clients_yaml(tmp_config_dir, lane_value="true", field_name=_FIELD)
-
-        assert _resolve_background_tool_guard_enabled("acme", "fast") is True
-
-    def test_unknown_client_falls_through_to_global(self, tmp_config_dir: Path) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false", field_name=_FIELD)
-
-        assert _resolve_background_tool_guard_enabled("not-a-client", "fast") is True
-
-    def test_unknown_lane_falls_through_to_global(self, tmp_config_dir: Path) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false", field_name=_FIELD)
-
-        assert _resolve_background_tool_guard_enabled("acme", "not-a-lane") is True
 
 
 class TestClassifyBackgroundTool:
@@ -209,9 +157,9 @@ class TestClassifyBackgroundTool:
         assert classify_background_tool(_monitor_payload(_bare_dir(tmp_path))) is None
 
     def test_disabled_guard_allows_backgrounded_bash(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, tmp_config_dir: Path
     ) -> None:
-        _disable_guard(monkeypatch)
+        _write_global_toggle(tmp_config_dir, _FIELD, "false")
         worktree = _headless_worktree(tmp_path)
 
         assert (
@@ -220,9 +168,9 @@ class TestClassifyBackgroundTool:
         )
 
     def test_disabled_guard_allows_monitor(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, tmp_config_dir: Path
     ) -> None:
-        _disable_guard(monkeypatch)
+        _write_global_toggle(tmp_config_dir, _FIELD, "false")
         worktree = _headless_worktree(tmp_path)
 
         assert classify_background_tool(_monitor_payload(worktree)) is None
@@ -249,6 +197,64 @@ class TestClassifyBackgroundTool:
             is None
         )
         assert "#2303" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("raw", ["true", 1, None], ids=["str", "int", "none"])
+    def test_run_in_background_not_exactly_true_warns_and_allows(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], raw: object
+    ) -> None:
+        """Fail open: only ``run_in_background is True`` refuses (#2303 R2)."""
+        worktree = _headless_worktree(tmp_path)
+
+        assert (
+            classify_background_tool(_bash_payload(worktree, run_in_background=raw))
+            is None
+        )
+        assert "#2303" in capsys.readouterr().err
+
+    def test_missing_run_in_background_allows_silently(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        worktree = _headless_worktree(tmp_path)
+        payload = {
+            **_bash_payload(worktree, run_in_background=True),
+            "tool_input": {"command": "uv run pytest tests/"},
+        }
+
+        assert classify_background_tool(payload) is None
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize(
+        "tool_input",
+        [{"run_in_background": True}, {"command": 7, "run_in_background": True}],
+        ids=["command-missing", "command-not-str"],
+    )
+    def test_unparseable_command_warns_and_allows_even_when_backgrounded(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        tool_input: dict[str, object],
+    ) -> None:
+        """The extractor has already warned "Failing open (NOT classified)";
+        refusing after that would contradict the warning the worker reads."""
+        worktree = _headless_worktree(tmp_path)
+        payload = {
+            **_bash_payload(worktree, run_in_background=True),
+            "tool_input": tool_input,
+        }
+
+        assert classify_background_tool(payload) is None
+        err = capsys.readouterr().err
+        assert "#2303" in err
+        assert "tool_input.command" in err
+
+    def test_sibling_guard_toggle_does_not_disable_this_guard(
+        self, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        """This classifier reads its own toggle, not the spawn guard's."""
+        _write_global_toggle(tmp_config_dir, "subagent_spawn_guard_enabled", "false")
+        worktree = _headless_worktree(tmp_path)
+
+        assert classify_background_tool(_monitor_payload(worktree)) is not None
 
     def test_unrecognized_tool_name_yields_no_verdict(self, tmp_path: Path) -> None:
         worktree = _headless_worktree(tmp_path)
@@ -296,6 +302,33 @@ class TestClassifyBackgroundTool:
 
         assert decision is not None
         assert decision.agent_id is None
+
+
+class TestToolNamesSingleSource:
+    """One source for the name the hook matches and the name it classifies."""
+
+    def test_every_matcher_wired_to_the_guard_is_a_classified_tool(
+        self, tmp_path: Path
+    ) -> None:
+        """A matcher the classifier does not branch on would be a silent no-op."""
+        settings = _build_hook_settings(tmp_path / "cw-context.json")
+        guard_hook = {"type": "command", "command": _BACKGROUND_TOOL_GUARD_COMMAND}
+        matchers = [
+            entry["matcher"]
+            for entry in settings["hooks"]["PreToolUse"]
+            if isinstance(entry, dict) and guard_hook in entry["hooks"]
+        ]
+        assert matchers == [models.BASH_TOOL_NAME, models.MONITOR_TOOL_NAME]
+
+        worktree = _headless_worktree(tmp_path)
+        for matcher in matchers:
+            payload = {
+                **_bash_payload(worktree, run_in_background=True),
+                "tool_name": matcher,
+            }
+            decision = classify_background_tool(payload)
+            assert decision is not None
+            assert decision.tool_name == matcher
 
 
 class TestEnforceReuse:
