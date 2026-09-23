@@ -143,6 +143,16 @@ AGENT_SPAWN_STAMP_KEY = "agent_spawn_stamp"
 AGENT_SPAWN_UNRESOLVED_COUNT_KEY = "unresolved_count"
 AGENT_SPAWN_LAST_STAMPED_AT_KEY = "last_stamped_at"
 
+# Tool names the ``cw background-tool-guard-pre`` hook (#2303) is both wired to
+# and branches on: ``cw.spawn._build_hook_settings`` writes them as PreToolUse
+# matchers, and ``cw.cli._background_tool_policy`` compares the payload's
+# ``tool_name`` against them. One spelling for both sides, so a matcher the
+# classifier does not recognise cannot ship as a silent no-op. Here rather than
+# in the policy module for the reason the keys above give: ``cw.spawn`` cannot
+# import ``cw.cli`` (``cw.cli`` imports ``cw.spawn``).
+BASH_TOOL_NAME = "Bash"
+MONITOR_TOOL_NAME = "Monitor"
+
 
 def extract_unresolved_spawn_count(context: dict[str, object]) -> int:
     """Return the ``agent_spawn_stamp`` counter in *context*, or 0 for any odd shape.
@@ -285,9 +295,15 @@ class LaneConfig(BaseModel):
     # Lane-level override for the `cw agent-spawn-pre` spawn-shape policy
     # (#2211). Same bidirectional shape and reasoning as
     # busy_wait_guard_enabled above: None = inherit the OrchestratorConfig
-    # default. Resolved by
-    # cw.cli._subagent_policy._resolve_spawn_guard_enabled.
+    # default. Resolved by cw.cli._hook_io.resolve_guard_enabled (a
+    # GuardToggle: renaming this field means renaming it there too).
     subagent_spawn_guard_enabled: bool | None = None
+    # Lane-level override for the `cw background-tool-guard-pre` guard
+    # (#2303). Same bidirectional shape and reasoning as
+    # subagent_spawn_guard_enabled above: None = inherit the
+    # OrchestratorConfig default. Resolved by
+    # cw.cli._hook_io.resolve_guard_enabled (a GuardToggle, likewise).
+    background_tool_guard_enabled: bool | None = None
     pipeline: StagePipelineConfig | None = None
     # Lane-level operator-signoff override (RFC 0007 Phase 3). None defers to
     # OrchestratorConfig.default_signoff. See GitHub #990.
@@ -746,6 +762,15 @@ class OrchestratorConfig(BaseModel):
     # subagent_type (deny-on-omission shipped in #2211 round 2, once the
     # spawn-site inventory closed).
     subagent_spawn_guard_enabled: bool = True
+    # Global default for the `cw background-tool-guard-pre` guard (#2303),
+    # overridable per lane (LaneConfig.background_tool_guard_enabled).
+    # Default-ON: the failure it prevents is a headless worker
+    # backgrounding a pipeline-dependent Bash call or reaching for
+    # Monitor, neither of which has a completion-notification path for a
+    # headless DAEMON session (ADR-0003's background_tasks tracking
+    # covers only the Agent tool's subagent spawn) -- and the guard fails
+    # open on every shape it cannot classify.
+    background_tool_guard_enabled: bool = True
     # Elapsed seconds before reconcile attempts to route an emitted-but-unrouted
     # sentinel (signal_stop never fired). A re-check delay, not a disposition
     # timer: an emitted sentinel is positive evidence the worker completed.

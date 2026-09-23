@@ -35,7 +35,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
 )
-from tests.conftest import _make_daemon_session
+from tests.conftest import _make_daemon_session, _write_clients_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2391,6 +2391,57 @@ class TestSubagentSpawnGuardConfig:
         from cw.config import _DEFAULT_ORCHESTRATOR_YAML
 
         assert "subagent_spawn_guard_enabled: true" in _DEFAULT_ORCHESTRATOR_YAML
+
+
+class TestBackgroundToolGuardConfig:
+    """The #2303 background-tool guard's per-lane-with-global-default switch."""
+
+    def test_global_default_is_on(self) -> None:
+        """Default-on: a headless backgrounded Bash/Monitor call is refused."""
+        from cw.models import OrchestratorConfig
+
+        assert OrchestratorConfig().background_tool_guard_enabled is True
+
+    def test_lane_override_defaults_to_none(self) -> None:
+        """None on a lane means "inherit", mirroring subagent_spawn_guard_enabled."""
+        from cw.models import LaneConfig
+
+        assert LaneConfig(name="fast").background_tool_guard_enabled is None
+
+    def test_global_override_round_trips(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        config = OrchestratorConfig.model_validate(
+            {"background_tool_guard_enabled": False}
+        )
+
+        assert config.background_tool_guard_enabled is False
+
+    def test_lane_override_round_trips_via_clients_yaml(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A lane block in clients.yaml loads the override independently."""
+        _write_clients_yaml(tmp_config_dir, "false", "background_tool_guard_enabled")
+
+        lane = load_clients()["acme"].lanes[0]
+
+        assert lane.background_tool_guard_enabled is False
+
+    def test_wrong_type_raises_validation_error(self) -> None:
+        from pydantic import ValidationError
+
+        from cw.models import OrchestratorConfig
+
+        with pytest.raises(ValidationError):
+            OrchestratorConfig.model_validate(
+                {"background_tool_guard_enabled": "not-a-bool"}
+            )
+
+    def test_default_template_documents_the_key(self) -> None:
+        """A fresh orchestrator.yaml names the kill switch inline."""
+        from cw.config import _DEFAULT_ORCHESTRATOR_YAML
+
+        assert "background_tool_guard_enabled: true" in _DEFAULT_ORCHESTRATOR_YAML
 
 
 # ---------------------------------------------------------------------------
