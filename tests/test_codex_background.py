@@ -28,7 +28,6 @@ from cw.codex_background import (
     REVIEW_VERDICT_OWNER_STAMP_FORMAT,
     _default_background,
     _persist_review_verdict,
-    _persist_structured_review_verdict,
     _post_review_comment,
     _resolve_claim_tier_enabled,
     _resolve_codex_fix_loop_enabled,
@@ -384,10 +383,21 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
         ).splitlines()[0]
     )
     assert written.endswith("rendered")
-    # #2223: the structured verdict envelope lands beside the rendered .md.
-    envelope = ReviewVerdictEnvelope.model_validate_json(
-        (worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH).read_text(encoding="utf-8")
+    # #2223: the structured verdict envelope lands beside the rendered .md,
+    # through the same _persist_review_verdict stamp/write path (round 1 fix:
+    # no second persist implementation) -- so the JSON body follows the same
+    # ownership-stamp first line as the .md sibling.
+    json_written = (worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH).read_text(
+        encoding="utf-8"
     )
+    json_lines = json_written.split("\n", 1)
+    assert (
+        json_lines[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="T-v", reviewed_sha="deadbeef"
+        ).splitlines()[0]
+    )
+    envelope = ReviewVerdictEnvelope.model_validate_json(json_lines[1])
     assert envelope.ticket_id == "T-v"
     assert envelope.verdict.reviewed_sha == "deadbeef"
 
@@ -565,9 +575,10 @@ def test_run_codex_review_and_complete_writes_structured_verdict_json_on_must_fi
             client=_client(worktree),
         )
 
-    envelope = ReviewVerdictEnvelope.model_validate_json(
-        (worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH).read_text(encoding="utf-8")
+    json_written = (worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH).read_text(
+        encoding="utf-8"
     )
+    envelope = ReviewVerdictEnvelope.model_validate_json(json_written.split("\n", 1)[1])
     assert envelope.ticket_id == "T-mf"
     assert envelope.verdict.must_fix[0].evidence == "def broken():"
     assert envelope.verdict.accepted[0].finding.evidence == "def broken():"
@@ -1335,42 +1346,42 @@ def test_persist_review_verdict_degrades_on_oserror(
     assert any("review_verdict_persist_failed" in r.message for r in caplog.records)
 
 
-def test_persist_structured_review_verdict_writes_durable_copy(tmp_path: Path) -> None:
-    """#2223: the structured verdict envelope lands at
-    ``.claude/review-verdict.json``, round-tripping ticket provenance and the
-    per-finding evidence ``check-voided`` needs."""
+def test_persist_review_verdict_writes_structured_json_via_relative_path(
+    tmp_path: Path,
+) -> None:
+    """#2223 round 1: the structured verdict envelope is written through the
+    same ``_persist_review_verdict`` mkdir/atomic-write/log contract as the
+    rendered ``.md`` sibling -- no second persist implementation -- by
+    passing the envelope's serialized JSON as *review_text* and this
+    artifact's own ``relative_path``."""
     verdict = consolidate_verdict(
         [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
         _make_diff(),
         reviewed_sha="deadbeef",
     )
-    path = _persist_structured_review_verdict(tmp_path, verdict, ticket_id="T-1")
+    envelope_text = ReviewVerdictEnvelope(
+        ticket_id="T-1", verdict=verdict
+    ).model_dump_json(indent=2)
+    path = _persist_review_verdict(
+        tmp_path,
+        envelope_text,
+        ticket_id="T-1",
+        reviewed_sha="deadbeef",
+        relative_path=REVIEW_VERDICT_JSON_RELATIVE_PATH,
+    )
     assert path == tmp_path / ".claude" / "review-verdict.json"
     assert path is not None
-    envelope = ReviewVerdictEnvelope.model_validate_json(
-        path.read_text(encoding="utf-8")
+    written = path.read_text(encoding="utf-8")
+    lines = written.split("\n", 1)
+    assert (
+        lines[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="T-1", reviewed_sha="deadbeef"
+        ).splitlines()[0]
     )
+    envelope = ReviewVerdictEnvelope.model_validate_json(lines[1])
     assert envelope.ticket_id == "T-1"
     assert envelope.verdict.accepted[0].finding.evidence == "def broken():"
-
-
-def test_persist_structured_review_verdict_degrades_on_oserror(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A write failure is logged and returns None; it never raises into the
-    daemon thread's success path."""
-    verdict = consolidate_verdict(
-        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
-        _make_diff(),
-        reviewed_sha="deadbeef",
-    )
-    (tmp_path / ".claude").write_text("not a directory", encoding="utf-8")
-    with caplog.at_level("WARNING"):
-        assert (
-            _persist_structured_review_verdict(tmp_path, verdict, ticket_id="T-1")
-            is None
-        )
-    assert any("review_verdict_persist_failed" in r.message for r in caplog.records)
 
 
 def test_persist_unparseable_review_artifact_writes_worktree_copy(
