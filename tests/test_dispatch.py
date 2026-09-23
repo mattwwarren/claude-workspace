@@ -9357,8 +9357,11 @@ class TestRevertClaimedTaskExpectedSessionId:
             )
         )
 
-        _revert_claimed_task_to_pending(
-            "test-client", "REV-1", expected_session_id="sess-current"
+        assert (
+            _revert_claimed_task_to_pending(
+                "test-client", "REV-1", expected_session_id="sess-current"
+            )
+            is True
         )
 
         task = load_dev_queue().tasks[0]
@@ -9379,8 +9382,11 @@ class TestRevertClaimedTaskExpectedSessionId:
             )
         )
 
-        _revert_claimed_task_to_pending(
-            "test-client", "REV-2", expected_session_id="sess-stale-snapshot"
+        assert (
+            _revert_claimed_task_to_pending(
+                "test-client", "REV-2", expected_session_id="sess-stale-snapshot"
+            )
+            is False
         )
 
         task = load_dev_queue().tasks[0]
@@ -9402,7 +9408,7 @@ class TestRevertClaimedTaskExpectedSessionId:
             )
         )
 
-        _revert_claimed_task_to_pending("test-client", "REV-3")
+        assert _revert_claimed_task_to_pending("test-client", "REV-3") is True
 
         task = load_dev_queue().tasks[0]
         assert task.status is QueueItemStatus.PENDING

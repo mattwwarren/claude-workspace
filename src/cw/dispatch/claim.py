@@ -639,8 +639,13 @@ def _revert_claimed_task_to_pending(
     hook_context_conflict_session_id: str | None = None,
     defer_for: timedelta | None = None,
     expected_session_id: str | None = None,
-) -> None:
+) -> bool:
     """Revert a still-RUNNING claimed task back to PENDING, clearing session_id.
+
+    Returns whether a row was actually reverted: ``False`` when no RUNNING row
+    matched, including an ``expected_session_id`` mismatch. Callers that only
+    revert their own just-failed claim can ignore it; a caller that reports
+    the revert (an event, a log line) must gate on it.
 
     Used by both the usage-limit and broad spawn-error paths: the task was
     claimed to RUNNING by :func:`_claim_next_pending` but spawn never
@@ -698,6 +703,7 @@ def _revert_claimed_task_to_pending(
     # still reads raw task.attempts — as of #1750 these are two separate
     # counters, not one shared counter.
     """
+    reverted = False
     with dev_queue_lock():
         store = load_dev_queue()
         for stored_task in store.tasks:
@@ -715,6 +721,7 @@ def _revert_claimed_task_to_pending(
                     QueueItemStatus.PENDING,
                     unproductive=defer_for is None,
                 )
+                reverted = True
                 stored_task.session_id = None
                 if defer_for is not None:
                     stored_task.attempts = max(0, stored_task.attempts - 1)
@@ -735,6 +742,7 @@ def _revert_claimed_task_to_pending(
                     )
                 break
         save_dev_queue(store)
+    return reverted
 
 
 def _park_running_task_blocked_on_user(
