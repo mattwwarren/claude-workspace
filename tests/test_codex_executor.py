@@ -44,9 +44,11 @@ from cw.local_runner import UNEXPECTED_ERROR, make_blocked
 from cw.models import (
     CODEX_BACKEND,
     ClientConfig,
+    CompletionReason,
     LaneConfig,
     LastResultSource,
     QueueItemStatus,
+    ReasoningEffort,
     SessionStatus,
     Stage,
     StageExecutorConfig,
@@ -54,7 +56,7 @@ from cw.models import (
     TicketTask,
 )
 from tests._codex_review_helpers import _mk_codex_proc
-from tests.conftest import find_completed_session, git_in
+from tests.conftest import _seed_completed_session, find_completed_session, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -192,6 +194,105 @@ def test_codex_executor_codex_not_found(
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_NOT_FOUND
     assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+
+
+def test_spawn_writes_cw_context_json_on_preflight_failure(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2280: cw-context.json lands even on the CODEX_NOT_FOUND pre-flight path.
+
+    ``CodexExecutor.spawn()`` never routed through ``_write_hook_context`` at
+    all before this ticket (both of that function's other call sites are
+    Claude-session spawns) — no ``prior_attempts_summary`` was ever collected
+    for a codex-review retry. No Stop hook is installed on this path:
+    CodexExecutor never involves a Claude session to signal-stop.
+    """
+    worktree = make_git_repo("wt-codex-context-preflight")
+    runner = FakeCodexRunner(returncode=0)
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = _sync_codex_executor(config, runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-ctx-pre", client="test", stage=Stage.REVIEW)
+
+    with patch("cw.executor.shutil.which", return_value=None):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    context_path = worktree / ".claude" / "cw-context.json"
+    assert context_path.exists()
+    context = json.loads(context_path.read_text())
+    assert context["ticket_id"] == "T-ctx-pre"
+    assert not (worktree / ".claude" / "settings.local.json").exists()
+
+
+def test_spawn_writes_cw_context_json_on_review_pass(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2280: cw-context.json also lands ahead of a real (inline) review pass."""
+    worktree = make_git_repo("wt-codex-context-review")
+    runner = FakeCodexRunner(returncode=0, output_file_content=_reviewer_doc())
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = _sync_codex_executor(config, runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-ctx-run", client="test", stage=Stage.REVIEW)
+
+    with (
+        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.codex_background._post_review_comment"),
+    ):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    context_path = worktree / ".claude" / "cw-context.json"
+    assert context_path.exists()
+    context = json.loads(context_path.read_text())
+    assert context["ticket_id"] == "T-ctx-run"
+    assert not (worktree / ".claude" / "settings.local.json").exists()
+
+
+def test_spawn_second_attempt_prior_attempts_summary_reflects_first_codex_park(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2280: prior_attempts_summary picks up a codex-origin park on retry.
+
+    Before this ticket, a retry after a codex-review park carried an empty
+    ``prior_attempts_summary`` regardless of ``task.attempts``, because
+    ``CodexExecutor.spawn()`` never wrote ``cw-context.json`` at all.
+    """
+    worktree = make_git_repo("wt-codex-retry")
+    _seed_completed_session(
+        tmp_path,
+        tmp_config_dir,
+        ticket_id="T-retry",
+        client="test",
+        status=SessionStatus.COMPLETED,
+        last_result={
+            "status": "blocked",
+            "stage_reached": "stage3_review",
+            "blocker": {
+                "stage": "stage3_review",
+                "reason": CODEX_REVIEW_UNPARSEABLE,
+                "details": "reviewer (codex_timeout)",
+            },
+        },
+    )
+    runner = FakeCodexRunner(returncode=0)
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = _sync_codex_executor(config, runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(
+        ticket_id="T-retry", client="test", stage=Stage.REVIEW, attempts=1
+    )
+
+    with patch("cw.executor.shutil.which", return_value=None):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+    summary = context["world_state_snapshot"]["prior_attempts_summary"]
+    assert len(summary) == 1
+    assert summary[0]["blocker_reason"] == CODEX_REVIEW_UNPARSEABLE
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +464,12 @@ def test_codex_executor_all_roles_fail_blocked(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """Unparseable output from every role → blocked, no comment posted."""
+    """Unparseable output from every role → blocked, no verdict to render.
+
+    #2280: no documents means no ``ReviewVerdict`` to render, but the park is
+    no longer silent — ``result.blocker.details`` (the per-role summary) is
+    now persisted to the worktree and posted as the ticket comment.
+    """
     worktree = _worktree_with_change(
         make_git_repo, "wt-codex-fail", filename="new.py", content="def broken():\n"
     )
@@ -383,8 +489,12 @@ def test_codex_executor_all_roles_fail_blocked(
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
-    # No documents → no verdict → nothing to post.
-    post_mock.assert_not_called()
+    post_mock.assert_called_once()
+    assert post_mock.call_args.args[0] == "T-1"
+    assert post_mock.call_args.args[1] == result.blocker.details
+    artifact = post_mock.call_args.kwargs["artifact_path"]
+    assert artifact == worktree / ".claude" / "review-verdict-unparseable.md"
+    assert artifact.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +746,46 @@ def test_preflight_failure_persist_error_completes_session_and_reraises(
     assert recovery.blocker.reason == UNEXPECTED_ERROR
 
 
+def test_spawn_write_hook_context_failure_completes_session_and_reraises(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2280: a `_write_hook_context` raise must not leak the session ACTIVE.
+
+    The session is persisted ACTIVE (Step 1) before `_write_hook_context`
+    runs -- a raise there previously propagated straight out of spawn() with
+    nothing driving the session out of ACTIVE, the same leaked-ACTIVE class
+    that held a client-ceiling slot for ~2h (#2285's addendum). Still
+    synchronous here (pre-backgrounding), so re-raising is correct -- dispatch
+    is still on this stack and its own handler reverts the claimed task.
+    """
+    worktree = make_git_repo("wt-codex-hook-context-boom")
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = _sync_codex_executor(config, FakeCodexRunner(returncode=0))
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-hc", client="test", stage=Stage.REVIEW)
+
+    with (
+        patch("cw.executor._write_hook_context", side_effect=OSError("hook boom")),
+        pytest.raises(OSError, match="hook boom"),
+    ):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    state = load_state()
+    assert not any(s.status == SessionStatus.ACTIVE for s in state.sessions)
+    session = find_completed_session(state)
+    assert session.status == SessionStatus.COMPLETED
+    # #2280 round 2: the full terminal record, not just status -- an
+    # unexpected-error completion is a crash, not a normal one.
+    assert session.completed_at is not None
+    assert session.completed_reason == CompletionReason.CRASHED
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == UNEXPECTED_ERROR
+
+
 def test_spawn_stamps_session_id_before_backgrounding(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
@@ -745,7 +895,9 @@ def test_spawn_threads_session_id_and_reasoning_effort_into_run_review(
     forwards the stage config's reasoning_effort rather than a default."""
     worktree = make_git_repo("wt-codex-sid-thread")
     runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND, reasoning_effort="max")
+    config = StageExecutorConfig(
+        backend=CODEX_BACKEND, reasoning_effort=ReasoningEffort.MAX
+    )
     executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-sid", client="test", stage=Stage.REVIEW)

@@ -171,6 +171,20 @@ def _capture_diff(
     ``changed_files`` is the full changed-path list (including pure
     deletions), parsed from this same diff text rather than a second
     subprocess call (SHOULD_FIX 11, #1236).
+
+    #2280 finding, documented rather than fixed here: this diff's full text
+    is inlined into every reviewer's prompt with no size cap (see
+    ``_context._prompt_render``'s ``## Diff`` section). A large diff burning
+    a tight per-role deadline (``_MIN_ROLE_TIMEOUT_SECONDS``, ``_const.py``)
+    is a plausible, unconfirmed contributor to a role timing out or
+    producing malformed output under that shared budget — one of several
+    ``ExecutorFailureCategory`` values that all coarsen to the same
+    ``codex_review_unparseable`` reason at the aggregate ``Blocker.reason``
+    level, so a timeout and a genuine parse/schema failure are
+    indistinguishable there today. A follow-up ticket could (a) surface the
+    per-role category into the sentinel's breadcrumbs instead of the coarse
+    reason alone, and (b) evaluate a diff-size warning or cap — neither is
+    implemented by this docstring note.
     """
     reviewed_sha = _capture_head_sha(worktree)
     diff_text = subprocess.check_output(
