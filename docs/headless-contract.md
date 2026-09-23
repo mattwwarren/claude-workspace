@@ -722,7 +722,7 @@ never appear in an `AutoDevResult`.
 
 | Literal | Where it comes from | What it means |
 |---|---|---|
-| `stale_dispatch` | `Status` (§4.1), stamped verbatim as the disposition by `_derive_disposition` | A session **ran**, discovered the open PR itself, and refused. `blocked_reason` is the sentinel's `blocker.reason` (canonically `pr_already_open`), and it is breadcrumb-eligible — the reason travels verbatim to the attention monitor. |
+| `stale_dispatch` | `Status` (§4.1), stamped verbatim as the disposition by `_derive_disposition` | A session **ran**, discovered the open PR itself, and refused. `blocked_reason` is the sentinel's `blocker.reason` (canonically `pr_already_open`), and it is breadcrumb-eligible — the reason travels verbatim to the attention watch (`attention_watch.py`). |
 | `stale_dispatch_gate` | `cw.dev_queue.STALE_DISPATCH_GATE_DISPOSITION` — **never** a `Status` member | The dispatch loop refused to spawn at all. **No session ever ran**, so `breadcrumbs` is hardcoded empty and the literal stays out of `BREADCRUMB_ELIGIBLE_PAUSED_STATUSES`. `blocked_reason` is `pr_already_open_pre_dispatch`. |
 
 **Where the gate fires:** `cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids`,
