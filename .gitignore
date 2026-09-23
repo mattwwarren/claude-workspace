@@ -18,4 +18,5 @@ zellij-plugin/target/
 .claude/prep-pr-state.json
 .claude/cw-context.json
 .claude/cw-context.json.lock
+.claude/review-verdict.md
 docs/handoffs/

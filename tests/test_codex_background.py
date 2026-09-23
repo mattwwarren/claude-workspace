@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +24,7 @@ from cw import codex_background
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_background import (
     _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
+    REVIEW_VERDICT_OWNER_STAMP_FORMAT,
     _default_background,
     _post_review_comment,
     _resolve_claim_tier_enabled,
@@ -334,7 +336,7 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
     with (
         patch(
             "cw.codex_background.run_review_with_fix_loop",
-            return_value=(result, object()),
+            return_value=(result, SimpleNamespace(reviewed_sha="deadbeef")),
         ),
         patch("cw.codex_background.render_verdict_comment", return_value="rendered"),
         patch("cw.codex_background._post_review_comment") as post_mock,
@@ -350,7 +352,14 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
     assert post_mock.call_args.kwargs["tracker"] is None
     artifact = post_mock.call_args.kwargs["artifact_path"]
     assert artifact == worktree / ".claude" / "review-verdict.md"
-    assert artifact.read_text(encoding="utf-8") == "rendered"
+    written = artifact.read_text(encoding="utf-8")
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="T-v", reviewed_sha="deadbeef"
+        ).splitlines()[0]
+    )
+    assert written.endswith("rendered")
 
 
 def test_run_codex_review_and_complete_exception_path(
@@ -516,7 +525,7 @@ def test_run_codex_review_and_complete_marker_cleared_after_verdict_posting(
 
     def _capture_marker(**_kwargs: object) -> tuple[object, object]:
         during.append(len(load_executor_blocked_markers()))
-        return (result, object())
+        return (result, SimpleNamespace(reviewed_sha="deadbeef"))
 
     with (
         patch(
@@ -535,6 +544,15 @@ def test_run_codex_review_and_complete_marker_cleared_after_verdict_posting(
 
     assert during == [1]
     post_mock.assert_called_once()
+    artifact = post_mock.call_args.kwargs["artifact_path"]
+    written = artifact.read_text(encoding="utf-8")
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="T-mark-v", reviewed_sha="deadbeef"
+        ).splitlines()[0]
+    )
+    assert written.endswith("rendered")
     assert load_executor_blocked_markers() == {}
 
 
@@ -1010,15 +1028,44 @@ def test_post_review_comment_posts_on_github_or_unknown_tracker(
 
 
 def test_persist_review_verdict_writes_durable_copy(tmp_path: Path) -> None:
-    """#2095: the rendered verdict lands in .claude/review-verdict.md."""
+    """#2095: the rendered verdict lands in .claude/review-verdict.md, stamped
+    with its owning ticket_id/reviewed_sha (#2279)."""
     from cw.codex_background import (
         REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
         _persist_review_verdict,
     )
 
-    path = _persist_review_verdict(tmp_path, "## Verdict\n")
+    path = _persist_review_verdict(
+        tmp_path, "## Verdict\n", ticket_id="2279", reviewed_sha="deadbeef"
+    )
     assert path == tmp_path / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
-    assert path.read_text(encoding="utf-8") == "## Verdict\n"
+    written = path.read_text(encoding="utf-8")
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="2279", reviewed_sha="deadbeef"
+        ).splitlines()[0]
+    )
+    assert written.endswith("## Verdict\n")
+
+
+def test_persist_review_verdict_stamp_handles_hyphenated_ticket_id(
+    tmp_path: Path,
+) -> None:
+    """A Linear-style ticket_id (e.g. GEN-1) keeps the stamp line parse-friendly."""
+    from cw.codex_background import _persist_review_verdict
+
+    path = _persist_review_verdict(
+        tmp_path, "## Verdict\n", ticket_id="GEN-1", reviewed_sha="cafef00d"
+    )
+    assert path is not None
+    written = path.read_text(encoding="utf-8")
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="GEN-1", reviewed_sha="cafef00d"
+        ).splitlines()[0]
+    )
 
 
 def test_persist_review_verdict_degrades_on_oserror(
@@ -1030,7 +1077,12 @@ def test_persist_review_verdict_degrades_on_oserror(
 
     (tmp_path / ".claude").write_text("not a directory", encoding="utf-8")
     with caplog.at_level("WARNING"):
-        assert _persist_review_verdict(tmp_path, "x") is None
+        assert (
+            _persist_review_verdict(
+                tmp_path, "x", ticket_id="T-1", reviewed_sha="deadbeef"
+            )
+            is None
+        )
     assert any("review_verdict_persist_failed" in r.message for r in caplog.records)
 
 
