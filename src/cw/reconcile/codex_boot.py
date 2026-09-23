@@ -88,12 +88,13 @@ from cw.config import (
     save_state,
     sessions_lock,
 )
-from cw.dev_queue import load_dev_queue
+from cw.dev_queue import dev_queue_lock, load_dev_queue
 from cw.events import record_event
 from cw.models import (
     CODEX_BACKEND,
     CompletionReason,
     OrchestratorEventType,
+    QueueItemStatus,
     ReapPolicy,
     ReapReason,
     SessionOrigin,
@@ -167,6 +168,9 @@ _PARK_REASON_NO_WORKTREE_PATH = (
     f"{_SCAN_INCONCLUSIVE}: no worktree path is recorded, so a lingering codex"
     " writer cannot be ruled out"
 )
+
+# Why a boot snapshot went stale before its session could be closed.
+_STALE_SESSION_GONE = "it is no longer in sessions.json"
 
 # Bounds every git call below: this pass blocks process start, so one hung
 # git must not wedge the dispatch loop before its first tick.
@@ -484,18 +488,78 @@ def _close_session_audited(
     save_state(state)
 
 
+def _row_still_bound(ticket_id: str, client_name: str, session_id: str) -> bool:
+    """Whether the task row is still RUNNING under *session_id*.
+
+    The same predicate the identity-checked row transitions re-verify
+    (``expected_session_id`` in ``cw.dispatch.claim``). Caller holds
+    ``dev_queue_lock``.
+    """
+    return any(
+        task.ticket_id == ticket_id
+        and task.client == client_name
+        and task.status is QueueItemStatus.RUNNING
+        and task.session_id == session_id
+        for task in load_dev_queue().tasks
+    )
+
+
+def _stale_snapshot_reason(
+    session: Session, snapshot: Session, ticket_id: str
+) -> str | None:
+    """Why the locked record is no longer the orphan *snapshot* saw, or None.
+
+    Still the same session (found by id, and the same incarnation: a ``cw
+    resume`` keeps the id but moves ``surface_ref`` and stamps
+    ``resumed_at``), still live, and still bound to the task row.
+    """
+    if (session.surface_ref, session.resumed_at) != (
+        snapshot.surface_ref,
+        snapshot.resumed_at,
+    ):
+        return "it was resumed since the snapshot"
+    if session.status not in _LIVE_STATUSES:
+        return f"it is now {session.status}"
+    if not _row_still_bound(ticket_id, snapshot.client, snapshot.id):
+        return "its task row no longer belongs to it"
+    return None
+
+
+def _leave_untouched(snapshot: Session, ticket_id: str, why: str) -> bool:
+    _log.warning(
+        "codex_boot: leaving session %s (%s/%s) untouched: %s",
+        snapshot.id,
+        snapshot.client,
+        ticket_id,
+        why,
+    )
+    return False
+
+
 def _close_or_propose_reap(
-    session_id: str, ticket_id: str, lane: str, disposition: _OrphanDisposition
-) -> None:
-    """Close the session, or propose its reap. Caller holds ``sessions_lock``."""
-    state = load_state()
-    session = next((s for s in state.sessions if s.id == session_id), None)
-    if session is None:
-        return
-    if disposition.close_session:
-        _close_session_audited(state, session, ticket_id, disposition)
-    else:
-        _propose_reap(state, session, ticket_id, lane)
+    snapshot: Session, ticket_id: str, lane: str, disposition: _OrphanDisposition
+) -> bool:
+    """Close the session, or propose its reap; False if the snapshot went stale.
+
+    Caller holds ``sessions_lock``. The disposition was decided from an
+    unlocked snapshot, so the record is re-checked here, with the dev-queue
+    lock held too, before anything is written: a newer session that replaced
+    the orphan in the meantime is left untouched rather than overwritten as
+    CRASHED.
+    """
+    with dev_queue_lock():
+        state = load_state()
+        session = next((s for s in state.sessions if s.id == snapshot.id), None)
+        if session is None:
+            return _leave_untouched(snapshot, ticket_id, _STALE_SESSION_GONE)
+        stale = _stale_snapshot_reason(session, snapshot, ticket_id)
+        if stale is not None:
+            return _leave_untouched(snapshot, ticket_id, stale)
+        if disposition.close_session:
+            _close_session_audited(state, session, ticket_id, disposition)
+        else:
+            _propose_reap(state, session, ticket_id, lane)
+    return True
 
 
 def _requeue_clean_orphan(
@@ -532,20 +596,21 @@ def _requeue_clean_orphan(
 
 def _close_orphaned_session_and_dispose(
     *,
-    session_id: str,
+    snapshot: Session,
     ticket_id: str,
-    client_name: str,
     stage: Stage,
     lane: str,
     disposition: _OrphanDisposition,
-) -> None:
+) -> bool:
     """Close the orphaned Session record if allowed, then requeue or park its task.
 
     A record left ACTIVE with no writer behind it holds a ceiling slot and
     trips the next spawn's hook-context conflict guard, so it closes unless
-    ``disposition`` says a writer may still be alive. The task transition
-    re-verifies ``expected_session_id`` under the dev-queue lock, so a row
-    re-claimed since the caller's snapshot is left alone.
+    ``disposition`` says a writer may still be alive. Returns False, having
+    touched nothing, when the record no longer matches *snapshot* (see
+    ``_close_or_propose_reap``). The task transition also re-verifies
+    ``expected_session_id`` under the dev-queue lock, so a row re-claimed
+    since the caller's snapshot is left alone.
 
     Two files, two writes, session first, on purpose: there is no
     cross-file transaction, and this is the order a crash between them can
@@ -565,22 +630,24 @@ def _close_orphaned_session_and_dispose(
     with sessions_lock():
         # Proposal before the park it proposes (ADR-0006 invariant 3). A raise
         # here leaves the task claimed, so the next boot re-finds the orphan.
-        _close_or_propose_reap(session_id, ticket_id, lane, disposition)
+        if not _close_or_propose_reap(snapshot, ticket_id, lane, disposition):
+            return False
         if disposition.should_requeue:
             _requeue_clean_orphan(
-                session_id=session_id,
+                session_id=snapshot.id,
                 ticket_id=ticket_id,
-                client_name=client_name,
+                client_name=snapshot.client,
                 stage=stage,
             )
         else:
             _park_running_task_blocked_on_user(
                 ticket_id=ticket_id,
-                client_name=client_name,
-                expected_session_id=session_id,
+                client_name=snapshot.client,
+                expected_session_id=snapshot.id,
                 disposition=CODEX_ORPHANED_AT_BOOT_DISPOSITION,
                 breadcrumbs=f"{_ORPHAN_BREADCRUMBS} ({disposition.reason}).",
             )
+    return True
 
 
 def reap_orphaned_codex_sessions_at_boot() -> int:
@@ -665,10 +732,9 @@ def _dispose_orphan(
     )
     _log_disposition(session, ticket_id, disposition)
     try:
-        _close_orphaned_session_and_dispose(
-            session_id=session.id,
+        return _close_orphaned_session_and_dispose(
+            snapshot=session,
             ticket_id=ticket_id,
-            client_name=session.client,
             stage=task.stage,
             lane=task.lane,
             disposition=disposition,
@@ -682,7 +748,6 @@ def _dispose_orphan(
             ticket_id,
         )
         return False
-    return True
 
 
 def _log_disposition(

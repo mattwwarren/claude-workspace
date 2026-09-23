@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 import psutil
 import pytest
 
-from cw.config import load_clients, load_state, save_state
+from cw.config import load_clients, load_state, save_state, sessions_lock
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import HookContextConflictError
@@ -487,11 +487,11 @@ def test_one_failing_orphan_does_not_stop_the_pass(
     )
     real_dispose = codex_boot._close_orphaned_session_and_dispose
 
-    def _dispose(**kwargs: Any) -> None:
+    def _dispose(**kwargs: Any) -> bool:
         if kwargs["ticket_id"] == "T-orphan":
             msg = "disk full"
             raise OSError(msg)
-        real_dispose(**kwargs)
+        return real_dispose(**kwargs)
 
     monkeypatch.setattr(codex_boot, "_close_orphaned_session_and_dispose", _dispose)
 
@@ -771,28 +771,23 @@ def test_skipped_requeue_emits_no_event_and_leaves_the_fresh_claim(
     tmp_config_dir: Path,
     tmp_path: Path,
     make_git_repo: Callable[..., Path],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The row is re-claimed between the snapshot and the locked revert.
+    """The row belongs to another session by the time the locked revert runs.
 
     The identity-checked revert skips, so TICKET_REQUEUED must not fire and
     the fresh session's claim must survive untouched.
     """
     _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
-    _no_codex_process(monkeypatch)
-    _use_auto_reap_policy(monkeypatch)
-    real_resolve = codex_boot._resolve_orphan_action
+    store = load_dev_queue()
+    store.tasks[0].session_id = "fresh-session"
+    save_dev_queue(store)
 
-    def _resolve_then_reclaimed(*args: Any) -> _OrphanDisposition:
-        disposition = real_resolve(*args)
-        store = load_dev_queue()
-        store.tasks[0].session_id = "fresh-session"
-        save_dev_queue(store)
-        return disposition
-
-    monkeypatch.setattr(codex_boot, "_resolve_orphan_action", _resolve_then_reclaimed)
-
-    reap_orphaned_codex_sessions_at_boot()
+    codex_boot._requeue_clean_orphan(
+        session_id="T-orphan",
+        ticket_id="T-orphan",
+        client_name="client-a",
+        stage=Stage.REVIEW,
+    )
 
     task = load_dev_queue().tasks[0]
     assert task.status is QueueItemStatus.RUNNING
@@ -800,7 +795,77 @@ def test_skipped_requeue_emits_no_event_and_leaves_the_fresh_claim(
     assert task.unproductive_attempts == 0
     assert task.disposition is None
     assert _requeued_events("test-codex-boot-skipped-requeue") == []
-    assert _attention_events("test-codex-boot-skipped-requeue-attn") == []
+
+
+def _replace_with_newer_session(state: CwState) -> None:
+    """A newer session takes the row over; the orphan's record stays ACTIVE."""
+    newer = state.sessions[0].model_copy(
+        update={"id": "newer-session", "started_at": datetime.now(UTC)}
+    )
+    state.sessions.append(newer)
+    store = load_dev_queue()
+    store.tasks[0].session_id = newer.id
+    save_dev_queue(store)
+
+
+def _resume_in_place(state: CwState) -> None:
+    """The same record is resumed onto a new daemon surface (``cw resume``)."""
+    state.sessions[0].surface_ref = "resumed-short-id"
+    state.sessions[0].resumed_at = datetime.now(UTC)
+
+
+def _completed_since_snapshot(state: CwState) -> None:
+    """Something else already closed the record, with its own reason."""
+    state.sessions[0].status = SessionStatus.COMPLETED
+    state.sessions[0].completed_at = datetime.now(UTC)
+    state.sessions[0].completed_reason = CompletionReason.NORMAL
+
+
+@pytest.mark.parametrize(
+    "supersede",
+    [_replace_with_newer_session, _resume_in_place, _completed_since_snapshot],
+    ids=["newer-session-owns-the-row", "resumed-in-place", "completed-since"],
+)
+def test_stale_snapshot_never_overwrites_a_newer_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    supersede: Callable[[CwState], None],
+) -> None:
+    """A newer session replaces the orphan between the snapshot and the close.
+
+    The close re-checks identity under the lock and finds the snapshot stale,
+    so nothing is overwritten: no session is closed as CRASHED, no reap is
+    proposed, and the task keeps its claim.
+    """
+    _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    _no_codex_process(monkeypatch)
+    _use_auto_reap_policy(monkeypatch)
+    real_resolve = codex_boot._resolve_orphan_action
+
+    superseded: dict[str, object] = {}
+
+    def _resolve_then_superseded(*args: Any) -> _OrphanDisposition:
+        disposition = real_resolve(*args)
+        state = load_state()
+        supersede(state)
+        save_state(state)
+        superseded["state"] = load_state().model_dump()
+        superseded["queue"] = load_dev_queue().model_dump()
+        return disposition
+
+    monkeypatch.setattr(codex_boot, "_resolve_orphan_action", _resolve_then_superseded)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 0
+
+    assert load_state().model_dump() == superseded["state"]
+    assert load_dev_queue().model_dump() == superseded["queue"]
+    consumer = f"test-codex-boot-stale-{supersede.__name__}"
+    assert _completed_events(consumer) == []
+    assert _reap_proposed_events(f"{consumer}-reap") == []
+    assert _requeued_events(f"{consumer}-requeued") == []
+    assert _attention_events(f"{consumer}-attn") == []
 
 
 def test_session_gone_from_state_is_neither_closed_nor_proposed(
@@ -809,16 +874,19 @@ def test_session_gone_from_state_is_neither_closed_nor_proposed(
     """A record pruned since the snapshot leaves nothing to close or stamp."""
     _seed(tmp_config_dir, tmp_path)
     before = load_state().model_dump()
+    snapshot = load_state().sessions[0].model_copy(update={"id": "no-such-session"})
     disposition = _OrphanDisposition(
         should_requeue=False,
         reason=_PARK_REASON_CODEX_PROCESS_RUNNING,
         close_session=False,
     )
 
-    codex_boot._close_or_propose_reap(
-        "no-such-session", "T-orphan", "default", disposition
-    )
+    with sessions_lock():
+        acted = codex_boot._close_or_propose_reap(
+            snapshot, "T-orphan", "default", disposition
+        )
 
+    assert acted is False
     assert load_state().model_dump() == before
     assert _reap_proposed_events("test-codex-boot-gone-reap") == []
     assert _completed_events("test-codex-boot-gone-completed") == []
