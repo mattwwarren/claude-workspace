@@ -28,22 +28,23 @@ The pass runs while ``serve`` is starting, so it never touches the network
 (the baseline is resolved from local refs only) and bounds every git call.
 
 A codex process still running in the worktree — including one whose cwd is
-the worktree's since-deleted directory — is a live writer, and the orphaned
-``Session`` record is closed to ``COMPLETED``/``CRASHED`` only once no writer
-remains; a session with no recorded worktree cannot be scanned, so it is never
-closed here. Under ``reap_policy: auto`` the pass terminates the writer first
-(SIGTERM, then SIGKILL, re-verifying the pid's creation time before each so a
-reused pid is never signalled); one that will not die leaves the session
-``ACTIVE`` and the task parked with its pid in the breadcrumbs. Under any
-other policy the pass neither kills nor closes: it parks, proposes the reap
-through reconcile's shared ``SESSION_REAP_PROPOSED`` emitter and leaves the
-session ``ACTIVE``. With no writer, the session is closed in both branches,
-and each close records a ``SESSION_COMPLETED`` audit event (``crashed: True``,
-``reason: codex_orphaned_at_boot``) before it is persisted. Before #2285 it
-stayed ``ACTIVE``
-forever: it held a client ceiling slot, and its stale ``cw-context.json`` made
-the next DAEMON-origin ``_write_hook_context`` into the same worktree raise
-``HookContextConflictError``.
+the worktree's since-deleted directory — is a live writer. The pass never
+signals one, under any ``reap_policy``: an orphan whose parent ``serve`` died
+normally exits on its own once its stdout pipe breaks. When the process scan
+finds a writer, or cannot tell (an unreadable candidate, a process racing
+away mid-scan, a failed scan, no recorded worktree to scan), the pass parks
+the task, leaves the ``Session`` ``ACTIVE``, proposes the reap through
+reconcile's shared ``SESSION_REAP_PROPOSED`` emitter (ADR-0006 signal-only)
+and names the pids, or "scan inconclusive", in the breadcrumbs. The next boot
+or reconcile tick re-evaluates, and the operator can act on the proposal.
+
+Only a scan that affirmatively finds no writer lets the orphaned ``Session``
+record close to ``COMPLETED``/``CRASHED``, in both branches, and each close
+records a ``SESSION_COMPLETED`` audit event (``crashed: True``, ``reason:
+codex_orphaned_at_boot``) before it is persisted. Before #2285 it stayed
+``ACTIVE`` forever: it held a client ceiling slot, and its stale
+``cw-context.json`` made the next DAEMON-origin ``_write_hook_context`` into
+the same worktree raise ``HookContextConflictError``.
 
 Two existing primitives carry the task transition rather than a new path:
 
@@ -68,10 +69,10 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import psutil
 
@@ -111,7 +112,7 @@ from cw.reconcile._shared import (
 from cw.reconcile.tasks import _resolve_task_policy
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
     from cw.models import (
         ClientConfig,
@@ -155,21 +156,21 @@ _PARK_REASON_DIRTY_WORKTREE = (
 _PARK_REASON_GIT_ERROR = "the worktree's git state could not be established"
 _PARK_REASON_HEAD_MOVED = "HEAD has moved since the review's recorded baseline"
 _PARK_REASON_CODEX_PROCESS_RUNNING = "a codex process is still running in the worktree"
-_PARK_REASON_CODEX_PROCESS_SURVIVED = (
-    "a codex process in the worktree survived SIGTERM and SIGKILL"
-)
-_PARK_REASON_PROCESS_SCAN_FAILED = (
-    "the process table could not be scanned for a lingering codex writer"
+# Leads every park reason for a scan that could not tell whether a codex
+# writer is left, so the breadcrumbs say so in the same words each time.
+_SCAN_INCONCLUSIVE = "scan inconclusive"
+_PARK_REASON_PROCESS_SCAN_INCONCLUSIVE = (
+    f"{_SCAN_INCONCLUSIVE}: the process table could not rule out a lingering"
+    " codex writer"
 )
 _PARK_REASON_NO_WORKTREE_PATH = (
-    "no worktree path is recorded, so a lingering codex writer cannot be ruled out"
+    f"{_SCAN_INCONCLUSIVE}: no worktree path is recorded, so a lingering codex"
+    " writer cannot be ruled out"
 )
 
 # Bounds every git call below: this pass blocks process start, so one hung
 # git must not wedge the dispatch loop before its first tick.
 _GIT_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
-# Bounds each of the post-SIGTERM and post-SIGKILL waits, for the same reason.
-_CODEX_TERMINATE_WAIT_SECONDS: float = 3.0
 # Porcelain v1: two status characters and a space precede the path.
 _GIT_PORCELAIN_PATH_OFFSET = 3
 _GIT_PORCELAIN_RENAME_SEPARATOR = " -> "
@@ -179,41 +180,6 @@ _CODEX_PROCESS_NAME = "codex"
 # What Linux reports (via /proc/<pid>/cwd, which psutil passes through) for a
 # process whose cwd directory has been removed: "<path> (deleted)".
 _DELETED_CWD_SUFFIX = " (deleted)"
-# psutil create_time() is epoch seconds as a float; pinned as integer ns, the
-# same conversion cw.local_runner.read_process_start_time_ns uses.
-_NS_PER_SECOND = 1_000_000_000
-
-
-class _SignallableProcess(Protocol):
-    """The subset of ``psutil.Process`` the terminate path calls."""
-
-    @property
-    def pid(self) -> int: ...
-
-    def terminate(self) -> None: ...
-
-    def kill(self) -> None: ...
-
-    def wait(self, timeout: float | None = None) -> object: ...
-
-
-@dataclass(frozen=True)
-class _CodexWriter:
-    """A codex process the cwd scan matched, pinned to its identity at scan time.
-
-    ``start_time_ns`` is the process creation time the scan saw: the same
-    pid + start-time pin ``LocalLivenessHandle`` uses. A pid the kernel has
-    since handed to a different process reads a different creation time, so
-    the terminate path re-checks it before every signal and never signals a
-    stranger.
-    """
-
-    process: _SignallableProcess
-    start_time_ns: int
-
-    @property
-    def pid(self) -> int:
-        return self.process.pid
 
 
 @dataclass(frozen=True)
@@ -222,34 +188,22 @@ class _OrphanDisposition:
 
     ``close_session`` is False only while a codex writer may still be alive in
     the worktree: closing the record then would free its ceiling slot and its
-    hook-context guard for a new spawn that races the writer.
-    ``propose_reap`` marks the ADR-0006 signal-only case, where an operator,
-    not this pass, authorizes the reap. ``terminated_writer_pids`` names the
-    writers this pass killed before closing the session.
+    hook-context guard for a new spawn that races the writer. The session is
+    then left ACTIVE and its reap proposed instead, for an operator to
+    authorize (ADR-0006 signal-only).
     """
 
     should_requeue: bool
     reason: str
     close_session: bool = True
-    propose_reap: bool = False
-    live_writer_pids: tuple[int, ...] = ()
-    terminated_writer_pids: tuple[int, ...] = ()
 
 
-def _park(
-    reason: str,
-    *,
-    close_session: bool = True,
-    propose_reap: bool = False,
-    live_writer_pids: tuple[int, ...] = (),
-) -> _OrphanDisposition:
-    return _OrphanDisposition(
-        should_requeue=False,
-        reason=reason,
-        close_session=close_session,
-        propose_reap=propose_reap,
-        live_writer_pids=live_writer_pids,
-    )
+def _park(reason: str) -> _OrphanDisposition:
+    return _OrphanDisposition(should_requeue=False, reason=reason)
+
+
+def _park_writer_may_be_live(reason: str) -> _OrphanDisposition:
+    return _OrphanDisposition(should_requeue=False, reason=reason, close_session=False)
 
 
 def _worktree_porcelain_clean_except_verdict(worktree: Path) -> bool | None:
@@ -329,157 +283,61 @@ def _cwd_is_worktree(cwd: str, worktree: Path, target: Path) -> bool:
     return plain == str(worktree) or Path(plain).resolve() == target
 
 
-def _codex_processes_in(worktree: Path) -> list[_CodexWriter] | None:
-    """Return every process named ``codex`` whose cwd is *worktree*.
+def _codex_processes_in(worktree: Path) -> list[int] | None:
+    """Return the pid of every process named ``codex`` whose cwd is *worktree*.
 
     A cwd scan is the only signal available: no PID is persisted for the
-    codex child (see the module docstring), so identity is pinned here, at
-    scan time, from each match's creation time. Never raises. A process that
-    vanishes or denies access mid-scan is skipped. ``None`` — the caller
-    parks rather than races an unobserved writer — when the scan cannot run
-    at all, or a match's creation time is unreadable, since a writer that
-    cannot be pinned can be neither safely signalled nor ruled out.
+    codex child (see the module docstring). Never raises, and fails closed:
+    ``None`` — inconclusive, which the caller parks on exactly as on a found
+    writer — whenever the scan cannot tell. That is a failed listing, any
+    entry racing away or erroring mid-scan, or a candidate psutil could not
+    read: ``process_iter`` reports an ``AccessDenied`` attribute as ``None``,
+    so a process whose name is ``None`` may be codex, and a codex whose cwd
+    is ``None`` may sit in the worktree. Only ``[]`` means no writer.
     """
-    target = worktree.resolve()
     try:
-        processes = list(psutil.process_iter(["name", "cwd", "create_time"]))
+        target = worktree.resolve()
+        processes = list(psutil.process_iter(["name", "cwd"]))
     except (psutil.Error, OSError):
         return None
-    matches: list[_CodexWriter] = []
+    pids: list[int] = []
     for process in processes:
         try:
             info = process.info
-            cwd = info.get("cwd")
-            if (
-                info.get("name") != _CODEX_PROCESS_NAME
-                or not cwd
-                or not _cwd_is_worktree(cwd, worktree, target)
-            ):
+            name = info.get("name")
+            if name is None:
+                return None
+            if name != _CODEX_PROCESS_NAME:
                 continue
-            create_time = info.get("create_time")
+            cwd = info.get("cwd")
+            if cwd is None:
+                return None
+            if _cwd_is_worktree(cwd, worktree, target):
+                pids.append(process.pid)
         except (psutil.Error, OSError):
-            continue
-        if create_time is None:
             return None
-        matches.append(
-            _CodexWriter(process, start_time_ns=int(create_time * _NS_PER_SECOND))
-        )
-    return matches
-
-
-def _current_start_time_ns(pid: int) -> int:
-    """Re-read *pid*'s creation time from a fresh handle.
-
-    A fresh ``psutil.Process``, because an existing one caches the creation
-    time it was built with. Raises what psutil raises.
-    """
-    return int(psutil.Process(pid).create_time() * _NS_PER_SECOND)
-
-
-def _still_scanned_writer(writer: _CodexWriter) -> bool | None:
-    """Whether *writer*'s pid still names the process the scan matched.
-
-    ``False`` when that process is gone: the pid is free, or now names a
-    process with a different creation time. ``None`` when the identity
-    cannot be read, which proves nothing either way.
-    """
-    try:
-        current = _current_start_time_ns(writer.pid)
-    except psutil.NoSuchProcess:
-        return False
-    except (psutil.Error, OSError):
-        return None
-    return current == writer.start_time_ns
-
-
-def _signal_if_still_scanned(
-    writer: _CodexWriter, send: Callable[[], None]
-) -> bool | None:
-    """Call *send* only once *writer*'s identity is re-verified; return the check."""
-    same = _still_scanned_writer(writer)
-    if same:
-        send()
-    return same
-
-
-def _terminate_codex_process(writer: _CodexWriter) -> bool:
-    """SIGTERM, bounded wait, then SIGKILL, bounded wait. True once it is gone.
-
-    Identity is re-verified before each signal. A mismatch means the scanned
-    writer has exited and its pid was reused: nothing is sent, and the writer
-    counts as gone. An unreadable identity sends nothing and counts as a
-    survivor. ``NoSuchProcess`` at any step means gone.
-    """
-    process = writer.process
-    try:
-        sent = _signal_if_still_scanned(writer, process.terminate)
-        if not sent:
-            return sent is False
-        try:
-            process.wait(timeout=_CODEX_TERMINATE_WAIT_SECONDS)
-        except psutil.TimeoutExpired:
-            sent = _signal_if_still_scanned(writer, process.kill)
-            if not sent:
-                return sent is False
-            process.wait(timeout=_CODEX_TERMINATE_WAIT_SECONDS)
-    except psutil.NoSuchProcess:
-        return True
-    except (psutil.Error, OSError):
-        # AccessDenied, or TimeoutExpired from the post-SIGKILL wait.
-        return False
-    return True
-
-
-def _terminate_codex_processes(writers: Sequence[_CodexWriter]) -> list[int]:
-    """Terminate each of *writers*; return the pids still alive afterwards."""
-    return [w.pid for w in writers if not _terminate_codex_process(w)]
+    return pids
 
 
 def _format_pids(pids: Sequence[int]) -> str:
     return ", ".join(f"pid {pid}" for pid in pids)
 
 
-def _settle_live_writer(
-    worktree: Path, *, auto: bool
-) -> _OrphanDisposition | tuple[int, ...]:
-    """Park while a codex writer may be alive in *worktree*.
+def _live_writer_park(worktree: Path) -> _OrphanDisposition | None:
+    """Park while a codex writer is, or may be, alive in *worktree*.
 
-    Once none is, return the pids this call terminated (empty when none was
-    found). Under ``auto`` a found writer is terminated first, and only one
-    that survives parks. Under any other policy nothing is killed: the park
-    leaves the session ACTIVE and proposes the reap for an operator to
-    authorize.
+    ``None`` only when the scan affirmatively finds no writer. Nothing is ever
+    signalled: a found writer and an inconclusive scan both leave the session
+    ACTIVE for its reap to be proposed.
     """
-    writers = _codex_processes_in(worktree)
-    if writers is None:
-        return _park(
-            _PARK_REASON_PROCESS_SCAN_FAILED,
-            close_session=False,
-            propose_reap=not auto,
+    pids = _codex_processes_in(worktree)
+    if pids is None:
+        return _park_writer_may_be_live(_PARK_REASON_PROCESS_SCAN_INCONCLUSIVE)
+    if pids:
+        return _park_writer_may_be_live(
+            f"{_PARK_REASON_CODEX_PROCESS_RUNNING} ({_format_pids(pids)})"
         )
-    if not writers:
-        return ()
-    pids = tuple(writer.pid for writer in writers)
-    if not auto:
-        return _park(
-            f"{_PARK_REASON_CODEX_PROCESS_RUNNING} ({_format_pids(pids)})",
-            close_session=False,
-            propose_reap=True,
-            live_writer_pids=pids,
-        )
-    survivors = tuple(_terminate_codex_processes(writers))
-    if survivors:
-        return _park(
-            f"{_PARK_REASON_CODEX_PROCESS_SURVIVED} ({_format_pids(survivors)})",
-            close_session=False,
-            live_writer_pids=survivors,
-        )
-    _log.warning(
-        "codex_boot: terminated lingering codex process(es) %s in %s",
-        _format_pids(pids),
-        worktree,
-    )
-    return pids
+    return None
 
 
 def _git_park_reason(
@@ -508,28 +366,26 @@ def _resolve_orphan_action(
 ) -> _OrphanDisposition:
     """Decide requeue vs. park, and whether the session may close, for one orphan.
 
-    The reap policy is resolved with the same resolver ``reconcile.tasks``
-    gates its reverts on (ADR-0006). The live-writer check runs under every
-    policy, since it alone decides whether the session may be closed, and it
-    runs before the git checks so they observe a worktree nothing is still
-    writing to. Past it, anything but ``reap_policy: auto`` parks; under
-    ``auto`` the remaining gates run cheapest and most decisive first, and
-    the first failing gate parks with its own reason.
+    The live-writer check runs first and under every policy, since it alone
+    decides whether the session may be closed, and so the git checks observe
+    a worktree nothing is still writing to. Past it, the reap policy is
+    resolved with the same resolver ``reconcile.tasks`` gates its reverts on
+    (ADR-0006): anything but ``reap_policy: auto`` parks; under ``auto`` the
+    remaining gates run cheapest and most decisive first, and the first
+    failing gate parks with its own reason.
     """
-    policy = _resolve_task_policy(task.client, task.lane, clients, config)
-    auto = policy is ReapPolicy.AUTO
     if worktree is None:
-        # No path to scan is a scan that cannot run: fail safe, as for an
-        # unscannable process table. A path that is recorded but no longer on
-        # disk still gets its scan (see _cwd_is_worktree).
-        return _park(
-            _PARK_REASON_NO_WORKTREE_PATH, close_session=False, propose_reap=not auto
-        )
-    settled = _settle_live_writer(worktree, auto=auto)
-    if isinstance(settled, _OrphanDisposition):
-        return settled
-    decision = _gate_clean_requeue(worktree, task, client, clients, config, auto=auto)
-    return replace(decision, terminated_writer_pids=settled)
+        # No path to scan is a scan that cannot run, so it is inconclusive. A
+        # path that is recorded but no longer on disk still gets its scan (see
+        # _cwd_is_worktree).
+        return _park_writer_may_be_live(_PARK_REASON_NO_WORKTREE_PATH)
+    live_writer = _live_writer_park(worktree)
+    if live_writer is not None:
+        return live_writer
+    policy = _resolve_task_policy(task.client, task.lane, clients, config)
+    return _gate_clean_requeue(
+        worktree, task, client, clients, config, auto=policy is ReapPolicy.AUTO
+    )
 
 
 def _gate_clean_requeue(
@@ -605,7 +461,6 @@ def _close_audit_payload(
             else _CLOSE_DISPOSITION_PARKED
         ),
         "detail": disposition.reason,
-        "terminated_writer_pids": list(disposition.terminated_writer_pids),
     }
 
 
@@ -639,7 +494,7 @@ def _close_or_propose_reap(
         return
     if disposition.close_session:
         _close_session_audited(state, session, ticket_id, disposition)
-    elif disposition.propose_reap:
+    else:
         _propose_reap(state, session, ticket_id, lane)
 
 
