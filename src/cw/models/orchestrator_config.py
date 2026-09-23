@@ -288,6 +288,12 @@ class LaneConfig(BaseModel):
     # default. Resolved by
     # cw.cli._subagent_policy._resolve_spawn_guard_enabled.
     subagent_spawn_guard_enabled: bool | None = None
+    # Lane-level override for the `cw background-tool-guard-pre` guard
+    # (#2303). Same bidirectional shape and reasoning as
+    # subagent_spawn_guard_enabled above: None = inherit the
+    # OrchestratorConfig default. Resolved by
+    # cw.cli._background_tool_policy._resolve_background_tool_guard_enabled.
+    background_tool_guard_enabled: bool | None = None
     pipeline: StagePipelineConfig | None = None
     # Lane-level operator-signoff override (RFC 0007 Phase 3). None defers to
     # OrchestratorConfig.default_signoff. See GitHub #990.
@@ -746,6 +752,15 @@ class OrchestratorConfig(BaseModel):
     # subagent_type (deny-on-omission shipped in #2211 round 2, once the
     # spawn-site inventory closed).
     subagent_spawn_guard_enabled: bool = True
+    # Global default for the `cw background-tool-guard-pre` guard (#2303),
+    # overridable per lane (LaneConfig.background_tool_guard_enabled).
+    # Default-ON: the failure it prevents is a headless worker
+    # backgrounding a pipeline-dependent Bash call or reaching for
+    # Monitor, neither of which has a completion-notification path for a
+    # headless DAEMON session (ADR-0003's background_tasks tracking
+    # covers only the Agent tool's subagent spawn) -- and the guard fails
+    # open on every shape it cannot classify.
+    background_tool_guard_enabled: bool = True
     # Elapsed seconds before reconcile attempts to route an emitted-but-unrouted
     # sentinel (signal_stop never fired). A re-check delay, not a disposition
     # timer: an emitted sentinel is positive evidence the worker completed.
