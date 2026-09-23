@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 import pytest
 from click.testing import CliRunner
 
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION, Status
 from cw.cli import main
+from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, orchestrator_config_file, save_state
 from cw.exceptions import CwError
 from cw.models import (
@@ -925,6 +926,27 @@ class TestValidateWorktree:
         assert daemon.spawn_calls == []
 
 
+def _hook_entries(
+    built: dict[str, dict[str, list[object]]], event: str
+) -> list[dict[str, object]]:
+    """Narrow one ``_build_hook_settings()["hooks"][event]`` list to dicts.
+
+    ``_build_hook_settings``'s return type is ``dict[str, dict[str,
+    list[object]]]`` -- accurate for what it builds, a heterogeneous
+    settings.local.json blob -- but every entry this test class reads back
+    out of it is in fact a dict. Narrow once here instead of an
+    ``entry["..."]`` cast at every call site below.
+    """
+    return [cast("dict[str, object]", entry) for entry in built["hooks"][event]]
+
+
+def _entry_hooks(entry: dict[str, object]) -> list[dict[str, object]]:
+    """Narrow one hook entry's own ``"hooks"`` list the same way."""
+    return [
+        cast("dict[str, object]", hook) for hook in cast("list[object]", entry["hooks"])
+    ]
+
+
 class TestHookSettingsTemplate:
     """The settings.local.json template wires both hooks (#940 R5 + #147)."""
 
@@ -932,18 +954,18 @@ class TestHookSettingsTemplate:
         """PreToolUse/Bash/cw guard-cwd is present; Stop/cw signal-stop preserved."""
         from cw.spawn import _build_hook_settings
 
-        hooks = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]
+        built = _build_hook_settings(_FAKE_CONTEXT_PATH)
 
-        stop_entries = hooks["Stop"]
+        stop_entries = _hook_entries(built, "Stop")
         assert any(
-            entry["hooks"][0]["command"] == _stop_hook_command(_FAKE_CONTEXT_PATH)
+            _entry_hooks(entry)[0]["command"] == _stop_hook_command(_FAKE_CONTEXT_PATH)
             for entry in stop_entries
         )
 
-        pretooluse_entries = hooks["PreToolUse"]
+        pretooluse_entries = _hook_entries(built, "PreToolUse")
         assert any(
             entry.get("matcher") == "Bash"
-            and entry["hooks"][0]["command"] == "cw guard-cwd"
+            and _entry_hooks(entry)[0]["command"] == "cw guard-cwd"
             for entry in pretooluse_entries
         )
 
@@ -957,11 +979,11 @@ class TestHookSettingsTemplate:
         """
         from cw.spawn import _build_hook_settings
 
-        entries = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]["PreToolUse"]
+        entries = _hook_entries(_build_hook_settings(_FAKE_CONTEXT_PATH), "PreToolUse")
         bash_entries = [e for e in entries if e.get("matcher") == "Bash"]
         assert len(bash_entries) == 1
 
-        commands = [hook["command"] for hook in bash_entries[0]["hooks"]]
+        commands = [hook["command"] for hook in _entry_hooks(bash_entries[0])]
         assert commands == ["cw guard-cwd", "cw guard-busy-wait"]
 
     def test_pretooluse_commands_stay_unguarded_literals(self) -> None:
@@ -974,18 +996,20 @@ class TestHookSettingsTemplate:
         """
         from cw.spawn import _build_hook_settings
 
-        entries = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]["PreToolUse"]
-        commands = [hook["command"] for entry in entries for hook in entry["hooks"]]
+        entries = _hook_entries(_build_hook_settings(_FAKE_CONTEXT_PATH), "PreToolUse")
+        commands = [
+            hook["command"] for entry in entries for hook in _entry_hooks(entry)
+        ]
         assert commands == ["cw guard-cwd", "cw guard-busy-wait", "cw agent-spawn-pre"]
 
     def test_hook_settings_template_includes_agent_spawn_pretooluse(self) -> None:
         """#1646: a subagent-tool PreToolUse entry sits alongside the Bash guard."""
         from cw.spawn import _AGENT_TOOL_MATCHER, _build_hook_settings
 
-        entries = _build_hook_settings(_FAKE_CONTEXT_PATH)["hooks"]["PreToolUse"]
+        entries = _hook_entries(_build_hook_settings(_FAKE_CONTEXT_PATH), "PreToolUse")
         assert any(
             entry.get("matcher") == _AGENT_TOOL_MATCHER
-            and entry["hooks"][0]["command"] == "cw agent-spawn-pre"
+            and _entry_hooks(entry)[0]["command"] == "cw agent-spawn-pre"
             for entry in entries
         )
         # Must not regress the pre-existing Bash guard entry.
@@ -1365,7 +1389,7 @@ class TestWriteHookContext:
                 "stage_reached": "stage3_review",
                 "blocker": {
                     "stage": "stage3_review",
-                    "reason": "codex_review_unparseable",
+                    "reason": CODEX_REVIEW_UNPARSEABLE,
                     "details": "reviewer (codex_timeout)",
                 },
             },
@@ -1391,7 +1415,7 @@ class TestWriteHookContext:
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
         summary = context["world_state_snapshot"]["prior_attempts_summary"]
         assert len(summary) == 1
-        assert summary[0]["blocker_reason"] == "codex_review_unparseable"
+        assert summary[0]["blocker_reason"] == CODEX_REVIEW_UNPARSEABLE
 
 
 class TestWriteHookContextAtomicAndLiveSession:
