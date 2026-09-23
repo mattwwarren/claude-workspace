@@ -438,10 +438,13 @@ def _write_hook_context(
     default_branch: str = "main",
     workspace_path: Path | None = None,
     lane: str | None = None,
+    write_stop_hook: bool = True,
 ) -> None:
     """Write hook config + correlation context into the worktree pre-spawn.
 
-    Two files land under ``<worktree>/.claude/``:
+    Two files land under ``<worktree>/.claude/`` when *write_stop_hook* is
+    True (the default, preserving every existing caller's behavior
+    byte-for-byte):
 
     - ``settings.local.json`` — configures a Stop hook that runs
       ``cw signal-stop`` after each agent turn, behind a POSIX-sh guard that
@@ -478,13 +481,20 @@ def _write_hook_context(
     cw state. If so, raise :class:`HookContextConflictError` rather than
     clobbering — the prior session has not finished and we must not steal
     its hook context (issue #427 fix 2).
+
+    ``write_stop_hook=False`` (#2280) skips ``settings.local.json`` entirely
+    — for a caller with no Claude session to signal-stop (``CodexExecutor.
+    spawn()``, whose review runs as prompt-driven ``codex exec`` subprocesses,
+    not a Claude turn loop), there is no Stop hook to install. The DAEMON
+    conflict check and ``cw-context.json`` itself (including
+    ``prior_attempts_summary``) are unaffected — both still run.
     """
     context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
     claude_dir = context_path.parent
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_path = claude_dir / "settings.local.json"
 
-    if origin is SessionOrigin.USER and settings_path.exists():
+    if write_stop_hook and origin is SessionOrigin.USER and settings_path.exists():
         msg = (
             "Cannot inject Stop hook: "
             f"{settings_path} already exists in a USER-origin worktree. "
@@ -516,10 +526,11 @@ def _write_hook_context(
                     msg, conflicting_session_id=prior_session_id
                 )
 
-    atomic_write_text(
-        settings_path,
-        json.dumps(_build_hook_settings(context_path.resolve()), indent=2) + "\n",
-    )
+    if write_stop_hook:
+        atomic_write_text(
+            settings_path,
+            json.dumps(_build_hook_settings(context_path.resolve()), indent=2) + "\n",
+        )
     context: dict[str, object] = {
         "schema_version": CW_CONTEXT_SCHEMA_VERSION,
         "session_id": session_id,

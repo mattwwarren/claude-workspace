@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from cw.config import save_state
+from cw.config import load_state, save_state
 from cw.disk import DiskUsage
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
@@ -612,6 +612,39 @@ def _make_daemon_session(**overrides: object) -> Session:
     }
     kwargs.update(overrides)
     return Session.model_validate(kwargs)
+
+
+def _seed_completed_session(
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    ticket_id: str,
+    client: str = "test-client",
+    status: SessionStatus = SessionStatus.TIMED_OUT,
+    last_result: dict[str, object] | None = None,
+    completed_at: datetime | None = None,
+) -> Session:
+    """Seed a TIMED_OUT or COMPLETED session for a given ticket in state.
+
+    Hoisted from ``tests/test_spawn.py`` (#2280) so ``tests/test_codex_
+    executor.py`` can seed a prior codex-review park for the same
+    ``prior_attempts_summary`` machinery without duplicating the builder.
+    """
+    workspace = tmp_path / "workspace" / client
+    workspace.mkdir(parents=True, exist_ok=True)
+    sess = Session(
+        name=f"{client}/auto-dev/{ticket_id}",
+        client=client,
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=status,
+        workspace_path=workspace,
+        last_result=last_result,
+        completed_at=completed_at or datetime.now(UTC),
+    )
+    state = load_state()
+    state.sessions.append(sess)
+    save_state(state)
+    return sess
 
 
 def find_completed_session(state: CwState) -> Session:

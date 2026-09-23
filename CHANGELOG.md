@@ -6,7 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.50.0] - 2026-09-23
+### Added
+
+- **A `codex_review_unparseable` park now persists a worktree artifact and `prior_attempts_summary` entry instead of leaving a silent, unreproducible dead end (#2280):** when every reviewer role fails to produce a parseable verdict, `_persist_unparseable_artifact` now writes the per-role failure detail to `review-verdict-unparseable.md` (via the shared `_persist_review_verdict` helper, so it gets the same mkdir/atomic-write/ownership-stamp guarantees) and posts it as a ticket comment, mirroring the verdict-present path. `CodexExecutor.spawn()` now also routes through `_write_hook_context` (with a new `write_stop_hook=False` gate, since a codex-review attempt has no Claude turn loop to Stop-hook), so a review attempt gets `cw-context.json` and a `prior_attempts_summary` entry on retry the same way a Claude-session attempt does — previously the context file silently contradicted the event bus about whether review had run at all. Dispatch's Rule 5 evidence-based unproductive-attempt charge now exempts `codex_review_unparseable`, alongside the existing `stale_dispatch` exemption, so a harness-side parse failure no longer ratchets the ticket toward `attempt_cap_blocked` the way a genuine crashloop does. A `_write_hook_context` failure during `CodexExecutor.spawn()` no longer leaks the just-persisted session in `ACTIVE` — it now completes the session (stamping `completed_at`/`completed_reason`, fixed at the shared `_complete_session_via_door` helper for all five executor call sites) before re-raising.
 
 ### Fixed
 
