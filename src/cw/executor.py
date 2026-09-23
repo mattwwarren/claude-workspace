@@ -87,7 +87,7 @@ from cw.opencode_runner import (
 from cw.plan_files import parse_plan_files_modified
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.result import emit_result_locked
-from cw.spawn import spawn_create_impl
+from cw.spawn import _write_hook_context, spawn_create_impl
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
@@ -948,6 +948,29 @@ class CodexExecutor:
             state = load_state()
             state.sessions.append(sess)
             save_state(state)
+
+        # #2280: CodexExecutor never reaches either of _write_hook_context's
+        # other two call sites (both are Claude-session spawns), so a
+        # codex-review attempt never got a cw-context.json — and with it,
+        # never got a prior_attempts_summary on retry. write_stop_hook=False:
+        # there is no Claude turn loop here to signal-stop. Called ahead of
+        # the pre-flight branch below so even a CODEX_REVIEW_ONLY/
+        # CODEX_NOT_FOUND park is covered.
+        _write_hook_context(
+            worktree,
+            session_id=sid,
+            session_name=sess.name,
+            client=client.name,
+            purpose=SessionPurpose.IMPL.value,
+            ticket_id=task.ticket_id,
+            origin=SessionOrigin.DAEMON,
+            task=task,
+            wall_clock_budget_seconds=wall_clock_budget_seconds,
+            default_branch=client.default_branch,
+            workspace_path=client.workspace_path,
+            lane=task.lane,
+            write_stop_hook=False,
+        )
 
         # Step 2: Pre-flight checks (first match assigns result).
         result: AutoDevResult | None = None
