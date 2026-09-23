@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.52.0] - 2026-09-23
+
 ### Added
 
 - **`cw`'s boot-time reconcile pass now recovers cleanly-orphaned codex sessions instead of leaving them stuck forever (#2285):** at boot, a codex worker session left behind by a crashed or killed writer process is identified via pinned process identity and cwd, and — only when the scan affirmatively proves no live writer remains — its ticket is requeued and its session closed via the shared reap emitter, with each closure individually audited. A lingering LIVE writer is never signaled (no kill path); it is parked instead. Any ambiguity in the scan (an unreadable roster, a deleted-dir cwd, a cwd-normalization error, or a stale boot snapshot overtaken by a newer session) fails closed to a park rather than a guess, and orphan identity is rechecked under lock immediately before a session is closed.
