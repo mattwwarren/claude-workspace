@@ -19,12 +19,21 @@ import pytest
 from cw.cli import _hook_io
 from cw.cli._hook_io import (
     _context_lock,
+    _extract_bash_command,
     _read_cw_context,
     _write_cw_context_locked,
+    active_headless_context,
+    enforce,
     find_cw_context,
 )
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
-from tests.conftest import _hold_context_lock, _write_hook_context_file
+from tests.conftest import (
+    _headless_worktree,
+    _hold_context_lock,
+    _write_hook_context_file,
+)
+from tests.test_cli_guard_busy_wait import _BASH_PRE_PAYLOAD
+from tests.test_cli_subagent_policy import _spawn_payload
 
 
 def _seeded_worktree(tmp_path: Path, name: str = "wt") -> Path:
@@ -193,3 +202,108 @@ def test_read_cw_context_round_trips_the_production_writer(tmp_path: Path) -> No
         (worktree / HOOK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
     )
     assert context == on_disk
+
+
+class TestActiveHeadlessContext:
+    """The policy applies to headless dispatch workers and nowhere else."""
+
+    def test_no_context_anywhere_yields_none(self, tmp_path: Path) -> None:
+        """A cwd with no ancestor cw-context.json is not a dispatch worker."""
+        bare = tmp_path / "bare"
+        bare.mkdir()
+
+        assert active_headless_context(_spawn_payload(bare)) is None
+
+    def test_interactive_context_yields_none(self, tmp_path: Path) -> None:
+        """``headless: false`` is an operator's own session — never guarded."""
+        worktree = tmp_path / "interactive"
+        worktree.mkdir()
+        _write_hook_context_file(worktree, headless=False)
+
+        assert active_headless_context(_spawn_payload(worktree)) is None
+
+    def test_headless_context_is_returned(self, tmp_path: Path) -> None:
+        worktree = _headless_worktree(tmp_path)
+
+        context = active_headless_context(_spawn_payload(worktree))
+
+        assert context is not None
+        assert context["headless"] is True
+
+    def test_subdirectory_cwd_still_resolves(self, tmp_path: Path) -> None:
+        """A subagent that ``cd``s inside the worktree is still covered.
+
+        ``find_cw_context`` walks upward, so the policy does not evaporate the
+        moment a worker's cwd moves into ``src/``.
+        """
+        worktree = _headless_worktree(tmp_path)
+        nested = worktree / "src" / "cw"
+        nested.mkdir(parents=True)
+
+        assert active_headless_context(_spawn_payload(nested)) is not None
+
+    def test_missing_cwd_yields_none(self, tmp_path: Path) -> None:
+        payload = {k: v for k, v in _spawn_payload(tmp_path).items() if k != "cwd"}
+
+        assert active_headless_context(payload) is None
+
+
+class TestEnforce:
+    """Turning a classification into the PreToolUse exit-code contract."""
+
+    def test_a_reason_exits_2_with_it_on_stderr(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            enforce("nope")
+
+        assert excinfo.value.code == 2
+        assert "nope" in capsys.readouterr().err
+
+    def test_none_verdict_is_a_pure_noop(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        enforce(None)
+
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
+
+
+class TestExtractBashCommand:
+    """The shared Bash-payload reader, warning through a caller-owned callback."""
+
+    def test_extracts_command_and_background_flag(self) -> None:
+        warnings: list[str] = []
+        payload = {
+            **_BASH_PRE_PAYLOAD,
+            "tool_input": {"command": "uv run pytest", "run_in_background": True},
+        }
+
+        assert _extract_bash_command(payload, warnings.append) == (
+            "uv run pytest",
+            True,
+        )
+        assert warnings == []
+
+    def test_malformed_tool_input_calls_warn_and_allows(self) -> None:
+        warnings: list[str] = []
+        payload = {**_BASH_PRE_PAYLOAD, "tool_input": "not-a-dict"}
+
+        assert _extract_bash_command(payload, warnings.append) == (None, False)
+        assert len(warnings) == 1
+        assert "tool_input is str, expected dict" in warnings[0]
+
+    def test_non_bool_run_in_background_calls_warn_and_defaults_false(self) -> None:
+        warnings: list[str] = []
+        payload = {
+            **_BASH_PRE_PAYLOAD,
+            "tool_input": {"command": "uv run pytest", "run_in_background": "yes"},
+        }
+
+        assert _extract_bash_command(payload, warnings.append) == (
+            "uv run pytest",
+            False,
+        )
+        assert len(warnings) == 1
+        assert "run_in_background is str, expected bool" in warnings[0]

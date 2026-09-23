@@ -44,17 +44,10 @@ an operator can switch them off per-lane or globally without a code release.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import click
 
-from cw.cli._hook_io import _context_str, find_cw_context
+from cw.cli._hook_io import _context_str, active_headless_context
 from cw.config import load_clients, load_orchestrator_config
-
-# PreToolUse contract: exit 2 blocks the tool call and feeds stderr back to
-# the agent. Same convention as cw guard-cwd and cw guard-busy-wait.
-_SPAWN_BLOCK_EXIT = 2
 
 # The refused values, compared case-insensitively after stripping. A blank
 # string is grouped with "fork" rather than with an omitted key: a caller that
@@ -114,27 +107,6 @@ def _warn_unexpected_shape(detail: str) -> None:
         "classified).",
         err=True,
     )
-
-
-def active_headless_context(payload: dict[str, object]) -> dict[str, object] | None:
-    """Return the cw context iff this spawn is inside a headless worker.
-
-    Scoped deliberately: an operator's interactive session may fork a
-    subagent for whatever they like, and a caller outside any cw worktree
-    (``orchestrate-phase.md``, a detached gate worktree) is structurally
-    exempt because no ancestor carries a context file.
-
-    Uses the upward-walking :func:`~cw.cli._hook_io.find_cw_context` rather
-    than an exact-path read so a worker whose cwd has moved into a
-    subdirectory is still covered — the same reason #2210 introduced it.
-    """
-    cwd_value = payload.get("cwd")
-    if not isinstance(cwd_value, str) or not cwd_value:
-        return None
-    context = find_cw_context(Path(cwd_value))
-    if context is None:
-        return None
-    return context if context.get("headless") is True else None
 
 
 def _resolve_spawn_guard_enabled(client: str | None, lane: str | None) -> bool:
@@ -211,16 +183,3 @@ def classify_spawn(payload: dict[str, object] | None) -> str | None:
         )
         return None
     return _classify_subagent_type(tool_input.get(_SUBAGENT_TYPE_KEY))
-
-
-def enforce(reason: str | None) -> None:
-    """Apply *reason* to the PreToolUse exit-code contract.
-
-    Exits 2 when there is a reason — the spawn never runs, and the agent reads
-    the reason back from stderr, which is how it learns what to retry with.
-    Does nothing at all for None.
-    """
-    if reason is None:
-        return
-    click.echo(reason, err=True)
-    sys.exit(_SPAWN_BLOCK_EXIT)

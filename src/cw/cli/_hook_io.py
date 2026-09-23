@@ -22,6 +22,13 @@ readers return ``dict[str, object]``, so every guard that pulls a scalar
 (``client``, ``lane``, ``session_id``) out of a context needs the identical
 narrowing. ``cw guard-busy-wait`` and ``cw agent-spawn-pre`` had independently
 grown byte-identical copies of it before this module took ownership.
+
+``active_headless_context``/``enforce`` (#2303) followed once a second
+PreToolUse guard (``cw background-tool-guard-pre``) needed the same
+"headless workers only" scoping and exit-code contract ``cw agent-spawn-pre``
+already had, and ``_extract_bash_command`` came with them from
+``cw guard-busy-wait`` — taking a ``warn`` callback so each guard's fail-open
+warning keeps its own attribution.
 """
 
 from __future__ import annotations
@@ -33,6 +40,8 @@ import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import click
 
 from cw.atomic import atomic_write_text
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
@@ -49,6 +58,10 @@ _LOCK_SUFFIX = ".lock"
 # instead.
 _LOCK_TIMEOUT_SECS_DEFAULT = 0.5
 _LOCK_RETRY_INTERVAL_SECS = 0.01
+
+# PreToolUse contract: exit 2 blocks the tool call and feeds stderr back to
+# the agent. Same convention as cw guard-cwd and cw guard-busy-wait.
+_PRETOOLUSE_BLOCK_EXIT = 2
 
 
 @contextlib.contextmanager
@@ -188,3 +201,67 @@ def find_cw_context(start: Path) -> dict[str, object] | None:
         if (candidate / HOOK_CONTEXT_RELATIVE_PATH).is_file():
             return _read_cw_context(str(candidate))
     return None
+
+
+def active_headless_context(payload: dict[str, object]) -> dict[str, object] | None:
+    """Return the cw context iff this spawn is inside a headless worker.
+
+    Scoped deliberately: an operator's interactive session may fork a
+    subagent for whatever they like, and a caller outside any cw worktree
+    (``orchestrate-phase.md``, a detached gate worktree) is structurally
+    exempt because no ancestor carries a context file.
+
+    Uses the upward-walking :func:`~cw.cli._hook_io.find_cw_context` rather
+    than an exact-path read so a worker whose cwd has moved into a
+    subdirectory is still covered — the same reason #2210 introduced it.
+    """
+    cwd_value = payload.get("cwd")
+    if not isinstance(cwd_value, str) or not cwd_value:
+        return None
+    context = find_cw_context(Path(cwd_value))
+    if context is None:
+        return None
+    return context if context.get("headless") is True else None
+
+
+def enforce(reason: str | None) -> None:
+    """Apply *reason* to the PreToolUse exit-code contract.
+
+    Exits 2 when there is a reason — the spawn never runs, and the agent reads
+    the reason back from stderr, which is how it learns what to retry with.
+    Does nothing at all for None.
+    """
+    if reason is None:
+        return
+    click.echo(reason, err=True)
+    sys.exit(_PRETOOLUSE_BLOCK_EXIT)
+
+
+def _extract_bash_command(
+    payload: dict[str, object], warn: Callable[[str], None]
+) -> tuple[str | None, bool]:
+    """Return ``(command, run_in_background)`` from a Bash PreToolUse payload.
+
+    Defensive by design: every read is ``.get()``-based and type-checked, and
+    a missing or wrong-type ``command`` is the routine "cannot classify this
+    call, allow it" case, never a crash. Every anomalous shape is reported
+    through *warn*, the calling guard's own attributed fail-open warning.
+    """
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        warn(f"tool_input is {type(tool_input).__name__}, expected dict")
+        return None, False
+    run_in_background_raw = tool_input.get("run_in_background", False)
+    if isinstance(run_in_background_raw, bool):
+        run_in_background = run_in_background_raw
+    else:
+        warn(
+            f"tool_input.run_in_background is "
+            f"{type(run_in_background_raw).__name__}, expected bool"
+        )
+        run_in_background = False
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        warn(f"tool_input.command is {type(command).__name__}, expected str")
+        return None, run_in_background
+    return command, run_in_background

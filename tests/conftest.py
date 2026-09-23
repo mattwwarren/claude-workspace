@@ -802,6 +802,32 @@ def _headless_worktree(tmp_path: Path, name: str = "wt") -> Path:
     return worktree
 
 
+def _write_clients_yaml(
+    tmp_config_dir: Path,
+    lane_value: str,
+    field_name: str = "subagent_spawn_guard_enabled",
+) -> None:
+    """Write a one-client, one-lane clients.yaml carrying a lane override.
+
+    Writes client ``acme`` with lane ``fast`` whose *field_name* is set to
+    *lane_value*. Hoisted from ``test_cli_subagent_policy.py`` (#2303) once
+    ``test_cli_background_tool_guard.py`` needed the same shape for its own
+    guard's kill switch; *field_name* selects which guard's override to write.
+    """
+    ws_dir = tmp_config_dir / "ws"
+    ws_dir.mkdir(exist_ok=True)
+    clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+    clients_path.parent.mkdir(parents=True, exist_ok=True)
+    clients_path.write_text(
+        "clients:\n"
+        "  acme:\n"
+        f"    workspace_path: {ws_dir}\n"
+        "    lanes:\n"
+        "      - name: fast\n"
+        f"        {field_name}: {lane_value}\n"
+    )
+
+
 @contextlib.contextmanager
 def _hold_context_lock(worktree: Path) -> Iterator[None]:
     """Hold ``<worktree>/.claude/cw-context.json.lock`` exclusively (#1946).
