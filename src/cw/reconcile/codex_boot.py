@@ -16,17 +16,27 @@ session as evidence of exactly that and dispositions it one of two ways
 
 - **Requeue** (RUNNING -> PENDING, same stage) only when the lane's
   ``reap_policy`` resolves to ``auto`` (ADR-0006: a revert is a destructive
-  act) AND the orphan is provably clean — the lane's codex fix loop is off,
-  the worktree carries nothing uncommitted beyond ``.claude/review-verdict.md``,
-  HEAD still matches the review's recorded baseline, and no codex process is
-  still running in the worktree. Emits ``TICKET_REQUEUED``.
+  act) AND the orphan is provably clean — no codex process is left writing in
+  the worktree, the lane's codex fix loop is off, the worktree carries nothing
+  uncommitted beyond ``.claude/review-verdict.md``, and HEAD still matches the
+  review's recorded baseline. Emits ``TICKET_REQUEUED`` once the
+  identity-checked revert has actually happened.
 - **Park** for operator inspection in every other case, exactly as before —
-  any uncertainty (a git error, an unresolvable ref) parks.
+  any uncertainty (a git error, a git timeout, an unresolvable ref) parks.
 
-In both branches the orphaned ``Session`` record itself is closed to
-``COMPLETED``/``CRASHED``. Before #2285 it stayed ``ACTIVE`` forever: it held a
-client ceiling slot, and its stale ``cw-context.json`` made the next
-DAEMON-origin ``_write_hook_context`` into the same worktree raise
+The pass runs while ``serve`` is starting, so it never touches the network
+(the baseline is resolved from local refs only) and bounds every git call.
+
+A codex process still running in the worktree is a live writer, and the
+orphaned ``Session`` record is closed to ``COMPLETED``/``CRASHED`` only once no
+writer remains. Under ``reap_policy: auto`` the pass terminates the writer
+first (SIGTERM, then SIGKILL); one that will not die leaves the session
+``ACTIVE`` and the task parked with its pid in the breadcrumbs. Under any
+other policy the pass neither kills nor closes: it parks, emits
+``SESSION_REAP_PROPOSED`` and leaves the session ``ACTIVE``. With no writer,
+the session is closed in both branches. Before #2285 it stayed ``ACTIVE``
+forever: it held a client ceiling slot, and its stale ``cw-context.json`` made
+the next DAEMON-origin ``_write_hook_context`` into the same worktree raise
 ``HookContextConflictError``.
 
 Two existing primitives carry the task transition rather than a new path:
@@ -52,6 +62,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -80,12 +91,19 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
-from cw.reconcile._shared import _LIVE_STATUSES, _is_headless, ticket_id_for_session
+from cw.reconcile._shared import (
+    _LIVE_STATUSES,
+    ProposedAction,
+    _is_headless,
+    feature_branch_key,
+    ticket_id_for_session,
+)
 from cw.reconcile.tasks import _resolve_task_policy
-from cw.worktree import _checked_out_branch, fetch_feature_branch
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig, OrchestratorConfig, Stage, TicketTask
+    from collections.abc import Sequence
+
+    from cw.models import ClientConfig, OrchestratorConfig, Session, Stage, TicketTask
 
 _log = logging.getLogger(__name__)
 
@@ -95,6 +113,10 @@ CODEX_ORPHANED_AT_BOOT_DISPOSITION = "codex_review_orphaned_at_boot"
 
 # TICKET_REQUEUED ``reason`` for a provably-clean orphan put back to PENDING.
 CODEX_ORPHAN_CLEAN_REQUEUE_REASON = "codex_orphan_clean_requeue_at_boot"
+
+# SESSION_REAP_PROPOSED ``reason`` for an orphan whose codex writer is still
+# alive under a reap_policy that does not authorize terminating it.
+CODEX_ORPHAN_LIVE_WRITER_REAP_REASON = "codex_orphan_live_writer_at_boot"
 
 _ORPHAN_BREADCRUMBS = (
     "ACTIVE codex-origin session found at process start; its background review"
@@ -114,16 +136,58 @@ _PARK_REASON_DIRTY_WORKTREE = (
 _PARK_REASON_GIT_ERROR = "the worktree's git state could not be established"
 _PARK_REASON_HEAD_MOVED = "HEAD has moved since the review's recorded baseline"
 _PARK_REASON_CODEX_PROCESS_RUNNING = "a codex process is still running in the worktree"
+_PARK_REASON_CODEX_PROCESS_SURVIVED = (
+    "a codex process in the worktree survived SIGTERM and SIGKILL"
+)
+_PARK_REASON_PROCESS_SCAN_FAILED = (
+    "the process table could not be scanned for a lingering codex writer"
+)
 
 # Bounds every git call below: this pass blocks process start, so one hung
 # git must not wedge the dispatch loop before its first tick.
 _GIT_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
+# Bounds each of the post-SIGTERM and post-SIGKILL waits, for the same reason.
+_CODEX_TERMINATE_WAIT_SECONDS: float = 3.0
 # Porcelain v1: two status characters and a space precede the path.
 _GIT_PORCELAIN_PATH_OFFSET = 3
 _GIT_PORCELAIN_RENAME_SEPARATOR = " -> "
 # psutil name() of the exec'd codex binary (codex_runner spawns it directly,
 # no shell or interpreter wrapper).
 _CODEX_PROCESS_NAME = "codex"
+
+
+@dataclass(frozen=True)
+class _OrphanDisposition:
+    """What the boot pass does with one orphan.
+
+    ``close_session`` is False only while a codex writer may still be alive in
+    the worktree: closing the record then would free its ceiling slot and its
+    hook-context guard for a new spawn that races the writer.
+    ``propose_reap`` marks the ADR-0006 signal-only case, where an operator,
+    not this pass, authorizes the reap.
+    """
+
+    should_requeue: bool
+    reason: str
+    close_session: bool = True
+    propose_reap: bool = False
+    live_writer_pids: tuple[int, ...] = ()
+
+
+def _park(
+    reason: str,
+    *,
+    close_session: bool = True,
+    propose_reap: bool = False,
+    live_writer_pids: tuple[int, ...] = (),
+) -> _OrphanDisposition:
+    return _OrphanDisposition(
+        should_requeue=False,
+        reason=reason,
+        close_session=close_session,
+        propose_reap=propose_reap,
+        live_writer_pids=live_writer_pids,
+    )
 
 
 def _worktree_porcelain_clean_except_verdict(worktree: Path) -> bool | None:
@@ -161,48 +225,53 @@ def _worktree_porcelain_clean_except_verdict(worktree: Path) -> bool | None:
 
 
 def _head_matches_pre_review_ref(
-    worktree: Path, task: TicketTask, client: ClientConfig
+    worktree: Path, task: TicketTask, clients: dict[str, ClientConfig]
 ) -> bool | None:
     """Return whether *worktree*'s HEAD still equals the review's baseline.
 
     The baseline is ``task.stage_base_ref`` (HEAD as stamped when the review
-    spawn succeeded). When that was never stamped, fall back to the remote
-    branch tip: best-effort fetch, then compare against ``origin/<branch>``.
-    ``None`` when neither can be established — HEAD unreadable, detached, or
-    no remote-tracking ref — which the caller parks as a git error.
+    spawn succeeded). When that was never stamped, fall back to the local
+    ``origin/<feature branch>`` tracking ref, naming the branch with the same
+    ``feature_branch_key`` dispatch provisioned the worktree from. Local refs
+    only: this runs before the first dispatch tick, so it never fetches.
+    ``None`` when neither can be established — HEAD unreadable, no tracking
+    ref, or git timing out — which the caller parks as a git error.
     """
-    head = capture_head_sha(worktree, strict=False)
+    head = capture_head_sha(
+        worktree, strict=False, timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS
+    )
     if not head:
         return None
     if task.stage_base_ref:
         return head == task.stage_base_ref
-    branch = _checked_out_branch(worktree)
-    if branch is None:
-        return None
-    # Best effort: a failed fetch leaves the existing tracking ref, and a
-    # missing one resolves to "" below, which parks.
-    fetch_feature_branch(client, branch)
-    origin_sha = capture_head_sha(worktree, ref=f"origin/{branch}", strict=False)
+    branch = feature_branch_key(task.client, task.ticket_id, clients)
+    origin_sha = capture_head_sha(
+        worktree,
+        ref=f"origin/{branch}",
+        strict=False,
+        timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS,
+    )
     if not origin_sha:
         return None
     return head == origin_sha
 
 
-def _codex_process_running_in(worktree: Path) -> bool:
-    """Return whether any process named ``codex`` has *worktree* as its cwd.
+def _codex_processes_in(worktree: Path) -> list[psutil.Process] | None:
+    """Return every process named ``codex`` whose cwd is *worktree*.
 
     A cwd scan is the only signal available: no PID is persisted for the
     codex child (see the module docstring), so this cannot pin identity by
     start time the way ``LocalLivenessHandle`` does. Never raises. A process
     that vanishes or denies access mid-scan is skipped; a scan that cannot run
-    at all reads as ``True`` so the caller parks rather than races an
+    at all returns ``None`` so the caller parks rather than races an
     unobserved writer.
     """
     target = worktree.resolve()
     try:
         processes = list(psutil.process_iter(["name", "cwd"]))
     except (psutil.Error, OSError):
-        return True
+        return None
+    matches: list[psutil.Process] = []
     for process in processes:
         try:
             info = process.info
@@ -212,14 +281,83 @@ def _codex_process_running_in(worktree: Path) -> bool:
                 and cwd
                 and Path(cwd).resolve() == target
             ):
-                return True
+                matches.append(process)
         except (psutil.Error, OSError):
             continue
-    return False
+    return matches
+
+
+def _terminate_codex_process(process: psutil.Process) -> bool:
+    """SIGTERM, bounded wait, then SIGKILL, bounded wait. True once it is gone.
+
+    ``NoSuchProcess`` at any step means gone. psutil also raises it rather
+    than signal a pid reused since the scan, so a stranger is never signalled.
+    """
+    try:
+        process.terminate()
+        try:
+            process.wait(timeout=_CODEX_TERMINATE_WAIT_SECONDS)
+        except psutil.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=_CODEX_TERMINATE_WAIT_SECONDS)
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError):
+        # AccessDenied, or TimeoutExpired from the post-SIGKILL wait.
+        return False
+    return True
+
+
+def _terminate_codex_processes(processes: Sequence[psutil.Process]) -> list[int]:
+    """Terminate each of *processes*; return the pids still alive afterwards."""
+    return [p.pid for p in processes if not _terminate_codex_process(p)]
+
+
+def _format_pids(pids: Sequence[int]) -> str:
+    return ", ".join(f"pid {pid}" for pid in pids)
+
+
+def _settle_live_writer(worktree: Path, *, auto: bool) -> _OrphanDisposition | None:
+    """Park while a codex writer may be alive in *worktree*; None once none is.
+
+    Under ``auto`` a found writer is terminated first, and only one that
+    survives parks. Under any other policy nothing is killed: the park leaves
+    the session ACTIVE and proposes the reap for an operator to authorize.
+    """
+    processes = _codex_processes_in(worktree)
+    if processes is None:
+        return _park(
+            _PARK_REASON_PROCESS_SCAN_FAILED,
+            close_session=False,
+            propose_reap=not auto,
+        )
+    if not processes:
+        return None
+    pids = tuple(process.pid for process in processes)
+    if not auto:
+        return _park(
+            f"{_PARK_REASON_CODEX_PROCESS_RUNNING} ({_format_pids(pids)})",
+            close_session=False,
+            propose_reap=True,
+            live_writer_pids=pids,
+        )
+    survivors = tuple(_terminate_codex_processes(processes))
+    if survivors:
+        return _park(
+            f"{_PARK_REASON_CODEX_PROCESS_SURVIVED} ({_format_pids(survivors)})",
+            close_session=False,
+            live_writer_pids=survivors,
+        )
+    _log.warning(
+        "codex_boot: terminated lingering codex process(es) %s in %s",
+        _format_pids(pids),
+        worktree,
+    )
+    return None
 
 
 def _git_park_reason(
-    worktree: Path, task: TicketTask, client: ClientConfig
+    worktree: Path, task: TicketTask, clients: dict[str, ClientConfig]
 ) -> str | None:
     """Return the park reason the worktree's git state implies, or None."""
     clean = _worktree_porcelain_clean_except_verdict(worktree)
@@ -227,7 +365,7 @@ def _git_park_reason(
         return _PARK_REASON_GIT_ERROR
     if not clean:
         return _PARK_REASON_DIRTY_WORKTREE
-    head_matches = _head_matches_pre_review_ref(worktree, task, client)
+    head_matches = _head_matches_pre_review_ref(worktree, task, clients)
     if head_matches is None:
         return _PARK_REASON_GIT_ERROR
     if not head_matches:
@@ -241,29 +379,121 @@ def _resolve_orphan_action(
     client: ClientConfig,
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
-) -> tuple[bool, str]:
-    """Decide requeue vs. park for one orphaned codex session.
+) -> _OrphanDisposition:
+    """Decide requeue vs. park, and whether the session may close, for one orphan.
 
-    Returns ``(should_requeue, reason)``. Gates run cheapest and most decisive
-    first; the first failing gate parks with its own reason. Gate 0 is the
-    ADR-0006 authority check: the requeue is a RUNNING -> PENDING revert, so
-    anything but ``reap_policy: auto`` for the task's lane (resolved with the
-    same resolver ``reconcile.tasks`` gates its reverts on) parks before any
-    git or psutil work runs.
+    The reap policy is resolved with the same resolver ``reconcile.tasks``
+    gates its reverts on (ADR-0006). The live-writer check runs under every
+    policy, since it alone decides whether the session may be closed, and it
+    runs before the git checks so they observe a worktree nothing is still
+    writing to. Past it, anything but ``reap_policy: auto`` parks; under
+    ``auto`` the remaining gates run cheapest and most decisive first, and
+    the first failing gate parks with its own reason.
     """
     policy = _resolve_task_policy(task.client, task.lane, clients, config)
-    if policy is not ReapPolicy.AUTO:
-        return False, _PARK_REASON_REAP_POLICY_NOT_AUTO
+    auto = policy is ReapPolicy.AUTO
     if worktree is None:
-        return False, _PARK_REASON_GIT_ERROR
+        return _park(
+            _PARK_REASON_GIT_ERROR if auto else _PARK_REASON_REAP_POLICY_NOT_AUTO
+        )
+    writer_park = _settle_live_writer(worktree, auto=auto)
+    if writer_park is not None:
+        return writer_park
+    if not auto:
+        return _park(_PARK_REASON_REAP_POLICY_NOT_AUTO)
     if _resolve_codex_fix_loop_enabled(client, task, config):
-        return False, _PARK_REASON_FIX_LOOP_ENABLED
-    git_reason = _git_park_reason(worktree, task, client)
+        return _park(_PARK_REASON_FIX_LOOP_ENABLED)
+    git_reason = _git_park_reason(worktree, task, clients)
     if git_reason is not None:
-        return False, git_reason
-    if _codex_process_running_in(worktree):
-        return False, _PARK_REASON_CODEX_PROCESS_RUNNING
-    return True, CODEX_ORPHAN_CLEAN_REQUEUE_REASON
+        return _park(git_reason)
+    return _OrphanDisposition(
+        should_requeue=True, reason=CODEX_ORPHAN_CLEAN_REQUEUE_REASON
+    )
+
+
+def _reap_proposed_payload(
+    session: Session, *, ticket_id: str, lane: str, pids: tuple[int, ...]
+) -> dict[str, object]:
+    """SESSION_REAP_PROPOSED payload, in ``_shared._emit_reap_proposed``'s shape.
+
+    ``park_blocked_on_user`` because that is what this pass did: ``cw
+    orchestrate run`` authorizes a reap only for ``revert_task`` and
+    ``crash_complete``, and must not crash-complete a session whose writer is
+    still alive, so it leaves this one for the operator.
+    """
+    return {
+        "session_id": session.id,
+        "session_name": session.name,
+        "client": session.client,
+        "ticket_id": ticket_id,
+        "lane": lane,
+        "proposed_action": ProposedAction.PARK_BLOCKED_ON_USER.value,
+        "reason": CODEX_ORPHAN_LIVE_WRITER_REAP_REASON,
+        "evidence": {
+            "codex_pids": list(pids),
+            "worktree": str(session.worktree_path) if session.worktree_path else None,
+        },
+    }
+
+
+def _close_or_propose_reap(
+    session_id: str, ticket_id: str, lane: str, disposition: _OrphanDisposition
+) -> dict[str, object] | None:
+    """Close the session, or stamp its reap proposal; return that payload.
+
+    Caller holds ``sessions_lock``. The proposal is stamped before its event
+    is recorded, as ``_emit_reap_proposed`` does, so ``reap_proposed_at``
+    dedups a later boot pass even if the event write fails.
+    """
+    state = load_state()
+    session = next((s for s in state.sessions if s.id == session_id), None)
+    if session is None:
+        return None
+    if disposition.close_session:
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = datetime.now(UTC)
+        session.completed_reason = CompletionReason.CRASHED
+        save_state(state)
+        return None
+    if not disposition.propose_reap or session.reap_proposed_at is not None:
+        return None
+    session.reap_proposed_at = datetime.now(UTC)
+    save_state(state)
+    return _reap_proposed_payload(
+        session, ticket_id=ticket_id, lane=lane, pids=disposition.live_writer_pids
+    )
+
+
+def _requeue_clean_orphan(
+    *, session_id: str, ticket_id: str, client_name: str, stage: Stage
+) -> None:
+    """Revert the task to PENDING; report it only if the revert happened."""
+    from cw.dispatch.claim import _revert_claimed_task_to_pending
+
+    if not _revert_claimed_task_to_pending(
+        client_name, ticket_id, expected_session_id=session_id
+    ):
+        _log.warning(
+            "codex_boot: %s/%s no longer belongs to session %s; requeue skipped",
+            client_name,
+            ticket_id,
+            session_id,
+        )
+        return
+    # Same-stage PENDING revert, so the payload mirrors dispatch/routing's
+    # provider_overload_retry shape (from_stage == to_stage, no ``regressed``
+    # key) rather than crud.py's always-regressed one.
+    record_event(
+        OrchestratorEventType.TICKET_REQUEUED,
+        {
+            "ticket_id": ticket_id,
+            "client": client_name,
+            "from_stage": stage,
+            "to_stage": stage,
+            "reason": CODEX_ORPHAN_CLEAN_REQUEUE_REASON,
+            "session_id": session_id,
+        },
+    )
 
 
 def _close_orphaned_session_and_dispose(
@@ -272,53 +502,32 @@ def _close_orphaned_session_and_dispose(
     ticket_id: str,
     client_name: str,
     stage: Stage,
-    should_requeue: bool,
-    park_reason: str,
+    lane: str,
+    disposition: _OrphanDisposition,
 ) -> None:
-    """Close the orphaned Session record, then requeue or park its task.
+    """Close the orphaned Session record if allowed, then requeue or park its task.
 
-    The session is closed in both branches: a record left ACTIVE holds a
-    ceiling slot and trips the next spawn's hook-context conflict guard. The
-    task transition re-verifies ``expected_session_id`` under the dev-queue
-    lock, so a row re-claimed since the caller's snapshot is left alone.
+    A record left ACTIVE with no writer behind it holds a ceiling slot and
+    trips the next spawn's hook-context conflict guard, so it closes unless
+    ``disposition`` says a writer may still be alive. The task transition
+    re-verifies ``expected_session_id`` under the dev-queue lock, so a row
+    re-claimed since the caller's snapshot is left alone.
     """
     # Deferred for the same import-cycle reason as in
     # reap_orphaned_codex_sessions_at_boot below.
-    from cw.dispatch.claim import (
-        _park_running_task_blocked_on_user,
-        _revert_claimed_task_to_pending,
-    )
+    from cw.dispatch.claim import _park_running_task_blocked_on_user
 
     # Why not mutate_state: dev_queue_lock is nested inside this sessions_lock
     # window (mirrors cli/spawn.py:_spawn_complete_impl's identical nesting) so
     # the session close and the task transition land under one lock scope.
     with sessions_lock():
-        state = load_state()
-        for session in state.sessions:
-            if session.id == session_id:
-                session.status = SessionStatus.COMPLETED
-                session.completed_at = datetime.now(UTC)
-                session.completed_reason = CompletionReason.CRASHED
-                break
-        save_state(state)
-        if should_requeue:
-            _revert_claimed_task_to_pending(
-                client_name, ticket_id, expected_session_id=session_id
-            )
-            # Same-stage PENDING revert, so the payload mirrors
-            # dispatch/routing's provider_overload_retry shape (from_stage ==
-            # to_stage, no ``regressed`` key) rather than crud.py's
-            # always-regressed one.
-            record_event(
-                OrchestratorEventType.TICKET_REQUEUED,
-                {
-                    "ticket_id": ticket_id,
-                    "client": client_name,
-                    "from_stage": stage,
-                    "to_stage": stage,
-                    "reason": CODEX_ORPHAN_CLEAN_REQUEUE_REASON,
-                    "session_id": session_id,
-                },
+        reap_payload = _close_or_propose_reap(session_id, ticket_id, lane, disposition)
+        if disposition.should_requeue:
+            _requeue_clean_orphan(
+                session_id=session_id,
+                ticket_id=ticket_id,
+                client_name=client_name,
+                stage=stage,
             )
         else:
             _park_running_task_blocked_on_user(
@@ -326,7 +535,13 @@ def _close_orphaned_session_and_dispose(
                 client_name=client_name,
                 expected_session_id=session_id,
                 disposition=CODEX_ORPHANED_AT_BOOT_DISPOSITION,
-                breadcrumbs=f"{_ORPHAN_BREADCRUMBS} ({park_reason}).",
+                breadcrumbs=f"{_ORPHAN_BREADCRUMBS} ({disposition.reason}).",
+            )
+        if reap_payload is not None:
+            record_event(
+                OrchestratorEventType.SESSION_REAP_PROPOSED,
+                reap_payload,
+                correlation_id=ticket_id,
             )
 
 
@@ -385,34 +600,41 @@ def reap_orphaned_codex_sessions_at_boot() -> int:
             continue
         if resolve_executor_config(task.stage, task, client).backend != CODEX_BACKEND:
             continue
-        should_requeue, reason = _resolve_orphan_action(
+        disposition = _resolve_orphan_action(
             session.worktree_path, task, client, clients, config
         )
-        if should_requeue:
-            _log.warning(
-                "codex_boot: session %s (%s/%s) was still ACTIVE at process start;"
-                " worktree and HEAD are unchanged since the review began --"
-                " requeuing the task for a fresh attempt",
-                session.id,
-                session.client,
-                ticket_id,
-            )
-        else:
-            _log.warning(
-                "codex_boot: session %s (%s/%s) was still ACTIVE at process start;"
-                " parking the task for operator inspection (%s)",
-                session.id,
-                session.client,
-                ticket_id,
-                reason,
-            )
+        _log_disposition(session, ticket_id, disposition)
         _close_orphaned_session_and_dispose(
             session_id=session.id,
             ticket_id=ticket_id,
             client_name=session.client,
             stage=task.stage,
-            should_requeue=should_requeue,
-            park_reason=reason,
+            lane=task.lane,
+            disposition=disposition,
         )
         parked += 1
     return parked
+
+
+def _log_disposition(
+    session: Session, ticket_id: str, disposition: _OrphanDisposition
+) -> None:
+    if disposition.should_requeue:
+        _log.warning(
+            "codex_boot: session %s (%s/%s) was still ACTIVE at process start;"
+            " worktree and HEAD are unchanged since the review began --"
+            " requeuing the task for a fresh attempt",
+            session.id,
+            session.client,
+            ticket_id,
+        )
+        return
+    _log.warning(
+        "codex_boot: session %s (%s/%s) was still ACTIVE at process start;"
+        " parking the task for operator inspection (%s)%s",
+        session.id,
+        session.client,
+        ticket_id,
+        disposition.reason,
+        "" if disposition.close_session else "; leaving the session ACTIVE",
+    )
