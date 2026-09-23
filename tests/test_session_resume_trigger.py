@@ -632,6 +632,37 @@ class TestConcurrentSendGuard:
         # actually registered.
         assert load_state().sessions[0].surface_ref == "deadbeef"
 
+    def test_roster_poll_oserror_stops_the_orphaned_process(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """An OSError from the roster poll (e.g. an unreadable roster file)
+        gets the same orphan-stop compensation as a CwError (#2212 review
+        round 6)."""
+        _write_clients_file(tmp_config_dir, sample_client)
+        session = _eligible_session(sample_client)
+        _persist(session)
+        adapter = NativeDaemonResumeTriggerAdapter(
+            native_daemon=mock_native_daemon, roster_poll_timeout=0.0
+        )
+
+        with (
+            patch("cw.session_resume_trigger.list_tickets", return_value=[]),
+            patch(
+                "cw.session_resume_trigger._verify_roster_registration",
+                side_effect=OSError("roster unreadable"),
+            ),
+        ):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is False
+        assert len(mock_native_daemon.spawn_calls) == 1
+        spawned_short_id = f"{mock_native_daemon._counter:08x}"
+        assert mock_native_daemon.stop_calls == [spawned_short_id]
+        assert load_state().sessions[0].surface_ref == "deadbeef"
+
 
 # ---------------------------------------------------------------------------
 # Scoped post-spawn compensation (#2212 review round 2, finding 3): a

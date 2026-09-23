@@ -369,11 +369,13 @@ class NativeDaemonResumeTriggerAdapter:
                 timeout=self._roster_poll_timeout,
                 interval=self._roster_poll_interval,
             )
-        except CwError:
+        except (CwError, OSError):
             # Registration failed after the process was already spawned --
             # stop it rather than leaving an orphan the operator's
             # `delivered=False` result gives no hint even exists (#2212
-            # review finding 3).
+            # review finding 3). OSError is caught alongside CwError because
+            # the roster poll reads a file and trigger() already treats the
+            # two as one failure class (#2212 review round 6).
             self._stop_and_log(
                 daemon, session_id, new_short_id, "roster-verify failure"
             )
