@@ -110,7 +110,7 @@ git merge origin/<base>
     **Headless:** emit `HEADLESS BLOCK` (`gate: "Step 1 sync-with-base push"`, `reason: agent_block` per this file's fixed convention, `details:` the verbatim push failure output). Do NOT retry automatically in headless mode and do NOT proceed to Step 2 — an unavailability condition (auth/network) needs the operator, not a blind retry.
 - **If merge conflicts** → surface the conflicting files to the user:
   > "Merge conflicts with `<base>`. Conflicting files: [list]. Resolve before continuing?"
-  - **Yes** → help resolve conflicts, commit the merge
+  - **Yes** → help resolve conflicts, commit the merge. When resolving a CHANGELOG conflict, never edit or remove a released `## [X.Y.Z]` section; your entry goes under `[Unreleased]`.
   - **Abort** → `git merge --abort`, stop /prep-pr
 
   **Headless:** run `git merge --abort` to restore a clean tree, then emit a
