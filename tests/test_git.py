@@ -129,3 +129,43 @@ class TestCaptureHeadSha:
 
         with pytest.raises(OSError, match="git is gone"):
             capture_head_sha(tmp_path, strict=True)
+
+    def test_timeout_is_forwarded_and_defaults_to_unbounded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[object] = []
+
+        def _record(
+            *_args: object, **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            seen.append(kwargs.get("timeout"))
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="abc\n")
+
+        monkeypatch.setattr("cw._git.subprocess.run", _record)
+
+        assert capture_head_sha(tmp_path, timeout=2.5) == "abc"
+        assert capture_head_sha(tmp_path) == "abc"
+        assert seen == [2.5, None]
+
+    def test_best_effort_returns_blank_when_git_hangs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A timeout is a failure like any other: blank under strict=False."""
+
+        def _hang(*_args: object, **_kwargs: object) -> None:
+            raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+        monkeypatch.setattr("cw._git.subprocess.run", _hang)
+
+        assert capture_head_sha(tmp_path, strict=False, timeout=1) == ""
+
+    def test_strict_propagates_when_git_hangs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _hang(*_args: object, **_kwargs: object) -> None:
+            raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+        monkeypatch.setattr("cw._git.subprocess.run", _hang)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            capture_head_sha(tmp_path, strict=True, timeout=1)
