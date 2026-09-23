@@ -837,13 +837,16 @@ def test_detect_unconsumed_queue_notification_returns_none_for_dequeue_operation
 ) -> None:
     """Only ``operation == "enqueue"`` counts; a trailing dequeue-shaped
     queue-operation record returns None (#2251)."""
-    from cw.reconcile._shared import _detect_unconsumed_queue_notification
+    from cw.reconcile._shared import (
+        _QUEUE_OPERATION_RECORD_TYPE,
+        _detect_unconsumed_queue_notification,
+    )
 
     sess, home, worktree, started_at = _unconsumed_queue_session(
         tmp_path, monkeypatch, "uqn-dequeue"
     )
     transcript = _write_transcript_records(
-        home, worktree, [{"type": "queue-operation", "op": "dequeue"}]
+        home, worktree, [{"type": _QUEUE_OPERATION_RECORD_TYPE, "op": "dequeue"}]
     )
     _stamp_after_start(transcript, started_at)
 
@@ -932,7 +935,11 @@ def test_detect_unconsumed_queue_notification_returns_none_for_non_string_conten
 ) -> None:
     """A trailing enqueue record whose content is not a string returns None
     (#2251)."""
-    from cw.reconcile._shared import _detect_unconsumed_queue_notification
+    from cw.reconcile._shared import (
+        _QUEUE_OPERATION_ENQUEUE,
+        _QUEUE_OPERATION_RECORD_TYPE,
+        _detect_unconsumed_queue_notification,
+    )
 
     sess, home, worktree, started_at = _unconsumed_queue_session(
         tmp_path, monkeypatch, "uqn-nonstr"
@@ -940,7 +947,13 @@ def test_detect_unconsumed_queue_notification_returns_none_for_non_string_conten
     transcript = _write_transcript_records(
         home,
         worktree,
-        [{"type": "queue-operation", "operation": "enqueue", "content": ["x"]}],
+        [
+            {
+                "type": _QUEUE_OPERATION_RECORD_TYPE,
+                "operation": _QUEUE_OPERATION_ENQUEUE,
+                "content": ["x"],
+            }
+        ],
     )
     _stamp_after_start(transcript, started_at)
 

@@ -166,6 +166,14 @@ _DANGLING_TOOL_USE_REASON = "dangling_tool_use"
 # resumed the turn). Takes priority over _DANGLING_TOOL_USE_REASON. Signal-only
 # exactly as its siblings are, per ADR-0014: nothing is disposed.
 _UNCONSUMED_QUEUE_NOTIFICATION_REASON = "unconsumed_queue_notification"
+
+# Wire-format identifiers for a harness queue-operation transcript record
+# (#2251 review round 1) -- shared by _iter_notification_records and
+# _detect_unconsumed_queue_notification so the two consumers of this record
+# shape never drift on the literal strings they match against.
+_QUEUE_OPERATION_RECORD_TYPE = "queue-operation"
+_QUEUE_OPERATION_ENQUEUE = "enqueue"
+
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 # TicketTask.advisory_note written by _stamp_session_id_mismatch_advisories
 # (#1762) when a RUNNING row's session_id no longer resolves to a live session.
@@ -956,7 +964,7 @@ def _iter_notification_records(path: Path) -> Iterator[str]:
                         content = message.get("content")
                         if isinstance(content, str):
                             yield content
-                elif record_type == "queue-operation":
+                elif record_type == _QUEUE_OPERATION_RECORD_TYPE:
                     content = record.get("content")
                     if isinstance(content, str):
                         yield content
@@ -1113,8 +1121,8 @@ def _detect_unconsumed_queue_notification(session: Session) -> str | None:
         return None
     if (
         last_record is None
-        or last_record.get("type") != "queue-operation"
-        or last_record.get("operation") != "enqueue"
+        or last_record.get("type") != _QUEUE_OPERATION_RECORD_TYPE
+        or last_record.get("operation") != _QUEUE_OPERATION_ENQUEUE
     ):
         return None
     content = last_record.get("content")
