@@ -353,9 +353,10 @@ def test_two_untagged_headings_fail(
 
     assert code == 1
     assert set(_kinds(payload)) == {"entry_outside_unreleased"}
-    assert "more than one untagged" in _violation(payload, "entry_outside_unreleased")[
-        "detail"
-    ]
+    assert (
+        "more than one untagged"
+        in _violation(payload, "entry_outside_unreleased")["detail"]
+    )
 
 
 def test_non_semver_untagged_heading_fails(
@@ -550,7 +551,9 @@ def test_malformed_since_tag_fails(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo = make_git_repo("repo")
-    _commit(repo, UNRELEASED, V100, version="1.0.0", since_tag="release-1", tag="release-1")
+    _commit(
+        repo, UNRELEASED, V100, version="1.0.0", since_tag="release-1", tag="release-1"
+    )
 
     code, _, err = _run(mod, repo, capsys)
 
