@@ -638,6 +638,7 @@ def _revert_claimed_task_to_pending(
     stamp_backoff: bool = False,
     hook_context_conflict_session_id: str | None = None,
     defer_for: timedelta | None = None,
+    expected_session_id: str | None = None,
 ) -> None:
     """Revert a still-RUNNING claimed task back to PENDING, clearing session_id.
 
@@ -675,6 +676,17 @@ def _revert_claimed_task_to_pending(
     is a failure, so it must not spend the ticket's attempt budget toward the
     global ceiling, and the caller must not signal ``spawn_error`` either.
 
+    ``expected_session_id`` (optional, #2285) re-verifies
+    ``stored_task.session_id == expected_session_id`` under the *same*
+    ``dev_queue_lock()`` acquisition that performs the revert, exactly as
+    :func:`_park_running_task_blocked_on_user` does. The caller is
+    ``cw.reconcile.codex_boot``'s clean-orphan requeue, which decides from an
+    unlocked snapshot and then runs git/psutil checks before calling here: a
+    row re-claimed by a fresh session in that window must not be reverted out
+    from under it, so a mismatch skips the revert silently. The same-tick
+    spawn-failure callers omit it -- they revert their own just-failed claim,
+    so there is no snapshot to go stale.
+
     # Why: task.attempts is NOT decremented on the FAILURE paths (no
     # *defer_for*). The increment-at-claim contract is intentional —
     # usage_limit deaths and spawn errors consume real dispatch budget and must
@@ -693,6 +705,10 @@ def _revert_claimed_task_to_pending(
                 stored_task.ticket_id == ticket_id
                 and stored_task.client == client_name
                 and stored_task.status == QueueItemStatus.RUNNING
+                and (
+                    expected_session_id is None
+                    or stored_task.session_id == expected_session_id
+                )
             ):
                 transition_task_status(
                     stored_task,

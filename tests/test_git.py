@@ -46,6 +46,21 @@ class TestCaptureHeadSha:
 
         assert capture_head_sha(repo) == git_in(repo, "rev-parse", "HEAD")
 
+    def test_ref_parameter_reads_an_arbitrary_ref(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """``ref`` names what to resolve (#2285); omitting it still means HEAD."""
+        repo = make_git_repo("head-sha-ref")
+        git_in(repo, "branch", "side")
+        commit_tracked_file(repo, "moved.py")
+
+        side_sha = capture_head_sha(repo, ref="side")
+
+        assert side_sha == git_in(repo, "rev-parse", "side")
+        assert side_sha != git_in(repo, "rev-parse", "HEAD")
+        assert capture_head_sha(repo, ref="main") == git_in(repo, "rev-parse", "main")
+        assert capture_head_sha(repo) == git_in(repo, "rev-parse", "HEAD")
+
     @pytest.mark.parametrize("strict", [True, False])
     def test_an_inherited_git_dir_cannot_redirect_it(
         self,

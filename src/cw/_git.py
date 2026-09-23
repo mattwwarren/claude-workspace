@@ -40,8 +40,12 @@ def git_clean_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
-def capture_head_sha(worktree: Path, *, strict: bool = True) -> str:
-    """Return *worktree*'s ``HEAD`` sha, honouring an explicit error policy.
+def capture_head_sha(worktree: Path, *, ref: str = "HEAD", strict: bool = True) -> str:
+    """Return the sha *ref* (default ``HEAD``) resolves to in *worktree*.
+
+    *ref* is any revision ``git rev-parse`` accepts; the codex boot reaper
+    passes ``origin/<branch>`` to compare a worktree's HEAD against its remote
+    tip (#2285).
 
     One implementation for two deliberately different callers (#2232). The
     review pass's diff capture must FAIL LOUDLY when it cannot resolve the
@@ -60,7 +64,7 @@ def capture_head_sha(worktree: Path, *, strict: bool = True) -> str:
     """
     try:
         completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "rev-parse", ref],
             cwd=worktree,
             capture_output=True,
             text=True,
