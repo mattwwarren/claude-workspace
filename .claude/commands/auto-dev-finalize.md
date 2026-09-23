@@ -8,6 +8,8 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Agent", "AskUserQuesti
 
 **Orientation:** Read `.cw/context.json` for ticket context. The feature branch must be pushed to origin with review complete (Stage 3 complete). This stage creates the PR and waits on CI.
 
+**`.claude/review-verdict.md`, if present, is this worktree's own durable copy of a codex background review (#2095), written directly by `cw`'s codex-review daemon — never git-tracked as of #2279, so a fresh worktree never inherits one from `main` or a sibling ticket. Its first line is an ownership stamp: `<!-- cw-review-verdict-owner ticket_id=<id> reviewed_sha=<sha> -->`. If the file is present, check that stamped `ticket_id` matches this ticket before treating its content as informative — a mismatch or a missing/malformed stamp means the file is stale or foreign; disregard its content entirely in that case. Either way, this file is never authoritative for the halt/ship decision — the ticket's own dev-queue disposition and this stage's own review-completeness checks are the only authority.
+
 In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage completes. In the interactive monolith chain: do NOT emit the sentinel here — `auto-dev.md` owns the single final sentinel AND the `done` stage event.
 
 **Arguments:** "$ARGUMENTS"
