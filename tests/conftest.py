@@ -488,7 +488,7 @@ def _stub_cw(
     lines = [
         "#!/bin/sh",
         'DIR=$(dirname "$0")',
-        "printf '%s\\n' \"$@\" > \"$DIR/cw.args\"",
+        'printf \'%s\\n\' "$@" > "$DIR/cw.args"',
         'echo $$ > "$DIR/cw.pid"',
     ]
     for i, event in enumerate(events):

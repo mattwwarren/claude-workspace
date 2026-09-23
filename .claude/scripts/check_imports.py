@@ -23,6 +23,7 @@ GROUPS: list[tuple[str, list[str]]] = [
     (".claude/skills/cw-followup/scripts", ["parse_sentinel", "render_decisions"]),
     (".claude/skills/cw-smoke-test/scripts", ["preflight"]),
     (".claude/skills/cw-validate-result/scripts", ["validate_sentinel"]),
+    (".claude/skills/orchestrate-sprint/scripts", ["attention_watch"]),
 ]
 
 
