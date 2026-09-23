@@ -83,6 +83,7 @@ from cw.dev_queue.migrate import migrate_dev_queue
 from cw.dev_queue.requeue import (
     _apply_requeue_stage,
     _impl_bypass_plan_available,
+    classify_requeue_live_session_error,
     requeue_ticket,
     unblock_ticket,
 )
@@ -138,6 +139,7 @@ __all__ = [
     "approve_ticket",
     "cancel_task_for_session",
     "cancel_ticket",
+    "classify_requeue_live_session_error",
     "clear_tickets",
     "consume_completed_sessions",
     "dev_queue_lock",

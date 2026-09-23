@@ -1138,6 +1138,25 @@ the newest `*.jsonl` under `~/.claude/projects/<slug>-dev-<T>/`:
 - In between → bounded deadline check; review/plan stages go parent-silent
   for ~20 min during subagent cycles, so a single 20-min gap is not death.
 
+**Automated for daemon sessions (#2275).** `cw dev-queue requeue` now refuses
+on its own when the daemon roster still lists a session for the ticket, even
+one the row's `session_id` no longer points at, and names the live session(s)
+plus a `cw spawn close <sid> --requeue` remediation. The same guard covers
+`cw spawn close --requeue`, `cw dev-queue drain --held` (reported per ticket
+as `skipped_live_session`) and the `auto_fix_ci` re-dispatch (which re-arms
+its one-shot latch so a later tick retries). `cw spawn close --requeue`
+exempts only the session it just closed; a second live session for the same
+ticket is still refused. The guard fails closed, like the worktree reuse
+guard (#2213): an unreadable or malformed roster refuses every one of those
+paths with `daemon roster unreadable at <path>; cannot rule out a live session
+for #<T>` (drain reports it as `skipped_roster_unreadable`), because nothing
+can show that no session is live. The just-closed exemption does not lift this
+refusal: the close still happens, but the requeue does not. Fix the roster file
+and retry. A roster file that does not exist means no daemon is running, and
+the requeue goes ahead. The manual transcript-mtime check above remains
+necessary only for work the daemon roster does not know about
+(non-daemon-origin sessions).
+
 ### CANCELLED row recovery (`--from-cancelled`)
 
 `cw spawn close <sid> --confirmed-dead` on a **RUNNING** row transitions that
