@@ -515,6 +515,40 @@ class RequeueStageError(CwError):
     __slots__ = ()
 
 
+class RequeueLiveSessionError(CwError):
+    """Raised when a requeue is refused because a daemon-live session still
+    exists for the ticket, or cannot be ruled out (GitHub #2275).
+
+    Carries the live session ids (``Session.id``) as structured data, mirroring
+    ``EmitSessionNotFoundError``'s shape, so a downstream catcher (auto_fix_ci's
+    ``PR_ACTION_FAILED`` payload) does not have to re-parse the message.
+    """
+
+    __slots__ = ("session_ids",)
+
+    def __init__(self, message: str, *, session_ids: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.session_ids = session_ids
+
+
+class RequeueRosterUnreadableError(RequeueLiveSessionError):
+    """Raised when a requeue is refused because the daemon roster at
+    ``roster_path`` is unreadable or malformed, so a live session for the
+    ticket cannot be ruled out (GitHub #2275, fail closed like #2213).
+
+    A ``RequeueLiveSessionError`` subclass so every existing live-session
+    catcher (CLI, ``drain``, ``auto_fix_ci``'s latch rollback) inherits the
+    refusal; ``classify_requeue_live_session_error`` tags it distinctly.
+    ``session_ids`` is always empty: no session is known to be live.
+    """
+
+    __slots__ = ("roster_path",)
+
+    def __init__(self, message: str, *, roster_path: Path) -> None:
+        super().__init__(message, session_ids=())
+        self.roster_path = roster_path
+
+
 class UnblockStateError(CwError):
     """Raised when a ticket cannot be unblocked because it is not park-marked."""
 

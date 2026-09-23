@@ -26,14 +26,20 @@ from cw.dev_queue.lifecycle import (
     REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
     REVIEW_STALENESS_GATE_DISPOSITION,
 )
-from cw.dev_queue.requeue import requeue_ticket
+from cw.dev_queue.requeue import classify_requeue_live_session_error, requeue_ticket
 from cw.dev_queue.storage import load_dev_queue
-from cw.exceptions import CwError
+from cw.exceptions import CwError, RequeueLiveSessionError
 
 if TYPE_CHECKING:
     from cw.models import TicketTask
 
-DrainStatus = Literal["requeued", "failed", "would_requeue"]
+DrainStatus = Literal[
+    "requeued",
+    "failed",
+    "would_requeue",
+    "skipped_live_session",
+    "skipped_roster_unreadable",
+]
 
 
 class DrainOutcome(TypedDict):
@@ -126,7 +132,12 @@ def drain_held_tickets(
 
     A RequeueStateError on one ticket (status raced away from BLOCKED_ON_USER
     between the snapshot and this call) does not abort the batch; it is
-    recorded as a per-ticket "failed" outcome and the loop proceeds.
+    recorded as a per-ticket "failed" outcome and the loop proceeds. A
+    RequeueLiveSessionError (a daemon-live session still exists for the
+    ticket, #2275) is recorded as a distinct "skipped_live_session" outcome;
+    its RequeueRosterUnreadableError subclass (the daemon roster is unreadable,
+    so a live session cannot be ruled out) as "skipped_roster_unreadable", the
+    refusal message carried in `detail`.
 
     Returns one `DrainOutcome` per selected ticket. `detail` is always a
     human-readable message (the stage transition, the target stage for a
@@ -153,6 +164,19 @@ def drain_held_tickets(
             continue
         try:
             result = requeue_ticket(task.ticket_id, client)
+        except RequeueLiveSessionError as exc:
+            reason_tag, message = classify_requeue_live_session_error(exc)
+            outcomes.append(
+                {
+                    "ticket_id": task.ticket_id,
+                    "client": client,
+                    "status": reason_tag,
+                    "detail": message,
+                    "from_stage": None,
+                    "to_stage": None,
+                }
+            )
+            continue
         except CwError as exc:
             outcomes.append(
                 {

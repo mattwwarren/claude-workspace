@@ -1347,6 +1347,197 @@ def test_act_auto_fix_ci_requeue_raises_emits_pr_action_failed(
     assert store_after.tasks[0].status == QueueItemStatus.COMPLETED
 
 
+def _raise_live_session(
+    *_args: object, **_kwargs: object
+) -> dict[str, str | bool | int]:
+    from cw.exceptions import RequeueLiveSessionError
+
+    msg = "Cannot requeue: a session for this ticket is live: 'stray1'"
+    raise RequeueLiveSessionError(msg, session_ids=("stray1",))
+
+
+def _seed_ci_failing_completed_row(tmp_config_dir: Path) -> TicketTask:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(
+        status=QueueItemStatus.COMPLETED,
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="ci_failing"),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    return task
+
+
+def test_auto_fix_ci_live_session_refusal_clears_latch(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275: a live-session refusal is transient, so the one-shot latch is
+    rolled back and PR_ACTION_FAILED carries a distinguishable reason."""
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _raise_live_session)
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop",
+        lambda **_kw: pytest.fail("dispatch must not run when requeue is refused"),
+    )
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is None
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].payload["redispatch_mode"] == "skipped_live_session"
+    assert failed[0].payload["live_session_ids"] == ["stray1"]
+    assert "stray1" in failed[0].payload["error"]
+
+
+def test_auto_fix_ci_roster_unreadable_refusal_clears_latch(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275 review round 1: an unreadable roster refuses through the real
+    requeue_ticket guard, takes the same latch rollback as a live-session
+    refusal, and tags PR_ACTION_FAILED with a distinct reason."""
+    from cw.native_daemon import FakeNativeDaemonClient
+
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+    roster = FakeNativeDaemonClient()
+    roster.roster_unreadable = True
+    monkeypatch.setattr("cw.dev_queue.requeue.get_native_daemon_client", lambda: roster)
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop",
+        lambda **_kw: pytest.fail("dispatch must not run when requeue is refused"),
+    )
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    row = load_dev_queue().tasks[0]
+    assert row.auto_fix_ci_fired_at is None
+    assert row.status == QueueItemStatus.COMPLETED
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].payload["redispatch_mode"] == "skipped_roster_unreadable"
+    assert failed[0].payload["live_session_ids"] == []
+    assert (
+        f"daemon roster unreadable at {roster.roster_path};"
+        f" cannot rule out a live session for #{task.ticket_id}"
+    ) in failed[0].payload["error"]
+
+
+def test_auto_fix_ci_live_session_refusal_keeps_concurrently_changed_latch(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275: the rollback is compare-and-clear -- a latch another actor
+    re-stamped between the two lock transactions is left untouched."""
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+    other_stamp = datetime(2031, 1, 1, tzinfo=UTC)
+
+    def _race_then_refuse(
+        *args: object, **kwargs: object
+    ) -> dict[str, str | bool | int]:
+        store = load_dev_queue()
+        store.tasks[0].auto_fix_ci_fired_at = other_stamp
+        save_dev_queue(store)
+        return _raise_live_session(*args, **kwargs)
+
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _race_then_refuse)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at == other_stamp
+
+
+def test_auto_fix_ci_live_session_refusal_row_vanished_is_noop(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275: a row removed between the two transactions is not resurrected;
+    PR_ACTION_FAILED is still emitted."""
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+
+    def _remove_then_refuse(
+        *args: object, **kwargs: object
+    ) -> dict[str, str | bool | int]:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        return _raise_live_session(*args, **kwargs)
+
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _remove_then_refuse)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    assert load_dev_queue().tasks == []
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+
+
+def test_auto_fix_ci_fires_again_after_live_session_latch_cleared(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275: the cleared latch genuinely re-arms the row for the next tick."""
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+    candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _raise_live_session)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    first = _act_auto_fix_ci([candidate], clients=load_effective_clients())
+    assert first == []
+
+    requeued: list[str] = []
+
+    def _requeue_ok(ticket_id: str, *_a: object, **_kw: object) -> dict[str, object]:
+        requeued.append(ticket_id)
+        return {"from_completed_applied": True}
+
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _requeue_ok)
+
+    second = _act_auto_fix_ci([candidate], clients=load_effective_clients())
+
+    assert second == [task.ticket_id]
+    assert requeued == [task.ticket_id]
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
+
+
+def test_auto_fix_ci_non_live_session_cwerror_still_latches(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275 non-interference: any other CwError keeps the latch stamped."""
+    from cw.exceptions import RequeueStateError
+
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+    row_gone_msg = "row moved on"
+
+    def _boom(*_args: object, **_kwargs: object) -> dict[str, str | bool | int]:
+        raise RequeueStateError(row_gone_msg)
+
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _boom)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert "redispatch_mode" not in failed[0].payload
+    assert "live_session_ids" not in failed[0].payload
+
+
 def test_auto_fix_ci_fires_once_per_episode(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
