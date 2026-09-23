@@ -186,11 +186,14 @@ def test_background_call_resolves_no_config_and_leaves_no_trace(
     is written and no default ``orchestrator.yaml`` is created. The foreground
     control proves the counting spies really sit on the resolution path.
     """
+    import cw.cli._hook_io as hook_io
     import cw.cli.guard_busy_wait as guard
 
     calls = {"orchestrator": 0, "clients": 0}
     real_orchestrator = guard.load_orchestrator_config
-    real_clients = guard.load_clients
+    # The lane lookup is the shared _hook_io.find_lane_config, so that is
+    # where clients.yaml is read.
+    real_clients = hook_io.load_clients
 
     def _count_orchestrator() -> Any:
         calls["orchestrator"] += 1
@@ -201,7 +204,7 @@ def test_background_call_resolves_no_config_and_leaves_no_trace(
         return real_clients()
 
     monkeypatch.setattr(guard, "load_orchestrator_config", _count_orchestrator)
-    monkeypatch.setattr(guard, "load_clients", _count_clients)
+    monkeypatch.setattr(hook_io, "load_clients", _count_clients)
     worktree = _worktree(tmp_path, lane="fast")
 
     result = _invoke(worktree, "true", run_in_background=True)

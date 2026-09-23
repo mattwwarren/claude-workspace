@@ -29,6 +29,14 @@ PreToolUse guard (``cw background-tool-guard-pre``) needed the same
 already had, and ``_extract_bash_command`` came with them from
 ``cw guard-busy-wait`` — taking a ``warn`` callback so each guard's fail-open
 warning keeps its own attribution.
+
+``resolve_guard_enabled``/``find_lane_config`` (#2303 round 2) are the kill
+switch every default-on PreToolUse guard shares: a global default in
+``orchestrator.yaml`` with a bidirectional per-lane override in
+``clients.yaml``. ``cw agent-spawn-pre`` and ``cw background-tool-guard-pre``
+had grown structurally identical resolvers against two field names, and
+``cw guard-busy-wait`` a third copy of the same lane scan inside its
+three-knob ``_resolve_settings``.
 """
 
 from __future__ import annotations
@@ -39,15 +47,25 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import click
 
 from cw.atomic import atomic_write_text
+from cw.config import load_clients, load_orchestrator_config
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+    from cw.models import LaneConfig
+
+# The default-on guard toggles resolved by resolve_guard_enabled. Each names a
+# field declared on BOTH OrchestratorConfig (the global default) and
+# LaneConfig (the ``None``-means-inherit lane override); the Literal keeps a
+# misspelt toggle a type error rather than an AttributeError inside a hook
+# that fails open and so would never surface it.
+GuardToggle = Literal["subagent_spawn_guard_enabled", "background_tool_guard_enabled"]
 
 _LOCK_SUFFIX = ".lock"
 # Bounded, non-blocking lock acquisition. A plain blocking ``LOCK_EX`` would be
@@ -265,3 +283,44 @@ def _extract_bash_command(
         warn(f"tool_input.command is {type(command).__name__}, expected str")
         return None, run_in_background
     return command, run_in_background
+
+
+def find_lane_config(client: str | None, lane: str | None) -> LaneConfig | None:
+    """Return *client*'s declared *lane* from ``clients.yaml``, or None.
+
+    None when either name is missing or empty, the client is not in
+    ``clients.yaml``, or it declares no lane of that name — every one of which
+    means "no lane override", so a caller falls through to the global default.
+    Reloaded from disk on every call: each hook invocation is its own
+    subprocess, so an operator's edit takes effect on the next tool call.
+    """
+    if not client or not lane:
+        return None
+    client_cfg = load_clients().get(client)
+    if client_cfg is None:
+        return None
+    for lane_cfg in client_cfg.effective_lanes:
+        if lane_cfg.name == lane:
+            return lane_cfg
+    return None
+
+
+def resolve_guard_enabled(
+    client: str | None, lane: str | None, toggle: GuardToggle
+) -> bool:
+    """Resolve a default-on guard's kill switch for *client*/*lane*.
+
+    A non-None lane-level override wins in either direction, else the global
+    default in ``orchestrator.yaml`` — the precedence
+    :func:`cw.cli.guard_busy_wait._resolve_settings` established (#1946). A
+    client absent from ``clients.yaml``, or a lane it does not declare, falls
+    through to the global value. Re-read from disk on every invocation, so the
+    kill switch needs no worker restart — the point of having one on a guard
+    that can refuse work.
+    """
+    enabled: bool = getattr(load_orchestrator_config(), toggle)
+    lane_cfg = find_lane_config(client, lane)
+    if lane_cfg is None:
+        return enabled
+    override: bool | None = getattr(lane_cfg, toggle)
+    return enabled if override is None else override

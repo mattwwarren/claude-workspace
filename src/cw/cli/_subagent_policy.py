@@ -46,8 +46,7 @@ from __future__ import annotations
 
 import click
 
-from cw.cli._hook_io import _context_str, active_headless_context
-from cw.config import load_clients, load_orchestrator_config
+from cw.cli._hook_io import _context_str, active_headless_context, resolve_guard_enabled
 
 # The refused values, compared case-insensitively after stripping. A blank
 # string is grouped with "fork" rather than with an omitted key: a caller that
@@ -109,34 +108,6 @@ def _warn_unexpected_shape(detail: str) -> None:
     )
 
 
-def _resolve_spawn_guard_enabled(client: str | None, lane: str | None) -> bool:
-    """Resolve the guard's kill switch for *client*/*lane*.
-
-    Precedence mirrors :func:`cw.cli.guard_busy_wait._resolve_settings`
-    exactly: a non-None lane-level override wins in either direction, else
-    the global default. A client absent from ``clients.yaml``, or a lane name
-    it does not declare, falls through to the global value.
-
-    Reloaded from disk on every invocation (each hook call is its own
-    subprocess), so an operator's edit takes effect on the next spawn with no
-    worker restart — which is the whole point of having a kill switch on a
-    guard that can refuse work.
-    """
-    enabled = load_orchestrator_config().subagent_spawn_guard_enabled
-
-    if client and lane:
-        client_cfg = load_clients().get(client)
-        if client_cfg is not None:
-            for lane_cfg in client_cfg.effective_lanes:
-                if lane_cfg.name != lane:
-                    continue
-                if lane_cfg.subagent_spawn_guard_enabled is not None:
-                    enabled = lane_cfg.subagent_spawn_guard_enabled
-                break
-
-    return enabled
-
-
 def _classify_subagent_type(raw: object) -> str | None:
     """Return the refusal reason for this ``subagent_type``, or None to allow.
 
@@ -170,8 +141,10 @@ def classify_spawn(payload: dict[str, object] | None) -> str | None:
     context = active_headless_context(payload)
     if context is None:
         return None
-    if not _resolve_spawn_guard_enabled(
-        _context_str(context, "client"), _context_str(context, "lane")
+    if not resolve_guard_enabled(
+        _context_str(context, "client"),
+        _context_str(context, "lane"),
+        "subagent_spawn_guard_enabled",
     ):
         return None
     if payload.get("tool_name") not in _AGENT_TOOL_NAMES:

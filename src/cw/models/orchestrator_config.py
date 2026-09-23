@@ -295,14 +295,14 @@ class LaneConfig(BaseModel):
     # Lane-level override for the `cw agent-spawn-pre` spawn-shape policy
     # (#2211). Same bidirectional shape and reasoning as
     # busy_wait_guard_enabled above: None = inherit the OrchestratorConfig
-    # default. Resolved by
-    # cw.cli._subagent_policy._resolve_spawn_guard_enabled.
+    # default. Resolved by cw.cli._hook_io.resolve_guard_enabled (a
+    # GuardToggle: renaming this field means renaming it there too).
     subagent_spawn_guard_enabled: bool | None = None
     # Lane-level override for the `cw background-tool-guard-pre` guard
     # (#2303). Same bidirectional shape and reasoning as
     # subagent_spawn_guard_enabled above: None = inherit the
     # OrchestratorConfig default. Resolved by
-    # cw.cli._background_tool_policy._resolve_background_tool_guard_enabled.
+    # cw.cli._hook_io.resolve_guard_enabled (a GuardToggle, likewise).
     background_tool_guard_enabled: bool | None = None
     pipeline: StagePipelineConfig | None = None
     # Lane-level operator-signoff override (RFC 0007 Phase 3). None defers to

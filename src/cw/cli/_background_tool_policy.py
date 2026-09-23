@@ -41,8 +41,8 @@ from cw.cli._hook_io import (
     _extract_bash_command,
     active_headless_context,
     enforce,
+    resolve_guard_enabled,
 )
-from cw.config import load_clients, load_orchestrator_config
 from cw.models import BASH_TOOL_NAME, MONITOR_TOOL_NAME
 
 __all__ = [
@@ -108,36 +108,6 @@ class _RefusalDecision(NamedTuple):
     agent_id: str | None
 
 
-def _resolve_background_tool_guard_enabled(
-    client: str | None, lane: str | None
-) -> bool:
-    """Resolve the guard's kill switch for *client*/*lane*.
-
-    Precedence mirrors
-    :func:`cw.cli._subagent_policy._resolve_spawn_guard_enabled` exactly: a
-    non-None lane-level override wins in either direction, else the global
-    default. A client absent from ``clients.yaml``, or a lane name it does not
-    declare, falls through to the global value.
-
-    Reloaded from disk on every invocation (each hook call is its own
-    subprocess), so an operator's edit takes effect on the next tool call with
-    no worker restart.
-    """
-    enabled = load_orchestrator_config().background_tool_guard_enabled
-
-    if client and lane:
-        client_cfg = load_clients().get(client)
-        if client_cfg is not None:
-            for lane_cfg in client_cfg.effective_lanes:
-                if lane_cfg.name != lane:
-                    continue
-                if lane_cfg.background_tool_guard_enabled is not None:
-                    enabled = lane_cfg.background_tool_guard_enabled
-                break
-
-    return enabled
-
-
 def _warn_unexpected_shape(detail: str) -> None:
     """Emit the loud fail-open warning, attributed to this guard.
 
@@ -193,8 +163,10 @@ def classify_background_tool(
     context = active_headless_context(payload)
     if context is None:
         return None
-    if not _resolve_background_tool_guard_enabled(
-        _context_str(context, "client"), _context_str(context, "lane")
+    if not resolve_guard_enabled(
+        _context_str(context, "client"),
+        _context_str(context, "lane"),
+        "background_tool_guard_enabled",
     ):
         return None
     refusal = _refusal_reason(payload)

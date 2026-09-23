@@ -45,8 +45,9 @@ from cw.cli._hook_io import (
     _read_cw_context,
     _read_hook_stdin_json,
     _write_cw_context_locked,
+    find_lane_config,
 )
-from cw.config import load_clients, load_orchestrator_config
+from cw.config import load_orchestrator_config
 from cw.events import record_event
 from cw.models import OrchestratorEventType
 
@@ -167,25 +168,25 @@ def _resolve_settings(client: str | None, lane: str | None) -> _GuardSettings:
     Reloaded from disk on every invocation (each hook call is its own
     subprocess), so an operator's edit takes effect on the next Bash call
     with no worker restart.
+
+    The lane lookup is the shared :func:`cw.cli._hook_io.find_lane_config`.
+    The toggle is not routed through
+    :func:`~cw.cli._hook_io.resolve_guard_enabled` like the other guards':
+    it resolves alongside two numeric knobs from the same lane, in one read.
     """
     global_cfg = load_orchestrator_config()
     enabled = global_cfg.busy_wait_guard_enabled
     repeat_threshold = global_cfg.busy_wait_guard_repeat_threshold
     window_seconds = global_cfg.busy_wait_guard_window_seconds
 
-    if client and lane:
-        client_cfg = load_clients().get(client)
-        if client_cfg is not None:
-            for lane_cfg in client_cfg.effective_lanes:
-                if lane_cfg.name != lane:
-                    continue
-                if lane_cfg.busy_wait_guard_enabled is not None:
-                    enabled = lane_cfg.busy_wait_guard_enabled
-                if lane_cfg.busy_wait_guard_repeat_threshold is not None:
-                    repeat_threshold = lane_cfg.busy_wait_guard_repeat_threshold
-                if lane_cfg.busy_wait_guard_window_seconds is not None:
-                    window_seconds = lane_cfg.busy_wait_guard_window_seconds
-                break
+    lane_cfg = find_lane_config(client, lane)
+    if lane_cfg is not None:
+        if lane_cfg.busy_wait_guard_enabled is not None:
+            enabled = lane_cfg.busy_wait_guard_enabled
+        if lane_cfg.busy_wait_guard_repeat_threshold is not None:
+            repeat_threshold = lane_cfg.busy_wait_guard_repeat_threshold
+        if lane_cfg.busy_wait_guard_window_seconds is not None:
+            window_seconds = lane_cfg.busy_wait_guard_window_seconds
 
     return _GuardSettings(enabled, repeat_threshold, window_seconds)
 

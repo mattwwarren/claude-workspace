@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
 from cw.cli import _hook_io
 from cw.cli._hook_io import (
+    GuardToggle,
     _context_lock,
     _extract_bash_command,
     _read_cw_context,
@@ -25,11 +27,15 @@ from cw.cli._hook_io import (
     active_headless_context,
     enforce,
     find_cw_context,
+    find_lane_config,
+    resolve_guard_enabled,
 )
-from cw.models import HOOK_CONTEXT_RELATIVE_PATH
+from cw.models import HOOK_CONTEXT_RELATIVE_PATH, LaneConfig, OrchestratorConfig
 from tests.conftest import (
     _headless_worktree,
     _hold_context_lock,
+    _write_clients_yaml,
+    _write_global_toggle,
     _write_hook_context_file,
 )
 from tests.test_cli_guard_busy_wait import _BASH_PRE_PAYLOAD
@@ -307,3 +313,116 @@ class TestExtractBashCommand:
         )
         assert len(warnings) == 1
         assert "run_in_background is str, expected bool" in warnings[0]
+
+
+_GUARD_TOGGLES = get_args(GuardToggle)
+
+
+class TestGuardToggleFields:
+    def test_toggle_set_covers_both_default_on_guards(self) -> None:
+        assert set(_GUARD_TOGGLES) == {
+            "subagent_spawn_guard_enabled",
+            "background_tool_guard_enabled",
+        }
+
+    @pytest.mark.parametrize("toggle", _GUARD_TOGGLES)
+    def test_every_toggle_is_a_field_on_both_config_layers(self, toggle: str) -> None:
+        """The resolver reads the toggle by name off both models; a rename of
+        either field must fail here rather than as an AttributeError in a hook
+        that fails open and so would never surface it."""
+        assert toggle in OrchestratorConfig.model_fields
+        assert toggle in LaneConfig.model_fields
+
+
+@pytest.mark.parametrize("toggle", _GUARD_TOGGLES)
+class TestResolveGuardEnabled:
+    """Lane-then-global fallthrough shared by every default-on guard toggle.
+
+    Relocated from ``TestResolveSpawnGuardEnabled`` (#2211) and
+    ``TestResolveBackgroundToolGuardEnabled`` (#2303) once both guards'
+    resolvers collapsed into :func:`cw.cli._hook_io.resolve_guard_enabled`:
+    the same six cases, now run against each toggle.
+    """
+
+    def test_defaults_on_with_no_client_or_lane(self, toggle: GuardToggle) -> None:
+        assert resolve_guard_enabled(None, None, toggle) is True
+
+    def test_global_disable_wins_with_no_lane_override(
+        self, toggle: GuardToggle, tmp_config_dir: Path
+    ) -> None:
+        _write_global_toggle(tmp_config_dir, toggle, "false")
+
+        assert resolve_guard_enabled(None, None, toggle) is False
+
+    def test_lane_override_disables_against_enabled_global(
+        self, toggle: GuardToggle, tmp_config_dir: Path
+    ) -> None:
+        _write_clients_yaml(tmp_config_dir, lane_value="false", field_name=toggle)
+
+        assert resolve_guard_enabled("acme", "fast", toggle) is False
+
+    def test_lane_override_enables_against_disabled_global(
+        self, toggle: GuardToggle, tmp_config_dir: Path
+    ) -> None:
+        """The override is bidirectional — a lane can turn the guard back ON."""
+        _write_global_toggle(tmp_config_dir, toggle, "false")
+        _write_clients_yaml(tmp_config_dir, lane_value="true", field_name=toggle)
+
+        assert resolve_guard_enabled("acme", "fast", toggle) is True
+
+    def test_unknown_client_falls_through_to_global(
+        self, toggle: GuardToggle, tmp_config_dir: Path
+    ) -> None:
+        _write_clients_yaml(tmp_config_dir, lane_value="false", field_name=toggle)
+
+        assert resolve_guard_enabled("not-a-client", "fast", toggle) is True
+
+    def test_unknown_lane_falls_through_to_global(
+        self, toggle: GuardToggle, tmp_config_dir: Path
+    ) -> None:
+        _write_clients_yaml(tmp_config_dir, lane_value="false", field_name=toggle)
+
+        assert resolve_guard_enabled("acme", "not-a-lane", toggle) is True
+
+    def test_other_toggles_lane_override_is_ignored(
+        self, toggle: GuardToggle, tmp_config_dir: Path
+    ) -> None:
+        """Each guard reads its own field, never a sibling guard's."""
+        other = next(name for name in _GUARD_TOGGLES if name != toggle)
+        _write_clients_yaml(tmp_config_dir, lane_value="false", field_name=other)
+
+        assert resolve_guard_enabled("acme", "fast", toggle) is True
+
+
+class TestFindLaneConfig:
+    """The declared-lane lookup every lane-overridable hook guard shares."""
+
+    def test_returns_the_declared_lane(self, tmp_config_dir: Path) -> None:
+        _write_clients_yaml(tmp_config_dir, lane_value="false")
+
+        lane_cfg = find_lane_config("acme", "fast")
+
+        assert lane_cfg is not None
+        assert lane_cfg.name == "fast"
+        assert lane_cfg.subagent_spawn_guard_enabled is False
+
+    @pytest.mark.parametrize(
+        ("client", "lane"),
+        [(None, "fast"), ("acme", None), ("", "fast"), ("acme", "")],
+    )
+    def test_missing_client_or_lane_yields_none(
+        self, tmp_config_dir: Path, client: str | None, lane: str | None
+    ) -> None:
+        _write_clients_yaml(tmp_config_dir, lane_value="false")
+
+        assert find_lane_config(client, lane) is None
+
+    def test_unknown_client_yields_none(self, tmp_config_dir: Path) -> None:
+        _write_clients_yaml(tmp_config_dir, lane_value="false")
+
+        assert find_lane_config("not-a-client", "fast") is None
+
+    def test_undeclared_lane_yields_none(self, tmp_config_dir: Path) -> None:
+        _write_clients_yaml(tmp_config_dir, lane_value="false")
+
+        assert find_lane_config("acme", "not-a-lane") is None
