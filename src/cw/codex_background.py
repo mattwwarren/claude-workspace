@@ -349,6 +349,15 @@ def _refuse_unguarded_claim_tier(
 # cw's only programmatic tracker client GitHub-only), this file IS the record.
 REVIEW_VERDICT_COMMENT_RELATIVE_PATH = Path(".claude") / "review-verdict.md"
 
+# Ownership-stamp marker and line format prefixed onto the durable verdict
+# file (#2279), hoisted so the writer and every test assertion share one
+# source instead of repeating the literal.
+REVIEW_VERDICT_OWNER_MARKER = "cw-review-verdict-owner"
+REVIEW_VERDICT_OWNER_STAMP_FORMAT = (
+    "<!-- " + REVIEW_VERDICT_OWNER_MARKER + " ticket_id={ticket_id} "
+    "reviewed_sha={reviewed_sha} -->\n"
+)
+
 
 def _persist_review_verdict(
     worktree: Path, review_text: str, *, ticket_id: str, reviewed_sha: str
@@ -362,8 +371,10 @@ def _persist_review_verdict(
     completed review into an unexpected-error completion.
     """
     stamped_text = (
-        f"<!-- cw-review-verdict-owner ticket_id={ticket_id} "
-        f"reviewed_sha={reviewed_sha} -->\n{review_text}"
+        REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id=ticket_id, reviewed_sha=reviewed_sha
+        )
+        + review_text
     )
     path = worktree / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
     try:

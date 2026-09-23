@@ -24,6 +24,7 @@ from cw import codex_background
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_background import (
     _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
+    REVIEW_VERDICT_OWNER_STAMP_FORMAT,
     _default_background,
     _post_review_comment,
     _resolve_claim_tier_enabled,
@@ -352,8 +353,11 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
     artifact = post_mock.call_args.kwargs["artifact_path"]
     assert artifact == worktree / ".claude" / "review-verdict.md"
     written = artifact.read_text(encoding="utf-8")
-    assert written.splitlines()[0] == (
-        "<!-- cw-review-verdict-owner ticket_id=T-v reviewed_sha=deadbeef -->"
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="T-v", reviewed_sha="deadbeef"
+        ).splitlines()[0]
     )
     assert written.endswith("rendered")
 
@@ -542,8 +546,11 @@ def test_run_codex_review_and_complete_marker_cleared_after_verdict_posting(
     post_mock.assert_called_once()
     artifact = post_mock.call_args.kwargs["artifact_path"]
     written = artifact.read_text(encoding="utf-8")
-    assert written.splitlines()[0] == (
-        "<!-- cw-review-verdict-owner ticket_id=T-mark-v reviewed_sha=deadbeef -->"
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="T-mark-v", reviewed_sha="deadbeef"
+        ).splitlines()[0]
     )
     assert written.endswith("rendered")
     assert load_executor_blocked_markers() == {}
@@ -1033,8 +1040,11 @@ def test_persist_review_verdict_writes_durable_copy(tmp_path: Path) -> None:
     )
     assert path == tmp_path / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
     written = path.read_text(encoding="utf-8")
-    assert written.splitlines()[0] == (
-        "<!-- cw-review-verdict-owner ticket_id=2279 reviewed_sha=deadbeef -->"
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="2279", reviewed_sha="deadbeef"
+        ).splitlines()[0]
     )
     assert written.endswith("## Verdict\n")
 
@@ -1050,8 +1060,11 @@ def test_persist_review_verdict_stamp_handles_hyphenated_ticket_id(
     )
     assert path is not None
     written = path.read_text(encoding="utf-8")
-    assert written.splitlines()[0] == (
-        "<!-- cw-review-verdict-owner ticket_id=GEN-1 reviewed_sha=cafef00d -->"
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="GEN-1", reviewed_sha="cafef00d"
+        ).splitlines()[0]
     )
 
 
