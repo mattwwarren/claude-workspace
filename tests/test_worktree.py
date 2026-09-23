@@ -1891,7 +1891,12 @@ class TestCreateWorktreeReuseRefresh:
         )
 
         result = _refresh_reused_worktree(
-            client, _REUSE_BRANCH, wt, ReuseRefreshReport(), ticket_id=None
+            client,
+            _REUSE_BRANCH,
+            wt,
+            ReuseRefreshReport(),
+            ticket_id=None,
+            daemon=native_daemon.get_native_daemon_client(),
         )
 
         assert merges == []
@@ -2690,6 +2695,60 @@ class TestReuseOccupancyRosterAndPaths:
 
         assert git_in(wt, "rev-parse", "HEAD") == new_sha
 
+    def test_injected_daemon_worker_blocks_the_fast_forward(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """#2213 round 7: occupancy consults the CALLER'S daemon, not the real
+        one. A worker seeded directly on an injected ``FakeNativeDaemonClient``
+        -- never written to the real (tmp-isolated) roster file -- must still
+        block the fast-forward, and the real roster must stay untouched."""
+        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        assert not native_daemon._ROSTER_PATH.exists()
+        fake = native_daemon.FakeNativeDaemonClient()
+        fake.seed_live_worker(wt)
+
+        with pytest.raises(WorktreeOccupiedError) as excinfo:
+            create_worktree(
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh_on_reuse=True,
+                native_daemon=fake,
+            )
+
+        assert excinfo.value.path == wt
+        assert "live daemon worker" in excinfo.value.reason
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+        # The real roster was never written -- the fake, not it, was consulted.
+        assert not native_daemon._ROSTER_PATH.exists()
+
+    def test_injected_daemon_unreadable_roster_fails_closed(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """#2213 round 7: a fake roster reporting unreadable (``None``) fails
+        closed exactly like the real one, even though cw state and the real
+        (tmp-isolated) roster file are both clean."""
+        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        fake = native_daemon.FakeNativeDaemonClient()
+        fake.roster_unreadable = True
+
+        with pytest.raises(WorktreeOccupiedError) as excinfo:
+            create_worktree(
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh_on_reuse=True,
+                native_daemon=fake,
+            )
+
+        assert excinfo.value.path == wt
+        assert "roster unreadable" in excinfo.value.reason
+        assert git_in(wt, "rev-parse", "HEAD") == old_sha
+
     def test_live_daemon_worker_homed_on_worktree_blocks_fast_forward(
         self,
         tmp_path: Path,
@@ -2882,11 +2941,12 @@ class TestReuseOccupancyRosterAndPaths:
         pre-mutation re-check covers it (``create_worktree``'s own guard raises
         earlier, but a checkout can land in between)."""
         client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
-        assert _reuse_occupancy(client, _REUSE_BRANCH, wt).reason is None
+        daemon = native_daemon.get_native_daemon_client()
+        assert _reuse_occupancy(client, _REUSE_BRANCH, wt, daemon=daemon).reason is None
 
         git_in(wt, "checkout", "-b", "dev/other")
 
-        reason = _reuse_occupancy(client, _REUSE_BRANCH, wt).reason
+        reason = _reuse_occupancy(client, _REUSE_BRANCH, wt, daemon=daemon).reason
         assert reason is not None
         assert "dev/other" in reason
 
@@ -2895,8 +2955,9 @@ class TestReuseOccupancyRosterAndPaths:
     ) -> None:
         client, wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
         git_in(wt, "checkout", "--detach")
+        daemon = native_daemon.get_native_daemon_client()
 
-        reason = _reuse_occupancy(client, _REUSE_BRANCH, wt).reason
+        reason = _reuse_occupancy(client, _REUSE_BRANCH, wt, daemon=daemon).reason
 
         assert reason is not None
         assert "detached" in reason
@@ -2927,7 +2988,10 @@ class TestReuseOccupancyRosterAndPaths:
         elif side == "worker":
             _seed_roster(bad)
 
-        reason = live_home_reason(bad if side == "target" else good)
+        reason = live_home_reason(
+            bad if side == "target" else good,
+            daemon=native_daemon.get_native_daemon_client(),
+        )
 
         assert reason is not None
         assert "cannot be resolved" in reason
@@ -2964,7 +3028,12 @@ class TestReuseOccupancyRosterAndPaths:
         deleted worktree would otherwise veto every refresh."""
         _seed_roster(tmp_path / "deleted-worktree")
 
-        assert live_home_reason(tmp_path / "wt") is None
+        assert (
+            live_home_reason(
+                tmp_path / "wt", daemon=native_daemon.get_native_daemon_client()
+            )
+            is None
+        )
 
     def test_symlink_loop_session_refuses_the_fast_forward(
         self,

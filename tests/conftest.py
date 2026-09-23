@@ -1708,13 +1708,29 @@ def tree_fingerprint(worktree: Path) -> tuple[str, str, str]:
     )
 
 
-def occupy_worktree(client: ClientConfig, worktree: Path, source: str) -> None:
+def occupy_worktree(
+    client: ClientConfig,
+    worktree: Path,
+    source: str,
+    *,
+    daemon: FakeNativeDaemonClient | None = None,
+) -> None:
     """Make a live occupant appear for *worktree* through the named source.
 
     ``state`` (a non-terminal cw session homed there) and ``roster`` (a live
     daemon worker with that ``cwd``) are positive matches; ``unreadable-roster``
     is the fail-closed case (occupancy cannot be ruled out). Shared by the
     fix-agent and dispatch-claim refusal tests (#2213 round 5).
+
+    *daemon* (#2213 round 7): pass the SAME :class:`FakeNativeDaemonClient`
+    instance the caller is about to inject into ``create_worktree`` /
+    ``dispatch_tick`` / ``_spawn_claimed_task``. Occupancy checks now consult
+    the caller's own resolved daemon rather than defaulting to the real one, so
+    a ``roster``/``unreadable-roster`` occupant written to the real (tmp-
+    isolated) roster file would go unseen by an injected fake -- writing to the
+    fake directly is what makes those sources observable again. Omit it (the
+    ``state`` source is unaffected either way) only when the caller relies on
+    ``create_worktree``'s own default (no injected daemon).
     """
     from cw import native_daemon
     from cw.config import load_state
@@ -1733,6 +1749,12 @@ def occupy_worktree(client: ClientConfig, worktree: Path, source: str) -> None:
             )
         )
         save_state(state)
+        return
+    if daemon is not None:
+        if source == "roster":
+            daemon.seed_live_worker(worktree)
+        else:
+            daemon.roster_unreadable = True
         return
     roster = native_daemon._ROSTER_PATH
     roster.parent.mkdir(parents=True, exist_ok=True)

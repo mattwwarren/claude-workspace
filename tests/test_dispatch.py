@@ -1630,6 +1630,11 @@ class TestDispatchTickAutoBypassesApprovedPlan:
                 t.status = QueueItemStatus.PENDING
                 t.session_id = None
         save_dev_queue(store)
+        # Stop the fake worker too (#2213 round 7): occupancy now reads the
+        # injected daemon for real, and a real daemon's roster reflects a
+        # worker's process exiting independently of cw's own session status.
+        for short_id in daemon.list_live_session_short_ids():
+            daemon.stop(short_id)
 
         spawned_2 = dispatch_tick(simple_config, native_daemon=daemon).spawned
         assert spawned_2 == 1
@@ -2391,14 +2396,16 @@ class TestDispatchTickSpawnErrors:
             raise WorktreeError(msg)
 
         monkeypatch.setattr("cw.dispatch.claim.create_worktree", _record)
+        daemon = FakeNativeDaemonClient()
 
-        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+        dispatch_tick(simple_config, native_daemon=daemon)
 
         assert seen == [
             {
                 "allow_dirty_reuse": True,
                 "refresh_on_reuse": True,
                 "ticket_id": "GEN-2213",
+                "native_daemon": daemon,
             }
         ]
 
@@ -3004,9 +3011,17 @@ class TestClaimRefusesOccupiedWorktree:
         monkeypatch: pytest.MonkeyPatch,
         source: str,
         *,
+        daemon: FakeNativeDaemonClient,
         ticket_id: str = _TICKET,
     ) -> Path:
-        """Provision the ticket's per-ticket worktree, then occupy it."""
+        """Provision the ticket's per-ticket worktree, then occupy it.
+
+        *daemon* must be the SAME instance passed to the test's own
+        ``dispatch_tick``/``_spawn_claimed_task`` call: occupancy now reads
+        the caller's resolved daemon, not the real one, so seeding a
+        different instance (or the real roster file) would go unseen (#2213
+        round 7).
+        """
         from cw.worktree import create_worktree
 
         branch = f"{client.feature_branch_prefix}/{ticket_id}"
@@ -3017,7 +3032,7 @@ class TestClaimRefusesOccupiedWorktree:
             # probe's state read indeterminate.
             monkeypatch.setattr("cw.worktree.live_session_worktree_paths", lambda: None)
         else:
-            occupy_worktree(client, worktree, source)
+            occupy_worktree(client, worktree, source, daemon=daemon)
         return worktree
 
     @pytest.mark.parametrize("source", _OCCUPANT_SOURCES)
@@ -3031,10 +3046,10 @@ class TestClaimRefusesOccupiedWorktree:
         source: str,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        worktree = self._seed(sample_client_config, monkeypatch, source)
+        daemon = FakeNativeDaemonClient()
+        worktree = self._seed(sample_client_config, monkeypatch, source, daemon=daemon)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         before = tree_fingerprint(worktree)
-        daemon = FakeNativeDaemonClient()
 
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
         result = dispatch_tick(simple_config, native_daemon=daemon)
@@ -3078,9 +3093,9 @@ class TestClaimRefusesOccupiedWorktree:
         the occupant is still running; it must not, and must not consume the
         ticket's attempt budget either."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        self._seed(sample_client_config, monkeypatch, "roster")
-        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         daemon = FakeNativeDaemonClient()
+        self._seed(sample_client_config, monkeypatch, "roster", daemon=daemon)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
 
         # The breaker threshold is 2; go well past it, releasing the short hold
         # each time so every tick genuinely re-attempts the claim.
@@ -3113,7 +3128,8 @@ class TestClaimRefusesOccupiedWorktree:
         from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        worktree = self._seed(sample_client_config, monkeypatch, "state")
+        daemon = FakeNativeDaemonClient()
+        worktree = self._seed(sample_client_config, monkeypatch, "state", daemon=daemon)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         task, _skipped = _claim_next_pending(
             "test-client",
@@ -3122,7 +3138,6 @@ class TestClaimRefusesOccupiedWorktree:
             config=simple_config,
         )
         assert task is not None
-        daemon = FakeNativeDaemonClient()
         lines: list[str] = []
 
         outcome = _spawn_claimed_task(
@@ -3160,7 +3175,8 @@ class TestClaimRefusesOccupiedWorktree:
         from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        self._seed(sample_client_config, monkeypatch, "roster")
+        daemon = FakeNativeDaemonClient()
+        self._seed(sample_client_config, monkeypatch, "roster", daemon=daemon)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client", priority=9))
         add_ticket(TicketTask(ticket_id="GEN-FREE", client="test-client"))
         first, _ = _claim_next_pending(
@@ -3174,7 +3190,7 @@ class TestClaimRefusesOccupiedWorktree:
         outcome = _spawn_claimed_task(
             first,
             sample_client_config,
-            resolved_native_daemon=FakeNativeDaemonClient(),
+            resolved_native_daemon=daemon,
             parent=None,
             emit=None,
         )
@@ -3247,7 +3263,12 @@ class TestClaimRefusesOccupiedWorktree:
         # attempted and released, which is what stamps the short hold.
         assert load_dev_queue().tasks[0].next_eligible_at is not None
 
-        # The prior stage completes; the next stage's claim proceeds.
+        # The prior stage completes; the next stage's claim proceeds. Stop the
+        # fake worker too (#2213 round 7): occupancy now reads the injected
+        # daemon for real, and a real daemon's roster reflects a worker's
+        # process exiting independently of cw's own session status.
+        (worker_id,) = daemon.list_live_session_short_ids()
+        daemon.stop(worker_id)
         state = load_state()
         for sess in state.sessions:
             if sess.id == live[0].id:
@@ -3307,9 +3328,9 @@ class TestStaleWorktreeYieldsToLiveOccupant:
             msg = "Refusing to reuse stale worktree"
             raise StaleWorktreeError(msg)
 
-        def _live(wt_path: Path) -> str | None:
+        def _live(wt_path: Path, *, daemon: FakeNativeDaemonClient) -> str | None:
             calls.append("live")
-            return live_home_reason(wt_path)
+            return live_home_reason(wt_path, daemon=daemon)
 
         def _unsaved(_client: object, _branch: str) -> str | None:
             calls.append("unsaved")
@@ -3329,8 +3350,15 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         client: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
         source: str,
+        *,
+        daemon: FakeNativeDaemonClient,
     ) -> Path:
-        """Home a live occupant (or an unreadable source) on the stale tree."""
+        """Home a live occupant (or an unreadable source) on the stale tree.
+
+        *daemon* must be the same instance the test later injects into
+        ``dispatch_tick``/``_spawn_claimed_task`` (#2213 round 7): see
+        :func:`occupy_worktree`.
+        """
         from cw.worktree import worktree_path_for
 
         stale_tree = worktree_path_for(client, self._BRANCH)
@@ -3341,7 +3369,7 @@ class TestStaleWorktreeYieldsToLiveOccupant:
             # probe's state read indeterminate.
             monkeypatch.setattr("cw.worktree.live_session_worktree_paths", lambda: None)
         else:
-            occupy_worktree(client, stale_tree, source)
+            occupy_worktree(client, stale_tree, source, daemon=daemon)
         return stale_tree
 
     def _assert_released_not_charged(self, stale_tree: Path) -> None:
@@ -3371,8 +3399,10 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         # Dirty on purpose: were dirtiness consulted first it would PARK the
         # task BLOCKED_ON_USER instead of releasing it.
         calls = self._stub_stale(monkeypatch, unsaved="1 uncommitted path(s)")
-        stale_tree = self._occupy(sample_client_config, monkeypatch, source)
         daemon = FakeNativeDaemonClient()
+        stale_tree = self._occupy(
+            sample_client_config, monkeypatch, source, daemon=daemon
+        )
 
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
         result = dispatch_tick(simple_config, native_daemon=daemon)
@@ -3404,8 +3434,10 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         calls = self._stub_stale(monkeypatch, unsaved=None)
-        stale_tree = self._occupy(sample_client_config, monkeypatch, source)
         daemon = FakeNativeDaemonClient()
+        stale_tree = self._occupy(
+            sample_client_config, monkeypatch, source, daemon=daemon
+        )
 
         result = dispatch_tick(simple_config, native_daemon=daemon)
 
@@ -3432,7 +3464,10 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         self._stub_stale(monkeypatch, unsaved="1 uncommitted path(s)")
-        stale_tree = self._occupy(sample_client_config, monkeypatch, source)
+        daemon = FakeNativeDaemonClient()
+        stale_tree = self._occupy(
+            sample_client_config, monkeypatch, source, daemon=daemon
+        )
         task, _skipped = _claim_next_pending(
             "test-client",
             lane="default",
@@ -3445,7 +3480,7 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         outcome = _spawn_claimed_task(
             task,
             sample_client_config,
-            resolved_native_daemon=FakeNativeDaemonClient(),
+            resolved_native_daemon=daemon,
             parent=None,
             emit=lines.append,
         )
@@ -6887,6 +6922,11 @@ class TestConfigReloadedEachTick:
         state = load_state()
         state.sessions = []
         save_state(state)
+        # Stop the fake workers too (#2213 round 7): occupancy now reads the
+        # injected daemon for real, and a real daemon's roster reflects a
+        # worker's process exiting independently of cw's own session status.
+        for short_id in daemon.list_live_session_short_ids():
+            daemon.stop(short_id)
 
         # Rewrite config: cap drops to 1
         config_path.write_text("per_client_max_parallel:\n  test-client: 1\n")
