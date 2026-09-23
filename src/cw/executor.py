@@ -6,6 +6,7 @@ import contextlib
 import logging
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cw.auto_dev_result import AutoDevResult
@@ -53,6 +54,7 @@ from cw.models import (
     LOCAL_BACKEND,
     OPENCODE_BACKEND,
     ClientConfig,
+    CompletionReason,
     LastResultSource,
     LocalLivenessHandle,
     OrchestratorEventType,
@@ -864,6 +866,13 @@ def _complete_session_via_door(
     is a normal, non-raising return -- the status transition below still
     runs regardless (R5): refusal affects only the last_result write, not
     the executor's status/event bookkeeping.
+
+    Sets the full terminal record -- ``status``, ``completed_at``, and
+    ``completed_reason`` -- matching the crash-completion precedent at
+    ``reconcile/concierge.py``'s ``_LIVE_STATUSES`` handling (#2280 round 2).
+    Every ``guard_already_completed=True`` call site is an ``except
+    Exception:`` branch, so that flag doubles as the crashed/normal signal:
+    True -> CRASHED, False -> NORMAL.
     """
     if guard_already_completed:
         state = load_state()
@@ -879,6 +888,12 @@ def _complete_session_via_door(
     target = next((s for s in state.sessions if s.id == sid), None)
     if target is not None:
         target.status = SessionStatus.COMPLETED
+        target.completed_at = datetime.now(UTC)
+        target.completed_reason = (
+            CompletionReason.CRASHED
+            if guard_already_completed
+            else CompletionReason.NORMAL
+        )
         save_state(state)
 
 

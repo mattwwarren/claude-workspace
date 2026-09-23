@@ -44,6 +44,7 @@ from cw.local_runner import UNEXPECTED_ERROR, make_blocked
 from cw.models import (
     CODEX_BACKEND,
     ClientConfig,
+    CompletionReason,
     LaneConfig,
     LastResultSource,
     QueueItemStatus,
@@ -774,6 +775,10 @@ def test_spawn_write_hook_context_failure_completes_session_and_reraises(
     assert not any(s.status == SessionStatus.ACTIVE for s in state.sessions)
     session = find_completed_session(state)
     assert session.status == SessionStatus.COMPLETED
+    # #2280 round 2: the full terminal record, not just status -- an
+    # unexpected-error completion is a crash, not a normal one.
+    assert session.completed_at is not None
+    assert session.completed_reason == CompletionReason.CRASHED
     assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
     result = AutoDevResult.model_validate(session.last_result)
     assert result.status == "blocked"
