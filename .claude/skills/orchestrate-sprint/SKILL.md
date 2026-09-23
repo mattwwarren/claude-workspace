@@ -238,12 +238,15 @@ process per (client, lane) stamp, and only after a crash.** Because the script a
 after it fires, a stale watch surviving a `/clear` resume is not the
 steady-state risk it was under the old persistent-Monitor design — it can
 only happen if a prior watch crashed instead of exiting cleanly. Before
-arming a new one, check for a watch on the *same* client and lane:
-`pgrep -f "attention_watch.py <client>( |$)"` (append ` <lane>` when you
-arm lane-scoped). If that returns a PID, stop that process first, so two
-watches never share one stamp file or deliver the same event twice. Watches
-for other clients, or for other lanes in a parallel-orchestrator setup, use
-their own stamp files and are not leftovers.
+arming a new one, list the running watches with `pgrep -af attention_watch.py`
+and read each one's arguments. A leftover is a watch whose client **and** lane
+arguments both match the one you are about to arm. An unscoped watch has no
+lane argument, and it is not a leftover of a lane-scoped watch, or the other
+way round. Stop a true leftover first, so two watches never share one stamp
+file or deliver the same event twice. Watches for other clients or other
+lanes use their own stamp files and are left alone. (A single `pgrep`
+pattern cannot tell "no lane" apart from "any lane", so read the argument
+list instead.)
 
 **Triage the event, then re-arm — and re-arm *before* asking the operator any
 blocking question.** The order is: event fires → watch exits → triage →

@@ -35,7 +35,8 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
-from cw.models import OrchestratorEventType
+from cw.dispatch.regress_repeat import _FINALIZE_REGRESS_REPEAT_REASON
+from cw.models import LivenessBucket, OrchestratorEventType
 from tests.conftest import _stub_cw
 
 _SCRIPT = (
@@ -142,6 +143,19 @@ def test_subscribed_types_are_valid_event_types(aw: ModuleType) -> None:
 def test_blocker_reason_allowlist_matches_routing_constant(aw: ModuleType) -> None:
     """The script cannot import cw, so its hand-copy is pinned here (#1597)."""
     assert aw.BLOCKER_REASON_PAUSED_STATUSES == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+
+def test_surfaced_liveness_buckets_are_canonical_bucket_values(aw: ModuleType) -> None:
+    """Hand-copied bucket names are pinned to LivenessBucket (#2004, #2250)."""
+    assert (
+        frozenset({LivenessBucket.STALE_30M.value, LivenessBucket.STALE_45M.value})
+        == aw.SURFACED_LIVENESS
+    )
+
+
+def test_finalize_regress_status_matches_canonical_reason(aw: ModuleType) -> None:
+    """Hand-copy of the #1717 finalize_regress_repeat reason, pinned (#2250)."""
+    assert aw.FINALIZE_REGRESS_REPEAT_PAUSED_STATUS == _FINALIZE_REGRESS_REPEAT_REASON
 
 
 # ---------------------------------------------------------------------------
