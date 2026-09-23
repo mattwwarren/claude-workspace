@@ -3638,3 +3638,94 @@ def test_validation_failed_cap_still_reads_raw_attempts_not_unproductive(
     t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
     assert t.status == QueueItemStatus.FAILED
     assert t.disposition == "abandoned"
+
+
+class TestFindLiveSessionsForTicket:
+    """Roster-keyed ticket liveness independent of TicketTask.session_id (#2275).
+
+    Surface refs are 8-char hex: ``session_daemon_liveness`` only counts a
+    ``surface_ref`` as a daemon surface when it matches the short-id shape.
+    """
+
+    LIVE_REF = "abcd1234"
+    STARTED = datetime(2026, 9, 1, tzinfo=UTC)
+
+    def test_no_session_for_ticket_returns_empty(self) -> None:
+        from cw.reconcile import find_live_sessions_for_ticket
+
+        other = _make_daemon_session(
+            id="sess-other", name="client-a/auto-dev/T-9", surface_ref=self.LIVE_REF
+        )
+        state = CwState(sessions=[other])
+
+        assert (
+            find_live_sessions_for_ticket(state, "T-1", "client-a", {self.LIVE_REF})
+            == []
+        )
+
+    def test_session_absent_from_roster_is_not_live(self) -> None:
+        from cw.reconcile import find_live_sessions_for_ticket
+
+        sess = _make_daemon_session(surface_ref=self.LIVE_REF)
+        state = CwState(sessions=[sess])
+
+        assert find_live_sessions_for_ticket(state, "T-1", "client-a", set()) == []
+
+    def test_stray_live_session_found_without_any_task_binding(
+        self, tmp_path: Path
+    ) -> None:
+        """Core #2275 regression: no dev-queue row points at this session."""
+        from cw.reconcile import find_live_sessions_for_ticket
+
+        stray = _mk_headless_daemon_session(
+            "T-2275", tmp_path, self.STARTED, surface_ref=self.LIVE_REF
+        )
+        state = CwState(sessions=[stray])
+
+        live = find_live_sessions_for_ticket(
+            state, "T-2275", "client-a", {self.LIVE_REF}
+        )
+
+        assert live == [stray]
+
+    def test_same_ticket_id_different_client_excluded(self) -> None:
+        from cw.reconcile import find_live_sessions_for_ticket
+
+        foreign = _make_daemon_session(
+            client="client-b",
+            name="client-b/auto-dev/T-1",
+            surface_ref=self.LIVE_REF,
+        )
+        state = CwState(sessions=[foreign])
+
+        assert (
+            find_live_sessions_for_ticket(state, "T-1", "client-a", {self.LIVE_REF})
+            == []
+        )
+
+    @pytest.mark.parametrize(
+        "status", [SessionStatus.COMPLETED, SessionStatus.BACKGROUNDED]
+    )
+    def test_non_live_status_excluded(self, status: SessionStatus) -> None:
+        from cw.reconcile import find_live_sessions_for_ticket
+
+        sess = _make_daemon_session(status=status, surface_ref=self.LIVE_REF)
+        state = CwState(sessions=[sess])
+
+        assert (
+            find_live_sessions_for_ticket(state, "T-1", "client-a", {self.LIVE_REF})
+            == []
+        )
+
+    def test_non_auto_dev_session_name_excluded(self) -> None:
+        from cw.reconcile import find_live_sessions_for_ticket
+
+        orchestrate = _make_daemon_session(
+            name="client-a/orchestrate/T-1", surface_ref=self.LIVE_REF
+        )
+        state = CwState(sessions=[orchestrate])
+
+        assert (
+            find_live_sessions_for_ticket(state, "T-1", "client-a", {self.LIVE_REF})
+            == []
+        )
