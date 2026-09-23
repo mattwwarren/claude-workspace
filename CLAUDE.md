@@ -58,7 +58,7 @@ uv run pytest tests/ --cov=cw      # Coverage report
 ## Quality Gates
 
 Before committing, run **every** gate CI enforces (`.github/workflows/ci.yml`),
-in order. The first seven mirror CI exactly; passing only a subset is the #1
+in order. The first eight mirror CI exactly; passing only a subset is the #1
 cause of a green local run that fails CI (see #436):
 
 ```bash
@@ -68,12 +68,13 @@ uv run ruff check src/ tests/                                    # 3. Lint
 uv run ruff format --check src/ tests/                           # 4. Format
 uv run mypy --strict src/                                        # 5. Type check
 uv run python .claude/scripts/check_imports.py                   # 6. Smoke-import .claude scripts
-uv run pre-commit run --all-files                                # 7. Hooks
+uv run python .claude/scripts/check_changelog_frozen.py          # 7. Freeze released CHANGELOG sections
+uv run pre-commit run --all-files                                # 8. Hooks
 uv run --extra mcp pytest tests/ -m 'not integration' \
-  --cov=cw --cov-report=xml --cov-fail-under=88                  # 8. Unit + total cov ≥88%
-uv run pytest tests/ -m integration                              # 9. tmux integration
+  --cov=cw --cov-report=xml --cov-fail-under=88                  # 9. Unit + total cov ≥88%
+uv run pytest tests/ -m integration                              # 10. tmux integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \
-  --fail-under=90                                                # 10. Patch coverage ≥90%
+  --fail-under=90                                                # 11. Patch coverage ≥90%
 ```
 
 (CI additionally runs a separate `package-smoke` job — wheel build +
@@ -107,15 +108,21 @@ Gate 2 is an environment step that mutates the venv, not a check: a failure
 there (no network, cold cache) is an environment problem to report, not code
 to fix or a reason to revert a resolved merge.
 
-Pre-commit hooks enforce gates 1 and 3–5 (gate 7 *is* the hook suite)
+Pre-commit hooks enforce gates 1, 3–5, and 7 (gate 8 *is* the hook suite)
 automatically on `git commit` (`uv run pre-commit install`) — git invokes them
 directly, with no `uv run` wrapper, so gate 1 is genuine on that path. Only
-running gate 7 **by hand** via `uv run pre-commit run` masks it. Gates 2 and 6
+running gate 8 **by hand** via `uv run pre-commit run` masks it. Gates 2 and 6
 have no hook: gate 6 runs only in CI and this list, and gate 2 is a venv sync,
 not a check. (The hook's mypy runs in pre-commit's isolated env without `mcp`,
 so it never sees the stale-extra failure. The pre-commit pytest hook does run
 in the project venv without `--extra mcp` and can still hit it; that gap is
 tracked in #2242.)
+
+Gate 7 compares each released `## [X.Y.Z]` section of `CHANGELOG.md` with the
+copy its release tag captured, for `[tool.cw.changelog_freeze].since_tag` and
+every later tag (#2304). Run locally it warns and passes when release tags have
+not been fetched; CI passes `--require-tags`, so a missing tag fails there.
+Fix a stale local checkout with `git fetch --tags`.
 
 **Requirements:**
 - `uv lock --check` - **ZERO drift**. Any `pyproject.toml` edit that moves the
