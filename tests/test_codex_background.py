@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -24,8 +24,10 @@ from cw import codex_background
 from cw.auto_dev_result import AutoDevResult, Blocker
 from cw.codex_background import (
     _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
+    REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
     REVIEW_VERDICT_OWNER_STAMP_FORMAT,
     _default_background,
+    _persist_review_verdict,
     _post_review_comment,
     _resolve_claim_tier_enabled,
     _resolve_codex_fix_loop_enabled,
@@ -418,15 +420,17 @@ def test_run_codex_review_and_complete_posts_one_line_comment_when_verdict_is_no
     assert "editor (codex_timeout); reviewer (codex_timeout)" in written
 
 
-def test_run_codex_review_and_complete_skips_verdict_persist_when_verdict_is_none(
+def test_run_codex_review_and_complete_skips_render_when_verdict_is_none(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """#2280: the verdict-shaped persist/render helpers stay verdict-gated.
+    """#2280: no ``ReviewVerdict`` means nothing for the renderer to render.
 
-    ``render_verdict_comment``/``_persist_review_verdict`` render a
-    ``ReviewVerdict`` -- there is nothing for them to render on the
-    zero-documents path, so the new ``elif`` arm must not call either.
+    ``render_verdict_comment`` needs a ``ReviewVerdict`` -- there is none on
+    the zero-documents path -- so the new ``elif`` arm must not call it.
+    ``_persist_review_verdict`` DOES still run on this path (#2280 round 2):
+    it is the shared writer :func:`_persist_unparseable_artifact` delegates
+    to, pointed at the unparseable artifact's own path.
     """
     worktree = make_git_repo("wt-bg-unparseable-skip")
     _seed_session("bg-unparseable-skip")
@@ -445,7 +449,9 @@ def test_run_codex_review_and_complete_skips_verdict_persist_when_verdict_is_non
             return_value=(result, None),
         ),
         patch("cw.codex_background.render_verdict_comment") as render_mock,
-        patch("cw.codex_background._persist_review_verdict") as persist_mock,
+        patch(
+            "cw.codex_background._persist_review_verdict", wraps=_persist_review_verdict
+        ) as persist_mock,
         patch("cw.codex_background._post_review_comment"),
     ):
         _run(
@@ -456,7 +462,13 @@ def test_run_codex_review_and_complete_skips_verdict_persist_when_verdict_is_non
         )
 
     render_mock.assert_not_called()
-    persist_mock.assert_not_called()
+    persist_mock.assert_called_once_with(
+        worktree,
+        ANY,
+        ticket_id="T-ups",
+        reviewed_sha=ANY,
+        relative_path=REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
+    )
 
 
 def test_run_codex_review_and_complete_exception_path(
@@ -1203,10 +1215,14 @@ def test_persist_unparseable_review_artifact_writes_worktree_copy(
         details="editor (codex_timeout); reviewer (invalid_json)",
     )
 
-    path = _persist_unparseable_artifact(tmp_path, blocker)
+    path = _persist_unparseable_artifact(
+        tmp_path, blocker, ticket_id="1234", reviewed_sha="deadbeef"
+    )
 
     assert path == tmp_path / REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH
     written = path.read_text(encoding="utf-8")
+    assert "ticket_id=1234" in written
+    assert "reviewed_sha=deadbeef" in written
     assert CODEX_REVIEW_UNPARSEABLE in written
     assert "editor (codex_timeout); reviewer (invalid_json)" in written
 
@@ -1222,11 +1238,13 @@ def test_persist_unparseable_review_artifact_degrades_on_oserror(
         stage="stage3_review", reason=CODEX_REVIEW_UNPARSEABLE, details="x"
     )
     with caplog.at_level("WARNING"):
-        assert _persist_unparseable_artifact(tmp_path, blocker) is None
-    assert any(
-        "review_unparseable_artifact_persist_failed" in r.message
-        for r in caplog.records
-    )
+        assert (
+            _persist_unparseable_artifact(
+                tmp_path, blocker, ticket_id="1234", reviewed_sha="deadbeef"
+            )
+            is None
+        )
+    assert any("review_verdict_persist_failed" in r.message for r in caplog.records)
 
 
 def test_post_review_comment_logs_on_nonzero_returncode(

@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw._git import capture_head_sha
 from cw.atomic import atomic_write_text
 from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_review import make_codex_blocked, render_verdict_comment
@@ -361,10 +362,20 @@ REVIEW_VERDICT_OWNER_STAMP_FORMAT = (
 
 
 def _persist_review_verdict(
-    worktree: Path, review_text: str, *, ticket_id: str, reviewed_sha: str
+    worktree: Path,
+    review_text: str,
+    *,
+    ticket_id: str,
+    reviewed_sha: str,
+    relative_path: Path = REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
 ) -> Path | None:
     """Write *review_text* to the worktree's durable verdict file, best-effort,
     prefixed with an ownership stamp (``ticket_id``/``reviewed_sha``) (#2279).
+
+    *relative_path* defaults to the rendered-verdict destination but is
+    overridable so :func:`_persist_unparseable_artifact` (#2280) can reuse
+    this same write path for its blocker-shaped artifact rather than keeping
+    a second mkdir/atomic-write/log implementation.
 
     Returns the path written, or None when the write failed (logged). Never
     raises: this runs on the daemon thread's success path after the sentinel
@@ -377,7 +388,7 @@ def _persist_review_verdict(
         )
         + review_text
     )
-    path = worktree / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
+    path = worktree / relative_path
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(path, stamped_text)
@@ -396,27 +407,27 @@ REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH = (
 )
 
 
-def _persist_unparseable_artifact(worktree: Path, blocker: Blocker) -> Path | None:
+def _persist_unparseable_artifact(
+    worktree: Path, blocker: Blocker, *, ticket_id: str, reviewed_sha: str
+) -> Path | None:
     """Write *blocker*'s reason/details to the worktree, best-effort (#2280).
 
-    Sibling of :func:`_persist_review_verdict` for the park that function's
-    verdict-shaped input cannot cover. Same never-raises contract: this also
-    runs on the daemon thread's success path after the sentinel has already
-    been persisted.
+    Renders the blocker-shaped text this path carries (there is no
+    ReviewVerdict to hand to :func:`render_verdict_comment`) and delegates
+    the actual write -- mkdir, ownership stamp, atomic write, never-raises
+    logging -- to :func:`_persist_review_verdict`, pointed at this artifact's
+    own path, so the two callers share one writer instead of two.
     """
     text = (
         f"# Codex review unparseable\n\nreason: {blocker.reason}\n\n{blocker.details}\n"
     )
-    path = worktree / REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, text)
-    except OSError as exc:
-        _log.warning(
-            "review_unparseable_artifact_persist_failed path=%s: %s", path, exc
-        )
-        return None
-    return path
+    return _persist_review_verdict(
+        worktree,
+        text,
+        ticket_id=ticket_id,
+        reviewed_sha=reviewed_sha,
+        relative_path=REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
+    )
 
 
 def _post_review_comment(
@@ -615,7 +626,12 @@ def _run_codex_review_and_complete(
             # (_format_failures_detail) plus a diagnostics-bundle pointer.
             # Reused verbatim as both the worktree artifact and the ticket
             # comment text, mirroring the verdict-present branch's shape.
-            artifact_path = _persist_unparseable_artifact(worktree, result.blocker)
+            artifact_path = _persist_unparseable_artifact(
+                worktree,
+                result.blocker,
+                ticket_id=task.ticket_id,
+                reviewed_sha=capture_head_sha(worktree, strict=False),
+            )
             _post_review_comment(
                 task.ticket_id,
                 result.blocker.details,
