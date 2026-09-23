@@ -29,6 +29,7 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.spawn import _stop_hook_command, build_disallowed_tools_arg
 from tests.conftest import (
+    _make_daemon_session,
     _make_ticket_task,
     _seed_completed_session,
     _seed_daemon_session,
@@ -2485,6 +2486,117 @@ class TestSpawnCloseRequeue:
             event_types=[OrchestratorEventType.TICKET_REQUEUED],
         )
         assert events == []
+
+    # 8-char hex so the #2275 live-session guard treats them as daemon surfaces.
+    _CLOSED_REF = "aaaa1111"
+    _OTHER_REF = "bbbb2222"
+
+    def _patch_daemons(
+        self, monkeypatch: pytest.MonkeyPatch, *live_refs: str
+    ) -> FakeNativeDaemonClient:
+        """Close-side stop goes to a throwaway fake; the requeue guard reads a
+        roster fake that still lists *live_refs* (roster not caught up yet)."""
+        roster = FakeNativeDaemonClient()
+        roster._live = set(live_refs)
+        monkeypatch.setattr(
+            "cw.cli.spawn.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.get_native_daemon_client", lambda: roster
+        )
+        return roster
+
+    def test_requeue_flag_ignores_the_just_closed_session_even_if_still_in_roster(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2275: the session --requeue just closed is excluded from the
+        live-session guard via ignore_session_ids, regardless of roster lag."""
+        from cw.dev_queue.requeue import requeue_ticket as real_requeue_ticket
+
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        sess = _seed_daemon_session(
+            tmp_path, tmp_config_dir, surface_ref=self._CLOSED_REF
+        )
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        self._patch_daemons(monkeypatch, self._CLOSED_REF)
+        seen_kwargs: list[dict[str, Any]] = []
+
+        def _spy(*args: Any, **kwargs: Any) -> dict[str, str | bool | int]:
+            seen_kwargs.append(kwargs)
+            return real_requeue_ticket(*args, **kwargs)
+
+        monkeypatch.setattr("cw.cli.spawn.requeue_ticket", _spy)
+
+        result = CliRunner().invoke(main, ["spawn", "close", "--requeue", sess.id])
+
+        assert result.exit_code == 0, result.output
+        assert "Requeued GEN-42" in result.output
+        assert seen_kwargs[0]["ignore_session_ids"] == frozenset({sess.id})
+
+    def test_requeue_flag_still_refused_by_a_second_different_live_session(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2275: only the just-closed session is exempt -- a second live
+        session for the same ticket still refuses the requeue."""
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus
+
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        sess = _seed_daemon_session(
+            tmp_path, tmp_config_dir, surface_ref=self._CLOSED_REF
+        )
+        other = _make_daemon_session(
+            id="othr5678",
+            name="test-client/auto-dev/GEN-42",
+            client="test-client",
+            surface_ref=self._OTHER_REF,
+        )
+        state = load_state()
+        state.sessions.append(other)
+        save_state(state)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        self._patch_daemons(monkeypatch, self._CLOSED_REF, self._OTHER_REF)
+
+        result = CliRunner().invoke(main, ["spawn", "close", "--requeue", sess.id])
+
+        assert result.exit_code != 0
+        assert other.id in result.output
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-42")
+        assert task.status == QueueItemStatus.CANCELLED
+
+    def test_requeue_flag_refused_when_roster_unreadable(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2275 review round 1: the just-closed exemption covers one known
+        session, not the unknown rest an unreadable roster cannot rule out --
+        the close lands, the requeue is refused with the fail-closed message."""
+        from cw.dev_queue import load_dev_queue
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType, QueueItemStatus
+
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        sess = _seed_daemon_session(
+            tmp_path, tmp_config_dir, surface_ref=self._CLOSED_REF
+        )
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        roster = self._patch_daemons(monkeypatch)
+        roster.roster_unreadable = True
+
+        result = CliRunner().invoke(main, ["spawn", "close", "--requeue", sess.id])
+
+        assert result.exit_code != 0
+        output = " ".join(result.output.split())
+        assert (
+            f"daemon roster unreadable at {roster.roster_path};"
+            " cannot rule out a live session for #GEN-42"
+        ) in output
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-42")
+        assert task.status == QueueItemStatus.CANCELLED
+        requeued = read_events(
+            consumer="_test_requeue_roster_unreadable",
+            event_types=[OrchestratorEventType.TICKET_REQUEUED],
+        )
+        assert requeued == []
 
 
 class TestSpawnCloseRequeueImplDirect:

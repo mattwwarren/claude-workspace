@@ -2349,6 +2349,29 @@ def resolve_session_liveness_for_task(
     return session_daemon_liveness(session, live_short_ids)
 
 
+def find_live_sessions_for_ticket(
+    state: CwState, ticket_id: str, client: str, live_short_ids: set[str]
+) -> list[Session]:
+    """Every session in *state* for (*ticket_id*, *client*) still live in the
+    daemon roster (GitHub #2275).
+
+    Unlike :func:`resolve_session_liveness_for_task`, does NOT key off any
+    ``TicketTask.session_id`` -- derives the ticket id from each
+    ``Session.name`` via :func:`ticket_id_for_session`, so a stray session no
+    dev-queue row points at any more is still found.
+    """
+    live: list[Session] = []
+    for session in state.sessions:
+        if session.client != client or session.status not in _LIVE_STATUSES:
+            continue
+        if ticket_id_for_session(session.name) != ticket_id:
+            continue
+        liveness = session_daemon_liveness(session, live_short_ids)
+        if liveness.native_surface and liveness.in_roster:
+            live.append(session)
+    return live
+
+
 def _session_id_advisory_mismatch(
     liveness: SessionLivenessForTask | None, spawn_cutoff: datetime
 ) -> bool:

@@ -15,7 +15,7 @@ plus shape/index assertions, Group B executes the literal `run:` blocks via
 `subprocess.run(["/bin/bash", "-c", ...])`.  Unlike that file, these scripts
 call real `git` subcommands, so they need a real repo: `_repo_with_remote`
 builds one on the `make_git_repo` fixture plus the separate-bare-origin shape
-from `tests/test_worktree.py`'s
+from `tests/test_worktree_lifecycle.py`'s
 `test_new_branch_base_is_origin_main_not_operator_head`.  A bare remote (not a
 self-remote) is required because
 `test_warn_step_only_reads_pyproject_and_remote_tags_not_local_tags` must

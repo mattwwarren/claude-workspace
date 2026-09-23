@@ -3031,7 +3031,9 @@ class TestClaimRefusesOccupiedWorktree:
             # A corrupt sessions.json would also break dispatch_tick's own state
             # reads before the claim is reached, so make only the occupancy
             # probe's state read indeterminate.
-            monkeypatch.setattr("cw.worktree.live_session_worktree_paths", lambda: None)
+            monkeypatch.setattr(
+                "cw.worktree._refresh.live_session_worktree_paths", lambda: None
+            )
         else:
             occupy_worktree(client, worktree, source, daemon=daemon)
         return worktree
@@ -3368,7 +3370,9 @@ class TestStaleWorktreeYieldsToLiveOccupant:
             # A corrupt sessions.json would also break dispatch_tick's own state
             # reads before the claim is reached, so make only the liveness
             # probe's state read indeterminate.
-            monkeypatch.setattr("cw.worktree.live_session_worktree_paths", lambda: None)
+            monkeypatch.setattr(
+                "cw.worktree._refresh.live_session_worktree_paths", lambda: None
+            )
         else:
             occupy_worktree(client, stale_tree, source, daemon=daemon)
         return stale_tree
@@ -4152,7 +4156,7 @@ class TestDispatchTickFreshnessGate:
         freshness_records = [
             r
             for r in caplog.records
-            if r.name in ("cw.dispatch", "cw.worktree")
+            if r.name in ("cw.dispatch", "cw.worktree._freshness")
             and "freshness" in r.message.lower()
         ]
         assert not any(r.exc_info for r in freshness_records), (

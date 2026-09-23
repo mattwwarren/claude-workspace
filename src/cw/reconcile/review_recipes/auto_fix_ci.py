@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.exceptions import CwError, DispatchLoopLockedError
+from cw.exceptions import CwError, DispatchLoopLockedError, RequeueLiveSessionError
 from cw.models import TERMINAL_QUEUE_STATUSES, QueueItemStatus
 from cw.pr_hydrate import _parse_pr_url, _repo_slug_mismatch
 from cw.reconcile.review_recipes._shared import (
@@ -66,6 +66,8 @@ _PAYLOAD_KEY_FAILING_CHECKS = "failing_checks"
 _PAYLOAD_KEY_QUEUE_ROW_STATUS = "queue_row_status"
 _PAYLOAD_KEY_REDISPATCH_MODE = "redispatch_mode"
 _PAYLOAD_KEY_FROM_COMPLETED_APPLIED = "from_completed_applied"
+# GitHub #2275 -- the live sessions that refused a requeue, as structured data.
+_PAYLOAD_KEY_LIVE_SESSION_IDS = "live_session_ids"
 
 # TicketTask statuses this recipe requeues in place rather than leaving alone
 # (GitHub #2100) -- the terminal statuses requeue_ticket's forward/same-stage
@@ -111,6 +113,10 @@ class _RedispatchJob(NamedTuple):
     lock at prepare time -- the single fact ``_dispatch_auto_fix_ci`` needs to
     decide whether to requeue the row in place or leave it alone; see
     ``_redispatch_existing_row``.
+
+    ``fired_at`` (GitHub #2275) is the exact ``auto_fix_ci_fired_at`` value
+    stamped at prepare time, so ``_rollback_latch_if_unchanged`` can
+    compare-and-clear without holding a stale ``task`` across locks.
     """
 
     client: str
@@ -118,6 +124,7 @@ class _RedispatchJob(NamedTuple):
     lane: str
     payload_base: dict[str, object]
     existing_status: QueueItemStatus
+    fired_at: datetime
 
 
 def _detect_auto_fix_ci_repo_mismatch(
@@ -214,6 +221,7 @@ def _prepare_auto_fix_ci_job(
         lane=task.lane,
         payload_base=payload_base,
         existing_status=existing_status,
+        fired_at=now,
     )
 
 
@@ -291,6 +299,14 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
     ``auto_fix_ci_fired_at`` latch stays stamped even when this dispatch
     fails — same posture as ``request_reviewer``: ``PR_ACTION_FAILED`` is the
     visible signal, the latch is NOT rolled back on dispatch failure.
+    Exception (GitHub #2275): a ``RequeueLiveSessionError`` is transient and
+    self-resolving (the live session will finish), so it triggers
+    ``_rollback_latch_if_unchanged`` to re-arm the row for a later tick, and
+    tags the ``PR_ACTION_FAILED`` payload with a ``skipped_live_session``
+    redispatch mode plus the live session ids. Its
+    ``RequeueRosterUnreadableError`` subclass (unreadable daemon roster, so a
+    live session cannot be ruled out) takes the same rollback, tagged
+    ``skipped_roster_unreadable`` with an empty id list.
 
     Why NOT ``force=True`` for the tick (#1362): this call can run either (a)
     nested inside a live loop's own tick (``dispatch_tick`` ->
@@ -321,6 +337,21 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
         else:
             job.payload_base[_PAYLOAD_KEY_REDISPATCH_MODE] = "noop_existing_row"
         run_dispatch_loop(once=True, client=job.client, emit=None)
+    except RequeueLiveSessionError as exc:
+        from cw.dev_queue import classify_requeue_live_session_error
+
+        reason_tag, message = classify_requeue_live_session_error(exc)
+        _rollback_latch_if_unchanged(job)
+        job.payload_base[_PAYLOAD_KEY_REDISPATCH_MODE] = reason_tag
+        job.payload_base[_PAYLOAD_KEY_LIVE_SESSION_IDS] = list(exc.session_ids)
+        _log.info(
+            "review_recipe_redispatch_%s ticket=%s: %s",
+            reason_tag,
+            job.ticket_id,
+            message,
+        )
+        _emit_pr_action_failed(job.payload_base, error=message, ticket_id=job.ticket_id)
+        return None
     except DispatchLoopLockedError as exc:
         _log.info(
             "review_recipe_redispatch_tick_skipped ticket=%s: %s",
@@ -352,6 +383,38 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
 
 def _clear_auto_fix_ci_fired(task: TicketTask) -> None:
     task.auto_fix_ci_fired_at = None
+
+
+def _rollback_latch_if_unchanged(job: _RedispatchJob) -> None:
+    """Compare-and-clear ``auto_fix_ci_fired_at`` after a live-session refusal
+    (GitHub #2275).
+
+    Re-acquires ``dev_queue_lock()`` as an independent second transaction --
+    the lock that stamped ``job.fired_at`` has already released. Clears the
+    latch only when the row still exists and its latch still equals
+    ``job.fired_at``; otherwise another tick or actor changed it since, so it
+    is left untouched rather than clobbered.
+    """
+    with dev_queue_lock():
+        store = load_dev_queue()
+        task = _find_review_task(store, job.ticket_id, job.client)
+        if task is None:
+            _log.info(
+                "auto_fix_ci_latch_rollback_skipped ticket=%s: row vanished",
+                job.ticket_id,
+            )
+            return
+        if task.auto_fix_ci_fired_at != job.fired_at:
+            _log.info(
+                "auto_fix_ci_latch_rollback_skipped ticket=%s:"
+                " fired_at changed since (now %r, expected %r)",
+                job.ticket_id,
+                task.auto_fix_ci_fired_at,
+                job.fired_at,
+            )
+            return
+        _clear_auto_fix_ci_fired(task)
+        save_dev_queue(store)
 
 
 def _act_auto_fix_ci(

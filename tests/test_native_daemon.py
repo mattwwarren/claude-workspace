@@ -976,6 +976,52 @@ class TestRealNativeDaemonClientWorkerCwds:
         assert client.list_live_worker_cwds() is None
 
 
+class TestRealNativeDaemonClientShortIdsFailClosed:
+    """list_live_session_short_ids_fail_closed: the requeue guard's view (#2275).
+
+    Same split as ``list_live_worker_cwds`` (#2213): an absent roster is an
+    empty set (no daemon, so no live sessions); an unreadable or malformed one
+    is ``None`` ("cannot rule out a live session").
+    """
+
+    def test_returns_worker_keys(self, tmp_path: Path) -> None:
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps({"workers": {"aaaa1111": {"pid": 1}}}))
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_session_short_ids_fail_closed() == {"aaaa1111"}
+
+    def test_absent_roster_returns_empty_set(self, tmp_path: Path) -> None:
+        client = RealNativeDaemonClient(roster_path=tmp_path / "nope.json")
+        assert client.list_live_session_short_ids_fail_closed() == set()
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param(b"{not json", id="invalid-json"),
+            pytest.param(b"\xff\xfe\x00 not utf-8", id="invalid-utf8"),
+            pytest.param(json.dumps({"workers": ["a"]}).encode(), id="workers-list"),
+            pytest.param(json.dumps(["x"]).encode(), id="top-level-list"),
+        ],
+    )
+    def test_malformed_roster_returns_none(self, tmp_path: Path, raw: bytes) -> None:
+        roster = tmp_path / "roster.json"
+        roster.write_bytes(raw)
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_session_short_ids_fail_closed() is None
+        # The fail-open view over the same file is unchanged.
+        assert client.list_live_session_short_ids() == set()
+
+    def test_unreadable_roster_returns_none(self, tmp_path: Path) -> None:
+        roster = tmp_path / "roster.json"
+        roster.mkdir()
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_session_short_ids_fail_closed() is None
+
+    def test_roster_path_is_exposed(self, tmp_path: Path) -> None:
+        roster = tmp_path / "roster.json"
+        assert RealNativeDaemonClient(roster_path=roster).roster_path == roster
+
+
 class TestRealNativeDaemonClientStop:
     """stop is best-effort and swallows expected failure modes."""
 
@@ -1047,6 +1093,17 @@ class TestFakeNativeDaemonClient:
         client.spawn_bg(cwd=tmp_path, prompt="x")
         client.roster_unreadable = True
         assert client.list_live_worker_cwds() is None
+
+    def test_short_ids_fail_closed_none_when_roster_unreadable(
+        self, tmp_path: Path
+    ) -> None:
+        """#2275: one flag drives every fail-closed roster view."""
+        client = FakeNativeDaemonClient()
+        short_id = client.spawn_bg(cwd=tmp_path, prompt="x")
+        assert client.list_live_session_short_ids_fail_closed() == {short_id}
+        client.roster_unreadable = True
+        assert client.list_live_session_short_ids_fail_closed() is None
+        assert isinstance(client.roster_path, Path)
 
     def test_raise_usage_limit_raises_before_counter(self, tmp_path: Path) -> None:
         """raise_usage_limit=True raises UsageLimitError before incrementing counter."""

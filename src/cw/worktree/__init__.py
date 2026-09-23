@@ -1,0 +1,197 @@
+"""Git worktree operations for isolated session workspaces.
+
+This package was split out of a single ``worktree.py`` module; the public
+import surface (``from cw.worktree import X``) is preserved here via
+re-exports. Submodules:
+
+- ``_git`` — shared git-subprocess leaf helpers (``_run_git``, ``_git_dir``,
+  ``_checked_out_branch``, ``check_not_main_checkout``).
+- ``_paths`` — worktree path and base resolution (``worktree_path_for``,
+  ``resolve_task_worktree``).
+- ``_scope`` — branch-diff scope measurement and the #1487 mismatch guard.
+- ``_freshness`` — fetch and freshness vs. origin, for feature and default
+  branches.
+- ``_unsaved`` — unsaved-work / dirty-tree detection.
+- ``_refresh`` — reuse refresh and occupancy for reused worktrees (#2213).
+- ``_lifecycle`` — ``create_worktree`` / ``remove_worktree``.
+
+Tests that patch a helper imported across submodules (``_run_git``,
+``fetch_feature_branch``, ...) must patch every submodule's binding; see
+``tests/_worktree_helpers.patch_worktree``.
+"""
+
+from __future__ import annotations
+
+from cw.worktree._freshness import (
+    _MISSING_REMOTE_REF_MARKER,
+    FetchOutcome,
+    FetchResult,
+    FetchWarningKey,
+    _fetch_default_branch,
+    _ff_relation,
+    _get_behind_count,
+    _warn_fetch_skip_once,
+    check_main_ff_safety,
+    fast_forward_main,
+    fetch_feature_branch,
+    get_head_branch,
+    is_main_behind_origin,
+    is_main_checkout_dirty,
+)
+from cw.worktree._git import (
+    _GIT_PORCELAIN_PATH_OFFSET,
+    _GIT_PORCELAIN_UNTRACKED,
+    _checked_out_branch,
+    _first_line,
+    _git_dir,
+    _ref_exists,
+    _run_git,
+    check_not_main_checkout,
+)
+from cw.worktree._lifecycle import (
+    _CW_EXCLUDE_PATTERN,
+    _WORKTREE_HELD_BY_RE,
+    _branch_held_error,
+    _parse_worktree_holder_path,
+    _register_cw_exclude,
+    _resolve_branch_start_point,
+    create_worktree,
+    remove_worktree,
+)
+from cw.worktree._paths import (
+    _HASH_BASE_SEGMENTS,
+    _WORKSPACE_HASH_CHARS,
+    _WORKTREE_NAME_CAP,
+    _hashed_worktree_base,
+    effective_worktree_bases,
+    resolve_task_worktree,
+    resolve_worktree_base,
+    slugify_branch,
+    worktree_path_for,
+)
+from cw.worktree._refresh import (
+    _NON_TERMINAL_SESSION_STATUSES,
+    _SHA_LOG_CHARS,
+    _STATE_READ_ERRORS,
+    RefreshOutcome,
+    RefreshResult,
+    ReuseRefreshReport,
+    _fetch_gate,
+    _ff_reused_worktree,
+    _normalize_path,
+    _Occupancy,
+    _occupancy_verdict,
+    _raise_if_occupied,
+    _record_fast_forward,
+    _refresh_from_tracking_ref,
+    _refresh_reused_worktree,
+    _refresh_reused_worktree_steps,
+    _reuse_occupancy,
+    live_home_reason,
+    live_session_worktree_paths,
+)
+from cw.worktree._scope import (
+    _NUMSTAT_MIN_COLS,
+    _SCOPE_MISMATCH_RATIO_THRESHOLD,
+    _BranchDiffScope,
+    _has_commits_beyond_base,
+    _parse_numstat_totals,
+    _reconcile_scope_field,
+    _resolve_merge_base,
+    _scope_mismatch_is_gross,
+    compute_branch_diff_scope,
+    reconcile_result_scope,
+    resolve_scope_guard_default_branch,
+)
+from cw.worktree._unsaved import (
+    _CW_SCRATCH_PREFIX,
+    _commits_ahead,
+    _own_remote_ref,
+    _resolve_remote_ref,
+    _uncommitted_changes_detail,
+    _unpushed_commits_detail,
+    _upstream_ref,
+    unsaved_work_reason,
+    worktree_has_unsaved_work,
+)
+
+__all__ = [
+    "_CW_EXCLUDE_PATTERN",
+    "_CW_SCRATCH_PREFIX",
+    "_GIT_PORCELAIN_PATH_OFFSET",
+    "_GIT_PORCELAIN_UNTRACKED",
+    "_HASH_BASE_SEGMENTS",
+    "_MISSING_REMOTE_REF_MARKER",
+    "_NON_TERMINAL_SESSION_STATUSES",
+    "_NUMSTAT_MIN_COLS",
+    "_SCOPE_MISMATCH_RATIO_THRESHOLD",
+    "_SHA_LOG_CHARS",
+    "_STATE_READ_ERRORS",
+    "_WORKSPACE_HASH_CHARS",
+    "_WORKTREE_HELD_BY_RE",
+    "_WORKTREE_NAME_CAP",
+    "FetchOutcome",
+    "FetchResult",
+    "FetchWarningKey",
+    "RefreshOutcome",
+    "RefreshResult",
+    "ReuseRefreshReport",
+    "_BranchDiffScope",
+    "_Occupancy",
+    "_branch_held_error",
+    "_checked_out_branch",
+    "_commits_ahead",
+    "_fetch_default_branch",
+    "_fetch_gate",
+    "_ff_relation",
+    "_ff_reused_worktree",
+    "_first_line",
+    "_get_behind_count",
+    "_git_dir",
+    "_has_commits_beyond_base",
+    "_hashed_worktree_base",
+    "_normalize_path",
+    "_occupancy_verdict",
+    "_own_remote_ref",
+    "_parse_numstat_totals",
+    "_parse_worktree_holder_path",
+    "_raise_if_occupied",
+    "_reconcile_scope_field",
+    "_record_fast_forward",
+    "_ref_exists",
+    "_refresh_from_tracking_ref",
+    "_refresh_reused_worktree",
+    "_refresh_reused_worktree_steps",
+    "_register_cw_exclude",
+    "_resolve_branch_start_point",
+    "_resolve_merge_base",
+    "_resolve_remote_ref",
+    "_reuse_occupancy",
+    "_run_git",
+    "_scope_mismatch_is_gross",
+    "_uncommitted_changes_detail",
+    "_unpushed_commits_detail",
+    "_upstream_ref",
+    "_warn_fetch_skip_once",
+    "check_main_ff_safety",
+    "check_not_main_checkout",
+    "compute_branch_diff_scope",
+    "create_worktree",
+    "effective_worktree_bases",
+    "fast_forward_main",
+    "fetch_feature_branch",
+    "get_head_branch",
+    "is_main_behind_origin",
+    "is_main_checkout_dirty",
+    "live_home_reason",
+    "live_session_worktree_paths",
+    "reconcile_result_scope",
+    "remove_worktree",
+    "resolve_scope_guard_default_branch",
+    "resolve_task_worktree",
+    "resolve_worktree_base",
+    "slugify_branch",
+    "unsaved_work_reason",
+    "worktree_has_unsaved_work",
+    "worktree_path_for",
+]

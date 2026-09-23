@@ -17,6 +17,7 @@ from cw.dev_queue import (
     add_ticket,
     approve_ticket,
     cancel_ticket,
+    classify_requeue_live_session_error,
     clear_tickets,
     drain_held_tickets,
     move_ticket,
@@ -29,6 +30,7 @@ from cw.dev_queue import (
     unblock_ticket,
 )
 from cw.events import record_event
+from cw.exceptions import RequeueLiveSessionError
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments, post_issue_comment
 from cw.models import (
     DEFAULT_LANE,
@@ -504,15 +506,19 @@ def dev_queue_requeue(
     """
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
-    result = requeue_ticket(
-        ticket_id,
-        resolved,
-        stage_override,
-        allow_regress=regress,
-        from_cancelled=from_cancelled,
-        from_failed=from_failed,
-        from_completed=from_completed,
-    )
+    try:
+        result = requeue_ticket(
+            ticket_id,
+            resolved,
+            stage_override,
+            allow_regress=regress,
+            from_cancelled=from_cancelled,
+            from_failed=from_failed,
+            from_completed=from_completed,
+        )
+    except RequeueLiveSessionError as exc:
+        _reason_tag, message = classify_requeue_live_session_error(exc)
+        raise click.ClickException(message) from exc
     if result["regressed"]:
         reason = "cli_regress"
     elif result["from_cancelled_applied"]:
