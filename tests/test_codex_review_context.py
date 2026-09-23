@@ -1294,24 +1294,21 @@ class TestSelectOutputInstructions:
             assert (
                 "This is a read-only sandbox: running the test suite, `uv`, a "
                 "linter, or a type-checker is not expected of you unless the "
-                "reviewer role's own rubric explicitly mandates that check."
-                in variant
+                "reviewer role's own rubric explicitly mandates that check." in variant
             )
             assert (
                 "Being unable to run a gate the rubric does not mandate is not "
                 'degradation — report `status="ok"` for that gate and, if useful, '
-                "note the sandbox limitation in `detail`."
-                in variant
+                "note the sandbox limitation in `detail`." in variant
             )
             assert (
-                "Total inability to execute a mandated gate is still `degraded`, never `failed`."
-                in variant
+                "Total inability to execute a mandated gate is still "
+                "`degraded`, never `failed`." in variant
             )
             assert (
                 '`status="failed"` is reserved for being unable to evaluate the '
                 "diff itself — the diff is missing or unreadable, a required file "
-                "is inaccessible, or your own output would be malformed."
-                in variant
+                "is inaccessible, or your own output would be malformed." in variant
             )
 
 
@@ -1338,15 +1335,13 @@ class TestOutputSchemaRulesSandboxClarification:
         )
         assert (
             "Total inability to execute a mandated gate is still "
-            "`degraded`, never `failed`."
-            in _OUTPUT_SCHEMA_RULES
+            "`degraded`, never `failed`." in _OUTPUT_SCHEMA_RULES
         )
         assert (
             '`status="failed"` is reserved for being unable to evaluate '
             "the diff itself — the diff is missing or unreadable, a "
             "required file is inaccessible, or your own output would be "
-            "malformed."
-            in _OUTPUT_SCHEMA_RULES
+            "malformed." in _OUTPUT_SCHEMA_RULES
         )
 
 
