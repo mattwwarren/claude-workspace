@@ -471,6 +471,31 @@ def test_conflict_free_duplicate_heading_fails(
     assert "<<<<<<<" not in (repo / "CHANGELOG.md").read_text(encoding="utf-8")
 
 
+def test_missing_unreleased_heading_fails(
+    mod: types.ModuleType, released_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _commit(released_repo, V100, version="1.0.0", since_tag="v1.0.0")
+
+    code, payload, _ = _run(mod, released_repo, capsys)
+
+    assert code == 1
+    violation = _violation(payload, "missing_heading")
+    assert violation["tag"] == "Unreleased"
+
+
+def test_unreleased_not_first_heading_fails(
+    mod: types.ModuleType, released_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _commit(released_repo, V100, UNRELEASED, version="1.0.0", since_tag="v1.0.0")
+
+    code, payload, _ = _run(mod, released_repo, capsys)
+
+    assert code == 1
+    violation = _violation(payload, "missing_heading")
+    assert violation["tag"] == "Unreleased"
+    assert "must be the first heading" in str(violation["detail"])
+
+
 def test_duplicate_unreleased_heading_fails(
     mod: types.ModuleType, released_repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

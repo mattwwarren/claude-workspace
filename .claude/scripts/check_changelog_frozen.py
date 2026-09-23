@@ -288,6 +288,28 @@ def check_untagged_headings(
     return violations
 
 
+def check_unreleased_anchor(headings: list[Heading]) -> list[Violation]:
+    """Rule 0: a `## [Unreleased]` heading exists and is the first heading.
+
+    Rule 2 anchors "the release in progress" on it, so a CHANGELOG that has
+    lost the heading (or buried it) must fail here rather than let rule 2
+    silently fall back to position 0. Duplicates are rule 3's job.
+    """
+    positions = [i for i, h in enumerate(headings) if h.version == _UNRELEASED]
+    if not positions:
+        detail = f"no `## [{_UNRELEASED}]` heading; new entries have nowhere to go"
+        return [Violation(_UNRELEASED, KIND_MISSING, detail)]
+    if positions[0] != 0:
+        first = headings[0]
+        detail = (
+            f"`## [{_UNRELEASED}]` (line {headings[positions[0]].line + 1}) must be"
+            f" the first heading, but `## [{first.version}]`"
+            f" (line {first.line + 1}) precedes it"
+        )
+        return [Violation(_UNRELEASED, KIND_MISSING, detail)]
+    return []
+
+
 def check_duplicate_headings(headings: list[Heading]) -> list[Violation]:
     """Rule 3: every `## [...]` heading appears at most once."""
     counts = Counter(h.version for h in headings)
@@ -330,6 +352,7 @@ def evaluate(
     }
     rel_path = changelog.resolve().relative_to(root.resolve()).as_posix()
     return [
+        *check_unreleased_anchor(headings),
         *check_frozen_sections(
             lines, headings, in_scope, _tag_changelogs(root, rel_path, in_scope)
         ),
