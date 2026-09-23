@@ -65,7 +65,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import psutil
 
@@ -154,6 +154,19 @@ _GIT_PORCELAIN_RENAME_SEPARATOR = " -> "
 # psutil name() of the exec'd codex binary (codex_runner spawns it directly,
 # no shell or interpreter wrapper).
 _CODEX_PROCESS_NAME = "codex"
+
+
+class _SignallableProcess(Protocol):
+    """The subset of ``psutil.Process`` the terminate path calls."""
+
+    @property
+    def pid(self) -> int: ...
+
+    def terminate(self) -> None: ...
+
+    def kill(self) -> None: ...
+
+    def wait(self, timeout: float | None = None) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -287,7 +300,7 @@ def _codex_processes_in(worktree: Path) -> list[psutil.Process] | None:
     return matches
 
 
-def _terminate_codex_process(process: psutil.Process) -> bool:
+def _terminate_codex_process(process: _SignallableProcess) -> bool:
     """SIGTERM, bounded wait, then SIGKILL, bounded wait. True once it is gone.
 
     ``NoSuchProcess`` at any step means gone. psutil also raises it rather
@@ -308,7 +321,9 @@ def _terminate_codex_process(process: psutil.Process) -> bool:
     return True
 
 
-def _terminate_codex_processes(processes: Sequence[psutil.Process]) -> list[int]:
+def _terminate_codex_processes(
+    processes: Sequence[_SignallableProcess],
+) -> list[int]:
     """Terminate each of *processes*; return the pids still alive afterwards."""
     return [p.pid for p in processes if not _terminate_codex_process(p)]
 

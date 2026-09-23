@@ -816,7 +816,7 @@ class TestWorktreePorcelainCleanExceptVerdict:
         def _hang(*_args: object, **_kwargs: object) -> None:
             raise subprocess.TimeoutExpired(cmd="git", timeout=10)
 
-        monkeypatch.setattr(codex_boot.subprocess, "run", _hang)
+        monkeypatch.setattr(subprocess, "run", _hang)
 
         assert _worktree_porcelain_clean_except_verdict(tmp_path) is None
 
@@ -825,17 +825,16 @@ class TestCodexProcessesIn:
     """cwd-based scan: the codex child has no persisted PID to pin."""
 
     @staticmethod
-    def _procs(
-        monkeypatch: pytest.MonkeyPatch, *infos: dict[str, object]
-    ) -> list[SimpleNamespace]:
-        processes = [SimpleNamespace(info=info) for info in infos]
-        monkeypatch.setattr(codex_boot.psutil, "process_iter", lambda _attrs: processes)
-        return processes
+    def _procs(monkeypatch: pytest.MonkeyPatch, *infos: dict[str, object]) -> None:
+        processes = [
+            SimpleNamespace(info=info, pid=pid) for pid, info in enumerate(infos, 100)
+        ]
+        monkeypatch.setattr(psutil, "process_iter", lambda _attrs: processes)
 
     def test_every_codex_in_the_worktree_is_returned(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        processes = self._procs(
+        self._procs(
             monkeypatch,
             {"name": "bash", "cwd": str(tmp_path)},
             {"name": "codex", "cwd": None},
@@ -843,7 +842,10 @@ class TestCodexProcessesIn:
             {"name": "codex", "cwd": str(tmp_path)},
         )
 
-        assert _codex_processes_in(tmp_path) == processes[2:]
+        found = _codex_processes_in(tmp_path)
+
+        assert found is not None
+        assert [p.pid for p in found] == [102, 103]
 
     def test_codex_elsewhere_does_not_match(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -860,12 +862,17 @@ class TestCodexProcessesIn:
             def info(self) -> dict[str, object]:
                 raise psutil.NoSuchProcess(pid=1)
 
-        survivor = SimpleNamespace(info={"name": "codex", "cwd": str(tmp_path)})
+        survivor = SimpleNamespace(
+            info={"name": "codex", "cwd": str(tmp_path)}, pid=200
+        )
         monkeypatch.setattr(
-            codex_boot.psutil, "process_iter", lambda _attrs: [_Vanished(), survivor]
+            psutil, "process_iter", lambda _attrs: [_Vanished(), survivor]
         )
 
-        assert _codex_processes_in(tmp_path) == [survivor]
+        found = _codex_processes_in(tmp_path)
+
+        assert found is not None
+        assert [p.pid for p in found] == [200]
 
     def test_a_failed_process_listing_is_unknown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -875,7 +882,7 @@ class TestCodexProcessesIn:
         def _denied(_attrs: object) -> list[object]:
             raise psutil.AccessDenied(pid=1)
 
-        monkeypatch.setattr(codex_boot.psutil, "process_iter", _denied)
+        monkeypatch.setattr(psutil, "process_iter", _denied)
 
         assert _codex_processes_in(tmp_path) is None
 
