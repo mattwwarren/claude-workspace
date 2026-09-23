@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -334,7 +335,7 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
     with (
         patch(
             "cw.codex_background.run_review_with_fix_loop",
-            return_value=(result, object()),
+            return_value=(result, SimpleNamespace(reviewed_sha="deadbeef")),
         ),
         patch("cw.codex_background.render_verdict_comment", return_value="rendered"),
         patch("cw.codex_background._post_review_comment") as post_mock,
@@ -350,7 +351,13 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
     assert post_mock.call_args.kwargs["tracker"] is None
     artifact = post_mock.call_args.kwargs["artifact_path"]
     assert artifact == worktree / ".claude" / "review-verdict.md"
-    assert artifact.read_text(encoding="utf-8") == "rendered"
+    # #2279: the durable copy is stamped with the ticket and reviewed sha it is
+    # about; the posted comment (args[1]) is not.
+    persisted = artifact.read_text(encoding="utf-8")
+    assert persisted.startswith(
+        "<!-- cw-review-verdict ticket=T-v reviewed_sha=deadbeef -->\n"
+    )
+    assert persisted.endswith("rendered")
 
 
 def test_run_codex_review_and_complete_exception_path(
@@ -516,7 +523,7 @@ def test_run_codex_review_and_complete_marker_cleared_after_verdict_posting(
 
     def _capture_marker(**_kwargs: object) -> tuple[object, object]:
         during.append(len(load_executor_blocked_markers()))
-        return (result, object())
+        return (result, SimpleNamespace(reviewed_sha="deadbeef"))
 
     with (
         patch(
@@ -1010,15 +1017,40 @@ def test_post_review_comment_posts_on_github_or_unknown_tracker(
 
 
 def test_persist_review_verdict_writes_durable_copy(tmp_path: Path) -> None:
-    """#2095: the rendered verdict lands in .claude/review-verdict.md."""
+    """#2095: the rendered verdict lands in .claude/review-verdict.md; #2279:
+    prefixed by a provenance header naming the ticket and reviewed sha."""
     from cw.codex_background import (
         REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
+        REVIEW_VERDICT_PROVENANCE_PREFIX,
         _persist_review_verdict,
     )
 
-    path = _persist_review_verdict(tmp_path, "## Verdict\n")
+    path = _persist_review_verdict(
+        tmp_path, "## Verdict\n", ticket_id="T-9", reviewed_sha="abc123"
+    )
     assert path == tmp_path / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
-    assert path.read_text(encoding="utf-8") == "## Verdict\n"
+    assert path.read_text(encoding="utf-8") == (
+        f"{REVIEW_VERDICT_PROVENANCE_PREFIX} ticket=T-9 reviewed_sha=abc123 -->\n"
+        "_Verdict for ticket T-9 at `abc123`._\n\n"
+        "## Verdict\n"
+    )
+
+
+def test_review_verdict_file_is_git_ignored() -> None:
+    """#2279: the per-ticket verdict must never be committed — tracked, it
+    merged to main and every sibling branch inherited another ticket's verdict,
+    which finalize then read as its own (#2205)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    ignored = (repo_root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".claude/review-verdict.md" in ignored
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", ".claude/review-verdict.md"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tracked.returncode != 0, "review-verdict.md is still tracked"
 
 
 def test_persist_review_verdict_degrades_on_oserror(
@@ -1030,7 +1062,10 @@ def test_persist_review_verdict_degrades_on_oserror(
 
     (tmp_path / ".claude").write_text("not a directory", encoding="utf-8")
     with caplog.at_level("WARNING"):
-        assert _persist_review_verdict(tmp_path, "x") is None
+        assert (
+            _persist_review_verdict(tmp_path, "x", ticket_id="T", reviewed_sha="s")
+            is None
+        )
     assert any("review_verdict_persist_failed" in r.message for r in caplog.records)
 
 

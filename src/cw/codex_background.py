@@ -347,11 +347,45 @@ def _refuse_unguarded_claim_tier(
 # ``.claude/`` beside ``cw-context.json`` before any tracker post is attempted
 # (#2095). On a tracker the daemon cannot write to (Linear -- ADR-0013 keeps
 # cw's only programmatic tracker client GitHub-only), this file IS the record.
+#
+# Git-ignored, not tracked (#2279, ADR-0016 follow-up F10). It was tracked
+# until then, so each ticket's ``git add -A`` committed its own verdict, the
+# merge carried it to ``main``, and every sibling branch's next base sync
+# delivered some OTHER ticket's verdict into its worktree -- where finalize
+# reads it as the authority on whether to halt (#2205). The provenance header
+# below is the second half of that fix: a consumer can verify the file names
+# the ticket and sha it is about to act on, and refuse a mismatch.
 REVIEW_VERDICT_COMMENT_RELATIVE_PATH = Path(".claude") / "review-verdict.md"
 
+# Machine-readable provenance line, first line of the persisted verdict. An
+# HTML comment so it renders invisibly if the file is ever pasted as markdown.
+REVIEW_VERDICT_PROVENANCE_PREFIX = "<!-- cw-review-verdict"
 
-def _persist_review_verdict(worktree: Path, review_text: str) -> Path | None:
+
+def render_review_verdict_provenance(*, ticket_id: str, reviewed_sha: str) -> str:
+    """Return the two-line provenance header stamped on the persisted verdict.
+
+    Line 1 is the parseable form (``<!-- cw-review-verdict ticket=<id>
+    reviewed_sha=<sha> -->``); line 2 says the same thing for a human reading
+    the file. Both name the ticket and the sha the verdict was rendered
+    against, so a finalize step (or an operator) can tell a verdict that is
+    about THIS branch from one that leaked in from a sibling (#2279).
+    """
+    return (
+        f"{REVIEW_VERDICT_PROVENANCE_PREFIX} ticket={ticket_id} "
+        f"reviewed_sha={reviewed_sha} -->\n"
+        f"_Verdict for ticket {ticket_id} at `{reviewed_sha}`._\n\n"
+    )
+
+
+def _persist_review_verdict(
+    worktree: Path, review_text: str, *, ticket_id: str, reviewed_sha: str
+) -> Path | None:
     """Write *review_text* to the worktree's durable verdict file, best-effort.
+
+    The file is prefixed with :func:`render_review_verdict_provenance` naming
+    *ticket_id* and *reviewed_sha*; the posted tracker comment is NOT (the
+    ticket thread already scopes it).
 
     Returns the path written, or None when the write failed (logged). Never
     raises: this runs on the daemon thread's success path after the sentinel
@@ -359,9 +393,12 @@ def _persist_review_verdict(worktree: Path, review_text: str) -> Path | None:
     completed review into an unexpected-error completion.
     """
     path = worktree / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
+    header = render_review_verdict_provenance(
+        ticket_id=ticket_id, reviewed_sha=reviewed_sha
+    )
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, review_text)
+        atomic_write_text(path, header + review_text)
     except OSError as exc:
         _log.warning("review_verdict_persist_failed path=%s: %s", path, exc)
         return None
@@ -544,7 +581,12 @@ def _run_codex_review_and_complete(
             )
             # #2095: the durable copy is written first, unconditionally, so a
             # tracker the daemon cannot post to still leaves a record.
-            artifact_path = _persist_review_verdict(worktree, review_text)
+            artifact_path = _persist_review_verdict(
+                worktree,
+                review_text,
+                ticket_id=task.ticket_id,
+                reviewed_sha=verdict.reviewed_sha,
+            )
             _post_review_comment(
                 task.ticket_id,
                 review_text,

@@ -1187,9 +1187,12 @@ fresh as the last stage that rewrote it. What each stage does on re-entry:
 - `review` — live-fetches comments on every invocation (#1730), on **both**
   execution backends: `claude-native` inlines them into every reviewer prompt
   as Business Context, and `codex` inlines them via
-  `cw.codex_review._context._load_operator_comments`. The codex path is
-  `github-issues`-only — a `codex` REVIEW backend on any other tracker has no
-  in-process fetch op and cannot deliver them.
+  `cw.codex_review._context._load_operator_comments` — **operator comments
+  only**: any comment the pipeline itself posted (the `<!-- cw-agent-authored -->`
+  marker) is dropped, so a prior round's verdict never re-enters the next
+  round's prompt (#2213). The codex path is `github-issues`-only — a `codex`
+  REVIEW backend on any other tracker has no in-process fetch op and cannot
+  deliver them.
 
 A requeue that lands at `review` additionally stamps
 `TicketTask.pending_operator_comment` when it arrived via `--regress` (or Rule

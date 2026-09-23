@@ -51,12 +51,16 @@ not amended or superseded; the two seams stay independent.
    per-finding operator rejection first and is not run under
    `--auto-accept-defaults`. ADR-0015 invariant 4 stands; mechanical free-text
    ingestion is follow-up F1.
-7. **A pipeline-authored convenience payload must not re-enter the pipeline's
-   own prompt as evidence through the ticket-comments route.**
-   `_load_operator_comments` elides the `### Settle a finding` section — and
-   nothing else — from comments carrying `AGENT_COMMENT_MARKER`. The invariant
-   is deliberately scoped to that route; the persisted `.claude/review-verdict.md`
-   route is an accepted consequence below.
+7. **Nothing the pipeline itself wrote re-enters the pipeline's own prompt
+   as evidence through the ticket-comments route.** `_load_operator_comments`
+   drops every comment carrying `AGENT_COMMENT_MARKER`. As first shipped
+   (#2210) it elided only the `### Settle a finding` section; #2213 showed the
+   rest of a prior verdict comment — its scope assessment, stale out-of-scope
+   file list and MUST_FIX titles — producing byte-identical verdicts that
+   cited files absent from the diff, so the exclusion was widened to the whole
+   comment. The persisted `.claude/review-verdict.md` route is closed by
+   follow-up F10 (below), so no pipeline-rendered verdict text reaches a later
+   reviewer by either route.
 8. **Minting a suppression is an audited operator act.** `cw review settle`
    requires a non-blank `--reason`, records provenance on the entry itself
    (`actor`, a CLI-stamped UTC `recorded_at`, the verbatim `summary`, the
@@ -384,13 +388,16 @@ not amended or superseded; the two seams stay independent.
   operator-attributed `"outcome": "REJECTED"` JSON and could self-suppress a
   real finding, bypassing the per-lane gate) and blanking `outcome` in the
   visible payload (rejected: conflicts with the "no hand-editing" requirement).
-- **The elision covers the comments route only.** The same rendered review
-  text, settle payloads included, is written to the git-tracked
-  `.claude/review-verdict.md`, which reaches later reviewers as added lines in
-  the next prompt's `## Diff` section. That route stays open; it is
-  lower-likelihood (a diff hunk reads less like a binding adjudication than a
-  comment does). Fix is follow-up **F10** — strip the section from the
-  persisted artifact, or stop tracking the file.
+- **The persisted-artifact route (follow-up F10) is closed.** The same
+  rendered review text, settle payloads included, is written to
+  `.claude/review-verdict.md`. While that file was git-tracked it reached later
+  reviewers as added lines in the next prompt's `## Diff` section — and, worse,
+  each ticket's merge carried its verdict to `main`, so a sibling branch's
+  base sync delivered another ticket's verdict into its worktree, where
+  finalize reads it as the authority on whether to halt (#2279, #2205). The
+  file is now git-ignored and untracked, and the persisted copy is prefixed
+  with a provenance header naming the ticket and `reviewed_sha` so a consumer
+  can refuse a verdict that is not about the branch it is finalizing.
 - **Convention drift from `docs/release-playbook.md`.** The playbook says a
   `False` master short-circuits the entire module. Shadow recording runs with
   the master **off**, for any ticket that has a ledger — that is the whole
