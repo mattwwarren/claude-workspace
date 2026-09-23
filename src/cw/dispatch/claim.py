@@ -1164,20 +1164,27 @@ def _defer_occupied_claim(
     return _SpawnOutcome(occupied=True, error=exc.reason)
 
 
-def _raise_if_stale_tree_occupied(client: ClientConfig, branch: str) -> None:
+def _raise_if_stale_tree_occupied(
+    client: ClientConfig, branch: str, *, daemon: NativeDaemonClient
+) -> None:
     """Raise :exc:`WorktreeOccupiedError` if the stale tree must not be removed.
 
     Guard 1 of the stale-worktree handler in :func:`_spawn_claimed_task`
     (#2213): consults :func:`cw.worktree.live_home_reason` -- the same predicate
     the same-branch reuse refresh uses, failing closed -- on the branch's
-    canonical worktree path. A live cw session or daemon-roster worker homed
-    there, or an unreadable state or roster, means the tree is not ours to
-    remove. The raised error is caught by ``_spawn_claimed_task``'s
+    canonical worktree path. *daemon* is the caller's own resolved
+    :class:`~cw.native_daemon.NativeDaemonClient` (#2213 round 7), passed
+    straight through rather than letting ``live_home_reason`` default to the
+    real client -- a test injecting :class:`~cw.native_daemon.FakeNativeDaemonClient`
+    into this claim path must be the thing consulted, not the host's real
+    roster. A live cw session or daemon-roster worker homed there, or an
+    unreadable state or roster, means the tree is not ours to remove. The
+    raised error is caught by ``_spawn_claimed_task``'s
     ``except WorktreeOccupiedError`` and reaches :func:`_defer_occupied_claim`.
     Returns normally (no occupant) so the dirty check and removal may follow.
     """
     stale_tree = worktree_path_for(client, branch)
-    occupant = live_home_reason(stale_tree)
+    occupant = live_home_reason(stale_tree, daemon=daemon)
     if occupant is None:
         return
     msg = (
@@ -1255,6 +1262,7 @@ def _spawn_claimed_task(
                 allow_dirty_reuse=True,
                 refresh_on_reuse=True,
                 ticket_id=task.ticket_id,
+                native_daemon=resolved_native_daemon,
             )
         except StaleWorktreeError:
             # A stale worktree (wrong branch / not a worktree) refused
@@ -1298,7 +1306,7 @@ def _spawn_claimed_task(
             # returning that helper's outcome inline keeps this function within
             # the PLR0911 return budget and gives the reuse-refresh refusal and
             # this one a single exit.
-            _raise_if_stale_tree_occupied(client, branch)
+            _raise_if_stale_tree_occupied(client, branch, daemon=resolved_native_daemon)
             unsaved = unsaved_work_reason(client, branch)
             if unsaved is not None:
                 _log.warning(

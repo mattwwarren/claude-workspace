@@ -33,6 +33,7 @@ from cw.models import (
     OrchestratorEventType,
     SessionPurpose,
 )
+from cw.native_daemon import get_native_daemon_client
 from cw.session_retention import find_session_by_id
 from cw.worktree import (
     ReuseRefreshReport,
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig
+    from cw.native_daemon import NativeDaemonClient
 
 _log = logging.getLogger("cw.reconcile.review_recipes")
 
@@ -137,6 +139,7 @@ def dispatch_fix_agent(
     lane: str,
     parent: str,
     remote_branch: str | None = None,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> str:
     """Provision the ticket's worktree, refresh it against main, dispatch the fix agent.
 
@@ -227,6 +230,15 @@ def dispatch_fix_agent(
     :exc:`HookContextConflictError` (retry next tick) from a hard failure
     (clear the latch and escalate), and can only do so if both reach it.
 
+    ``native_daemon`` (#2213 round 7) is this dispatch's own
+    :class:`~cw.native_daemon.NativeDaemonClient`, threaded into
+    ``create_worktree``'s occupancy check instead of that check defaulting to
+    :func:`~cw.native_daemon.get_native_daemon_client` several calls down.
+    This function is the entry point (``cw.reconcile.fix_dispatch`` has none in
+    scope today), so it defaults to the real client when omitted -- the same
+    shape as :func:`cw.session.start_session` -- and tests inject
+    :class:`~cw.native_daemon.FakeNativeDaemonClient` here directly.
+
     ``parent`` is resolved via :func:`cw.session_retention.find_session_by_id`
     (cw id, ``claude_session_id``, or an archived session -- #2149) rather
     than passed straight through to ``spawn_create_impl``. When it cannot be
@@ -254,6 +266,7 @@ def dispatch_fix_agent(
             parent,
         )
 
+    daemon = native_daemon or get_native_daemon_client()
     _refuse_if_worktree_references_live_session(client, branch)
     refresh = ReuseRefreshReport()
     try:
@@ -264,6 +277,7 @@ def dispatch_fix_agent(
             refresh_on_reuse=True,
             refresh_report=refresh,
             ticket_id=ticket_id,
+            native_daemon=daemon,
         )
     except WorktreeOccupiedError as exc:
         # A live session or worker may be homed on this worktree. Every step
