@@ -47,6 +47,7 @@ from cw.models import (
     LaneConfig,
     LastResultSource,
     QueueItemStatus,
+    ReasoningEffort,
     SessionStatus,
     Stage,
     StageExecutorConfig,
@@ -744,6 +745,42 @@ def test_preflight_failure_persist_error_completes_session_and_reraises(
     assert recovery.blocker.reason == UNEXPECTED_ERROR
 
 
+def test_spawn_write_hook_context_failure_completes_session_and_reraises(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2280: a `_write_hook_context` raise must not leak the session ACTIVE.
+
+    The session is persisted ACTIVE (Step 1) before `_write_hook_context`
+    runs -- a raise there previously propagated straight out of spawn() with
+    nothing driving the session out of ACTIVE, the same leaked-ACTIVE class
+    that held a client-ceiling slot for ~2h (#2285's addendum). Still
+    synchronous here (pre-backgrounding), so re-raising is correct -- dispatch
+    is still on this stack and its own handler reverts the claimed task.
+    """
+    worktree = make_git_repo("wt-codex-hook-context-boom")
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = _sync_codex_executor(config, FakeCodexRunner(returncode=0))
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-hc", client="test", stage=Stage.REVIEW)
+
+    with (
+        patch("cw.executor._write_hook_context", side_effect=OSError("hook boom")),
+        pytest.raises(OSError, match="hook boom"),
+    ):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    state = load_state()
+    assert not any(s.status == SessionStatus.ACTIVE for s in state.sessions)
+    session = find_completed_session(state)
+    assert session.status == SessionStatus.COMPLETED
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == UNEXPECTED_ERROR
+
+
 def test_spawn_stamps_session_id_before_backgrounding(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
@@ -853,7 +890,9 @@ def test_spawn_threads_session_id_and_reasoning_effort_into_run_review(
     forwards the stage config's reasoning_effort rather than a default."""
     worktree = make_git_repo("wt-codex-sid-thread")
     runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND, reasoning_effort="max")
+    config = StageExecutorConfig(
+        backend=CODEX_BACKEND, reasoning_effort=ReasoningEffort.MAX
+    )
     executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-sid", client="test", stage=Stage.REVIEW)
