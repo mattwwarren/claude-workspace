@@ -133,6 +133,8 @@ def resolve_permission_mode(
 # session ids; the daemon updates this file synchronously when a worker
 # spawns or stops, so it's a reliable liveness oracle.
 _ROSTER_PATH = Path.home() / ".claude" / "daemon" / "roster.json"
+# FakeNativeDaemonClient's nominal roster path: never read, only reported.
+_FAKE_ROSTER_PATH = Path("/fake/claude/daemon/roster.json")
 
 # Base path for per-session supervisor state files. Each background session
 # has a ``<short_id>/state.json`` under this directory containing
@@ -331,11 +333,28 @@ class NativeDaemonClient(Protocol):
         """
         ...
 
+    @property
+    def roster_path(self) -> Path:
+        """The ``roster.json`` this client reads, for operator-facing messages."""
+        ...
+
     def list_live_session_short_ids(self) -> set[str]:
         """Return the set of short session ids the daemon considers live.
 
         Reads ``roster.json``; an unreadable or malformed roster yields an
         empty set so the caller can fall back to outage-safe behavior.
+        """
+        ...
+
+    def list_live_session_short_ids_fail_closed(self) -> set[str] | None:
+        """Return the live short session ids, or None when the roster is unreadable.
+
+        The fail-closed twin of :meth:`list_live_session_short_ids`, for a
+        caller about to *mutate* on the answer (the requeue live-session guard,
+        GitHub #2275) -- same split as :meth:`list_live_worker_cwds` (#2213):
+        ``None`` means the roster could not be read or understood and the
+        caller must assume a session may be live; an *absent* roster (no
+        daemon has ever run) is an empty set.
         """
         ...
 
@@ -360,9 +379,10 @@ def _read_roster_workers(path: Path) -> dict[str, object] | None:
     """Read the roster's ``workers`` mapping: the one parser for roster.json.
 
     Shared by :meth:`RealNativeDaemonClient.list_live_session_short_ids` (the
-    fail-open liveness view) and
+    fail-open liveness view), its fail-closed twin
+    :meth:`RealNativeDaemonClient.list_live_session_short_ids_fail_closed`, and
     :meth:`RealNativeDaemonClient.list_live_worker_cwds` (the fail-closed
-    occupancy view) so the two can never disagree about what the file says.
+    occupancy view) so they can never disagree about what the file says.
 
     Returns ``{}`` when the roster file is absent (no daemon has ever run) and
     ``None`` for every other failure -- another ``OSError``, bytes that are not
@@ -487,15 +507,29 @@ class RealNativeDaemonClient:
             raise CwError(msg)
         return match.group(1)
 
+    @property
+    def roster_path(self) -> Path:
+        """The ``roster.json`` path this client reads."""
+        return self._roster_path
+
     def list_live_session_short_ids(self) -> set[str]:
         """Read ``roster.json`` and return the set of worker short ids.
 
         Fails open: an absent, unreadable or malformed roster yields an empty
         set (see :func:`_read_roster_workers`).
         """
+        short_ids = self.list_live_session_short_ids_fail_closed()
+        return set() if short_ids is None else short_ids
+
+    def list_live_session_short_ids_fail_closed(self) -> set[str] | None:
+        """Read ``roster.json``: worker short ids, or None if unreadable.
+
+        An absent roster is an empty set; an unreadable or malformed one is
+        ``None`` (logged at WARNING by :func:`_read_roster_workers`).
+        """
         workers = _read_roster_workers(self._roster_path)
         if workers is None:
-            return set()
+            return None
         return {key for key in workers if isinstance(key, str)}
 
     def list_live_worker_cwds(self) -> frozenset[Path] | None:
@@ -555,8 +589,11 @@ class FakeNativeDaemonClient:
         self.raise_usage_limit: bool = False
         self.usage_limit_reset_at: datetime | None = None
         self.raise_unregistered: bool = False
-        # Simulates a present-but-unreadable roster for list_live_worker_cwds.
+        # Simulates a present-but-unreadable roster for the fail-closed views
+        # (list_live_worker_cwds, list_live_session_short_ids_fail_closed).
         self.roster_unreadable: bool = False
+        # Nothing reads it; named in fail-closed refusal messages (#2275).
+        self.roster_path: Path = _FAKE_ROSTER_PATH
 
     def spawn_bg(
         self,
@@ -610,6 +647,12 @@ class FakeNativeDaemonClient:
 
     def list_live_session_short_ids(self) -> set[str]:
         """Return a copy of the in-memory live set."""
+        return set(self._live)
+
+    def list_live_session_short_ids_fail_closed(self) -> set[str] | None:
+        """Return a copy of the in-memory live set; None if unreadable."""
+        if self.roster_unreadable:
+            return None
         return set(self._live)
 
     def list_live_worker_cwds(self) -> frozenset[Path] | None:
