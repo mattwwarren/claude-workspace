@@ -116,6 +116,7 @@ from cw.review_findings._consolidate import (
     _select_rejected_must_fix,
     consolidate_verdict,
     write_review_verdict,
+    write_review_verdict_envelope,
 )
 from cw.review_findings._dedup import (
     _dedup_key,
@@ -149,6 +150,7 @@ from cw.review_findings._models import (
     ReviewerRunMetrics,
     ReviewerRunRecord,
     ReviewVerdict,
+    ReviewVerdictEnvelope,
     Severity,
     StrippedEscalation,
     TrackingDisposition,
@@ -189,6 +191,7 @@ __all__ = [
     "RejectedFinding",
     "RejectedFindingReason",
     "ReviewVerdict",
+    "ReviewVerdictEnvelope",
     "ReviewerFindingsDocument",
     "ReviewerHealthStatus",
     "ReviewerRunFailure",
@@ -225,4 +228,5 @@ __all__ = [
     "parse_reviewer_document",
     "validate_reviewer_document",
     "write_review_verdict",
+    "write_review_verdict_envelope",
 ]
