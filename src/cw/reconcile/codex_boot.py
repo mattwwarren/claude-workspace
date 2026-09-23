@@ -153,8 +153,6 @@ def _worktree_porcelain_clean_except_verdict(worktree: Path) -> bool | None:
         return None
     allowed = str(REVIEW_VERDICT_COMMENT_RELATIVE_PATH)
     for line in completed.stdout.splitlines():
-        if not line:
-            continue
         entry = line[_GIT_PORCELAIN_PATH_OFFSET:]
         paths = entry.split(_GIT_PORCELAIN_RENAME_SEPARATOR, 1)
         if any(path != allowed for path in paths):

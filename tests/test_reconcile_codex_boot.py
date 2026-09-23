@@ -19,7 +19,7 @@ import psutil
 import pytest
 
 from cw.config import load_clients, load_state, save_state
-from cw.dev_queue import add_ticket, load_dev_queue
+from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import HookContextConflictError
 from cw.models import (
@@ -353,6 +353,27 @@ def test_lingering_codex_process_is_parked(
     assert reap_orphaned_codex_sessions_at_boot() == 1
 
     _assert_parked("test-codex-boot-lingering", _PARK_REASON_CODEX_PROCESS_RUNNING)
+    _assert_session_closed()
+
+
+def test_unestablishable_baseline_is_parked_as_git_error(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No stage_base_ref and no origin/<branch> to fall back to → park."""
+    _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    store = load_dev_queue()
+    store.tasks[0].stage_base_ref = None
+    save_dev_queue(store)
+    _no_fetch(monkeypatch)
+    _no_codex_process(monkeypatch)
+    _use_auto_reap_policy(monkeypatch)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+
+    _assert_parked("test-codex-boot-no-baseline", _PARK_REASON_GIT_ERROR)
     _assert_session_closed()
 
 
