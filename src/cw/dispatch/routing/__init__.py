@@ -247,13 +247,14 @@ _MUST_FIX_MECHANICALLY_REJECTED_REASON = "codex_must_fix_mechanically_rejected"
 # _park_must_fix_mechanically_rejected above -- the one gate-class park whose
 # breadcrumbs is genuinely populated from blocker.reason rather than a
 # hardcoded "" literal. Named + anchored so
-# .claude/skills/orchestrate-sprint/scripts/attention_monitor.sh's
-# hand-transcribed Python set (which runs outside src/cw and cannot import
-# this constant) has one file to keep in sync against. See #1597.
+# .claude/skills/orchestrate-sprint/scripts/attention_watch.py's
+# hand-transcribed BLOCKER_REASON_PAUSED_STATUSES (which runs outside src/cw
+# and cannot import this constant) has one file to keep in sync against;
+# tests/test_attention_watch.py pins the two equal. See #1597, #2250.
 #
 # IMPORTANT: this constant has no runtime reader anywhere in src/cw -- it is
-# the canonical *declaration* consumed only by attention_monitor.sh (an
-# out-of-repo hand-copy) and by the pinning test below. Adding a paused_status
+# the canonical *declaration* consumed only by attention_watch.py (an
+# out-of-package hand-copy) and by the pinning tests. Adding a paused_status
 # here does NOT by itself cause a breadcrumb to be emitted for it: the
 # producing _park_* helper must independently stamp non-empty breadcrumbs
 # content at its own call site. Every gate-class park other than

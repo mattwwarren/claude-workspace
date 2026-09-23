@@ -12866,9 +12866,10 @@ class TestApplyStagedDecision:
 
     def test_breadcrumb_eligible_paused_statuses_composition(self) -> None:
         """#1597 Item A: BREADCRUMB_ELIGIBLE_PAUSED_STATUSES composition drift
-        guard. Anchors attention_monitor.sh's hand-transcribed
-        _BLOCKER_REASON_PAUSED_STATUSES (outside src/cw, cannot import this
-        constant) against its derivation: the STAGE_FAILURE_STATUSES members
+        guard. Anchors attention_watch.py's hand-transcribed
+        BLOCKER_REASON_PAUSED_STATUSES (outside src/cw, cannot import this
+        constant; pinned equal in test_attention_watch.py) against its
+        derivation: the STAGE_FAILURE_STATUSES members
         that can carry a non-null blocker (schema.py's #777 exception --
         'blocked'/'merge_gate_blocked' only) plus the _AWAITING_OPERATOR_REASON
         substitute Rule 5 writes when blocker_reason is in
