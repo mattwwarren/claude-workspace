@@ -15,6 +15,11 @@ For each RUNNING task in the dev-queue (one client or all), look up:
 Then compute a WAIT / PEEK / STOP recommendation per row so the operator can
 decide whether to keep a session alive or close it via ``cw spawn close``.
 
+BLOCKED_ON_USER tasks are listed too, after the RUNNING rows, with a
+``BLOCKED`` recommendation and their park disposition: they have no session
+to inspect, but a checkpoint peek that omitted them could report all-clear
+while a ticket sat parked for hours (#2250).
+
 Reports only — never stops sessions itself.
 """
 
@@ -100,14 +105,23 @@ def _reached_deep_stage(high_water: Stage | None) -> bool:
 
 
 RECOMMEND_BLIND = "PEEK-BLIND"
+RECOMMEND_BLOCKED = "BLOCKED"
 _SIGNAL_SOURCE_BLIND = "blind"
 _SIGNAL_SOURCE_TRANSCRIPT = "transcript"
+_SIGNAL_SOURCE_QUEUE = "queue"
 _EPOCH = dt.datetime.fromtimestamp(0, tz=dt.UTC)
 
 
 def load_running_tasks(client: str | None) -> list[TicketTask]:
     """Return RUNNING TicketTask entries, optionally filtered by client."""
     return [t for t in list_tickets(client) if t.status == QueueItemStatus.RUNNING]
+
+
+def load_blocked_tasks(client: str | None) -> list[TicketTask]:
+    """Return BLOCKED_ON_USER TicketTask entries, optionally filtered by client."""
+    return [
+        t for t in list_tickets(client) if t.status == QueueItemStatus.BLOCKED_ON_USER
+    ]
 
 
 def _load_session_refs(session_id: str | None) -> dict[str, Any]:
@@ -780,8 +794,43 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
     }
 
 
+def format_blocked_row(t: TicketTask, now: dt.datetime) -> dict[str, Any]:
+    """Build a report dict for one BLOCKED_ON_USER task.
+
+    A parked row has no running session to inspect, so it carries only
+    dev-queue state: ``status`` is the park disposition and ``age_min`` is
+    how long it has been parked. Same keys as a RUNNING row, so a checkpoint
+    peek can never report all-clear while a ticket sits parked (#2250).
+    """
+    parked_min = (
+        minutes_since(t.completed_at.isoformat(), now) if t.completed_at else None
+    )
+    return {
+        "ticket": t.ticket_id,
+        "session": (t.session_id or "-")[:12],
+        "client": t.client,
+        "attempts": t.attempts,
+        "unproductive_attempts": t.unproductive_attempts,
+        "age_min": round(parked_min, 1) if parked_min is not None else None,
+        "idle_min": None,
+        "stage": t.stage.value,
+        "status": t.disposition,
+        "pr": None,
+        "pr_state": None,
+        "recommend": RECOMMEND_BLOCKED,
+        "reason": (
+            f"BLOCKED_ON_USER ({t.disposition or 'unknown'}) — parked, no running "
+            "session; needs operator action"
+        ),
+        "signal_source": _SIGNAL_SOURCE_QUEUE,
+        "jsonl_idle_min": None,
+        "stage_high_water": t.stage_high_water,
+        "pipeline_stage": t.stage,
+    }
+
+
 def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]]:
-    """Enumerate RUNNING tasks and build one report row per task."""
+    """Build one report row per RUNNING task, then one per BLOCKED_ON_USER task."""
     rows = []
     for t in load_running_tasks(client):
         transcript = find_transcript_for_ticket(
@@ -805,6 +854,7 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
                 "jsonl_idle_min": _compute_jsonl_idle_min(t, now),
             }
         rows.append(format_row(t, info, now))
+    rows.extend(format_blocked_row(t, now) for t in load_blocked_tasks(client))
     return rows
 
 
@@ -812,7 +862,7 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
     """Print rows as a formatted text table with a suggested-stops footer."""
     rows = list(rows)
     if not rows:
-        click.echo("No RUNNING tasks found.")
+        click.echo("No RUNNING or BLOCKED_ON_USER tasks found.")
         return
     cols = [
         ("ticket", 7),
