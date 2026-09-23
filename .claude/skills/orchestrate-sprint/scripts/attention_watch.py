@@ -244,6 +244,10 @@ def drain(
     idle_deadline = time.monotonic() + max_idle_s
     burst_deadline: float | None = None
     while True:
+        # Checked before reading, not only on an empty queue: a steady stream
+        # of events must still end the burst on time (#2250 review).
+        if burst_deadline is not None and time.monotonic() >= burst_deadline:
+            return wake
         deadline = idle_deadline if burst_deadline is None else burst_deadline
         try:
             raw = lines_q.get(timeout=max(0.0, deadline - time.monotonic()))

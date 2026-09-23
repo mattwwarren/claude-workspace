@@ -234,13 +234,16 @@ then a ticket you sent to `debt` wedges and never pages you. (Real incident:
 this client — the normal case — a lane argument can only lose you events.
 
 **The watch exits on every event, so "leftover watch" now means at most one
-process per client, and only after a crash.** Because the script always exits
+process per (client, lane) stamp, and only after a crash.** Because the script always exits
 after it fires, a stale watch surviving a `/clear` resume is not the
 steady-state risk it was under the old persistent-Monitor design — it can
 only happen if a prior watch crashed instead of exiting cleanly. Before
-arming a new one, check: `pgrep -f attention_watch.py`. If that returns a
-PID, stop that process first — don't let two overlapping watches race to
-deliver the same event twice.
+arming a new one, check for a watch on the *same* client and lane:
+`pgrep -f "attention_watch.py <client>( |$)"` (append ` <lane>` when you
+arm lane-scoped). If that returns a PID, stop that process first, so two
+watches never share one stamp file or deliver the same event twice. Watches
+for other clients, or for other lanes in a parallel-orchestrator setup, use
+their own stamp files and are not leftovers.
 
 **Triage the event, then re-arm — and re-arm *before* asking the operator any
 blocking question.** The order is: event fires → watch exits → triage →

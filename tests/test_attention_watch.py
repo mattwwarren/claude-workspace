@@ -30,7 +30,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -310,6 +310,21 @@ def test_event_after_burst_window_not_included(
     assert "late" not in state.seen
     # Unconsumed, so the stamp stays behind it and the next arm replays it.
     assert state.last_created == "2026-01-01T00:00:01Z"
+
+
+def test_steady_stream_still_ends_burst_on_time(
+    aw: ModuleType, fast_burst: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A queue that never goes empty must not keep the burst open past its
+    deadline (#2250 review). A fake clock that advances on every read makes
+    the deadline pass mid-backlog, deterministically."""
+    ticks = iter(float(i) * fast_burst for i in range(10_000))
+    monkeypatch.setattr(aw, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    backlog = 100
+    events = [_event(f"s{i}", "2026-01-01T00:00:05.1Z") for i in range(backlog)]
+    state = aw.ResumeState(_SEED_STAMP, set())
+    wake = aw.drain(_filled_queue(events), state, max_idle_s=60.0)
+    assert 0 < len(wake.lines) < backlog
 
 
 @pytest.mark.usefixtures("fast_burst")
