@@ -141,7 +141,10 @@ def _spawn_close_requeue_impl(
     *closed_session_id* (the resolved ``Session.id``) is exempted from
     ``requeue_ticket``'s live-session guard (#2275), since its roster entry
     may lag the close. Any *other* live session for the ticket still raises
-    ``RequeueLiveSessionError``, which propagates to ``handle_errors``.
+    ``RequeueLiveSessionError``, which propagates to ``handle_errors`` -- as
+    does its ``RequeueRosterUnreadableError`` subclass: an unreadable roster
+    cannot rule out a live session the exemption does not name, so the close
+    lands but the requeue is refused.
     """
     if ticket_id is None or client is None:
         click.echo(

@@ -1146,7 +1146,14 @@ plus a `cw spawn close <sid> --requeue` remediation. The same guard covers
 as `skipped_live_session`) and the `auto_fix_ci` re-dispatch (which re-arms
 its one-shot latch so a later tick retries). `cw spawn close --requeue`
 exempts only the session it just closed; a second live session for the same
-ticket is still refused. The manual transcript-mtime check above remains
+ticket is still refused. The guard fails closed, like the worktree reuse
+guard (#2213): an unreadable or malformed roster refuses every one of those
+paths with `daemon roster unreadable at <path>; cannot rule out a live session
+for #<T>` (drain reports it as `skipped_roster_unreadable`), because nothing
+can show that no session is live. The just-closed exemption does not lift this
+refusal: the close still happens, but the requeue does not. Fix the roster file
+and retry. A roster file that does not exist means no daemon is running, and
+the requeue goes ahead. The manual transcript-mtime check above remains
 necessary only for work the daemon roster does not know about
 (non-daemon-origin sessions).
 
