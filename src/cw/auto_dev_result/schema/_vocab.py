@@ -124,9 +124,12 @@ FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset({"agent_block"})
 # FINALIZE_REGRESS_BLOCKER_REASONS above -- self-heals nothing, just tags the
 # park so the attention layer and (later, A4) auto-resume can tell it apart
 # from a genuine `blocked`. push_auth_failed (#1049) is retro-classified as
-# the first instance.
+# the first instance. dependency_unmerged (#2260) is the second: a ticket
+# split into a dependency chain (the #2233/#2213 precedent) whose downstream
+# leg can't proceed until the upstream PR merges -- an unreachable dependency,
+# not a broken leg.
 OPERATOR_UNAVAILABLE_BLOCKER_REASONS: frozenset[str] = frozenset(
-    {"push_auth_failed", "operator_unavailable"}
+    {"push_auth_failed", "operator_unavailable", "dependency_unmerged"}
 )
 # blocker.reason emitted when a stage finds a destructive directive (delete a
 # remote branch, force-push/rewrite shared history, discard work, close or
