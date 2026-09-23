@@ -1,6 +1,6 @@
 """Tests for ``cw.dispatch.branch_freshness`` — ticket-branch staleness (#1823).
 
-Mirrors ``tests/test_worktree.py``'s ``TestComputeBranchDiffScope`` fixture
+Mirrors ``tests/test_worktree_scope.py``'s ``TestComputeBranchDiffScope`` fixture
 shape: real ``git`` repos built in ``tmp_path`` via the shared ``make_git_repo``
 fixture, with ``origin`` pointed at the repo itself so ``origin/<default>`` is a
 resolvable ref without a network. Every failure mode asserts the fail-open

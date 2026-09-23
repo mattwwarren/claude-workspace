@@ -4203,10 +4203,9 @@ def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
 
     _verify_salvaged_scope now resolves default_branch via the shared
     cw.worktree.resolve_scope_guard_default_branch helper (#1487 fix loop),
-    which calls cw.worktree.load_effective_clients directly rather than the
+    which calls cw.worktree._scope.load_effective_clients directly rather than the
     reconcile-cluster _deps indirection.
     """
-    from cw import worktree as wt_mod
     from cw.exceptions import CwError
 
     home = tmp_path / "home"
@@ -4218,7 +4217,7 @@ def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
         msg = "clients.yaml is unreadable"
         raise CwError(msg)
 
-    monkeypatch.setattr(wt_mod, "load_effective_clients", _boom)
+    monkeypatch.setattr("cw.worktree._scope.load_effective_clients", _boom)
 
     result = _parse_scope_guard_sentinel(
         home, worktree, _inflate_scope(_stage_complete_payload())

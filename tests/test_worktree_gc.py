@@ -1270,7 +1270,7 @@ class TestLiveWorktreePaths:
         state = CwState(sessions=sessions)
 
         with (
-            patch("cw.worktree.load_state", return_value=state),
+            patch("cw.worktree._refresh.load_state", return_value=state),
             patch("cw.worktree_gc.load_dev_queue", return_value=MagicMock(tasks=[])),
         ):
             paths = _live_worktree_paths()
@@ -1290,7 +1290,7 @@ class TestLiveWorktreePaths:
         queue.tasks = [task]
 
         with (
-            patch("cw.worktree.load_state", return_value=CwState()),
+            patch("cw.worktree._refresh.load_state", return_value=CwState()),
             patch("cw.worktree_gc.load_dev_queue", return_value=queue),
         ):
             paths = _live_worktree_paths()
@@ -1302,7 +1302,7 @@ class TestLiveWorktreePaths:
         """A state-read failure (I/O or parse) degrades to "no live sessions
         known": a corrupt state file never blocks GC."""
         with (
-            patch("cw.worktree.load_state", side_effect=error),
+            patch("cw.worktree._refresh.load_state", side_effect=error),
             patch("cw.worktree_gc.load_dev_queue", return_value=MagicMock(tasks=[])),
         ):
             paths = _live_worktree_paths()
@@ -1315,7 +1315,7 @@ class TestLiveWorktreePaths:
         unexpected exception type is a bug and now surfaces through GC too,
         instead of silently disabling the live-session guard."""
         with (
-            patch("cw.worktree.load_state", side_effect=RuntimeError("bug")),
+            patch("cw.worktree._refresh.load_state", side_effect=RuntimeError("bug")),
             patch("cw.worktree_gc.load_dev_queue", return_value=MagicMock(tasks=[])),
             pytest.raises(RuntimeError, match="bug"),
         ):
@@ -1323,7 +1323,7 @@ class TestLiveWorktreePaths:
 
     def test_dev_queue_load_error_returns_empty(self) -> None:
         with (
-            patch("cw.worktree.load_state", return_value=CwState()),
+            patch("cw.worktree._refresh.load_state", return_value=CwState()),
             patch(
                 "cw.worktree_gc.load_dev_queue",
                 side_effect=Exception("queue corrupt"),

@@ -95,6 +95,7 @@ from cw.worktree import FetchOutcome, FetchResult, create_worktree, worktree_pat
 # client / lane), _pr_state builds a PrState with sensible OPEN defaults.
 # _client_with_lanes builds a ClientConfig with the given lanes (reused by the
 # resolve-precedence tests below).
+from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _clean_git_env,
     git_in,
@@ -2854,7 +2855,7 @@ def _make_fix_client(
     ``create_worktree`` actually walks this repo with git, so ``_make_client``'s
     bare-mkdir workspace (tests/test_spawn.py) cannot stand in here. Combines
     that helper's shape with the ``ClientConfig(worktree_base=...)`` pattern
-    precedented in tests/test_worktree.py.
+    precedented in tests/test_worktree_lifecycle.py.
     """
     repo = make_git_repo(f"{name}-main")
     return ClientConfig(
@@ -3217,8 +3218,9 @@ def test_dispatch_fix_agent_reports_failed_refresh_fetch_in_friction_note(
     worktree = create_worktree(client, branch, allow_dirty_reuse=True)
     # In sync with origin, so the HEAD check passes even though the refresh
     # fetch (patched) fails; only the dispatch's own real ``git fetch`` runs.
-    monkeypatch.setattr(
-        "cw.worktree.fetch_feature_branch",
+    patch_worktree(
+        monkeypatch,
+        "fetch_feature_branch",
         lambda _c, _b: FetchResult(
             FetchOutcome.FAILED, "rc=128: fatal: Could not read from remote repository."
         ),

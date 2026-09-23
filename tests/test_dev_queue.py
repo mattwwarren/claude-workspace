@@ -67,6 +67,7 @@ from cw.models import (
     TicketTask,
     WatchedPr,
 )
+from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _make_daemon_session,
     _make_ticket_task,
@@ -12676,10 +12677,8 @@ class TestPlanIsReviewedTrackerAware:
         *,
         checked_out: str | None = "dev/GEN-500",
     ) -> None:
-        monkeypatch.setattr(
-            "cw.worktree.worktree_path_for", lambda _client, _branch: wt
-        )
-        monkeypatch.setattr("cw.worktree._checked_out_branch", lambda _wt: checked_out)
+        patch_worktree(monkeypatch, "worktree_path_for", lambda _client, _branch: wt)
+        patch_worktree(monkeypatch, "_checked_out_branch", lambda _wt: checked_out)
 
     def test_linear_tracker_skips_fetch_and_reads_branch_worktree(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -12808,7 +12807,7 @@ class TestPlanIsReviewedTrackerAware:
             msg = "worktree_path_for must not run when worktree_path is stamped"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.worktree.worktree_path_for", _boom)
+        patch_worktree(monkeypatch, "worktree_path_for", _boom)
         store = load_dev_queue()
         store.tasks[0].worktree_path = tmp_path / "wt-explicit"
         self._write_wt_plan(store.tasks[0].worktree_path, plan_body())

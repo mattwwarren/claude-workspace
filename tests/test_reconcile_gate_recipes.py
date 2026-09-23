@@ -43,6 +43,7 @@ from cw.reconcile.gate_recipes import (
     resolve_gate_recipe_enabled,
     run_gate_recipes,
 )
+from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _make_daemon_session,
     _make_ticket_task,
@@ -2431,8 +2432,8 @@ class TestDetectAdoptPlanTrackerAware:
         wt = tmp_path / "wt"
         (wt / ".cw").mkdir(parents=True)
         (wt / ".cw" / "plan.md").write_text(plan_body(), encoding="utf-8")
-        monkeypatch.setattr("cw.worktree.worktree_path_for", lambda _c, _b: wt)
-        monkeypatch.setattr("cw.worktree._checked_out_branch", lambda _wt: "dev/GEN-1")
+        patch_worktree(monkeypatch, "worktree_path_for", lambda _c, _b: wt)
+        patch_worktree(monkeypatch, "_checked_out_branch", lambda _wt: "dev/GEN-1")
         task = _make_task(stage=Stage.PLAN, worktree_path=None)
         state = CwState(sessions=[_make_session(last_result=_plan_result())])
 
@@ -2451,8 +2452,9 @@ class TestDetectAdoptPlanTrackerAware:
             "cw.reconcile.gate_recipes.fetch_approved_plan_comment",
             _fetch_must_not_run,
         )
-        monkeypatch.setattr(
-            "cw.worktree.worktree_path_for",
+        patch_worktree(
+            monkeypatch,
+            "worktree_path_for",
             lambda _c, _b: tmp_path / "missing",
         )
         task = _make_task(stage=Stage.PLAN, worktree_path=None)
