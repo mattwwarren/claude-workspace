@@ -14,7 +14,6 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, MagicMock, patch
 
@@ -60,7 +59,12 @@ from cw.models import (
 )
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_findings import ReviewVerdictEnvelope, consolidate_verdict
-from tests.conftest import _make_daemon_session, _make_diff, _make_finding, _make_reviewer_doc
+from tests.conftest import (
+    _make_daemon_session,
+    _make_diff,
+    _make_finding,
+    _make_reviewer_doc,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -728,11 +732,16 @@ def test_run_codex_review_and_complete_marker_cleared_after_verdict_posting(
         reason=CODEX_REVIEW_UNPARSEABLE,
         stage_reached="stage3_review",
     )
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+        _make_diff(),
+        reviewed_sha="deadbeef",
+    )
     during: list[int] = []
 
     def _capture_marker(**_kwargs: object) -> tuple[object, object]:
         during.append(len(load_executor_blocked_markers()))
-        return (result, SimpleNamespace(reviewed_sha="deadbeef"))
+        return (result, verdict)
 
     with (
         patch(
@@ -1338,7 +1347,9 @@ def test_persist_structured_review_verdict_writes_durable_copy(tmp_path: Path) -
     path = _persist_structured_review_verdict(tmp_path, verdict, ticket_id="T-1")
     assert path == tmp_path / ".claude" / "review-verdict.json"
     assert path is not None
-    envelope = ReviewVerdictEnvelope.model_validate_json(path.read_text(encoding="utf-8"))
+    envelope = ReviewVerdictEnvelope.model_validate_json(
+        path.read_text(encoding="utf-8")
+    )
     assert envelope.ticket_id == "T-1"
     assert envelope.verdict.accepted[0].finding.evidence == "def broken():"
 

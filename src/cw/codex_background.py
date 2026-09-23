@@ -49,6 +49,7 @@ from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.models.orchestrator_config import CODEX_TIER_CLAIM_SUPPRESSION
 from cw.review_finding_dispositions import merge_finding_dispositions
+from cw.review_findings import write_review_verdict_envelope
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
@@ -59,6 +60,7 @@ if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
     from cw.review_finding_dispositions import FindingDisposition
+    from cw.review_findings import ReviewVerdict
 
 _log = logging.getLogger(__name__)
 
@@ -406,6 +408,44 @@ def _persist_review_verdict(
     return path
 
 
+# Durable copy of the STRUCTURED review verdict, beside REVIEW_VERDICT_
+# COMMENT_RELATIVE_PATH's rendered ``.md`` (#2223/#1108). Where the ``.md``
+# gives a human the rendered comment text, this gives a consumer (e.g.
+# ``cw review check-voided``) the per-finding ``evidence``/``severity``/
+# ``file``/``summary`` fields as real fields rather than prose — closing the
+# gap where an operator adjudicating a ``codex_must_fix_findings`` park with
+# the fix loop disabled had no source for ``check-voided``'s evidence anchor.
+# Provenance rides on the wrapping ``ReviewVerdictEnvelope`` (``ticket_id``),
+# not a text stamp — JSON has no comment syntax for one.
+REVIEW_VERDICT_JSON_RELATIVE_PATH = Path(".claude") / "review-verdict.json"
+
+
+def _persist_structured_review_verdict(
+    worktree: Path,
+    verdict: ReviewVerdict,
+    *,
+    ticket_id: str,
+    relative_path: Path = REVIEW_VERDICT_JSON_RELATIVE_PATH,
+) -> Path | None:
+    """Write *verdict* to the worktree as a :class:`ReviewVerdictEnvelope`, best-effort.
+
+    Mirrors :func:`_persist_review_verdict`'s mkdir/atomic-write/catch-OSError/
+    never-raise contract, delegating the actual serialize+write to
+    :func:`write_review_verdict_envelope`.
+
+    Returns the path written, or None when the write failed (logged). Never
+    raises, for the same reason :func:`_persist_review_verdict` never does.
+    """
+    path = worktree / relative_path
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_review_verdict_envelope(verdict, ticket_id=ticket_id, path=path)
+    except OSError as exc:
+        _log.warning("review_verdict_persist_failed path=%s: %s", path, exc)
+        return None
+    return path
+
+
 # Durable copy of a zero-documents park's blocker, written beside
 # review-verdict.md (#2280). ``verdict`` is None on this path -- every
 # reviewer failed, so there is no ReviewVerdict to render -- so this carries
@@ -619,6 +659,9 @@ def _run_codex_review_and_complete(
                 review_text,
                 ticket_id=task.ticket_id,
                 reviewed_sha=verdict.reviewed_sha,
+            )
+            _persist_structured_review_verdict(
+                worktree, verdict, ticket_id=task.ticket_id
             )
             _post_review_comment(
                 task.ticket_id,
