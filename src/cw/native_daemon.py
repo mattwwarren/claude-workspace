@@ -592,6 +592,22 @@ class FakeNativeDaemonClient:
             self._cwd_by_id[short_id] = cwd
         return short_id
 
+    def seed_live_worker(self, cwd: Path) -> str:
+        """Register a live worker homed at *cwd* without a real spawn (#2213).
+
+        Test-only seeding for occupancy tests: registers the worker directly in
+        the live set so :meth:`list_live_worker_cwds` reports it, without
+        appending to ``spawn_calls`` the way :meth:`spawn_bg` would -- a test
+        proving "occupied, so nothing was spawned" must not itself record a
+        spawn to make the occupant appear. Returns the short id, for a test
+        that also wants to :meth:`stop` it.
+        """
+        self._counter += 1
+        short_id = f"{self._counter:08x}"
+        self._live.add(short_id)
+        self._cwd_by_id[short_id] = cwd
+        return short_id
+
     def list_live_session_short_ids(self) -> set[str]:
         """Return a copy of the in-memory live set."""
         return set(self._live)
