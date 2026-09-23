@@ -2664,7 +2664,7 @@ def _make_fix_client(
     ``create_worktree`` actually walks this repo with git, so ``_make_client``'s
     bare-mkdir workspace (tests/test_spawn.py) cannot stand in here. Combines
     that helper's shape with the ``ClientConfig(worktree_base=...)`` pattern
-    precedented in tests/test_worktree.py.
+    precedented in tests/test_worktree_lifecycle.py.
     """
     repo = make_git_repo(f"{name}-main")
     return ClientConfig(
