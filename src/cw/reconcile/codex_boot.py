@@ -101,7 +101,7 @@ from cw.reconcile._shared import (
 from cw.reconcile.tasks import _resolve_task_policy
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from cw.models import ClientConfig, OrchestratorConfig, Session, Stage, TicketTask
 
@@ -142,6 +142,9 @@ _PARK_REASON_CODEX_PROCESS_SURVIVED = (
 _PARK_REASON_PROCESS_SCAN_FAILED = (
     "the process table could not be scanned for a lingering codex writer"
 )
+_PARK_REASON_NO_WORKTREE_PATH = (
+    "no worktree path is recorded, so a lingering codex writer cannot be ruled out"
+)
 
 # Bounds every git call below: this pass blocks process start, so one hung
 # git must not wedge the dispatch loop before its first tick.
@@ -154,6 +157,12 @@ _GIT_PORCELAIN_RENAME_SEPARATOR = " -> "
 # psutil name() of the exec'd codex binary (codex_runner spawns it directly,
 # no shell or interpreter wrapper).
 _CODEX_PROCESS_NAME = "codex"
+# What Linux reports (via /proc/<pid>/cwd, which psutil passes through) for a
+# process whose cwd directory has been removed: "<path> (deleted)".
+_DELETED_CWD_SUFFIX = " (deleted)"
+# psutil create_time() is epoch seconds as a float; pinned as integer ns, the
+# same conversion cw.local_runner.read_process_start_time_ns uses.
+_NS_PER_SECOND = 1_000_000_000
 
 
 class _SignallableProcess(Protocol):
@@ -167,6 +176,25 @@ class _SignallableProcess(Protocol):
     def kill(self) -> None: ...
 
     def wait(self, timeout: float | None = None) -> object: ...
+
+
+@dataclass(frozen=True)
+class _CodexWriter:
+    """A codex process the cwd scan matched, pinned to its identity at scan time.
+
+    ``start_time_ns`` is the process creation time the scan saw: the same
+    pid + start-time pin ``LocalLivenessHandle`` uses. A pid the kernel has
+    since handed to a different process reads a different creation time, so
+    the terminate path re-checks it before every signal and never signals a
+    stranger.
+    """
+
+    process: _SignallableProcess
+    start_time_ns: int
+
+    @property
+    def pid(self) -> int:
+        return self.process.pid
 
 
 @dataclass(frozen=True)
@@ -269,49 +297,109 @@ def _head_matches_pre_review_ref(
     return head == origin_sha
 
 
-def _codex_processes_in(worktree: Path) -> list[psutil.Process] | None:
+def _cwd_is_worktree(cwd: str, worktree: Path, target: Path) -> bool:
+    """Whether a process *cwd* is *worktree*, in either form the kernel reports.
+
+    A process can sit in a directory that has since been removed (a deleted
+    or re-provisioned worktree); its cwd then reads ``<path> (deleted)``, and
+    it is still a live writer the pass must see.
+    """
+    plain = cwd.removesuffix(_DELETED_CWD_SUFFIX)
+    return plain == str(worktree) or Path(plain).resolve() == target
+
+
+def _codex_processes_in(worktree: Path) -> list[_CodexWriter] | None:
     """Return every process named ``codex`` whose cwd is *worktree*.
 
     A cwd scan is the only signal available: no PID is persisted for the
-    codex child (see the module docstring), so this cannot pin identity by
-    start time the way ``LocalLivenessHandle`` does. Never raises. A process
-    that vanishes or denies access mid-scan is skipped; a scan that cannot run
-    at all returns ``None`` so the caller parks rather than races an
-    unobserved writer.
+    codex child (see the module docstring), so identity is pinned here, at
+    scan time, from each match's creation time. Never raises. A process that
+    vanishes or denies access mid-scan is skipped. ``None`` — the caller
+    parks rather than races an unobserved writer — when the scan cannot run
+    at all, or a match's creation time is unreadable, since a writer that
+    cannot be pinned can be neither safely signalled nor ruled out.
     """
     target = worktree.resolve()
     try:
-        processes = list(psutil.process_iter(["name", "cwd"]))
+        processes = list(psutil.process_iter(["name", "cwd", "create_time"]))
     except (psutil.Error, OSError):
         return None
-    matches: list[psutil.Process] = []
+    matches: list[_CodexWriter] = []
     for process in processes:
         try:
             info = process.info
             cwd = info.get("cwd")
             if (
-                info.get("name") == _CODEX_PROCESS_NAME
-                and cwd
-                and Path(cwd).resolve() == target
+                info.get("name") != _CODEX_PROCESS_NAME
+                or not cwd
+                or not _cwd_is_worktree(cwd, worktree, target)
             ):
-                matches.append(process)
+                continue
+            create_time = info.get("create_time")
         except (psutil.Error, OSError):
             continue
+        if create_time is None:
+            return None
+        matches.append(
+            _CodexWriter(process, start_time_ns=int(create_time * _NS_PER_SECOND))
+        )
     return matches
 
 
-def _terminate_codex_process(process: _SignallableProcess) -> bool:
-    """SIGTERM, bounded wait, then SIGKILL, bounded wait. True once it is gone.
+def _current_start_time_ns(pid: int) -> int:
+    """Re-read *pid*'s creation time from a fresh handle.
 
-    ``NoSuchProcess`` at any step means gone. psutil also raises it rather
-    than signal a pid reused since the scan, so a stranger is never signalled.
+    A fresh ``psutil.Process``, because an existing one caches the creation
+    time it was built with. Raises what psutil raises.
+    """
+    return int(psutil.Process(pid).create_time() * _NS_PER_SECOND)
+
+
+def _still_scanned_writer(writer: _CodexWriter) -> bool | None:
+    """Whether *writer*'s pid still names the process the scan matched.
+
+    ``False`` when that process is gone: the pid is free, or now names a
+    process with a different creation time. ``None`` when the identity
+    cannot be read, which proves nothing either way.
     """
     try:
-        process.terminate()
+        current = _current_start_time_ns(writer.pid)
+    except psutil.NoSuchProcess:
+        return False
+    except (psutil.Error, OSError):
+        return None
+    return current == writer.start_time_ns
+
+
+def _signal_if_still_scanned(
+    writer: _CodexWriter, send: Callable[[], None]
+) -> bool | None:
+    """Call *send* only once *writer*'s identity is re-verified; return the check."""
+    same = _still_scanned_writer(writer)
+    if same:
+        send()
+    return same
+
+
+def _terminate_codex_process(writer: _CodexWriter) -> bool:
+    """SIGTERM, bounded wait, then SIGKILL, bounded wait. True once it is gone.
+
+    Identity is re-verified before each signal. A mismatch means the scanned
+    writer has exited and its pid was reused: nothing is sent, and the writer
+    counts as gone. An unreadable identity sends nothing and counts as a
+    survivor. ``NoSuchProcess`` at any step means gone.
+    """
+    process = writer.process
+    try:
+        sent = _signal_if_still_scanned(writer, process.terminate)
+        if not sent:
+            return sent is False
         try:
             process.wait(timeout=_CODEX_TERMINATE_WAIT_SECONDS)
         except psutil.TimeoutExpired:
-            process.kill()
+            sent = _signal_if_still_scanned(writer, process.kill)
+            if not sent:
+                return sent is False
             process.wait(timeout=_CODEX_TERMINATE_WAIT_SECONDS)
     except psutil.NoSuchProcess:
         return True
@@ -321,11 +409,9 @@ def _terminate_codex_process(process: _SignallableProcess) -> bool:
     return True
 
 
-def _terminate_codex_processes(
-    processes: Sequence[_SignallableProcess],
-) -> list[int]:
-    """Terminate each of *processes*; return the pids still alive afterwards."""
-    return [p.pid for p in processes if not _terminate_codex_process(p)]
+def _terminate_codex_processes(writers: Sequence[_CodexWriter]) -> list[int]:
+    """Terminate each of *writers*; return the pids still alive afterwards."""
+    return [w.pid for w in writers if not _terminate_codex_process(w)]
 
 
 def _format_pids(pids: Sequence[int]) -> str:
@@ -339,16 +425,16 @@ def _settle_live_writer(worktree: Path, *, auto: bool) -> _OrphanDisposition | N
     survives parks. Under any other policy nothing is killed: the park leaves
     the session ACTIVE and proposes the reap for an operator to authorize.
     """
-    processes = _codex_processes_in(worktree)
-    if processes is None:
+    writers = _codex_processes_in(worktree)
+    if writers is None:
         return _park(
             _PARK_REASON_PROCESS_SCAN_FAILED,
             close_session=False,
             propose_reap=not auto,
         )
-    if not processes:
+    if not writers:
         return None
-    pids = tuple(process.pid for process in processes)
+    pids = tuple(writer.pid for writer in writers)
     if not auto:
         return _park(
             f"{_PARK_REASON_CODEX_PROCESS_RUNNING} ({_format_pids(pids)})",
@@ -356,7 +442,7 @@ def _settle_live_writer(worktree: Path, *, auto: bool) -> _OrphanDisposition | N
             propose_reap=True,
             live_writer_pids=pids,
         )
-    survivors = tuple(_terminate_codex_processes(processes))
+    survivors = tuple(_terminate_codex_processes(writers))
     if survivors:
         return _park(
             f"{_PARK_REASON_CODEX_PROCESS_SURVIVED} ({_format_pids(survivors)})",
@@ -408,8 +494,11 @@ def _resolve_orphan_action(
     policy = _resolve_task_policy(task.client, task.lane, clients, config)
     auto = policy is ReapPolicy.AUTO
     if worktree is None:
+        # No path to scan is a scan that cannot run: fail safe, as for an
+        # unscannable process table. A path that is recorded but no longer on
+        # disk still gets its scan (see _cwd_is_worktree).
         return _park(
-            _PARK_REASON_GIT_ERROR if auto else _PARK_REASON_REAP_POLICY_NOT_AUTO
+            _PARK_REASON_NO_WORKTREE_PATH, close_session=False, propose_reap=not auto
         )
     writer_park = _settle_live_writer(worktree, auto=auto)
     if writer_park is not None:

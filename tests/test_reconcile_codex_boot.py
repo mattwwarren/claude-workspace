@@ -48,12 +48,14 @@ from cw.reconcile.codex_boot import (
     _PARK_REASON_FIX_LOOP_ENABLED,
     _PARK_REASON_GIT_ERROR,
     _PARK_REASON_HEAD_MOVED,
+    _PARK_REASON_NO_WORKTREE_PATH,
     _PARK_REASON_PROCESS_SCAN_FAILED,
     _PARK_REASON_REAP_POLICY_NOT_AUTO,
     CODEX_ORPHAN_CLEAN_REQUEUE_REASON,
     CODEX_ORPHAN_LIVE_WRITER_REAP_REASON,
     CODEX_ORPHANED_AT_BOOT_DISPOSITION,
     _codex_processes_in,
+    _CodexWriter,
     _head_matches_pre_review_ref,
     _OrphanDisposition,
     _resolve_orphan_action,
@@ -189,8 +191,39 @@ class _FakeCodex:
         return 0
 
 
-def _live_writer(monkeypatch: pytest.MonkeyPatch, *processes: object) -> None:
-    monkeypatch.setattr(codex_boot, "_codex_processes_in", lambda _wt: list(processes))
+# Creation time the fakes below are pinned to at "scan" time.
+_SCANNED_START_NS = 1_700_000_000_000_000_000
+
+
+def _pin_identity(monkeypatch: pytest.MonkeyPatch, *readings: object) -> None:
+    """Script what each post-scan identity re-read returns (or raises).
+
+    With no *readings* every re-read matches the scan, i.e. the pid still names
+    the scanned process. Otherwise each re-read consumes the next reading; an
+    exception instance is raised instead of returned.
+    """
+    queue = list(readings)
+
+    def _reread(_pid: int) -> int:
+        if not queue:
+            return _SCANNED_START_NS
+        reading = queue.pop(0)
+        if isinstance(reading, BaseException):
+            raise reading
+        assert isinstance(reading, int)
+        return reading
+
+    monkeypatch.setattr(codex_boot, "_current_start_time_ns", _reread)
+
+
+def _writer(process: _FakeCodex) -> _CodexWriter:
+    return _CodexWriter(process=process, start_time_ns=_SCANNED_START_NS)
+
+
+def _live_writer(monkeypatch: pytest.MonkeyPatch, *processes: _FakeCodex) -> None:
+    writers = [_writer(process) for process in processes]
+    monkeypatch.setattr(codex_boot, "_codex_processes_in", lambda _wt: writers)
+    _pin_identity(monkeypatch)
 
 
 def _record_subprocess_argv(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
@@ -821,13 +854,17 @@ class TestWorktreePorcelainCleanExceptVerdict:
         assert _worktree_porcelain_clean_except_verdict(tmp_path) is None
 
 
+_DELETED = " (deleted)"
+
+
 class TestCodexProcessesIn:
     """cwd-based scan: the codex child has no persisted PID to pin."""
 
     @staticmethod
     def _procs(monkeypatch: pytest.MonkeyPatch, *infos: dict[str, object]) -> None:
         processes = [
-            SimpleNamespace(info=info, pid=pid) for pid, info in enumerate(infos, 100)
+            SimpleNamespace(info={"create_time": 1_700_000_000.5, **info}, pid=pid)
+            for pid, info in enumerate(infos, 100)
         ]
         monkeypatch.setattr(psutil, "process_iter", lambda _attrs: processes)
 
@@ -847,12 +884,93 @@ class TestCodexProcessesIn:
         assert found is not None
         assert [p.pid for p in found] == [102, 103]
 
+    def test_the_scan_pins_each_writer_to_its_creation_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._procs(
+            monkeypatch,
+            {"name": "codex", "cwd": str(tmp_path), "create_time": 1_700_000_000.25},
+        )
+
+        found = _codex_processes_in(tmp_path)
+
+        assert found is not None
+        assert [w.start_time_ns for w in found] == [
+            int(1_700_000_000.25 * 1_000_000_000)
+        ]
+
+    def test_a_writer_whose_creation_time_is_unreadable_is_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A match that cannot be pinned can be neither signalled nor ruled out."""
+        self._procs(
+            monkeypatch, {"name": "codex", "cwd": str(tmp_path), "create_time": None}
+        )
+
+        assert _codex_processes_in(tmp_path) is None
+
     def test_codex_elsewhere_does_not_match(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._procs(monkeypatch, {"name": "codex", "cwd": str(tmp_path / "other")})
 
         assert _codex_processes_in(tmp_path) == []
+
+    def test_a_cwd_in_a_deleted_worktree_matches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The kernel reports a removed cwd as ``<path> (deleted)``."""
+        gone = tmp_path / "wt"
+        self._procs(monkeypatch, {"name": "codex", "cwd": f"{gone}{_DELETED}"})
+
+        found = _codex_processes_in(gone)
+
+        assert found is not None
+        assert [p.pid for p in found] == [100]
+
+    def test_a_deleted_sibling_directory_does_not_match(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._procs(
+            monkeypatch, {"name": "codex", "cwd": f"{tmp_path / 'other'}{_DELETED}"}
+        )
+
+        assert _codex_processes_in(tmp_path / "wt") == []
+
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux"),
+        reason="the ' (deleted)' cwd form is Linux /proc behaviour",
+    )
+    def test_a_real_process_in_a_deleted_directory_is_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Proves the kernel really reports the suffixed form psutil hands us."""
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; print('ready', flush=True); time.sleep(60)",
+            ],
+            cwd=worktree,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert proc.stdout is not None
+            assert proc.stdout.readline().strip() == "ready"
+            worktree.rmdir()
+            name = psutil.Process(proc.pid).name()
+            monkeypatch.setattr(codex_boot, "_CODEX_PROCESS_NAME", name)
+
+            found = _codex_processes_in(worktree)
+
+            assert found is not None
+            assert proc.pid in [w.pid for w in found]
+        finally:
+            proc.kill()
+            proc.wait()
 
     def test_a_process_that_vanishes_mid_scan_is_skipped(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -863,7 +981,7 @@ class TestCodexProcessesIn:
                 raise psutil.NoSuchProcess(pid=1)
 
         survivor = SimpleNamespace(
-            info={"name": "codex", "cwd": str(tmp_path)}, pid=200
+            info={"name": "codex", "cwd": str(tmp_path), "create_time": 1.0}, pid=200
         )
         monkeypatch.setattr(
             psutil, "process_iter", lambda _attrs: [_Vanished(), survivor]
@@ -892,8 +1010,19 @@ class TestCodexProcessesIn:
         assert _codex_processes_in(tmp_path) == []
 
 
+def _real_writer(proc: subprocess.Popen[str], *, drift_ns: int = 0) -> _CodexWriter:
+    """Pin a real child the way the scan does; *drift_ns* fakes a reused pid."""
+    start_ns = codex_boot._current_start_time_ns(proc.pid)
+    return _CodexWriter(psutil.Process(proc.pid), start_time_ns=start_ns + drift_ns)
+
+
 class TestTerminateCodexProcesses:
-    """SIGTERM, bounded wait, SIGKILL, bounded wait; returns surviving pids."""
+    """SIGTERM, bounded wait, SIGKILL, bounded wait; returns surviving pids.
+
+    Identity is re-verified before each signal: a pid whose creation time no
+    longer matches the scan names a different process, so it is never
+    signalled, and the scanned writer it replaced is gone.
+    """
 
     @staticmethod
     def _spawn(code: str) -> subprocess.Popen[str]:
@@ -907,7 +1036,7 @@ class TestTerminateCodexProcesses:
     def test_a_real_process_dies_on_sigterm(self) -> None:
         proc = self._spawn("import time; print('ready', flush=True); time.sleep(60)")
 
-        assert _terminate_codex_processes([psutil.Process(proc.pid)]) == []
+        assert _terminate_codex_processes([_real_writer(proc)]) == []
         assert not psutil.pid_exists(proc.pid)
 
     def test_a_real_sigterm_ignoring_process_is_sigkilled(
@@ -919,39 +1048,201 @@ class TestTerminateCodexProcesses:
             " print('ready', flush=True); time.sleep(60)"
         )
 
-        assert _terminate_codex_processes([psutil.Process(proc.pid)]) == []
+        assert _terminate_codex_processes([_real_writer(proc)]) == []
         assert not psutil.pid_exists(proc.pid)
 
-    def test_a_process_that_outlives_sigkill_is_reported(self) -> None:
-        writer = _FakeCodex(pid=4242, dies_on=None)
+    def test_a_real_pid_reused_since_the_scan_is_not_signalled(self) -> None:
+        """The pid now names a process born after the scan: hands off."""
+        proc = self._spawn("import time; print('ready', flush=True); time.sleep(60)")
+        try:
+            assert _terminate_codex_processes([_real_writer(proc, drift_ns=-1)]) == []
+            assert proc.poll() is None  # never signalled, still running
+        finally:
+            proc.kill()
+            proc.wait()
 
-        assert _terminate_codex_processes([writer]) == [4242]
+    def test_pid_reused_before_sigterm_sends_no_signal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        writer = _FakeCodex(pid=4242)
+        _pin_identity(monkeypatch, _SCANNED_START_NS + 1)
+
+        assert _terminate_codex_processes([_writer(writer)]) == []
+        assert writer.signals == []
+
+    def test_pid_reused_between_sigterm_and_sigkill_sends_no_sigkill(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        writer = _FakeCodex(pid=4242, dies_on=None)
+        _pin_identity(monkeypatch, _SCANNED_START_NS, _SCANNED_START_NS + 1)
+
+        assert _terminate_codex_processes([_writer(writer)]) == []
+        assert writer.signals == ["SIGTERM"]
+
+    def test_a_writer_gone_before_the_reread_is_not_signalled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        writer = _FakeCodex(pid=4242)
+        _pin_identity(monkeypatch, psutil.NoSuchProcess(pid=4242))
+
+        assert _terminate_codex_processes([_writer(writer)]) == []
+        assert writer.signals == []
+
+    def test_an_unreadable_identity_sends_nothing_and_reports_a_survivor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        writer = _FakeCodex(pid=4242, dies_on=None)
+        _pin_identity(monkeypatch, _SCANNED_START_NS, psutil.AccessDenied(pid=4242))
+
+        assert _terminate_codex_processes([_writer(writer)]) == [4242]
+        assert writer.signals == ["SIGTERM"]
+
+    def test_a_process_that_outlives_sigkill_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        writer = _FakeCodex(pid=4242, dies_on=None)
+        _pin_identity(monkeypatch)
+
+        assert _terminate_codex_processes([_writer(writer)]) == [4242]
         assert writer.signals == ["SIGTERM", "SIGKILL"]
 
-    def test_a_process_already_gone_counts_as_terminated(self) -> None:
+    def test_a_process_already_gone_counts_as_terminated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         class _Gone(_FakeCodex):
             def terminate(self) -> None:
                 raise psutil.NoSuchProcess(pid=self.pid)
 
-        assert _terminate_codex_processes([_Gone()]) == []
+        _pin_identity(monkeypatch)
 
-    def test_a_process_we_may_not_signal_is_reported(self) -> None:
+        assert _terminate_codex_processes([_writer(_Gone())]) == []
+
+    def test_a_process_we_may_not_signal_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         class _Denied(_FakeCodex):
             def terminate(self) -> None:
                 raise psutil.AccessDenied(pid=self.pid)
 
-        assert _terminate_codex_processes([_Denied(pid=7)]) == [7]
+        _pin_identity(monkeypatch)
+
+        assert _terminate_codex_processes([_writer(_Denied(pid=7))]) == [7]
 
 
-def test_missing_worktree_path_is_a_git_error(
-    tmp_config_dir: Path, tmp_path: Path
+def test_live_writer_whose_pid_is_reused_before_the_kill_is_left_alone(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """End to end: the scanned writer exited and its pid was reused.
+
+    Nothing is signalled, and since the scanned writer is gone the orphan is
+    dispositioned as if no writer had been found.
+    """
+    _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    writer = _FakeCodex(pid=4242)
+    _live_writer(monkeypatch, writer)
+    _pin_identity(monkeypatch, _SCANNED_START_NS + 1)
+    _use_auto_reap_policy(monkeypatch)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+
+    assert writer.signals == []
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+    _assert_session_closed()
+
+
+def _auto(*, auto: bool) -> OrchestratorConfig:
+    return OrchestratorConfig(
+        reap_policy=ReapPolicy.AUTO if auto else ReapPolicy.SIGNAL_ONLY
+    )
+
+
+@pytest.mark.parametrize("auto", [True, False])
+def test_no_recorded_worktree_path_parks_without_closing(
+    tmp_config_dir: Path, tmp_path: Path, *, auto: bool
+) -> None:
+    """No path means no process scan, so no proof the writer is gone."""
     clients = _clients(tmp_config_dir, tmp_path)
-    config = OrchestratorConfig(reap_policy=ReapPolicy.AUTO)
 
     assert _resolve_orphan_action(
-        None, _task_without_base_ref(), clients["client-a"], clients, config
-    ) == _OrphanDisposition(should_requeue=False, reason=_PARK_REASON_GIT_ERROR)
+        None, _task_without_base_ref(), clients["client-a"], clients, _auto(auto=auto)
+    ) == _OrphanDisposition(
+        should_requeue=False,
+        reason=_PARK_REASON_NO_WORKTREE_PATH,
+        close_session=False,
+        propose_reap=not auto,
+    )
+
+
+def test_deleted_worktree_with_a_live_writer_parks_without_closing(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recorded path is gone, but a codex process still sits in it."""
+    clients = _clients(tmp_config_dir, tmp_path)
+    gone = tmp_path / "wt"
+    process = SimpleNamespace(
+        info={"name": "codex", "cwd": f"{gone}{_DELETED}", "create_time": 1.0},
+        pid=4242,
+    )
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: [process])
+
+    disposition = _resolve_orphan_action(
+        gone, _task_without_base_ref(), clients["client-a"], clients, _auto(auto=False)
+    )
+
+    assert disposition.close_session is False
+    assert disposition.propose_reap is True
+    assert disposition.live_writer_pids == (4242,)
+    assert _PARK_REASON_CODEX_PROCESS_RUNNING in disposition.reason
+
+
+def test_deleted_worktree_whose_scan_fails_parks_without_closing(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clients = _clients(tmp_config_dir, tmp_path)
+
+    def _denied(_attrs: object) -> list[object]:
+        raise psutil.AccessDenied(pid=1)
+
+    monkeypatch.setattr(psutil, "process_iter", _denied)
+
+    disposition = _resolve_orphan_action(
+        tmp_path / "wt",
+        _task_without_base_ref(),
+        clients["client-a"],
+        clients,
+        _auto(auto=True),
+    )
+
+    assert disposition.reason == _PARK_REASON_PROCESS_SCAN_FAILED
+    assert disposition.close_session is False
+
+
+@pytest.mark.parametrize(
+    ("auto", "reason"),
+    [(True, _PARK_REASON_GIT_ERROR), (False, _PARK_REASON_REAP_POLICY_NOT_AUTO)],
+)
+def test_deleted_worktree_with_no_writer_closes_as_before(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    auto: bool,
+    reason: str,
+) -> None:
+    """Scan found nothing: the usual gates decide, and the session closes."""
+    clients = _clients(tmp_config_dir, tmp_path)
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: [])
+
+    assert _resolve_orphan_action(
+        tmp_path / "wt",
+        _task_without_base_ref(),
+        clients["client-a"],
+        clients,
+        _auto(auto=auto),
+    ) == _OrphanDisposition(should_requeue=False, reason=reason)
 
 
 def test_non_codex_backend_session_is_left_alone(
