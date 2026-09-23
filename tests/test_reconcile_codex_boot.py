@@ -1149,6 +1149,22 @@ class TestCodexProcessesIn:
 
         assert _codex_processes_in(tmp_path) is None
 
+    @pytest.mark.parametrize(
+        "exc", [RuntimeError("symlink loop"), ValueError("embedded NUL")]
+    )
+    def test_cwd_normalization_error_is_inconclusive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: Exception
+    ) -> None:
+        """A candidate cwd that cannot be normalized may be the writer."""
+        self._procs(monkeypatch, {"name": "codex", "cwd": str(tmp_path / "loop")})
+
+        def _boom(*_args: object) -> bool:
+            raise exc
+
+        monkeypatch.setattr(codex_boot, "_cwd_is_worktree", _boom)
+
+        assert _codex_processes_in(tmp_path) is None
+
     def test_codex_elsewhere_does_not_match(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

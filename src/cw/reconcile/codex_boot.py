@@ -276,6 +276,18 @@ def _head_matches_pre_review_ref(
     return head == origin_sha
 
 
+# Everything the scan can raise while reading or normalizing a candidate:
+# psutil's own errors, OS errors, and ``Path.resolve`` failing on a symlink
+# loop (``RuntimeError``) or an embedded NUL (``ValueError``). Any of them
+# makes the scan inconclusive, never "no writer" (#2285 review round 4).
+_SCAN_ERRORS: tuple[type[Exception], ...] = (
+    psutil.Error,
+    OSError,
+    RuntimeError,
+    ValueError,
+)
+
+
 def _cwd_is_worktree(cwd: str, worktree: Path, target: Path) -> bool:
     """Whether a process *cwd* is *worktree*, in either form the kernel reports.
 
@@ -302,7 +314,7 @@ def _codex_processes_in(worktree: Path) -> list[int] | None:
     try:
         target = worktree.resolve()
         processes = list(psutil.process_iter(["name", "cwd"]))
-    except (psutil.Error, OSError):
+    except _SCAN_ERRORS:
         return None
     pids: list[int] = []
     for process in processes:
@@ -318,7 +330,7 @@ def _codex_processes_in(worktree: Path) -> list[int] | None:
                 return None
             if _cwd_is_worktree(cwd, worktree, target):
                 pids.append(process.pid)
-        except (psutil.Error, OSError):
+        except _SCAN_ERRORS:
             return None
     return pids
 
