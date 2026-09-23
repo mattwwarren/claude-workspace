@@ -1392,6 +1392,42 @@ def test_auto_fix_ci_live_session_refusal_clears_latch(
     assert "stray1" in failed[0].payload["error"]
 
 
+def test_auto_fix_ci_roster_unreadable_refusal_clears_latch(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275 review round 1: an unreadable roster refuses through the real
+    requeue_ticket guard, takes the same latch rollback as a live-session
+    refusal, and tags PR_ACTION_FAILED with a distinct reason."""
+    from cw.native_daemon import FakeNativeDaemonClient
+
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+    roster = FakeNativeDaemonClient()
+    roster.roster_unreadable = True
+    monkeypatch.setattr("cw.dev_queue.requeue.get_native_daemon_client", lambda: roster)
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop",
+        lambda **_kw: pytest.fail("dispatch must not run when requeue is refused"),
+    )
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    row = load_dev_queue().tasks[0]
+    assert row.auto_fix_ci_fired_at is None
+    assert row.status == QueueItemStatus.COMPLETED
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].payload["redispatch_mode"] == "skipped_roster_unreadable"
+    assert failed[0].payload["live_session_ids"] == []
+    assert (
+        f"daemon roster unreadable at {roster.roster_path};"
+        f" cannot rule out a live session for #{task.ticket_id}"
+    ) in failed[0].payload["error"]
+
+
 def test_auto_fix_ci_live_session_refusal_keeps_concurrently_changed_latch(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

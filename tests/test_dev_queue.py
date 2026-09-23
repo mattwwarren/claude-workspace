@@ -8616,6 +8616,179 @@ class TestRequeueLiveSessionGuard:
         assert t.status == QueueItemStatus.PENDING
 
 
+def _assert_roster_unreadable_refusal(
+    message: str, roster_path: Path, ticket_id: str = "GEN-500"
+) -> None:
+    """The operator-specified fail-closed message, remediation included."""
+    assert (
+        f"daemon roster unreadable at {roster_path};"
+        f" cannot rule out a live session for #{ticket_id}"
+    ) in message
+    assert "fix the roster" in message
+    assert "cw spawn close <sid> --requeue" in message
+
+
+class TestRequeueRosterUnreadableGuard:
+    """The live-session guard fails closed on an unreadable roster (#2275,
+    review round 1), matching #2213's ``live_home_reason`` split: unreadable
+    or malformed refuses; absent proceeds."""
+
+    def _seed_parked_review_row(self) -> None:
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-dead-review",
+            disposition="review_health_gate",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+    def _assert_row_untouched(self) -> None:
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.stage == Stage.REVIEW
+        assert t.session_id == "sess-dead-review"
+
+    def test_unreadable_roster_refuses_even_with_no_known_session(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueLiveSessionError, RequeueRosterUnreadableError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_parked_review_row()
+        fake = _fake_daemon_with_live()
+        fake.roster_unreadable = True
+
+        with pytest.raises(RequeueRosterUnreadableError) as excinfo:
+            requeue_ticket("GEN-500", "genhealth", native_daemon=fake)
+
+        # Same refusal family, so every existing live-session catcher inherits it.
+        assert isinstance(excinfo.value, RequeueLiveSessionError)
+        assert excinfo.value.session_ids == ()
+        assert excinfo.value.roster_path == fake.roster_path
+        _assert_roster_unreadable_refusal(str(excinfo.value), fake.roster_path)
+        self._assert_row_untouched()
+
+    def test_unreadable_roster_refuses_even_when_session_is_ignored(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """``ignore_session_ids`` exempts one known session, not the unknown
+        rest an unreadable roster cannot rule out."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueRosterUnreadableError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_parked_review_row()
+        live = _seed_live_ticket_session()
+        fake = _fake_daemon_with_live(_LIVE_SURFACE_REF)
+        fake.roster_unreadable = True
+
+        with pytest.raises(RequeueRosterUnreadableError):
+            requeue_ticket(
+                "GEN-500",
+                "genhealth",
+                native_daemon=fake,
+                ignore_session_ids=frozenset({live.id}),
+            )
+
+        self._assert_row_untouched()
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(OSError("roster gone sideways"), id="oserror"),
+            pytest.param(ValueError("roster bytes"), id="valueerror"),
+        ],
+    )
+    def test_roster_read_raising_refuses(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        error: Exception,
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueRosterUnreadableError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_parked_review_row()
+        fake = _fake_daemon_with_live()
+
+        def _raise() -> set[str] | None:
+            raise error
+
+        monkeypatch.setattr(fake, "list_live_session_short_ids_fail_closed", _raise)
+
+        with pytest.raises(RequeueRosterUnreadableError) as excinfo:
+            requeue_ticket("GEN-500", "genhealth", native_daemon=fake)
+
+        _assert_roster_unreadable_refusal(str(excinfo.value), fake.roster_path)
+        assert excinfo.value.__cause__ is error
+        self._assert_row_untouched()
+
+    def test_real_client_malformed_roster_refuses_naming_the_path(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueRosterUnreadableError
+        from cw.native_daemon import RealNativeDaemonClient
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_parked_review_row()
+        roster = tmp_path / "roster.json"
+        roster.write_text("{not json", encoding="utf-8")
+
+        with pytest.raises(RequeueRosterUnreadableError) as excinfo:
+            requeue_ticket(
+                "GEN-500",
+                "genhealth",
+                native_daemon=RealNativeDaemonClient(roster_path=roster),
+            )
+
+        _assert_roster_unreadable_refusal(str(excinfo.value), roster)
+        self._assert_row_untouched()
+
+    def test_real_client_absent_roster_proceeds(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No roster file means no daemon, so no live sessions: proceed."""
+        from cw.dev_queue import requeue_ticket
+        from cw.native_daemon import RealNativeDaemonClient
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_parked_review_row()
+        _seed_live_ticket_session()
+
+        result = requeue_ticket(
+            "GEN-500",
+            "genhealth",
+            native_daemon=RealNativeDaemonClient(
+                roster_path=tmp_path / "absent" / "roster.json"
+            ),
+        )
+
+        assert result["to_stage"] == "review"
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_classify_tags_roster_unreadable_distinctly(self) -> None:
+        from pathlib import Path
+
+        from cw.dev_queue import classify_requeue_live_session_error
+        from cw.exceptions import RequeueLiveSessionError, RequeueRosterUnreadableError
+
+        unreadable = RequeueRosterUnreadableError("unreadable", roster_path=Path("/r"))
+        live = RequeueLiveSessionError("live", session_ids=("s1",))
+
+        assert classify_requeue_live_session_error(unreadable) == (
+            "skipped_roster_unreadable",
+            "unreadable",
+        )
+        assert classify_requeue_live_session_error(live) == (
+            "skipped_live_session",
+            "live",
+        )
+
+
 # ---------------------------------------------------------------------------
 # TestRequeueReviewDeliveryDegrade — #1730 degrade-loudly, never raise
 # ---------------------------------------------------------------------------
@@ -9337,6 +9510,50 @@ class TestDrainHeldTickets:
         assert store["GEN-500"].status == QueueItemStatus.BLOCKED_ON_USER
         assert store["GEN-501"].status == QueueItemStatus.PENDING
 
+    def test_drain_reports_skipped_roster_unreadable_with_reason(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unreadable roster cannot rule out a live session for ANY held
+        row, so each is skipped with a distinct reason carried in the outcome
+        -- neither "failed" nor "requeued" (#2275 review round 1)."""
+        from cw.dev_queue import REVIEW_HEALTH_GATE_DISPOSITION, drain_held_tickets
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        rows = [
+            _make_blocked_task(
+                ticket_id=ticket_id,
+                stage=Stage.REVIEW,
+                session_id=f"sess-{ticket_id}",
+                disposition=REVIEW_HEALTH_GATE_DISPOSITION,
+            )
+            for ticket_id in ("GEN-500", "GEN-501")
+        ]
+        save_dev_queue(DevQueueStore(tasks=rows))
+        fake = _fake_daemon_with_live()
+        fake.roster_unreadable = True
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.get_native_daemon_client", lambda: fake
+        )
+
+        outcomes = drain_held_tickets("genhealth")
+
+        assert [o["status"] for o in outcomes] == [
+            "skipped_roster_unreadable",
+            "skipped_roster_unreadable",
+        ]
+        for outcome in outcomes:
+            _assert_roster_unreadable_refusal(
+                outcome["detail"], fake.roster_path, outcome["ticket_id"]
+            )
+            assert outcome["from_stage"] is None
+            assert outcome["to_stage"] is None
+        assert all(
+            t.status == QueueItemStatus.BLOCKED_ON_USER for t in load_dev_queue().tasks
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestUnblockTicket — unblock_ticket() mutation function
@@ -9717,6 +9934,35 @@ class TestCLIRequeue:
 
         assert result.exit_code != 0
         assert stray.id in result.output
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_requeue_unreadable_roster_exits_nonzero(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unreadable roster refuses the CLI requeue with the distinct
+        fail-closed message (#2275 review round 1)."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-dead-cli")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        fake = _fake_daemon_with_live()
+        fake.roster_unreadable = True
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.get_native_daemon_client", lambda: fake
+        )
+
+        result = CliRunner().invoke(
+            main,
+            ["dev-queue", "requeue", "GEN-500", "--client", "genhealth"],
+        )
+
+        assert result.exit_code != 0
+        _assert_roster_unreadable_refusal(
+            " ".join(result.output.split()), fake.roster_path
+        )
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
 

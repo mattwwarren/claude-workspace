@@ -2564,6 +2564,40 @@ class TestSpawnCloseRequeue:
         task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-42")
         assert task.status == QueueItemStatus.CANCELLED
 
+    def test_requeue_flag_refused_when_roster_unreadable(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2275 review round 1: the just-closed exemption covers one known
+        session, not the unknown rest an unreadable roster cannot rule out --
+        the close lands, the requeue is refused with the fail-closed message."""
+        from cw.dev_queue import load_dev_queue
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType, QueueItemStatus
+
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        sess = _seed_daemon_session(
+            tmp_path, tmp_config_dir, surface_ref=self._CLOSED_REF
+        )
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        roster = self._patch_daemons(monkeypatch)
+        roster.roster_unreadable = True
+
+        result = CliRunner().invoke(main, ["spawn", "close", "--requeue", sess.id])
+
+        assert result.exit_code != 0
+        output = " ".join(result.output.split())
+        assert (
+            f"daemon roster unreadable at {roster.roster_path};"
+            " cannot rule out a live session for #GEN-42"
+        ) in output
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-42")
+        assert task.status == QueueItemStatus.CANCELLED
+        requeued = read_events(
+            consumer="_test_requeue_roster_unreadable",
+            event_types=[OrchestratorEventType.TICKET_REQUEUED],
+        )
+        assert requeued == []
+
 
 class TestSpawnCloseRequeueImplDirect:
     """Direct-call unit tests for _spawn_close_requeue_impl (#1889).
