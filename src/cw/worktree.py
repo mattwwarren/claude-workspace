@@ -29,6 +29,7 @@ from cw.native_daemon import get_native_daemon_client
 if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.models import ClientConfig, TicketTask
+    from cw.native_daemon import NativeDaemonClient
 
 _log = logging.getLogger(__name__)
 
@@ -786,6 +787,7 @@ def _ff_reused_worktree(
     report: ReuseRefreshReport,
     *,
     ticket_id: str | None,
+    daemon: NativeDaemonClient,
 ) -> RefreshResult:
     """Fast-forward *wt_path* to *target* with ``merge --ff-only``.
 
@@ -830,6 +832,7 @@ def _ff_reused_worktree(
             "using worktree as-is"
         ),
         raise_on_branch_mismatch=True,
+        daemon=daemon,
     )
     if verdict is not None:
         return verdict
@@ -962,7 +965,7 @@ def _normalize_path(path: Path) -> Path:
     return path.resolve()
 
 
-def live_home_reason(wt_path: Path) -> str | None:
+def live_home_reason(wt_path: Path, *, daemon: NativeDaemonClient) -> str | None:
     """Return why a live session or daemon worker may be homed on *wt_path*.
 
     The one liveness predicate for a worktree, public because two paths must
@@ -974,9 +977,13 @@ def live_home_reason(wt_path: Path) -> str | None:
     Consults BOTH sources and reports occupied when either says so:
 
     - cw's persisted session state (:func:`live_session_worktree_paths`), and
-    - the daemon roster's live workers, each recorded with the ``cwd`` it was
-      spawned in (``NativeDaemonClient.list_live_worker_cwds``) -- a worker can
-      be live in the roster before, or after, cw state reflects it.
+    - *daemon*'s live workers, each recorded with the ``cwd`` it was spawned in
+      (:meth:`~cw.native_daemon.NativeDaemonClient.list_live_worker_cwds`) --
+      a worker can be live in the roster before, or after, cw state reflects
+      it. *daemon* is the caller's own client -- never defaulted here -- so a
+      test that injects :class:`~cw.native_daemon.FakeNativeDaemonClient` is
+      actually consulted instead of this function silently reading the host's
+      real roster.
 
     Fails closed: an unreadable state file, an unreadable roster, or ANY path
     that cannot be normalized reads as "cannot rule out a live session", never
@@ -990,7 +997,7 @@ def live_home_reason(wt_path: Path) -> str | None:
     sessions = live_session_worktree_paths()
     if sessions is None:
         return "session state unreadable, cannot rule out a live session"
-    workers = get_native_daemon_client().list_live_worker_cwds()
+    workers = daemon.list_live_worker_cwds()
     if workers is None:
         return "daemon roster unreadable, cannot rule out a live session"
     try:
@@ -1039,7 +1046,9 @@ class _Occupancy(NamedTuple):
         return self.local
 
 
-def _reuse_occupancy(client: ClientConfig, branch: str, wt_path: Path) -> _Occupancy:
+def _reuse_occupancy(
+    client: ClientConfig, branch: str, wt_path: Path, *, daemon: NativeDaemonClient
+) -> _Occupancy:
     """Return whether *wt_path* is occupied (must not be moved), and why.
 
     The single predicate the reuse refresh consults, both up front and again
@@ -1071,7 +1080,9 @@ def _reuse_occupancy(client: ClientConfig, branch: str, wt_path: Path) -> _Occup
         if unsaved is not None:
             local = f"unsaved work ({unsaved})"
     return _Occupancy(
-        live=live_home_reason(wt_path), branch_mismatch=branch_mismatch, local=local
+        live=live_home_reason(wt_path, daemon=daemon),
+        branch_mismatch=branch_mismatch,
+        local=local,
     )
 
 
@@ -1082,6 +1093,7 @@ def _occupancy_verdict(
     *,
     action: str,
     raise_on_branch_mismatch: bool = False,
+    daemon: NativeDaemonClient,
 ) -> RefreshResult | None:
     """Return the stopping result when the refresh must not go on, else ``None``.
 
@@ -1104,7 +1116,7 @@ def _occupancy_verdict(
     ``occupancy.live``), since only :exc:`WorktreeOccupiedError` may report an
     occupant.
     """
-    occupancy = _reuse_occupancy(client, branch, wt_path)
+    occupancy = _reuse_occupancy(client, branch, wt_path, daemon=daemon)
     reason = occupancy.reason
     if reason is None:
         return None
@@ -1187,6 +1199,7 @@ def _refresh_from_tracking_ref(
     report: ReuseRefreshReport,
     *,
     ticket_id: str | None,
+    daemon: NativeDaemonClient,
 ) -> RefreshResult:
     """Classify HEAD against the freshly fetched ``origin/<branch>`` and act on it.
 
@@ -1231,7 +1244,13 @@ def _refresh_from_tracking_ref(
             )
         case "behind":
             return _ff_reused_worktree(
-                client, branch, wt_path, target, report, ticket_id=ticket_id
+                client,
+                branch,
+                wt_path,
+                target,
+                report,
+                ticket_id=ticket_id,
+                daemon=daemon,
             )
         case _:
             assert_never(relation)
@@ -1244,10 +1263,15 @@ def _refresh_reused_worktree_steps(
     report: ReuseRefreshReport,
     *,
     ticket_id: str | None,
+    daemon: NativeDaemonClient,
 ) -> RefreshResult:
     """The ordered steps of :func:`_refresh_reused_worktree`, which see OSError."""
     verdict = _occupancy_verdict(
-        client, branch, wt_path, action="not refreshing reused worktree"
+        client,
+        branch,
+        wt_path,
+        action="not refreshing reused worktree",
+        daemon=daemon,
     )
     if verdict is not None:
         return verdict
@@ -1255,7 +1279,7 @@ def _refresh_reused_worktree_steps(
     if stopped is not None:
         return stopped
     return _refresh_from_tracking_ref(
-        client, branch, wt_path, report, ticket_id=ticket_id
+        client, branch, wt_path, report, ticket_id=ticket_id, daemon=daemon
     )
 
 
@@ -1266,6 +1290,7 @@ def _refresh_reused_worktree(
     report: ReuseRefreshReport,
     *,
     ticket_id: str | None,
+    daemon: NativeDaemonClient,
 ) -> RefreshResult:
     """Best-effort fetch, then fast-forward a *behind, unoccupied* reused worktree.
 
@@ -1329,7 +1354,7 @@ def _refresh_reused_worktree(
     """
     try:
         result = _refresh_reused_worktree_steps(
-            client, branch, wt_path, report, ticket_id=ticket_id
+            client, branch, wt_path, report, ticket_id=ticket_id, daemon=daemon
         )
     except OSError as exc:
         reason = _first_line(str(exc)) or type(exc).__name__
@@ -1384,6 +1409,7 @@ def create_worktree(
     refresh_on_reuse: bool = False,
     refresh_report: ReuseRefreshReport | None = None,
     ticket_id: str | None = None,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> Path:
     """Create a git worktree for the given branch.
 
@@ -1450,6 +1476,16 @@ def create_worktree(
     *refresh_on_reuse* is set. The audit write is best-effort: an ``OSError``
     from it is logged and never changes the outcome.
 
+    *native_daemon* (#2213 round 7) is the caller's own
+    :class:`~cw.native_daemon.NativeDaemonClient`, threaded through to the
+    occupancy check's daemon-roster read (:func:`live_home_reason`) instead of
+    this function defaulting to :func:`~cw.native_daemon.get_native_daemon_client`
+    internally. Defaults to that real client when omitted -- the same shape as
+    :func:`cw.session.start_session` -- so a caller that injects
+    :class:`~cw.native_daemon.FakeNativeDaemonClient` (dispatch claim, tests) is
+    actually consulted, and the host's real roster is never read out from under
+    an injected fake. Ignored unless *refresh_on_reuse* is set.
+
     See :func:`_refresh_reused_worktree`.
 
     When no existing worktree is reused, the branch itself is resolved via a
@@ -1498,12 +1534,14 @@ def create_worktree(
             )
             raise StaleWorktreeError(msg)
         if refresh_on_reuse:
+            daemon = native_daemon or get_native_daemon_client()
             refresh = _refresh_reused_worktree(
                 client,
                 branch,
                 wt_path,
                 refresh_report if refresh_report is not None else ReuseRefreshReport(),
                 ticket_id=ticket_id,
+                daemon=daemon,
             )
             # Occupied means another worker may be using the tree: no path
             # is handed back. Every other outcome is the caller's to use.
