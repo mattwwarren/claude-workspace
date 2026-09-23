@@ -271,8 +271,10 @@ triage doesn't replay what you already saw. Events arrive to *you*; you
 triage; you push the operator only what changes what they'd do next. Use
 `/cw-queue-peek` for the WAIT/PEEK/STOP verdict on any session running long.
 **Silence means healthy only within the `--max-idle-seconds` backstop
-window — and only once you've confirmed exactly one watch is armed
-(`pgrep -f attention_watch.py`).** A `WATCHER |` line of either kind — the
+window — and only once you've confirmed exactly one watch is armed for
+your client and lane (`pgrep -af attention_watch.py`, reading the arguments
+as described in the leftover check above; watches for other clients or
+lanes don't count).** A `WATCHER |` line of either kind — the
 idle backstop firing, or `cw event tail` exiting on its own — means re-arm,
 not "still healthy, ignore." With those two conditions held, the watch
 covers the failure signatures within its window, so no news within that
@@ -420,7 +422,8 @@ delegation.
   `age_m` (Phase 4).
 - **Polling on top of the watch.** The event bus is push; trust the silence —
   but only within the `--max-idle-seconds` window, and only after confirming
-  exactly one watch is armed (`pgrep -f attention_watch.py`, Phase 4).
+  exactly one watch is armed for your client and lane (`pgrep -af
+  attention_watch.py`, reading the arguments; Phase 4).
 - **Dribbling decisions.** Five one-question round-trips for what could've been
   one batched `AskUserQuestion`.
 - **Over-dispatching.** More running ≠ faster done; it's just less attention per
