@@ -54,6 +54,7 @@ from cw.worktree import _git_dir
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.auto_dev_result import Blocker
     from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
     from cw.review_finding_dispositions import FindingDisposition
@@ -386,6 +387,38 @@ def _persist_review_verdict(
     return path
 
 
+# Durable copy of a zero-documents park's blocker, written beside
+# review-verdict.md (#2280). ``verdict`` is None on this path -- every
+# reviewer failed, so there is no ReviewVerdict to render -- so this carries
+# the blocker's reason/details instead of a rendered verdict comment.
+REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH = (
+    Path(".claude") / "review-verdict-unparseable.md"
+)
+
+
+def _persist_unparseable_artifact(worktree: Path, blocker: Blocker) -> Path | None:
+    """Write *blocker*'s reason/details to the worktree, best-effort (#2280).
+
+    Sibling of :func:`_persist_review_verdict` for the park that function's
+    verdict-shaped input cannot cover. Same never-raises contract: this also
+    runs on the daemon thread's success path after the sentinel has already
+    been persisted.
+    """
+    text = (
+        f"# Codex review unparseable\n\nreason: {blocker.reason}\n\n{blocker.details}\n"
+    )
+    path = worktree / REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, text)
+    except OSError as exc:
+        _log.warning(
+            "review_unparseable_artifact_persist_failed path=%s: %s", path, exc
+        )
+        return None
+    return path
+
+
 def _post_review_comment(
     ticket_id: str,
     review_text: str,
@@ -571,6 +604,21 @@ def _run_codex_review_and_complete(
             _post_review_comment(
                 task.ticket_id,
                 review_text,
+                cwd=_git_dir(client),
+                tracker=resolve_tracker(client.workspace_path),
+                artifact_path=artifact_path,
+            )
+        elif result.blocker is not None:
+            # #2280: verdict is None because every reviewer failed -- there is
+            # no ReviewVerdict to render, but result.blocker.details already
+            # carries the per-role "role (reason)" summary
+            # (_format_failures_detail) plus a diagnostics-bundle pointer.
+            # Reused verbatim as both the worktree artifact and the ticket
+            # comment text, mirroring the verdict-present branch's shape.
+            artifact_path = _persist_unparseable_artifact(worktree, result.blocker)
+            _post_review_comment(
+                task.ticket_id,
+                result.blocker.details,
                 cwd=_git_dir(client),
                 tracker=resolve_tracker(client.workspace_path),
                 artifact_path=artifact_path,

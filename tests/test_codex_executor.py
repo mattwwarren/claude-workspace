@@ -462,7 +462,12 @@ def test_codex_executor_all_roles_fail_blocked(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """Unparseable output from every role → blocked, no comment posted."""
+    """Unparseable output from every role → blocked, no verdict to render.
+
+    #2280: no documents means no ``ReviewVerdict`` to render, but the park is
+    no longer silent — ``result.blocker.details`` (the per-role summary) is
+    now persisted to the worktree and posted as the ticket comment.
+    """
     worktree = _worktree_with_change(
         make_git_repo, "wt-codex-fail", filename="new.py", content="def broken():\n"
     )
@@ -482,8 +487,12 @@ def test_codex_executor_all_roles_fail_blocked(
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
-    # No documents → no verdict → nothing to post.
-    post_mock.assert_not_called()
+    post_mock.assert_called_once()
+    assert post_mock.call_args.args[0] == "T-1"
+    assert post_mock.call_args.args[1] == result.blocker.details
+    artifact = post_mock.call_args.kwargs["artifact_path"]
+    assert artifact == worktree / ".claude" / "review-verdict-unparseable.md"
+    assert artifact.exists()
 
 
 # ---------------------------------------------------------------------------
