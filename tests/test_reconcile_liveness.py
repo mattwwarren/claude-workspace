@@ -20,14 +20,17 @@ from cw.models import (
     LivenessBucket,
     OrchestratorConfig,
     OrchestratorEventType,
+    QueueItemStatus,
     SessionOrigin,
     SessionStatus,
     Stage,
     TicketTask,
 )
+from cw.reconcile import _deps
 from cw.reconcile._shared import (
     _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON,
     _SESSION_UNRESPONSIVE_REASON,
+    _STOPPED_WITHOUT_SENTINEL_REASON,
 )
 from cw.reconcile.liveness import (
     _classify_liveness_bucket,
@@ -466,14 +469,21 @@ def _write_spawn_stamp(
     )
 
 
-def _attention_events() -> list[dict[str, object]]:
+def _events_of(event_type: OrchestratorEventType) -> list[dict[str, object]]:
+    """Payloads of every recorded event of *event_type* (#2135).
+
+    Generalized from the former attention-only reader so the #2135
+    suppression tests can assert on ``session.liveness_changed`` too without a
+    second near-duplicate reader. The consumer name is derived from the event
+    type so the two readers keep independent offsets.
+    """
     from cw.events import read_events
 
     return [
         dict(e.payload)
         for e in read_events(
-            consumer="test-liveness-deadline",
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            consumer=f"test-liveness-{event_type.value}",
+            event_types=[event_type],
         )
     ]
 
@@ -506,7 +516,7 @@ def test_spawn_within_deadline_still_suppresses_distress(
     assert len(candidates) == 1
     assert candidates[0].new_bucket == LivenessBucket.STALE_45M
     assert candidates[0].distress is False
-    assert _attention_events() == []
+    assert _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
 
 
 def test_spawn_past_deadline_fires_named_attention_signal(
@@ -540,7 +550,7 @@ def test_spawn_past_deadline_fires_named_attention_signal(
     assert len(candidates) == 1
     assert candidates[0].distress is True
     assert candidates[0].spawn_deadline_minutes == 30
-    events = _attention_events()
+    events = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
     assert len(events) == 1
     assert events[0]["paused_status"] == _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON
     breadcrumbs = str(events[0]["breadcrumbs"])
@@ -566,7 +576,7 @@ def test_no_spawn_stamp_keeps_generic_unresponsive_reason(
         task_by_ticket={"T-1": task},
     )
 
-    events = _attention_events()
+    events = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
     assert len(events) == 1
     assert events[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
 
@@ -595,7 +605,7 @@ def test_terminal_sentinel_still_suppresses_past_deadline(
 
     assert len(candidates) == 1
     assert candidates[0].distress is False
-    assert _attention_events() == []
+    assert _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
 
 
 def test_detect_liveness_candidates_populates_dangling_tool_use_field(
@@ -681,3 +691,189 @@ def test_detect_liveness_candidates_leaves_dangling_tool_use_none_below_top_buck
     assert len(candidates) == 1
     assert candidates[0].new_bucket == LivenessBucket.STALE_30M
     assert candidates[0].dangling_tool_use is None
+
+
+# ---------------------------------------------------------------------------
+# #2135: signal-only suppression for a row parked by the abandoned-exit park
+# ---------------------------------------------------------------------------
+
+
+def _parked_task(session_id: str | None, **overrides: object) -> TicketTask:
+    """A row parked BLOCKED_ON_USER by the #2135 abandoned-exit park."""
+    kwargs: dict[str, object] = {
+        "ticket_id": "T-1",
+        "client": "client-a",
+        "stage": Stage.PLAN,
+        "status": QueueItemStatus.BLOCKED_ON_USER,
+        "disposition": _STOPPED_WITHOUT_SENTINEL_REASON,
+        "session_id": session_id,
+    }
+    kwargs.update(overrides)
+    return TicketTask.model_validate(kwargs)
+
+
+def _assert_top_bucket_latched(sess: object) -> None:
+    """The bucket latch and its event are identical parked or not (#2135)."""
+    assert sess.liveness_bucket == LivenessBucket.STALE_45M
+    latches = _events_of(OrchestratorEventType.SESSION_LIVENESS_CHANGED)
+    assert len(latches) == 1
+    assert latches[0]["old_bucket"] == "live"
+    assert latches[0]["new_bucket"] == "stale_45m"
+
+
+def test_parked_stopped_without_sentinel_row_suppresses_session_unresponsive(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """The row already paged via its own session.needs_attention (#2135).
+
+    Signal-only: the distress flag is withheld, nothing is mutated beyond the
+    ordinary bucket latch, and no push fires.
+    """
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=60)
+    state = CwState(sessions=[sess])
+
+    candidates = record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": _parked_task(sess.id)},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].new_bucket == LivenessBucket.STALE_45M
+    assert candidates[0].distress is False
+    assert candidates[0].next_renotify_eligible_at is None
+    assert _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
+    _deps.fire_push_notification.assert_not_called()
+    _assert_top_bucket_latched(sess)
+    assert sess.liveness_attention_next_eligible_at is None
+
+
+@pytest.mark.parametrize(
+    "task_for",
+    [
+        lambda sid: _parked_task(sid, disposition="gh_check_blocked"),
+        lambda sid: _parked_task(sid, disposition=None),
+        lambda _sid: None,
+        lambda sid: _parked_task(sid, status=QueueItemStatus.PENDING),
+        lambda _sid: _parked_task("some-other-session"),
+        lambda _sid: _parked_task(None),
+    ],
+    ids=[
+        "other-disposition",
+        "no-disposition",
+        "no-task",
+        "requeued-row",
+        "other-session-row",
+        "row-without-session-id",
+    ],
+)
+def test_non_suppressed_task_shapes_still_emit_session_unresponsive(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    task_for: object,
+) -> None:
+    """Every shape but the exact parked triple keeps paging (fails open)."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=60)
+    state = CwState(sessions=[sess])
+    task = task_for(sess.id)
+
+    candidates = record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": task} if task is not None else {},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].distress is True
+    attention = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert len(attention) == 1
+    assert attention[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
+    _deps.fire_push_notification.assert_called_once()
+    _assert_top_bucket_latched(sess)
+
+
+def test_suppressed_session_steady_state_and_recovery_latch_unchanged(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A suppressed crossing still latches, and a later transition still records."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=60)
+    state = CwState(sessions=[sess])
+    task_by_ticket = {"T-1": _parked_task(sess.id)}
+
+    record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket=task_by_ticket,
+    )
+
+    steady = record_session_liveness_changes(
+        state,
+        now=_NOW + timedelta(minutes=1),
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket=task_by_ticket,
+    )
+    assert steady == []
+
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=1)
+    recovered = record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket=task_by_ticket,
+    )
+
+    assert len(recovered) == 1
+    assert recovered[0].new_bucket == LivenessBucket.LIVE
+    assert sess.liveness_bucket == LivenessBucket.LIVE
+    latches = _events_of(OrchestratorEventType.SESSION_LIVENESS_CHANGED)
+    assert len(latches) == 2
+    assert latches[1]["old_bucket"] == "stale_45m"
+    assert latches[1]["new_bucket"] == "live"
+    assert _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
+
+
+def test_requeue_after_suppressed_crossing_pages_on_next_tick(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """The predicate is evaluated per tick: a requeued row pages again (#2135)."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=60)
+    state = CwState(sessions=[sess])
+
+    record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": _parked_task(sess.id)},
+    )
+    assert _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
+
+    # requeue_ticket leaves the row PENDING; the disposition literal survives.
+    requeued = _parked_task(sess.id, status=QueueItemStatus.PENDING)
+    candidates = record_session_liveness_changes(
+        state,
+        now=_NOW + timedelta(minutes=1),
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": requeued},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].distress is True
+    attention = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert len(attention) == 1
+    assert attention[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
+    _deps.fire_push_notification.assert_called_once()

@@ -149,7 +149,7 @@ ignore = [
 ".claude/scripts/*.py" = ["INP001"]
 # Operator tooling under .claude/ (PR review/finalize, queue-peek, smoke-test
 # preflight) is linted at the baseline ruff level but exempted from the package
-# complexity discipline — CLAUDE.md gate 1 scopes ruff complexity to src/ + tests/.
+# complexity discipline — CLAUDE.md's `ruff check` gate scopes ruff complexity to src/ + tests/.
 # These are untested standalone scripts; extracting helpers solely to satisfy the
 # refactor rules would be unverified churn. (PLR0913 is already globally ignored.)
 ".claude/**/*.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
@@ -285,6 +285,11 @@ ignore = [
 # the cw.reconcile package) must not reach back at import time. Mirrors
 # _shared.py's own deferred cw.dispatch import (#698).
 "src/cw/reconcile/codex_boot.py" = ["PLC0415"]
+# fix_dispatch defers the same cw.dispatch.claim._park_running_task_blocked_on_user
+# inside _park_for_unresolved_ref (#2209), for the identical reason as
+# codex_boot above: claim.py imports cw.executor at module top and cw.executor
+# imports cw.reconcile, so this module must not reach back at import time.
+"src/cw/reconcile/fix_dispatch.py" = ["PLC0415"]
 # claim defers the cw.dispatch.gating import inside _spawn_claimed_task to break
 # the gating ↔ claim circular dependency (#1310): gating imports claim at module
 # top, so claim's own reach back into gating must be function-level. Inline

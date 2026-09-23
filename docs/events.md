@@ -403,6 +403,38 @@ Operator-relevant: if you see this without having stopped the loop yourself,
 dispatch is down and pending tickets will not be claimed until it is
 restarted.
 
+### `dispatch.usage_limit_armed`
+
+**Emitter:** `run_dispatch_loop` in `cw.dispatch.loop` (via
+`_arm_usage_limit_windows`)
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "until": "<iso8601>",
+  "source": "parsed_reset | flat_backoff"
+}
+```
+**Semantics:** Fires once per client whose usage-limit back-off window is
+opened, on the tick that opens it — the set-side counterpart to
+`dispatch.usage_limit_cleared` below, which only ever fired on the way out.
+Per client, not per fleet: since #1409 the back-off window is keyed by client
+name, so a limit one client hit no longer parks the rest. A tick that arms
+three clients emits three events.
+
+`until` is the deadline that was persisted for that client. `source` says
+where it came from: `parsed_reset` when the spawn-time message named a reset
+time that parsed (and survived the 7-day clamp), `flat_backoff` when it did
+not and the window fell back to `usage_limit_backoff_seconds`. A
+transcript-derived (reconcile) detection names no client at all, so it arms
+every known client with `source: "flat_backoff"`.
+
+Operator-relevant: this is how you find out a window is open and how long it
+runs, without reading the dispatch log. Nothing clears a window early —
+`_merge_persisted_usage_limited_until` never shortens one — so a
+`parsed_reset` far in the future is the line to check when dispatch looks
+idle. `--once` mode never arms a window and so never emits this.
+
 ### `dispatch.usage_limit_cleared`
 
 **Emitter:** `run_dispatch_loop` in `cw.dispatch.loop` (via
@@ -643,13 +675,16 @@ without task revert).
 
 ### `session.needs_attention`
 
-**Emitter:** `revert_timed_out_tasks`, `revert_completed_silent_tasks`, and
-the liveness sweep's distress check (`record_session_liveness_changes`) in
-`cw.reconcile`; `apply_staged_decision`, `dispatch_tick` (via
-`_record_client_freshness_block`), and the dispatch loop's per-tick staleness
-watchdog (via `_notify_stale_clients_with_pending`) in `cw.dispatch`. (The
-former idle-watchdog / salvage / salvage-skip emitters were removed with the
-process-kill timeouts, ADR-0014.)
+**Emitter:** `revert_timed_out_tasks`, `revert_completed_silent_tasks`, the
+liveness sweep's distress check (`record_session_liveness_changes`), and the
+Stop hook's abandoned-exit park (`_route_stopped_without_sentinel`, invoked
+from `cw signal-stop`, #2135) in `cw.reconcile`; `apply_staged_decision`,
+`dispatch_tick` (via `_record_client_freshness_block`), and the dispatch
+loop's per-tick staleness watchdog (via `_notify_stale_clients_with_pending`)
+in `cw.dispatch`. (The former idle-watchdog / salvage / salvage-skip emitters
+were removed with the process-kill timeouts, ADR-0014.) The liveness sweep's
+distress check is skipped entirely for a row parked with
+`stopped_without_sentinel` — see that value's bullet below.
 **Payload:**
 ```json
 {
@@ -660,9 +695,18 @@ process-kill timeouts, ADR-0014.)
   "claude_session_id": "<str | null>",
   "paused_status": "<str>",
   "breadcrumbs": "<str>",
-  "crashed": false
+  "crashed": false,
+  "lane": "<str | null>"
 }
 ```
+`lane` is the ninth of the canonical nine fields. It is stamped by the
+task-scoped emitters (the phantom sweep's park, the dispatch claim path, the
+Stop hook's abandoned-exit park) and is what `cw event tail --lane` filters
+on — `_event_matches` drops any event whose `payload["lane"]` is not in the
+requested lane names. It is **absent** from the liveness sweep's distress
+payload and from the client-scoped `dispatch_loop_stale` payload, both of
+which carry their own extra fields instead.
+
 **Semantics:** Emitted when a session requires human intervention — the
 orchestrator cannot automatically retry or complete it. `paused_status` is an
 open enum; consumers MUST tolerate unknown values. Known values:
@@ -673,6 +717,14 @@ open enum; consumers MUST tolerate unknown values. Known values:
   tail. Edge-triggered per bucket crossing, fires a push notification, and
   mutates nothing — the session keeps running; the operator decides.
   `breadcrumbs` carries stale minutes, stage, and elapsed seconds.
+  **Suppressed** (#2135) when the session's ticket task is `BLOCKED_ON_USER`
+  with `disposition="stopped_without_sentinel"` and that task's `session_id`
+  is this session's — a state only reachable once an operator has armed
+  `park_on_abandoned_exit_enabled`. That row already paged via its own
+  `session.needs_attention`, so a recurring distress fire is noise. The
+  suppression is signal-only and evaluated per tick: bucket latching and
+  `session.liveness_changed` are unaffected, every other disposition (and a
+  session with no task) still pages, and a requeue re-enables it.
 - `"fix_loop_await_deadline_exceeded"` — the same liveness-sweep distress
   path, for the case its sibling above excludes: the session's quietness IS
   explained by an outstanding subagent spawn, but that spawn has been
@@ -731,6 +783,33 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `premises_pending_verification` sentinel status). The task is BLOCKED_ON_USER.
   Operator should inspect the session result (`cw session result <id>`) and
   either resolve the ambiguities and re-dispatch, or close the ticket. See #923.
+- `"stopped_without_sentinel"` — the Stop hook observed an **abandoned exit**
+  (#2135): the worker recorded a `park_comment_marker` in its worktree's
+  `.claude/cw-context.json` (via `cw signal-park`, after its park comment
+  posted) matching this session, ticket and the RUNNING row's stage, the Stop
+  fired with no pending background tasks and no sentinel, and no
+  `AUTO_DEV_RESULT` framing text — not even an unpaired open marker — appears
+  in the transcript at or after the marker's `posted_at`. The marker is the
+  worker's own recorded claim, not an observation by cw that a tracker comment
+  exists. **Gated, default off:** the
+  park requires `park_on_abandoned_exit_enabled: true` in `orchestrator.yaml`
+  *and* a `park_on_abandoned_exit` map enabling it on the row's lane (or the
+  ticket), whose lane the client must also declare. With the switch off this
+  disposition is never emitted and a
+  sentinel-less Stop defers exactly as it did before #2135. Unlike its
+  signal-only
+  siblings above, this one **does mutate the task row**: `RUNNING →
+  BLOCKED_ON_USER` with `disposition="stopped_without_sentinel"`, no
+  `blocked_reason`, and no `unproductive_attempts` charge (the park post is
+  positive evidence of progress). That same mutation first emits a
+  `task.transition` from `transition_task_status` (`old_status: "running"` →
+  `new_status: "blocked_on_user"`, `unproductive_charge: false`) while
+  `dev_queue_lock` is held, and then this event once the lock is released.
+  The payload is the canonical nine fields including `lane`. The **session is
+  left ACTIVE** and the worker is not stopped, so a late sentinel still
+  rescues the row (#918); only a `RUNNING` row transitions, so a repeat Stop
+  is idempotent. Evidence-driven, never a timer (ADR-0014). See
+  `docs/session-disposition.md` §6c.
 - `"freshness_gate_blocked"` — A client's consecutive freshness-gate-block
   latch (`ClientConcurrencyOverride.consecutive_freshness_blocks`, RFC 0007
   §W2) reached `freshness_block_attention_threshold`. Client-scoped, not
@@ -855,8 +934,13 @@ open enum; consumers MUST tolerate unknown values. Known values:
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for most emissions (via `fire_push_notification`)
-— **except** `"freshness_gate_blocked"`, `"salvage_skip_escalated"`, and
-`"dispatch_loop_stale"`, which deliberately do not push. This mirrors the existing `gh_check_blocked`
+— **except** `"freshness_gate_blocked"`, `"salvage_skip_escalated"`,
+`"dispatch_loop_stale"`, and `"stopped_without_sentinel"`, which deliberately
+do not push. (`stopped_without_sentinel` is emitted from the short-lived
+`cw signal-stop` hook process, whose backgrounded push thread would be
+dropped when it exits.) The liveness sweep's distress fire — and therefore
+its push — is skipped entirely for a row parked with
+`stopped_without_sentinel`. This mirrors the existing `gh_check_blocked`
 paused_status (verified: its `_emit_phantom_terminal_events` call site,
 `cw.reconcile.phantom._events`, does not call `fire_push_notification`
 either).
@@ -1845,16 +1929,31 @@ debt itself is already surfaced on the posted review comment.
 {
   "file": "<str>",
   "summary": "<str>",
+  "severity": "<str>",
   "outcome": "REJECTED",
   "rationale": "<str>",
-  "recorded_at": "<str>"
+  "recorded_at": "<str>",
+  "match_kind": "exact" | "claim",
+  "similarity": "<float>",
+  "matched_key": "<str>"
 }
 ```
 **Semantics:** GitHub #1838. One event per re-derived review finding suppressed
-because its `review_debt.fingerprint_v1` identity matched a `REJECTED` entry in
-the ticket's cross-round adjudication ledger
-(`TicketTask.finding_dispositions`, schema v31). The finding is stamped
+because it matched a `REJECTED` entry in the ticket's cross-round adjudication
+ledger (`TicketTask.finding_dispositions`, schema v31). The finding is stamped
 `disposition="rejected"` and leaves `must_fix`/`blocking`.
+
+`match_kind` (#2210) says which tier matched. `"exact"` is the original
+identity — the finding's own ledger key equals the recorded one, which since
+review round 3 means a **byte-identical** summary (the key is
+`file::normalized summary::<sha256 of the verbatim summary>`, ADR-0016
+invariant 12) — and always carries `similarity: 1.0`. `"claim"` is the fuzzy same-file tier,
+which applies **only when armed** on the task's lane
+(`codex_claim_suppression_enabled` plus `codex_review_tiers:
+{claim_suppression: true}`); while it is off it emits
+`review.finding_claim_shadowed` below instead of suppressing anything.
+`matched_key` is the ledger key that won — including its trailing 64-hex
+digest — which for a claim match is NOT the finding's own key.
 
 Mandatory for the same reason as `review.finding_voided` above, and NOT a reuse
 of it: the two suppressions have different identities (fingerprint-keyed vs.
@@ -1878,6 +1977,261 @@ expected steady-state outcome once an operator has settled a finding, and it is
 already visible on the review comment.
 
 `correlation_id` is the `ticket_id`.
+
+### `review.finding_claim_shadowed`
+
+**Emitter:** `suppress_adjudicated_findings`
+(`cw.review_finding_dispositions`), on the same hop as
+`review.finding_disposition_suppressed` above.
+**Payload:**
+```json
+{
+  "file": "<str>",
+  "summary": "<str>",
+  "severity": "MUST_FIX",
+  "similarity": "<float>",
+  "matched_key": "<str>",
+  "matched_recorded_at": "<str>",
+  "matched_rationale": "<str>",
+  "reviewed_sha": "<str>"
+}
+```
+**Semantics:** GitHub #2210. The ledger's fuzzy **claim** tier matched a
+re-derived finding against a `REJECTED` entry, but the per-lane gate was
+closed — so nothing was suppressed and the finding stayed blocking. This event
+is the counterfactual record: reading these is how an operator judges the
+matcher's thresholds against real rewordings before arming a lane (ADR-0016).
+
+Deliberately a distinct type rather than a reuse of
+`review.finding_disposition_suppressed`, for the same reason that one is
+distinct from `review.finding_voided`: one type could not say whether a finding
+was actually suppressed or only *would* have been, and that distinction is the
+entire content of this event.
+
+It is recorded **even when the master switch is off**, for any ticket that has
+a ledger at all. That is a deliberate deviation from
+`docs/release-playbook.md`'s "a `False` master short-circuits the module"
+convention — the measurement is the point of the default-off period. A fresh
+install with no ledger still emits nothing.
+
+It fires on **every pass** that re-derives the finding, so a fix loop produces
+one per cycle. Group on `(correlation_id, file, summary)` and count distinct
+`reviewed_sha` values: each fix cycle commits and so has its own SHA, while
+equal SHAs are repeats within one reviewed commit (a requeue with no new
+commit, say). A failed write is logged at WARNING and never alters the verdict
+or aborts the pass — the shadow is observational.
+
+**Querying:** `cw event tail --type review.finding_claim_shadowed --json` reads
+only the **live** inbox. Auto-prune archives older events to
+`events/inbox.<YYYY-MM-DD>.jsonl` under `events_dir()` rather than deleting
+them, so read those files for older ones, or raise
+`event_inbox_retention_count`.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`, matching its
+three siblings above: it is an analysis record an operator goes looking for,
+not an interrupt.
+
+`correlation_id` is the `ticket_id`.
+
+### `review.finding_settled`
+
+**Emitter:** `cw review settle` (`cw.cli.review.commands`)
+**Payload:**
+```json
+{
+  "key": "<file>::<normalized summary>::<sha256 of the verbatim summary>",
+  "file": "<str>",
+  "summary": "<str>",
+  "outcome": "REJECTED",
+  "reason": "<str>",
+  "actor": "<gh login>",
+  "recorded_at": "<ISO-8601 UTC>",
+  "reviewed_sha": "<str>"
+}
+```
+**Semantics:** GitHub #2210. An operator minted a durable cross-round ledger
+entry for one finding. The **mirror** of
+`review.finding_disposition_suppressed` above: that event records a suppression
+*firing*, this one records it being *created*.
+
+Mandatory for the same reason both of its siblings are. A settle is the one act
+that can silence a real defect permanently and invisibly — the ledger has no
+expiry, and rollback (#2232) is itself an operator act with its own event — so
+the record of who did it, when,
+and against which reviewed sha cannot live only in a ticket comment that can be
+edited afterwards. The same four facts are also written onto the durable
+`FindingDisposition` itself (`actor`, `recorded_at`, `summary`,
+`reviewed_sha`); the event is the queryable copy.
+
+**One event per settled finding**, counted over the *collapsed* ledger: two
+payload entries with the same file and byte-identical summary are one settled
+finding and one event, the same arithmetic the marker uses. Two summaries that
+merely normalize alike are two findings (the key binds the verbatim text) and
+two events.
+
+**Emitted before the marker is written** (ADR-0016 invariant 10). Every event
+for the settle records first; only then does the command render the marker to
+stdout and `--out`. If any emit fails the whole settle is refused — no marker,
+no `--out` file, non-zero exit, a message naming the finding and the failure —
+so a durable suppression can never exist without its audit record. The
+converse can: if the third of five events fails, the first two are recorded
+with no marker written, which is accepted noise. This is deliberately the
+opposite ordering to #1617's save-then-emit rule, which governs a *state
+mutation* whose event must not claim something that did not land; here the
+event **is** the safety mechanism.
+
+`cw review settle` refuses to run anywhere it cannot prove is an operator's
+own interactive session — a dispatch worker, or a directory whose
+`.claude/cw-context.json` cannot be resolved at all (see ADR-0016 invariant 8,
+which fails CLOSED as of #2210 round 4) — so no event of this type can
+originate from one. A refused run — blank `--reason`, unresolvable gh
+identity, an entry with no reviewed sha, the session refusal, or a failed
+audit emit — emits no marker and writes nothing.
+
+A record that never went through this command is not applied by the reader at
+all (ADR-0016 invariant 9), so the absence of a `review.finding_settled` event
+for a suppression now means the suppression did not happen — not that it
+happened unaudited.
+
+**Querying:** `cw event tail --type review.finding_settled --json`. Same
+archive caveat as `review.finding_claim_shadowed` above.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`: the operator
+running the command already knows it happened; this is an audit record read
+after the fact, not an interrupt.
+
+`correlation_id` is the `ticket_id` when `cw review settle --ticket <id>` names
+one, and `null` otherwise. The payload the blocking comment renders carries no
+ticket id — `ReviewVerdict` has no such field and the comment renderer is not
+given one — so the command cannot infer it, and inventing a correlation id
+would be worse than an honest null. Pass `--ticket` to get grouping.
+
+An entry whose `outcome` is `REVERSED` emits
+`review.finding_disposition_reverted` below **instead of** this event, so a
+count of `review.finding_settled` is a count of decisions recorded, never of
+decisions withdrawn.
+
+### `review.finding_disposition_reverted`
+
+**Emitters:** `cw review settle` (`cw.cli.review.commands`), for a payload
+entry whose `outcome` is `REVERSED`; and the review pass itself
+(`cw.codex_review._context.core._emit_thread_reversal_events`) for a `REVERSED`
+record arriving through the ticket thread's marker. Both go through
+`cw.review_finding_dispositions.disposition_event_type` /
+`disposition_event_payload`, so the type and payload cannot drift apart.
+**Payload:**
+```json
+{
+  "key": "<file>::<normalized summary>::<sha256 of the verbatim summary>",
+  "file": "<str>",
+  "summary": "<str>",
+  "outcome": "REVERSED",
+  "reason": "<str>",
+  "actor": "<gh login>",
+  "recorded_at": "<ISO-8601 UTC>",
+  "reviewed_sha": "<str>"
+}
+```
+**Semantics:** GitHub #2232. An operator **withdrew** a ledger entry they had
+previously settled. ADR-0016 named a per-record rollback as a precondition for
+ever arming the ledger's fuzzy claim tier; this is that rollback's audit
+record.
+
+Rollback reuses `cw review settle` rather than adding a command, so there is no
+second write path into the ledger: the marker's newest-`recorded_at`-wins merge
+resolves the same key to the reversal. Every guard the settle path already has
+applies unchanged — the dispatch-worker refusal, the resolved `actor`, the
+audit-before-effect ordering, and the all-events-then-one-write atomicity.
+
+**Its own type rather than a `review.finding_settled` with a different
+`outcome`.** That is this region's convention (`..._disposition_suppressed` and
+`..._claim_shadowed` share one emitting function and are still two types): an
+operator asking "what have I withdrawn" runs one `--type` query instead of
+filtering settles on payload content. The payload is byte-identically shaped,
+and carries `outcome` anyway, so a consumer that wants both loses nothing.
+
+**Querying:** `cw event tail --type review.finding_disposition_reverted --json`.
+Same archive caveat as `review.finding_claim_shadowed` above.
+
+Deliberately **not** in `_DEFAULT_OPERATOR_EVENT_TYPES`, for the same reason
+`review.finding_settled` is not: the operator who ran the command already knows.
+
+`correlation_id` follows `review.finding_settled`'s rule exactly — the
+`ticket_id` when `--ticket` names one, else `null`. From the review-pass
+emitter it is always the ticket id, which that path always has.
+
+**The review-pass emitter fires only on a state change** — a `REVERSED` record
+absent from the durable ledger before the merge, or replacing a different
+record under the same key. The marker is re-parsed on every pass, so a
+withdrawal already on the row produces no further events. Unlike the command,
+it **warns rather than raising** on a failed write: the operator's decision
+already exists durably on the ticket thread, so there is nothing to hold back,
+and parking a review run over an event-store `OSError` would trade a safe
+outcome for a stalled one. Only `REVERSED` is emitted from that path; an
+`ACCEPTED`/`REJECTED` record synced in from the thread is #2210's unchanged
+behaviour and produces no event.
+
+### `review.finding_disposition_stale`
+
+**Emitter:** `suppress_adjudicated_findings`
+(`cw.review_finding_dispositions`).
+**Payload:**
+```json
+{
+  "key": "<file>::<normalized summary>::<sha256 of the verbatim summary>",
+  "file": "<str>",
+  "summary": "<str>",
+  "outcome": "<str>",
+  "reason": "<str>",
+  "actor": "<gh login>",
+  "recorded_at": "<ISO-8601 UTC>",
+  "reviewed_sha": "<the sha the RECORD was settled against>",
+  "current_sha": "<the sha THIS pass reviewed>"
+}
+```
+The settle/revert payload above plus `current_sha`. Full parity is the point:
+someone triaging a drifted suppression is asking who silenced this finding and
+why, and the two shas alone answer neither. `file` and `summary` are the
+finding as it came back THIS round rather than the record's stored copy — on a
+claim-tier match those differ, and the live text is what the reader is looking
+at.
+
+**Semantics:** GitHub #2232. A ledger record matched a re-derived finding, and
+was **not applied**, because the file changed between the sha the record was
+settled against and the sha this pass reviewed. The finding kept blocking.
+
+The ledger's identity is deliberately not evidence-anchored (an evidence anchor
+lapses the moment code moves, which is the memory loss #1838 exists to remove),
+so the accepted cost is a suppression that can outlive the code it was granted
+for. This event is how that cost stops being silent.
+
+**Surfacing, not expiry.** The record is not deleted, not rewritten, and not
+marked spent: it still applies on any later pass where that file has not moved.
+The operator decides whether to re-settle it against the current code or
+withdraw it with `review.finding_disposition_reverted` above. Silent expiry is
+precisely the invisible mechanical act ADR-0016 exists to refuse.
+
+**Advisory, so a failed write warns rather than aborting** — the asymmetry with
+`review.finding_settled`, which refuses the whole settle on a failed emit, is
+deliberate and runs the same direction both times. There the audited act
+*creates* a durable suppression, so an unrecorded one is invisible; here the
+act is *declining* to suppress, which is already the safe outcome and is
+already visible twice over — on the posted comment under "Settled findings
+re-raised (the code moved)", and in the finding that kept blocking.
+
+Fails toward surfacing: an unresolvable ref (a rebase or force-push orphaning
+the settled sha) or an unreadable worktree is reported as drift rather than
+assumed clean.
+
+**Querying:** `cw event tail --type review.finding_disposition_stale --json`.
+Same archive caveat as `review.finding_claim_shadowed` above.
+
+Deliberately **not** in `_DEFAULT_OPERATOR_EVENT_TYPES`: per-finding, per-pass
+volume, in the same class as `review.finding_claim_shadowed`, and the posted
+comment already carries the operator-facing version.
+
+`correlation_id` is the ticket id, always — this event is emitted from inside a
+review pass, which has one.
 
 ### `watched_pr.collision`
 

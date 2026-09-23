@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import pytest
+import pytest
 
 
 class TestIterAssistantTextBlocks:
@@ -190,6 +188,212 @@ class TestIterSentinelTextBlocks:
 
         monkeypatch.setattr("pathlib.Path.open", _boom)
         assert list(_iter_sentinel_text_blocks(transcript)) == []
+
+
+class TestIterSentinelTextRecords:
+    """Tests for _iter_sentinel_text_records (timestamped sentinel-text walk, #2135).
+
+    The timestamped superset ``_iter_sentinel_text_blocks`` now delegates to.
+    The ``strict`` flag exists for the Stop hook's false-park guard, which reads
+    the transcript for *negative* evidence: there, "could not read or parse"
+    must be distinguishable from "no frame found", so strict mode re-raises
+    what the lenient default swallows.
+    """
+
+    @staticmethod
+    def _write(tmp_path: Path, records: list[str]) -> Path:
+        transcript = tmp_path / "t.jsonl"
+        transcript.write_text("\n".join(records) + "\n")
+        return transcript
+
+    def test_yields_timestamped_text_in_file_order(self, tmp_path: Path) -> None:
+        """Assistant text and tool_result text carry their record timestamp."""
+        from cw._util import _iter_sentinel_text_records
+
+        transcript = self._write(
+            tmp_path,
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "timestamp": "2026-01-01T00:00:00+00:00",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": "prompt prose"}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": "2026-01-01T00:01:00+00:00",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "narrative"},
+                                {
+                                    "type": "tool_use",
+                                    "name": "Bash",
+                                    "input": {"command": "echo hi"},
+                                },
+                            ],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "timestamp": "2026-01-01T00:02:00+00:00",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {"type": "tool_result", "content": "stdout-sentinel"}
+                            ],
+                        },
+                    }
+                ),
+            ],
+        )
+
+        assert list(_iter_sentinel_text_records(transcript)) == [
+            ("2026-01-01T00:01:00+00:00", "narrative"),
+            ("2026-01-01T00:02:00+00:00", "stdout-sentinel"),
+        ]
+
+    def test_timestamp_is_none_when_absent_or_not_a_string(
+        self, tmp_path: Path
+    ) -> None:
+        from cw._util import _iter_sentinel_text_records
+
+        transcript = self._write(
+            tmp_path,
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "no-ts"}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": 1234,
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "int-ts"}],
+                        },
+                    }
+                ),
+            ],
+        )
+
+        assert list(_iter_sentinel_text_records(transcript)) == [
+            (None, "no-ts"),
+            (None, "int-ts"),
+        ]
+
+    def test_texts_match_iter_sentinel_text_blocks(self, tmp_path: Path) -> None:
+        """Delegation parity: the same file yields the same texts either way."""
+        from cw._util import (
+            _iter_sentinel_text_blocks,
+            _iter_sentinel_text_records,
+        )
+
+        transcript = self._write(
+            tmp_path,
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": "2026-01-01T00:01:00+00:00",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "narrative"}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "content": [
+                                        {"type": "text", "text": "list-stdout"}
+                                    ],
+                                }
+                            ],
+                        },
+                    }
+                ),
+            ],
+        )
+
+        assert [text for _ts, text in _iter_sentinel_text_records(transcript)] == list(
+            _iter_sentinel_text_blocks(transcript)
+        )
+
+    def test_whitespace_only_line_is_skipped_in_both_modes(
+        self, tmp_path: Path
+    ) -> None:
+        from cw._util import _iter_sentinel_text_records
+
+        transcript = tmp_path / "t.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "kept"}],
+                    },
+                }
+            )
+            + "\n   \n"
+        )
+
+        assert list(_iter_sentinel_text_records(transcript)) == [(None, "kept")]
+        assert list(_iter_sentinel_text_records(transcript, strict=True)) == [
+            (None, "kept")
+        ]
+
+    def test_missing_file_yields_nothing_in_both_modes(self, tmp_path: Path) -> None:
+        from cw._util import _iter_sentinel_text_records
+
+        missing = tmp_path / "nope.jsonl"
+        assert list(_iter_sentinel_text_records(missing)) == []
+        assert list(_iter_sentinel_text_records(missing, strict=True)) == []
+
+    def test_strict_re_raises_a_malformed_line(self, tmp_path: Path) -> None:
+        """A torn or malformed line is evidence in strict mode, silence by default."""
+        from cw._util import _iter_sentinel_text_records
+
+        transcript = self._write(tmp_path, ["{ not valid json"])
+
+        assert list(_iter_sentinel_text_records(transcript)) == []
+        with pytest.raises(json.JSONDecodeError):
+            list(_iter_sentinel_text_records(transcript, strict=True))
+
+    def test_strict_re_raises_an_oserror_on_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw._util import _iter_sentinel_text_records
+
+        transcript = self._write(tmp_path, ['{"type": "assistant"}'])
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            msg = "boom"
+            raise PermissionError(msg)
+
+        monkeypatch.setattr("pathlib.Path.open", _boom)
+        assert list(_iter_sentinel_text_records(transcript)) == []
+        with pytest.raises(OSError, match="boom"):
+            list(_iter_sentinel_text_records(transcript, strict=True))
 
 
 class TestParseSentinelFromTranscriptToolResult:
@@ -572,3 +776,10 @@ class TestMcpExtraMsg:
 
         assert "channel server requires [mcp] extra" in MCP_EXTRA_MSG
         assert "uv tool install" in MCP_EXTRA_MSG
+
+    def test_does_not_advise_removed_from_flag(self) -> None:
+        """The local-clone hint points at install.sh, not uv's removed --from."""
+        from cw._util import MCP_EXTRA_MSG
+
+        assert "--from" not in MCP_EXTRA_MSG
+        assert "install.sh" in MCP_EXTRA_MSG

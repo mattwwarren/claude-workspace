@@ -104,3 +104,9 @@ jobs:
 
       - name: Smoke test - guide data file
         run: cw guide | grep -q "orchestrating a sprint"
+
+      - name: Smoke test - scripts/install.sh (local-clone install)
+        run: |
+          ./scripts/install.sh
+          cw --version
+          grep -q 'extras = \["mcp"\]' "$(uv tool dir)/claude-workspace/uv-receipt.toml"

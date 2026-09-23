@@ -13,6 +13,7 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw._util import claude_project_dir
 from cw.auto_dev_result import AutoDevResult
 from cw.cli._base import handle_errors, main
 from cw.cli._hook_io import (
@@ -20,7 +21,10 @@ from cw.cli._hook_io import (
     _read_hook_stdin_json,
     _write_cw_context_locked,
 )
-from cw.cli._sentinels import _parse_sentinel_from_transcript
+from cw.cli._sentinels import (
+    _parse_sentinel_from_transcript,
+    _sentinel_frame_after,
+)
 from cw.config import (
     load_state,
     save_state,
@@ -38,18 +42,22 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
     extract_unresolved_spawn_count,
+    read_park_comment_marker,
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
     _apply_sentinel_to_task,
     _has_terminal_sentinel,
+    _route_stopped_without_sentinel,
+    find_running_task_for_session,
+    park_gate_open,
 )
 from cw.result import emit_result_locked, reconstruct_staged_sentinel
 from cw.worktree import reconcile_result_scope, resolve_scope_guard_default_branch
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import BlockedResult
-    from cw.models import CwState, Session
+    from cw.models import CwState, ParkCommentMarker, Session, TicketTask
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +121,18 @@ def _parse_headless_sentinel(
     """
     csid = claude_session_id if isinstance(claude_session_id, str) else None
     parsed = _parse_sentinel_from_transcript(cwd_value, csid)
-    if parsed is None and session.worktree_path is not None:
+    # Rescan only a *different* directory: when the hook cwd already equals the
+    # recorded worktree_path, the same transcript was just read (equal strings
+    # encode to the same project dir), so a second pass repeats it byte for
+    # byte. A per-call skip, not a cache -- nothing outlives this invocation.
+    # A sentinel landing in the few ms between the two scans is caught by the
+    # next Stop, exactly like one landing just after the second scan (deferring
+    # is the fail-safe direction, ADR-0003).
+    if (
+        parsed is None
+        and session.worktree_path is not None
+        and str(session.worktree_path) != cwd_value
+    ):
         parsed = _parse_sentinel_from_transcript(str(session.worktree_path), csid)
     if isinstance(parsed, AutoDevResult):
         parsed = _verify_headless_scope(parsed, session)
@@ -184,6 +203,127 @@ def _handle_headless_no_sentinel() -> bool:
     return True
 
 
+def _armed_running_task(session: Session, ticket_id: str) -> TicketTask | None:
+    """The RUNNING row the #2135 park may fire for, or ``None``.
+
+    The Stop hook fires at **every** main-agent turn boundary, so the park's
+    evidence -- and above all the transcript walk whose cost grows with session
+    length -- must not be read on every turn, and neither should a config file.
+    The preconditions are therefore ordered by cost:
+
+    1. headless DAEMON session and empty ``background_tasks`` -- already
+       established, since ``signal_stop`` returns before this path otherwise;
+    2. the RUNNING dev-queue row this session owns (one lock-free
+       ``dev_queue.json`` read). No row, or a row that is not RUNNING, means
+       there is nothing to park;
+    3. the park flag for that row (:func:`park_gate_open`): the master switch
+       plus the per-lane / per-ticket resolution. Memoized per process and
+       fail-closed -- an unreadable config, an unknown client, an undeclared
+       lane or an absent lane entry all read as disabled, and none of them
+       raises out of the hook.
+
+    Returns the row rather than a bool because the caller needs its ``stage``:
+    that is the one field of the marker checked against a source independent of
+    the marker's own file. With the park disabled -- the shipped default -- a
+    sentinel-less Stop costs the row lookup and at most one config resolution,
+    and behaves exactly as the pre-#2135 unconditional defer.
+    """
+    task = find_running_task_for_session(ticket_id, session.id)
+    return task if task is not None and park_gate_open(task) else None
+
+
+def _sentinel_frame_follows_marker(
+    session: Session,
+    cwd_value: str,
+    claude_session_id: object,
+    marker: ParkCommentMarker,
+) -> bool:
+    """Whether a sentinel frame appears after *marker* was stamped (#2135).
+
+    True suppresses the park. Both candidate transcripts are read -- the hook's
+    ``cwd`` project dir and the session's recorded ``worktree_path`` project dir
+    (issue #799, for an EnterWorktree-shifted cwd). That is the same pair
+    ``_parse_headless_sentinel`` searches, but not the same stopping rule: it
+    falls back to the second location whenever the first yields no *sentinel*,
+    so a first transcript that exists yet carries no frame must not end this
+    search either. A frame is a hit wherever it lands.
+
+    Returns True on the first frame hit or read failure, and False only once
+    every transcript that exists has been read clean. A missing Claude session
+    id, or no transcript in either location, also returns True: without the
+    transcript a late frame cannot be ruled out, and the cost of being wrong
+    that way is a silent non-park rather than a park that hides a real blocker
+    reason behind the wrong disposition.
+    """
+    if not isinstance(claude_session_id, str) or not claude_session_id:
+        return True
+    search_dirs = [cwd_value]
+    if session.worktree_path is not None:
+        search_dirs.append(str(session.worktree_path))
+    found_transcript = False
+    # ``dict.fromkeys`` drops a repeated directory (the common case: the hook's
+    # cwd IS the worktree) so the hot path never reads the same file twice.
+    for search_dir in dict.fromkeys(search_dirs):
+        transcript_path = claude_project_dir(search_dir) / f"{claude_session_id}.jsonl"
+        if not transcript_path.is_file():
+            continue
+        found_transcript = True
+        if _sentinel_frame_after(transcript_path, marker.posted_at):
+            return True
+    return not found_transcript
+
+
+def _park_if_abandoned(
+    session: Session,
+    context: dict[str, object],
+    cwd_value: str,
+    claude_session_id: object,
+    ticket_id_value: object,
+) -> None:
+    """Park the ticket's row when this Stop looks like an abandoned exit (#2135).
+
+    Called only after the sentinel parse has already returned ``None``. The
+    park ships **dark**: with ``park_on_abandoned_exit_enabled`` false (the
+    default) :func:`_armed_running_task` returns ``None`` before the marker is
+    read or any transcript is opened, and the caller defers exactly as it did
+    before #2135.
+
+    The evidence is the worker's own ``park_comment_marker``, written by ``cw
+    signal-park`` after its park comment posted -- a RECORDED CLAIM by the
+    producer, never an observation by cw that a tracker comment exists. It must
+    cover this session id, this ticket id and the RUNNING row's stage; a
+    malformed marker is an absent marker.
+
+    The transcript is then consulted for NEGATIVE evidence only
+    (:func:`_sentinel_frame_follows_marker`): a frame marker at or after the
+    stamp suppresses the park, because a truncated, unpaired or placeholder
+    frame parses to ``None`` and would otherwise be stamped
+    ``stopped_without_sentinel``, hiding the worker's real blocker reason. It
+    can never cause a park, and any read or parse trouble counts as a frame.
+
+    Order (cheapest first): ticket id, RUNNING row, park flag, marker (an
+    in-memory lookup in the context dict the hook already parsed), transcript.
+    Fail-closed at every step -- each returns without parking, and none raises.
+
+    Accepted limitation: a worker that dies between deciding its exit and
+    running the stamp leaves no marker, and this defers exactly as it did
+    before #2135.
+    """
+    if not isinstance(ticket_id_value, str) or not ticket_id_value:
+        return
+    task = _armed_running_task(session, ticket_id_value)
+    if task is None:
+        return
+    marker = read_park_comment_marker(context)
+    if marker is None or not marker.covers(
+        session_id=session.id, ticket_id=ticket_id_value, stage=task.stage
+    ):
+        return
+    if _sentinel_frame_follows_marker(session, cwd_value, claude_session_id, marker):
+        return
+    _route_stopped_without_sentinel(ticket_id_value, session)
+
+
 def _harvest_last_result_through_door(
     session_id: str, sentinel: AutoDevResult | BlockedResult
 ) -> None:
@@ -244,6 +384,7 @@ def _resolve_and_complete_headless_session(
     state: CwState,
     session: Session,
     *,
+    context: dict[str, object],
     cwd_value: str,
     claude_session_id: object,
     ticket_id_value: object,
@@ -258,8 +399,11 @@ def _resolve_and_complete_headless_session(
 
     Returns a ``_HeadlessResolution`` with ``rescued=None`` when the caller
     must bail without any further action: either no sentinel was found
-    (``_handle_headless_no_sentinel`` defers unconditionally — there is no
-    wall-clock budget anymore),
+    (``_handle_headless_no_sentinel`` defers — there is no wall-clock budget
+    anymore — unconditionally *unless* ``_park_if_abandoned`` finds the
+    worker's own recorded park marker in *context*, #2135, in which case the
+    ticket's row is parked BLOCKED_ON_USER while the session itself is still
+    left untouched),
     or the shared staged-advance authority refused the route on a stage
     mismatch (GitHub #1031, the #986 incident — extends #1019's phantom-path
     guard to the Stop-hook path). A stage-mismatch refusal leaves session and
@@ -296,6 +440,9 @@ def _resolve_and_complete_headless_session(
         )
         if parsed_sentinel is None:
             _handle_headless_no_sentinel()
+            _park_if_abandoned(
+                session, context, cwd_value, claude_session_id, ticket_id_value
+            )
             return _HeadlessResolution(rescued=None, landed_terminal=False)
 
     # Issue #251: directly update the dev-queue task *before* marking the
@@ -374,9 +521,11 @@ def _snapshot_agent_spawn_stamp(
     ``agent_spawn_stamp._adjust_unresolved_count`` this is a *set*, not a
     delta -- the Stop hook payload's own ``background_tasks`` list is already
     the harness's authoritative live count for this turn, so there is nothing
-    to accumulate against. ``last_stamped_at`` refreshes on every write
-    (snapshot or clear alike) per this ticket's Adopted Assumption: it is an
-    operator-facing nicety only, not load-bearing for any comparison.
+    to accumulate against. ``last_stamped_at`` refreshes on every snapshot,
+    even when the count is unchanged. At count > 0 it IS load-bearing: it bounds
+    the #2012 distress-suppression deadline (``reconcile/liveness.py``,
+    ``doctor/wedge.py``), which is why the deferral snapshot never skips a
+    write. At count 0 nothing reads it.
     """
     context[AGENT_SPAWN_STAMP_KEY] = {
         AGENT_SPAWN_UNRESOLVED_COUNT_KEY: count,
@@ -389,10 +538,12 @@ def _clear_agent_spawn_stamp(context: dict[str, object]) -> dict[str, object]:
     """Zero ``agent_spawn_stamp`` -- the counterpart of
     :func:`_snapshot_agent_spawn_stamp`.
 
-    Runs on every Stop whose ``background_tasks`` is empty/absent, i.e. every
-    turn that is NOT deferring for pending background work. This is what
-    retires a snapshot written by a prior deferred turn once the harness's
-    own accounting shows nothing outstanding -- see :func:`signal_stop`.
+    Runs on every Stop whose ``background_tasks`` is empty/absent -- i.e. every
+    turn that is NOT deferring for pending background work -- unless the stamp
+    is already the resolved shape (:func:`_agent_spawn_stamp_is_clear`, #2229).
+    This is what retires a snapshot written by a prior deferred turn once the
+    harness's own accounting shows nothing outstanding -- see
+    :func:`signal_stop`.
 
     #1947 review: logs when this actually retires a nonzero count -- this
     write otherwise vanishes silently (same fail-open contract as every
@@ -408,6 +559,22 @@ def _clear_agent_spawn_stamp(context: dict[str, object]) -> dict[str, object]:
             prior_count,
         )
     return _snapshot_agent_spawn_stamp(context, 0)
+
+
+def _agent_spawn_stamp_is_clear(context: dict[str, object]) -> bool:
+    """True only when the stamp is exactly the resolved shape: a dict whose
+    ``unresolved_count`` is a non-bool ``int`` equal to 0 (#2229).
+
+    Mirrors :func:`cw.models.extract_unresolved_spawn_count` but is stricter:
+    that helper collapses every malformed shape (absent, non-dict, ``"0"``,
+    ``False``, negative) to 0, whereas the clear write must still normalize
+    those to ``{0, <now>}``. Pure ``isinstance`` logic, so it cannot raise.
+    """
+    stamp = context.get(AGENT_SPAWN_STAMP_KEY)
+    if not isinstance(stamp, dict):
+        return False
+    count = stamp.get(AGENT_SPAWN_UNRESOLVED_COUNT_KEY)
+    return isinstance(count, int) and not isinstance(count, bool) and count == 0
 
 
 @main.command(name="signal-stop")
@@ -479,11 +646,20 @@ def signal_stop() -> None:
 
     # #1947: every Stop that reaches this point has background_tasks
     # empty/absent -- clear any stale agent_spawn_stamp snapshot a prior
-    # deferred turn left behind. Runs unconditionally here (before the
-    # session lookup below) so it fires even when no session in
-    # state.sessions matches this hook's session_id; fails open silently,
-    # same contract as the snapshot write above.
-    _write_cw_context_locked(cwd_value, _clear_agent_spawn_stamp)
+    # deferred turn left behind. Runs here (before the session lookup below)
+    # so it fires even when no session in state.sessions matches this hook's
+    # session_id; fails open silently, same contract as the snapshot write
+    # above.
+    #
+    # #2229: skipped when the stamp is already the resolved shape -- no lock,
+    # no rewrite. Safe because (a) ``last_stamped_at`` is unread at count 0
+    # (``reconcile/_shared.py`` returns early on a zero count), and (b) the
+    # decision uses the unlocked read from above, which is linearizable: an
+    # ``agent-spawn-pre`` increment landing after that read is equivalent to
+    # "this Stop cleared first, then the spawn incremented". The write path
+    # below re-reads under the lock and must never be handed ``context``.
+    if not _agent_spawn_stamp_is_clear(context):
+        _write_cw_context_locked(cwd_value, _clear_agent_spawn_stamp)
 
     # Why not mutate_state: dual-lock (dev_queue_lock nested at the TIMED_OUT path)
     # and daemon.stop() network call inside the lock window (criteria 1 and 2).
@@ -566,6 +742,7 @@ def signal_stop() -> None:
         resolution = _resolve_and_complete_headless_session(
             state,
             session,
+            context=context,
             cwd_value=cwd_value,
             claude_session_id=claude_session_id,
             ticket_id_value=ticket_id_value,

@@ -40,6 +40,7 @@ import click
 
 from cw.cli._base import main
 from cw.cli._hook_io import (
+    _context_str,
     _read_cw_context,
     _read_hook_stdin_json,
     _write_cw_context_locked,
@@ -220,12 +221,6 @@ def _resolve_settings(client: str | None, lane: str | None) -> _GuardSettings:
     return _GuardSettings(enabled, repeat_threshold, window_seconds)
 
 
-def _str_or_none(context: dict[str, object], key: str) -> str | None:
-    """Return ``context[key]`` when it is a non-empty string, else None."""
-    value = context.get(key)
-    return value if isinstance(value, str) and value else None
-
-
 def _entry_within(entry: object, cutoff: datetime) -> bool:
     """Return True iff *entry* is a well-formed record newer than *cutoff*."""
     if not isinstance(entry, dict):
@@ -325,9 +320,9 @@ def _classify_command(
         return _BlockDecision(
             reason=reason,
             command_hash=command_hash,
-            client=_str_or_none(context, "client"),
-            lane=_str_or_none(context, "lane"),
-            session_id=_str_or_none(context, "session_id"),
+            client=_context_str(context, "client"),
+            lane=_context_str(context, "lane"),
+            session_id=_context_str(context, "session_id"),
             repeat_threshold=repeat_threshold,
             window_seconds=window_seconds,
         )
@@ -345,6 +340,24 @@ def _classify_command(
     return None
 
 
+def _is_settled_background_call(payload: dict[str, object]) -> bool:
+    """True for a well-formed backgrounded Bash call: ``tool_input`` a dict,
+    ``run_in_background`` exactly ``True`` and ``command`` a ``str`` (#2229).
+
+    Side-effect free, unlike :func:`_extract_bash_command`, so it can run
+    before the enabled gate without emitting shape warnings from a disabled
+    guard. In exactly this shape the extractor returns ``(command, True)``
+    with no warning and :func:`_classify` returns None whether or not the
+    guard is enabled -- so the config reads it would trigger are pure cost.
+    """
+    tool_input = payload.get("tool_input")
+    return (
+        isinstance(tool_input, dict)
+        and tool_input.get("run_in_background") is True
+        and isinstance(tool_input.get("command"), str)
+    )
+
+
 def _classify() -> _BlockDecision | None:
     """Return the block decision for this hook invocation, or None to allow."""
     payload = _read_hook_stdin_json()
@@ -353,10 +366,14 @@ def _classify() -> _BlockDecision | None:
     cwd_value = payload.get("cwd")
     if not isinstance(cwd_value, str) or not cwd_value:
         return None
+    # #2229: a settled backgrounded call is allowed regardless of the guard's
+    # settings, so return before resolving them (see the predicate's docstring).
+    if _is_settled_background_call(payload):
+        return None
 
     context = _read_cw_context(cwd_value) or {}
     settings = _resolve_settings(
-        _str_or_none(context, "client"), _str_or_none(context, "lane")
+        _context_str(context, "client"), _context_str(context, "lane")
     )
     # Gate before touching state: a disabled guard must leave no trace in
     # cw-context.json at all, not merely decline to block.

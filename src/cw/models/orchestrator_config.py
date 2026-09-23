@@ -22,7 +22,11 @@ from cw.models.enums import (
     ReasoningEffort,
     Stage,
 )
-from cw.models.tasks import _validate_gate_recipe_keys, _validate_review_recipe_keys
+from cw.models.tasks import (
+    _validate_gate_recipe_keys,
+    _validate_park_on_abandoned_exit_keys,
+    _validate_review_recipe_keys,
+)
 
 
 class LaneConcurrencyOverride(BaseModel):
@@ -216,6 +220,30 @@ class StagePipelineConfig(BaseModel):
         return self
 
 
+#: The one recognised key of :attr:`LaneConfig.codex_review_tiers` (#2210).
+#: A named constant, not a bare literal, because ``cw.codex_background``'s
+#: resolver and its hardcoded-off floor key on the same string.
+CODEX_TIER_CLAIM_SUPPRESSION = "claim_suppression"
+_CODEX_REVIEW_TIER_KEYS = frozenset({CODEX_TIER_CLAIM_SUPPRESSION})
+
+
+def _validate_codex_review_tier_keys(value: dict[str, bool]) -> dict[str, bool]:
+    """Fail loud on an unrecognized codex-review-tier key (#2210).
+
+    Same stance, and the same reason, as ``_validate_gate_recipe_keys``: a
+    typo'd key would otherwise resolve silently to the hardcoded default-off,
+    leaving the operator convinced they armed a tier they did not.
+    """
+    unknown = sorted(set(value) - _CODEX_REVIEW_TIER_KEYS)
+    if unknown:
+        msg = (
+            f"codex_review_tiers has unrecognized tier key(s): {unknown}. "
+            f"Recognised keys: {sorted(_CODEX_REVIEW_TIER_KEYS)}."
+        )
+        raise ValueError(msg)
+    return value
+
+
 class LaneConfig(BaseModel):
     """Configuration for a named dispatch lane.
 
@@ -244,6 +272,22 @@ class LaneConfig(BaseModel):
     busy_wait_guard_enabled: bool | None = None
     busy_wait_guard_repeat_threshold: int | None = Field(default=None, ge=2)
     busy_wait_guard_window_seconds: int | None = Field(default=None, ge=1)
+    # Lane-level override for the disposition ledger's drift check (#2232).
+    # Same bidirectional shape and reasoning as busy_wait_guard_enabled above:
+    # None = inherit the OrchestratorConfig default. Resolved by
+    # cw.codex_background._resolve_disposition_drift_check_enabled, which
+    # mirrors guard_busy_wait._resolve_settings' lane-then-global fallthrough
+    # rather than _resolve_claim_tier_enabled's master-switch-then-floor shape
+    # -- there is no kill switch and no floor for a check that defaults on.
+    # Turning it off for a lane REFUSES to arm that lane's claim tier; see
+    # cw.exceptions.ClaimTierArmingError.
+    disposition_drift_check_enabled: bool | None = None
+    # Lane-level override for the `cw agent-spawn-pre` spawn-shape policy
+    # (#2211). Same bidirectional shape and reasoning as
+    # busy_wait_guard_enabled above: None = inherit the OrchestratorConfig
+    # default. Resolved by
+    # cw.cli._subagent_policy._resolve_spawn_guard_enabled.
+    subagent_spawn_guard_enabled: bool | None = None
     pipeline: StagePipelineConfig | None = None
     # Lane-level operator-signoff override (RFC 0007 Phase 3). None defers to
     # OrchestratorConfig.default_signoff. See GitHub #990.
@@ -301,6 +345,21 @@ class LaneConfig(BaseModel):
     # to the hardcoded default-off. Recognised keys: "address_review",
     # "auto_fix_ci", "request_reviewer", "escalate_merge_block" (RFC 0010 P4).
     review_recipes: dict[str, bool] | None = None
+    # Lane-level enablement map for the Stop-hook abandoned-exit park (#2135).
+    # Middle tier in resolve_park_on_abandoned_exit_enabled's 3-tier
+    # precedence: consulted when the ticket carries no override, and itself
+    # overridden by TicketTask.park_on_abandoned_exit. The key absent from this
+    # map (or None) defers to the hardcoded default-off. Recognised key:
+    # PARK_ON_ABANDONED_EXIT_KEY.
+    park_on_abandoned_exit: dict[str, bool] | None = None
+    # Lane-level codex-review tier enablement map (#2210). Middle tier in
+    # cw.codex_background._resolve_claim_tier_enabled's precedence, which is
+    # 2-tier rather than 3 (master switch -> lane map -> hardcoded-off floor):
+    # a per-ticket override would be a persisted dev-queue schema change this
+    # ticket deliberately does not make. A tier absent from this map (or None)
+    # defers to the hardcoded default-off. Recognised keys:
+    # "claim_suppression". See ADR-0016.
+    codex_review_tiers: dict[str, bool] | None = None
 
     @field_validator("name")
     @classmethod
@@ -359,6 +418,24 @@ class LaneConfig(BaseModel):
         if value is None:
             return None
         return _validate_review_recipe_keys(value)
+
+    @field_validator("park_on_abandoned_exit")
+    @classmethod
+    def _check_park_on_abandoned_exit(
+        cls, value: dict[str, bool] | None
+    ) -> dict[str, bool] | None:
+        if value is None:
+            return None
+        return _validate_park_on_abandoned_exit_keys(value)
+
+    @field_validator("codex_review_tiers")
+    @classmethod
+    def _check_codex_review_tiers(
+        cls, value: dict[str, bool] | None
+    ) -> dict[str, bool] | None:
+        if value is None:
+            return None
+        return _validate_codex_review_tier_keys(value)
 
 
 _USAGE_LIMIT_BACKOFF_SECONDS = 3600
@@ -649,6 +726,26 @@ class OrchestratorConfig(BaseModel):
     # occurrence -- the opposite of the fail-open design goal.
     busy_wait_guard_repeat_threshold: int = Field(default=3, ge=2)
     busy_wait_guard_window_seconds: int = Field(default=300, ge=1)
+    # Global default for the disposition ledger's drift check (#2232),
+    # overridable per lane (LaneConfig.disposition_drift_check_enabled).
+    # Default-ON for the same reason busy_wait_guard_enabled is, and for the
+    # opposite reason to codex_claim_suppression_enabled two fields below: a
+    # CHECK is presumed wanted, a FEATURE is presumed unwanted. Turning it off
+    # is a deliberate act with a consequence -- the claim tier refuses to arm
+    # on any lane where this resolves False (ClaimTierArmingError), because
+    # drift-checking is what keeps a stale settle from silently suppressing a
+    # re-raised finding once the fuzzy tier is live (ADR-0016).
+    disposition_drift_check_enabled: bool = True
+    # Global default for the `cw agent-spawn-pre` spawn-shape policy (#2211),
+    # overridable per lane (LaneConfig.subagent_spawn_guard_enabled).
+    # Default-ON for the same reason as busy_wait_guard_enabled: the failure
+    # it prevents is a forked (or unnamed) subagent doing unrostered work cw
+    # can neither see nor stop (#2017), and the guard's own failure mode is
+    # bounded the other way -- it fails open on every shape it cannot
+    # classify, and refuses only an explicitly-named fork or an omitted
+    # subagent_type (deny-on-omission shipped in #2211 round 2, once the
+    # spawn-site inventory closed).
+    subagent_spawn_guard_enabled: bool = True
     # Elapsed seconds before reconcile attempts to route an emitted-but-unrouted
     # sentinel (signal_stop never fired). A re-check delay, not a disposition
     # timer: an emitted sentinel is positive evidence the worker completed.
@@ -709,6 +806,16 @@ class OrchestratorConfig(BaseModel):
     # (lane -> global) resolver -- see
     # cw.codex_background._resolve_codex_fix_loop_enabled.
     default_codex_fix_loop_enabled: bool = False
+    # #2210 — master opt-in for the codex review ledger's fuzzy claim-match
+    # suppression tier. Default False, mirroring gate_recipes_enabled's
+    # fail-safe posture. BOTH this and the task's lane
+    # (LaneConfig.codex_review_tiers["claim_suppression"]) must be true for the
+    # tier to suppress anything; either one set False is a kill switch. While
+    # it is off the tier still MEASURES itself, emitting one
+    # review.finding_claim_shadowed event per finding it would have
+    # suppressed -- that is the corpus an operator judges before arming a
+    # lane. See cw.codex_background._resolve_claim_tier_enabled and ADR-0016.
+    codex_claim_suppression_enabled: bool = False
     # RFC 0008 W2 — global ladder of transcript-staleness thresholds (minutes),
     # ordered [stale_15m, stale_30m, stale_45m]. A session's transcript-mtime
     # age is compared against these to classify Session.liveness_bucket.
@@ -803,6 +910,17 @@ class OrchestratorConfig(BaseModel):
     # construction until P2 ships). Default False, mirroring
     # gate_recipes_enabled's fail-safe default.
     review_recipes_enabled: bool = False
+    # GitHub #2135 — master switch for the Stop-hook abandoned-exit park.
+    # Default False: the park is a state-mutating auto-actor that moves a
+    # dev-queue row RUNNING -> BLOCKED_ON_USER off the worker's recorded park
+    # marker, so it ships dark and is armed per-lane by an operator —
+    # mirroring gate_recipes_enabled's fail-safe default and
+    # docs/release-playbook.md's default-off floor for this change class. With
+    # this False the Stop hook defers on a sentinel-less exit exactly as it did
+    # before #2135, without reading the marker. Per-lane / per-ticket
+    # resolution: LaneConfig.park_on_abandoned_exit,
+    # TicketTask.park_on_abandoned_exit, resolve_park_on_abandoned_exit_enabled.
+    park_on_abandoned_exit_enabled: bool = False
     # GitHub #1437 — operator escape hatch for the SSH-agent-key preflight
     # gate (#927). Default True (gate stays enforced): unlike
     # concierge_enabled/gate_recipes_enabled above, this does NOT gate new

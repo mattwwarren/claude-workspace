@@ -14,6 +14,10 @@ each submodule only imports from those above it (no cycles):
   the ``PLAN_*_FINGERPRINT_KEY`` wire-key constants (#2102).
 - ``orchestrator_config`` — lane/pipeline/orchestrator config models and their
   operator-forward defaults.
+- ``park_comment_marker`` — ``ParkCommentMarker`` and its reader, the #2135
+  worker-recorded park evidence. Its own module rather than a tenant of
+  ``orchestrator_config`` (where the sibling ``agent_spawn_stamp`` accessors
+  live) only because that file is already past the module-size convention.
 - ``session`` — ``LocalLivenessHandle``, ``Session``.
 - ``client`` — ``ClientConfig`` and ``DEFAULT_AUTO_PURPOSES``.
 - ``state`` — ``CwState`` and ``CW_STATE_SCHEMA_VERSION`` (the DAG leaf).
@@ -73,6 +77,11 @@ from cw.models.orchestrator_config import (
     StagePipelineConfig,
     extract_unresolved_spawn_count,
 )
+from cw.models.park_comment_marker import (
+    PARK_COMMENT_MARKER_KEY,
+    ParkCommentMarker,
+    read_park_comment_marker,
+)
 from cw.models.session import LocalLivenessHandle, Session
 from cw.models.state import CW_STATE_SCHEMA_VERSION, CwState
 from cw.models.tasks import (
@@ -80,6 +89,7 @@ from cw.models.tasks import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
     DEV_QUEUE_SCHEMA_VERSION,
+    PARK_ON_ABANDONED_EXIT_KEY,
     PLAN_APPROVED_FINGERPRINT_KEY,
     PLAN_DRAFT_FINGERPRINT_KEY,
     DevQueueStore,
@@ -109,6 +119,8 @@ __all__ = [
     "LOCAL_BACKEND",
     "OCCUPIED_LANE_STATUSES",
     "OPENCODE_BACKEND",
+    "PARK_COMMENT_MARKER_KEY",
+    "PARK_ON_ABANDONED_EXIT_KEY",
     "PLAN_APPROVED_FINGERPRINT_KEY",
     "PLAN_DRAFT_FINGERPRINT_KEY",
     "TERMINAL_QUEUE_STATUSES",
@@ -138,6 +150,7 @@ __all__ = [
     "OrchestratorConfig",
     "OrchestratorEvent",
     "OrchestratorEventType",
+    "ParkCommentMarker",
     "PendingFixDispatch",
     "PrState",
     "QueueItemStatus",
@@ -157,4 +170,5 @@ __all__ = [
     "_validate_review_recipe_keys",
     "extract_unresolved_spawn_count",
     "occupies_lane_slot",
+    "read_park_comment_marker",
 ]

@@ -44,14 +44,20 @@ from cw.codex_review._context import (
     _render_adjudicated_findings_block,
     _select_output_instructions,
 )
+from cw.codex_review._context._prompt_text import _ADJUDICATED_INSTRUCTIONS
 from cw.codex_runner import FakeCodexRunner
+from cw.events import read_events
+from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, SessionOrigin
+from cw.models.enums import OrchestratorEventType
 from cw.review_adjudication import render_voided_findings_block
 from cw.review_finding_dispositions import (
     FindingDisposition,
     _disposition_key,
+    disposition_event_payload,
     render_finding_disposition_block,
 )
+from cw.review_markers import DISPOSITION_SENTINEL, SETTLE_SECTION_HEADING
 from cw.spawn import _write_hook_context
 from tests._codex_review_helpers import (
     _doc_json,
@@ -60,7 +66,13 @@ from tests._codex_review_helpers import (
     _task,
     _write,
 )
-from tests.conftest import _make_diff, _make_finding, _make_ticket_task, git_in
+from tests.conftest import (
+    _make_diff,
+    _make_finding,
+    _make_reviewer_doc,
+    _make_ticket_task,
+    git_in,
+)
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
@@ -420,6 +432,120 @@ class TestLoadOperatorComments:
         assert rendered == (
             "### a (2026-08-10T00:00:00Z)\nBODY1\n\n### b (2026-08-10T01:00:00Z)\nBODY2"
         )
+
+    # -- #2210: settle-payload elision on pipeline-authored comments --------
+
+    def _rendered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+    ) -> str | None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: [{"author": {"login": "op"}, "body": body}],
+        )
+        return _load_operator_comments(self._github_repo(tmp_path), "T-1")
+
+    def _pipeline_body(self, *, marker: bool = True, settle: bool = True) -> str:
+        parts = [
+            "## Codex Review Verdict",
+            "",
+            "**BLOCKING** — 1 MUST_FIX finding(s) must be addressed.",
+            "",
+            "### MUST_FIX",
+            "",
+            "- **src/cw/foo.py:10** — Bug here",
+            "",
+        ]
+        if settle:
+            parts += [
+                SETTLE_SECTION_HEADING,
+                "",
+                "Each payload below records one blocking finding as settled.",
+                "",
+                "**1. src/cw/foo.py**",
+                "",
+                "```json",
+                '{\n  "entries": [\n    {\n      "file": "src/cw/foo.py",'
+                '\n      "summary": "Bug here",\n      "outcome": "REJECTED",'
+                '\n      "rationale": ""\n    }\n  ]\n}',
+                "```",
+                "",
+            ]
+        body = "\n".join(parts).rstrip() + "\n"
+        return f"{body}\n{AGENT_COMMENT_MARKER}" if marker else body
+
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    def test_marker_bearing_comment_settle_section_is_elided(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newline: str
+    ) -> None:
+        body = self._pipeline_body().replace("\n", newline)
+        rendered = self._rendered(tmp_path, monkeypatch, body)
+        assert rendered is not None
+        assert SETTLE_SECTION_HEADING not in rendered
+        assert '"outcome": "REJECTED"' not in rendered
+
+    def test_marker_bearing_comment_other_content_still_renders(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rendered = self._rendered(tmp_path, monkeypatch, self._pipeline_body())
+        assert rendered is not None
+        assert "## Codex Review Verdict" in rendered
+        assert "### MUST_FIX" in rendered
+        assert "- **src/cw/foo.py:10** — Bug here" in rendered
+        assert AGENT_COMMENT_MARKER in rendered
+
+    def test_unmarked_comment_with_lookalike_section_is_not_elided(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An operator may legitimately paste a payload themselves; elision is
+        # provenance-keyed, never content-keyed.
+        body = self._pipeline_body(marker=False)
+        rendered = self._rendered(tmp_path, monkeypatch, body)
+        assert rendered == f"### op\n{body}"
+
+    def test_marker_bearing_comment_without_the_section_is_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = self._pipeline_body(settle=False)
+        rendered = self._rendered(tmp_path, monkeypatch, body)
+        assert rendered == f"### op\n{body}"
+
+    def test_elision_stops_at_the_next_heading_and_at_the_marker_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = (
+            f"{SETTLE_SECTION_HEADING}\npayload text\n\n"
+            "### Debt — recorded, not blocking\n\n- **a.py** — keep me\n\n"
+            f"{SETTLE_SECTION_HEADING}\nsecond payload\n\n{AGENT_COMMENT_MARKER}"
+        )
+        rendered = self._rendered(tmp_path, monkeypatch, body)
+        assert rendered is not None
+        assert "payload text" not in rendered
+        assert "second payload" not in rendered
+        assert "### Debt — recorded, not blocking" in rendered
+        assert "- **a.py** — keep me" in rendered
+        assert AGENT_COMMENT_MARKER in rendered
+
+    def test_rendered_blocking_comment_round_trips_through_the_elider(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The renderer's heading and the elider share one constant (#2210)."""
+        from cw.codex_review import render_verdict_comment
+        from cw.review_findings import consolidate_verdict
+
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        assert verdict.blocking is True
+        review_text = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert SETTLE_SECTION_HEADING in review_text
+        body = f"{review_text}\n\n{AGENT_COMMENT_MARKER}"
+
+        rendered = self._rendered(tmp_path, monkeypatch, body)
+        assert rendered is not None
+        assert SETTLE_SECTION_HEADING not in rendered
+        assert '"outcome": "REJECTED"' not in rendered
 
 
 class TestLoadVoidedFindings:
@@ -2019,6 +2145,12 @@ def _disposition_ledger(
         "outcome": "REJECTED",
         "rationale": "intentional tradeoff, settled in an earlier round",
         "recorded_at": "2026-08-16T00:00:00Z",
+        # #2210 round 2: the reader applies a record only with full
+        # provenance, so the default fixture carries what `cw review settle`
+        # records -- otherwise these tests would stop exercising the block.
+        "actor": "mattwwarren",
+        "reviewed_sha": "abc1234",
+        "summary": summary,
     }
     payload.update(overrides)
     return {key: FindingDisposition.model_validate(payload)}
@@ -2050,7 +2182,7 @@ class TestLoadFindingDispositions:
         monkeypatch.setattr(
             "cw.codex_review._context.core.fetch_issue_comments", _fail_if_called
         )
-        assert _load_finding_dispositions(tmp_path, "T-1") == {}
+        assert _load_finding_dispositions(tmp_path, "T-1") == ({}, [])
 
     def test_returns_empty_on_fetch_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2059,7 +2191,10 @@ class TestLoadFindingDispositions:
             "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: None,
         )
-        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == {}
+        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == (
+            {},
+            [],
+        )
 
     def test_returns_empty_when_no_comment_carries_a_sentinel(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2068,7 +2203,10 @@ class TestLoadFindingDispositions:
             "cw.codex_review._context.core.fetch_issue_comments",
             lambda *_a, **_kw: [{"author": {"login": "a"}, "body": "just prose"}],
         )
-        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == {}
+        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == (
+            {},
+            [],
+        )
 
     def test_fetches_fresh_and_parses_the_sentinel_out_of_the_thread(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2085,7 +2223,29 @@ class TestLoadFindingDispositions:
                 },
             ],
         )
-        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == ledger
+        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == (
+            ledger,
+            [],
+        )
+
+    def test_a_record_failing_provenance_is_reported_not_returned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad = _disposition_ledger(actor="")
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "b"},
+                    "body": render_finding_disposition_block(bad),
+                }
+            ],
+        )
+        enforceable, refused = _load_finding_dispositions(
+            self._github_repo(tmp_path), "T-1"
+        )
+        assert enforceable == {}
+        assert [(r.key, r.missing) for r in refused] == [(next(iter(bad)), ["actor"])]
 
 
 class TestRenderAdjudicatedFindingsBlock:
@@ -2111,6 +2271,105 @@ class TestRenderAdjudicatedFindingsBlock:
         )
         assert block is not None
         assert "ACCEPTED" in block
+
+    def test_a_reversed_entry_is_never_told_to_the_reviewer(self) -> None:
+        """#2232: a withdrawal is the absence of a decision, not one.
+
+        This block is BINDING — it tells the model the finding is decided —
+        so rendering a ``REVERSED`` line would assert the opposite of what a
+        reversal means. A ledger whose only entry is reversed has nothing to
+        say, so the whole block is elided.
+        """
+        assert (
+            _render_adjudicated_findings_block(_disposition_ledger(outcome="REVERSED"))
+            is None
+        )
+
+    def test_a_reversed_entry_is_dropped_beside_a_live_one(self) -> None:
+        ledger = {
+            **_disposition_ledger(),
+            **_disposition_ledger(file="src/cw/bar.py", outcome="REVERSED"),
+        }
+        block = _render_adjudicated_findings_block(ledger)
+
+        assert block is not None
+        assert "REVERSED" not in block
+        assert "src/cw/bar.py" not in block
+        assert "src/cw/foo.py" in block
+        assert block.count("\n- ") == 1
+
+    def test_the_hand_authored_block_warning_is_built_from_the_shared_sentinel(
+        self,
+    ) -> None:
+        # #2210 round 3: the prompt names the marker through the constant its
+        # parser owns, never a second spelling — asserted against the imported
+        # constant so it moves with it instead of pinning a copy of the text.
+        assert f"`{DISPOSITION_SENTINEL}` block yourself" in _ADJUDICATED_INSTRUCTIONS
+        block = _render_adjudicated_findings_block(_disposition_ledger())
+        assert block is not None
+        assert DISPOSITION_SENTINEL in block
+
+    def test_block_states_the_contest_protocol_and_inline_rationale(self) -> None:
+        # #2210: the intro now names the typed escape hatch and how an inline
+        # rationale comment is to be treated. The per-entry line is unchanged.
+        block = _render_adjudicated_findings_block(_disposition_ledger())
+        assert block is not None
+        assert "contests_adjudication" in block
+        assert "`# Why:`" in block
+        assert "knowingly re-raising" in block
+        assert "evidence to weigh" in block
+        assert "do not re-raise" in block
+
+    def test_inline_rationale_is_evidence_to_weigh_not_a_suppression_instruction(
+        self,
+    ) -> None:
+        # Round-2 soundness RISK 2: code-author-controlled text must never be
+        # able to instruct the reviewer to withhold a finding. Only
+        # operator-authored ledger entries may do that.
+        block = _render_adjudicated_findings_block(_disposition_ledger())
+        assert block is not None
+        assert "part of this record" not in block
+        assert "do not raise a finding that only disagrees" not in block
+        assert "`consequence` field" in block
+
+    def test_instructions_promise_no_automatic_discard_in_any_wording(self) -> None:
+        # Decision 12: no model-side suppression promise beyond the mechanism.
+        block = _render_adjudicated_findings_block(_disposition_ledger())
+        assert block is not None
+        assert "in any wording" not in block
+        assert "discarded unread" not in block
+
+    def test_an_under_provenanced_entry_never_reaches_the_prompt(self) -> None:
+        """#2210 round 2: the prompt is an application surface too.
+
+        This block tells the reviewer the decision is BINDING, so honouring a
+        record with no recorded actor would let a hand-pasted (or
+        worker-authored) block suppress a finding through the model instead of
+        through the backstop — the same unaudited suppression, one layer up.
+        """
+        assert _render_adjudicated_findings_block(_disposition_ledger(actor="")) is None
+
+    def test_only_the_provenanced_half_of_a_mixed_ledger_renders(self) -> None:
+        ledger = {
+            **_disposition_ledger(),
+            **_disposition_ledger(
+                file="src/cw/bar.py", summary="Other bug", reviewed_sha=""
+            ),
+        }
+        block = _render_adjudicated_findings_block(ledger)
+
+        assert block is not None
+        assert block.count("\n- ") == 1
+        assert "src/cw/bar.py" not in block
+
+    def test_per_entry_lines_are_unchanged(self) -> None:
+        block = _render_adjudicated_findings_block(_disposition_ledger())
+        assert block is not None
+        assert (
+            "- **src/cw/foo.py** — bug here — previously adjudicated: "
+            "REJECTED, do not re-raise unless the code at this location "
+            "changed (intentional tradeoff, settled in an earlier round)"
+        ) in block
 
 
 class TestBuildReviewerPromptAdjudicatedFindings:
@@ -2257,3 +2516,260 @@ class TestPrepareReviewPassFindingDispositions:
                 "dispositions": fresh,
             }
         ]
+
+    def _thread(
+        self, monkeypatch: pytest.MonkeyPatch, *ledgers: dict[str, FindingDisposition]
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "op"},
+                    "body": render_finding_disposition_block(ledger),
+                }
+                for ledger in ledgers
+            ],
+        )
+
+    def _reverted_events(self) -> list[object]:
+        return [
+            event.payload
+            for event in read_events(
+                event_types=[OrchestratorEventType.REVIEW_FINDING_DISPOSITION_REVERTED]
+            )
+        ]
+
+    def test_a_withdrawal_arriving_from_the_thread_is_audited(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2232 MUST_FIX 3: the sync path emits the reversal audit event.
+
+        ``cw review settle`` records one event per record it writes; this path
+        — the review pass folding the ticket thread's marker into the durable
+        ledger — recorded nothing. #2232 is what makes a withdrawal of a
+        load-bearing suppression reachable through it.
+        """
+        repo = self._repo(make_git_repo, "wt-2232-thread-revert")
+        stored = _disposition_ledger(rationale="settled in round 1")
+        key = next(iter(stored))
+        withdrawal = _disposition_ledger(
+            outcome="REVERSED",
+            rationale="the code moved, withdraw it",
+            recorded_at="2026-09-01T00:00:00Z",
+        )
+        self._thread(monkeypatch, withdrawal)
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+
+        _prepare_review_pass(
+            _make_ticket_task(
+                ticket_id="T-1", client="test", finding_dispositions=stored
+            ),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2232-thread-revert",
+        )
+
+        assert self._reverted_events() == [
+            disposition_event_payload(key, withdrawal[key])
+        ]
+
+    def test_a_settle_arriving_from_the_thread_emits_no_reversal(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only REVERSED is audited here; #2210's other two outcomes are unchanged."""
+        repo = self._repo(make_git_repo, "wt-2232-thread-settle")
+        self._thread(monkeypatch, _disposition_ledger())
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+
+        _prepare_review_pass(
+            _make_ticket_task(ticket_id="T-1", client="test"),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2232-thread-settle",
+        )
+
+        assert self._reverted_events() == []
+
+    def test_a_withdrawal_already_on_the_row_is_not_re_audited(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The marker is re-parsed every pass; the audited act happened once."""
+        repo = self._repo(make_git_repo, "wt-2232-thread-idempotent")
+        withdrawal = _disposition_ledger(
+            outcome="REVERSED", recorded_at="2026-09-01T00:00:00Z"
+        )
+        self._thread(monkeypatch, withdrawal)
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+
+        _prepare_review_pass(
+            _make_ticket_task(
+                ticket_id="T-1", client="test", finding_dispositions=withdrawal
+            ),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2232-thread-idempotent",
+        )
+
+        assert self._reverted_events() == []
+
+    def test_a_failed_audit_write_does_not_abort_the_review_pass(
+        self,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Degrades where the settle command raises, for a documented reason.
+
+        There the caller can still refuse to write the marker; here the
+        operator's decision already exists durably on the ticket thread and
+        there is nothing to hold back. Parking a run over an event-store
+        OSError would trade a safe outcome for a stalled one.
+        """
+        repo = self._repo(make_git_repo, "wt-2232-thread-emit-fails")
+        withdrawal = _disposition_ledger(
+            outcome="REVERSED", recorded_at="2026-09-01T00:00:00Z"
+        )
+        key = next(iter(withdrawal))
+        self._thread(monkeypatch, withdrawal)
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "event store is gone"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.events.record_event", _raise)
+        with caplog.at_level(logging.WARNING, logger="cw.codex_review._context.core"):
+            prepared = _prepare_review_pass(
+                _make_ticket_task(ticket_id="T-1", client="test"),
+                repo,
+                "main",
+                runner=FakeCodexRunner(),
+                session_id="s-2232-thread-emit-fails",
+            )
+
+        assert prepared.finding_dispositions == withdrawal
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and r.name == "cw.codex_review._context.core"
+        ]
+        assert len(warnings) == 1
+        assert "T-1" in warnings[0]
+        assert key in warnings[0]
+
+    def test_an_invalid_marker_record_never_evicts_the_stored_entry(
+        self,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Validate first, write second (#2210 round 3), through the real seam.
+
+        The marker is the hand-pasteable surface. A record for a key the
+        durable ledger already settled — with a LATER ``recorded_at`` that
+        would win a newest-wins merge — must not replace it, must not be
+        persisted onto the running row, must be logged once at WARNING naming
+        the ticket and key, and must come back on the pass inputs so the
+        verdict can report it.
+        """
+        repo = self._repo(make_git_repo, "wt-1838-evict")
+        stored = _disposition_ledger(rationale="the settled one")
+        key = next(iter(stored))
+        hijack = _disposition_ledger(
+            actor="", rationale="hijack", recorded_at="2099-01-01T00:00:00Z"
+        )
+        self._thread(monkeypatch, hijack)
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **kwargs: calls.append(kwargs),
+        )
+        with caplog.at_level(logging.WARNING, logger="cw.review_finding_dispositions"):
+            prepared = _prepare_review_pass(
+                _make_ticket_task(
+                    ticket_id="T-1", client="test", finding_dispositions=stored
+                ),
+                repo,
+                "main",
+                runner=FakeCodexRunner(),
+                session_id="s-1838-evict",
+            )
+
+        assert prepared.finding_dispositions == stored
+        assert [(r.key, r.missing) for r in prepared.refused_dispositions] == [
+            (key, ["actor"])
+        ]
+        assert calls == []
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and r.name == "cw.review_finding_dispositions"
+        ]
+        assert len(warnings) == 1
+        assert "T-1" in warnings[0]
+        assert key in warnings[0]
+
+    def test_only_the_enforceable_delta_is_persisted_from_a_mixed_thread(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-1838-mixed")
+        good = _disposition_ledger()
+        bad = _disposition_ledger(file="src/cw/bad.py", summary="Bad bug", actor="")
+        self._thread(monkeypatch, {**good, **bad})
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **kwargs: calls.append(kwargs),
+        )
+        prepared = _prepare_review_pass(
+            _make_ticket_task(ticket_id="T-1", client="test"),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1838-mixed",
+        )
+
+        assert prepared.finding_dispositions == good
+        assert [r.key for r in prepared.refused_dispositions] == list(bad)
+        assert [call["dispositions"] for call in calls] == [good]
+
+    def test_a_valid_newer_marker_record_still_replaces_the_stored_entry(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-1838-replace")
+        stored = _disposition_ledger(rationale="old")
+        newer = _disposition_ledger(rationale="new", recorded_at="2026-09-01T00:00:00Z")
+        self._thread(monkeypatch, newer)
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+        prepared = _prepare_review_pass(
+            _make_ticket_task(
+                ticket_id="T-1", client="test", finding_dispositions=stored
+            ),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1838-replace",
+        )
+
+        assert prepared.finding_dispositions == newer
+        assert prepared.refused_dispositions == []

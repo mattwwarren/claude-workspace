@@ -5,11 +5,18 @@ comment-thread reads every pass performs, the adjudication-ledger merge that
 persists what a pass learned, and :func:`_prepare_review_pass`, which drives
 every other ``_context`` submodule to produce one pass's
 :class:`_ReviewPassInputs`.
+
+One of those reads is deliberately not verbatim: :func:`_load_operator_comments`
+elides the ``### Settle a finding`` section from comments the pipeline itself
+wrote (#2210). A pipeline-authored convenience payload must not re-enter the
+pipeline's own prompt as evidence — see :func:`_elide_settle_section`.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import re
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_review._capability import _probe_filesystem_capability
@@ -35,14 +42,24 @@ from cw.codex_review._diff import (
     _capture_diff,
     _capture_head_sha,
 )
-from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments
+from cw.gh import (
+    AGENT_COMMENT_MARKER,
+    FETCH_COMMENTS_TIMEOUT,
+    fetch_issue_comments,
+    is_agent_authored,
+)
 from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
 from cw.review_adjudication import parse_voided_findings_block
 from cw.review_finding_dispositions import (
+    REVERSED,
+    disposition_event_payload,
+    disposition_event_type,
+    log_refused_dispositions,
     merge_finding_dispositions,
     parse_finding_disposition_block,
 )
+from cw.review_markers import SETTLE_SECTION_HEADING
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
@@ -58,6 +75,9 @@ if TYPE_CHECKING:
         CapturedDiff,
         Finding,
     )
+    from cw.review_markers import RefusedDisposition
+
+_log = logging.getLogger(__name__)
 
 
 def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:
@@ -117,6 +137,44 @@ def _fetch_ticket_comments(
     return fetch_issue_comments(ticket_id, timeout=FETCH_COMMENTS_TIMEOUT, cwd=worktree)
 
 
+# Built by concatenation rather than an f-string: the `{1,3}` quantifier would
+# need brace-doubling, which is exactly the kind of quiet breakage this regex
+# must not have. The span starts at the settle heading's own line and runs,
+# lazily, to whichever comes first: the next `#`-to-`###` heading (a `####`
+# line is NOT one), the provenance marker line, or the end of the body. So a
+# section followed by another heading loses only itself, a section that is last
+# stops before the marker line, and text after the section is never swallowed.
+# The payload's own lines cannot terminate the span early -- `json.dumps(...,
+# indent=2)` puts every string value on one line, so no payload line begins
+# with `#`, and the label lines begin with `**`.
+#
+# The `\r` allowance is defensive hardening: pipeline-authored comment bodies
+# come back from GitHub with LF endings (verified on this ticket's own thread),
+# and a CRLF body would otherwise make the elision a silent no-op.
+_SETTLE_SECTION_RE = re.compile(
+    "^"
+    + re.escape(SETTLE_SECTION_HEADING)
+    + r"[ \t\r]*\n.*?(?=^#{1,3} |^"
+    + re.escape(AGENT_COMMENT_MARKER)
+    + r"|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _elide_settle_section(body: str) -> str:
+    """Strip every ``### Settle a finding`` section from *body* (#2210).
+
+    The heading is :data:`SETTLE_SECTION_HEADING`, the same constant the
+    renderer that emits the section uses, so the producer and this consumer
+    cannot drift apart — a round-trip test pins that coupling.
+
+    No placeholder is left behind. The operator's resolution asked for
+    elision, not annotation, and an added "[payload removed]" line is itself
+    text the next reviewer could misread. See ADR-0016 invariant 7.
+    """
+    return _SETTLE_SECTION_RE.sub("", body)
+
+
 def _load_operator_comments(
     worktree: Path,
     ticket_id: str,
@@ -142,6 +200,21 @@ def _load_operator_comments(
     failure, or an empty thread: a review without comments is strictly better
     than no review, and the requeue-side ``requeue.review_delivery_degraded``
     event (#1730) is what makes an undeliverable pairing operator-visible.
+
+    One exception to "verbatim" (#2210): a comment carrying
+    :data:`~cw.gh.AGENT_COMMENT_MARKER` — i.e. one the pipeline itself posted —
+    loses its ``### Settle a finding`` section before rendering. That section
+    is a pre-filled ``"outcome": "REJECTED"`` payload the blocking comment
+    hands the OPERATOR; ``post_issue_comment`` posts under whatever identity
+    ``gh`` is authed as, plausibly the operator's, and on a requeue the
+    reviewer prompt tells the model a comment reflecting a prior operator
+    adjudication is binding. Left visible, the next reviewer would read its own
+    findings restated as an operator decision and could self-suppress a real
+    one, bypassing the per-lane claim gate entirely. Elision is
+    provenance-keyed, never content-keyed: an operator's own pasted payload
+    (no marker) stays visible by design, and a marker-bearing comment without
+    such a section renders byte-identically to before. Everything else in a
+    pipeline comment still reaches the reviewer.
     """
     if isinstance(comments, _CommentsNotProvided):
         comments = _fetch_ticket_comments(worktree, ticket_id)
@@ -152,6 +225,8 @@ def _load_operator_comments(
         body = comment.get("body")
         if not isinstance(body, str) or not body.strip():
             continue
+        if is_agent_authored(body):
+            body = _elide_settle_section(body)
         author = comment.get("author")
         login = author.get("login") if isinstance(author, dict) else None
         created = comment.get("createdAt")
@@ -207,7 +282,7 @@ def _load_finding_dispositions(
     comments: list[dict[str, object]] | None | _CommentsNotProvided = (
         _COMMENTS_NOT_PROVIDED
     ),
-) -> dict[str, FindingDisposition]:
+) -> tuple[dict[str, FindingDisposition], list[RefusedDisposition]]:
     """Parse the operator's cross-round finding adjudications off the ticket.
 
     Sibling of :func:`_load_voided_findings` in every respect that matters —
@@ -220,15 +295,17 @@ def _load_finding_dispositions(
     a void lapses when the code moves, an adjudication does not. Merging the
     reads would couple two grammars that must be free to diverge.
 
-    Returns only what the CURRENT comment thread carries. The durable half of
-    the ledger lives on ``TicketTask.finding_dispositions``, and
+    Returns ``(enforceable, refused)`` for only what the CURRENT comment thread
+    carries (#2210 round 3): a record that fails provenance is in ``refused``
+    and never in ``enforceable``, so it cannot reach the ledger. The durable
+    half of the ledger lives on ``TicketTask.finding_dispositions``, and
     :func:`_prepare_review_pass` merges the two — so a degraded fetch costs the
     pass nothing it already knew.
     """
     if isinstance(comments, _CommentsNotProvided):
         comments = _fetch_ticket_comments(worktree, ticket_id)
     if not comments:
-        return {}
+        return {}, []
     bodies = [
         body for comment in comments if isinstance(body := comment.get("body"), str)
     ]
@@ -301,6 +378,13 @@ class _ReviewPassInputs(NamedTuple):
     ``run_review`` and the fix loop's per-cycle re-review already share, so
     both paths see the same ledger.
 
+    ``refused_dispositions`` (#2210 round 3) are the marker records this pass
+    REFUSED to write into that ledger for failing provenance. They are not in
+    ``finding_dispositions`` (validate first, write second), so they ride
+    separately to post-synthesis, where they are stamped onto the verdict so
+    the posted comment reports the attempt. Already logged by the time they
+    are returned.
+
     ``delta_diff``/``delta_changed_files`` (#1837) are the fix-loop re-review
     pair: the diff between the previous reviewed head and this one, and its
     changed-path set. Both are ``None`` on cycle 0, which reviews the whole
@@ -320,8 +404,74 @@ class _ReviewPassInputs(NamedTuple):
     agent_spec_status: list[AgentSpecStatus]
     voided_findings: list[VoidedFinding]
     finding_dispositions: dict[str, FindingDisposition]
+    refused_dispositions: list[RefusedDisposition]
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
+
+
+def _emit_thread_reversal_events(
+    task: TicketTask,
+    merged: dict[str, FindingDisposition],
+) -> None:
+    """Audit every withdrawal this pass's comment thread brought in (#2232).
+
+    The settle COMMAND emits one audit event per record it writes
+    (``cw.cli.review.commands._emit_settle_events``); this path — the review
+    pass folding the ticket thread's marker into the durable ledger — wrote
+    nothing to the audit log at all. That predates this ticket (#2210's
+    architecture), but #2232 is what makes a ``REVERSED`` record reachable
+    through it, and a withdrawal of a load-bearing suppression is materially
+    higher stakes than a hand-authored ``ACCEPTED``/``REJECTED``: it un-does a
+    decision someone made, through a surface with no command invocation to
+    point at afterwards. Same event type and same payload as the command
+    (:func:`~cw.review_finding_dispositions.disposition_event_type` /
+    :func:`~cw.review_finding_dispositions.disposition_event_payload`), so one
+    ``cw event tail --type review.finding_disposition_reverted`` sees both.
+
+    Emitted for a withdrawal that is NEW to the ledger — absent before this
+    merge, or replacing a different record under the same key. The marker is
+    re-parsed on every review pass, so emitting over ``parsed`` wholesale
+    would re-record the same withdrawal every round; what is audited is the
+    state change, which is what happened once.
+
+    Only ``REVERSED`` is emitted here, deliberately. The other two outcomes
+    reaching the ledger through this path is #2210's existing, unchanged
+    behaviour, and auditing them is its own question with its own blast
+    radius — not one to settle inside this ticket.
+
+    **Degrades rather than raising**, unlike the command. There the audited act
+    CREATES a durable suppression and the caller can refuse to write the
+    marker; here the operator's decision already exists — durably, on the
+    ticket thread — and there is nothing to hold back. Aborting a review pass
+    over an event-store ``OSError`` would park a run to protect a record that
+    the next pass re-reads and re-emits anyway. Same direction, and the same
+    reasoning, as ``review_finding_dispositions._emit_stale``.
+    """
+    reversals = [
+        (key, entry)
+        for key, entry in sorted(merged.items())
+        if entry.outcome == REVERSED and task.finding_dispositions.get(key) != entry
+    ]
+    if not reversals:
+        return
+    # Deferred import: same cycle-avoidance as the sync import below.
+    from cw.events import record_event
+
+    for key, entry in reversals:
+        try:
+            record_event(
+                disposition_event_type(entry),
+                payload=disposition_event_payload(key, entry),
+                correlation_id=task.ticket_id,
+            )
+        except OSError:
+            _log.warning(
+                "auto-dev: could not record the disposition-reverted audit "
+                "event (ticket=%s, key=%s)",
+                task.ticket_id,
+                key,
+                exc_info=True,
+            )
 
 
 def _merge_and_persist_finding_dispositions(
@@ -331,7 +481,7 @@ def _merge_and_persist_finding_dispositions(
     comments: list[dict[str, object]] | None | _CommentsNotProvided = (
         _COMMENTS_NOT_PROVIDED
     ),
-) -> dict[str, FindingDisposition]:
+) -> tuple[dict[str, FindingDisposition], list[RefusedDisposition]]:
     """Fold this pass's marker entries into *task*'s ledger, and persist them.
 
     Two records, one answer (#1838). The tracker marker is the operator's INPUT
@@ -346,9 +496,26 @@ def _merge_and_persist_finding_dispositions(
     there is nothing new to record, and every review pass paying for a
     dev-queue lock + read + write to store what is already stored would be a
     real cost for no benefit.
+
+    **Validate first, write second** (#2210 round 3). The marker is the
+    hand-pasteable surface, so what it parsed is split BEFORE anything is
+    written: only the enforceable delta is merged and persisted to the running
+    dev-queue row, and every record that failed provenance is logged once at
+    WARNING here — naming the ticket and key — and returned as the second
+    element. It is never written and never replaces an existing entry, so a
+    malformed or pasted block cannot destroy the provenance of a legitimately
+    settled finding. The caller carries the refusals to the verdict so the
+    review output reports them too.
     """
-    parsed = _load_finding_dispositions(worktree, task.ticket_id, comments=comments)
+    parsed, refused = _load_finding_dispositions(
+        worktree, task.ticket_id, comments=comments
+    )
+    log_refused_dispositions(refused, task.ticket_id)
     merged = merge_finding_dispositions(task.finding_dispositions, parsed)
+    # Audit BEFORE the write, for the same reason the settle command does
+    # (#2232): the record of a withdrawal must not be able to lag the
+    # withdrawal itself.
+    _emit_thread_reversal_events(task, merged)
     if parsed:
         # Deferred import: cw.codex_background imports cw.codex_fix_loop, which
         # imports this package — a module-level import here would close that
@@ -361,7 +528,7 @@ def _merge_and_persist_finding_dispositions(
             ticket_id=task.ticket_id,
             dispositions=parsed,
         )
-    return merged
+    return merged, refused
 
 
 def _prepare_review_pass(
@@ -435,8 +602,10 @@ def _prepare_review_pass(
     voided_findings = _load_voided_findings(
         worktree, task.ticket_id, comments=fetched_comments
     )
-    finding_dispositions = _merge_and_persist_finding_dispositions(
-        task, worktree, comments=fetched_comments
+    finding_dispositions, refused_dispositions = (
+        _merge_and_persist_finding_dispositions(
+            task, worktree, comments=fetched_comments
+        )
     )
     ruff_lint_config = _load_ruff_lint_config(worktree)
     quality_gates_text = _load_claude_md_quality_gates(worktree)
@@ -490,6 +659,7 @@ def _prepare_review_pass(
         agent_spec_status=[resolutions[role].status for role in roles],
         voided_findings=voided_findings,
         finding_dispositions=finding_dispositions,
+        refused_dispositions=refused_dispositions,
         delta_diff=delta_diff,
         delta_changed_files=delta_changed_files,
     )

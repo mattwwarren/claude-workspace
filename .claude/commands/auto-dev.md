@@ -86,6 +86,8 @@ Everything else runs to completion or exits with a structured error.
 - Large path is unchanged (already exits at S3), but include the full health summary in the result payload.
 - When this rule downgrades the status, set `health.downgrade_applied: true` in the structured output. (Distinct from `health.fix_loop_escalated` which signals fix-loop escalation events — see Step 3b.5.)
 
+**Agent spawn typing rule (#2211):** every spawn at every stage MUST name an explicit `subagent_type` (`"general-purpose"` for real work, `"Read Only Helper"` for an extraction or lookup that must not be able to write). **Never fork.** An unnamed or forked subagent takes no `cw` roster entry, so cw can neither see it start nor stop it (#2017); a fork additionally inherits the parent's tools and its mandate, which is how #2211's read-only helper ended up committing and pushing to a live branch. In a headless worker `cw agent-spawn-pre` refuses an explicit fork outright (exit 2), and refuses an omitted type on the same terms now that every command file's spawn sites are typed (#2253 tracks whether `review-sweep.md`'s six roles should become real agents).
+
 **Agent spawn rule:** every agent prompt in headless mode MUST include BOTH the Friction Protocol block AND the Health Check block. Implementation and fix-loop agents MUST additionally include the Completion Artifacts block (see Subagent Reliability Mitigations section). Every spawn MUST set a wall-clock timeout per Mitigation 4 (recommended: 30m for impl, 15m for fix/review, 10m for lightweight); a non-returning task is treated as `agent_block`, not a hang.
 
 **Out of scope in headless mode:**
@@ -144,7 +146,7 @@ The rows below define the deterministic headless action for every interactive ga
 | S3 accepted MUST_FIX finding whose remedy is outside the diff (`no_diff_anchor`) | EXIT `blocked` with `blocker.reason: "review_operator_actionable"` (routes to BLOCKED_ON_USER; not finalize; posts the operator checklist as a tracker comment, #1817) |
 | S3 fix-loop cycle 3+ OR scope growth at any cycle | Append to `friction_highlights`, set `health.fix_loop_escalated: true`, continue |
 | Any other agent BLOCK (Plan / prep-pr / etc.) | EXIT `blocked` with `blocker.reason: "agent_block"` |
-| Tool call denied by auto-mode classifier (any stage) | EXIT `blocked` with `blocker.reason: "tool_denied"`, `retry_eligible: true`, `next_actions: ["redispatch_ticket"]` (see Tool-Use Denial Exit section) |
+| Tool call denied by auto-mode classifier (any stage) | EXIT `blocked` with `blocker.reason: "tool_denied"`, `retry_eligible: true`, `next_actions: ["redispatch_ticket"]` (see Tool-Use Denial Exit section) (except a denied `cw signal-park`, see the *Park-comment stamp rule*) |
 | S4a merge gate (small only — large already exited) | EXIT `merge_gate_blocked` if prior pipeline PR open |
 | S4b PR creation, small | AUTO-CREATE with auto-merge |
 | S4d UI Evidence Gate, no UI files OR media present in body | AUTO-CONTINUE — enable auto-merge |
@@ -386,6 +388,8 @@ The Claude Code auto-mode classifier can deny a tool call mid-pipeline (typical 
 
 Match is a case-sensitive substring check against the tool_result content. The classifier's deny message is structured and stable; do NOT loosen the match to "denied" alone (that would catch normal exit-code-1 errors).
 
+**Exception (#2135) - `cw signal-park`.** This section does not apply to a denied, failed or unknown `cw signal-park` call: that call is a best-effort stamp, its failure is ignored and the worker emits its original blocker sentinel unchanged. See the *Park-comment stamp rule* section below.
+
 **Action (headless).** On match, emit the `blocked` sentinel in the **same parent turn** as the denied tool result, before any other prose, then exit. Do NOT attempt to work around the denial with a different tool — the orchestrator's job is to re-dispatch under fresh classifier conditions (claude-workspace#183 — classifier non-determinism), not to evade.
 
 **Sentinel shape:**
@@ -414,6 +418,28 @@ Match is a case-sensitive substring check against the tool_result content. The c
 **Action (interactive).** The denial appears verbatim to the user in the normal tool-result stream; no skill action is required. The user re-authorizes or alters the operation as they would for any classifier prompt.
 
 **Precedent.** This is the analogue of the Stage 4 `merge_gate_blocked` exit (a classifier-style gate that exits cleanly rather than stalling). Tool denial is the cross-stage version of the same principle.
+
+---
+
+## Park-comment stamp rule (#2135)
+
+A headless worker that has posted a park comment records that fact with `cw signal-park` just before it emits its sentinel. The command writes a `park_comment_marker` (ticket id, stage, cw session id, UTC `posted_at`) into `.claude/cw-context.json`. If the worker's turn then ends without the sentinel frame landing, `cw signal-stop` may park the dev-queue row as `stopped_without_sentinel` instead of leaving it `RUNNING` for the liveness ladder, but only when the operator has armed `park_on_abandoned_exit_enabled` for the row's lane; otherwise the hook defers exactly as it always has. The sentinel stays the primary path; the marker is fallback evidence.
+
+**What the marker is.** A *recorded claim by the worker* that it has posted its park comment and is taking that exit, not an observation by cw that a tracker comment was posted (cw never checks the tracker). It is stamped only after that post has succeeded. It takes no argument: the stage and ids come from cw state, never from the worker. It is tracker-agnostic (GitHub and Linear alike).
+
+**Where it runs.** Only where a stage doc carries a **Park marker (#2135)** clause, and only after the comment post that clause names has succeeded; a stage doc without that clause does not stamp. Run it once, in the foreground (never `run_in_background`, see *Worker Execution Discipline*), from the cw session worktree root (the directory holding `.claude/cw-context.json`), never from a gate or nested worktree.
+
+**Failure of the stamp is ignored (carve-out from the Tool-Use Denial Exit).** `cw signal-park` is a best-effort side channel. Any failure of the call is treated as "no marker", never as an error of the stage:
+- an auto-mode classifier denial of the `cw signal-park` call is **not** a `tool_denied` exit: the *Tool-Use Denial Exit* section above does not apply to this one call;
+- a non-zero exit is ignored;
+- an unknown-command error (`No such command 'signal-park'` from a `cw` that predates this command, i.e. version skew) is ignored;
+- an exit 0 whose output says `park marker NOT recorded` is ignored;
+- any other failure of the call is ignored.
+In every case do not retry, do not work around it, do not report it as a blocker, and emit the sentinel you were already about to emit, **unchanged**. A missing marker only means the Stop hook defers, as it did before #2135.
+
+**Not stamped.** `cw signal-park` is never run for a `stage_complete`, `shipped` or other non-blocked exit, or for any exit whose park comment failed to post or was never posted (every impl-stage exit today); the plan-of-record post; the `## Voided Review Findings` comment; the finalize PR-link comment; the `plan_pending_approval` re-park that only references the existing park comment; exits that post nothing and are not `blocked` (`no_op`, `scope_exceeded`, `forbidden_area`, `stale_dispatch`); and the `tool_denied` exit itself (the Tool-Use Denial Exit emits its sentinel immediately, with no further tool call).
+
+**Accepted limitation.** A worker that dies between deciding the exit and running the stamp leaves no marker, and the Stop hook defers exactly as it did before #2135. The Stop hook also defers when a sentinel frame, complete or partial, appears in the transcript after the marker's `posted_at`, so a stamp followed by a truncated frame is left to the ordinary paths.
 
 ---
 
@@ -513,7 +539,7 @@ Options:
 ```
 
 - **Fix all / Fix critical / Cherry-pick** → For each PR being fixed:
-  - **CI failure:** Spawn agent in that PR's branch to investigate and fix. Push. Wait 10m for CI (per Stage 5 protocol).
+  - **CI failure:** Spawn agent (`subagent_type: "general-purpose"`) in that PR's branch to investigate and fix. Push. Wait 10m for CI (per Stage 5 protocol).
   - **Changes requested:** Surface full feedback, apply fixes, push, reply to comments. Wait 10m for CI.
   - **Merge conflicts:** Fetch main, merge, resolve conflicts, re-run quality gates, push. Wait 10m for CI.
   - After all fixes: re-scan to confirm health, then proceed to Stage 1.
@@ -1125,7 +1151,7 @@ When `status: "blocked"`, the `blocker.reason` field carries one of:
 
 Other `blocker.reason` values are reserved for future use; consumers should treat unknown reasons as opaque strings and surface them to the user verbatim.
 
-**Fix-dispatch failures carry no `blocker.reason` at all** (#2017). Since the fix agent is dispatched asynchronously by a reconcile tick, no session is running when a dispatch fails — there is no sentinel to put a reason in. Those failures surface as events instead: `stage.errored` with `error_kind: "fix_dispatch_failed"` and `session.needs_attention` with `paused_status: "fix_dispatch_failed"` (the error text in `breadcrumbs`). See `docs/events.md`.
+**Fix-dispatch failures carry no `blocker.reason` at all** (#2017). Since the fix agent is dispatched asynchronously by a reconcile tick, no session is running when a dispatch fails — there is no sentinel to put a reason in. Those failures surface as events instead: `stage.errored` with `error_kind: "fix_dispatch_failed"` and `session.needs_attention` with `paused_status: "fix_dispatch_failed"` (the error text in `breadcrumbs`). See `docs/events.md`. One class is an exception: when no remote ref's tip matches the worktree's HEAD, the row parks `BLOCKED_ON_USER` with `disposition: fix_dispatch_ref_unresolved` and emits only `session.needs_attention` (no `stage.errored`), keeping `pending_fix_dispatch` as evidence of the action list the REVIEW round derived (#2209). That retention is not a resume point — `cw dev-queue requeue` sets the row PENDING, the handoff is dropped by the #2142 stale-handoff sweep, and the ticket is claimed into a fresh REVIEW session (#2265).
 
 ### Field Notes
 

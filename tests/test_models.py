@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1074,7 +1075,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 37
+        assert DEV_QUEUE_SCHEMA_VERSION == 38
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -1392,6 +1393,37 @@ class TestCodexFixLoopEnabledGate:
             ).default_codex_fix_loop_enabled
             is True
         )
+
+
+class TestCodexClaimSuppressionGate:
+    """Lane-scoped codex claim-match suppression tier (#2210, ADR-0016)."""
+
+    def test_orchestrator_master_switch_defaults_false(self) -> None:
+        assert OrchestratorConfig().codex_claim_suppression_enabled is False
+
+    def test_lane_config_codex_review_tiers_defaults_none(self) -> None:
+        assert LaneConfig(name="x").codex_review_tiers is None
+
+    def test_explicit_none_passes_the_key_validator(self) -> None:
+        # An explicit null in YAML reaches the validator, unlike the default.
+        assert LaneConfig(name="x", codex_review_tiers=None).codex_review_tiers is None
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_lane_accepts_the_recognised_key(self, enabled: bool) -> None:
+        lane = LaneConfig(name="x", codex_review_tiers={"claim_suppression": enabled})
+        assert lane.codex_review_tiers == {"claim_suppression": enabled}
+
+    def test_typo_key_raises_naming_the_recognised_keys(self) -> None:
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError, match="claim_suppression"):
+            LaneConfig(name="x", codex_review_tiers={"claim_supression": True})
+
+    def test_orchestrator_master_switch_round_trips(self) -> None:
+        config = OrchestratorConfig.model_validate(
+            {"codex_claim_suppression_enabled": True}
+        )
+        assert config.codex_claim_suppression_enabled is True
 
 
 class TestLaneAttemptCeiling:
@@ -1859,6 +1891,16 @@ class TestConciergeAndEscalationModelSurface:
         cfg = OrchestratorConfig(gate_recipes_enabled=True)
         assert cfg.gate_recipes_enabled is True
 
+    # -- GitHub #2135 abandoned-exit park master switch ----------------------
+
+    def test_orchestrator_config_park_on_abandoned_exit_defaults_false(self) -> None:
+        """The park ships dark: the flip is an operator action (#2135)."""
+        assert OrchestratorConfig().park_on_abandoned_exit_enabled is False
+
+    def test_orchestrator_config_park_on_abandoned_exit_accepts_true(self) -> None:
+        cfg = OrchestratorConfig(park_on_abandoned_exit_enabled=True)
+        assert cfg.park_on_abandoned_exit_enabled is True
+
     # -- GitHub #1437 ssh_key_gate operator escape hatch ---------------------
 
     def test_orchestrator_config_ssh_key_gate_enabled_defaults_true(self) -> None:
@@ -2010,7 +2052,9 @@ class TestPackageExportCompleteness:
     ``AGENT_SPAWN_*`` stamp keys = 53, plus #1646's own review-fix-loop
     addition of ``extract_unresolved_spawn_count`` = 54, plus #2100's
     ``occupies_lane_slot`` = 55, plus #2102's two ``PLAN_*_FINGERPRINT_KEY``
-    wire keys = 57) — hardcoded here, NOT
+    wire keys = 57, plus #2135's ``PARK_ON_ABANDONED_EXIT_KEY``,
+    ``PARK_COMMENT_MARKER_KEY``, ``ParkCommentMarker`` and
+    ``read_park_comment_marker`` = 61) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2057,6 +2101,9 @@ class TestPackageExportCompleteness:
             "OrchestratorConfig",
             "OrchestratorEvent",
             "OrchestratorEventType",
+            "PARK_COMMENT_MARKER_KEY",
+            "PARK_ON_ABANDONED_EXIT_KEY",
+            "ParkCommentMarker",
             "PLAN_APPROVED_FINGERPRINT_KEY",
             "PLAN_DRAFT_FINGERPRINT_KEY",
             "PendingFixDispatch",
@@ -2085,6 +2132,7 @@ class TestPackageExportCompleteness:
             "_validate_review_recipe_keys",
             "extract_unresolved_spawn_count",
             "occupies_lane_slot",
+            "read_park_comment_marker",
         }
         assert set(models.__all__) == expected
 
@@ -2156,3 +2204,178 @@ class TestPendingFixDispatch:
             2026, 8, 26, tzinfo=UTC
         )
         assert restored.fix_dispatch_session_id == "fix-sess"
+
+
+class TestParkCommentMarker:
+    """The worker-recorded park marker (GitHub #2135).
+
+    The Stop hook's fallback evidence that a headless worker posted its park
+    comment and was taking that exit. Validated by cw code on the way in, so a
+    malformed marker can only mean a hand edit or corruption -- and is treated
+    as an absent marker, silently.
+    """
+
+    _POSTED_AT = datetime(2026, 1, 1, 0, 3, tzinfo=UTC)
+
+    def _marker(self, **overrides: object) -> object:
+        from cw.models import ParkCommentMarker
+
+        fields: dict[str, object] = {
+            "ticket_id": "940",
+            "stage": Stage.IMPL,
+            "session_id": "sess940g",
+            "posted_at": self._POSTED_AT,
+        }
+        fields.update(overrides)
+        return ParkCommentMarker(**fields)
+
+    def test_park_comment_marker_round_trips_through_the_reader(self) -> None:
+        from cw.models import (
+            PARK_COMMENT_MARKER_KEY,
+            ParkCommentMarker,
+            read_park_comment_marker,
+        )
+
+        marker = self._marker()
+        assert isinstance(marker, ParkCommentMarker)
+        context = {PARK_COMMENT_MARKER_KEY: marker.model_dump(mode="json")}
+
+        assert read_park_comment_marker(context) == marker
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param({}, id="absent-key"),
+            pytest.param({"park_comment_marker": None}, id="none"),
+            pytest.param({"park_comment_marker": "nope"}, id="not-a-dict"),
+            pytest.param({"park_comment_marker": []}, id="list"),
+            pytest.param(
+                {
+                    "park_comment_marker": {
+                        "stage": "impl",
+                        "session_id": "sess940g",
+                        "posted_at": "2026-01-01T00:03:00+00:00",
+                    }
+                },
+                id="missing-ticket-id",
+            ),
+            pytest.param(
+                {
+                    "park_comment_marker": {
+                        "ticket_id": "940",
+                        "stage": "impl",
+                        "session_id": "sess940g",
+                        "posted_at": "2026-01-01T00:03:00",
+                    }
+                },
+                id="naive-posted-at",
+            ),
+            pytest.param(
+                {
+                    "park_comment_marker": {
+                        "ticket_id": "940",
+                        "stage": "nonsense",
+                        "session_id": "sess940g",
+                        "posted_at": "2026-01-01T00:03:00+00:00",
+                    }
+                },
+                id="unknown-stage",
+            ),
+            pytest.param(
+                {
+                    "park_comment_marker": {
+                        "ticket_id": "",
+                        "stage": "impl",
+                        "session_id": "sess940g",
+                        "posted_at": "2026-01-01T00:03:00+00:00",
+                    }
+                },
+                id="empty-ticket-id",
+            ),
+            pytest.param(
+                {
+                    "park_comment_marker": {
+                        "ticket_id": "940",
+                        "stage": "impl",
+                        "session_id": "",
+                        "posted_at": "2026-01-01T00:03:00+00:00",
+                    }
+                },
+                id="empty-session-id",
+            ),
+            pytest.param(
+                {
+                    "park_comment_marker": {
+                        "ticket_id": "940",
+                        "stage": "impl",
+                        "session_id": "sess940g",
+                        "posted_at": "2026-01-01T00:03:00+00:00",
+                        "attempt": 2,
+                    }
+                },
+                id="extra-field",
+            ),
+        ],
+    )
+    def test_read_park_comment_marker_is_none_for_a_malformed_marker(
+        self, payload: dict[str, object], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A malformed marker is an absent marker -- silently, with no log."""
+        from cw.models import read_park_comment_marker
+
+        with caplog.at_level(logging.DEBUG):
+            assert read_park_comment_marker(payload) is None
+        assert caplog.records == []
+
+    @pytest.mark.parametrize(
+        ("overrides", "expected"),
+        [
+            pytest.param({}, True, id="all-match"),
+            pytest.param({"session_id": "other"}, False, id="session-differs"),
+            pytest.param({"ticket_id": "999"}, False, id="ticket-differs"),
+            pytest.param({"stage": Stage.REVIEW}, False, id="stage-differs"),
+        ],
+    )
+    def test_covers_is_true_only_when_session_ticket_and_stage_all_match(
+        self, overrides: dict[str, object], expected: bool
+    ) -> None:
+        from cw.models import ParkCommentMarker
+
+        marker = self._marker(**overrides)
+        assert isinstance(marker, ParkCommentMarker)
+        assert (
+            marker.covers(session_id="sess940g", ticket_id="940", stage=Stage.IMPL)
+            is expected
+        )
+
+    def test_covers_ignores_posted_at(self) -> None:
+        """posted_at is audit-only: it never participates in coverage (#2135 B4)."""
+        from cw.models import ParkCommentMarker
+
+        ancient = self._marker(posted_at=datetime(2000, 1, 1, tzinfo=UTC))
+        future = self._marker(posted_at=datetime(2099, 1, 1, tzinfo=UTC))
+        assert isinstance(ancient, ParkCommentMarker)
+        assert isinstance(future, ParkCommentMarker)
+
+        for marker in (ancient, future):
+            assert marker.covers(
+                session_id="sess940g", ticket_id="940", stage=Stage.IMPL
+            )
+
+    def test_park_on_abandoned_exit_key_is_exported_from_cw_models(self) -> None:
+        """One home for the config key: cw.models, imported by reconcile (#2135)."""
+        from cw.models import PARK_ON_ABANDONED_EXIT_KEY
+
+        assert PARK_ON_ABANDONED_EXIT_KEY == "park_on_abandoned_exit"
+
+    def test_validator_error_text_lists_the_key_constant(self) -> None:
+        from pydantic import ValidationError
+
+        from cw.models import PARK_ON_ABANDONED_EXIT_KEY
+
+        with pytest.raises(ValidationError) as excinfo:
+            TicketTask(
+                ticket_id="X", client="acme", park_on_abandoned_exit={"bogus": True}
+            )
+
+        assert f"{sorted([PARK_ON_ABANDONED_EXIT_KEY])}" in str(excinfo.value)

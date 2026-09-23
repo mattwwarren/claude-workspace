@@ -615,6 +615,11 @@ class _SpawnOutcome:
     out of the slot/lane loops; ``capability_parked`` alone does not (but see
     above — it can co-occur with ``spawn_error`` once the park-count
     threshold is reached).
+    ``usage_limit_reset_at`` — the instant the limit lifts, when the spawn-time
+    message named one that parsed (#1409); None when it did not, which the
+    dispatch loop reads as "use the flat ``usage_limit_backoff_seconds``". Only
+    ever set alongside ``usage_limit_detected``. Declared last so the existing
+    positional-free call sites are unaffected.
     """
 
     spawned: bool = False
@@ -623,6 +628,7 @@ class _SpawnOutcome:
     error: str = ""
     capability_parked: bool = False
     occupied: bool = False
+    usage_limit_reset_at: datetime | None = None
 
 
 def _revert_claimed_task_to_pending(
@@ -1373,21 +1379,29 @@ def _spawn_claimed_task(
                 f" session={session_id}"
                 f" worktree={worktree_path}"
             )
-    except UsageLimitError:
+    except UsageLimitError as exc:
         # Narrow catch for fleet-wide usage limits. Raised by
         # executor.spawn → NativeDaemonClient.spawn_bg when the
         # claude output matches USAGE_LIMIT_RE. The task was claimed
         # to RUNNING but no session_id was assigned (spawn failed);
         # revert it explicitly to PENDING below, then break so no
         # further slots are tried this tick.
+        #
+        # The raw spawn-time message is NOT logged here: native_daemon
+        # ._usage_limit_error already logs it exactly once per raise (#1409),
+        # and repeating it would give two records for one event.
         _log.warning(
-            "dispatch_tick: usage limit detected for %s/%s; setting back-off",
+            "dispatch_tick: usage limit detected for %s/%s; setting back-off"
+            " (reset_at=%s)",
             client.name,
             task.ticket_id,
+            exc.reset_at,
         )
         # Revert the claimed task back to PENDING — spawn never succeeded.
         _revert_claimed_task_to_pending(client.name, task.ticket_id)
-        return _SpawnOutcome(usage_limit_detected=True)
+        return _SpawnOutcome(
+            usage_limit_detected=True, usage_limit_reset_at=exc.reset_at
+        )
     except HookContextConflictError as exc:
         # Narrow catch ahead of the broad handler below (order matters —
         # HookContextConflictError is a plain CwError subclass and would
