@@ -644,6 +644,62 @@ This is unrelated to `cw event prune`, which trims the event log itself.
 
 ---
 
+## 6a. Answer a paused session (`cw session send`)
+
+A worker that pauses to ask you something parks its row `BLOCKED_ON_USER` and
+then sits there. Before #2212 the only way to answer was lossy: close the
+session, requeue the ticket, and let a fresh worker rediscover the context you
+were about to hand it. `cw session send` collapses that into one command that
+preserves the transcript, the worktree, the dev-queue row, and the row's
+`BLOCKED_ON_USER` status.
+
+**Find the rows waiting on you.** `cw queue peek` now reports parked rows
+alongside running ones, tagged `AWAITING_OPERATOR` with the reason they
+parked:
+
+```bash
+cw queue peek --client <client>
+```
+
+An `AWAITING_OPERATOR` row is waiting on a human, not wedged — it carries no
+age/idle score and is never listed under "Suggested stops." A `STOP-OR-PEEK`
+row is the ambiguous case that still needs your eyes.
+
+**Answer it.**
+
+```bash
+# Inline
+cw session send <session-id> --message "Use the second approach; the first
+one breaks the lane cap."
+
+# Or from a file, for anything longer than a sentence
+cw session send <session-id> --message-file ./answer.md
+```
+
+The message is appended to the session's durable mailbox first, then a resume
+is attempted. The command exits 0 whenever the message was **queued**, which
+is the point: a queued message survives whether or not the session could be
+woken right now. Exit 1 means nothing was queued at all — unknown session,
+terminal session, or bad flags.
+
+**What it does not do.** It does not transition the dev-queue row. The row
+stays `BLOCKED_ON_USER`; releasing it is still the separate, explicit action
+it always was (`cw dev-queue requeue`, `cw plan approve`, etc.).
+
+**The one case it cannot handle yet.** A session that is genuinely live and
+mid-task (`RUNNING` row, `ACTIVE` session) cannot be woken — there is no way
+to deliver into a running `claude --bg` turn, per #1889's spike. You will see:
+
+```
+Message <id> queued for session <id>.
+Warning: not delivered yet — session is live and mid-task; live-session
+delivery is deferred to #2255
+```
+
+That is the expected outcome, not a failure: the message is on disk and will
+be there when the session is next resumed. See ADR-0017 for the full decision
+record.
+
 ## 7. Patterns
 
 ### Harden before dispatch

@@ -196,6 +196,13 @@ class OrchestratorEventType(StrEnum):
     SESSION_COMPLETED = "session.completed"
     SESSION_TIMED_OUT = "session.timed_out"
     SESSION_NEEDS_ATTENTION = "session.needs_attention"
+    # GitHub #2212 -- an operator queued a message into a session's inbound
+    # mailbox via `cw session send`. Emitted for the durable inbox APPEND, not
+    # for delivery: it fires whether or not the resume trigger could wake the
+    # session, because queuing is the command's reliability bar. The paired
+    # SESSION_RESUMED history record (cw.history, a different bus) is what
+    # records an actual respawn.
+    SESSION_MESSAGE_SENT = "session.message_sent"
     TICKET_NEEDS_SYNC = "ticket.needs_sync"
     STAGE_ENTERED = "stage.entered"
     STAGE_ERRORED = "stage.errored"
