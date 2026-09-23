@@ -69,6 +69,7 @@ if TYPE_CHECKING:
         TicketTask,
     )
     from cw.native_daemon import NativeDaemonClient
+    from cw.worktree import FetchWarningKey
 from cw.dispatch.lanes import _notify_stale_clients_with_pending
 from cw.dispatch.routing import _accumulate_task_cost, apply_staged_decision
 from cw.dispatch.tick import dispatch_tick
@@ -794,8 +795,9 @@ def _run_dispatch_loop_body(
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     # Track stale-warn deduplication across all ticks within this run.
     warned_stale: set[tuple[str, str]] = set()
-    # Track fetch-fail-warn deduplication for persistently unreachable remotes.
-    warned_fetch_fail: set[str] = set()
+    # Track fetch-fail-warn deduplication for persistently unreachable remotes,
+    # keyed on the failure (client, outcome, reason) so a new failure still warns.
+    warned_fetch_fail: set[FetchWarningKey] = set()
     # Track wave-collision pairs already warned; prevents duplicate events
     # for long-running in-flight task pairs across multiple ticks (#784).
     warned_collision: set[frozenset[str]] = set()

@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 import click
 
 from cw._transcript import locate_transcript, subagent_transcript_paths
-from cw._util import claude_project_dir
+from cw._util import _iter_tool_result_text, claude_project_dir
 from cw.auto_dev_result import (
     AutoDevResult,
     extract_block,
@@ -46,6 +46,7 @@ from cw.opencode_runner import (
     OPENCODE_LOG_RELATIVE_PATH,
     extract_text_from_jsonl,
 )
+from cw.pr_hydrate import _PR_URL_RE
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -437,6 +438,30 @@ def _scan_assistant_content(contents: list[Any]) -> tuple[AutoDevResult | None, 
     return sentinel, usage_limit_detected
 
 
+def _tool_result_pr_number(record: dict[str, Any]) -> int | None:
+    """Return the last GitHub PR number named in one user record's tool_results.
+
+    Fallback evidence for a session wedged before it emitted its finalize
+    sentinel: ``gh pr create`` already printed the PR URL into a
+    ``tool_result`` block (#2251). Only ``tool_result`` blocks count -- a PR
+    URL in assistant prose is not evidence this session opened it.
+    """
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return None
+    contents = message.get("content")
+    if not isinstance(contents, list):
+        return None
+    pr_number: int | None = None
+    for block in contents:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        for text in _iter_tool_result_text(block):
+            for match in _PR_URL_RE.finditer(text):
+                pr_number = int(match.group(2))
+    return pr_number
+
+
 def parse_transcript(path: Path) -> dict[str, Any]:
     """Walk the jsonl, return first/last activity timestamps + last sentinel status.
 
@@ -447,6 +472,7 @@ def parse_transcript(path: Path) -> dict[str, Any]:
     first_user_ts: str | None = None
     last_asst_ts: str | None = None
     last_sentinel: AutoDevResult | None = None
+    tool_output_pr_number: int | None = None
     usage_limit_detected = False
 
     try:
@@ -458,8 +484,12 @@ def parse_transcript(path: Path) -> dict[str, Any]:
                     continue
                 entry_type = d.get("type")
                 ts = d.get("timestamp")
-                if entry_type == "user" and not first_user_ts and ts:
-                    first_user_ts = ts
+                if entry_type == "user":
+                    if not first_user_ts and ts:
+                        first_user_ts = ts
+                    tool_output_pr_number = (
+                        _tool_result_pr_number(d) or tool_output_pr_number
+                    )
                 if entry_type == "assistant" and ts:
                     last_asst_ts = ts
                     msg = d.get("message", {})
@@ -479,7 +509,9 @@ def parse_transcript(path: Path) -> dict[str, Any]:
         "last_sentinel_status": last_sentinel.status if last_sentinel else None,
         "last_sentinel_stage": last_sentinel.stage_reached if last_sentinel else None,
         "last_pr_number": (
-            last_sentinel.pr.number if last_sentinel and last_sentinel.pr else None
+            last_sentinel.pr.number
+            if last_sentinel and last_sentinel.pr
+            else tool_output_pr_number
         ),
         "usage_limit_detected": usage_limit_detected,
     }

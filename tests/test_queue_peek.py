@@ -1405,6 +1405,144 @@ class TestParseTranscript:
         assert result["last_pr_number"] == 77
         assert result["last_sentinel_status"] == "shipped"
 
+    @staticmethod
+    def _tool_result_record(content: object) -> dict[str, Any]:
+        return {
+            "type": "user",
+            "timestamp": "2026-06-01T10:03:00Z",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tu1", "content": content}
+                ]
+            },
+        }
+
+    def test_extracts_pr_number_from_tool_result_when_no_sentinel(
+        self, tmp_path: Path
+    ) -> None:
+        """A session wedged before its finalize sentinel still reports the PR
+        `gh pr create` printed into a tool_result (#2251)."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                self._tool_result_record(
+                    "Creating pull request\nhttps://github.com/org/repo/pull/456\n"
+                )
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["last_pr_number"] == 456
+        assert result["last_sentinel_status"] is None
+
+    def test_sentinel_pr_number_wins_over_tool_result_pr_url(
+        self, tmp_path: Path
+    ) -> None:
+        """A sentinel's pr.number is authoritative over the tool-output fallback
+        (#2251)."""
+        pr = {
+            "number": 77,
+            "url": "https://github.com/org/repo/pull/77",
+            "auto_merge": False,
+            "base": "main",
+        }
+        text = _sentinel_text(
+            _sentinel_payload(status="shipped", stage="stage5_post_create", pr=pr)
+        )
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:05:00Z",
+                    "message": {"content": [{"type": "text", "text": text}]},
+                },
+                self._tool_result_record("https://github.com/org/repo/pull/999"),
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["last_pr_number"] == 77
+
+    def test_last_tool_result_pr_url_wins_when_multiple(self, tmp_path: Path) -> None:
+        """Last match in file order wins, matching sentinel semantics (#2251)."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                self._tool_result_record("https://github.com/org/repo/pull/100"),
+                self._tool_result_record("https://github.com/org/repo/pull/200"),
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["last_pr_number"] == 200
+
+    def test_tool_result_content_as_list_of_text_blocks_scanned(
+        self, tmp_path: Path
+    ) -> None:
+        """The list-of-text-sub-blocks tool_result shape is scanned (#2251)."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                self._tool_result_record(
+                    [{"type": "text", "text": "https://github.com/org/repo/pull/789"}]
+                )
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["last_pr_number"] == 789
+
+    def test_assistant_prose_pr_url_not_matched_as_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """Only tool output counts as evidence; a PR URL in assistant prose is
+        ignored (#2251)."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:05:00Z",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "See https://github.com/org/repo/pull/321",
+                            }
+                        ]
+                    },
+                }
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["last_pr_number"] is None
+
+    def test_no_pr_url_anywhere_returns_none(self, tmp_path: Path) -> None:
+        """Ordinary transcript, including non-dict message/content shapes → no
+        false-positive PR number (#2251)."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "user",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {"content": "start"},
+                },
+                {"type": "user", "timestamp": "2026-06-01T10:01:00Z", "message": "x"},
+                {
+                    "type": "user",
+                    "timestamp": "2026-06-01T10:02:00Z",
+                    "message": {"content": ["not-a-dict", {"type": "text"}]},
+                },
+                self._tool_result_record("12 passed in 3.1s"),
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["last_pr_number"] is None
+
     def test_skips_documented_example_sentinel(self, tmp_path: Path) -> None:
         """Example sentinel (PROJ-1234, pr#42) is skipped; status stays None."""
         pr = {

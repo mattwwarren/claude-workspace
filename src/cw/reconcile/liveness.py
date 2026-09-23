@@ -36,6 +36,14 @@ already been surfaced by its own ``session.needs_attention``, so a recurring
 nothing is mutated, bucket latching and ``session.liveness_changed`` are
 untouched, every other disposition still pages, and the predicate is
 evaluated per tick so a requeue re-enables the signal with no special casing.
+
+One more discriminating reason on that distress leg (#2251): when the
+transcript's last record is a ``queue-operation`` enqueue notification that no
+later turn consumed -- a backgrounded Bash call's completion landing on a
+headless session nothing will ever resume -- the signal fires as
+``unconsumed_queue_notification``, naming the notification text. It is checked
+ahead of ``dangling_tool_use`` (most specific signal first). Signal-only like
+every other reason here.
 """
 
 from __future__ import annotations
@@ -61,8 +69,10 @@ from cw.reconcile._shared import (
     _LIVE_STATUSES,
     _SESSION_UNRESPONSIVE_REASON,
     _STOPPED_WITHOUT_SENTINEL_REASON,
+    _UNCONSUMED_QUEUE_NOTIFICATION_REASON,
     DanglingToolUseEvidence,
     _detect_dangling_tool_use,
+    _detect_unconsumed_queue_notification,
     _has_terminal_sentinel,
     _transcript_age_seconds,
     _unresolved_subagent_spawn_age_seconds,
@@ -137,6 +147,12 @@ class LivenessCandidate:
     # #2012's/#1969's domain, never this one's, so the two fields are
     # mutually exclusive by construction.
     dangling_tool_use: DanglingToolUseEvidence | None = None
+    # #2251 — the redacted text of a queue-operation enqueue notification left
+    # unconsumed at the transcript tail, or None. Gated exactly like
+    # dangling_tool_use (distress_base and spawn_age is None) and computed
+    # first; when set, the dangling_tool_use scan is skipped, so the two are
+    # mutually exclusive by construction.
+    unconsumed_queue_notification: str | None = None
     elapsed_seconds: float = 0.0
     # RFC 0008 W2 re-fire cadence (#1858). Set only when distress is True; the
     # future timestamp both stamped onto Session.liveness_attention_next_eligible_at
@@ -324,12 +340,21 @@ def _detect_liveness_candidates(
             if distress_base
             else None
         )
-        # #1482 — only scanned when no outstanding subagent spawn explains
-        # the quietness (spawn_age is None); an outstanding spawn is #2012's
-        # domain regardless of what else is in the transcript.
+        # #1482 / #2251 — only scanned when no outstanding subagent spawn
+        # explains the quietness (spawn_age is None); an outstanding spawn is
+        # #2012's domain regardless of what else is in the transcript. The
+        # more specific unconsumed-notification signal is checked first and,
+        # when present, skips the dangling_tool_use scan.
+        unconsumed_queue_notification = (
+            _detect_unconsumed_queue_notification(session)
+            if distress_base and spawn_age is None
+            else None
+        )
         dangling_tool_use = (
             _detect_dangling_tool_use(session)
-            if distress_base and spawn_age is None
+            if distress_base
+            and spawn_age is None
+            and unconsumed_queue_notification is None
             else None
         )
         deadline_seconds = config.fix_loop_await_deadline_minutes * _SECONDS_PER_MINUTE
@@ -366,6 +391,7 @@ def _detect_liveness_candidates(
                 elapsed_seconds=(now - session.started_at).total_seconds(),
                 next_renotify_eligible_at=next_renotify_eligible_at,
                 dangling_tool_use=dangling_tool_use,
+                unconsumed_queue_notification=unconsumed_queue_notification,
             )
         )
     return candidates
@@ -374,8 +400,12 @@ def _detect_liveness_candidates(
 def _distress_signal_text(candidate: LivenessCandidate) -> tuple[str, str]:
     """Return the ``(paused_status, breadcrumbs)`` pair for a distress fire.
 
-    Three shapes:
+    Four shapes:
 
+    * **An unconsumed queue-operation enqueue at the transcript tail** (#2251)
+      — ``unconsumed_queue_notification``, naming the (redacted) notification
+      text: typically a backgrounded Bash call's completion that a headless
+      session was never resumed to process.
     * **An unresolved, non-subagent tool_use at the transcript tail** (#1482)
       — ``dangling_tool_use``, naming the tool (and, when available, a
       redacted command snippet) most commonly an orphaned permission prompt
@@ -392,16 +422,25 @@ def _distress_signal_text(candidate: LivenessCandidate) -> tuple[str, str]:
       differs (chase a dispatch that produced no subagent, vs. a session that
       simply went quiet).
 
-    The first and third are mutually exclusive by construction --
-    ``dangling_tool_use`` is only computed when ``spawn_age`` (and therefore
-    ``spawn_deadline_minutes``) is ``None`` -- so checking ``dangling_tool_use``
-    first cannot shadow the deadline branch. All three are signal-only: the
+    The first two are each mutually exclusive with the deadline branch by
+    construction -- both are only computed when ``spawn_age`` (and therefore
+    ``spawn_deadline_minutes``) is ``None`` -- so checking them first cannot
+    shadow it; and the first two exclude each other (the dangling_tool_use scan
+    is skipped when a notification was found). All four are signal-only: the
     session is left running either way (ADR-0014).
     """
     common = (
         f"transcript flat {candidate.stale_minutes:.0f}m at stage "
         f"{candidate.stage.value}; elapsed {candidate.elapsed_seconds:.0f}s"
     )
+    if candidate.unconsumed_queue_notification is not None:
+        return (
+            _UNCONSUMED_QUEUE_NOTIFICATION_REASON,
+            f"{common}; no sentinel, no pending subagent; transcript tail is an "
+            "unconsumed queue-operation enqueue notification the session was "
+            "never resumed to process: "
+            f"{candidate.unconsumed_queue_notification}; session left running",
+        )
     if candidate.dangling_tool_use is not None:
         evidence = candidate.dangling_tool_use
         snippet = f" ({evidence.command_snippet})" if evidence.command_snippet else ""
