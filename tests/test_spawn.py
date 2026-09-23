@@ -27,7 +27,11 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.spawn import _stop_hook_command, build_disallowed_tools_arg
-from tests.conftest import _make_ticket_task, _seed_daemon_session
+from tests.conftest import (
+    _make_ticket_task,
+    _seed_completed_session,
+    _seed_daemon_session,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -3750,34 +3754,6 @@ class TestRosterRegistrationVerification:
 # ---------------------------------------------------------------------------
 # Tests for #838: prior_attempts_summary populated on retry
 # ---------------------------------------------------------------------------
-
-
-def _seed_completed_session(
-    tmp_path: Path,
-    tmp_config_dir: Path,
-    ticket_id: str,
-    client: str = "test-client",
-    status: SessionStatus = SessionStatus.TIMED_OUT,
-    last_result: dict[str, object] | None = None,
-    completed_at: datetime | None = None,
-) -> Session:
-    """Seed a TIMED_OUT or COMPLETED session for a given ticket in state."""
-    workspace = tmp_path / "workspace" / client
-    workspace.mkdir(parents=True, exist_ok=True)
-    sess = Session(
-        name=f"{client}/auto-dev/{ticket_id}",
-        client=client,
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=status,
-        workspace_path=workspace,
-        last_result=last_result,
-        completed_at=completed_at or datetime.now(UTC),
-    )
-    state = load_state()
-    state.sessions.append(sess)
-    save_state(state)
-    return sess
 
 
 class TestPriorAttemptsSummary:
