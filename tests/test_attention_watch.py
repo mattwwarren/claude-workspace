@@ -341,6 +341,25 @@ def test_steady_stream_still_ends_burst_on_time(
     assert 0 < len(wake.lines) < backlog
 
 
+def test_non_qualifying_stream_still_hits_idle_backstop(
+    aw: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Filtered-out events (liveness flaps) that never let the queue drain
+    must not hold the idle backstop open (#2250 review)."""
+    ticks = iter(float(i) for i in range(10_000))
+    monkeypatch.setattr(aw, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    backlog = 100
+    flaps = [
+        _liveness_event(session_id=f"s{i}", new_bucket="live") for i in range(backlog)
+    ]
+    state = aw.ResumeState(_SEED_STAMP, set())
+    wake = aw.drain(_filled_queue(flaps), state, max_idle_s=10.0)
+    assert wake.idle_backstop
+    assert wake.lines == ["WATCHER | idle backstop after 10s, no events, re-arm"]
+    # It fired mid-stream, not merely after the backlog happened to drain.
+    assert len(state.seen) < backlog
+
+
 @pytest.mark.usefixtures("fast_burst")
 def test_upstream_exit_ends_drain(aw: ModuleType) -> None:
     state = aw.ResumeState(_SEED_STAMP, set())

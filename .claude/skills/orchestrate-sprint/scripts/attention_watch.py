@@ -232,6 +232,16 @@ class Wake:
     idle_backstop: bool = False
 
 
+def _expire(wake: Wake, *, idle: bool, max_idle_s: float) -> Wake:
+    """Close out *wake* when its deadline passes; an idle expiry pages re-arm."""
+    if idle:
+        wake.idle_backstop = True
+        wake.lines.append(
+            f"WATCHER | idle backstop after {max_idle_s:g}s, no events, re-arm"
+        )
+    return wake
+
+
 def drain(
     lines_q: queue.Queue[str | None], state: ResumeState, *, max_idle_s: float
 ) -> Wake:
@@ -244,20 +254,18 @@ def drain(
     idle_deadline = time.monotonic() + max_idle_s
     burst_deadline: float | None = None
     while True:
-        # Checked before reading, not only on an empty queue: a steady stream
-        # of events must still end the burst on time (#2250 review).
-        if burst_deadline is not None and time.monotonic() >= burst_deadline:
-            return wake
+        # Both deadlines are checked before every read, not only when the
+        # queue runs empty: a steady stream of events -- qualifying or
+        # filtered out -- must not hold the burst or the idle backstop open
+        # (#2250 review).
         deadline = idle_deadline if burst_deadline is None else burst_deadline
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _expire(wake, idle=burst_deadline is None, max_idle_s=max_idle_s)
         try:
-            raw = lines_q.get(timeout=max(0.0, deadline - time.monotonic()))
+            raw = lines_q.get(timeout=remaining)
         except queue.Empty:
-            if burst_deadline is None:
-                wake.idle_backstop = True
-                wake.lines.append(
-                    f"WATCHER | idle backstop after {max_idle_s:g}s, no events, re-arm"
-                )
-            return wake
+            return _expire(wake, idle=burst_deadline is None, max_idle_s=max_idle_s)
         if raw is None:
             wake.upstream_exited = True
             return wake
