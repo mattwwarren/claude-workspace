@@ -956,21 +956,31 @@ class CodexExecutor:
         # there is no Claude turn loop here to signal-stop. Called ahead of
         # the pre-flight branch below so even a CODEX_REVIEW_ONLY/
         # CODEX_NOT_FOUND park is covered.
-        _write_hook_context(
-            worktree,
-            session_id=sid,
-            session_name=sess.name,
-            client=client.name,
-            purpose=SessionPurpose.IMPL.value,
-            ticket_id=task.ticket_id,
-            origin=SessionOrigin.DAEMON,
-            task=task,
-            wall_clock_budget_seconds=wall_clock_budget_seconds,
-            default_branch=client.default_branch,
-            workspace_path=client.workspace_path,
-            lane=task.lane,
-            write_stop_hook=False,
-        )
+        try:
+            _write_hook_context(
+                worktree,
+                session_id=sid,
+                session_name=sess.name,
+                client=client.name,
+                purpose=SessionPurpose.IMPL.value,
+                ticket_id=task.ticket_id,
+                origin=SessionOrigin.DAEMON,
+                task=task,
+                wall_clock_budget_seconds=wall_clock_budget_seconds,
+                default_branch=client.default_branch,
+                workspace_path=client.workspace_path,
+                lane=task.lane,
+                write_stop_hook=False,
+            )
+        except Exception:
+            # #2280: sess is already persisted ACTIVE above -- a raise here
+            # would otherwise leak it permanently ACTIVE (the same class of
+            # leak that held a client-ceiling slot for ~2h, #2285). Mirrors
+            # the pre-flight-result-write branch below: dispatch is still on
+            # this stack, so re-raising lets its own handler revert the
+            # claimed task to PENDING.
+            _complete_session_as_unexpected_error(sid, task, worktree)
+            raise
 
         # Step 2: Pre-flight checks (first match assigns result).
         result: AutoDevResult | None = None
