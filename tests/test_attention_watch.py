@@ -58,6 +58,8 @@ def _load() -> ModuleType:
     assert spec is not None
     assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
+    # @dataclass resolves its module through sys.modules at class creation.
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -503,7 +505,9 @@ def _run_watch(
     )
 
 
-def _seed_stamp(path: Path, created_at: str = _SEED_STAMP, ids: tuple[str, ...] = ()) -> Path:
+def _seed_stamp(
+    path: Path, created_at: str = _SEED_STAMP, ids: tuple[str, ...] = ()
+) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"created_at": created_at, "ids": list(ids)}))
     return path
@@ -623,7 +627,9 @@ def test_cli_lane_scopes_event_tail_invocation(tmp_path: Path) -> None:
     result = _run_watch(tmp_path, "acme", "debt", cw_bin=bin_dir / "cw")
     assert result.returncode == 0, result.stderr
     assert _flag_value(_invoked_args(bin_dir), "--lane") == "debt"
-    lane_stamp = _home(tmp_path) / ".claude-workspace" / "attention-stamp-acme-debt.json"
+    lane_stamp = (
+        _home(tmp_path) / ".claude-workspace" / "attention-stamp-acme-debt.json"
+    )
     assert lane_stamp.is_file()
 
 
