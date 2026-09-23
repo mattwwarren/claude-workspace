@@ -140,6 +140,11 @@ class ReapReason(StrEnum):
     # whose blocking PR has since merged. release_stale_gated_tasks detects
     # and (under ReapPolicy.AUTO) releases these rows.
     STALE_GATE = "stale_gate"
+    # GitHub #2285 — a codex review orphaned by a crash still has a live codex
+    # writer in its worktree at boot, or the process scan cannot rule one out.
+    # The boot pass never signals it. Proposal-only: surfaces via
+    # session.reap_proposed, never stamped as a session's reap_reason.
+    CODEX_ORPHAN_LIVE_WRITER = "codex_orphan_live_writer_at_boot"
 
 
 class LastResultSource(StrEnum):

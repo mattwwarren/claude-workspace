@@ -687,6 +687,7 @@ Current producers (post-ADR-0014 — every one evidence-driven, never a timer):
 | `phantom_surface` | Daemon surface absent from roster (`_reconcile_locked` phantom sweep). |
 | `usage_limit_cutoff` | Transcript of a dead/phantom session contained a Claude usage-limit message; drives dispatch back-off. |
 | `terminal_sibling` | A PENDING row was parked/cancelled because the same (client, ticket) already has a COMPLETED or CANCELLED sibling row (#876). Queue-only disposition — surfaces via `session.reap_proposed` and the task's `disposition`, not via a session reap. |
+| `codex_orphan_live_writer_at_boot` | The boot pass over crash-orphaned codex reviews found a codex process still running in the worktree, or could not rule one out (an inconclusive process scan), so it parked the task and left the session ACTIVE; it never signals the writer, under any `reap_policy` (#2285). Proposal-only — surfaces via `session.reap_proposed`, not via a session reap. |
 | `completed_backstop` | Backstop path (`revert_timed_out_tasks` / `revert_completed_silent_tasks`) found a TIMED_OUT (legacy) or COMPLETED DAEMON session with a still-RUNNING queue task and no prior reap_reason. |
 
 Historical-only values (no longer produced — removed with the process-kill

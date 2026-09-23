@@ -751,18 +751,21 @@ def _run_boot_passes(client: str | None) -> None:
     * the orphaned-codex reap (#1727) — a codex session still ACTIVE at
       process start means the prior process died mid-review (crash/SIGKILL),
       the one case the loop's shutdown join cannot reach since that thread
-      died with its process;
+      died with its process. Each orphan's session is closed and its task is
+      requeued when provably clean under ``reap_policy: auto``, or parked for
+      operator inspection otherwise (#2285);
     * the executor-blocked marker clear (#1742) — any marker still on disk is
       orphaned, because no daemon thread survives a process restart. Kept
-      separate from the reap above on purpose: parking an orphaned session and
-      clearing a stale marker are different concerns;
+      separate from the reap above on purpose: disposing of an orphaned
+      session and clearing a stale marker are different concerns;
     * the scoped-serve starvation WARNING (#1875).
     """
     orphaned_codex = reap_orphaned_codex_sessions_at_boot()
     if orphaned_codex:
         _log.warning(
             "dispatch: %d codex session(s) were ACTIVE at process start;"
-            " parked for operator inspection",
+            " each was closed and requeued if provably clean, otherwise parked"
+            " for operator inspection",
             orphaned_codex,
         )
     clear_all_executor_blocked_markers()

@@ -40,8 +40,25 @@ def git_clean_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
-def capture_head_sha(worktree: Path, *, strict: bool = True) -> str:
-    """Return *worktree*'s ``HEAD`` sha, honouring an explicit error policy.
+def capture_head_sha(
+    worktree: Path,
+    *,
+    ref: str = "HEAD",
+    strict: bool = True,
+    timeout: float | None = None,
+) -> str:
+    """Return the sha *ref* (default ``HEAD``) resolves to in *worktree*.
+
+    *ref* is any revision ``git rev-parse`` accepts; the codex boot reaper
+    passes ``origin/<branch>`` to compare a worktree's HEAD against its local
+    tracking ref (#2285).
+
+    *timeout* bounds the ``git`` call in seconds (``None``, the default, is
+    unbounded). A timeout is one more way for ``git`` to fail, so it follows
+    *strict* exactly as the other failures below do: ``strict=True`` raises
+    ``subprocess.TimeoutExpired``, ``strict=False`` returns ``""``. The boot
+    reaper passes one because it runs before the dispatch loop's first tick,
+    where a hung ``git`` would keep dispatch from starting at all.
 
     One implementation for two deliberately different callers (#2232). The
     review pass's diff capture must FAIL LOUDLY when it cannot resolve the
@@ -60,14 +77,15 @@ def capture_head_sha(worktree: Path, *, strict: bool = True) -> str:
     """
     try:
         completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "rev-parse", ref],
             cwd=worktree,
             capture_output=True,
             text=True,
             check=strict,
             env=git_clean_env(),
+            timeout=timeout,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         if strict:
             raise
         return ""

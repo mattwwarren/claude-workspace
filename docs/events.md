@@ -98,6 +98,32 @@ paths. Payload keys vary slightly by emitter; the Stop-hook shape is:
 Optional keys: `rescued: true` + `rescue_reason: "late_sentinel"` when a late
 Stop-hook sentinel salvaged an idle-parked task (#918); `salvaged: true` +
 `status: "<sentinel status>"` on reconcile's routed-sentinel backstop paths.
+
+The boot pass over crash-orphaned codex reviews
+(`reap_orphaned_codex_sessions_at_boot` in `cw.reconcile.codex_boot`, #2285)
+emits this event as the audit record of each orphaned session it closes. It
+records the event *before* persisting the close, so a failed write leaves the
+session ACTIVE for the next boot to retry rather than closed with no audit:
+
+```json
+{
+  "session_id": "<str>",
+  "session_name": "<str>",
+  "client": "<str>",
+  "ticket_id": "<str>",
+  "crashed": true,
+  "salvaged": false,
+  "reason": "codex_orphaned_at_boot",
+  "disposition": "requeued | parked",
+  "detail": "<requeue reason, or the park reason appended to the breadcrumbs>"
+}
+```
+
+`disposition` is the task transition the pass decided on; the transition
+itself confirms with `ticket.requeued` or `session.needs_attention` once it
+lands. A session whose worktree may still hold a live codex writer is never
+closed (and never signalled): it stays ACTIVE and its reap is proposed via
+`session.reap_proposed` instead, so no `session.completed` is emitted for it.
 The dispatch loop consumes this event (consumer cursor `"dispatch"`) to
 transition the matching `TicketTask` to COMPLETED.
 

@@ -50,6 +50,7 @@ from cw.dispatch import (
     _park_running_task_blocked_on_user,
     _reset_codex_capability_cache,
     _resolve_dispatch_skip_reason,
+    _revert_claimed_task_to_pending,
     _stale_pending_clients,
     consume_completed_sessions,
     dispatch_tick,
@@ -9335,6 +9336,87 @@ class TestParkRunningTaskExpectedSessionId:
 
         task = load_dev_queue().tasks[0]
         assert task.status is QueueItemStatus.BLOCKED_ON_USER
+
+
+class TestRevertClaimedTaskExpectedSessionId:
+    """#2285: ``expected_session_id`` closes the clean-orphan requeue TOCTOU.
+
+    ``cw.reconcile.codex_boot`` decides to requeue a clean codex orphan from a
+    snapshot read taken before any lock, then runs git/psutil checks that
+    widen the window further. A row re-claimed by a fresh session in that
+    window must not be reverted to PENDING out from under the live session, so
+    the identity is re-verified under the same ``dev_queue_lock()`` the revert
+    runs under -- mirroring :class:`TestParkRunningTaskExpectedSessionId`.
+    """
+
+    def test_matching_expected_session_id_reverts_as_before(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        add_ticket(
+            TicketTask(
+                ticket_id="REV-1",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-current",
+            )
+        )
+
+        assert (
+            _revert_claimed_task_to_pending(
+                "test-client", "REV-1", expected_session_id="sess-current"
+            )
+            is True
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.PENDING
+        assert task.session_id is None
+
+    def test_mismatched_expected_session_id_skips_the_revert(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """The row now belongs to a newer session; the stale caller must not
+        touch it, even though (ticket_id, client, RUNNING) still match."""
+        add_ticket(
+            TicketTask(
+                ticket_id="REV-2",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-new-successor",
+            )
+        )
+
+        assert (
+            _revert_claimed_task_to_pending(
+                "test-client", "REV-2", expected_session_id="sess-stale-snapshot"
+            )
+            is False
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.RUNNING
+        assert task.session_id == "sess-new-successor"
+        assert task.unproductive_attempts == 0
+
+    def test_expected_session_id_omitted_preserves_existing_behavior(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """The five pre-existing callers pass no ``expected_session_id`` -- the
+        revert must match on (ticket_id, client, RUNNING) alone, as before."""
+        add_ticket(
+            TicketTask(
+                ticket_id="REV-3",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-anything",
+            )
+        )
+
+        assert _revert_claimed_task_to_pending("test-client", "REV-3") is True
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.PENDING
+        assert task.session_id is None
 
 
 # ---------------------------------------------------------------------------
