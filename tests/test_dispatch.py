@@ -12605,6 +12605,64 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
 
+    # -- codex_review_unparseable unproductive-charge exemption (#2280) ----
+
+    def test_blocked_codex_review_unparseable_does_not_charge_unproductive_attempt(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#2280: a harness-side parse failure is not evidence the claim did
+        no work.
+
+        CODEX_REVIEW_UNPARSEABLE falls through to the generic Rule 5 branch
+        (it is not ``_park_must_fix_mechanically_rejected``'s reason), so its
+        exemption lives in the ``rule5_unproductive`` ternary alongside the
+        existing ``stale_dispatch`` hardcode. The payload here deliberately
+        carries no ``commits``/``review``/``resolution_consumed`` keys, so
+        without the exemption ``claim_unproductive`` would resolve True.
+        """
+        from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("CRU-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {
+                "stage": "stage3_review",
+                "reason": CODEX_REVIEW_UNPARSEABLE,
+                "details": "reviewer (codex_timeout)",
+            },
+        }
+
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.blocked_reason == CODEX_REVIEW_UNPARSEABLE
+        assert task.unproductive_attempts == 0
+
+    def test_blocked_codex_must_fix_findings_still_charges_unproductive_attempt(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Negative control: the exemption is CODEX_REVIEW_UNPARSEABLE-specific.
+
+        A different blocked reason, with the same evidence-free payload, is
+        untouched by #2280 and still charges via the ordinary evidence-based
+        Rule 5 computation — guards against the exemption over-broadening.
+        """
+        from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("CRU-2", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage3_review", "reason": CODEX_MUST_FIX_FINDINGS},
+        }
+
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.blocked_reason == CODEX_MUST_FIX_FINDINGS
+        assert task.unproductive_attempts == 1
+
     def test_review_pending_approval_small_tier_review_health_gate_parks(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
