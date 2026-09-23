@@ -15,6 +15,7 @@ from __future__ import annotations
 from cw.cli import (
     agent_spawn_stamp,
     agent_spawn_verify,
+    background_tool_guard_pre,
     channels,
     config_cmds,
     focus,
@@ -100,6 +101,7 @@ __all__ = [
     "_transcript_age_seconds",
     "agent_spawn_stamp",
     "agent_spawn_verify",
+    "background_tool_guard_pre",
     "channels",
     "config_cmds",
     "focus",
