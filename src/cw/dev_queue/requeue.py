@@ -38,6 +38,7 @@ from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import (
     RequeueLiveSessionError,
+    RequeueRosterUnreadableError,
     RequeueStageError,
     RequeueStateError,
     UnblockStateError,
@@ -396,8 +397,35 @@ def _requeue_state_error_message(ticket_id: str, status: QueueItemStatus) -> str
     return base + "."
 
 
-SkippedLiveSessionTag = Literal["skipped_live_session"]
-_REASON_SKIPPED_LIVE_SESSION: SkippedLiveSessionTag = "skipped_live_session"
+RequeueRefusalTag = Literal["skipped_live_session", "skipped_roster_unreadable"]
+_REASON_SKIPPED_LIVE_SESSION: RequeueRefusalTag = "skipped_live_session"
+_REASON_SKIPPED_ROSTER_UNREADABLE: RequeueRefusalTag = "skipped_roster_unreadable"
+
+
+def _live_short_ids_or_refuse(
+    ticket_id: str, native_daemon: NativeDaemonClient
+) -> set[str]:
+    """The roster's live short ids, failing closed (GitHub #2275, review round 1).
+
+    Same split as ``cw.worktree.live_home_reason`` (#2213): an *absent* roster
+    is an empty set (no daemon, so no live sessions) and the requeue proceeds;
+    an unreadable or malformed one -- the fail-closed read returns ``None``, or
+    raises ``OSError``/``ValueError`` -- cannot rule out a live session, so
+    raise :class:`RequeueRosterUnreadableError` rather than read it as "none".
+    """
+    roster_path = native_daemon.roster_path
+    msg = (
+        f"daemon roster unreadable at {roster_path}; cannot rule out a live"
+        f" session for #{ticket_id}. Refusing to requeue: fix the roster, or run"
+        " `cw spawn close <sid> --requeue` if the session is known."
+    )
+    try:
+        live_short_ids = native_daemon.list_live_session_short_ids_fail_closed()
+    except (OSError, ValueError) as exc:
+        raise RequeueRosterUnreadableError(msg, roster_path=roster_path) from exc
+    if live_short_ids is None:
+        raise RequeueRosterUnreadableError(msg, roster_path=roster_path)
+    return live_short_ids
 
 
 def _refuse_if_live_session(
@@ -421,11 +449,13 @@ def _refuse_if_live_session(
 
     *ignore_session_ids* is a ``Session.id``-keyed post-filter on the matched
     sessions -- never compared against ``surface_ref``/the roster's short ids,
-    which are a different namespace.
+    which are a different namespace. It cannot exempt an unreadable roster:
+    that refusal (:func:`_live_short_ids_or_refuse`) is about sessions no one
+    can name, so it fires before any session is matched.
     """
     from cw.reconcile import find_live_sessions_for_ticket
 
-    live_short_ids = native_daemon.list_live_session_short_ids()
+    live_short_ids = _live_short_ids_or_refuse(ticket_id, native_daemon)
     live = [
         s
         for s in find_live_sessions_for_ticket(
@@ -447,13 +477,18 @@ def _refuse_if_live_session(
 
 def classify_requeue_live_session_error(
     exc: RequeueLiveSessionError,
-) -> tuple[SkippedLiveSessionTag, str]:
+) -> tuple[RequeueRefusalTag, str]:
     """``(reason_tag, message)`` for a refused requeue (GitHub #2275).
 
     The one shared outcome-classification seam every ``RequeueLiveSessionError``
     catcher (the CLI, ``drain``, ``auto_fix_ci``) uses instead of each
-    hand-formatting its own skipped-live-session string.
+    hand-formatting its own skipped-live-session string. An unreadable roster
+    (:class:`RequeueRosterUnreadableError`) gets its own
+    ``skipped_roster_unreadable`` tag: no session is known to be live, so the
+    remediation differs (fix the roster).
     """
+    if isinstance(exc, RequeueRosterUnreadableError):
+        return _REASON_SKIPPED_ROSTER_UNREADABLE, str(exc)
     return _REASON_SKIPPED_LIVE_SESSION, str(exc)
 
 
@@ -520,7 +555,9 @@ def requeue_ticket(
     Raises:
         RequeueLiveSessionError: if a daemon-live session exists for the
             ticket (other than one in ``ignore_session_ids``); raised before
-            any dev-queue mutation (#2275).
+            any dev-queue mutation (#2275). Its subclass
+            ``RequeueRosterUnreadableError`` when the roster is unreadable or
+            malformed, so a live session cannot be ruled out (fail closed).
         RequeueStateError: if ticket is not BLOCKED_ON_USER or
             AWAITING_OPERATOR_SIGNOFF (forward path), unless from_cancelled
             is True and the ticket is CANCELLED, from_failed is True and
