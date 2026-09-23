@@ -303,7 +303,10 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
     self-resolving (the live session will finish), so it triggers
     ``_rollback_latch_if_unchanged`` to re-arm the row for a later tick, and
     tags the ``PR_ACTION_FAILED`` payload with a ``skipped_live_session``
-    redispatch mode plus the live session ids.
+    redispatch mode plus the live session ids. Its
+    ``RequeueRosterUnreadableError`` subclass (unreadable daemon roster, so a
+    live session cannot be ruled out) takes the same rollback, tagged
+    ``skipped_roster_unreadable`` with an empty id list.
 
     Why NOT ``force=True`` for the tick (#1362): this call can run either (a)
     nested inside a live loop's own tick (``dispatch_tick`` ->
@@ -342,7 +345,8 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
         job.payload_base[_PAYLOAD_KEY_REDISPATCH_MODE] = reason_tag
         job.payload_base[_PAYLOAD_KEY_LIVE_SESSION_IDS] = list(exc.session_ids)
         _log.info(
-            "review_recipe_redispatch_skipped_live_session ticket=%s: %s",
+            "review_recipe_redispatch_%s ticket=%s: %s",
+            reason_tag,
             job.ticket_id,
             message,
         )
