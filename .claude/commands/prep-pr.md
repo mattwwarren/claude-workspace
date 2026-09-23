@@ -254,15 +254,17 @@ Before running each gate, fetch its timeout ceiling:
 ```bash
 "$PREP_PR_STATE" gate-timeout <gate-name>
 ```
-Pass `<gate-name>` exactly as `detect-gates` printed it; names derived from a shared executable (e.g. `pytest-integration`) resolve to the base tool's ceiling by longest hyphen-delimited prefix. This returns `foreground_ceiling_s` (when to switch this gate to background) and `poll_ceiling_s` (total wall-clock budget once backgrounded before declaring the result lost).
+Pass `<gate-name>` exactly as `detect-gates` printed it; names derived from a shared executable (e.g. `pytest-integration`) resolve to the base tool's ceiling by longest hyphen-delimited prefix. This returns `foreground_ceiling_s` (when to switch this gate to background interactively; in headless mode, the gate's total budget) and `poll_ceiling_s` (interactive only: total wall-clock budget once backgrounded before declaring the result lost).
 
 For each gate:
 1. Record the start time: capture `date -u +%Y-%m-%dT%H:%M:%SZ` as `<started>`.
 2. Run the gate command via the `Bash` tool with `timeout` set to `foreground_ceiling_s * 1000` (ms; the Bash tool accepts up to 600000ms).
    - **If it completes within the ceiling** → proceed with the existing pass/fail handling (autofix retry, or ask/HEADLESS-BLOCK below).
-   - **If the foreground call itself times out** → this is the deliberate "switch to background" trigger. Re-issue the *same* command via `Bash` with `run_in_background: true`. The tool returns immediately with a shell id and an output-file path; record `<output_file>`.
-3. Once backgrounded, the harness passively notifies this session when the command exits (success, failure, or crash) — this is the primary detection path. Do not idle-wait; continue other Step-7 work if any, and let the notification arrive.
-4. **Liveness / early-block check** (bounded re-checks, not a dedicated poll tool): at intervals (e.g. every few minutes of elapsed session time), `Read` `<output_file>` to confirm the gate is still producing output (progress = alive), and call:
+   - **If the foreground call itself times out:**
+     - **Headless:** the foreground ceiling is this gate's *total* budget. Never re-issue the command with `run_in_background: true` and never accept a harness-offered background continuation — see `## Worker Execution Discipline` in `.claude/commands/auto-dev.md` (rule 3) for why: a backgrounded raw Bash call has no completion-notification path for a headless DAEMON session, so its completion lands as an unconsumed `queue-operation` record and the turn that ended "waiting on it" never resumes (#2251). Skip the background switch and skip points 3–4 entirely: emit the `gate_timeout` block defined in point 4 **immediately**, with `details: foreground ceiling <foreground_ceiling_s>s exceeded at <started>; not backgrounded (headless). Last captured output: <tail of the timed-out call's output>`.
+     - **Interactive (no `--headless`):** this is the deliberate "switch to background" trigger. Re-issue the *same* command via `Bash` with `run_in_background: true`. The tool returns immediately with a shell id and an output-file path; record `<output_file>`.
+3. **Interactive only.** Once backgrounded, the harness passively notifies this session when the command exits (success, failure, or crash) — this is the primary detection path. Do not idle-wait; continue other Step-7 work if any, and let the notification arrive.
+4. **Interactive only — liveness / early-block check** (bounded re-checks, not a dedicated poll tool): at intervals (e.g. every few minutes of elapsed session time), `Read` `<output_file>` to confirm the gate is still producing output (progress = alive), and call:
    ```bash
    "$PREP_PR_STATE" gate-elapsed --started <started> --ceiling-seconds <poll_ceiling_s>
    ```
