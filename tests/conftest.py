@@ -1670,6 +1670,26 @@ def git_in(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def list_tags(repo: Path) -> list[str]:
+    """Return ``git tag --list`` for *repo*, one tag per entry, blank lines dropped.
+
+    Hoisted from ``test_release_sh.py``'s private ``_tags`` (#2304) so the
+    CHANGELOG-freeze gate's tests share one tag-listing helper.
+    """
+    return [line for line in git_in(repo, "tag", "--list").splitlines() if line]
+
+
+def write_pyproject_override(repo: Path, toml_body: str) -> Path:
+    """Write *toml_body* as ``<repo>/pyproject.toml`` and return its path.
+
+    The fixture writer for ``[tool.cw.<name>]`` per-repo override tables,
+    hoisted from ``test_check_plan_scope_conformance.py`` (#2304).
+    """
+    pyproject = repo / "pyproject.toml"
+    pyproject.write_text(toml_body, encoding="utf-8")
+    return pyproject
+
+
 @pytest.fixture
 def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
     """Factory fixture to create git repos in tmp_path.
