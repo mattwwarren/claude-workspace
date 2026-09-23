@@ -21,15 +21,22 @@ import logging
 from typing import TYPE_CHECKING
 
 from cw.events import record_event
-from cw.exceptions import CwError, HookContextConflictError, RemoteRefUnresolvedError
+from cw.exceptions import (
+    CwError,
+    HookContextConflictError,
+    RemoteRefUnresolvedError,
+    WorktreeOccupiedError,
+)
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
     SessionPurpose,
 )
+from cw.native_daemon import get_native_daemon_client
 from cw.session_retention import find_session_by_id
 from cw.worktree import (
+    ReuseRefreshReport,
     _git_dir,
     _ref_exists,
     _run_git,
@@ -42,6 +49,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig
+    from cw.native_daemon import NativeDaemonClient
 
 _log = logging.getLogger("cw.reconcile.review_recipes")
 
@@ -131,6 +139,7 @@ def dispatch_fix_agent(
     lane: str,
     parent: str,
     remote_branch: str | None = None,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> str:
     """Provision the ticket's worktree, refresh it against main, dispatch the fix agent.
 
@@ -142,10 +151,48 @@ def dispatch_fix_agent(
     ``create_worktree``'s idempotent-reuse branch rather than provisioning
     anything.
 
-    Order is load-bearing (R22): the two pure reads -- the live-session
-    pre-check and the HEAD verification -- both run before ``fetch``/``merge``,
-    the only mutating steps. A precondition failure therefore leaves the
-    worktree untouched and needs no compensating restore.
+    Order is load-bearing (R22): the live-session pre-check is a pure read that
+    runs before anything touches the worktree. ``create_worktree`` is then
+    called with ``refresh_on_reuse=True`` (#2213): a network ``git fetch`` of
+    ``origin/<branch>`` (can be slow; a failed fetch skips the fast-forward and
+    uses the worktree as-is), then a fast-forward of the reused worktree to it
+    -- only when the worktree is unoccupied (no unsaved work, no live session
+    in cw state or worker in the daemon roster homed on it, occupancy
+    re-checked immediately before the merge), clean, on the expected branch
+    and strictly behind; otherwise it is left exactly as it is. Never a
+    reset. A fast-forward that moves HEAD records one ``worktree.fast_forwarded``
+    audit event carrying *ticket_id* (see ``docs/events.md``).
+
+    **"The refresh did not move the worktree" means two different things, and
+    only one of them stops this dispatch.**
+
+    - *Occupied -- abort.* A live cw session, a live daemon-roster worker, or an
+      indeterminate read of either (fail closed) means another worker may be
+      operating in the tree. ``create_worktree`` RAISES
+      :exc:`~cw.exceptions.WorktreeOccupiedError` for it, and this function
+      converts that straight away into the existing transient
+      :exc:`HookContextConflictError`, before any later step can act on the
+      worktree: the HEAD verification, ``git fetch``, the merge of
+      ``origin/<default_branch>`` into it, the hook-context write and the spawn.
+      Refusing only the fast-forward and then merging into and spawning onto a
+      tree a live worker is using would defeat the guard's whole purpose. The
+      conflict is the transient one (retried next tick, escalated by
+      ``cw.reconcile.fix_dispatch`` once it stops being transient), so nothing
+      is lost by skipping.
+    - *Not refreshed -- proceed.* Unsaved work (this path legitimately reuses a
+      worktree carrying a prior stage's churn), a failed fetch, a diverged
+      branch, a fast-forward git refused, an OS error or a branch absent from
+      origin all leave the tree the caller's to use as it is. The dispatch goes
+      on, and each failure is named in a friction note (below).
+
+    Past the occupancy refusal the HEAD verification runs, before
+    ``fetch``/``merge``, the only other mutating steps. A precondition failure
+    therefore leaves the worktree untouched except for the fast-forward, which
+    strictly advances HEAD and needs no compensating restore. Unlike
+    ``create_worktree``, this caller has a friction surface (the prompt prefix),
+    so each refresh failure -- fetch failed (with git's reason), fast-forward
+    refused, diverged, an OS error -- reported through the report's ``notes`` is
+    named there, worktree and reason, alongside the log line.
 
     The HEAD verification IS the ref resolution since #2209:
     :func:`_resolve_fix_remote_ref` walks a three-rung ladder -- the impl
@@ -183,6 +230,15 @@ def dispatch_fix_agent(
     :exc:`HookContextConflictError` (retry next tick) from a hard failure
     (clear the latch and escalate), and can only do so if both reach it.
 
+    ``native_daemon`` (#2213 round 7) is this dispatch's own
+    :class:`~cw.native_daemon.NativeDaemonClient`, threaded into
+    ``create_worktree``'s occupancy check instead of that check defaulting to
+    :func:`~cw.native_daemon.get_native_daemon_client` several calls down.
+    This function is the entry point (``cw.reconcile.fix_dispatch`` has none in
+    scope today), so it defaults to the real client when omitted -- the same
+    shape as :func:`cw.session.start_session` -- and tests inject
+    :class:`~cw.native_daemon.FakeNativeDaemonClient` here directly.
+
     ``parent`` is resolved via :func:`cw.session_retention.find_session_by_id`
     (cw id, ``claude_session_id``, or an archived session -- #2149) rather
     than passed straight through to ``spawn_create_impl``. When it cannot be
@@ -210,8 +266,35 @@ def dispatch_fix_agent(
             parent,
         )
 
+    daemon = native_daemon or get_native_daemon_client()
     _refuse_if_worktree_references_live_session(client, branch)
-    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    refresh = ReuseRefreshReport()
+    try:
+        worktree = create_worktree(
+            client,
+            branch,
+            allow_dirty_reuse=True,
+            refresh_on_reuse=True,
+            refresh_report=refresh,
+            ticket_id=ticket_id,
+            native_daemon=daemon,
+        )
+    except WorktreeOccupiedError as exc:
+        # A live session or worker may be homed on this worktree. Every step
+        # below mutates it (fetch, merge, hook-context write, spawn), so none
+        # may run: skip the whole dispatch, worktree untouched, and let the
+        # caller's transient-conflict handling retry.
+        msg = (
+            f"dispatch_fix_agent: worktree {exc.path} for {branch} may be held "
+            f"by a live session or daemon worker ({exc.reason}). "
+            "Refusing to fetch, merge or dispatch the fix agent into it; the "
+            "worktree was not touched."
+        )
+        raise HookContextConflictError(msg) from exc
+    effective_prompt = (
+        "".join(f"_Friction note: {note}_\n\n" for note in refresh.notes)
+        + effective_prompt
+    )
 
     if _resolve_fix_remote_ref(branch, remote_branch, worktree) is None:
         upstream = _upstream_ref(worktree)

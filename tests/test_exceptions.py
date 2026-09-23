@@ -149,6 +149,33 @@ class TestBranchHeldByWorktreeError:
         assert str(err) == "msg"
 
 
+class TestWorktreeOccupiedError:
+    """#2213 round 5: a live occupant refuses the reuse refresh as a type a
+    caller cannot ignore. Modeled on BranchHeldByWorktreeError above.
+
+    It is a WorktreeError so a broad ``except WorktreeError`` still contains it,
+    but deliberately NOT a StaleWorktreeError: the dispatch claim path removes a
+    stale worktree on that branch, and an occupied one must never be removed.
+    """
+
+    def test_is_worktree_error_but_not_stale_worktree_error(self) -> None:
+        from cw.exceptions import StaleWorktreeError, WorktreeOccupiedError
+
+        assert issubclass(WorktreeOccupiedError, WorktreeError)
+        assert not issubclass(WorktreeOccupiedError, StaleWorktreeError)
+
+    def test_carries_path_and_reason(self) -> None:
+        from pathlib import Path
+
+        from cw.exceptions import WorktreeOccupiedError
+
+        err = WorktreeOccupiedError("msg", path=Path("/x"), reason="a live session")
+
+        assert err.path == Path("/x")
+        assert err.reason == "a live session"
+        assert str(err) == "msg"
+
+
 class TestRemoteRefUnresolvedError:
     """#2209: a typed CwError subclass so fix_dispatch can discriminate the
     unresolvable-remote-ref class without matching message text.

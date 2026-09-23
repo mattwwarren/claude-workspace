@@ -16,15 +16,18 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
 from cw import codex_background
-from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result import AutoDevResult, Blocker
 from cw.codex_background import (
     _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
+    REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
+    REVIEW_VERDICT_OWNER_STAMP_FORMAT,
     _default_background,
+    _persist_review_verdict,
     _post_review_comment,
     _resolve_claim_tier_enabled,
     _resolve_codex_fix_loop_enabled,
@@ -303,6 +306,11 @@ def test_run_codex_review_and_complete_success_path(
             "cw.codex_background._record_orchestrator_event",
             side_effect=lambda *args, **_kw: events.append(args[0]),
         ),
+        # #2280: verdict=None now takes the zero-documents park/post branch
+        # (see test_run_codex_review_and_complete_posts_one_line_comment_
+        # when_verdict_is_none below) — patched here so this general
+        # success-path test stays hermetic instead of shelling out to gh.
+        patch("cw.codex_background._post_review_comment") as post_mock,
     ):
         _run(sid="bg-ok", task=task, worktree=worktree, client=_client(worktree))
 
@@ -315,6 +323,7 @@ def test_run_codex_review_and_complete_success_path(
     assert persisted.blocker is not None
     assert persisted.blocker.reason == CODEX_REVIEW_UNPARSEABLE
     assert len(events) == 1
+    post_mock.assert_called_once()
 
 
 def test_run_codex_review_and_complete_posts_verdict_comment(
@@ -351,13 +360,115 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
     assert post_mock.call_args.kwargs["tracker"] is None
     artifact = post_mock.call_args.kwargs["artifact_path"]
     assert artifact == worktree / ".claude" / "review-verdict.md"
-    # #2279: the durable copy is stamped with the ticket and reviewed sha it is
-    # about; the posted comment (args[1]) is not.
-    persisted = artifact.read_text(encoding="utf-8")
-    assert persisted.startswith(
-        "<!-- cw-review-verdict ticket=T-v reviewed_sha=deadbeef -->\n"
+    written = artifact.read_text(encoding="utf-8")
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="T-v", reviewed_sha="deadbeef"
+        ).splitlines()[0]
     )
-    assert persisted.endswith("rendered")
+    assert written.endswith("rendered")
+
+
+def test_run_codex_review_and_complete_posts_one_line_comment_when_verdict_is_none(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2280: a zero-documents park (verdict=None) now persists + posts too.
+
+    Before this ticket, Step 4b's ``if verdict is not None:`` gate meant a
+    park where every reviewer failed left no worktree artifact and no ticket
+    comment -- the operator saw only the coarse ``codex_review_unparseable``
+    reason with nothing to diagnose it. The new ``elif result.blocker is not
+    None:`` arm reuses ``result.blocker.details`` (already the per-role
+    ``role (reason)`` summary ``_format_failures_detail`` built) as the
+    comment text, mirroring the existing verdict-present branch's shape.
+    """
+    worktree = make_git_repo("wt-bg-unparseable")
+    _seed_session("bg-unparseable")
+    task = TicketTask(ticket_id="T-up", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="T-up",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        details="editor (codex_timeout); reviewer (codex_timeout)",
+        stage_reached="stage3_review",
+    )
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, None),
+        ),
+        patch("cw.codex_background._post_review_comment") as post_mock,
+    ):
+        _run(
+            sid="bg-unparseable", task=task, worktree=worktree, client=_client(worktree)
+        )
+
+    post_mock.assert_called_once()
+    assert post_mock.call_args.args[0] == "T-up"
+    assert (
+        post_mock.call_args.args[1]
+        == "editor (codex_timeout); reviewer (codex_timeout)"
+    )
+    assert post_mock.call_args.kwargs["tracker"] is None
+    artifact = post_mock.call_args.kwargs["artifact_path"]
+    assert artifact == worktree / ".claude" / "review-verdict-unparseable.md"
+    written = artifact.read_text(encoding="utf-8")
+    assert "codex_review_unparseable" in written
+    assert "editor (codex_timeout); reviewer (codex_timeout)" in written
+
+
+def test_run_codex_review_and_complete_skips_render_when_verdict_is_none(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2280: no ``ReviewVerdict`` means nothing for the renderer to render.
+
+    ``render_verdict_comment`` needs a ``ReviewVerdict`` -- there is none on
+    the zero-documents path -- so the new ``elif`` arm must not call it.
+    ``_persist_review_verdict`` DOES still run on this path (#2280 round 2):
+    it is the shared writer :func:`_persist_unparseable_artifact` delegates
+    to, pointed at the unparseable artifact's own path.
+    """
+    worktree = make_git_repo("wt-bg-unparseable-skip")
+    _seed_session("bg-unparseable-skip")
+    task = TicketTask(ticket_id="T-ups", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="T-ups",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        details="reviewer (invalid_json)",
+        stage_reached="stage3_review",
+    )
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, None),
+        ),
+        patch("cw.codex_background.render_verdict_comment") as render_mock,
+        patch(
+            "cw.codex_background._persist_review_verdict", wraps=_persist_review_verdict
+        ) as persist_mock,
+        patch("cw.codex_background._post_review_comment"),
+    ):
+        _run(
+            sid="bg-unparseable-skip",
+            task=task,
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    render_mock.assert_not_called()
+    persist_mock.assert_called_once_with(
+        worktree,
+        ANY,
+        ticket_id="T-ups",
+        reviewed_sha=ANY,
+        relative_path=REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
+    )
 
 
 def test_run_codex_review_and_complete_exception_path(
@@ -542,6 +653,15 @@ def test_run_codex_review_and_complete_marker_cleared_after_verdict_posting(
 
     assert during == [1]
     post_mock.assert_called_once()
+    artifact = post_mock.call_args.kwargs["artifact_path"]
+    written = artifact.read_text(encoding="utf-8")
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="T-mark-v", reviewed_sha="deadbeef"
+        ).splitlines()[0]
+    )
+    assert written.endswith("rendered")
     assert load_executor_blocked_markers() == {}
 
 
@@ -1017,23 +1137,25 @@ def test_post_review_comment_posts_on_github_or_unknown_tracker(
 
 
 def test_persist_review_verdict_writes_durable_copy(tmp_path: Path) -> None:
-    """#2095: the rendered verdict lands in .claude/review-verdict.md; #2279:
-    prefixed by a provenance header naming the ticket and reviewed sha."""
+    """#2095: the rendered verdict lands in .claude/review-verdict.md, stamped
+    with its owning ticket_id/reviewed_sha (#2279)."""
     from cw.codex_background import (
         REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
-        REVIEW_VERDICT_PROVENANCE_PREFIX,
         _persist_review_verdict,
     )
 
     path = _persist_review_verdict(
-        tmp_path, "## Verdict\n", ticket_id="T-9", reviewed_sha="abc123"
+        tmp_path, "## Verdict\n", ticket_id="2279", reviewed_sha="deadbeef"
     )
     assert path == tmp_path / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
-    assert path.read_text(encoding="utf-8") == (
-        f"{REVIEW_VERDICT_PROVENANCE_PREFIX} ticket=T-9 reviewed_sha=abc123 -->\n"
-        "_Verdict for ticket T-9 at `abc123`._\n\n"
-        "## Verdict\n"
+    written = path.read_text(encoding="utf-8")
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="2279", reviewed_sha="deadbeef"
+        ).splitlines()[0]
     )
+    assert written.endswith("## Verdict\n")
 
 
 def test_review_verdict_file_is_git_ignored() -> None:
@@ -1053,6 +1175,25 @@ def test_review_verdict_file_is_git_ignored() -> None:
     assert tracked.returncode != 0, "review-verdict.md is still tracked"
 
 
+def test_persist_review_verdict_stamp_handles_hyphenated_ticket_id(
+    tmp_path: Path,
+) -> None:
+    """A Linear-style ticket_id (e.g. GEN-1) keeps the stamp line parse-friendly."""
+    from cw.codex_background import _persist_review_verdict
+
+    path = _persist_review_verdict(
+        tmp_path, "## Verdict\n", ticket_id="GEN-1", reviewed_sha="cafef00d"
+    )
+    assert path is not None
+    written = path.read_text(encoding="utf-8")
+    assert (
+        written.splitlines()[0]
+        == REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id="GEN-1", reviewed_sha="cafef00d"
+        ).splitlines()[0]
+    )
+
+
 def test_persist_review_verdict_degrades_on_oserror(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1063,7 +1204,61 @@ def test_persist_review_verdict_degrades_on_oserror(
     (tmp_path / ".claude").write_text("not a directory", encoding="utf-8")
     with caplog.at_level("WARNING"):
         assert (
-            _persist_review_verdict(tmp_path, "x", ticket_id="T", reviewed_sha="s")
+            _persist_review_verdict(
+                tmp_path, "x", ticket_id="T-1", reviewed_sha="deadbeef"
+            )
+            is None
+        )
+    assert any("review_verdict_persist_failed" in r.message for r in caplog.records)
+
+
+def test_persist_unparseable_review_artifact_writes_worktree_copy(
+    tmp_path: Path,
+) -> None:
+    """#2280: a zero-documents park writes its own durable worktree copy.
+
+    Sibling of :func:`_persist_review_verdict`, for the park a
+    ``ReviewVerdict`` was never produced for -- carries the blocker's reason
+    and details instead of a rendered verdict comment.
+    """
+    from cw.codex_background import (
+        REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
+        _persist_unparseable_artifact,
+    )
+
+    blocker = Blocker(
+        stage="stage3_review",
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        details="editor (codex_timeout); reviewer (invalid_json)",
+    )
+
+    path = _persist_unparseable_artifact(
+        tmp_path, blocker, ticket_id="1234", reviewed_sha="deadbeef"
+    )
+
+    assert path == tmp_path / REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH
+    written = path.read_text(encoding="utf-8")
+    assert "ticket_id=1234" in written
+    assert "reviewed_sha=deadbeef" in written
+    assert CODEX_REVIEW_UNPARSEABLE in written
+    assert "editor (codex_timeout); reviewer (invalid_json)" in written
+
+
+def test_persist_unparseable_review_artifact_degrades_on_oserror(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A write failure is logged and returns None; never raises (#2280)."""
+    from cw.codex_background import _persist_unparseable_artifact
+
+    (tmp_path / ".claude").write_text("not a directory", encoding="utf-8")
+    blocker = Blocker(
+        stage="stage3_review", reason=CODEX_REVIEW_UNPARSEABLE, details="x"
+    )
+    with caplog.at_level("WARNING"):
+        assert (
+            _persist_unparseable_artifact(
+                tmp_path, blocker, ticket_id="1234", reviewed_sha="deadbeef"
+            )
             is None
         )
     assert any("review_verdict_persist_failed" in r.message for r in caplog.records)

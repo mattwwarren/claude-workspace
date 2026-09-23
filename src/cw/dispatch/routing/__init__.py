@@ -59,7 +59,10 @@ from cw.auto_dev_result import (
     STALE_DISPATCH_BLOCKER_REASON,
     is_known_blocker_reason,
 )
-from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
+from cw.codex_review import (
+    CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+    CODEX_REVIEW_UNPARSEABLE,
+)
 from cw.dev_queue import (
     REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
     _advance_task_pointer,
@@ -247,13 +250,14 @@ _MUST_FIX_MECHANICALLY_REJECTED_REASON = "codex_must_fix_mechanically_rejected"
 # _park_must_fix_mechanically_rejected above -- the one gate-class park whose
 # breadcrumbs is genuinely populated from blocker.reason rather than a
 # hardcoded "" literal. Named + anchored so
-# .claude/skills/orchestrate-sprint/scripts/attention_monitor.sh's
-# hand-transcribed Python set (which runs outside src/cw and cannot import
-# this constant) has one file to keep in sync against. See #1597.
+# .claude/skills/orchestrate-sprint/scripts/attention_watch.py's
+# hand-transcribed BLOCKER_REASON_PAUSED_STATUSES (which runs outside src/cw
+# and cannot import this constant) has one file to keep in sync against;
+# tests/test_attention_watch.py pins the two equal. See #1597, #2250.
 #
 # IMPORTANT: this constant has no runtime reader anywhere in src/cw -- it is
-# the canonical *declaration* consumed only by attention_monitor.sh (an
-# out-of-repo hand-copy) and by the pinning test below. Adding a paused_status
+# the canonical *declaration* consumed only by attention_watch.py (an
+# out-of-package hand-copy) and by the pinning tests. Adding a paused_status
 # here does NOT by itself cause a breadcrumb to be emitted for it: the
 # producing _park_* helper must independently stamp non-empty breadcrumbs
 # content at its own call site. Every gate-class park other than
@@ -908,7 +912,19 @@ def _route_stage_failure(
     # exists to surface. Hardcoded False for the same reason Rule 4
     # hardcodes it for no_op: a correct, evidence-producing terminal
     # outcome, not a crashloop.
-    rule5_unproductive = False if status == "stale_dispatch" else claim_unproductive
+    #
+    # #2280: a codex_review_unparseable park is a harness-side parse
+    # failure (timeout, missing output, invalid JSON, schema mismatch --
+    # every ExecutorFailureCategory that reason aggregates), not evidence
+    # the ticket produced no progress -- same rationale as
+    # _park_must_fix_mechanically_rejected's unproductive=False above, for
+    # a reason that falls through to this generic branch instead of that
+    # dedicated one.
+    rule5_unproductive = (
+        False
+        if status == "stale_dispatch" or blocker_reason == CODEX_REVIEW_UNPARSEABLE
+        else claim_unproductive
+    )
     transition_task_status(
         task,
         QueueItemStatus.BLOCKED_ON_USER,

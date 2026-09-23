@@ -748,6 +748,17 @@ open enum; consumers MUST tolerate unknown values. Known values:
   as its siblings are — nothing is disposed (ADR-0014). `breadcrumbs`
   carries stale minutes, stage, elapsed seconds, the unresolved tool's
   name, and a truncated, secret-redacted command snippet when available.
+- `"unconsumed_queue_notification"` — the same liveness-sweep distress path,
+  for the case where the transcript's last record is a
+  `{"type": "queue-operation", "operation": "enqueue"}` notification that no
+  later turn consumed — typically a backgrounded Bash call's completion
+  landing on a headless session that nothing will ever resume (#2251:
+  `/prep-pr` backgrounded a quality gate and the finalize stage wedged).
+  Gated exactly like `dangling_tool_use` (no outstanding subagent spawn) and
+  takes priority over it: when this matches, the `dangling_tool_use` scan is
+  skipped. Signal-only exactly as its siblings are — nothing is disposed
+  (ADR-0014). `breadcrumbs` carries stale minutes, stage, elapsed seconds, and
+  the notification text, truncated and secret-redacted.
 - `"silently_idle"` — *historical (ADR-0014)*: the idle watchdog's park.
   No longer produced; may exist on old rows/logs.
 - `"needs_salvage"` — *historical (ADR-0014)*: the git-state salvage LOW
@@ -956,6 +967,36 @@ resolves to a ticket currently parked in a hold-class disposition
 namespace). Every other `paused_status` still forwards immediately,
 unbatched. See `docs/operator-channel.md`'s "Digest coalescing" section for
 the full buffer/window/flush contract.
+
+### `session.message_sent`
+
+**Emitter:** `cw session send` (`cw.cli.session_send`)
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "session_name": "<str>",
+  "client": "<str>",
+  "message_id": "<str>",
+  "author": "<str>"
+}
+```
+**Semantics:** An operator queued a message into a session's inbound mailbox
+(#2212). Emitted for the durable **append**, not for delivery: it fires
+whether or not the resume trigger could wake the session, because queuing —
+not delivery — is `cw session send`'s reliability bar. A successful respawn
+additionally writes a `session_resumed` record to the *history* bus
+(`cw.history`), which is a different bus with a different record type; seeing
+this event without that one means the message is queued and still waiting.
+
+`author` is audit-only — it is never compared for authorization, and defaults
+to the local OS username rather than a resolved GitHub login. The message
+body is deliberately **not** in the payload: the event bus is a fleet-wide
+coordination stream, and the body lives in the session's own
+`inboxes/<session_id>/inbox.jsonl`. No `correlation_id` is set.
+
+Until #2255 lands, the common outcome for a session that is genuinely live
+and mid-task is queued-but-not-delivered; see ADR-0017.
 
 ### `session.salvage_skipped` — historical (ADR-0014)
 
@@ -2270,6 +2311,53 @@ queryable record (`cw event tail`/`cw event wait`); opting it into the
 default push-notification forward-set is a separate policy call left for a
 follow-up if this proves to fire in practice.
 
+### `worktree.fast_forwarded`
+
+**Emitter:** `_ff_reused_worktree` (`cw.worktree`), reached from
+`create_worktree(..., refresh_on_reuse=True)` — the dispatch claim path and
+`dispatch_fix_agent`.
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "ticket_id": "<str | null>",
+  "branch": "<str>",
+  "worktree_path": "<str>",
+  "old_sha": "<str, full 40-char SHA>",
+  "new_sha": "<str, full 40-char SHA>"
+}
+```
+**Semantics:** GitHub #2213. The reuse refresh can move a reused per-ticket
+worktree's `HEAD` on its own (a strict `git merge --ff-only` to a freshly
+fetched `origin/<branch>`), so an operator asking "why is my worktree at a
+different commit than I left it?" gets a durable answer here instead of only a
+debug log: which client and ticket, which worktree, and the exact before/after
+commits.
+
+**Emitted only when `HEAD` actually moved** (`new_sha != old_sha` after a
+successful `merge --ff-only`). Nothing is emitted on the no-op paths: the
+worktree already current, ahead of origin, or diverged from it; a fast-forward
+git refused; a worktree occupied by a live session or worker (the refusal is
+raised, nothing is touched); or one not refreshed (dirty, failed fetch, branch
+absent from origin, wrong branch). A record per turn would be noise. A merge
+that succeeds but leaves `HEAD` where it was ("Already up to date") also emits
+nothing.
+
+The event is written after the fast-forward has completed and is best-effort:
+an `OSError` from the write (full disk, unwritable inbox) is logged at
+`WARNING` and never turns the completed fast-forward into "not refreshed" or
+raises. A lost line is the failure mode, not a wrong outcome.
+
+`correlation_id` is the `ticket_id` when the caller supplied one (the claim
+path passes the task's ticket id; `dispatch_fix_agent` passes its own), else
+absent (`ticket_id` is `null` in the payload).
+
+Audit-only: **not** forwarded to the operator-attention channel. It is not in
+`_DEFAULT_OPERATOR_EVENT_TYPES` (`orchestrator_config.py`, an allowlist), so
+the default is exclusion; a mechanical, strictly-forward move is not an
+operator alert. It exists as the durable, queryable record
+(`cw event tail --type worktree.fast_forwarded`).
+
 ### Operator-attention channel (RFC 0008 W3, #1002)
 
 A server-side filter (`cw.cw_operator_events`) forwards a declarative subset
@@ -2285,7 +2373,7 @@ events plus `pr.action_taken`/`pr.action_failed`), `session.liveness_changed`
 with cursor name `"operator-channel-bridge"`. `concierge.recovered`,
 `concierge.recovery_backoff_armed` and
 `concierge.hook_context_conflict_refused` are deliberately excluded
-(audit-only).
+(audit-only), as is `worktree.fast_forwarded`.
 See [`docs/operator-channel.md`](operator-channel.md) for the filter
 reference, subscription instructions, and degradation contract.
 

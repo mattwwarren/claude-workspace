@@ -6,6 +6,7 @@ import contextlib
 import logging
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cw.auto_dev_result import AutoDevResult
@@ -53,6 +54,7 @@ from cw.models import (
     LOCAL_BACKEND,
     OPENCODE_BACKEND,
     ClientConfig,
+    CompletionReason,
     LastResultSource,
     LocalLivenessHandle,
     OrchestratorEventType,
@@ -87,7 +89,7 @@ from cw.opencode_runner import (
 from cw.plan_files import parse_plan_files_modified
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.result import emit_result_locked
-from cw.spawn import spawn_create_impl
+from cw.spawn import _write_hook_context, spawn_create_impl
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
@@ -864,6 +866,13 @@ def _complete_session_via_door(
     is a normal, non-raising return -- the status transition below still
     runs regardless (R5): refusal affects only the last_result write, not
     the executor's status/event bookkeeping.
+
+    Sets the full terminal record -- ``status``, ``completed_at``, and
+    ``completed_reason`` -- matching the crash-completion precedent at
+    ``reconcile/concierge.py``'s ``_LIVE_STATUSES`` handling (#2280 round 2).
+    Every ``guard_already_completed=True`` call site is an ``except
+    Exception:`` branch, so that flag doubles as the crashed/normal signal:
+    True -> CRASHED, False -> NORMAL.
     """
     if guard_already_completed:
         state = load_state()
@@ -879,6 +888,12 @@ def _complete_session_via_door(
     target = next((s for s in state.sessions if s.id == sid), None)
     if target is not None:
         target.status = SessionStatus.COMPLETED
+        target.completed_at = datetime.now(UTC)
+        target.completed_reason = (
+            CompletionReason.CRASHED
+            if guard_already_completed
+            else CompletionReason.NORMAL
+        )
         save_state(state)
 
 
@@ -948,6 +963,39 @@ class CodexExecutor:
             state = load_state()
             state.sessions.append(sess)
             save_state(state)
+
+        # #2280: CodexExecutor never reaches either of _write_hook_context's
+        # other two call sites (both are Claude-session spawns), so a
+        # codex-review attempt never got a cw-context.json — and with it,
+        # never got a prior_attempts_summary on retry. write_stop_hook=False:
+        # there is no Claude turn loop here to signal-stop. Called ahead of
+        # the pre-flight branch below so even a CODEX_REVIEW_ONLY/
+        # CODEX_NOT_FOUND park is covered.
+        try:
+            _write_hook_context(
+                worktree,
+                session_id=sid,
+                session_name=sess.name,
+                client=client.name,
+                purpose=SessionPurpose.IMPL.value,
+                ticket_id=task.ticket_id,
+                origin=SessionOrigin.DAEMON,
+                task=task,
+                wall_clock_budget_seconds=wall_clock_budget_seconds,
+                default_branch=client.default_branch,
+                workspace_path=client.workspace_path,
+                lane=task.lane,
+                write_stop_hook=False,
+            )
+        except Exception:
+            # #2280: sess is already persisted ACTIVE above -- a raise here
+            # would otherwise leak it permanently ACTIVE (the same class of
+            # leak that held a client-ceiling slot for ~2h, #2285). Mirrors
+            # the pre-flight-result-write branch below: dispatch is still on
+            # this stack, so re-raising lets its own handler revert the
+            # claimed task to PENDING.
+            _complete_session_as_unexpected_error(sid, task, worktree)
+            raise
 
         # Step 2: Pre-flight checks (first match assigns result).
         result: AutoDevResult | None = None

@@ -396,7 +396,8 @@ not amended or superseded; the two seams stay independent.
   base sync delivered another ticket's verdict into its worktree, where
   finalize reads it as the authority on whether to halt (#2279, #2205). The
   file is now git-ignored and untracked, and the persisted copy is prefixed
-  with a provenance header naming the ticket and `reviewed_sha` so a consumer
+  with an ownership stamp (`<!-- cw-review-verdict-owner ticket_id=<id>
+  reviewed_sha=<sha> -->`) naming the ticket and `reviewed_sha` so a consumer
   can refuse a verdict that is not about the branch it is finalizing.
 - **Convention drift from `docs/release-playbook.md`.** The playbook says a
   `False` master short-circuits the entire module. Shadow recording runs with

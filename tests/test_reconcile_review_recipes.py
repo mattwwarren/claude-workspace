@@ -43,6 +43,7 @@ from cw.exceptions import (
     HookContextConflictError,
     RemoteRefUnresolvedError,
     SessionsLockReentryError,
+    WorktreeOccupiedError,
 )
 from cw.models import (
     ClientConfig,
@@ -87,14 +88,20 @@ from cw.reconcile.review_recipes import (
     _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
 )
 from cw.review_strategy import ReviewStrategy
-from cw.worktree import worktree_path_for
+from cw.worktree import FetchOutcome, FetchResult, create_worktree, worktree_path_for
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
 # construction: _make_task accepts **kwargs (pr_url / pr_state / session_id /
 # client / lane), _pr_state builds a PrState with sensible OPEN defaults.
 # _client_with_lanes builds a ClientConfig with the given lanes (reused by the
 # resolve-precedence tests below).
-from tests.conftest import _clean_git_env, git_in
+from tests.conftest import (
+    _clean_git_env,
+    git_in,
+    occupy_worktree,
+    push_commit_to_origin,
+    tree_fingerprint,
+)
 from tests.test_pr_hydrate import _pr_state, _watched
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 
@@ -1337,6 +1344,197 @@ def test_act_auto_fix_ci_requeue_raises_emits_pr_action_failed(
     store_after = load_dev_queue()
     assert len(store_after.tasks) == 1
     assert store_after.tasks[0].status == QueueItemStatus.COMPLETED
+
+
+def _raise_live_session(
+    *_args: object, **_kwargs: object
+) -> dict[str, str | bool | int]:
+    from cw.exceptions import RequeueLiveSessionError
+
+    msg = "Cannot requeue: a session for this ticket is live: 'stray1'"
+    raise RequeueLiveSessionError(msg, session_ids=("stray1",))
+
+
+def _seed_ci_failing_completed_row(tmp_config_dir: Path) -> TicketTask:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(
+        status=QueueItemStatus.COMPLETED,
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="ci_failing"),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    return task
+
+
+def test_auto_fix_ci_live_session_refusal_clears_latch(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275: a live-session refusal is transient, so the one-shot latch is
+    rolled back and PR_ACTION_FAILED carries a distinguishable reason."""
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _raise_live_session)
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop",
+        lambda **_kw: pytest.fail("dispatch must not run when requeue is refused"),
+    )
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is None
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].payload["redispatch_mode"] == "skipped_live_session"
+    assert failed[0].payload["live_session_ids"] == ["stray1"]
+    assert "stray1" in failed[0].payload["error"]
+
+
+def test_auto_fix_ci_roster_unreadable_refusal_clears_latch(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275 review round 1: an unreadable roster refuses through the real
+    requeue_ticket guard, takes the same latch rollback as a live-session
+    refusal, and tags PR_ACTION_FAILED with a distinct reason."""
+    from cw.native_daemon import FakeNativeDaemonClient
+
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+    roster = FakeNativeDaemonClient()
+    roster.roster_unreadable = True
+    monkeypatch.setattr("cw.dev_queue.requeue.get_native_daemon_client", lambda: roster)
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop",
+        lambda **_kw: pytest.fail("dispatch must not run when requeue is refused"),
+    )
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    row = load_dev_queue().tasks[0]
+    assert row.auto_fix_ci_fired_at is None
+    assert row.status == QueueItemStatus.COMPLETED
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].payload["redispatch_mode"] == "skipped_roster_unreadable"
+    assert failed[0].payload["live_session_ids"] == []
+    assert (
+        f"daemon roster unreadable at {roster.roster_path};"
+        f" cannot rule out a live session for #{task.ticket_id}"
+    ) in failed[0].payload["error"]
+
+
+def test_auto_fix_ci_live_session_refusal_keeps_concurrently_changed_latch(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275: the rollback is compare-and-clear -- a latch another actor
+    re-stamped between the two lock transactions is left untouched."""
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+    other_stamp = datetime(2031, 1, 1, tzinfo=UTC)
+
+    def _race_then_refuse(
+        *args: object, **kwargs: object
+    ) -> dict[str, str | bool | int]:
+        store = load_dev_queue()
+        store.tasks[0].auto_fix_ci_fired_at = other_stamp
+        save_dev_queue(store)
+        return _raise_live_session(*args, **kwargs)
+
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _race_then_refuse)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at == other_stamp
+
+
+def test_auto_fix_ci_live_session_refusal_row_vanished_is_noop(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275: a row removed between the two transactions is not resurrected;
+    PR_ACTION_FAILED is still emitted."""
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+
+    def _remove_then_refuse(
+        *args: object, **kwargs: object
+    ) -> dict[str, str | bool | int]:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        return _raise_live_session(*args, **kwargs)
+
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _remove_then_refuse)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    assert load_dev_queue().tasks == []
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+
+
+def test_auto_fix_ci_fires_again_after_live_session_latch_cleared(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275: the cleared latch genuinely re-arms the row for the next tick."""
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+    candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _raise_live_session)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    first = _act_auto_fix_ci([candidate], clients=load_effective_clients())
+    assert first == []
+
+    requeued: list[str] = []
+
+    def _requeue_ok(ticket_id: str, *_a: object, **_kw: object) -> dict[str, object]:
+        requeued.append(ticket_id)
+        return {"from_completed_applied": True}
+
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _requeue_ok)
+
+    second = _act_auto_fix_ci([candidate], clients=load_effective_clients())
+
+    assert second == [task.ticket_id]
+    assert requeued == [task.ticket_id]
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
+
+
+def test_auto_fix_ci_non_live_session_cwerror_still_latches(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2275 non-interference: any other CwError keeps the latch stamped."""
+    from cw.exceptions import RequeueStateError
+
+    task = _seed_ci_failing_completed_row(tmp_config_dir)
+    row_gone_msg = "row moved on"
+
+    def _boom(*_args: object, **_kwargs: object) -> dict[str, str | bool | int]:
+        raise RequeueStateError(row_gone_msg)
+
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _boom)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert "redispatch_mode" not in failed[0].payload
+    assert "live_session_ids" not in failed[0].payload
 
 
 def test_auto_fix_ci_fires_once_per_episode(
@@ -2846,6 +3044,207 @@ def test_dispatch_fix_agent_resumes_pushed_branch(
 
     assert len(stub_spawn.calls) == 2
     assert stub_spawn.calls[1]["worktree"] == wt
+
+
+def test_dispatch_fix_agent_fast_forwards_behind_worktree(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """#2213: a reused worktree behind an already-fetched tracking ref is
+    fast-forwarded by ``create_worktree`` instead of tripping the HEAD check."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    old_sha = git_in(worktree, "rev-parse", "HEAD")
+
+    origin = Path(git_in(client.workspace_path, "remote", "get-url", "origin"))
+    new_sha = push_commit_to_origin(origin, branch, tmp_path / "side", "upstream.txt")
+    # Load-bearing: without this fetch the workspace's tracking ref still equals
+    # the worktree's HEAD, ``_resolve_remote_ref`` resolves to that stale ref,
+    # the HEAD-equals-remote check passes today, and this test is vacuous.
+    git_in(client.workspace_path, "fetch", "origin")
+    assert new_sha != old_sha
+    assert git_in(worktree, "rev-parse", "HEAD") == old_sha
+
+    dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert len(stub_spawn.calls) == 1
+    assert git_in(worktree, "rev-parse", "HEAD") == new_sha
+    # A refresh that worked leaves no friction note behind.
+    assert "Friction note" not in str(stub_spawn.calls[0]["prompt"])
+    # Round 6: the fast-forward left exactly one audit event, attributed to the
+    # dispatching ticket (the fix-agent path threads its ``ticket_id`` through).
+    (event,) = read_events(event_types=[OrchestratorEventType.WORKTREE_FAST_FORWARDED])
+    assert event.correlation_id == "2017"
+    assert event.payload["ticket_id"] == "2017"
+    assert event.payload["branch"] == branch
+    assert event.payload["old_sha"] == old_sha
+    assert event.payload["new_sha"] == new_sha
+
+
+@pytest.mark.parametrize("worktree_is", ["in-sync", "behind"])
+@pytest.mark.parametrize("source", ["roster", "state", "unreadable-roster"])
+def test_dispatch_fix_agent_refuses_an_occupied_worktree_and_mutates_nothing(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    source: str,
+    worktree_is: str,
+) -> None:
+    """#2213 round 4: a refresh refusal for a live occupant must stop EVERY
+    later mutation on the fix-agent path, not just the fast-forward.
+
+    Before, ``create_worktree`` declined to fast-forward and dispatch then went
+    on regardless: ``git fetch origin``, a merge of ``origin/main`` INTO the
+    occupied worktree, and a spawn onto it. ``origin/main`` has moved here, so
+    any of those is observable: the worktree fingerprint (HEAD, index, every
+    file's bytes) and the workspace's ``origin/main`` tracking ref must all be
+    exactly as they were, and nothing is spawned.
+    """
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    origin = Path(git_in(client.workspace_path, "remote", "get-url", "origin"))
+    if worktree_is == "behind":
+        push_commit_to_origin(origin, branch, tmp_path / "side", "upstream.txt")
+        git_in(client.workspace_path, "fetch", "origin")
+    # origin/main moves on AFTER the workspace last fetched: a dispatch-level
+    # ``git fetch origin`` would advance the tracking ref, and the merge that
+    # follows it would put a merge commit on the worktree's HEAD.
+    push_commit_to_origin(origin, "main", tmp_path / "side-main", "main-only.txt")
+    occupy_worktree(client, worktree, source)
+    main_ref = "refs/remotes/origin/main"
+    main_before = git_in(client.workspace_path, "rev-parse", main_ref)
+    before = tree_fingerprint(worktree)
+
+    with pytest.raises(HookContextConflictError) as excinfo:
+        dispatch_fix_agent(
+            client=client,
+            branch=branch,
+            prompt=_FIX_PROMPT_TEXT,
+            label="fix-2017",
+            ticket_id="2017",
+            lane="default",
+            parent="parent-session",
+        )
+
+    assert tree_fingerprint(worktree) == before
+    assert git_in(client.workspace_path, "rev-parse", main_ref) == main_before
+    assert stub_spawn.calls == []
+    # Round 5: the transient conflict is raised FROM the typed refusal that
+    # ``create_worktree`` now raises, not from a flag the caller remembered to
+    # check -- so no later step of this function can run without it.
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, WorktreeOccupiedError)
+    assert cause.path == worktree
+    message = str(excinfo.value)
+    assert str(worktree) in message
+    assert branch in message
+    assert "worktree was not touched" in message
+    # The reason is named: which occupant, or that it could not be ruled out.
+    assert {
+        "roster": "live daemon worker",
+        "state": "live session",
+        "unreadable-roster": "roster unreadable",
+    }[source] in message
+
+
+def test_dispatch_fix_agent_proceeds_past_unsaved_work_alone(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """Control for the refusal test: only a LIVE occupant stops the dispatch.
+    Unsaved work refuses the fast-forward, but this path legitimately reuses a
+    worktree carrying a prior stage's churn (``allow_dirty_reuse``), so the
+    dispatch goes ahead and the churn survives."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    churn = worktree / "uv.lock"
+    churn.write_text("churn from the prior stage\n", encoding="utf-8")
+
+    dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert len(stub_spawn.calls) == 1
+    assert churn.read_text(encoding="utf-8") == "churn from the prior stage\n"
+
+
+def test_dispatch_fix_agent_reports_failed_refresh_fetch_in_friction_note(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2213 round 3: unlike ``create_worktree``, this caller has a friction
+    surface (the prompt prefix), so a failed refresh fetch is named there --
+    worktree and reason -- alongside the log line, and the dispatch proceeds."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    _seed_fix_parent_session(client, "parent-session")
+    worktree = create_worktree(client, branch, allow_dirty_reuse=True)
+    # In sync with origin, so the HEAD check passes even though the refresh
+    # fetch (patched) fails; only the dispatch's own real ``git fetch`` runs.
+    monkeypatch.setattr(
+        "cw.worktree.fetch_feature_branch",
+        lambda _c, _b: FetchResult(
+            FetchOutcome.FAILED, "rc=128: fatal: Could not read from remote repository."
+        ),
+    )
+
+    dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+    )
+
+    assert len(stub_spawn.calls) == 1
+    prompt = str(stub_spawn.calls[0]["prompt"])
+    note = next(
+        line for line in prompt.splitlines() if line.startswith("_Friction note:")
+    )
+    assert str(worktree) in note
+    assert f"origin/{branch}" in note
+    assert "fetch" in note
+    # Round 5: the note says WHY, not just that the fetch failed.
+    assert "Could not read from remote repository" in note
+    assert prompt.endswith(_FIX_PROMPT_TEXT)
 
 
 def test_dispatch_fix_agent_verifies_head_before_merge(

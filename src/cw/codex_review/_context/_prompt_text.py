@@ -85,14 +85,23 @@ _OUTPUT_SCHEMA_RULES = (
     'returning `status="ok"` with an empty `findings` array, `detail` MUST '
     "briefly state what was checked (a blank `detail` on that combination is "
     "rejected by the schema) — do not emit the trivial empty case without "
-    "saying what you verified. If a rubric-mandated check from the inlined "
-    "agent specification could not actually be performed in this "
-    'environment, use `status="degraded"` (naming the unperformed check in '
-    '`detail`) rather than silently reporting `"ok"`. `detail` is REQUIRED '
-    'and MUST be non-empty whenever `status` is "degraded" or "failed" — a '
-    "degraded or failed reviewer with a blank `detail` is rejected as a "
-    "schema violation, exactly like a blank `detail` on the empty-findings "
-    '`status="ok"` case above. Every '
+    "saying what you verified. This is a read-only sandbox: running the "
+    "test suite, `uv`, a linter, or a type-checker is not expected of you "
+    "unless the reviewer role's own rubric explicitly mandates that check. "
+    "Being unable to run a gate the rubric does not mandate is not "
+    'degradation — report `status="ok"` for that gate and, if useful, note '
+    "the sandbox limitation in `detail`. If a rubric-mandated check from "
+    "the inlined agent specification could not actually be performed in "
+    'this environment, use `status="degraded"` (naming the unperformed '
+    'check in `detail`) rather than silently reporting `"ok"`. Total '
+    "inability to execute a mandated gate is still `degraded`, never "
+    '`failed`. `status="failed"` is reserved for being unable to evaluate '
+    "the diff itself — the diff is missing or unreadable, a required file "
+    "is inaccessible, or your own output would be malformed. `detail` is "
+    'REQUIRED and MUST be non-empty whenever `status` is "degraded" or '
+    '"failed" — a degraded or failed reviewer with a blank `detail` is '
+    "rejected as a schema violation, exactly like a blank `detail` on the "
+    'empty-findings `status="ok"` case above. Every '
     "finding's `evidence` MUST be a verbatim substring of the claimed file's "
     "changed lines. Report no prose outside the JSON object."
 )

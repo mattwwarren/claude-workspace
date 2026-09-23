@@ -124,6 +124,7 @@ def _spawn_close_requeue_impl(
     session_id: str,
     ticket_id: str | None,
     client: str | None,
+    closed_session_id: str | None = None,
 ) -> None:
     """Requeue a just-closed session's ticket back to PENDING (``--requeue``).
 
@@ -136,6 +137,14 @@ def _spawn_close_requeue_impl(
     that's what happened, or whether this is a genuine state problem that
     should propagate. Separated from the Click command so tests can call it
     directly.
+
+    *closed_session_id* (the resolved ``Session.id``) is exempted from
+    ``requeue_ticket``'s live-session guard (#2275), since its roster entry
+    may lag the close. Any *other* live session for the ticket still raises
+    ``RequeueLiveSessionError``, which propagates to ``handle_errors`` -- as
+    does its ``RequeueRosterUnreadableError`` subclass: an unreadable roster
+    cannot rule out a live session the exemption does not name, so the close
+    lands but the requeue is refused.
     """
     if ticket_id is None or client is None:
         click.echo(
@@ -146,7 +155,13 @@ def _spawn_close_requeue_impl(
 
     try:
         result = requeue_ticket(
-            ticket_id, client, allow_regress=False, from_cancelled=True
+            ticket_id,
+            client,
+            allow_regress=False,
+            from_cancelled=True,
+            ignore_session_ids=(
+                frozenset({closed_session_id}) if closed_session_id else frozenset()
+            ),
         )
     except RequeueStateError:
         store = load_dev_queue()
@@ -302,19 +317,24 @@ def spawn_close(session_id: str, confirmed_dead: bool, requeue: bool) -> None:
     # needs without re-deriving it from a session that's already COMPLETED.
     ticket_id: str | None = None
     client: str | None = None
+    closed_session_id: str | None = None
     if requeue:
         state = load_state()
         sess = state.find_by_name_or_id(session_id)
         if sess is not None:
             ticket_id = ticket_id_for_session(sess.name)
             client = sess.client
+            closed_session_id = sess.id
 
     _spawn_close_impl(session_id=session_id)
     click.echo(f"Closed session: {session_id}")
 
     if requeue:
         _spawn_close_requeue_impl(
-            session_id=session_id, ticket_id=ticket_id, client=client
+            session_id=session_id,
+            ticket_id=ticket_id,
+            client=client,
+            closed_session_id=closed_session_id,
         )
 
 

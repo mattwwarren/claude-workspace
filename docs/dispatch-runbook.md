@@ -383,11 +383,17 @@ Run it at checkpoints — after a gate, after a merge, before reporting that a
 wave is healthy — not on a timer. Event-driven monitoring covers the named
 failures; peek covers the unnamed one.
 
-This has landed (#2004): the attention monitor (`scripts/attention_monitor.sh`,
-see the `orchestrate-sprint` skill's Phase 4) now subscribes to
+This has landed (#2004): the attention watch (`scripts/attention_watch.py`,
+see the `orchestrate-sprint` skill's Phase 4) subscribes to
 `session.liveness_changed`, filtered to `stale_30m`/`stale_45m`, so a stalled
 worker pages you once the reconcile liveness sweep crosses one of those
-bucket boundaries. `cw queue peek` remains valuable as a **confirmation**
+bucket boundaries. Since #2250 the watch is wake-on-event rather than a
+persistent Monitor: the orchestrator runs it as a backgrounded `Bash`, it
+exits after delivering a burst of events (or after its `--max-idle-seconds`
+backstop, default 7200s, with a `WATCHER | idle backstop …` line), and the
+orchestrator re-arms it after triage. A per-client resume stamp under
+`~/.claude-workspace/` makes each re-arm pick up exactly where the last wake
+left off, so events landing between wakes are delivered late, never lost. `cw queue peek` remains valuable as a **confirmation**
 step — and it still covers the narrower residual window before the first
 `stale_30m` crossing — but it is no longer the only line of defense.
 
@@ -643,6 +649,62 @@ cw dev-queue prune --all-clients --confirm
 This is unrelated to `cw event prune`, which trims the event log itself.
 
 ---
+
+## 6a. Answer a paused session (`cw session send`)
+
+A worker that pauses to ask you something parks its row `BLOCKED_ON_USER` and
+then sits there. Before #2212 the only way to answer was lossy: close the
+session, requeue the ticket, and let a fresh worker rediscover the context you
+were about to hand it. `cw session send` collapses that into one command that
+preserves the transcript, the worktree, the dev-queue row, and the row's
+`BLOCKED_ON_USER` status.
+
+**Find the rows waiting on you.** `cw queue peek` now reports parked rows
+alongside running ones, tagged `AWAITING_OPERATOR` with the reason they
+parked:
+
+```bash
+cw queue peek --client <client>
+```
+
+An `AWAITING_OPERATOR` row is waiting on a human, not wedged — it carries no
+age/idle score and is never listed under "Suggested stops." A `STOP-OR-PEEK`
+row is the ambiguous case that still needs your eyes.
+
+**Answer it.**
+
+```bash
+# Inline
+cw session send <session-id> --message "Use the second approach; the first
+one breaks the lane cap."
+
+# Or from a file, for anything longer than a sentence
+cw session send <session-id> --message-file ./answer.md
+```
+
+The message is appended to the session's durable mailbox first, then a resume
+is attempted. The command exits 0 whenever the message was **queued**, which
+is the point: a queued message survives whether or not the session could be
+woken right now. Exit 1 means nothing was queued at all — unknown session,
+terminal session, or bad flags.
+
+**What it does not do.** It does not transition the dev-queue row. The row
+stays `BLOCKED_ON_USER`; releasing it is still the separate, explicit action
+it always was (`cw dev-queue requeue`, `cw plan approve`, etc.).
+
+**The one case it cannot handle yet.** A session that is genuinely live and
+mid-task (`RUNNING` row, `ACTIVE` session) cannot be woken — there is no way
+to deliver into a running `claude --bg` turn, per #1889's spike. You will see:
+
+```
+Message <id> queued for session <id>.
+Warning: not delivered yet — session is live and mid-task; live-session
+delivery is deferred to #2255
+```
+
+That is the expected outcome, not a failure: the message is on disk and will
+be there when the session is next resumed. See ADR-0017 for the full decision
+record.
 
 ## 7. Patterns
 
@@ -1075,6 +1137,25 @@ the newest `*.jsonl` under `~/.claude/projects/<slug>-dev-<T>/`:
   worktree, `cw spawn close <sid> --confirmed-dead`, requeue.
 - In between → bounded deadline check; review/plan stages go parent-silent
   for ~20 min during subagent cycles, so a single 20-min gap is not death.
+
+**Automated for daemon sessions (#2275).** `cw dev-queue requeue` now refuses
+on its own when the daemon roster still lists a session for the ticket, even
+one the row's `session_id` no longer points at, and names the live session(s)
+plus a `cw spawn close <sid> --requeue` remediation. The same guard covers
+`cw spawn close --requeue`, `cw dev-queue drain --held` (reported per ticket
+as `skipped_live_session`) and the `auto_fix_ci` re-dispatch (which re-arms
+its one-shot latch so a later tick retries). `cw spawn close --requeue`
+exempts only the session it just closed; a second live session for the same
+ticket is still refused. The guard fails closed, like the worktree reuse
+guard (#2213): an unreadable or malformed roster refuses every one of those
+paths with `daemon roster unreadable at <path>; cannot rule out a live session
+for #<T>` (drain reports it as `skipped_roster_unreadable`), because nothing
+can show that no session is live. The just-closed exemption does not lift this
+refusal: the close still happens, but the requeue does not. Fix the roster file
+and retry. A roster file that does not exist means no daemon is running, and
+the requeue goes ahead. The manual transcript-mtime check above remains
+necessary only for work the daemon roster does not know about
+(non-daemon-origin sessions).
 
 ### CANCELLED row recovery (`--from-cancelled`)
 

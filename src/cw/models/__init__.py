@@ -18,6 +18,8 @@ each submodule only imports from those above it (no cycles):
   worker-recorded park evidence. Its own module rather than a tenant of
   ``orchestrator_config`` (where the sibling ``agent_spawn_stamp`` accessors
   live) only because that file is already past the module-size convention.
+- ``session_inbox`` — ``SessionInboxMessage``, one operator message in a
+  session's inbound mailbox (#2212). Also a DAG root.
 - ``session`` — ``LocalLivenessHandle``, ``Session``.
 - ``client`` — ``ClientConfig`` and ``DEFAULT_AUTO_PURPOSES``.
 - ``state`` — ``CwState`` and ``CW_STATE_SCHEMA_VERSION`` (the DAG leaf).
@@ -83,6 +85,7 @@ from cw.models.park_comment_marker import (
     read_park_comment_marker,
 )
 from cw.models.session import LocalLivenessHandle, Session
+from cw.models.session_inbox import SessionInboxMessage
 from cw.models.state import CW_STATE_SCHEMA_VERSION, CwState
 from cw.models.tasks import (
     _SAFE_TICKET_ID,
@@ -158,6 +161,7 @@ __all__ = [
     "ReapReason",
     "ReasoningEffort",
     "Session",
+    "SessionInboxMessage",
     "SessionOrigin",
     "SessionPurpose",
     "SessionStatus",

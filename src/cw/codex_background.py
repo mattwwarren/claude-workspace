@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw._git import capture_head_sha
 from cw.atomic import atomic_write_text
 from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_review import make_codex_blocked, render_verdict_comment
@@ -54,6 +55,7 @@ from cw.worktree import _git_dir
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.auto_dev_result import Blocker
     from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
     from cw.review_finding_dispositions import FindingDisposition
@@ -357,52 +359,83 @@ def _refuse_unguarded_claim_tier(
 # the ticket and sha it is about to act on, and refuse a mismatch.
 REVIEW_VERDICT_COMMENT_RELATIVE_PATH = Path(".claude") / "review-verdict.md"
 
-# Machine-readable provenance line, first line of the persisted verdict. An
-# HTML comment so it renders invisibly if the file is ever pasted as markdown.
-REVIEW_VERDICT_PROVENANCE_PREFIX = "<!-- cw-review-verdict"
-
-
-def render_review_verdict_provenance(*, ticket_id: str, reviewed_sha: str) -> str:
-    """Return the two-line provenance header stamped on the persisted verdict.
-
-    Line 1 is the parseable form (``<!-- cw-review-verdict ticket=<id>
-    reviewed_sha=<sha> -->``); line 2 says the same thing for a human reading
-    the file. Both name the ticket and the sha the verdict was rendered
-    against, so a finalize step (or an operator) can tell a verdict that is
-    about THIS branch from one that leaked in from a sibling (#2279).
-    """
-    return (
-        f"{REVIEW_VERDICT_PROVENANCE_PREFIX} ticket={ticket_id} "
-        f"reviewed_sha={reviewed_sha} -->\n"
-        f"_Verdict for ticket {ticket_id} at `{reviewed_sha}`._\n\n"
-    )
+# Ownership-stamp marker and line format prefixed onto the durable verdict
+# file (#2279), hoisted so the writer and every test assertion share one
+# source instead of repeating the literal.
+REVIEW_VERDICT_OWNER_MARKER = "cw-review-verdict-owner"
+REVIEW_VERDICT_OWNER_STAMP_FORMAT = (
+    "<!-- " + REVIEW_VERDICT_OWNER_MARKER + " ticket_id={ticket_id} "
+    "reviewed_sha={reviewed_sha} -->\n"
+)
 
 
 def _persist_review_verdict(
-    worktree: Path, review_text: str, *, ticket_id: str, reviewed_sha: str
+    worktree: Path,
+    review_text: str,
+    *,
+    ticket_id: str,
+    reviewed_sha: str,
+    relative_path: Path = REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
 ) -> Path | None:
-    """Write *review_text* to the worktree's durable verdict file, best-effort.
+    """Write *review_text* to the worktree's durable verdict file, best-effort,
+    prefixed with an ownership stamp (``ticket_id``/``reviewed_sha``) (#2279).
 
-    The file is prefixed with :func:`render_review_verdict_provenance` naming
-    *ticket_id* and *reviewed_sha*; the posted tracker comment is NOT (the
-    ticket thread already scopes it).
+    *relative_path* defaults to the rendered-verdict destination but is
+    overridable so :func:`_persist_unparseable_artifact` (#2280) can reuse
+    this same write path for its blocker-shaped artifact rather than keeping
+    a second mkdir/atomic-write/log implementation.
 
     Returns the path written, or None when the write failed (logged). Never
     raises: this runs on the daemon thread's success path after the sentinel
     has already been persisted, and a filesystem hiccup must not turn a
     completed review into an unexpected-error completion.
     """
-    path = worktree / REVIEW_VERDICT_COMMENT_RELATIVE_PATH
-    header = render_review_verdict_provenance(
-        ticket_id=ticket_id, reviewed_sha=reviewed_sha
+    stamped_text = (
+        REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
+            ticket_id=ticket_id, reviewed_sha=reviewed_sha
+        )
+        + review_text
     )
+    path = worktree / relative_path
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, header + review_text)
+        atomic_write_text(path, stamped_text)
     except OSError as exc:
         _log.warning("review_verdict_persist_failed path=%s: %s", path, exc)
         return None
     return path
+
+
+# Durable copy of a zero-documents park's blocker, written beside
+# review-verdict.md (#2280). ``verdict`` is None on this path -- every
+# reviewer failed, so there is no ReviewVerdict to render -- so this carries
+# the blocker's reason/details instead of a rendered verdict comment.
+REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH = (
+    Path(".claude") / "review-verdict-unparseable.md"
+)
+
+
+def _persist_unparseable_artifact(
+    worktree: Path, blocker: Blocker, *, ticket_id: str, reviewed_sha: str
+) -> Path | None:
+    """Write *blocker*'s reason/details to the worktree, best-effort (#2280).
+
+    Renders the blocker-shaped text this path carries (there is no
+    ReviewVerdict to hand to :func:`render_verdict_comment`) and delegates
+    the actual write -- mkdir, ownership stamp, atomic write, never-raises
+    logging -- to :func:`_persist_review_verdict`, pointed at this artifact's
+    own path, so the two callers share one writer instead of two.
+    """
+    text = (
+        f"# Codex review unparseable\n\nreason: {blocker.reason}\n\n{blocker.details}\n"
+    )
+    return _persist_review_verdict(
+        worktree,
+        text,
+        ticket_id=ticket_id,
+        reviewed_sha=reviewed_sha,
+        relative_path=REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
+    )
 
 
 def _post_review_comment(
@@ -590,6 +623,26 @@ def _run_codex_review_and_complete(
             _post_review_comment(
                 task.ticket_id,
                 review_text,
+                cwd=_git_dir(client),
+                tracker=resolve_tracker(client.workspace_path),
+                artifact_path=artifact_path,
+            )
+        elif result.blocker is not None:
+            # #2280: verdict is None because every reviewer failed -- there is
+            # no ReviewVerdict to render, but result.blocker.details already
+            # carries the per-role "role (reason)" summary
+            # (_format_failures_detail) plus a diagnostics-bundle pointer.
+            # Reused verbatim as both the worktree artifact and the ticket
+            # comment text, mirroring the verdict-present branch's shape.
+            artifact_path = _persist_unparseable_artifact(
+                worktree,
+                result.blocker,
+                ticket_id=task.ticket_id,
+                reviewed_sha=capture_head_sha(worktree, strict=False),
+            )
+            _post_review_comment(
+                task.ticket_id,
+                result.blocker.details,
                 cwd=_git_dir(client),
                 tracker=resolve_tracker(client.workspace_path),
                 artifact_path=artifact_path,

@@ -196,6 +196,13 @@ class OrchestratorEventType(StrEnum):
     SESSION_COMPLETED = "session.completed"
     SESSION_TIMED_OUT = "session.timed_out"
     SESSION_NEEDS_ATTENTION = "session.needs_attention"
+    # GitHub #2212 -- an operator queued a message into a session's inbound
+    # mailbox via `cw session send`. Emitted for the durable inbox APPEND, not
+    # for delivery: it fires whether or not the resume trigger could wake the
+    # session, because queuing is the command's reliability bar. The paired
+    # SESSION_RESUMED history record (cw.history, a different bus) is what
+    # records an actual respawn.
+    SESSION_MESSAGE_SENT = "session.message_sent"
     TICKET_NEEDS_SYNC = "ticket.needs_sync"
     STAGE_ENTERED = "stage.entered"
     STAGE_ERRORED = "stage.errored"
@@ -489,6 +496,19 @@ class OrchestratorEventType(StrEnum):
     # page — like SENTINEL_STAGE_MISMATCH, deliberately not added to
     # _DEFAULT_OPERATOR_EVENT_TYPES.
     SENTINEL_RACE_MISS = "sentinel.race_miss"
+    # GitHub #2213 -- audit record of a reused worktree's HEAD being moved by
+    # the reuse refresh. Emitted by cw.worktree._ff_reused_worktree only when
+    # ``merge --ff-only`` succeeded AND HEAD actually changed (old_sha !=
+    # new_sha), so an operator asking "why is my worktree at a different commit
+    # than I left it?" has a durable answer (client, ticket, path, before/after
+    # SHAs) instead of a debug log. Nothing is emitted on the no-op paths
+    # (already current, ahead, diverged, refused, occupied, not refreshed): a
+    # record per turn would be noise. Namespaced by its owning module
+    # (worktree.py), same convention as SCOPE_ROUTING_DECISION. Deliberately
+    # NOT added to _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config.py): it
+    # is an audit trail of a mechanical, strictly-forward move, not an
+    # operator alert.
+    WORKTREE_FAST_FORWARDED = "worktree.fast_forwarded"
 
 
 class DispatchSkipReason(StrEnum):

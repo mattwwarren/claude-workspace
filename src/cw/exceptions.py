@@ -224,6 +224,36 @@ class BranchHeldByWorktreeError(WorktreeError):
         self.holder_path = holder_path
 
 
+class WorktreeOccupiedError(WorktreeError):
+    """``create_worktree`` refused to hand back a worktree another worker may be using.
+
+    Raised only by ``create_worktree``'s reuse refresh (``refresh_on_reuse=True``,
+    #2213) when a live cw session in persisted state, a live daemon-roster
+    worker, or an INDETERMINATE read of either (fail closed) is homed on the
+    worktree. It carries the two facts a handler needs: ``path`` (the worktree)
+    and ``reason`` (which occupant, or that occupancy could not be ruled out).
+
+    It is an exception rather than a return value so a caller cannot get it
+    wrong by forgetting to look: an ignored boolean or report field lets a spawn
+    path carry on into an occupied tree (the dispatch claim path did exactly
+    that). Every caller that would spawn into, dispatch against, or mutate the
+    worktree must abort.
+
+    It is deliberately NOT a :class:`StaleWorktreeError`. The dispatch claim path
+    force-removes a stale worktree on that branch; an occupied one must never be
+    removed, only left for a later attempt. A tree that is merely dirty, diverged
+    or behind is NOT this error: that is "not refreshed", and the tree is the
+    caller's to use as it is.
+    """
+
+    __slots__ = ("path", "reason")
+
+    def __init__(self, message: str, *, path: Path, reason: str) -> None:
+        super().__init__(message)
+        self.path = path
+        self.reason = reason
+
+
 class HookContextConflictError(CwError):
     """Hook-context injection refused to overwrite a worktree's existing state.
 
@@ -483,6 +513,40 @@ class RequeueStageError(CwError):
     """Raised when requeue would regress a ticket to an earlier stage."""
 
     __slots__ = ()
+
+
+class RequeueLiveSessionError(CwError):
+    """Raised when a requeue is refused because a daemon-live session still
+    exists for the ticket, or cannot be ruled out (GitHub #2275).
+
+    Carries the live session ids (``Session.id``) as structured data, mirroring
+    ``EmitSessionNotFoundError``'s shape, so a downstream catcher (auto_fix_ci's
+    ``PR_ACTION_FAILED`` payload) does not have to re-parse the message.
+    """
+
+    __slots__ = ("session_ids",)
+
+    def __init__(self, message: str, *, session_ids: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.session_ids = session_ids
+
+
+class RequeueRosterUnreadableError(RequeueLiveSessionError):
+    """Raised when a requeue is refused because the daemon roster at
+    ``roster_path`` is unreadable or malformed, so a live session for the
+    ticket cannot be ruled out (GitHub #2275, fail closed like #2213).
+
+    A ``RequeueLiveSessionError`` subclass so every existing live-session
+    catcher (CLI, ``drain``, ``auto_fix_ci``'s latch rollback) inherits the
+    refusal; ``classify_requeue_live_session_error`` tags it distinctly.
+    ``session_ids`` is always empty: no session is known to be live.
+    """
+
+    __slots__ = ("roster_path",)
+
+    def __init__(self, message: str, *, roster_path: Path) -> None:
+        super().__init__(message, session_ids=())
+        self.roster_path = roster_path
 
 
 class UnblockStateError(CwError):

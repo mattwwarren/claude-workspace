@@ -1005,7 +1005,12 @@ class TestFullStagedPipelineE2E:
             assert session_id is not None
 
             # Simulate shipped result -- mark session COMPLETED so worktree
-            # reuse guard does not block the next stage spawn.
+            # reuse guard does not block the next stage spawn. Also stop the
+            # fake worker (#2213 round 7): occupancy now reads the injected
+            # daemon for real, and a real daemon's roster reflects a worker's
+            # process exiting independently of cw's own session status.
+            for short_id in mock_native_daemon.list_live_session_short_ids():
+                mock_native_daemon.stop(short_id)
             sess = Session(
                 id=session_id,
                 name="e2e-client/auto-dev/E2E-1",
