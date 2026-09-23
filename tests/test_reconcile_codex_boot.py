@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import psutil
@@ -34,12 +34,14 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     ReapPolicy,
+    ReapReason,
     Session,
     SessionOrigin,
     SessionStatus,
     Stage,
     TicketTask,
 )
+from cw.reconcile import _shared as reconcile_shared
 from cw.reconcile import codex_boot
 from cw.reconcile.codex_boot import (
     _PARK_REASON_CODEX_PROCESS_RUNNING,
@@ -52,7 +54,6 @@ from cw.reconcile.codex_boot import (
     _PARK_REASON_PROCESS_SCAN_FAILED,
     _PARK_REASON_REAP_POLICY_NOT_AUTO,
     CODEX_ORPHAN_CLEAN_REQUEUE_REASON,
-    CODEX_ORPHAN_LIVE_WRITER_REAP_REASON,
     CODEX_ORPHANED_AT_BOOT_DISPOSITION,
     _codex_processes_in,
     _CodexWriter,
@@ -226,6 +227,37 @@ def _live_writer(monkeypatch: pytest.MonkeyPatch, *processes: _FakeCodex) -> Non
     _pin_identity(monkeypatch)
 
 
+def _completed_events(consumer: str) -> list[dict[str, object]]:
+    return [
+        e.payload
+        for e in read_events(
+            consumer=consumer,
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+    ]
+
+
+def _failing_record_event(
+    monkeypatch: pytest.MonkeyPatch,
+    target: ModuleType,
+    failing_type: OrchestratorEventType,
+) -> Callable[..., Any]:
+    """Make *target*.record_event raise OSError for *failing_type* only.
+
+    Returns the real ``record_event`` so a test can restore it for a retry.
+    """
+    real: Callable[..., Any] = target.record_event
+
+    def _record(event_type: OrchestratorEventType, *args: Any, **kwargs: Any) -> Any:
+        if event_type is failing_type:
+            msg = "disk full"
+            raise OSError(msg)
+        return real(event_type, *args, **kwargs)
+
+    monkeypatch.setattr(target, "record_event", _record)
+    return real
+
+
 def _record_subprocess_argv(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     """Record every ``subprocess.run`` argv, delegating to the real call."""
     calls: list[list[str]] = []
@@ -370,6 +402,41 @@ def test_clean_orphan_with_fix_loop_off_is_requeued(
     assert payloads[0]["ticket_id"] == "T-orphan"
     assert payloads[0]["client"] == "client-a"
     assert "regressed" not in payloads[0]
+
+
+def test_one_failing_orphan_does_not_stop_the_pass(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An I/O failure disposing of one orphan is logged; the next still runs."""
+    _seed(tmp_config_dir, tmp_path)
+    second = _mk_headless_daemon_session("T-second", tmp_path / "wt2", _STARTED_AT)
+    state = load_state()
+    state.sessions.append(second)
+    save_state(state)
+    add_ticket(
+        TicketTask(
+            ticket_id="T-second",
+            client="client-a",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+            session_id=second.id,
+        )
+    )
+    real_dispose = codex_boot._close_orphaned_session_and_dispose
+
+    def _dispose(**kwargs: Any) -> None:
+        if kwargs["ticket_id"] == "T-orphan":
+            msg = "disk full"
+            raise OSError(msg)
+        real_dispose(**kwargs)
+
+    monkeypatch.setattr(codex_boot, "_close_orphaned_session_and_dispose", _dispose)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+
+    by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    assert by_ticket["T-orphan"].status is QueueItemStatus.RUNNING
+    assert by_ticket["T-second"].status is QueueItemStatus.BLOCKED_ON_USER
 
 
 def test_signal_only_still_parks_clean_orphan(
@@ -533,6 +600,8 @@ def test_live_writer_under_signal_only_is_not_killed_and_reap_is_proposed(
     session = _assert_session_left_active()
     assert session.reap_proposed_at is not None
 
+    # Emitted by reconcile's shared _emit_reap_proposed, so the payload is
+    # that helper's shape (its evidence block, not codex-specific fields).
     proposals = _reap_proposed_events("test-codex-boot-signal-only-reap")
     assert len(proposals) == 1
     assert proposals[0] == {
@@ -542,9 +611,76 @@ def test_live_writer_under_signal_only_is_not_killed_and_reap_is_proposed(
         "ticket_id": "T-orphan",
         "lane": "default",
         "proposed_action": "park_blocked_on_user",
-        "reason": CODEX_ORPHAN_LIVE_WRITER_REAP_REASON,
-        "evidence": {"codex_pids": [4242], "worktree": str(session.worktree_path)},
+        "reason": ReapReason.CODEX_ORPHAN_LIVE_WRITER.value,
+        "evidence": {
+            "elapsed_seconds": 0.0,
+            "in_roster": False,
+            "transcript_age_seconds": None,
+            "transcript_mtime_age_seconds": None,
+        },
     }
+    # A session left ACTIVE is not closed, so it gets no completion audit.
+    assert _completed_events("test-codex-boot-signal-only-completed") == []
+
+
+def test_reap_proposal_is_delegated_to_the_shared_emitter(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One SESSION_REAP_PROPOSED emitter: reconcile's, not a local copy."""
+    _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    _live_writer(monkeypatch, _FakeCodex(pid=4242))
+    calls: list[list[object]] = []
+
+    def _spy(_state: object, candidates: list[object], **_kw: object) -> set[str]:
+        calls.append(candidates)
+        return set()
+
+    monkeypatch.setattr(codex_boot, "_emit_reap_proposed", _spy)
+
+    reap_orphaned_codex_sessions_at_boot()
+
+    assert len(calls) == 1
+    (candidate,) = calls[0]
+    assert isinstance(candidate, codex_boot.ReapCandidate)
+    assert candidate.proposed_action is codex_boot.ProposedAction.PARK_BLOCKED_ON_USER
+    assert candidate.reap_reason is ReapReason.CODEX_ORPHAN_LIVE_WRITER
+    assert candidate.ticket_id == "T-orphan"
+    assert candidate.client == "client-a"
+
+
+def test_failed_reap_proposal_leaves_the_stamp_unset_for_a_retry(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Emit first, persist the dedup stamp after: a failed emit stamps nothing.
+
+    The task is left claimed too, so the next boot re-finds the orphan and
+    proposes again instead of the dedup guard silently swallowing it.
+    """
+    _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    _live_writer(monkeypatch, _FakeCodex(pid=4242))
+    real = _failing_record_event(
+        monkeypatch, reconcile_shared, OrchestratorEventType.SESSION_REAP_PROPOSED
+    )
+
+    assert reap_orphaned_codex_sessions_at_boot() == 0
+
+    assert _assert_session_left_active().reap_proposed_at is None
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.session_id == load_state().sessions[0].id
+    assert _attention_events("test-codex-boot-failed-proposal-attn") == []
+
+    monkeypatch.setattr(reconcile_shared, "record_event", real)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+    assert _assert_session_left_active().reap_proposed_at is not None
+    assert len(_reap_proposed_events("test-codex-boot-failed-proposal-reap")) == 1
 
 
 def test_already_proposed_session_is_not_proposed_again(
@@ -640,13 +776,13 @@ def test_session_gone_from_state_is_neither_closed_nor_proposed(
         live_writer_pids=(4242,),
     )
 
-    assert (
-        codex_boot._close_or_propose_reap(
-            "no-such-session", "T-orphan", "default", disposition
-        )
-        is None
+    codex_boot._close_or_propose_reap(
+        "no-such-session", "T-orphan", "default", disposition
     )
+
     assert load_state().model_dump() == before
+    assert _reap_proposed_events("test-codex-boot-gone-reap") == []
+    assert _completed_events("test-codex-boot-gone-completed") == []
 
 
 @pytest.fixture

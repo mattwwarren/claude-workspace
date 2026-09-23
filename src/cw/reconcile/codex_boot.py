@@ -88,12 +88,16 @@ from cw.models import (
     CompletionReason,
     OrchestratorEventType,
     ReapPolicy,
+    ReapReason,
     SessionOrigin,
     SessionStatus,
 )
+from cw.reconcile import _deps
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
     ProposedAction,
+    ReapCandidate,
+    _emit_reap_proposed,
     _is_headless,
     feature_branch_key,
     ticket_id_for_session,
@@ -103,7 +107,14 @@ from cw.reconcile.tasks import _resolve_task_policy
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from cw.models import ClientConfig, OrchestratorConfig, Session, Stage, TicketTask
+    from cw.models import (
+        ClientConfig,
+        CwState,
+        OrchestratorConfig,
+        Session,
+        Stage,
+        TicketTask,
+    )
 
 _log = logging.getLogger(__name__)
 
@@ -113,10 +124,6 @@ CODEX_ORPHANED_AT_BOOT_DISPOSITION = "codex_review_orphaned_at_boot"
 
 # TICKET_REQUEUED ``reason`` for a provably-clean orphan put back to PENDING.
 CODEX_ORPHAN_CLEAN_REQUEUE_REASON = "codex_orphan_clean_requeue_at_boot"
-
-# SESSION_REAP_PROPOSED ``reason`` for an orphan whose codex writer is still
-# alive under a reap_policy that does not authorize terminating it.
-CODEX_ORPHAN_LIVE_WRITER_REAP_REASON = "codex_orphan_live_writer_at_boot"
 
 _ORPHAN_BREADCRUMBS = (
     "ACTIVE codex-origin session found at process start; its background review"
@@ -515,57 +522,47 @@ def _resolve_orphan_action(
     )
 
 
-def _reap_proposed_payload(
-    session: Session, *, ticket_id: str, lane: str, pids: tuple[int, ...]
-) -> dict[str, object]:
-    """SESSION_REAP_PROPOSED payload, in ``_shared._emit_reap_proposed``'s shape.
+def _propose_reap(state: CwState, session: Session, ticket_id: str, lane: str) -> None:
+    """Propose the reap through reconcile's shared ``_emit_reap_proposed``.
 
     ``park_blocked_on_user`` because that is what this pass did: ``cw
     orchestrate run`` authorizes a reap only for ``revert_task`` and
     ``crash_complete``, and must not crash-complete a session whose writer is
-    still alive, so it leaves this one for the operator.
+    still alive, so it leaves this one for the operator. The shared emitter
+    owns the ``reap_proposed_at`` dedup and records the event before it
+    persists that stamp, so a failed emit leaves the next boot free to retry.
     """
-    return {
-        "session_id": session.id,
-        "session_name": session.name,
-        "client": session.client,
-        "ticket_id": ticket_id,
-        "lane": lane,
-        "proposed_action": ProposedAction.PARK_BLOCKED_ON_USER.value,
-        "reason": CODEX_ORPHAN_LIVE_WRITER_REAP_REASON,
-        "evidence": {
-            "codex_pids": list(pids),
-            "worktree": str(session.worktree_path) if session.worktree_path else None,
-        },
-    }
+    candidate = ReapCandidate(
+        session_id=session.id,
+        proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
+        ticket_id=ticket_id,
+        reap_reason=ReapReason.CODEX_ORPHAN_LIVE_WRITER,
+        lane=lane,
+        client=session.client,
+        worktree_path=session.worktree_path,
+    )
+    _emit_reap_proposed(
+        state,
+        [candidate],
+        native_live=_deps.get_native_daemon_client().list_live_session_short_ids(),
+    )
 
 
 def _close_or_propose_reap(
     session_id: str, ticket_id: str, lane: str, disposition: _OrphanDisposition
-) -> dict[str, object] | None:
-    """Close the session, or stamp its reap proposal; return that payload.
-
-    Caller holds ``sessions_lock``. The proposal is stamped before its event
-    is recorded, as ``_emit_reap_proposed`` does, so ``reap_proposed_at``
-    dedups a later boot pass even if the event write fails.
-    """
+) -> None:
+    """Close the session, or propose its reap. Caller holds ``sessions_lock``."""
     state = load_state()
     session = next((s for s in state.sessions if s.id == session_id), None)
     if session is None:
-        return None
+        return
     if disposition.close_session:
         session.status = SessionStatus.COMPLETED
         session.completed_at = datetime.now(UTC)
         session.completed_reason = CompletionReason.CRASHED
         save_state(state)
-        return None
-    if not disposition.propose_reap or session.reap_proposed_at is not None:
-        return None
-    session.reap_proposed_at = datetime.now(UTC)
-    save_state(state)
-    return _reap_proposed_payload(
-        session, ticket_id=ticket_id, lane=lane, pids=disposition.live_writer_pids
-    )
+    elif disposition.propose_reap:
+        _propose_reap(state, session, ticket_id, lane)
 
 
 def _requeue_clean_orphan(
@@ -625,7 +622,9 @@ def _close_orphaned_session_and_dispose(
     # window (mirrors cli/spawn.py:_spawn_complete_impl's identical nesting) so
     # the session close and the task transition land under one lock scope.
     with sessions_lock():
-        reap_payload = _close_or_propose_reap(session_id, ticket_id, lane, disposition)
+        # Proposal before the park it proposes (ADR-0006 invariant 3). A raise
+        # here leaves the task claimed, so the next boot re-finds the orphan.
+        _close_or_propose_reap(session_id, ticket_id, lane, disposition)
         if disposition.should_requeue:
             _requeue_clean_orphan(
                 session_id=session_id,
@@ -640,12 +639,6 @@ def _close_orphaned_session_and_dispose(
                 expected_session_id=session_id,
                 disposition=CODEX_ORPHANED_AT_BOOT_DISPOSITION,
                 breadcrumbs=f"{_ORPHAN_BREADCRUMBS} ({disposition.reason}).",
-            )
-        if reap_payload is not None:
-            record_event(
-                OrchestratorEventType.SESSION_REAP_PROPOSED,
-                reap_payload,
-                correlation_id=ticket_id,
             )
 
 
@@ -704,10 +697,33 @@ def reap_orphaned_codex_sessions_at_boot() -> int:
             continue
         if resolve_executor_config(task.stage, task, client).backend != CODEX_BACKEND:
             continue
-        disposition = _resolve_orphan_action(
-            session.worktree_path, task, client, clients, config
-        )
-        _log_disposition(session, ticket_id, disposition)
+        if _dispose_orphan(session, ticket_id, task, client, clients, config):
+            parked += 1
+    return parked
+
+
+def _dispose_orphan(
+    session: Session,
+    ticket_id: str,
+    task: TicketTask,
+    client: ClientConfig,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> bool:
+    """Decide and apply one orphan's disposition; False if it could not land.
+
+    An I/O failure recording an audit event or persisting state is logged
+    and swallowed here, per orphan: this runs on the boot path, and one
+    orphan's failed write must neither stop ``serve`` from starting nor the
+    remaining orphans from being dispositioned. The session's own writes
+    precede the task transition, so a failure there leaves the task claimed
+    and the next boot retries.
+    """
+    disposition = _resolve_orphan_action(
+        session.worktree_path, task, client, clients, config
+    )
+    _log_disposition(session, ticket_id, disposition)
+    try:
         _close_orphaned_session_and_dispose(
             session_id=session.id,
             ticket_id=ticket_id,
@@ -716,8 +732,16 @@ def reap_orphaned_codex_sessions_at_boot() -> int:
             lane=task.lane,
             disposition=disposition,
         )
-        parked += 1
-    return parked
+    except OSError:
+        _log.exception(
+            "codex_boot: could not dispose of orphaned session %s (%s/%s);"
+            " leaving it for the next boot",
+            session.id,
+            session.client,
+            ticket_id,
+        )
+        return False
+    return True
 
 
 def _log_disposition(
