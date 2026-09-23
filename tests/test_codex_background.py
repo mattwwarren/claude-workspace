@@ -1158,6 +1158,23 @@ def test_persist_review_verdict_writes_durable_copy(tmp_path: Path) -> None:
     assert written.endswith("## Verdict\n")
 
 
+def test_review_verdict_file_is_git_ignored() -> None:
+    """#2279: the per-ticket verdict must never be committed — tracked, it
+    merged to main and every sibling branch inherited another ticket's verdict,
+    which finalize then read as its own (#2205)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    ignored = (repo_root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".claude/review-verdict.md" in ignored
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", ".claude/review-verdict.md"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tracked.returncode != 0, "review-verdict.md is still tracked"
+
+
 def test_persist_review_verdict_stamp_handles_hyphenated_ticket_id(
     tmp_path: Path,
 ) -> None:

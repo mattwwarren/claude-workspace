@@ -349,6 +349,14 @@ def _refuse_unguarded_claim_tier(
 # ``.claude/`` beside ``cw-context.json`` before any tracker post is attempted
 # (#2095). On a tracker the daemon cannot write to (Linear -- ADR-0013 keeps
 # cw's only programmatic tracker client GitHub-only), this file IS the record.
+#
+# Git-ignored, not tracked (#2279, ADR-0016 follow-up F10). It was tracked
+# until then, so each ticket's ``git add -A`` committed its own verdict, the
+# merge carried it to ``main``, and every sibling branch's next base sync
+# delivered some OTHER ticket's verdict into its worktree -- where finalize
+# reads it as the authority on whether to halt (#2205). The provenance header
+# below is the second half of that fix: a consumer can verify the file names
+# the ticket and sha it is about to act on, and refuse a mismatch.
 REVIEW_VERDICT_COMMENT_RELATIVE_PATH = Path(".claude") / "review-verdict.md"
 
 # Ownership-stamp marker and line format prefixed onto the durable verdict

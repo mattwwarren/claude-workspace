@@ -7,16 +7,15 @@ every other ``_context`` submodule to produce one pass's
 :class:`_ReviewPassInputs`.
 
 One of those reads is deliberately not verbatim: :func:`_load_operator_comments`
-elides the ``### Settle a finding`` section from comments the pipeline itself
-wrote (#2210). A pipeline-authored convenience payload must not re-enter the
-pipeline's own prompt as evidence — see :func:`_elide_settle_section`.
+drops every comment the pipeline itself wrote (#2210, widened by #2213). A
+prior round's verdict must not re-enter the pipeline's own prompt as evidence
+— cross-round memory flows through the structured adjudication ledger instead.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_review._capability import _probe_filesystem_capability
@@ -43,7 +42,6 @@ from cw.codex_review._diff import (
     _capture_head_sha,
 )
 from cw.gh import (
-    AGENT_COMMENT_MARKER,
     FETCH_COMMENTS_TIMEOUT,
     fetch_issue_comments,
     is_agent_authored,
@@ -59,7 +57,6 @@ from cw.review_finding_dispositions import (
     merge_finding_dispositions,
     parse_finding_disposition_block,
 )
-from cw.review_markers import SETTLE_SECTION_HEADING
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
@@ -148,33 +145,6 @@ def _fetch_ticket_comments(
 # indent=2)` puts every string value on one line, so no payload line begins
 # with `#`, and the label lines begin with `**`.
 #
-# The `\r` allowance is defensive hardening: pipeline-authored comment bodies
-# come back from GitHub with LF endings (verified on this ticket's own thread),
-# and a CRLF body would otherwise make the elision a silent no-op.
-_SETTLE_SECTION_RE = re.compile(
-    "^"
-    + re.escape(SETTLE_SECTION_HEADING)
-    + r"[ \t\r]*\n.*?(?=^#{1,3} |^"
-    + re.escape(AGENT_COMMENT_MARKER)
-    + r"|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
-
-
-def _elide_settle_section(body: str) -> str:
-    """Strip every ``### Settle a finding`` section from *body* (#2210).
-
-    The heading is :data:`SETTLE_SECTION_HEADING`, the same constant the
-    renderer that emits the section uses, so the producer and this consumer
-    cannot drift apart — a round-trip test pins that coupling.
-
-    No placeholder is left behind. The operator's resolution asked for
-    elision, not annotation, and an added "[payload removed]" line is itself
-    text the next reviewer could misread. See ADR-0016 invariant 7.
-    """
-    return _SETTLE_SECTION_RE.sub("", body)
-
-
 def _load_operator_comments(
     worktree: Path,
     ticket_id: str,
@@ -201,20 +171,22 @@ def _load_operator_comments(
     than no review, and the requeue-side ``requeue.review_delivery_degraded``
     event (#1730) is what makes an undeliverable pairing operator-visible.
 
-    One exception to "verbatim" (#2210): a comment carrying
+    One exception to "verbatim" (#2210, widened by #2213): a comment carrying
     :data:`~cw.gh.AGENT_COMMENT_MARKER` — i.e. one the pipeline itself posted —
-    loses its ``### Settle a finding`` section before rendering. That section
-    is a pre-filled ``"outcome": "REJECTED"`` payload the blocking comment
-    hands the OPERATOR; ``post_issue_comment`` posts under whatever identity
-    ``gh`` is authed as, plausibly the operator's, and on a requeue the
-    reviewer prompt tells the model a comment reflecting a prior operator
-    adjudication is binding. Left visible, the next reviewer would read its own
-    findings restated as an operator decision and could self-suppress a real
-    one, bypassing the per-lane claim gate entirely. Elision is
-    provenance-keyed, never content-keyed: an operator's own pasted payload
-    (no marker) stays visible by design, and a marker-bearing comment without
-    such a section renders byte-identically to before. Everything else in a
-    pipeline comment still reaches the reviewer.
+    is dropped entirely. #2210 elided only the ``### Settle a finding``
+    payload, leaving the rest of every prior "Codex Review Verdict" comment in
+    the prompt: its superseded scope assessment, its stale out-of-scope file
+    list and its MUST_FIX titles. On a ticket many rounds deep that was tens
+    of kilobytes of the reviewer's own earlier output, rendered under a header
+    the prompt tells the model to treat as adjudication input. The observed
+    result (#2213) was byte-identical verdicts across runs and MUST_FIX
+    findings citing files absent from the diff — the model was quoting the
+    thread, not the code. Cross-round memory is the structured ledger's job
+    (``adjudicated_findings``, the voided-findings record); the raw thread is
+    an unfiltered second channel that swamps it. Exclusion is
+    provenance-keyed, never content-keyed: an operator's own comment, a pasted
+    payload included, stays visible by design, and a bare ``gh issue comment``
+    posted without the marker is treated as operator-authored.
     """
     if isinstance(comments, _CommentsNotProvided):
         comments = _fetch_ticket_comments(worktree, ticket_id)
@@ -226,7 +198,7 @@ def _load_operator_comments(
         if not isinstance(body, str) or not body.strip():
             continue
         if is_agent_authored(body):
-            body = _elide_settle_section(body)
+            continue
         author = comment.get("author")
         login = author.get("login") if isinstance(author, dict) else None
         created = comment.get("createdAt")
