@@ -54,6 +54,7 @@ from cw.reconcile.codex_boot import (
     _PARK_REASON_PROCESS_SCAN_FAILED,
     _PARK_REASON_REAP_POLICY_NOT_AUTO,
     CODEX_ORPHAN_CLEAN_REQUEUE_REASON,
+    CODEX_ORPHAN_CLOSE_REASON,
     CODEX_ORPHANED_AT_BOOT_DISPOSITION,
     _codex_processes_in,
     _CodexWriter,
@@ -402,6 +403,122 @@ def test_clean_orphan_with_fix_loop_off_is_requeued(
     assert payloads[0]["ticket_id"] == "T-orphan"
     assert payloads[0]["client"] == "client-a"
     assert "regressed" not in payloads[0]
+
+
+def _expected_close_audit(
+    session: Session, *, disposition: str, detail: str, pids: list[int]
+) -> dict[str, object]:
+    return {
+        "session_id": session.id,
+        "session_name": session.name,
+        "client": "client-a",
+        "ticket_id": "T-orphan",
+        "crashed": True,
+        "salvaged": False,
+        "reason": CODEX_ORPHAN_CLOSE_REASON,
+        "disposition": disposition,
+        "detail": detail,
+        "terminated_writer_pids": pids,
+    }
+
+
+def test_closing_a_requeued_orphan_records_a_completion_audit_event(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    _no_codex_process(monkeypatch)
+    _use_auto_reap_policy(monkeypatch)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+
+    session = load_state().sessions[0]
+    assert _completed_events("test-codex-boot-audit-requeued") == [
+        _expected_close_audit(
+            session,
+            disposition="requeued",
+            detail=CODEX_ORPHAN_CLEAN_REQUEUE_REASON,
+            pids=[],
+        )
+    ]
+
+
+def test_closing_a_parked_orphan_records_a_completion_audit_event(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    _seed(tmp_config_dir, tmp_path)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+
+    session = load_state().sessions[0]
+    assert _completed_events("test-codex-boot-audit-parked") == [
+        _expected_close_audit(
+            session,
+            disposition="parked",
+            detail=_PARK_REASON_REAP_POLICY_NOT_AUTO,
+            pids=[],
+        )
+    ]
+
+
+def test_closing_after_killing_the_writer_records_the_killed_pids(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _ = _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    (repo / "extra.txt").write_text("stray\n")
+    _live_writer(monkeypatch, _FakeCodex(pid=4242, dies_on="SIGTERM"))
+    _use_auto_reap_policy(monkeypatch)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+
+    session = load_state().sessions[0]
+    assert _completed_events("test-codex-boot-audit-killed") == [
+        _expected_close_audit(
+            session,
+            disposition="parked",
+            detail=_PARK_REASON_DIRTY_WORKTREE,
+            pids=[4242],
+        )
+    ]
+
+
+def test_failed_close_audit_leaves_the_session_open_for_a_retry(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit before effect: no event, no close — and no boot-pass crash.
+
+    The task keeps its claim, so the next boot re-finds the orphan and closes
+    it with its audit event rather than skipping it on the identity check.
+    """
+    _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    _no_codex_process(monkeypatch)
+    _use_auto_reap_policy(monkeypatch)
+    real = _failing_record_event(
+        monkeypatch, codex_boot, OrchestratorEventType.SESSION_COMPLETED
+    )
+
+    assert reap_orphaned_codex_sessions_at_boot() == 0
+
+    session = _assert_session_left_active()
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.session_id == session.id
+    assert _requeued_events("test-codex-boot-failed-audit-requeued") == []
+
+    monkeypatch.setattr(codex_boot, "record_event", real)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+    _assert_session_closed()
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+    assert len(_completed_events("test-codex-boot-failed-audit-completed")) == 1
 
 
 def test_one_failing_orphan_does_not_stop_the_pass(

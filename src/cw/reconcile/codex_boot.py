@@ -27,14 +27,20 @@ session as evidence of exactly that and dispositions it one of two ways
 The pass runs while ``serve`` is starting, so it never touches the network
 (the baseline is resolved from local refs only) and bounds every git call.
 
-A codex process still running in the worktree is a live writer, and the
-orphaned ``Session`` record is closed to ``COMPLETED``/``CRASHED`` only once no
-writer remains. Under ``reap_policy: auto`` the pass terminates the writer
-first (SIGTERM, then SIGKILL); one that will not die leaves the session
+A codex process still running in the worktree — including one whose cwd is
+the worktree's since-deleted directory — is a live writer, and the orphaned
+``Session`` record is closed to ``COMPLETED``/``CRASHED`` only once no writer
+remains; a session with no recorded worktree cannot be scanned, so it is never
+closed here. Under ``reap_policy: auto`` the pass terminates the writer first
+(SIGTERM, then SIGKILL, re-verifying the pid's creation time before each so a
+reused pid is never signalled); one that will not die leaves the session
 ``ACTIVE`` and the task parked with its pid in the breadcrumbs. Under any
-other policy the pass neither kills nor closes: it parks, emits
-``SESSION_REAP_PROPOSED`` and leaves the session ``ACTIVE``. With no writer,
-the session is closed in both branches. Before #2285 it stayed ``ACTIVE``
+other policy the pass neither kills nor closes: it parks, proposes the reap
+through reconcile's shared ``SESSION_REAP_PROPOSED`` emitter and leaves the
+session ``ACTIVE``. With no writer, the session is closed in both branches,
+and each close records a ``SESSION_COMPLETED`` audit event (``crashed: True``,
+``reason: codex_orphaned_at_boot``) before it is persisted. Before #2285 it
+stayed ``ACTIVE``
 forever: it held a client ceiling slot, and its stale ``cw-context.json`` made
 the next DAEMON-origin ``_write_hook_context`` into the same worktree raise
 ``HookContextConflictError``.
@@ -62,7 +68,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -124,6 +130,12 @@ CODEX_ORPHANED_AT_BOOT_DISPOSITION = "codex_review_orphaned_at_boot"
 
 # TICKET_REQUEUED ``reason`` for a provably-clean orphan put back to PENDING.
 CODEX_ORPHAN_CLEAN_REQUEUE_REASON = "codex_orphan_clean_requeue_at_boot"
+
+# SESSION_COMPLETED ``reason`` for an orphaned session this pass closes, and
+# its ``disposition`` values (the task transition decided on).
+CODEX_ORPHAN_CLOSE_REASON = "codex_orphaned_at_boot"
+_CLOSE_DISPOSITION_REQUEUED = "requeued"
+_CLOSE_DISPOSITION_PARKED = "parked"
 
 _ORPHAN_BREADCRUMBS = (
     "ACTIVE codex-origin session found at process start; its background review"
@@ -212,7 +224,8 @@ class _OrphanDisposition:
     the worktree: closing the record then would free its ceiling slot and its
     hook-context guard for a new spawn that races the writer.
     ``propose_reap`` marks the ADR-0006 signal-only case, where an operator,
-    not this pass, authorizes the reap.
+    not this pass, authorizes the reap. ``terminated_writer_pids`` names the
+    writers this pass killed before closing the session.
     """
 
     should_requeue: bool
@@ -220,6 +233,7 @@ class _OrphanDisposition:
     close_session: bool = True
     propose_reap: bool = False
     live_writer_pids: tuple[int, ...] = ()
+    terminated_writer_pids: tuple[int, ...] = ()
 
 
 def _park(
@@ -425,12 +439,16 @@ def _format_pids(pids: Sequence[int]) -> str:
     return ", ".join(f"pid {pid}" for pid in pids)
 
 
-def _settle_live_writer(worktree: Path, *, auto: bool) -> _OrphanDisposition | None:
-    """Park while a codex writer may be alive in *worktree*; None once none is.
+def _settle_live_writer(
+    worktree: Path, *, auto: bool
+) -> _OrphanDisposition | tuple[int, ...]:
+    """Park while a codex writer may be alive in *worktree*.
 
-    Under ``auto`` a found writer is terminated first, and only one that
-    survives parks. Under any other policy nothing is killed: the park leaves
-    the session ACTIVE and proposes the reap for an operator to authorize.
+    Once none is, return the pids this call terminated (empty when none was
+    found). Under ``auto`` a found writer is terminated first, and only one
+    that survives parks. Under any other policy nothing is killed: the park
+    leaves the session ACTIVE and proposes the reap for an operator to
+    authorize.
     """
     writers = _codex_processes_in(worktree)
     if writers is None:
@@ -440,7 +458,7 @@ def _settle_live_writer(worktree: Path, *, auto: bool) -> _OrphanDisposition | N
             propose_reap=not auto,
         )
     if not writers:
-        return None
+        return ()
     pids = tuple(writer.pid for writer in writers)
     if not auto:
         return _park(
@@ -461,7 +479,7 @@ def _settle_live_writer(worktree: Path, *, auto: bool) -> _OrphanDisposition | N
         _format_pids(pids),
         worktree,
     )
-    return None
+    return pids
 
 
 def _git_park_reason(
@@ -507,9 +525,23 @@ def _resolve_orphan_action(
         return _park(
             _PARK_REASON_NO_WORKTREE_PATH, close_session=False, propose_reap=not auto
         )
-    writer_park = _settle_live_writer(worktree, auto=auto)
-    if writer_park is not None:
-        return writer_park
+    settled = _settle_live_writer(worktree, auto=auto)
+    if isinstance(settled, _OrphanDisposition):
+        return settled
+    decision = _gate_clean_requeue(worktree, task, client, clients, config, auto=auto)
+    return replace(decision, terminated_writer_pids=settled)
+
+
+def _gate_clean_requeue(
+    worktree: Path,
+    task: TicketTask,
+    client: ClientConfig,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+    *,
+    auto: bool,
+) -> _OrphanDisposition:
+    """With no writer left, requeue only a provably clean orphan under ``auto``."""
     if not auto:
         return _park(_PARK_REASON_REAP_POLICY_NOT_AUTO)
     if _resolve_codex_fix_loop_enabled(client, task, config):
@@ -548,6 +580,55 @@ def _propose_reap(state: CwState, session: Session, ticket_id: str, lane: str) -
     )
 
 
+def _close_audit_payload(
+    session: Session, ticket_id: str, disposition: _OrphanDisposition
+) -> dict[str, object]:
+    """SESSION_COMPLETED payload for a session this pass closes.
+
+    The crashed, nothing-salvaged shape reconcile's phantom sweep emits, plus
+    why and how it was closed. ``disposition`` is the task transition decided
+    on; the identity-checked transition itself confirms with TICKET_REQUEUED or
+    SESSION_NEEDS_ATTENTION when it lands. ``crashed: True`` also keeps the
+    dispatch consumer from completing the task off this event.
+    """
+    return {
+        "session_id": session.id,
+        "session_name": session.name,
+        "client": session.client,
+        "ticket_id": ticket_id,
+        "crashed": True,
+        "salvaged": False,
+        "reason": CODEX_ORPHAN_CLOSE_REASON,
+        "disposition": (
+            _CLOSE_DISPOSITION_REQUEUED
+            if disposition.should_requeue
+            else _CLOSE_DISPOSITION_PARKED
+        ),
+        "detail": disposition.reason,
+        "terminated_writer_pids": list(disposition.terminated_writer_pids),
+    }
+
+
+def _close_session_audited(
+    state: CwState, session: Session, ticket_id: str, disposition: _OrphanDisposition
+) -> None:
+    """Record the closure's audit event, then close and persist the session.
+
+    Audit before effect, the settle ledger's ordering (#2232): a failed event
+    write raises before anything is mutated, so a session is never closed
+    without its audit trail and the next boot retries the whole disposition.
+    """
+    record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        _close_audit_payload(session, ticket_id, disposition),
+        correlation_id=ticket_id,
+    )
+    session.status = SessionStatus.COMPLETED
+    session.completed_at = datetime.now(UTC)
+    session.completed_reason = CompletionReason.CRASHED
+    save_state(state)
+
+
 def _close_or_propose_reap(
     session_id: str, ticket_id: str, lane: str, disposition: _OrphanDisposition
 ) -> None:
@@ -557,10 +638,7 @@ def _close_or_propose_reap(
     if session is None:
         return
     if disposition.close_session:
-        session.status = SessionStatus.COMPLETED
-        session.completed_at = datetime.now(UTC)
-        session.completed_reason = CompletionReason.CRASHED
-        save_state(state)
+        _close_session_audited(state, session, ticket_id, disposition)
     elif disposition.propose_reap:
         _propose_reap(state, session, ticket_id, lane)
 
@@ -613,6 +691,14 @@ def _close_orphaned_session_and_dispose(
     ``disposition`` says a writer may still be alive. The task transition
     re-verifies ``expected_session_id`` under the dev-queue lock, so a row
     re-claimed since the caller's snapshot is left alone.
+
+    Two files, two writes, session first, on purpose: there is no
+    cross-file transaction, and this is the order a crash between them can
+    recover from. A closed session whose task is still RUNNING is picked up
+    by reconcile's ``revert_completed_silent_tasks`` backstop; a task already
+    parked or requeued (its ``session_id`` cleared) behind a still-ACTIVE
+    session would be skipped by every later boot's identity check, which is
+    the stranded-session bug #2285 closes.
     """
     # Deferred for the same import-cycle reason as in
     # reap_orphaned_codex_sessions_at_boot below.
