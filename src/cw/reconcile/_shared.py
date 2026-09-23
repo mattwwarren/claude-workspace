@@ -158,6 +158,14 @@ _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON = "fix_loop_await_deadline_exceeded"
 # minutes with only the generic session_unresponsive signal to go on).
 # Signal-only exactly as its siblings are, per ADR-0014: nothing is disposed.
 _DANGLING_TOOL_USE_REASON = "dangling_tool_use"
+# Paused-status written to SESSION_NEEDS_ATTENTION events by the same liveness
+# distress path when the transcript's last record is a queue-operation enqueue
+# notification (e.g. a backgrounded Bash command's completion) that no later
+# turn ever consumed (GitHub #2251; forensic incident: /prep-pr backgrounded a
+# quality gate in a headless session, the completion was enqueued, and nothing
+# resumed the turn). Takes priority over _DANGLING_TOOL_USE_REASON. Signal-only
+# exactly as its siblings are, per ADR-0014: nothing is disposed.
+_UNCONSUMED_QUEUE_NOTIFICATION_REASON = "unconsumed_queue_notification"
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 # TicketTask.advisory_note written by _stamp_session_id_mismatch_advisories
 # (#1762) when a RUNNING row's session_id no longer resolves to a live session.
@@ -985,7 +993,16 @@ def _bash_command_snippet(block: dict[str, object]) -> str | None:
     command = tool_input.get("command")
     if not isinstance(command, str):
         return None
-    redacted = redact(command)
+    return _redact_and_truncate(command)
+
+
+def _redact_and_truncate(text: str) -> str:
+    """Redact secret-shaped substrings, then cap at the breadcrumb snippet length.
+
+    Redaction runs first so truncation can never split a secret into an
+    unrecognisable (and therefore unredacted) prefix.
+    """
+    redacted = redact(text)
     if len(redacted) <= _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS:
         return redacted
     return redacted[:_TOOL_USE_COMMAND_SNIPPET_MAX_CHARS] + "…"
@@ -1064,6 +1081,46 @@ def _detect_dangling_tool_use(session: Session) -> DanglingToolUseEvidence | Non
         tool_name=last_name,
         command_snippet=_bash_command_snippet(last_block),
     )
+
+
+def _detect_unconsumed_queue_notification(session: Session) -> str | None:
+    """Return the text of an unconsumed queue-operation enqueue at the tail.
+
+    Scans the session's transcript (via :func:`_locate_session_transcript`)
+    forward, keeping only the last well-formed dict record. Returns that
+    record's redacted, length-capped ``content`` iff it is a ``{"type":
+    "queue-operation", "operation": "enqueue"}`` record with string
+    ``content`` -- a harness notification (e.g. a backgrounded Bash command's
+    completion) that no later turn ever consumed (GitHub #2251). Record shape
+    per :func:`_iter_notification_records`. Never raises; fails open to
+    ``None`` on a missing or unreadable transcript, mirroring
+    :func:`_detect_dangling_tool_use`.
+    """
+    transcript = _locate_session_transcript(session)
+    if transcript is None:
+        return None
+    last_record: dict[str, object] | None = None
+    try:
+        with transcript.open() as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    last_record = record
+    except OSError:
+        return None
+    if (
+        last_record is None
+        or last_record.get("type") != "queue-operation"
+        or last_record.get("operation") != "enqueue"
+    ):
+        return None
+    content = last_record.get("content")
+    if not isinstance(content, str):
+        return None
+    return _redact_and_truncate(content)
 
 
 def _detect_provider_overload(session: Session) -> bool:
