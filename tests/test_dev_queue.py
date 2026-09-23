@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ReapReason, Session
+    from cw.native_daemon import FakeNativeDaemonClient
     from tests.conftest import CapturedEvent
 
 
@@ -8441,6 +8442,181 @@ class TestRequeueTicket:
 
 
 # ---------------------------------------------------------------------------
+# TestRequeueLiveSessionGuard — #2275 refuse requeue while a session is live
+# ---------------------------------------------------------------------------
+
+# 8-char hex: session_daemon_liveness only treats a surface_ref of the daemon
+# short-id shape as a native daemon surface.
+_LIVE_SURFACE_REF = "abcd1234"
+
+
+def _seed_live_ticket_session(
+    ticket_id: str = "GEN-500",
+    client: str = "genhealth",
+    *,
+    session_id: str = "sess-stray",
+    surface_ref: str = _LIVE_SURFACE_REF,
+) -> Session:
+    """Append a daemon session named for *ticket_id* to state and return it.
+
+    The session is deliberately unbound: no dev-queue row's ``session_id``
+    points at it (the #2275 shape).
+    """
+    from cw.config import load_state, save_state
+
+    session = _make_daemon_session(
+        id=session_id,
+        name=f"{client}/auto-dev/{ticket_id}",
+        client=client,
+        surface_ref=surface_ref,
+    )
+    state = load_state()
+    state.sessions.append(session)
+    save_state(state)
+    return session
+
+
+def _fake_daemon_with_live(*short_ids: str) -> FakeNativeDaemonClient:
+    from cw.native_daemon import FakeNativeDaemonClient
+
+    fake = FakeNativeDaemonClient()
+    fake._live = set(short_ids)
+    return fake
+
+
+class TestRequeueLiveSessionGuard:
+    """requeue_ticket refuses while a daemon-live session exists (#2275)."""
+
+    def _seed_parked_review_row(self) -> None:
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-dead-review",
+            disposition="review_health_gate",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+    def test_requeue_refuses_when_live_session_exists_for_ticket(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueLiveSessionError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_parked_review_row()
+        _seed_live_ticket_session()
+        fake = _fake_daemon_with_live(_LIVE_SURFACE_REF)
+
+        with pytest.raises(RequeueLiveSessionError):
+            requeue_ticket(
+                "GEN-500", "genhealth", stage_override="finalize", native_daemon=fake
+            )
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.stage == Stage.REVIEW
+        assert t.session_id == "sess-dead-review"
+
+    def test_requeue_live_session_error_names_the_session(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueLiveSessionError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_parked_review_row()
+        stray = _seed_live_ticket_session()
+        fake = _fake_daemon_with_live(_LIVE_SURFACE_REF)
+
+        with pytest.raises(RequeueLiveSessionError) as excinfo:
+            requeue_ticket("GEN-500", "genhealth", native_daemon=fake)
+
+        assert stray.id in str(excinfo.value)
+        assert stray.name in str(excinfo.value)
+        assert f"cw spawn close {stray.id} --requeue" in str(excinfo.value)
+        assert excinfo.value.session_ids == (stray.id,)
+
+    def test_requeue_proceeds_when_no_live_session(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_parked_review_row()
+        _seed_live_ticket_session()
+        fake = _fake_daemon_with_live()
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", stage_override="finalize", native_daemon=fake
+        )
+
+        assert result["to_stage"] == "finalize"
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.FINALIZE
+
+    def test_requeue_live_session_guard_ignores_different_client(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_parked_review_row()
+        _seed_live_ticket_session(client="other-client")
+        fake = _fake_daemon_with_live(_LIVE_SURFACE_REF)
+
+        result = requeue_ticket("GEN-500", "genhealth", native_daemon=fake)
+
+        assert result["to_stage"] == "review"
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_regress_also_refused_when_live_session_exists(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueLiveSessionError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_parked_review_row()
+        _seed_live_ticket_session()
+        fake = _fake_daemon_with_live(_LIVE_SURFACE_REF)
+
+        with pytest.raises(RequeueLiveSessionError):
+            requeue_ticket(
+                "GEN-500",
+                "genhealth",
+                stage_override="impl",
+                allow_regress=True,
+                native_daemon=fake,
+            )
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.stage == Stage.REVIEW
+
+    def test_requeue_ignore_session_ids_excludes_named_session(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_parked_review_row()
+        live = _seed_live_ticket_session()
+        fake = _fake_daemon_with_live(_LIVE_SURFACE_REF)
+
+        result = requeue_ticket(
+            "GEN-500",
+            "genhealth",
+            native_daemon=fake,
+            ignore_session_ids=frozenset({live.id}),
+        )
+
+        assert result["to_stage"] == "review"
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
 # TestRequeueReviewDeliveryDegrade — #1730 degrade-loudly, never raise
 # ---------------------------------------------------------------------------
 
@@ -9117,6 +9293,50 @@ class TestDrainHeldTickets:
         assert {o["ticket_id"] for o in outcomes} == {"GEN-500", "GEN-501"}
         assert all(o["status"] == "requeued" for o in outcomes)
 
+    def test_drain_reports_skipped_live_session_for_blocked_ticket(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A live session for one held row yields a distinct
+        skipped_live_session outcome, not "failed"; the sibling row still
+        requeues (#2275)."""
+        from cw.dev_queue import REVIEW_HEALTH_GATE_DISPOSITION, drain_held_tickets
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        conflicting = _make_blocked_task(
+            ticket_id="GEN-500",
+            stage=Stage.REVIEW,
+            session_id="sess-drain-dead",
+            disposition=REVIEW_HEALTH_GATE_DISPOSITION,
+        )
+        sibling = _make_blocked_task(
+            ticket_id="GEN-501",
+            stage=Stage.REVIEW,
+            session_id="sess-drain-sib",
+            disposition=REVIEW_HEALTH_GATE_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[conflicting, sibling]))
+        stray = _seed_live_ticket_session("GEN-500")
+        fake = _fake_daemon_with_live(_LIVE_SURFACE_REF)
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.get_native_daemon_client", lambda: fake
+        )
+
+        outcomes = drain_held_tickets("genhealth")
+
+        by_id = {o["ticket_id"]: o for o in outcomes}
+        skipped = by_id["GEN-500"]
+        assert skipped["status"] == "skipped_live_session"
+        assert stray.id in skipped["detail"]
+        assert skipped["from_stage"] is None
+        assert skipped["to_stage"] is None
+        assert by_id["GEN-501"]["status"] == "requeued"
+        store = {t.ticket_id: t for t in load_dev_queue().tasks}
+        assert store["GEN-500"].status == QueueItemStatus.BLOCKED_ON_USER
+        assert store["GEN-501"].status == QueueItemStatus.PENDING
+
 
 # ---------------------------------------------------------------------------
 # TestUnblockTicket — unblock_ticket() mutation function
@@ -9468,6 +9688,37 @@ class TestCLIRequeue:
             ],
         )
         assert result.exit_code != 0
+
+    def test_requeue_live_session_exits_nonzero(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A live session for the ticket refuses the CLI requeue (#2275).
+
+        Exercises requeue_ticket's production default-resolution branch
+        (native_daemon=None -> get_native_daemon_client()).
+        """
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-dead-cli")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        stray = _seed_live_ticket_session()
+        fake = _fake_daemon_with_live(_LIVE_SURFACE_REF)
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.get_native_daemon_client", lambda: fake
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "requeue", "GEN-500", "--client", "genhealth"],
+        )
+
+        assert result.exit_code != 0
+        assert stray.id in result.output
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_requeue_impl_bypass_without_plan_exits_nonzero(
         self,

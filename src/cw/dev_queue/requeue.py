@@ -9,14 +9,17 @@ Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 ``lifecycle`` (the transition + stage helpers) at module level. The
 ``dev_queue ↔ config`` cycle break — ``load_state`` / ``save_state`` /
 ``sessions_lock`` / ``ReapReason`` — stays a function-level deferred import
-inside ``unblock_ticket``.
+inside ``unblock_ticket``. The #2275 live-session guard imports
+``load_state`` and ``cw.native_daemon`` at module level (neither imports
+``cw.dev_queue`` back) and defers only its ``cw.reconcile`` import, which
+does cycle.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
-from cw.config import get_client
+from cw.config import get_client, load_state
 from cw.dev_queue.crud import (
     _APPROVABLE_STATUSES,
     _find_ticket,
@@ -33,9 +36,15 @@ from cw.dev_queue.lifecycle import (
 )
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
-from cw.exceptions import RequeueStageError, RequeueStateError, UnblockStateError
+from cw.exceptions import (
+    RequeueLiveSessionError,
+    RequeueStageError,
+    RequeueStateError,
+    UnblockStateError,
+)
 from cw.gh import fetch_approved_plan_comment
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _checked_out_branch, worktree_path_for
 
@@ -387,6 +396,67 @@ def _requeue_state_error_message(ticket_id: str, status: QueueItemStatus) -> str
     return base + "."
 
 
+SkippedLiveSessionTag = Literal["skipped_live_session"]
+_REASON_SKIPPED_LIVE_SESSION: SkippedLiveSessionTag = "skipped_live_session"
+
+
+def _refuse_if_live_session(
+    ticket_id: str,
+    client_name: str,
+    *,
+    native_daemon: NativeDaemonClient,
+    ignore_session_ids: frozenset[str] = frozenset(),
+) -> None:
+    """Refuse a requeue while a daemon-live session exists for *ticket_id*
+    (GitHub #2275), except sessions named in *ignore_session_ids*.
+
+    A live session for the ticket that no dev-queue row points at any more
+    (a signal_only park retains ``task.session_id`` but a sibling can still be
+    running) would later complete and advance the row past the operator's
+    requeue. Refusing here automates the runbook's "Liveness before state"
+    check. Runs outside any lock, like ``unblock_ticket``'s fast pre-check.
+
+    Deferred import: ``cw.reconcile._shared`` imports from ``cw.dev_queue`` at
+    module level, so a module-top import back into ``cw.reconcile`` cycles.
+
+    *ignore_session_ids* is a ``Session.id``-keyed post-filter on the matched
+    sessions -- never compared against ``surface_ref``/the roster's short ids,
+    which are a different namespace.
+    """
+    from cw.reconcile import find_live_sessions_for_ticket
+
+    live_short_ids = native_daemon.list_live_session_short_ids()
+    live = [
+        s
+        for s in find_live_sessions_for_ticket(
+            load_state(), ticket_id, client_name, live_short_ids
+        )
+        if s.id not in ignore_session_ids
+    ]
+    if not live:
+        return
+    names = ", ".join(f"{s.id!r} ({s.name})" for s in live)
+    msg = (
+        f"Cannot requeue ticket '{ticket_id}': a session for this ticket"
+        f" is live in the daemon roster: {names}. Close it with"
+        f" `cw spawn close {live[0].id} --requeue` or wait for it to"
+        " finish, then retry."
+    )
+    raise RequeueLiveSessionError(msg, session_ids=tuple(s.id for s in live))
+
+
+def classify_requeue_live_session_error(
+    exc: RequeueLiveSessionError,
+) -> tuple[SkippedLiveSessionTag, str]:
+    """``(reason_tag, message)`` for a refused requeue (GitHub #2275).
+
+    The one shared outcome-classification seam every ``RequeueLiveSessionError``
+    catcher (the CLI, ``drain``, ``auto_fix_ci``) uses instead of each
+    hand-formatting its own skipped-live-session string.
+    """
+    return _REASON_SKIPPED_LIVE_SESSION, str(exc)
+
+
 def requeue_ticket(
     ticket_id: str,
     client_name: str,
@@ -396,6 +466,8 @@ def requeue_ticket(
     from_cancelled: bool = False,
     from_failed: bool = False,
     from_completed: bool = False,
+    native_daemon: NativeDaemonClient | None = None,
+    ignore_session_ids: frozenset[str] = frozenset(),
 ) -> dict[str, str | bool | int]:
     """Requeue a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF ticket, optionally
     at a specific stage.
@@ -439,8 +511,16 @@ def requeue_ticket(
             backward-regress gate: a COMPLETED row combined with a backward
             stage_override still raises RequeueStageError, since
             _apply_requeue_stage's regress check is unchanged.
+        native_daemon: daemon client whose roster the live-session guard
+            reads; ``None`` resolves :func:`get_native_daemon_client`.
+        ignore_session_ids: ``Session.id`` values excluded from the
+            live-session guard (e.g. the session ``cw spawn close --requeue``
+            just closed, whose roster entry may lag the close).
 
     Raises:
+        RequeueLiveSessionError: if a daemon-live session exists for the
+            ticket (other than one in ``ignore_session_ids``); raised before
+            any dev-queue mutation (#2275).
         RequeueStateError: if ticket is not BLOCKED_ON_USER or
             AWAITING_OPERATOR_SIGNOFF (forward path), unless from_cancelled
             is True and the ticket is CANCELLED, from_failed is True and
@@ -453,6 +533,12 @@ def requeue_ticket(
             available locally or on the tracker (#1681).
         CwError: if no matching task is found.
     """
+    _refuse_if_live_session(
+        ticket_id,
+        client_name,
+        native_daemon=native_daemon or get_native_daemon_client(),
+        ignore_session_ids=ignore_session_ids,
+    )
     with _lock():
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
