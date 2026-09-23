@@ -12,7 +12,7 @@ import contextlib
 import enum
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple, assert_never
+from typing import TYPE_CHECKING, Literal, NamedTuple, assert_never
 
 from cw.config import load_state
 from cw.events import record_event
@@ -28,6 +28,7 @@ from cw.worktree._git import (
 from cw.worktree._unsaved import unsaved_work_reason
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
 
     from cw.models import ClientConfig
@@ -340,7 +341,100 @@ def _normalize_path(path: Path) -> Path:
     return path.resolve()
 
 
-def live_home_reason(wt_path: Path, *, daemon: NativeDaemonClient) -> str | None:
+# One distinct unresolvable-record warning: which side recorded it (session
+# state vs. daemon roster), the record's raw path, and the OSError's
+# rendered text. A caller-owned dedup set of these lets the SAME poisoned
+# record stay quiet on a repeat call while a NEW one -- a different path, a
+# different side, or the same path failing a new way -- still warns. Same
+# shape as cw.worktree._freshness.FetchWarningKey / _warn_fetch_skip_once
+# (#2213); kept local rather than shared because the two key shapes are
+# structurally different and each module already owns its own failure
+# domain (#2240).
+type UnresolvablePathWarningKey = tuple[str, str, str]
+
+
+def _warn_unresolvable_path_once(
+    warned_unresolvable: set[UnresolvablePathWarningKey] | None,
+    warn_key: UnresolvablePathWarningKey,
+    message: str,
+    *args: object,
+) -> None:
+    """Log *message* at WARNING once per *warn_key*, then remember the key.
+
+    ``None`` for *warned_unresolvable* (a one-shot caller) always warns and
+    remembers nothing -- same contract as
+    :func:`cw.worktree._freshness._warn_fetch_skip_once`.
+    """
+    if warned_unresolvable is not None and warn_key in warned_unresolvable:
+        return
+    _log.warning(message, *args)
+    if warned_unresolvable is not None:
+        warned_unresolvable.add(warn_key)
+
+
+def _normalize_records(
+    paths: Iterable[Path],
+    kind: Literal["session", "worker"],
+    warned_unresolvable: set[UnresolvablePathWarningKey] | None,
+) -> tuple[set[Path], int]:
+    """Normalize each of *paths*, skipping (and counting) any that raise ``OSError``.
+
+    An individual bad session/worker record must not veto an unrelated
+    target (#2240) -- only the caller's own target path fails closed on
+    its own ``OSError`` (see :func:`live_home_reason`). A skip still makes
+    the overall answer conservative: the caller folds the count back into
+    "cannot rule out a live session" when the target does not otherwise
+    match a successfully normalized home. Each skip is logged once per
+    ``(kind, path, error)`` via *warned_unresolvable* so a persistently
+    poisoned record is diagnosable rather than silently invisible.
+    """
+    homes: set[Path] = set()
+    skipped = 0
+    for path in paths:
+        try:
+            homes.add(_normalize_path(path))
+        except OSError as exc:
+            skipped += 1
+            _warn_unresolvable_path_once(
+                warned_unresolvable,
+                (kind, str(path), str(exc)),
+                "live_home_reason: %s record %s could not be resolved (%s);"
+                " skipping it rather than reading every worktree as occupied",
+                kind,
+                path,
+                exc,
+            )
+    return homes, skipped
+
+
+def _home_match_reason(
+    target: Path, session_homes: set[Path], worker_homes: set[Path], skipped: int
+) -> str | None:
+    """Compare *target* against normalized homes; explain a skip as occupied.
+
+    Split out of :func:`live_home_reason` to keep its own return count within
+    the PLR0911 budget (CLAUDE.md) -- the added skip-count branch pushed the
+    combined function over it.
+    """
+    if target in session_homes:
+        return "a live session is homed on this worktree"
+    if target in worker_homes:
+        return "a live daemon worker is homed on this worktree"
+    if skipped:
+        plural = "" if skipped == 1 else "s"
+        return (
+            f"{skipped} recorded path{plural} cannot be resolved, "
+            "cannot rule out a live session"
+        )
+    return None
+
+
+def live_home_reason(
+    wt_path: Path,
+    *,
+    daemon: NativeDaemonClient,
+    warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
+) -> str | None:
     """Return why a live session or daemon worker may be homed on *wt_path*.
 
     The one liveness predicate for a worktree, public because two paths must
@@ -360,14 +454,32 @@ def live_home_reason(wt_path: Path, *, daemon: NativeDaemonClient) -> str | None
       actually consulted instead of this function silently reading the host's
       real roster.
 
-    Fails closed: an unreadable state file, an unreadable roster, or ANY path
-    that cannot be normalized reads as "cannot rule out a live session", never
-    as "free". Every path is compared after normalization
-    (:func:`_normalize_path`) on both sides, so a symlinked or non-canonical
-    spelling of the same directory still matches, and a path that cannot be
-    normalized -- a symlink loop, a permission error, a component that is not a
-    directory, an over-long name -- reads as occupied rather than as a path that
-    merely differs.
+    Fails closed on the TARGET path exactly as before: any ``OSError``
+    other than the deliberate ``FileNotFoundError`` carve-out (see
+    :func:`_normalize_path`) reads as "cannot rule out a live session".
+
+    An individual session or worker RECORD that cannot be normalized does
+    NOT, on its own, veto this call (#2240) -- it is skipped and counted
+    instead, and logged once (deduped via *warned_unresolvable*, see
+    :func:`_normalize_records`). Because a skipped record's true path is
+    unknown, the target cannot be proven to differ from it, so the answer
+    is still not "definitely free": if the target matched no successfully
+    normalized home AND at least one record was skipped, this still
+    returns occupied. That preserves the fail-closed posture for the case
+    that actually warrants it, without ONE bad record silently vetoing
+    EVERY unrelated worktree's occupancy check the way it did before
+    #2240 -- the difference is diagnosability (a WARNING now names the
+    broken record), not a change in the free/occupied verdict for a
+    target that shares no relation to the poisoned record.
+
+    *warned_unresolvable* defaults to ``None`` (always warn, dedup
+    nothing) -- the dispatch loop's stale-worktree-occupancy check
+    (:func:`cw.dispatch.claim._raise_if_stale_tree_occupied`) threads a
+    process-lifetime-owned set through six call layers, mirroring
+    ``dispatch_tick``'s ``warned_fetch_fail`` (see
+    :func:`cw.dispatch.loop._run_dispatch_loop_body`); the reuse-refresh
+    call site (:func:`_reuse_occupancy`) has no such loop-lifetime set and
+    keeps the always-warn default.
     """
     sessions = live_session_worktree_paths()
     if sessions is None:
@@ -377,15 +489,18 @@ def live_home_reason(wt_path: Path, *, daemon: NativeDaemonClient) -> str | None
         return "daemon roster unreadable, cannot rule out a live session"
     try:
         target = _normalize_path(wt_path)
-        session_homes = {_normalize_path(path) for path in sessions}
-        worker_homes = {_normalize_path(path) for path in workers}
     except OSError as exc:
         return f"a path cannot be resolved ({exc}), cannot rule out a live session"
-    if target in session_homes:
-        return "a live session is homed on this worktree"
-    if target in worker_homes:
-        return "a live daemon worker is homed on this worktree"
-    return None
+
+    session_homes, skipped_sessions = _normalize_records(
+        sessions, "session", warned_unresolvable
+    )
+    worker_homes, skipped_workers = _normalize_records(
+        workers, "worker", warned_unresolvable
+    )
+    return _home_match_reason(
+        target, session_homes, worker_homes, skipped_sessions + skipped_workers
+    )
 
 
 class _Occupancy(NamedTuple):

@@ -2086,8 +2086,9 @@ class TestReuseOccupancyRosterAndPaths:
             lambda: frozenset({target}),
         )
         _seed_roster(bad_worker)
+        daemon = native_daemon.get_native_daemon_client()
 
-        reason = live_home_reason(target, daemon=native_daemon.get_native_daemon_client())
+        reason = live_home_reason(target, daemon=daemon)
 
         assert reason == "a live session is homed on this worktree"
         assert len(_cw_worktree_records(caplog, logging.WARNING)) == 1
@@ -2101,7 +2102,7 @@ class TestReuseOccupancyRosterAndPaths:
         )
         _seed_roster(target)
 
-        reason = live_home_reason(target, daemon=native_daemon.get_native_daemon_client())
+        reason = live_home_reason(target, daemon=daemon)
 
         assert reason == "a live daemon worker is homed on this worktree"
         assert len(_cw_worktree_records(caplog, logging.WARNING)) == 1
@@ -2125,6 +2126,7 @@ class TestReuseOccupancyRosterAndPaths:
         )
         (tmp_path / "w").mkdir()
         bad_worker = _unnormalizable_path("eacces", tmp_path / "w", monkeypatch)
+        _seed_roster(bad_worker)
 
         reason = live_home_reason(good, daemon=native_daemon.get_native_daemon_client())
 

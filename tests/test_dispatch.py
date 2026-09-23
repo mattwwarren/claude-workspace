@@ -3470,6 +3470,10 @@ class TestStaleWorktreeYieldsToLiveOccupant:
     ) -> None:
         """The SAME poisoned worker record must not re-warn on a second tick
         once ``warned_unresolvable`` threads through all six call layers."""
+        from freezegun import freeze_time
+
+        from cw.dispatch.claim import _OCCUPIED_DEFER_SECONDS
+
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         self._stub_stale(monkeypatch, unsaved=None)
@@ -3478,12 +3482,14 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         warned: set[UnresolvablePathWarningKey] = set()
 
         caplog.set_level(logging.WARNING, logger="cw.worktree._refresh")
-        first = dispatch_tick(
-            simple_config, native_daemon=daemon, warned_unresolvable=warned
-        )
-        second = dispatch_tick(
-            simple_config, native_daemon=daemon, warned_unresolvable=warned
-        )
+        with freeze_time("2026-07-16 12:00:00") as frozen:
+            first = dispatch_tick(
+                simple_config, native_daemon=daemon, warned_unresolvable=warned
+            )
+            frozen.tick(delta=timedelta(seconds=_OCCUPIED_DEFER_SECONDS + 1))
+            second = dispatch_tick(
+                simple_config, native_daemon=daemon, warned_unresolvable=warned
+            )
 
         assert first.spawned == 0
         assert second.spawned == 0
@@ -3506,6 +3512,10 @@ class TestStaleWorktreeYieldsToLiveOccupant:
     ) -> None:
         """A genuinely NEW bad record still warns even when the shared set
         already holds an unrelated key."""
+        from freezegun import freeze_time
+
+        from cw.dispatch.claim import _OCCUPIED_DEFER_SECONDS
+
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         self._stub_stale(monkeypatch, unsaved=None)
@@ -3514,23 +3524,25 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         warned: set[UnresolvablePathWarningKey] = set()
 
         caplog.set_level(logging.WARNING, logger="cw.worktree._refresh")
-        first = dispatch_tick(
-            simple_config, native_daemon=daemon, warned_unresolvable=warned
-        )
-        assert first.spawned == 0
-        assert (
-            sum(
-                1
-                for r in caplog.records
-                if r.name == "cw.worktree._refresh" and r.levelno == logging.WARNING
+        with freeze_time("2026-07-16 12:00:00") as frozen:
+            first = dispatch_tick(
+                simple_config, native_daemon=daemon, warned_unresolvable=warned
             )
-            == 1
-        )
+            assert first.spawned == 0
+            assert (
+                sum(
+                    1
+                    for r in caplog.records
+                    if r.name == "cw.worktree._refresh" and r.levelno == logging.WARNING
+                )
+                == 1
+            )
 
-        daemon.seed_live_worker(_symlink_loop(tmp_dispatch_dirs, "poisoned-2"))
-        second = dispatch_tick(
-            simple_config, native_daemon=daemon, warned_unresolvable=warned
-        )
+            daemon.seed_live_worker(_symlink_loop(tmp_dispatch_dirs, "poisoned-2"))
+            frozen.tick(delta=timedelta(seconds=_OCCUPIED_DEFER_SECONDS + 1))
+            second = dispatch_tick(
+                simple_config, native_daemon=daemon, warned_unresolvable=warned
+            )
 
         assert second.spawned == 0
         assert (
@@ -5533,6 +5545,7 @@ class TestRunDispatchLoopVerbose:
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
             warned_disk_pressure: set[str] | None = None,
+            warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
             usage_limited_until: Mapping[str, datetime] | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -5550,6 +5563,7 @@ class TestRunDispatchLoopVerbose:
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
                 warned_disk_pressure=warned_disk_pressure,
+                warned_unresolvable=warned_unresolvable,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -15606,6 +15620,7 @@ class TestWaveCollisionDetection:
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
             warned_disk_pressure: set[str] | None = None,
+            warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
             usage_limited_until: Mapping[str, datetime] | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -15622,6 +15637,7 @@ class TestWaveCollisionDetection:
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
                 warned_disk_pressure=warned_disk_pressure,
+                warned_unresolvable=warned_unresolvable,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,

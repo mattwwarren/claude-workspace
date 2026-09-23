@@ -69,7 +69,7 @@ if TYPE_CHECKING:
         TicketTask,
     )
     from cw.native_daemon import NativeDaemonClient
-    from cw.worktree import FetchWarningKey
+    from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
 from cw.dispatch.lanes import _notify_stale_clients_with_pending
 from cw.dispatch.routing import _accumulate_task_cost, apply_staged_decision
 from cw.dispatch.tick import dispatch_tick
@@ -811,6 +811,11 @@ def _run_dispatch_loop_body(
     # per-client, not fleet-wide, since each client's worktree_base may sit
     # on its own mount.
     warned_disk_pressure: set[str] = set()
+    # Track unresolvable-record-warn deduplication across all ticks within
+    # this run; keyed on (kind, path, error) so a session-side and worker-side
+    # break of the same path warn independently -- see
+    # cw.worktree.UnresolvablePathWarningKey.
+    warned_unresolvable: set[UnresolvablePathWarningKey] = set()
     # Scan-frequency gate for the cross-client staleness watchdog (#1875);
     # process-lifetime local like the warn-dedup sets above. See
     # _run_stale_client_watchdog_guarded for why the gate is a call-frequency
@@ -868,6 +873,7 @@ def _run_dispatch_loop_body(
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
                 warned_disk_pressure=warned_disk_pressure,
+                warned_unresolvable=warned_unresolvable,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client,
