@@ -31,6 +31,7 @@ from cw.reconcile._shared import (
     _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON,
     _SESSION_UNRESPONSIVE_REASON,
     _STOPPED_WITHOUT_SENTINEL_REASON,
+    _UNCONSUMED_QUEUE_NOTIFICATION_REASON,
 )
 from cw.reconcile.liveness import (
     _classify_liveness_bucket,
@@ -691,6 +692,144 @@ def test_detect_liveness_candidates_leaves_dangling_tool_use_none_below_top_buck
     assert len(candidates) == 1
     assert candidates[0].new_bucket == LivenessBucket.STALE_30M
     assert candidates[0].dangling_tool_use is None
+
+
+# ---------------------------------------------------------------------------
+# #2251: unconsumed queue-operation enqueue notification at the transcript tail
+# ---------------------------------------------------------------------------
+
+_BG_DONE_TEXT = "Background command ci-local.sh completed (exit code 0)"
+
+
+def _write_unconsumed_queue_transcript(
+    home: Path, worktree: Path, *, stale_minutes: float, dangling_bash: bool = False
+) -> None:
+    """Write a transcript ending in an unconsumed queue-operation enqueue.
+
+    With *dangling_bash*, an unresolved Bash tool_use precedes the enqueue
+    record, so both #1482's and #2251's detectors would match it.
+    """
+    from tests._reconcile_helpers import (
+        _notification_record,
+        _write_transcript_records,
+    )
+
+    stale_at = _NOW - timedelta(minutes=stale_minutes)
+    block: dict[str, object] = (
+        {
+            "type": "tool_use",
+            "id": "tu1",
+            "name": "Bash",
+            "input": {"command": "pytest tests/"},
+        }
+        if dangling_bash
+        else {"type": "text", "text": "running gates"}
+    )
+    records: list[dict[str, object]] = [
+        {
+            "type": "assistant",
+            "timestamp": stale_at.isoformat(),
+            "message": {"role": "assistant", "content": [block]},
+        },
+        _notification_record(_BG_DONE_TEXT, kind="queue-operation"),
+    ]
+    transcript = _write_transcript_records(home, worktree, records)
+    os.utime(str(transcript), (stale_at.timestamp(), stale_at.timestamp()))
+
+
+def test_detect_liveness_candidates_populates_unconsumed_queue_notification_field(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A top-bucket, no-sentinel, no-spawn-stamp session whose transcript tail
+    is a queue-operation enqueue populates unconsumed_queue_notification
+    (#2251)."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_unconsumed_queue_transcript(home, worktree, stale_minutes=60)
+    state = CwState(sessions=[sess])
+
+    candidates = _detect_liveness_candidates(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].new_bucket == LivenessBucket.STALE_45M
+    assert candidates[0].unconsumed_queue_notification == _BG_DONE_TEXT
+    assert candidates[0].dangling_tool_use is None
+
+
+def test_detect_liveness_candidates_leaves_unconsumed_queue_none_below_top_bucket(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """Only computed under distress_base (top bucket) (#2251)."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_unconsumed_queue_transcript(home, worktree, stale_minutes=32)
+    state = CwState(sessions=[sess])
+
+    candidates = _detect_liveness_candidates(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].new_bucket == LivenessBucket.STALE_30M
+    assert candidates[0].unconsumed_queue_notification is None
+
+
+def test_unconsumed_queue_notification_takes_priority_over_dangling_tool_use(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A dangling Bash tool_use followed by a trailing enqueue record reports
+    only the more specific #2251 signal; the #1482 scan is skipped."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_unconsumed_queue_transcript(
+        home, worktree, stale_minutes=60, dangling_bash=True
+    )
+    state = CwState(sessions=[sess])
+
+    candidates = _detect_liveness_candidates(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].unconsumed_queue_notification == _BG_DONE_TEXT
+    assert candidates[0].dangling_tool_use is None
+
+
+def test_record_liveness_changes_emits_unconsumed_queue_notification_paused_status(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """The distress fire carries the discriminating paused_status and names
+    the notification text in its breadcrumb (#2251)."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_unconsumed_queue_transcript(home, worktree, stale_minutes=60)
+    state = CwState(sessions=[sess])
+    task = TicketTask(ticket_id="T-1", client="client-a", stage=Stage.PLAN)
+
+    record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": task},
+    )
+
+    events = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert len(events) == 1
+    assert events[0]["paused_status"] == _UNCONSUMED_QUEUE_NOTIFICATION_REASON
+    breadcrumbs = str(events[0]["breadcrumbs"])
+    assert _BG_DONE_TEXT in breadcrumbs
+    assert "queue-operation" in breadcrumbs
 
 
 # ---------------------------------------------------------------------------

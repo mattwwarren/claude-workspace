@@ -748,6 +748,17 @@ open enum; consumers MUST tolerate unknown values. Known values:
   as its siblings are — nothing is disposed (ADR-0014). `breadcrumbs`
   carries stale minutes, stage, elapsed seconds, the unresolved tool's
   name, and a truncated, secret-redacted command snippet when available.
+- `"unconsumed_queue_notification"` — the same liveness-sweep distress path,
+  for the case where the transcript's last record is a
+  `{"type": "queue-operation", "operation": "enqueue"}` notification that no
+  later turn consumed — typically a backgrounded Bash call's completion
+  landing on a headless session that nothing will ever resume (#2251:
+  `/prep-pr` backgrounded a quality gate and the finalize stage wedged).
+  Gated exactly like `dangling_tool_use` (no outstanding subagent spawn) and
+  takes priority over it: when this matches, the `dangling_tool_use` scan is
+  skipped. Signal-only exactly as its siblings are — nothing is disposed
+  (ADR-0014). `breadcrumbs` carries stale minutes, stage, elapsed seconds, and
+  the notification text, truncated and secret-redacted.
 - `"silently_idle"` — *historical (ADR-0014)*: the idle watchdog's park.
   No longer produced; may exist on old rows/logs.
 - `"needs_salvage"` — *historical (ADR-0014)*: the git-state salvage LOW

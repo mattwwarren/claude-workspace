@@ -754,6 +754,259 @@ def test_bash_command_snippet_redacts_secret_shaped_substrings(
 
 
 # ---------------------------------------------------------------------------
+# #2251: unconsumed queue-operation enqueue notification at the transcript tail
+# ---------------------------------------------------------------------------
+
+_BG_DONE_TEXT = "Background command ci-local.sh completed (exit code 0)"
+
+
+def _unconsumed_queue_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> tuple[Session, Path, Path, datetime]:
+    """Return ``(session, home, worktree, started_at)`` for the #2251 tests."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / f"wt-{name}"
+    sess = _mk_headless_daemon_session(name, worktree, started_at)
+    return sess, home, worktree, started_at
+
+
+def test_detect_unconsumed_queue_notification_returns_text_for_trailing_enqueue(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transcript whose last record is a queue-operation enqueue returns that
+    record's content (#2251)."""
+    from cw.reconcile._shared import _detect_unconsumed_queue_notification
+
+    sess, home, worktree, started_at = _unconsumed_queue_session(
+        tmp_path, monkeypatch, "uqn-trailing"
+    )
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _tool_use_record("tu1", "Bash", input_={"command": "ci-local.sh"}),
+            _tool_result_record("tu1"),
+            _notification_record(_BG_DONE_TEXT, kind="queue-operation"),
+        ],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_unconsumed_queue_notification(sess) == _BG_DONE_TEXT
+
+
+def test_detect_unconsumed_queue_notification_returns_none_when_not_last_record(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An enqueue record followed by a later assistant turn means the session
+    resumed and consumed it → None (#2251)."""
+    from cw.reconcile._shared import _detect_unconsumed_queue_notification
+
+    sess, home, worktree, started_at = _unconsumed_queue_session(
+        tmp_path, monkeypatch, "uqn-consumed"
+    )
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _notification_record(_BG_DONE_TEXT, kind="queue-operation"),
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "gate passed"}],
+                },
+            },
+        ],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_unconsumed_queue_notification(sess) is None
+
+
+def test_detect_unconsumed_queue_notification_returns_none_for_dequeue_operation(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only ``operation == "enqueue"`` counts; a trailing dequeue-shaped
+    queue-operation record returns None (#2251)."""
+    from cw.reconcile._shared import (
+        _QUEUE_OPERATION_RECORD_TYPE,
+        _detect_unconsumed_queue_notification,
+    )
+
+    sess, home, worktree, started_at = _unconsumed_queue_session(
+        tmp_path, monkeypatch, "uqn-dequeue"
+    )
+    transcript = _write_transcript_records(
+        home, worktree, [{"type": _QUEUE_OPERATION_RECORD_TYPE, "op": "dequeue"}]
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_unconsumed_queue_notification(sess) is None
+
+
+def test_detect_unconsumed_queue_notification_returns_none_for_missing_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No locatable transcript → None (fail-open, mirrors
+    _detect_dangling_tool_use) (#2251)."""
+    from cw.reconcile._shared import _detect_unconsumed_queue_notification
+
+    sess, _home, _worktree, _started_at = _unconsumed_queue_session(
+        tmp_path, monkeypatch, "uqn-notrans"
+    )
+
+    assert _detect_unconsumed_queue_notification(sess) is None
+
+
+def test_detect_unconsumed_queue_notification_returns_none_on_read_error(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A located-but-unreadable transcript (OSError on open) → None, same
+    injection technique as the widened-timestamp OSError test (#2251)."""
+    from cw.reconcile._shared import _detect_unconsumed_queue_notification
+
+    sess, _home, worktree, _started_at = _unconsumed_queue_session(
+        tmp_path, monkeypatch, "uqn-oserror"
+    )
+    fake_path = worktree / "does-not-exist.jsonl"
+    monkeypatch.setattr(
+        "cw.reconcile._shared._locate_session_transcript",
+        lambda *_a, **_kw: fake_path,
+    )
+
+    assert _detect_unconsumed_queue_notification(sess) is None
+
+
+def test_detect_unconsumed_queue_notification_returns_none_on_malformed_json_lines(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed and non-dict JSONL lines are skipped without raising; the last
+    *well-formed* record decides. A trailing garbage line after a consumed
+    enqueue still returns None, and one after an unconsumed enqueue still
+    returns its text (#2251)."""
+    from cw.reconcile._shared import _detect_unconsumed_queue_notification
+
+    sess, home, worktree, started_at = _unconsumed_queue_session(
+        tmp_path, monkeypatch, "uqn-malformed"
+    )
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _notification_record(_BG_DONE_TEXT, kind="queue-operation"),
+            _tool_result_record("tu1"),
+        ],
+    )
+    with transcript.open("a") as handle:
+        handle.write("{not valid json\n")
+        handle.write("[1, 2]\n")
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_unconsumed_queue_notification(sess) is None
+
+    transcript.write_text(
+        json.dumps(_notification_record(_BG_DONE_TEXT, kind="queue-operation"))
+        + "\n{not valid json\n"
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_unconsumed_queue_notification(sess) == _BG_DONE_TEXT
+
+
+def test_detect_unconsumed_queue_notification_returns_none_for_non_string_content(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trailing enqueue record whose content is not a string returns None
+    (#2251)."""
+    from cw.reconcile._shared import (
+        _QUEUE_OPERATION_ENQUEUE,
+        _QUEUE_OPERATION_RECORD_TYPE,
+        _detect_unconsumed_queue_notification,
+    )
+
+    sess, home, worktree, started_at = _unconsumed_queue_session(
+        tmp_path, monkeypatch, "uqn-nonstr"
+    )
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            {
+                "type": _QUEUE_OPERATION_RECORD_TYPE,
+                "operation": _QUEUE_OPERATION_ENQUEUE,
+                "content": ["x"],
+            }
+        ],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_unconsumed_queue_notification(sess) is None
+
+
+def test_detect_unconsumed_queue_notification_truncates_and_redacts_long_content(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The notification text is redacted, then capped at the shared snippet
+    length with a trailing ellipsis (#2251)."""
+    from cw.reconcile._shared import (
+        _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS,
+        _detect_unconsumed_queue_notification,
+    )
+
+    sess, home, worktree, started_at = _unconsumed_queue_session(
+        tmp_path, monkeypatch, "uqn-long"
+    )
+    secret = "c" * 40
+    content = f"Authorization: {secret} " + "y" * (
+        _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS + 50
+    )
+    transcript = _write_transcript_records(
+        home, worktree, [_notification_record(content, kind="queue-operation")]
+    )
+    _stamp_after_start(transcript, started_at)
+
+    snippet = _detect_unconsumed_queue_notification(sess)
+    assert snippet is not None
+    assert secret not in snippet
+    assert "<redacted>" in snippet
+    assert len(snippet) == _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS + 1
+    assert snippet.endswith("…")
+
+
+def test_unconsumed_queue_notification_reason_importable_from_reconcile_package() -> (
+    None
+):
+    """Pins the re-export surface (#2251), mirrors
+    test_dangling_tool_use_detector_importable_from_reconcile_package."""
+    from cw.reconcile import (
+        _UNCONSUMED_QUEUE_NOTIFICATION_REASON,
+        _detect_unconsumed_queue_notification,
+    )
+
+    assert _UNCONSUMED_QUEUE_NOTIFICATION_REASON == "unconsumed_queue_notification"
+    assert callable(_detect_unconsumed_queue_notification)
+
+
+# ---------------------------------------------------------------------------
 # #1345: usage-limit recency bound — matched_at / transcript_tail_at tracking
 # ---------------------------------------------------------------------------
 
