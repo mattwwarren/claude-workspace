@@ -44,7 +44,7 @@ from cw.review_findings import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
 CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
@@ -431,6 +431,20 @@ def run_guard_fence(
         Path(f"/tmp/touched_files-{session}").unlink(missing_ok=True)
 
 
+def _write_bin_stub(tmp_path: Path, name: str, body: str) -> Path:
+    """Write ``body`` as an executable ``name`` in ``tmp_path/bin``; return the dir.
+
+    The shared mechanics behind every fake-external-CLI helper here
+    (``_stub_gh``, ``_stub_cw``) so a new one differs only in its script body.
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    stub = fake_bin / name
+    stub.write_text(body)
+    stub.chmod(0o755)
+    return fake_bin
+
+
 def _stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
     """Write an executable ``gh`` stub into a fresh bin dir and return it (#1799).
 
@@ -441,16 +455,49 @@ def _stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
     third copy. Imported today by test_release_tag_workflow.py's dry-run
     summary tests, whose script shells out to ``gh issue list``.
     """
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_gh = fake_bin / "gh"
     # Quoted heredoc ('GH_STDOUT_EOF') -- no shell interpolation of `stdout`'s
     # contents, matching how a real `gh` payload is opaque data.
-    fake_gh.write_text(
-        f"#!/bin/sh\ncat <<'GH_STDOUT_EOF'\n{stdout}GH_STDOUT_EOF\nexit {exit_code}\n"
+    return _write_bin_stub(
+        tmp_path,
+        "gh",
+        f"#!/bin/sh\ncat <<'GH_STDOUT_EOF'\n{stdout}GH_STDOUT_EOF\nexit {exit_code}\n",
     )
-    fake_gh.chmod(0o755)
-    return fake_bin
+
+
+def _stub_cw(
+    tmp_path: Path,
+    *,
+    events: Sequence[str] = (),
+    delay_s: float = 0.0,
+    exit_code: int = 0,
+    block: bool = False,
+) -> Path:
+    """Write an executable fake ``cw`` into a fresh bin dir and return it (#2250).
+
+    Stands in for ``cw event tail --follow ... --json``: ignores its flags,
+    prints each pre-built JSON line in ``events`` to stdout (sleeping
+    ``delay_s`` between lines), then exits ``exit_code`` -- or, with
+    ``block=True``, ``exec``s a long ``sleep`` so only the caller's own timer or
+    an explicit terminate ends it. ``exec`` keeps the stub's PID, so
+    terminating that PID really stops it rather than orphaning a ``sleep``.
+
+    Side files next to the stub: ``cw.args`` (one invocation arg per line) and
+    ``cw.pid`` (the stub's PID), for tests asserting what was invoked and
+    whether it was terminated.
+    """
+    lines = [
+        "#!/bin/sh",
+        'DIR=$(dirname "$0")',
+        'printf \'%s\\n\' "$@" > "$DIR/cw.args"',
+        'echo $$ > "$DIR/cw.pid"',
+    ]
+    for i, event in enumerate(events):
+        if i and delay_s:
+            lines.append(f"sleep {delay_s}")
+        # Quoted heredoc -- the event JSON is opaque data, never interpolated.
+        lines.extend([f"cat <<'CW_EVENT_EOF'\n{event}", "CW_EVENT_EOF"])
+    lines.append("exec sleep 3600" if block else f"exit {exit_code}")
+    return _write_bin_stub(tmp_path, "cw", "\n".join(lines) + "\n")
 
 
 def _seed_daemon_session(
@@ -1637,3 +1684,129 @@ def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") 
         check=True,
         env=clean_env,
     )
+
+
+def push_commit_to_origin(
+    origin: Path,
+    branch: str,
+    work_dir: Path,
+    filename: str,
+    content: str = "out-of-band\n",
+) -> str:
+    """Push one new commit to *branch* on the bare *origin* from a side clone.
+
+    Simulates an out-of-band push (another machine, a sibling session, a fix
+    agent's isolation worktree) that advances ``origin/<branch>`` without
+    touching the workspace under test. *branch* must already exist on *origin*.
+
+    The clone at *work_dir* is created only when *work_dir* does not yet exist;
+    a second call in the same test reuses it, re-syncing to the current remote
+    tip first so the new commit lands on top of whatever was pushed since.
+    Writes *content* to *filename* so a test can make upstream set a value that
+    differs from a local commit. Returns the pushed commit's SHA.
+    """
+    if not work_dir.exists():
+        subprocess.run(
+            ["git", "clone", str(origin), str(work_dir)],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_clean_git_env(),
+        )
+    git_in(work_dir, "fetch", "origin")
+    git_in(work_dir, "checkout", "-B", branch, f"origin/{branch}")
+    (work_dir / filename).write_text(content, encoding="utf-8")
+    git_in(work_dir, "add", filename)
+    git_in(
+        work_dir,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=cw test",
+        "commit",
+        "-m",
+        f"out-of-band {filename}",
+    )
+    git_in(work_dir, "push", "origin", branch)
+    return git_in(work_dir, "rev-parse", "HEAD")
+
+
+def tree_fingerprint(worktree: Path) -> tuple[str, str, str]:
+    """``(HEAD sha, porcelain status, digest of every working-tree file)``.
+
+    Byte-level: two equal fingerprints mean nothing moved HEAD, the index or a
+    single file's content in the worktree. Hoisted (#2213 round 5) from
+    ``test_reconcile_review_recipes.py`` once the dispatch claim tests needed
+    the same "nothing touched the occupied worktree" proof.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    for path in sorted(worktree.rglob("*")):
+        rel = path.relative_to(worktree)
+        if rel.parts[0] == ".git" or not path.is_file():
+            continue
+        digest.update(str(rel).encode())
+        digest.update(path.read_bytes())
+    return (
+        git_in(worktree, "rev-parse", "HEAD"),
+        git_in(worktree, "status", "--porcelain=v1", "--untracked-files=all"),
+        digest.hexdigest(),
+    )
+
+
+def occupy_worktree(
+    client: ClientConfig,
+    worktree: Path,
+    source: str,
+    *,
+    daemon: FakeNativeDaemonClient | None = None,
+) -> None:
+    """Make a live occupant appear for *worktree* through the named source.
+
+    ``state`` (a non-terminal cw session homed there) and ``roster`` (a live
+    daemon worker with that ``cwd``) are positive matches; ``unreadable-roster``
+    is the fail-closed case (occupancy cannot be ruled out). Shared by the
+    fix-agent and dispatch-claim refusal tests (#2213 round 5).
+
+    *daemon* (#2213 round 7): pass the SAME :class:`FakeNativeDaemonClient`
+    instance the caller is about to inject into ``create_worktree`` /
+    ``dispatch_tick`` / ``_spawn_claimed_task``. Occupancy checks now consult
+    the caller's own resolved daemon rather than defaulting to the real one, so
+    a ``roster``/``unreadable-roster`` occupant written to the real (tmp-
+    isolated) roster file would go unseen by an injected fake -- writing to the
+    fake directly is what makes those sources observable again. Omit it (the
+    ``state`` source is unaffected either way) only when the caller relies on
+    ``create_worktree``'s own default (no injected daemon).
+    """
+    from cw import native_daemon
+    from cw.config import load_state
+
+    if source == "state":
+        state = load_state()
+        state.sessions.append(
+            Session(
+                name=f"{client.name}/impl/occupant",
+                client=client.name,
+                purpose=SessionPurpose.IMPL,
+                origin=SessionOrigin.USER,
+                workspace_path=client.workspace_path,
+                worktree_path=worktree,
+                status=SessionStatus.ACTIVE,
+            )
+        )
+        save_state(state)
+        return
+    if daemon is not None:
+        if source == "roster":
+            daemon.seed_live_worker(worktree)
+        else:
+            daemon.roster_unreadable = True
+        return
+    roster = native_daemon._ROSTER_PATH
+    roster.parent.mkdir(parents=True, exist_ok=True)
+    if source == "roster":
+        payload = {"workers": {"aaaa1111": {"pid": 1, "cwd": str(worktree)}}}
+        roster.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        roster.write_text("{not json", encoding="utf-8")

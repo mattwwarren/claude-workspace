@@ -841,6 +841,141 @@ class TestRealNativeDaemonClientRoster:
         assert client.list_live_session_short_ids() == set()
 
 
+class TestRealNativeDaemonClientWorkerCwds:
+    """list_live_worker_cwds: which worktrees live daemon workers are homed on.
+
+    Unlike ``list_live_session_short_ids`` (fail-open: unreadable -> empty), this
+    is consumed by a mutation guard, so it fails closed: ``None`` means "could
+    not tell", and only an absent roster (no daemon ever ran) is an empty set.
+    """
+
+    def test_returns_worker_cwds(self, tmp_path: Path) -> None:
+        roster = tmp_path / "roster.json"
+        roster.write_text(
+            json.dumps(
+                {
+                    "workers": {
+                        "aaaa1111": {"pid": 1, "cwd": "/wt/one"},
+                        "bbbb2222": {"pid": 2, "cwd": "/wt/two"},
+                        "cccc3333": {"pid": 3, "cwd": "/wt/one"},
+                    }
+                }
+            )
+        )
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_worker_cwds() == frozenset(
+            {Path("/wt/one"), Path("/wt/two")}
+        )
+
+    def test_empty_workers_returns_empty_set(self, tmp_path: Path) -> None:
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps({"workers": {}}))
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_worker_cwds() == frozenset()
+
+    def test_absent_roster_returns_empty_set(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = RealNativeDaemonClient(roster_path=tmp_path / "nope.json")
+        with caplog.at_level("WARNING", logger="cw.native_daemon"):
+            assert client.list_live_worker_cwds() == frozenset()
+        assert caplog.records == []
+
+    def test_invalid_json_returns_none_and_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        roster = tmp_path / "roster.json"
+        roster.write_text("{not json")
+        client = RealNativeDaemonClient(roster_path=roster)
+        with caplog.at_level("WARNING", logger="cw.native_daemon"):
+            assert client.list_live_worker_cwds() is None
+        assert any("not valid JSON" in r.getMessage() for r in caplog.records)
+
+    def test_invalid_utf8_returns_none_and_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # ``read_text(encoding="utf-8")`` raises UnicodeDecodeError -- a
+        # ValueError, NOT an OSError or JSONDecodeError -- on invalid bytes. It
+        # must read as "cannot determine" (None), never escape the reader (#2213).
+        roster = tmp_path / "roster.json"
+        roster.write_bytes(b'{"workers": {"aaaa1111": {"cwd": "/wt/\xff\xfe"}}}')
+        client = RealNativeDaemonClient(roster_path=roster)
+        with caplog.at_level("WARNING", logger="cw.native_daemon"):
+            assert client.list_live_worker_cwds() is None
+        assert any("unreadable" in r.getMessage() for r in caplog.records)
+
+    def test_short_ids_fail_open_on_invalid_utf8(self, tmp_path: Path) -> None:
+        """The same shared parser: the liveness view stays fail-open."""
+        roster = tmp_path / "roster.json"
+        roster.write_bytes(b"\xff\xfe\x00 not utf-8")
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_session_short_ids() == set()
+
+    def test_non_enoent_oserror_returns_none_and_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A directory at the roster path: read_text raises IsADirectoryError, an
+        # OSError that is NOT FileNotFoundError.
+        roster = tmp_path / "roster.json"
+        roster.mkdir()
+        client = RealNativeDaemonClient(roster_path=roster)
+        with caplog.at_level("WARNING", logger="cw.native_daemon"):
+            assert client.list_live_worker_cwds() is None
+        assert any("unreadable" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param({"workers": ["a", "b"]}, id="workers-list"),
+            pytest.param({"proto": 1}, id="workers-missing"),
+            pytest.param(["not", "a", "dict"], id="top-level-list"),
+            pytest.param({"workers": {"aaaa1111": "not-a-dict"}}, id="entry-not-dict"),
+            pytest.param({"workers": {"aaaa1111": {"pid": 1}}}, id="entry-no-cwd"),
+            pytest.param({"workers": {"aaaa1111": {"cwd": ""}}}, id="entry-empty-cwd"),
+            pytest.param({"workers": {"aaaa1111": {"cwd": 7}}}, id="entry-int-cwd"),
+            pytest.param(
+                {"workers": {"aaaa1111": {"cwd": "/wt/ok"}, "bbbb2222": {"pid": 2}}},
+                id="one-good-one-bad",
+            ),
+        ],
+    )
+    def test_malformed_shape_returns_none(
+        self, tmp_path: Path, payload: object, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps(payload))
+        client = RealNativeDaemonClient(roster_path=roster)
+        with caplog.at_level("WARNING", logger="cw.native_daemon"):
+            assert client.list_live_worker_cwds() is None
+        assert caplog.records  # the failure is not silent
+
+    def test_short_ids_and_cwds_share_one_parser(self, tmp_path: Path) -> None:
+        """Both views read the same file through the same loader, so they can
+        never disagree about what the roster says."""
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps({"workers": {"aaaa1111": {"cwd": "/wt/one"}}}))
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_session_short_ids() == {"aaaa1111"}
+        assert client.list_live_worker_cwds() == frozenset({Path("/wt/one")})
+
+    def test_short_ids_still_fail_open_on_unreadable_roster(
+        self, tmp_path: Path
+    ) -> None:
+        roster = tmp_path / "roster.json"
+        roster.mkdir()
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_session_short_ids() == set()
+
+    def test_short_ids_tolerate_entries_without_cwd(self, tmp_path: Path) -> None:
+        """The liveness view only needs the keys: a cwd-less entry is a live
+        worker for reconcile even though it makes the cwd view fail closed."""
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps({"workers": {"aaaa1111": {"pid": 1}}}))
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_session_short_ids() == {"aaaa1111"}
+        assert client.list_live_worker_cwds() is None
+
+
 class TestRealNativeDaemonClientStop:
     """stop is best-effort and swallows expected failure modes."""
 
@@ -890,6 +1025,28 @@ class TestFakeNativeDaemonClient:
         client.stop(short_id)
         assert client.stop_calls == [short_id]
         assert client.list_live_session_short_ids() == set()
+
+    def test_worker_cwds_track_live_spawns(self, tmp_path: Path) -> None:
+        client = FakeNativeDaemonClient()
+        first = client.spawn_bg(cwd=tmp_path / "one", prompt="a")
+        client.spawn_bg(cwd=tmp_path / "two", prompt="b")
+        assert client.list_live_worker_cwds() == frozenset(
+            {tmp_path / "one", tmp_path / "two"}
+        )
+        client.stop(first)
+        assert client.list_live_worker_cwds() == frozenset({tmp_path / "two"})
+
+    def test_worker_cwds_exclude_unregistered_spawn(self, tmp_path: Path) -> None:
+        client = FakeNativeDaemonClient()
+        client.raise_unregistered = True
+        client.spawn_bg(cwd=tmp_path, prompt="x")
+        assert client.list_live_worker_cwds() == frozenset()
+
+    def test_worker_cwds_none_when_roster_unreadable(self, tmp_path: Path) -> None:
+        client = FakeNativeDaemonClient()
+        client.spawn_bg(cwd=tmp_path, prompt="x")
+        client.roster_unreadable = True
+        assert client.list_live_worker_cwds() is None
 
     def test_raise_usage_limit_raises_before_counter(self, tmp_path: Path) -> None:
         """raise_usage_limit=True raises UsageLimitError before incrementing counter."""

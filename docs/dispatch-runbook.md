@@ -383,11 +383,17 @@ Run it at checkpoints — after a gate, after a merge, before reporting that a
 wave is healthy — not on a timer. Event-driven monitoring covers the named
 failures; peek covers the unnamed one.
 
-This has landed (#2004): the attention monitor (`scripts/attention_monitor.sh`,
-see the `orchestrate-sprint` skill's Phase 4) now subscribes to
+This has landed (#2004): the attention watch (`scripts/attention_watch.py`,
+see the `orchestrate-sprint` skill's Phase 4) subscribes to
 `session.liveness_changed`, filtered to `stale_30m`/`stale_45m`, so a stalled
 worker pages you once the reconcile liveness sweep crosses one of those
-bucket boundaries. `cw queue peek` remains valuable as a **confirmation**
+bucket boundaries. Since #2250 the watch is wake-on-event rather than a
+persistent Monitor: the orchestrator runs it as a backgrounded `Bash`, it
+exits after delivering a burst of events (or after its `--max-idle-seconds`
+backstop, default 7200s, with a `WATCHER | idle backstop …` line), and the
+orchestrator re-arms it after triage. A per-client resume stamp under
+`~/.claude-workspace/` makes each re-arm pick up exactly where the last wake
+left off, so events landing between wakes are delivered late, never lost. `cw queue peek` remains valuable as a **confirmation**
 step — and it still covers the narrower residual window before the first
 `stale_30m` crossing — but it is no longer the only line of defense.
 

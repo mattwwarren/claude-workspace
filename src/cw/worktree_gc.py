@@ -10,9 +10,9 @@ import subprocess as _sp
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from cw.config import load_state
 from cw.dev_queue import load_dev_queue
-from cw.models import QueueItemStatus, SessionStatus
+from cw.models import QueueItemStatus
+from cw.worktree import live_session_worktree_paths
 
 _log = logging.getLogger(__name__)
 
@@ -418,31 +418,22 @@ def _verdict_for_state(
     return GcVerdict.REMOVE_CLOSED
 
 
-_NON_TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
-    {SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED}
-)
-
-
 def _live_worktree_paths() -> frozenset[Path]:
     """Return paths of all worktrees backing live sessions or running dispatch tasks.
 
     Loads CwState and DevQueueStore the same way reconcile does. Conservative:
-    on any load error returns an empty set so a corrupted state file never
-    blocks GC from running — it only disables the live-session safety guard for
-    that run (logged at WARNING).
-    """
-    live: set[Path] = set()
+    when the session state cannot be read or parsed (``OSError`` /
+    ``ValueError``, see :func:`cw.worktree.live_session_worktree_paths`) or the
+    dev-queue cannot be loaded, the affected half contributes nothing so a
+    corrupted state file never blocks GC from running — it only disables that
+    live-session safety guard for the run (logged at WARNING). An unexpected
+    exception type from the session-state read is a bug and propagates.
 
-    try:
-        state = load_state()
-        for session in state.sessions:
-            if (
-                session.status in _NON_TERMINAL_SESSION_STATUSES
-                and session.worktree_path is not None
-            ):
-                live.add(session.worktree_path)
-    except Exception as exc:  # noqa: BLE001 — corrupted session state must not block worktree GC; degrades to no live-session guard for this run (see docstring)
-        _log.warning("gc: failed to load session state for live-path guard: %s", exc)
+    GC fails OPEN on that ``None`` (unchanged from before #2213); the
+    ``create_worktree`` reuse refresh fails CLOSED on the same ``None``. The
+    split is deliberate -- see :func:`cw.worktree.live_session_worktree_paths`.
+    """
+    live: set[Path] = set(live_session_worktree_paths() or ())
 
     try:
         queue = load_dev_queue()
