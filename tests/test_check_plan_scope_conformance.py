@@ -14,7 +14,11 @@ import sys
 import types
 from pathlib import Path
 
-from tests.conftest import GUARD_MARKER_CURRENT, _plan_text
+from tests.conftest import (
+    GUARD_MARKER_CURRENT,
+    _plan_text,
+    write_pyproject_override,
+)
 
 # ---------------------------------------------------------------------------
 # Script loader
@@ -502,7 +506,7 @@ def _write_repo(tmp_path: Path, pyproject: str | None) -> Path:
     plan = repo / ".cw" / "plan.md"
     plan.write_text(_plan_text(_paths("planned", 14)), encoding="utf-8")
     if pyproject is not None:
-        (repo / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+        write_pyproject_override(repo, pyproject)
     return plan
 
 

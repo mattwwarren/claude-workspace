@@ -48,6 +48,10 @@ def test_classify_merge_conflict_in_groups() -> None:
     assert "classify_merge_conflict" in _scripts_group()
 
 
+def test_check_changelog_frozen_in_groups() -> None:
+    assert "check_changelog_frozen" in _scripts_group()
+
+
 def test_every_enumerated_script_exists_on_disk() -> None:
     for pythonpath, modules in _mod.GROUPS:
         for module in modules:

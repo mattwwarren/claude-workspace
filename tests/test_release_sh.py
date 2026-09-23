@@ -31,7 +31,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from tests.conftest import _clean_git_env
+from tests.conftest import _clean_git_env, list_tags
 from tests.test_release_tag_workflow import GUARD_STEP_ID, _script
 
 ROOT = Path(__file__).parent.parent
@@ -71,17 +71,6 @@ def _commit_head_subject(repo: Path, subject: str) -> None:
     )
 
 
-def _tags(repo: Path) -> list[str]:
-    result = subprocess.run(
-        ["git", "-C", str(repo), "tag", "--list"],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_clean_git_env(),
-    )
-    return [line for line in result.stdout.splitlines() if line]
-
-
 def test_guard_rejects_chore_release_subject_matching_neither_form(
     make_git_repo: Callable[..., Path],
 ) -> None:
@@ -95,7 +84,7 @@ def test_guard_rejects_chore_release_subject_matching_neither_form(
     assert ACCEPTED_FORM_V in output
     assert ACCEPTED_FORM_BUMP in output
     assert WORKFLOW_POINTER in output
-    assert _tags(repo) == []
+    assert list_tags(repo) == []
 
 
 def test_guard_accepts_bump_version_to_subject(
@@ -153,7 +142,7 @@ def test_guard_override_env_var_skips_check(
     output = result.stdout + result.stderr
     assert GUARD_REJECTION_MARKER not in output
     assert PYPROJECT_MISSING_MARKER in output
-    assert _tags(repo) == []
+    assert list_tags(repo) == []
 
 
 def test_guard_non_release_subject_passes_through_unchecked(
