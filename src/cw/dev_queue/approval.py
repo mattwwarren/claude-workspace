@@ -596,6 +596,7 @@ def _approve_scope_drift_locked(
     task.scope_drift_approved_extra_files = approved_files
     task.scope_drift_approved_head = head_sha
     _reset_for_same_stage_requeue(task)
+    save_dev_queue(store)
     record_event(
         OrchestratorEventType.TICKET_APPROVED,
         {
@@ -607,7 +608,6 @@ def _approve_scope_drift_locked(
             "scope_drift_approved_head": head_sha,
         },
     )
-    save_dev_queue(store)
     return {
         "from_stage": from_stage,
         "to_stage": task.stage.value,
