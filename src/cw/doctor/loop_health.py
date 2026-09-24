@@ -15,6 +15,10 @@ The one cross-module need (:func:`_collapse_blocked_on_user_tasks` from
 :func:`_reap_session_by_selector` — ``wedge`` imports two symbols from this
 module at top level, so this module's reach back into ``wedge`` must be
 function-level to break the cycle (see the ``pyproject.toml`` PLC0415 entry).
+Its RUNNING re-find goes through ``cw.dispatch.claim._find_running_row`` for
+an exact ``(client, session_id)`` match, closing the duplicate-row hazard
+tracked by #2219; that import is top-level (``cw.dispatch`` never imports
+``cw.doctor``, so there is no cycle to break).
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from typing import TYPE_CHECKING
 from cw.config import load_orchestrator_config, load_state, save_state, sessions_lock
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.dispatch import TICK_STALE_SECONDS, _stale_pending_clients
+from cw.dispatch.claim import _find_running_row
 from cw.dispatch_state import load_executor_blocked_markers
 from cw.doctor import _deps
 from cw.doctor._shared import CheckResult
@@ -328,15 +333,16 @@ def _reap_session_by_selector(
         with dev_queue_lock():
             store = _deps.load_dev_queue()
             running_reverted = False
-            for task in store.tasks:
-                if (
-                    task.ticket_id == ticket_id
-                    and task.status == QueueItemStatus.RUNNING
-                ):
-                    transition_task_status(task, QueueItemStatus.PENDING)
-                    task.session_id = None
-                    running_reverted = True
-                    break
+            # #2219: only the row this session owns (by client and
+            # session_id), never the first RUNNING row sharing the ticket id
+            # -- a duplicate row or another client's same-numbered ticket.
+            stored_task = _find_running_row(
+                store, ticket_id, target.client, session_id=target.id
+            )
+            if stored_task is not None:
+                transition_task_status(stored_task, QueueItemStatus.PENDING)
+                stored_task.session_id = None
+                running_reverted = True
             if running_reverted:
                 mutations.append("task_reverted_to_pending")
                 save_dev_queue(store)
