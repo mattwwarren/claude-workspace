@@ -592,22 +592,27 @@ def _approve_scope_drift_locked(
         )
         raise ApproveGateError(msg)
 
+    original_store = store.model_copy(deep=True)
     from_stage = task.stage.value
     task.scope_drift_approved_extra_files = approved_files
     task.scope_drift_approved_head = head_sha
     _reset_for_same_stage_requeue(task)
     save_dev_queue(store)
-    record_event(
-        OrchestratorEventType.TICKET_APPROVED,
-        {
-            "ticket_id": ticket_id,
-            "client": client_name,
-            "from_stage": from_stage,
-            "to_stage": task.stage.value,
-            "scope_drift_approved_extra_files": approved_files,
-            "scope_drift_approved_head": head_sha,
-        },
-    )
+    try:
+        record_event(
+            OrchestratorEventType.TICKET_APPROVED,
+            {
+                "ticket_id": ticket_id,
+                "client": client_name,
+                "from_stage": from_stage,
+                "to_stage": task.stage.value,
+                "scope_drift_approved_extra_files": approved_files,
+                "scope_drift_approved_head": head_sha,
+            },
+        )
+    except Exception:
+        save_dev_queue(original_store)
+        raise
     return {
         "from_stage": from_stage,
         "to_stage": task.stage.value,

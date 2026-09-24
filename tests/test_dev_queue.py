@@ -6676,6 +6676,29 @@ class TestApproveScopeDrift:
 
         assert load_dev_queue().model_dump() == before
 
+    def test_event_write_failure_compensates_persisted_approval(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed TICKET_APPROVED write must not leave the grant persisted."""
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        before = load_dev_queue().model_dump()
+
+        def _raise_event(*_args: object, **_kwargs: object) -> None:
+            msg = "event inbox unavailable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.approval.record_event", _raise_event)
+
+        with pytest.raises(OSError, match="event inbox unavailable"):
+            approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        assert load_dev_queue().model_dump() == before
+
 # ---------------------------------------------------------------------------
 # TestApproveTicketLockedResolved — _approve_ticket_locked(resolved_task=...)
 # ---------------------------------------------------------------------------
