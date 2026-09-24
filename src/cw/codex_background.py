@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
     from cw.review_finding_dispositions import FindingDisposition
+    from cw.review_findings import ReviewVerdict
 
 _log = logging.getLogger(__name__)
 
@@ -370,6 +371,34 @@ REVIEW_VERDICT_OWNER_STAMP_FORMAT = (
 )
 
 
+def _persist_worktree_artifact(
+    worktree: Path, text: str, *, relative_path: Path
+) -> Path | None:
+    """Write *text* to ``worktree / relative_path``, best-effort (#2223).
+
+    The shared mkdir/atomic-write/catch-OSError/never-raise contract every
+    worktree-persisted artifact needs, factored out so a caller that must NOT
+    prefix a Markdown ownership-comment stamp (e.g. a JSON artifact, which the
+    stamp would make unparseable) doesn't have to fork the write logic to get
+    it (#2223 review round 2). :func:`_persist_review_verdict` is the
+    stamp-prefixing caller; :func:`_persist_structured_review_verdict` is the
+    plain one.
+
+    Returns the path written, or None when the write failed (logged). Never
+    raises: every caller runs on the daemon thread's success path after the
+    sentinel has already been persisted, and a filesystem hiccup must not turn
+    a completed review into an unexpected-error completion.
+    """
+    path = worktree / relative_path
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, text)
+    except OSError as exc:
+        _log.warning("review_verdict_persist_failed path=%s: %s", path, exc)
+        return None
+    return path
+
+
 def _persist_review_verdict(
     worktree: Path,
     review_text: str,
@@ -387,9 +416,7 @@ def _persist_review_verdict(
     a second mkdir/atomic-write/log implementation.
 
     Returns the path written, or None when the write failed (logged). Never
-    raises: this runs on the daemon thread's success path after the sentinel
-    has already been persisted, and a filesystem hiccup must not turn a
-    completed review into an unexpected-error completion.
+    raises: see :func:`_persist_worktree_artifact`.
     """
     stamped_text = (
         REVIEW_VERDICT_OWNER_STAMP_FORMAT.format(
@@ -397,14 +424,9 @@ def _persist_review_verdict(
         )
         + review_text
     )
-    path = worktree / relative_path
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, stamped_text)
-    except OSError as exc:
-        _log.warning("review_verdict_persist_failed path=%s: %s", path, exc)
-        return None
-    return path
+    return _persist_worktree_artifact(
+        worktree, stamped_text, relative_path=relative_path
+    )
 
 
 # Durable copy of the STRUCTURED review verdict, beside REVIEW_VERDICT_
@@ -414,11 +436,40 @@ def _persist_review_verdict(
 # ``file``/``summary`` fields as real fields rather than prose — closing the
 # gap where an operator adjudicating a ``codex_must_fix_findings`` park with
 # the fix loop disabled had no source for ``check-voided``'s evidence anchor.
-# Written through ``_persist_review_verdict`` itself (same mkdir/atomic-write/
-# catch-OSError/never-raise contract, same ownership stamp) rather than a
-# second persist function -- #2223 review round 1 flagged the earlier sibling
-# helper as a duplicate of that contract.
+# Written through ``_persist_worktree_artifact`` directly, NOT through
+# ``_persist_review_verdict`` (#2223 review round 2 correction of round 1):
+# that helper's Markdown ownership-comment prefix makes the file invalid
+# JSON. Ownership instead rides as native fields (``ticket_id`` on the
+# wrapping ``ReviewVerdictEnvelope``, ``reviewed_sha`` already required on
+# ``verdict`` itself) -- see :func:`_persist_structured_review_verdict`.
 REVIEW_VERDICT_JSON_RELATIVE_PATH = Path(".claude") / "review-verdict.json"
+
+
+def _persist_structured_review_verdict(
+    worktree: Path,
+    verdict: ReviewVerdict,
+    *,
+    ticket_id: str,
+    relative_path: Path = REVIEW_VERDICT_JSON_RELATIVE_PATH,
+) -> Path | None:
+    """Write *verdict* to the worktree as JSON, wrapped for provenance (#2223).
+
+    Serializes via :class:`~cw.review_findings.ReviewVerdictEnvelope`
+    (``ticket_id`` + ``verdict``, the latter already carrying its own
+    ``reviewed_sha``) and delegates the actual write to
+    :func:`_persist_worktree_artifact` directly -- never
+    :func:`_persist_review_verdict`, whose Markdown ownership-comment prefix
+    would make the result invalid JSON.
+
+    Returns the path written, or None when the write failed (logged). Never
+    raises: see :func:`_persist_worktree_artifact`.
+    """
+    envelope_text = ReviewVerdictEnvelope(
+        ticket_id=ticket_id, verdict=verdict
+    ).model_dump_json(indent=2)
+    return _persist_worktree_artifact(
+        worktree, envelope_text, relative_path=relative_path
+    )
 
 
 # Durable copy of a zero-documents park's blocker, written beside
@@ -635,14 +686,8 @@ def _run_codex_review_and_complete(
                 ticket_id=task.ticket_id,
                 reviewed_sha=verdict.reviewed_sha,
             )
-            _persist_review_verdict(
-                worktree,
-                ReviewVerdictEnvelope(
-                    ticket_id=task.ticket_id, verdict=verdict
-                ).model_dump_json(indent=2),
-                ticket_id=task.ticket_id,
-                reviewed_sha=verdict.reviewed_sha,
-                relative_path=REVIEW_VERDICT_JSON_RELATIVE_PATH,
+            _persist_structured_review_verdict(
+                worktree, verdict, ticket_id=task.ticket_id
             )
             _post_review_comment(
                 task.ticket_id,
