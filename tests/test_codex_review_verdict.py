@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -2300,6 +2301,19 @@ class TestRenderFindingsIsDispositionAware:
         assert "suppressed" in line
         assert "dropped" in line
 
+    def test_unresolved_disposition_renders_without_suppression(self) -> None:
+        """#2352 — a fix-loop cap-exit survivor renders like a live finding."""
+        survivor = _make_finding(severity="MUST_FIX", summary="still blocking")
+        body = render_verdict_comment(
+            self._verdict(
+                self._accepted(survivor, disposition="unresolved"),
+            ),
+            fix_loop_enabled=False,
+        )
+
+        line = self._bullet(body, "still blocking")
+        assert "suppressed" not in line
+
     def test_blank_disposition_detail_still_annotates(self) -> None:
         finding = _make_finding(severity="SHOULD_FIX", summary="deferred one")
         body = render_verdict_comment(
@@ -2337,6 +2351,58 @@ class TestRenderFindingsIsDispositionAware:
         )
 
         assert "suppressed" not in body
+
+
+class TestHistoryNoteResolvedCount:
+    """#2352 — the blocking-branch history note must not go negative.
+
+    ``review.deferred`` can exceed ``review.must_fix_initial`` once
+    ``_admit_new_must_fix`` admits a genuinely-new MUST_FIX finding mid-loop,
+    so subtracting the two to derive a "resolved" count can go negative.
+    """
+
+    def test_normal_case_unchanged_wording(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={
+                "review": verdict.review.model_copy(
+                    update={"must_fix_initial": 3, "deferred": 1, "fix_cycles_used": 2}
+                )
+            }
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=True)
+        assert (
+            "2 of 3 originally-found MUST_FIX finding(s) resolved across "
+            "2 fix cycle(s); 1 still open."
+        ) in body
+
+    def test_deferred_exceeding_initial_renders_coherently(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={
+                "accepted": [
+                    verdict.accepted[0].model_copy(
+                        update={"disposition": "unresolved"}
+                    )
+                ]
+            }
+        )
+        verdict = verdict.model_copy(
+            update={
+                "review": verdict.review.model_copy(
+                    update={"must_fix_initial": 3, "deferred": 6, "fix_cycles_used": 5}
+                )
+            }
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=True)
+        assert "3 originally-found MUST_FIX finding(s)" in body
+        assert "6 still open after 5 fix cycle(s)" in body
+        assert re.search(r"-\d", body) is None
+        assert "MUST_FIX REJECTED" not in body
 
 
 class TestRenderVerdictComment:

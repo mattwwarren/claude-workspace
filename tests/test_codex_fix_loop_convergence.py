@@ -9,6 +9,7 @@ substantiated release-critical exception), diverting the rest into a debt ledger
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -350,7 +351,7 @@ def _verdict(*accepted: AcceptedFinding, **overrides: object) -> ReviewVerdict:
 
 
 class TestSurvivorsOnlyVerdict:
-    def test_fingerprinted_survivor_is_stamped_deferred(self) -> None:
+    def test_fingerprinted_survivor_is_stamped_unresolved(self) -> None:
         survivor = _accepted(summary="Missing null check at line 10")
         bystander = _accepted(severity="SHOULD_FIX", summary="Style nit")
         verdict = _verdict(survivor, bystander)
@@ -360,10 +361,10 @@ class TestSurvivorsOnlyVerdict:
 
         assert rebuilt.blocking is True
         assert rebuilt.must_fix == [survivor.finding]
-        assert rebuilt.accepted[0].disposition == "deferred"
+        assert rebuilt.accepted[0].disposition == "unresolved"
         assert rebuilt.accepted[1].disposition == "fixed"
 
-    def test_park_survivors_stamps_fingerprinted_survivor_as_deferred(
+    def test_park_survivors_stamps_fingerprinted_survivor_as_unresolved_and_renders_without_suppression(
         self, tmp_path: Path
     ) -> None:
         survivor = _accepted(summary="Missing null check at line 10")
@@ -385,7 +386,49 @@ class TestSurvivorsOnlyVerdict:
         )
 
         assert survivors.blocking is True
-        assert survivors.accepted[0].disposition == "deferred"
+        assert survivors.accepted[0].disposition == "unresolved"
+        assert _result.blocker is not None
+        assert "_(suppressed — deferred)_" not in _result.blocker.details
+
+    def test_park_survivors_renders_non_negative_history_when_admitted_new_exceeds_initial(
+        self, tmp_path: Path
+    ) -> None:
+        survivor = _accepted(summary="Missing null check at line 10")
+        admitted_mid_loop = _accepted(
+            file="other.py", summary="admitted mid-loop"
+        )
+        verdict = _verdict(survivor)
+        open_findings = {
+            _open_finding_key(survivor.finding): survivor,
+            _open_finding_key(admitted_mid_loop.finding): admitted_mid_loop,
+        }
+        cycle0_review = Review(
+            must_fix_initial=1,
+            should_fix=0,
+            fix_cycles_used=0,
+            deferred=0,
+            agents_run=1,
+        )
+
+        result, _survivors = _park_survivors(
+            task=_task(),
+            worktree=tmp_path,
+            session_id="s-park-overflow",
+            reason=CODEX_MUST_FIX_FINDINGS,
+            verdict=verdict,
+            open_findings=open_findings,
+            cycle0_review=cycle0_review,
+            cycle_count=_MAX_FIX_CYCLES,
+            retry_eligible=None,
+            snapshot=_PersistedSnapshot("pointer", 0),
+            had_real_commit=True,
+        )
+
+        assert result.blocker is not None
+        details = result.blocker.details
+        assert re.search(r"-\d", details) is None
+        assert "1 originally-found" in details
+        assert "2 still open" in details
 
 
 # ---------------------------------------------------------------------------
