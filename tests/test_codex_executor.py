@@ -666,12 +666,15 @@ def test_codex_executor_exception_handler_marks_session_completed(
     executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-exc", client="test", stage=Stage.REVIEW)
+    # Same created_at as `task`: the stamp re-finds the spawning task's own
+    # row by that identity (#2219), as the claimed row is in real dispatch.
     add_ticket(
         TicketTask(
             ticket_id="T-exc",
             client="test",
             stage=Stage.REVIEW,
             status=QueueItemStatus.RUNNING,
+            created_at=task.created_at,
         )
     )
 
@@ -801,12 +804,15 @@ def test_spawn_stamps_session_id_before_backgrounding(
     config = StageExecutorConfig(backend=CODEX_BACKEND)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-stamp", client="test", stage=Stage.REVIEW)
+    # Same created_at as `task`: the stamp re-finds the spawning task's own
+    # row by that identity (#2219), as the claimed row is in real dispatch.
     add_ticket(
         TicketTask(
             ticket_id="T-stamp",
             client="test",
             stage=Stage.REVIEW,
             status=QueueItemStatus.RUNNING,
+            created_at=task.created_at,
         )
     )
 

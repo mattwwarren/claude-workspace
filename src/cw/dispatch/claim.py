@@ -632,6 +632,62 @@ class _SpawnOutcome:
     usage_limit_reset_at: datetime | None = None
 
 
+def _find_running_row(
+    store: DevQueueStore,
+    ticket_id: str,
+    client_name: str,
+    *,
+    created_at: datetime | None = None,
+    session_id: str | None = None,
+) -> TicketTask | None:
+    """Return the caller's own RUNNING row for ``(ticket_id, client_name)``.
+
+    The shared locked re-find (#2219) for every site that already holds one
+    specific row and must mutate *that* row, not whichever RUNNING row for the
+    ticket happens to come first. Duplicate RUNNING rows for one
+    ``(ticket_id, client)`` are reachable via add-after-terminal plus
+    ``requeue --from-completed``, so ``(ticket_id, client, RUNNING)`` alone is
+    not an identity.
+
+    Two identity kinds, AND-combined when both are supplied:
+
+    - ``created_at`` -- fixed at row creation and never reassigned, so it
+      works before any session exists (claim-time and pre-spawn callers,
+      mirroring :func:`_apply_plan_bypass_if_available`'s #1286 re-find).
+    - ``session_id`` -- ``TicketTask.session_id == Session.id`` for a row a
+      session has already been stamped onto (post-spawn callers, e.g.
+      ``cw.reconcile.codex_boot`` and ``cw.doctor.loop_health``).
+
+    Both default to ``None``, but at least one is required: every production
+    caller of every function that routes through this helper (in this
+    module, ``cw.codex_background``, and ``cw.doctor.loop_health``) already
+    supplies an identity, so a bare ``(ticket_id, client_name, RUNNING)``
+    match here would only ever serve a caller that skipped disambiguating a
+    duplicate RUNNING row -- the exact hazard #2219 closes. Raises
+    :class:`ValueError` rather than silently falling back to that match.
+
+    Read-only: the caller mutates the returned row and saves *store* itself,
+    under the ``dev_queue_lock()`` it loaded *store* under.
+    """
+    if created_at is None and session_id is None:
+        msg = (
+            "_find_running_row requires created_at or session_id (#2219): "
+            "a bare (ticket_id, client_name, RUNNING) match can mutate the "
+            "wrong duplicate row"
+        )
+        raise ValueError(msg)
+    for stored_task in store.tasks:
+        if (
+            stored_task.ticket_id == ticket_id
+            and stored_task.client == client_name
+            and stored_task.status == QueueItemStatus.RUNNING
+            and (created_at is None or stored_task.created_at == created_at)
+            and (session_id is None or stored_task.session_id == session_id)
+        ):
+            return stored_task
+    return None
+
+
 def _revert_claimed_task_to_pending(
     client_name: str,
     ticket_id: str,
@@ -640,13 +696,14 @@ def _revert_claimed_task_to_pending(
     hook_context_conflict_session_id: str | None = None,
     defer_for: timedelta | None = None,
     expected_session_id: str | None = None,
+    created_at: datetime | None = None,
 ) -> bool:
     """Revert a still-RUNNING claimed task back to PENDING, clearing session_id.
 
     Returns whether a row was actually reverted: ``False`` when no RUNNING row
-    matched, including an ``expected_session_id`` mismatch. Callers that only
-    revert their own just-failed claim can ignore it; a caller that reports
-    the revert (an event, a log line) must gate on it.
+    matched, including an ``expected_session_id`` or ``created_at`` mismatch.
+    Callers that only revert their own just-failed claim can ignore it; a
+    caller that reports the revert (an event, a log line) must gate on it.
 
     Used by both the usage-limit and broad spawn-error paths: the task was
     claimed to RUNNING by :func:`_claim_next_pending` but spawn never
@@ -693,6 +750,12 @@ def _revert_claimed_task_to_pending(
     spawn-failure callers omit it -- they revert their own just-failed claim,
     so there is no snapshot to go stale.
 
+    ``created_at`` (#2219) is the same-tick callers' identity instead: they
+    pass their claimed task's ``created_at`` so a duplicate RUNNING row for
+    the same ``(ticket_id, client)`` is never reverted in their place. Both
+    identities route through :func:`_find_running_row`; in every real call
+    exactly one of them is supplied.
+
     # Why: task.attempts is NOT decremented on the FAILURE paths (no
     # *defer_for*). The increment-at-claim contract is intentional —
     # usage_limit deaths and spawn errors consume real dispatch budget and must
@@ -707,41 +770,38 @@ def _revert_claimed_task_to_pending(
     reverted = False
     with dev_queue_lock():
         store = load_dev_queue()
-        for stored_task in store.tasks:
-            if (
-                stored_task.ticket_id == ticket_id
-                and stored_task.client == client_name
-                and stored_task.status == QueueItemStatus.RUNNING
-                and (
-                    expected_session_id is None
-                    or stored_task.session_id == expected_session_id
+        stored_task = _find_running_row(
+            store,
+            ticket_id,
+            client_name,
+            created_at=created_at,
+            session_id=expected_session_id,
+        )
+        if stored_task is not None:
+            transition_task_status(
+                stored_task,
+                QueueItemStatus.PENDING,
+                unproductive=defer_for is None,
+            )
+            reverted = True
+            stored_task.session_id = None
+            if defer_for is not None:
+                stored_task.attempts = max(0, stored_task.attempts - 1)
+                stored_task.next_eligible_at = datetime.now(UTC) + defer_for
+            if hook_context_conflict_session_id is not None:
+                stored_task.hook_context_conflict_session_id = (
+                    hook_context_conflict_session_id
                 )
-            ):
-                transition_task_status(
-                    stored_task,
-                    QueueItemStatus.PENDING,
-                    unproductive=defer_for is None,
+            if stamp_backoff:
+                stored_task.spawn_error_count += 1
+                delay = min(
+                    _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS
+                    * (2 ** (stored_task.spawn_error_count - 1)),
+                    _SPAWN_ERROR_BACKOFF_CAP_SECONDS,
                 )
-                reverted = True
-                stored_task.session_id = None
-                if defer_for is not None:
-                    stored_task.attempts = max(0, stored_task.attempts - 1)
-                    stored_task.next_eligible_at = datetime.now(UTC) + defer_for
-                if hook_context_conflict_session_id is not None:
-                    stored_task.hook_context_conflict_session_id = (
-                        hook_context_conflict_session_id
-                    )
-                if stamp_backoff:
-                    stored_task.spawn_error_count += 1
-                    delay = min(
-                        _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS
-                        * (2 ** (stored_task.spawn_error_count - 1)),
-                        _SPAWN_ERROR_BACKOFF_CAP_SECONDS,
-                    )
-                    stored_task.next_eligible_at = datetime.now(UTC) + timedelta(
-                        seconds=delay
-                    )
-                break
+                stored_task.next_eligible_at = datetime.now(UTC) + timedelta(
+                    seconds=delay
+                )
         save_dev_queue(store)
     return reverted
 
@@ -754,6 +814,7 @@ def _park_running_task_blocked_on_user(
     breadcrumbs: str,
     expected_session_id: str | None = None,
     unproductive: bool = True,
+    created_at: datetime | None = None,
     codex_orphan_session_id: str | None = None,
 ) -> None:
     """Move a still-RUNNING claimed task to BLOCKED_ON_USER, clearing session_id.
@@ -790,6 +851,12 @@ def _park_running_task_blocked_on_user(
     before any session_id has been stamped, so there is no snapshot to go
     stale.
 
+    ``created_at`` (#2219) is the pre-spawn callers' identity instead: they
+    pass their claimed task's ``created_at`` so a duplicate RUNNING row for
+    the same ``(ticket_id, client)`` is never parked in their place. Both
+    identities route through :func:`_find_running_row`; in every real call
+    exactly one of them is supplied.
+
     Also emits SESSION_NEEDS_ATTENTION (#1257) using the canonical 9-field
     payload shape (see ``_route_scope_gated_approval`` in routing.py), reading
     ``stored_task.session_id``/``stored_task.lane`` before ``session_id`` is
@@ -809,41 +876,38 @@ def _park_running_task_blocked_on_user(
     """
     with dev_queue_lock():
         store = load_dev_queue()
-        for stored_task in store.tasks:
-            if (
-                stored_task.ticket_id == ticket_id
-                and stored_task.client == client_name
-                and stored_task.status == QueueItemStatus.RUNNING
-                and (
-                    expected_session_id is None
-                    or stored_task.session_id == expected_session_id
-                )
-            ):
-                transition_task_status(
-                    stored_task,
-                    QueueItemStatus.BLOCKED_ON_USER,
-                    disposition=disposition,
-                    unproductive=unproductive,
-                )
-                record_event(
-                    OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-                    {
-                        "session_id": stored_task.session_id or "",
-                        "session_name": "",
-                        "client": client_name,
-                        "ticket_id": ticket_id,
-                        "claude_session_id": None,
-                        "paused_status": disposition,
-                        "breadcrumbs": breadcrumbs,
-                        "crashed": False,
-                        "lane": stored_task.lane,
-                    },
-                    correlation_id=ticket_id,
-                )
-                stored_task.session_id = None
-                if codex_orphan_session_id is not None:
-                    stored_task.codex_orphan_session_id = codex_orphan_session_id
-                break
+        stored_task = _find_running_row(
+            store,
+            ticket_id,
+            client_name,
+            created_at=created_at,
+            session_id=expected_session_id,
+        )
+        if stored_task is not None:
+            transition_task_status(
+                stored_task,
+                QueueItemStatus.BLOCKED_ON_USER,
+                disposition=disposition,
+                unproductive=unproductive,
+            )
+            record_event(
+                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                {
+                    "session_id": stored_task.session_id or "",
+                    "session_name": "",
+                    "client": client_name,
+                    "ticket_id": ticket_id,
+                    "claude_session_id": None,
+                    "paused_status": disposition,
+                    "breadcrumbs": breadcrumbs,
+                    "crashed": False,
+                    "lane": stored_task.lane,
+                },
+                correlation_id=ticket_id,
+            )
+            stored_task.session_id = None
+            if codex_orphan_session_id is not None:
+                stored_task.codex_orphan_session_id = codex_orphan_session_id
         save_dev_queue(store)
 
 
@@ -931,6 +995,7 @@ def _codex_capability_gate(
         disposition=probe.diagnosis,
         breadcrumbs=probe.detail,
         unproductive=False,
+        created_at=task.created_at,
     )
     _codex_capability_park_count[0] += 1
     breaker_engaged = (
@@ -962,72 +1027,73 @@ def _stamp_spawn_success(
     PLR statement budget, mirroring :func:`_codex_capability_gate`'s extraction
     for the same reason. Sole caller; it runs after the executor returns, so
     every write here is predicated on a spawn that genuinely succeeded.
+
+    The stored row is re-found by the spawned task's ``created_at`` via
+    :func:`_find_running_row` (#2219), so a duplicate RUNNING row for the same
+    ``(ticket_id, client)`` is never stamped with this session in its place.
     """
     with dev_queue_lock():
         store = load_dev_queue()
-        for stored_task in store.tasks:
-            if (
-                stored_task.ticket_id == task.ticket_id
-                and stored_task.client == client_name
-                and stored_task.status == QueueItemStatus.RUNNING
-            ):
-                stored_task.session_id = session_id
-                stored_task.spawn_error_count = 0
-                stored_task.next_eligible_at = None
-                # #1631: the single write site for the durable "a session was
-                # genuinely spawned for this row" fact. Unconditional and
-                # write-once-to-True -- reaching here IS the proof, and no
-                # revert/requeue path ever clears it. reconcile's
-                # timed-out-merged backstop reads it to tell a usage-limit-only
-                # attempt history (which leaves spawn_error_count at 0, so the
-                # counters alone cannot say) apart from a task that really ran
-                # and shipped.
-                stored_task.ever_spawned = True
-                # #1674: the worktree just proved reusable, so any recorded
-                # hook-context conflict is stale evidence — cleared here
-                # atomically with the other spawn-failure counters.
-                stored_task.hook_context_conflict_session_id = None
-                # #1794: executor.spawn above already wrote the in-memory
-                # task's regressed_into_stage into the new session's
-                # queue_metadata, so the per-arrival marker is consumed.
-                # Clear it so it never leaks into a later, unrelated stage
-                # entry (the false positive the cumulative regress_attempts
-                # counter would have produced).
-                # #1801: this clear is unconditional and runs BEFORE any
-                # reap could ever observe a no-sentinel death, which is
-                # why a spawn that dies silently loses the signal for
-                # good -- evaluated and accepted, see the field's comment
-                # in src/cw/models/tasks.py for the full reasoning.
-                stored_task.regressed_into_stage = None
-                # #1730: stage-gated clear -- unlike regressed_into_stage
-                # (cleared unconditionally at the next spawn), this marker
-                # must survive an intervening non-REVIEW spawn (e.g. Rule
-                # 5a's self-heal regresses to IMPL, not REVIEW) so it is
-                # only consumed when a REVIEW-stage session is actually
-                # about to read the delivered comments.
-                if stored_task.stage == Stage.REVIEW:
-                    stored_task.pending_operator_comment = False
-                # R5: stamp stage_base_ref -- non-fatal on failure
-                try:
-                    head_sha = subprocess.check_output(
-                        [
-                            "git",
-                            "-C",
-                            str(worktree_path),
-                            "rev-parse",
-                            "HEAD",
-                        ],
-                        text=True,
-                        timeout=5,
-                    )
-                    stored_task.stage_base_ref = head_sha.strip()
-                except subprocess.SubprocessError as exc:
-                    _log.warning(
-                        "dispatch: stage_base_ref failed for %s: %s",
-                        task.ticket_id,
-                        exc,
-                    )
-                break
+        stored_task = _find_running_row(
+            store, task.ticket_id, client_name, created_at=task.created_at
+        )
+        if stored_task is not None:
+            stored_task.session_id = session_id
+            stored_task.spawn_error_count = 0
+            stored_task.next_eligible_at = None
+            # #1631: the single write site for the durable "a session was
+            # genuinely spawned for this row" fact. Unconditional and
+            # write-once-to-True -- reaching here IS the proof, and no
+            # revert/requeue path ever clears it. reconcile's
+            # timed-out-merged backstop reads it to tell a usage-limit-only
+            # attempt history (which leaves spawn_error_count at 0, so the
+            # counters alone cannot say) apart from a task that really ran
+            # and shipped.
+            stored_task.ever_spawned = True
+            # #1674: the worktree just proved reusable, so any recorded
+            # hook-context conflict is stale evidence — cleared here
+            # atomically with the other spawn-failure counters.
+            stored_task.hook_context_conflict_session_id = None
+            # #1794: executor.spawn above already wrote the in-memory
+            # task's regressed_into_stage into the new session's
+            # queue_metadata, so the per-arrival marker is consumed.
+            # Clear it so it never leaks into a later, unrelated stage
+            # entry (the false positive the cumulative regress_attempts
+            # counter would have produced).
+            # #1801: this clear is unconditional and runs BEFORE any
+            # reap could ever observe a no-sentinel death, which is
+            # why a spawn that dies silently loses the signal for
+            # good -- evaluated and accepted, see the field's comment
+            # in src/cw/models/tasks.py for the full reasoning.
+            stored_task.regressed_into_stage = None
+            # #1730: stage-gated clear -- unlike regressed_into_stage
+            # (cleared unconditionally at the next spawn), this marker
+            # must survive an intervening non-REVIEW spawn (e.g. Rule
+            # 5a's self-heal regresses to IMPL, not REVIEW) so it is
+            # only consumed when a REVIEW-stage session is actually
+            # about to read the delivered comments.
+            if stored_task.stage == Stage.REVIEW:
+                stored_task.pending_operator_comment = False
+            # R5: stamp stage_base_ref -- non-fatal on failure
+            try:
+                head_sha = subprocess.check_output(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_path),
+                        "rev-parse",
+                        "HEAD",
+                    ],
+                    text=True,
+                    timeout=5,
+                )
+                stored_task.stage_base_ref = head_sha.strip()
+            except subprocess.SubprocessError as exc:
+                _log.warning(
+                    "dispatch: stage_base_ref failed for %s: %s",
+                    task.ticket_id,
+                    exc,
+                )
         save_dev_queue(store)
 
 
@@ -1193,6 +1259,7 @@ def _defer_occupied_claim(
         client.name,
         task.ticket_id,
         defer_for=timedelta(seconds=_OCCUPIED_DEFER_SECONDS),
+        created_at=task.created_at,
     )
     if emit is not None:
         emit(
@@ -1385,6 +1452,7 @@ def _spawn_claimed_task(
                     disposition="dirty_worktree",
                     breadcrumbs=f"{worktree_path_for(client, branch)}: {unsaved}",
                     unproductive=False,
+                    created_at=task.created_at,
                 )
             else:
                 with contextlib.suppress(WorktreeError, OSError):
@@ -1465,7 +1533,9 @@ def _spawn_claimed_task(
             exc.reset_at,
         )
         # Revert the claimed task back to PENDING — spawn never succeeded.
-        _revert_claimed_task_to_pending(client.name, task.ticket_id)
+        _revert_claimed_task_to_pending(
+            client.name, task.ticket_id, created_at=task.created_at
+        )
         return _SpawnOutcome(
             usage_limit_detected=True, usage_limit_reset_at=exc.reset_at
         )
@@ -1490,6 +1560,7 @@ def _spawn_claimed_task(
             task.ticket_id,
             stamp_backoff=True,
             hook_context_conflict_session_id=exc.conflicting_session_id,
+            created_at=task.created_at,
         )
         return _SpawnOutcome(spawn_error=True, error=str(exc))
     except WorktreeOccupiedError as exc:
@@ -1519,7 +1590,12 @@ def _spawn_claimed_task(
             client.name,
             task.ticket_id,
         )
-        _revert_claimed_task_to_pending(client.name, task.ticket_id, stamp_backoff=True)
+        _revert_claimed_task_to_pending(
+            client.name,
+            task.ticket_id,
+            stamp_backoff=True,
+            created_at=task.created_at,
+        )
         return _SpawnOutcome(spawn_error=True, error=str(exc))
 
     return _SpawnOutcome(spawned=True)

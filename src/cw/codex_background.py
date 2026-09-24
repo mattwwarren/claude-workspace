@@ -46,7 +46,7 @@ from cw.events import record_event as _record_orchestrator_event
 from cw.exceptions import ClaimTierArmingError
 from cw.gh import post_issue_comment
 from cw.local_runner import UNEXPECTED_ERROR
-from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.models import OrchestratorEventType
 from cw.models.orchestrator_config import CODEX_TIER_CLAIM_SUPPRESSION
 from cw.review_finding_dispositions import merge_finding_dispositions
 from cw.review_findings import render_review_verdict_envelope
@@ -109,7 +109,7 @@ def _start_daemon_thread(fn: Callable[[], None], *, name: str) -> None:
 
 
 def _stamp_session_id_on_running_task(
-    *, client_name: str, ticket_id: str, session_id: str
+    *, client_name: str, ticket_id: str, session_id: str, created_at: datetime
 ) -> None:
     """Stamp *session_id* onto the matching RUNNING dev-queue row (#1727 R1).
 
@@ -127,20 +127,27 @@ def _stamp_session_id_on_running_task(
     only, no error-counter reset and no stage_base_ref, so backoff semantics
     keep a single owner in claim.py.
 
-    A no-op when no RUNNING row matches: CodexExecutor is reachable outside
-    dispatch (direct construction in tests, a future one-off invocation), and
-    there is nothing to attribute in that case.
+    *created_at* is the spawning task's identity (#2219): the row is re-found
+    via :func:`cw.dispatch.claim._find_running_row`, so a duplicate RUNNING
+    row for the same ``(ticket_id, client)`` is never stamped in its place.
+    Required, with no default, because the one caller always holds the task.
+
+    A no-op when no RUNNING row matches that identity: CodexExecutor is
+    reachable outside dispatch (direct construction in tests, a future one-off
+    invocation), and there is nothing to attribute in that case.
     """
+    # Deferred for the same cycle reason as _revert_claimed_task_to_pending's
+    # import below: claim.py imports cw.executor at module level, which
+    # imports this module.
+    from cw.dispatch.claim import _find_running_row
+
     with dev_queue_lock():
         store = load_dev_queue()
-        for stored_task in store.tasks:
-            if (
-                stored_task.ticket_id == ticket_id
-                and stored_task.client == client_name
-                and stored_task.status == QueueItemStatus.RUNNING
-            ):
-                stored_task.session_id = session_id
-                break
+        stored_task = _find_running_row(
+            store, ticket_id, client_name, created_at=created_at
+        )
+        if stored_task is not None:
+            stored_task.session_id = session_id
         save_dev_queue(store)
 
 
@@ -148,6 +155,7 @@ def _sync_finding_dispositions_to_running_task(
     *,
     client_name: str,
     ticket_id: str,
+    created_at: datetime,
     dispositions: dict[str, FindingDisposition],
 ) -> None:
     """Merge *dispositions* into the matching RUNNING dev-queue row (#1838 R1).
@@ -174,20 +182,21 @@ def _sync_finding_dispositions_to_running_task(
     refused (#2210 round 3): it never lands on the row and never replaces a
     valid entry already there, whatever the caller passed. The caller hands
     over only the enforceable delta and reports the refusals itself.
+
+    *created_at* re-finds the caller's own row exactly as
+    :func:`_stamp_session_id_on_running_task` does (#2219): required, so a
+    duplicate RUNNING row for the same ``(ticket_id, client)`` never receives
+    another row's ledger.
     """
     if not dispositions:
         return
+    # Deferred: same claim.py -> cw.executor -> this module cycle as above.
+    from cw.dispatch.claim import _find_running_row
+
     with dev_queue_lock():
         store = load_dev_queue()
-        matched = next(
-            (
-                stored_task
-                for stored_task in store.tasks
-                if stored_task.ticket_id == ticket_id
-                and stored_task.client == client_name
-                and stored_task.status == QueueItemStatus.RUNNING
-            ),
-            None,
+        matched = _find_running_row(
+            store, ticket_id, client_name, created_at=created_at
         )
         if matched is None:
             return
@@ -745,7 +754,11 @@ def _run_codex_review_and_complete(
         # imports cw.executor at module level, which imports this module.
         from cw.dispatch.claim import _revert_claimed_task_to_pending
 
-        _revert_claimed_task_to_pending(client.name, task.ticket_id, stamp_backoff=True)
+        # expected_session_id (#2219): revert only the row this review's own
+        # session was stamped onto, never a duplicate RUNNING sibling.
+        _revert_claimed_task_to_pending(
+            client.name, task.ticket_id, stamp_backoff=True, expected_session_id=sid
+        )
     finally:
         # #1742: fires on every exit path — the return out of ``try``, the
         # return out of ``except``, and a BaseException the except clause does
