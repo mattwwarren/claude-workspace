@@ -71,17 +71,29 @@ DEFAULT_PRUNE_OLDER_THAN_DAYS: int = 90
 
 
 def _validate_stage_in_pipeline(
-    stage: Stage, stages: list[Stage], *, client: str
+    stage: Stage, stages: list[Stage], *, client: str, lane: str | None = None
 ) -> None:
     """Raise ``RequeueStageError`` iff ``stage`` is not a member of ``stages``.
 
     Shared by ``add_ticket`` (below) and ``_apply_requeue_stage``
     (``cw.dev_queue.requeue``) — the "is this stage actually in *this
-    client's* configured pipeline" check, extracted so the two call sites
-    can never drift apart. See GitHub #1682.
+    client's* (or lane's) configured pipeline" check, extracted so the two
+    call sites can never drift apart. See GitHub #1682, #2216.
+
+    ``lane``, when supplied, names the lane in the error message and lists
+    the resolved ``stages`` — callers pass ``task.lane`` so the raised error
+    never falls back to describing the client default when a lane override
+    is actually what was checked.
     """
     if stage not in stages:
-        msg = f"Stage '{stage.value}' is not in the pipeline for client '{client}'."
+        if lane is not None:
+            msg = (
+                f"Stage '{stage.value}' is not in the pipeline for lane"
+                f" '{lane}' of client '{client}'. Lane pipeline stages:"
+                f" {stages}."
+            )
+        else:
+            msg = f"Stage '{stage.value}' is not in the pipeline for client '{client}'."
         raise RequeueStageError(msg)
 
 
@@ -123,8 +135,12 @@ def add_ticket(task: TicketTask) -> bool:
                     f" Run: cw lane add {task.client} {task.lane}"
                 )
                 raise LaneNotFoundError(msg)
-            stages = client_cfg.pipeline.stages
-            _validate_stage_in_pipeline(task.stage, stages, client=task.client)
+            from cw.executor import resolve_pipeline_stages
+
+            stages = resolve_pipeline_stages(task, client_cfg)
+            _validate_stage_in_pipeline(
+                task.stage, stages, client=task.client, lane=task.lane
+            )
             if task.stage != DEFAULT_STAGE:
                 _raise_stage_high_water(task, stages, task.stage)
         store = load_dev_queue()
