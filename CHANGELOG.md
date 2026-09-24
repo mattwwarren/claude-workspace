@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`external_state_block` is a new `AUTO_DEV_RESULT` blocker reason for a `/prep-pr` BLOCK whose root cause is state external to the branch (#2320):** a base-branch-state classifier in `auto-dev-finalize.md` now inspects a collapsed `/prep-pr` BLOCK for evidence the failure came from `origin/main`, not the branch's own diff, before defaulting to the generic `agent_block`. It parks `BLOCKED_ON_USER` at FINALIZE without regressing to IMPL — regressing wasted an attempt IMPL could never fix, since the branch's own code wasn't the problem (fixes the #2304 incident class).
+
 ### Fixed
 
 - **A never-pushed reused worktree with no commits of its own is no longer left permanently stale (#2328):** the reuse refresh's `BRANCH_ABSENT` case previously stopped unconditionally, even when the branch had zero commits beyond `origin/<default_branch>` and that default branch had moved on. It now fetches `origin/<default_branch>` and fast-forwards to it (through the same occupancy and `--ff-only` safety as the pushed-branch path) when the branch has no commits of its own, and leaves it untouched with a friction note when it does.
