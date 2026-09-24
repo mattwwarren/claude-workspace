@@ -44,7 +44,7 @@ if TYPE_CHECKING:
         OrchestratorConfig,
     )
     from cw.native_daemon import NativeDaemonClient
-    from cw.worktree import FetchWarningKey
+    from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
 from cw.dispatch.gating import (
     _apply_disk_pressure_gate,
     _apply_ssh_key_gate,
@@ -277,6 +277,7 @@ def _dispatch_client_with_host_budget(
     emit: Callable[[str], None] | None,
     usage_limited_until: datetime | None,
     host_capacity: HostCapacityContext,
+    warned_unresolvable: set[UnresolvablePathWarningKey] | None,
 ) -> tuple[_ClientDispatchResult, HostCapacityContext]:
     """Wrap :func:`_dispatch_client_lanes` with the host-capacity gate (#1444).
 
@@ -300,6 +301,7 @@ def _dispatch_client_with_host_budget(
         resolved_native_daemon=resolved_native_daemon,
         parent=parent,
         emit=emit,
+        warned_unresolvable=warned_unresolvable,
         usage_limited_until=usage_limited_until,
         host_capacity=host_capacity,
     )
@@ -467,6 +469,7 @@ def dispatch_tick(
     warned_collision: set[frozenset[str]] | None = None,
     warned_ssh_key: set[str] | None = None,
     warned_disk_pressure: set[str] | None = None,
+    warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
     usage_limited_until: Mapping[str, datetime] | None = None,
     auto_ff: bool = True,
     client_filter: str | None = None,
@@ -514,6 +517,12 @@ def dispatch_tick(
             dispatcher run (#1887). Keyed per-client, not fleet-wide like
             ``warned_ssh_key``: each client's ``worktree_base`` may sit on
             its own mount. Caller owns the set; mutated in-place.
+        warned_unresolvable: Mutable set of ``(kind, path, error)`` keys
+            (:data:`cw.worktree.UnresolvablePathWarningKey`) that have already
+            received a WARNING for an unresolvable session/worker occupancy
+            record during this dispatcher run. Suppresses repeats of the SAME
+            broken record; a different record -- a different path, side, or
+            error -- still warns. Caller owns the set; mutated in-place.
         usage_limited_until: Per-client back-off deadlines, keyed by client
             name (#1409). A client with a future deadline is skipped with
             ``skip_reason=USAGE_LIMITED``; every other client dispatches
@@ -737,6 +746,7 @@ def dispatch_tick(
             emit=emit,
             usage_limited_until=windows.get(client.name),
             host_capacity=host_capacity,
+            warned_unresolvable=warned_unresolvable,
         )
         spawned += client_result.spawned
         if client_result.usage_limit_detected:
