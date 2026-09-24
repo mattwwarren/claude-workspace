@@ -3165,6 +3165,88 @@ class TestClaimRefusesOccupiedWorktree:
             for line in lines
         ), lines
 
+    def test_occupied_after_fast_forward_leaves_head_at_the_new_sha(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2233: the reuse fast-forward inside ``create_worktree`` (and, for a
+        repo with submodules, its own post-ff submodule-sync occupancy
+        re-check) can move HEAD for real before ``WorktreeOccupiedError`` is
+        raised -- the exception no longer implies "HEAD untouched"
+        (``_raise_if_occupied``'s and this module's own wording said so
+        before this ticket; see Touch-point Contract). Simulate that
+        ordering directly: seed the tree with a real ``create_worktree``
+        call, land a real commit standing in for the fast-forward's own HEAD
+        move, then patch ``create_worktree`` to raise exactly as the real
+        one now can from its post-ff occupancy re-check. Assert
+        ``_spawn_claimed_task`` still just defers -- no spawn, PENDING -- and,
+        the point of this test, that HEAD is left at the moved SHA, not
+        rolled back or otherwise touched by the deferral path.
+        """
+        from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
+        from cw.exceptions import WorktreeOccupiedError
+        from cw.worktree import create_worktree
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        daemon = FakeNativeDaemonClient()
+        branch = f"{sample_client_config.feature_branch_prefix}/{self._TICKET}"
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+        old_sha = git_in(worktree, "rev-parse", "HEAD")
+        git_in(
+            worktree,
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=cw test",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "simulated fast-forward",
+        )
+        new_sha = git_in(worktree, "rev-parse", "HEAD")
+        assert new_sha != old_sha
+
+        def _raise_occupied_after_ff(*_args: object, **_kwargs: object) -> Path:
+            msg = "simulated: occupied after the fast-forward landed"
+            raise WorktreeOccupiedError(
+                msg,
+                path=worktree,
+                reason="live session appeared during submodule sync",
+            )
+
+        monkeypatch.setattr(
+            "cw.dispatch.claim.create_worktree", _raise_occupied_after_ff
+        )
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        task, _skipped = _claim_next_pending(
+            "test-client",
+            lane="default",
+            client=sample_client_config,
+            config=simple_config,
+        )
+        assert task is not None
+
+        outcome = _spawn_claimed_task(
+            task,
+            sample_client_config,
+            resolved_native_daemon=daemon,
+            parent=None,
+            emit=None,
+        )
+
+        assert outcome.occupied is True
+        assert outcome.spawned is False
+        assert outcome.spawn_error is False
+        assert daemon.spawn_calls == []
+        # The fast-forward is never undone by the deferral path.
+        assert git_in(worktree, "rev-parse", "HEAD") == new_sha
+        task_after = load_dev_queue().tasks[0]
+        assert task_after.status == QueueItemStatus.PENDING
+        assert task_after.session_id is None
+
     def test_a_deferred_head_of_line_ticket_does_not_starve_the_next_one(
         self,
         tmp_dispatch_dirs: Path,

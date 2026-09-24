@@ -6,6 +6,7 @@ import errno
 import json
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -46,7 +47,12 @@ from cw.worktree import (
 )
 from cw.worktree_gc import _live_worktree_paths
 from tests._worktree_helpers import patch_worktree
-from tests.conftest import _symlink_loop, git_in, push_commit_to_origin
+from tests.conftest import (
+    _clean_git_env,
+    _symlink_loop,
+    git_in,
+    push_commit_to_origin,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1534,6 +1540,118 @@ def _seed_behind(
     return client, wt, workspace, old_sha, new_sha
 
 
+def _make_bare_repo_with_commit(tmp_path: Path, name: str) -> Path:
+    """Create a bare repo at ``tmp_path/<name>.git`` seeded with one commit.
+
+    Serves as a submodule's own origin for the reuse-refresh submodule-sync
+    tests (#2233).
+    """
+    seed = tmp_path / f"{name}-seed"
+    subprocess.run(
+        ["git", "init", "-b", "main", str(seed)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    (seed / "README.md").write_text("sub\n", encoding="utf-8")
+    git_in(seed, "add", "README.md")
+    git_in(
+        seed,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=cw test",
+        "commit",
+        "-m",
+        "seed",
+    )
+    bare = tmp_path / f"{name}.git"
+    subprocess.run(
+        ["git", "clone", "--bare", str(seed), str(bare)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    return bare
+
+
+def _push_submodule_add_to_origin(
+    origin: Path, branch: str, work_dir: Path, sub_origin: Path, sub_name: str = "sub"
+) -> str:
+    """Push a commit to *branch* on *origin* that adds *sub_origin* as a submodule.
+
+    Mirrors :func:`push_commit_to_origin`'s side-clone convention. Passes
+    ``protocol.file.allow=always`` on the ``submodule add`` invocation only:
+    git 2.38+ blocks local/``file://`` submodule transports by default (the
+    CVE-2022-39253 hardening); both origins here are synthetic tmp-path
+    repos, so this carries no real security relaxation. The *production*
+    ``git submodule update`` call this exercises reads the allowance from
+    repo config instead (see ``_seed_behind_with_submodule``).
+    """
+    if not work_dir.exists():
+        subprocess.run(
+            ["git", "clone", str(origin), str(work_dir)],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_clean_git_env(),
+        )
+    git_in(work_dir, "fetch", "origin")
+    git_in(work_dir, "checkout", "-B", branch, f"origin/{branch}")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(work_dir),
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            str(sub_origin),
+            sub_name,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    git_in(
+        work_dir,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=cw test",
+        "commit",
+        "-m",
+        "add submodule",
+    )
+    git_in(work_dir, "push", "origin", branch)
+    return git_in(work_dir, "rev-parse", "HEAD")
+
+
+def _seed_behind_with_submodule(
+    tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> tuple[ClientConfig, Path, Path, str, str, Path]:
+    """``_seed_behind`` plus an upstream commit that adds a submodule (#2233).
+
+    Returns ``(client, wt, workspace, old_sha, new_sha, sub_origin)``. Sets
+    ``protocol.file.allow=always`` on *workspace*'s repo config (shared by the
+    worktree ``wt`` via the common ``.git`` dir) so the PRODUCTION
+    ``git submodule update --init --recursive`` call -- which passes no
+    ``-c`` flags of its own -- can clone the synthetic local submodule origin.
+    """
+    client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
+    git_in(workspace, "config", "protocol.file.allow", "always")
+    old_sha = git_in(wt, "rev-parse", "HEAD")
+    sub_origin = _make_bare_repo_with_commit(tmp_path, "sub")
+    new_sha = _push_submodule_add_to_origin(
+        origin, _REUSE_BRANCH, tmp_path / "side-submodule", sub_origin
+    )
+    return client, wt, workspace, old_sha, new_sha, sub_origin
+
+
 def _refresh_with_debug(client: ClientConfig, caplog: pytest.LogCaptureFixture) -> Path:
     caplog.clear()  # drop seed-phase records
     with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
@@ -1608,6 +1726,115 @@ def _debug_reasons(caplog: pytest.LogCaptureFixture) -> list[str]:
         for r in _cw_worktree_records(caplog, logging.DEBUG)
         if r.levelno == logging.DEBUG
     ]
+
+
+class TestReuseSubmoduleSync:
+    """#2233: a reuse fast-forward that brings in ``.gitmodules`` changes syncs
+    submodules; one that doesn't leaves repos without submodules untouched."""
+
+    def test_submodule_sync_after_fast_forward_that_adds_gitmodules(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client, wt, _workspace, old_sha, new_sha, _sub = _seed_behind_with_submodule(
+            tmp_path, make_git_repo
+        )
+        assert old_sha != new_sha
+
+        result = create_worktree(
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+        )
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+        assert (wt / ".gitmodules").exists()
+        assert (wt / "sub" / "README.md").exists()
+
+    def test_no_submodule_call_without_gitmodules(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client, wt, _workspace, _old, new_sha = _seed_behind(tmp_path, make_git_repo)
+        calls = _spy_git(monkeypatch)
+
+        result = create_worktree(
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+        )
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+        assert not any(args and args[0] == "submodule" for args, _cwd in calls)
+
+    def test_occupancy_change_after_ff_aborts_before_submodule_sync(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A session appearing between the fast-forward and the submodule sync
+        aborts the WHOLE refresh -- the ff already moved HEAD (not undone),
+        but the submodule sync never runs and the caller gets
+        ``WorktreeOccupiedError``, exactly the "abort" contract #2213 gives a
+        caller that would otherwise spawn/dispatch/mutate an occupied tree."""
+        client, wt, workspace, _old_sha, new_sha, _sub = _seed_behind_with_submodule(
+            tmp_path, make_git_repo
+        )
+
+        def merge_then_occupy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            result = _run_git(*args, cwd=cwd, check=check)
+            if args and args[0] == "merge":
+                _seed_session(workspace, wt, SessionStatus.ACTIVE)
+            return result
+
+        patch_worktree(monkeypatch, "_run_git", merge_then_occupy)
+
+        with (
+            caplog.at_level(logging.DEBUG, logger="cw.worktree"),
+            pytest.raises(WorktreeOccupiedError),
+        ):
+            create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
+
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha  # ff not undone
+        assert not (wt / "sub" / "README.md").exists()  # sync never ran
+        assert any("submodule sync skipped" in m for m in _debug_reasons(caplog))
+
+    def test_submodule_sync_failure_is_reported_as_friction_and_does_not_abort(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client, wt, _workspace, _old_sha, new_sha, sub_origin = (
+            _seed_behind_with_submodule(tmp_path, make_git_repo)
+        )
+        shutil.rmtree(sub_origin)  # submodule clone will fail: origin is gone
+        report = ReuseRefreshReport()
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            result = create_worktree(
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh_on_reuse=True,
+                refresh_report=report,
+            )
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha  # ff still landed
+        assert not (wt / "sub" / "README.md").exists()  # sync failed, no clone
+        assert len(report.notes) == 1
+        assert "submodule sync" in report.notes[0]
+        assert str(wt) in report.notes[0]
+        assert any(
+            "submodule sync" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.WARNING)
+        )
 
 
 class TestReuseOccupancyRosterAndPaths:
