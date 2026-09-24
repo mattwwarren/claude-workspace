@@ -64,6 +64,9 @@ class CompletionReason(StrEnum):
     CRASHED = "crashed"
     NORMAL = "normal"
     TIMED_OUT = "timed_out"
+    # GitHub #2324 — the worker's turn ended on a usage-limit message. Not a
+    # crash: the session did its work up to the limit.
+    USAGE_LIMITED = "usage_limited"
 
 
 class SessionOrigin(StrEnum):
@@ -127,6 +130,10 @@ class ReapReason(StrEnum):
     PHANTOM_SURFACE = "phantom_surface"
     IDLE_STALL = "idle_stall"
     USAGE_LIMIT_CUTOFF = "usage_limit_cutoff"
+    # GitHub #2324 — a still-roster-present worker whose transcript tail is a
+    # usage-limit message with no sentinel. Distinct from USAGE_LIMIT_CUTOFF,
+    # which names the roster-absent salvage path.
+    USAGE_LIMIT_MID_TURN = "usage_limit_mid_turn"
     RETRY_CAP_PARKED = "retry_cap_parked"
     STALLED_RETRY_CAP_PARKED = "stalled_retry_cap_parked"
     WALL_CLOCK_BUDGET = "wall_clock_budget"

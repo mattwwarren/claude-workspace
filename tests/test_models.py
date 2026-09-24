@@ -29,6 +29,7 @@ from cw.models import (
     PrState,
     QueueItemStatus,
     ReapPolicy,
+    ReapReason,
     ReasoningEffort,
     Session,
     SessionPurpose,
@@ -40,6 +41,7 @@ from cw.models import (
     WatchedPr,
 )
 from cw.review_finding_dispositions import FindingDisposition
+from tests.conftest import _make_daemon_session
 
 
 class TestSessionPurpose:
@@ -539,9 +541,33 @@ class TestCompletionReason:
         assert CompletionReason.CRASHED.value == "crashed"
         assert CompletionReason.NORMAL.value == "normal"
         assert CompletionReason.TIMED_OUT.value == "timed_out"
+        assert CompletionReason.USAGE_LIMITED.value == "usage_limited"
 
     def test_all_values(self) -> None:
-        assert len(CompletionReason) == 5
+        assert len(CompletionReason) == 6
+
+    def test_usage_limited_round_trips_on_session(self) -> None:
+        """#2324: a mid-turn usage-limit close persists and reloads intact."""
+        session = _make_daemon_session(
+            status=SessionStatus.COMPLETED,
+            completed_reason=CompletionReason.USAGE_LIMITED,
+            reap_reason=ReapReason.USAGE_LIMIT_MID_TURN,
+        )
+
+        dumped = session.model_dump(mode="json")
+        restored = Session.model_validate(dumped)
+
+        assert dumped["completed_reason"] == "usage_limited"
+        assert dumped["reap_reason"] == "usage_limit_mid_turn"
+        assert restored.completed_reason is CompletionReason.USAGE_LIMITED
+        assert restored.reap_reason is ReapReason.USAGE_LIMIT_MID_TURN
+
+
+class TestReapReasonUsageLimitMidTurn:
+    def test_value_distinct_from_terminal_cutoff(self) -> None:
+        """#2324: the roster-present mid-turn path owns its own reap reason."""
+        assert ReapReason.USAGE_LIMIT_MID_TURN.value == "usage_limit_mid_turn"
+        assert ReapReason.USAGE_LIMIT_MID_TURN != ReapReason.USAGE_LIMIT_CUTOFF
 
 
 class TestOrchestratorConfigLegacyDefault:

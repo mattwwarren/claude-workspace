@@ -1057,6 +1057,64 @@ def test_detect_usage_limit_matched_at_is_last_matching_record_timestamp(
     assert detection.transcript_tail_at == datetime.fromisoformat(t3)
 
 
+def test_detect_usage_limit_matched_text_is_last_matching_record_text(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """matched_text carries the LAST matching record's text, even untimestamped
+    (#2324: feeds parse_usage_limit_reset without a second transcript scan)."""
+    from cw.reconcile import _detect_usage_limit
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-matched-text"
+    sess = _mk_headless_daemon_session("matched-text", worktree, started_at)
+
+    last_text = "You've hit your weekly limit · resets Sep 26, 11pm"
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _ul_record(_UL_TEXT, "2026-01-01T00:00:10+00:00"),
+            _ul_record("continuing work", "2026-01-01T00:00:20+00:00"),
+            _ul_record(last_text),
+        ],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    detection = _detect_usage_limit(sess)
+    assert detection.detected is True
+    assert detection.matched_text == last_text
+    assert detection.matched_at == datetime.fromisoformat("2026-01-01T00:00:10+00:00")
+
+
+def test_detect_usage_limit_matched_text_none_when_nothing_matched(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No usage-limit match leaves matched_text at its None default (#2324)."""
+    from cw.reconcile import _detect_usage_limit
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-matched-none"
+    sess = _mk_headless_daemon_session("matched-none", worktree, started_at)
+    transcript = _write_transcript_records(
+        home, worktree, [_ul_record("all fine", "2026-01-01T00:00:10+00:00")]
+    )
+    _stamp_after_start(transcript, started_at)
+
+    assert _detect_usage_limit(sess).matched_text is None
+
+
 def test_detect_usage_limit_transcript_tail_at_tracks_last_record_even_when_unmatched(
     tmp_config_dir: Path,
     tmp_path: Path,

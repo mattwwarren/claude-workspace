@@ -281,6 +281,11 @@ _STALLED_CAP_PARKED_REASON = "stalled_retry_cap_parked"
 # Not _NEEDS_SALVAGE_REASON: that constant is historical (its producer was
 # deleted by ADR-0014) and new detection must not be wired into it.
 _STOPPED_WITHOUT_SENTINEL_REASON = "stopped_without_sentinel"
+# Disposition stamped (and paused_status written to the SESSION_NEEDS_ATTENTION
+# event) when a still-roster-present worker's transcript tail is a usage-limit
+# message with no sentinel (GitHub #2324). Stamped on the BLOCKED_ON_USER park
+# a non-auto reap_policy routes to; the auto branch reverts to PENDING instead.
+_USAGE_LIMITED_MID_TURN_REASON = "usage_limited_mid_turn"
 # The 6-member reap-eligible disposition base shared verbatim by
 # concierge.py's _FALSE_PARK_ELIGIBLE_DISPOSITIONS (recipe 1: false-park
 # requeue) and escalation.py's _ELIGIBLE_DISPOSITIONS (BLOCKED_ON_USER
@@ -850,11 +855,14 @@ class UsageLimitDetection(NamedTuple):
     :func:`_last_content_entry_timestamp`; ``None`` when no record has a
     parseable timestamp. The recency gate (:func:`_usage_limit_is_recent`)
     compares the two so a stale limit message is not mistaken for a live cutoff.
+    ``matched_text`` is the LAST matching record's text, timestamped or not, so
+    a caller can parse its reset time without a second scan (#2324).
     """
 
     detected: bool
     matched_at: datetime | None
     transcript_tail_at: datetime | None
+    matched_text: str | None = None
 
 
 def _parse_iso_timestamp(raw: object) -> datetime | None:
@@ -911,8 +919,9 @@ def _detect_usage_limit(session: Session) -> UsageLimitDetection:
     record's text matched :data:`USAGE_LIMIT_RE`, ``matched_at`` the LAST
     matching record's timestamp (last-match-wins among records with a parseable
     timestamp), ``transcript_tail_at`` the transcript's last content-bearing
-    timestamp. Uses :func:`_locate_session_transcript` for precise per-session
-    lookup (surface_ref-prefix glob, #541). Never raises; returns an all-empty
+    timestamp, ``matched_text`` the LAST matching record's text. Uses
+    :func:`_locate_session_transcript` for precise per-session lookup
+    (surface_ref-prefix glob, #541). Never raises; returns an all-empty
     detection when the project dir is absent, no matching .jsonl exists, or the
     transcript predates the session start.
     """
@@ -921,17 +930,18 @@ def _detect_usage_limit(session: Session) -> UsageLimitDetection:
         return UsageLimitDetection(
             detected=False, matched_at=None, transcript_tail_at=None
         )
-    detected = False
+    matched_text: str | None = None
     matched_at: datetime | None = None
     for ts, text in _iter_assistant_records(transcript):
         if USAGE_LIMIT_RE.search(text):
-            detected = True
+            matched_text = text  # last-match-wins
             if ts is not None:
                 matched_at = ts  # last-match-wins
     return UsageLimitDetection(
-        detected=detected,
+        detected=matched_text is not None,
         matched_at=matched_at,
         transcript_tail_at=_last_content_entry_timestamp(transcript),
+        matched_text=matched_text,
     )
 
 
