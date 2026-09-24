@@ -6,9 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.53.0] - 2026-09-24
+
 ### Added
 
 - **A new `cw background-tool-guard-pre` PreToolUse hook refuses backgrounded Bash calls and the Monitor tool in headless workers (#2303):** three Stage-2 impl subagents (#2250, #2280, #2275) wedged the way #2251 fixed only for `/prep-pr`: they ended a turn waiting on a `run_in_background: true` Bash call or a Monitor'd task, and a headless DAEMON session has no completion-notification path for either (the Stop hook's `background_tasks` tracks only Agent-tool spawns, ADR-0003). The guard runs as the third command on every dispatched worktree's `"Bash"` matcher and on a new `"Monitor"` matcher, refuses both shapes with exit 2 in headless workers only, and names the sanctioned retry in its reason: a foreground `timeout`-wrapped call, or the #2291 detached-launch-plus-bounded-poll pattern for work over 600s. Every refusal records a new `guard.background_tool_refused` event (tool name, client, lane, ticket, and the calling `agent_id` when the payload carries one). Default-on, fail-open on any shape it cannot classify, and switchable per lane or globally via the new `background_tool_guard_enabled` config key. `active_headless_context`, `enforce` and `_extract_bash_command` moved into `cw.cli._hook_io` so the three PreToolUse guards share them.
+- **A CI gate now freezes released CHANGELOG sections (#2304):** `.claude/scripts/check_changelog_frozen.py` checks `CHANGELOG.md` against the reachable release tags from `[tool.cw.changelog_freeze].since_tag` (`v1.51.0`) onward. Every tag keeps exactly one `## [X.Y.Z]` heading whose body matches the copy the tag captured. At most one untagged version section may exist, and it must be the release in progress, directly under `[Unreleased]` and matching `pyproject.toml`'s version. `[Unreleased]` must exist and come first, and no heading may repeat. It runs as quality gate 7, in CI with `--require-tags` (a checkout without tags fails loudly) and as a pre-commit hook (without tags it warns and passes). Merge resolutions had corrupted released sections six times on 2026-09-23, once through a conflict-free three-way merge that duplicated a heading. The gate caught the sixth before it had itself merged.
 
 ## [1.52.0] - 2026-09-23
 
