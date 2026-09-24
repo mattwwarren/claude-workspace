@@ -276,8 +276,7 @@ def test_render_bundle_path_absolute_fallback_when_outside_home(
     monkeypatch.setattr(_Path, "home", lambda: other_home)
 
     bundle = diagnostics_bundle_dir("sid-outside-home")
-    with pytest.raises(ValueError):
-        bundle.relative_to(other_home)
+    assert not str(bundle).startswith(str(other_home))
 
     rendered = render_bundle_path("sid-outside-home")
     assert rendered == str(bundle)
