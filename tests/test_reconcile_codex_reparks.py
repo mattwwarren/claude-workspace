@@ -521,6 +521,32 @@ def test_session_resumed_after_the_park_is_never_closed(
         assert _task().status is QueueItemStatus.PENDING
 
 
+def test_wrong_client_link_is_cleared_never_closed_or_requeued(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2307 review round 4: the linked session belongs to another client than
+    the task — a wrong or stale link, never a park this row may act on. Only
+    the link is cleared; the session (another client's live process) is never
+    closed and the row never requeues. No process scan runs: the mismatch is
+    caught before disposition is ever resolved."""
+    _seed_parked(tmp_config_dir, tmp_path, make_git_repo)
+    state = load_state()
+    state.sessions[0].client = _OTHER_CLIENT
+    save_state(state)
+    calls = _spy_process_iter(monkeypatch)
+
+    assert _run(auto=True) == []
+
+    assert calls == []
+    _assert_session_active()
+    _assert_left_parked_and_unlinked()
+    assert _completed_events("test-reparks-wrong-client-completed") == []
+    assert _requeued_events("test-reparks-wrong-client-requeued") == []
+
+
 def test_row_without_linkage_field_is_ignored(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -784,6 +810,38 @@ def test_closing_a_session_that_vanished_since_detect_still_decides_the_row(
 
     assert _completed_events("test-reparks-vanished-completed") == []
     _assert_left_parked_and_unlinked()
+
+
+def test_session_resumed_between_detect_and_act_is_never_closed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """#2307 review round 4: detect's decision can go stale before act runs
+    under lock. A resume landing after detect but before act is re-checked
+    against the freshly reloaded record and left alone — never closed, never
+    requeued — exactly as a resume caught at detect time already is."""
+    _, session = _seed_parked(tmp_config_dir, tmp_path, make_git_repo)
+    candidate = _ReparkCandidate(
+        ticket_id=_TICKET,
+        client=_CLIENT,
+        orphan_session_id=session.id,
+        stage=Stage.REVIEW,
+        disposition=_OrphanDisposition(
+            should_requeue=True, reason=CODEX_ORPHAN_CLEAN_REQUEUE_REASON
+        ),
+    )
+    state = load_state()
+    state.sessions[0].resumed_at = _NOW
+    save_state(state)
+
+    with sessions_lock():
+        assert _act_on_live_writer_repark_candidates([candidate], now=_NOW) == []
+
+    _assert_session_active()
+    _assert_left_parked_and_unlinked()
+    assert _completed_events("test-reparks-resumed-between-completed") == []
+    assert _requeued_events("test-reparks-resumed-between-requeued") == []
 
 
 def test_dispatch_tick_reconciles_a_live_writer_park(

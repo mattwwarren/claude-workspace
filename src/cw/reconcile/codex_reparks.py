@@ -100,6 +100,7 @@ CODEX_ORPHAN_CLEAN_REQUEUE_REASON_AT_RECONCILE = (
 _LIVE_WRITER_RESCAN_BACKOFF_SECONDS = 300
 
 _STALE_SESSION_RESUMED = "it was resumed after the park"
+_STALE_SESSION_WRONG_CLIENT = "it belongs to a different client than the task"
 
 
 @dataclass(frozen=True)
@@ -134,9 +135,16 @@ def _stale_link_reason(session: Session | None, task: TicketTask) -> str | None:
     session in place), so a session resumed after the park is a new live
     process under the old id. ``completed_at`` is the park time:
     ``transition_task_status`` stamps it on the BLOCKED_ON_USER transition.
+    The client check (#2307 review round 4) catches a wrong or stale link
+    pointing at another client's session — an identity mismatch, never a
+    session this row is allowed to close or requeue on. Callable a second
+    time in the act phase against a freshly reloaded ``session``/``task`` to
+    catch a resume landing between detect and act.
     """
     if session is None:
         return _STALE_SESSION_GONE
+    if session.client != task.client:
+        return _STALE_SESSION_WRONG_CLIENT
     if session.resumed_at is not None and (
         task.completed_at is None or session.resumed_at > task.completed_at
     ):
@@ -212,29 +220,48 @@ def _clear_link(task: TicketTask) -> None:
 
 
 def _close_unless_terminal(
-    session_id: str, ticket_id: str, disposition: _OrphanDisposition
-) -> None:
-    """Close the orphaned session with its audit event, unless already closed.
+    session_id: str, task: TicketTask, disposition: _OrphanDisposition
+) -> bool:
+    """Close the orphaned session with its audit event; False if the link
+    went stale since detect (#2307 review round 4) — never closed or counted.
 
-    Any non-terminal status closes, not just ACTIVE/IDLE: an orphan that went
+    Re-runs ``_stale_link_reason`` against the freshly reloaded session
+    before closing anything: a session resumed, gone, or re-linked to another
+    client between the detect and act phases is the same staleness detect
+    already screens for, and closing (or requeueing past) it here would
+    finish acting on a decision the fresh record no longer supports. Any
+    non-terminal status closes, not just ACTIVE/IDLE: an orphan that went
     BACKGROUNDED after the park still holds its client-ceiling slot, and
     requeueing past it would recreate the leak this sweep exists to remove
     (#2307 review round 1). Caller holds ``sessions_lock`` (ambient) and
-    ``dev_queue_lock``. An already-terminal session is the crash-recovery
-    case: its audit event was recorded when it closed, so it gets no second
-    one.
+    ``dev_queue_lock``. An already-terminal, non-stale session is the
+    crash-recovery case: its audit event was recorded when it closed, so it
+    gets no second one, and the caller still proceeds with *disposition*.
     """
     state = load_state()
     session = next((s for s in state.sessions if s.id == session_id), None)
-    if session is None or session.status in TERMINAL_SESSION_STATUSES:
-        return
+    stale_reason = _stale_link_reason(session, task)
+    if stale_reason is not None:
+        _log.warning(
+            "codex_reparks: not closing %s/%s's session %s: %s",
+            task.client,
+            task.ticket_id,
+            session_id,
+            stale_reason,
+        )
+        return False
+    if session is None:  # unreachable: _stale_link_reason(None, ...) is never None
+        return False
+    if session.status in TERMINAL_SESSION_STATUSES:
+        return True
     _close_session_audited(
         state,
         session,
-        ticket_id,
+        task.ticket_id,
         disposition,
         close_reason=CODEX_ORPHAN_CLOSE_REASON_AT_RECONCILE,
     )
+    return True
 
 
 def _apply_decision(
@@ -262,9 +289,15 @@ def _apply_decision(
             seconds=_LIVE_WRITER_RESCAN_BACKOFF_SECONDS
         )
         return False
-    _close_unless_terminal(
-        candidate.orphan_session_id, candidate.ticket_id, disposition
+    still_linked = _close_unless_terminal(
+        candidate.orphan_session_id, task, disposition
     )
+    if not still_linked:
+        # The link went stale between detect and act (resumed, gone, or
+        # re-linked to another client): don't close or requeue, exactly as
+        # the detect-time stale branch above.
+        _clear_link(task)
+        return False
     if disposition.should_requeue:
         # Clears the link and backoff too (transition_task_status's
         # unconditional clear). BLOCKED_ON_USER -> PENDING is not a RUNNING
