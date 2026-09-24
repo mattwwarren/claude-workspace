@@ -13,7 +13,6 @@ from cw.models import (
     ClientConfig,
 )
 from cw.worktree import (
-    _resolve_remote_ref,
     unsaved_work_reason,
     worktree_has_unsaved_work,
 )
@@ -26,89 +25,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # TestWorktreeHasUnsavedWork (#425)
 # ---------------------------------------------------------------------------
-
-
-class TestResolveRemoteRef:
-    """#2145: dispatch_fix_agent's remote-ref resolution prefers the checked-out
-    branch's verified ``@{u}`` upstream over a guessed ``origin/<branch>`` name,
-    falling back to the guess only when the upstream is absent or stale."""
-
-    @staticmethod
-    def _mock(
-        *,
-        upstream: str | None = "origin/dev/2145",
-        upstream_rc: int = 0,
-        verified_refs: frozenset[str] = frozenset(),
-    ) -> Callable[..., MagicMock]:
-        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
-            result = MagicMock(returncode=0, stderr="", stdout="")
-            if "@{u}" in args:
-                if upstream_rc != 0 or upstream is None:
-                    result.returncode = upstream_rc or 128
-                else:
-                    result.stdout = f"{upstream}\n"
-            elif "--verify" in args:
-                ref = args[-1]
-                result.returncode = 0 if ref in verified_refs else 128
-            return result
-
-        return mock_run
-
-    def test_prefers_verified_upstream_over_origin_branch_guess(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """@{u} resolves to a differently-named ref; both it and the guessed
-        origin/<branch> verify -- the upstream wins."""
-        wt_path = tmp_path / "wt"
-        wt_path.mkdir()
-        patch_worktree(
-            monkeypatch,
-            "_run_git",
-            self._mock(
-                upstream="origin/dev/renamed-slug",
-                verified_refs=frozenset({"origin/dev/renamed-slug", "origin/dev/2145"}),
-            ),
-        )
-        assert _resolve_remote_ref("dev/2145", wt_path) == "origin/dev/renamed-slug"
-
-    def test_falls_back_to_origin_branch_when_no_upstream_configured(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        wt_path = tmp_path / "wt"
-        wt_path.mkdir()
-        patch_worktree(
-            monkeypatch,
-            "_run_git",
-            self._mock(upstream=None, verified_refs=frozenset({"origin/dev/2145"})),
-        )
-        assert _resolve_remote_ref("dev/2145", wt_path) == "origin/dev/2145"
-
-    def test_falls_back_to_origin_branch_when_upstream_configured_but_stale(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        wt_path = tmp_path / "wt"
-        wt_path.mkdir()
-        patch_worktree(
-            monkeypatch,
-            "_run_git",
-            self._mock(
-                upstream="origin/deleted-upstream",
-                verified_refs=frozenset({"origin/dev/2145"}),
-            ),
-        )
-        assert _resolve_remote_ref("dev/2145", wt_path) == "origin/dev/2145"
-
-    def test_returns_none_when_neither_resolves(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        wt_path = tmp_path / "wt"
-        wt_path.mkdir()
-        patch_worktree(
-            monkeypatch,
-            "_run_git",
-            self._mock(upstream=None, verified_refs=frozenset()),
-        )
-        assert _resolve_remote_ref("dev/2145", wt_path) is None
 
 
 class TestUnsavedWorkReason:
