@@ -4005,6 +4005,73 @@ class TestReapSessionBySelector:
         t = next(t for t in store.tasks if t.ticket_id == "ticket-x")
         assert t.status == QueueItemStatus.PENDING
 
+    def test_reap_session_duplicate_running_rows_only_session_matched_row_reverts(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2219: two RUNNING rows for one (ticket_id, client) -- only the row
+        owned by the reaped session reverts; the sibling (e.g. a concurrent
+        respawn's row) stays RUNNING with its session_id intact, even though
+        it sits first in the store."""
+        from datetime import UTC, datetime, timedelta
+
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import _reap_session_by_selector
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+            TicketTask,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        target = Session(
+            id="dup12345",
+            name="client-a/auto-dev/dup-ticket",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref=None,
+        )
+        save_state(CwState(sessions=[target]))
+        earlier = datetime(2026, 1, 1, tzinfo=UTC)
+        row_b = TicketTask(
+            ticket_id="dup-ticket",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="some-other-session",
+            created_at=earlier,
+        )
+        row_a = TicketTask(
+            ticket_id="dup-ticket",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=target.id,
+            created_at=earlier + timedelta(days=1),
+        )
+        save_dev_queue(DevQueueStore(tasks=[row_b, row_a]))
+        row_b_before = load_dev_queue().tasks[0].model_dump()
+
+        result = _reap_session_by_selector(target.id)
+
+        assert result is True
+        stored = {t.created_at: t for t in load_dev_queue().tasks}
+        assert stored[row_a.created_at].status == QueueItemStatus.PENDING
+        assert stored[row_a.created_at].session_id is None
+        assert stored[row_b.created_at].model_dump() == row_b_before
+
     def test_reap_session_not_found_returns_false(
         self,
         tmp_config_dir: Path,
