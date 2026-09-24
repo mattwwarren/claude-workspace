@@ -18,6 +18,7 @@ import psutil
 import pytest
 
 from cw.config import (
+    load_clients,
     load_state,
     orchestrator_config_file,
     save_state,
@@ -26,14 +27,17 @@ from cw.config import (
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.models import (
+    TERMINAL_SESSION_STATUSES,
     CompletionReason,
     CwState,
+    DevQueueStore,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     ReapPolicy,
     SessionStatus,
     Stage,
+    TicketTask,
 )
 from cw.reconcile import reconcile
 from cw.reconcile.codex_boot import (
@@ -53,7 +57,10 @@ from cw.reconcile.codex_reparks import (
     _ReparkCandidate,
     run_codex_live_writer_reparks,
 )
+from tests._reconcile_helpers import _mk_headless_daemon_session
+from tests.conftest import commit_tracked_file, git_in
 from tests.test_reconcile_codex_boot import (
+    _STARTED_AT,
     _completed_events,
     _FakeCodex,
     _forbid_os_kill,
@@ -61,18 +68,25 @@ from tests.test_reconcile_codex_boot import (
     _no_codex_process,
     _requeued_events,
     _seed_clean_codex_orphan,
+    _write_clients_yaml,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cw.models import Session, TicketTask
+    from cw.models import Session
 
 _PARKED_AT = datetime(2026, 1, 1, 0, 30, 0, tzinfo=UTC)
 _NOW = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
 _TICKET = "T-orphan"
 _CLIENT = "client-a"
+_OTHER_CLIENT = "client-b"
+# Every status a Session can still leave: the ones a recovery must not leave
+# behind on the orphan it recovers (#2307 review round 1).
+_NON_TERMINAL_SESSION_STATUSES = tuple(
+    status for status in SessionStatus if status not in TERMINAL_SESSION_STATUSES
+)
 
 
 def _config(*, auto: bool) -> OrchestratorConfig:
@@ -228,6 +242,52 @@ def test_writer_exits_between_ticks_closes_session_and_requeues(
     assert task.codex_orphan_session_id is None
     assert task.codex_orphan_rescan_next_eligible_at is None
     assert _requeued_events("test-reparks-exit-requeued") == [_requeue_payload(session)]
+
+
+@pytest.mark.parametrize("auto", [True, False])
+@pytest.mark.parametrize("status", _NON_TERMINAL_SESSION_STATUSES)
+def test_writer_gone_closes_the_orphan_whatever_its_non_terminal_status(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    status: SessionStatus,
+    auto: bool,
+) -> None:
+    """#2307 review round 1: an orphan that went BACKGROUNDED after the park
+    is not ACTIVE/IDLE, but it is not closed either, and it still holds a
+    client-ceiling slot. Whatever its non-terminal status, the audited close
+    lands before the row is requeued (or left parked), so no non-terminal
+    codex session survives a recovery."""
+    _, session = _seed_parked(tmp_config_dir, tmp_path, make_git_repo)
+    state = load_state()
+    state.sessions[0].status = status
+    save_state(state)
+    _no_codex_process(monkeypatch)
+
+    assert _run(auto=auto) == ([_TICKET] if auto else [])
+
+    assert _session().status in TERMINAL_SESSION_STATUSES
+    _assert_session_closed()
+    assert _completed_events(f"test-reparks-{status}-{auto}-completed") == [
+        _close_audit(
+            session,
+            disposition="requeued" if auto else "parked",
+            detail=(
+                CODEX_ORPHAN_CLEAN_REQUEUE_REASON
+                if auto
+                else _PARK_REASON_REAP_POLICY_NOT_AUTO
+            ),
+        )
+    ]
+    if auto:
+        assert _task().status is QueueItemStatus.PENDING
+        assert _requeued_events(f"test-reparks-{status}-requeued") == [
+            _requeue_payload(session)
+        ]
+    else:
+        _assert_left_parked_and_unlinked()
 
 
 def test_still_live_writer_leaves_everything_untouched(
@@ -496,6 +556,160 @@ def test_row_for_an_unknown_client_is_skipped(
     _assert_session_active()
     task = _assert_still_parked(session)
     assert task.codex_orphan_rescan_next_eligible_at is None
+
+
+def _seed_two_client_parks(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    *,
+    lane_policies: dict[str, ReapPolicy],
+) -> dict[str, Session]:
+    """One clean, writer-gone-eligible live-writer park per client.
+
+    Both rows share a ticket id on purpose (ticket numbering is per-client),
+    so only ``client`` tells them apart. Each client's default lane declares
+    its own ``reap_policy`` from *lane_policies*. Returns sessions by client.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _write_clients_yaml(
+        tmp_config_dir,
+        workspace,
+        "codex",
+        names=tuple(lane_policies),
+        lane_reap_policies=lane_policies,
+    )
+    sessions: dict[str, Session] = {}
+    tasks: list[TicketTask] = []
+    for client in lane_policies:
+        repo = make_git_repo(f"wt-{client}")
+        session = _mk_headless_daemon_session(
+            f"sess-{client}", repo, _STARTED_AT
+        ).model_copy(update={"client": client, "name": f"{client}/auto-dev/{_TICKET}"})
+        commit_tracked_file(repo, ".claude/cw-context.json", '{"headless": true}')
+        tasks.append(
+            TicketTask(
+                ticket_id=_TICKET,
+                client=client,
+                stage=Stage.REVIEW,
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition=CODEX_ORPHANED_AT_BOOT_DISPOSITION,
+                completed_at=_PARKED_AT,
+                stage_base_ref=git_in(repo, "rev-parse", "HEAD"),
+                codex_orphan_session_id=session.id,
+            )
+        )
+        (repo / ".claude" / "review-verdict.md").write_text("verdict text\n")
+        sessions[client] = session
+    save_state(CwState(sessions=list(sessions.values())))
+    save_dev_queue(DevQueueStore(tasks=tasks))
+    return sessions
+
+
+def _task_for(client: str) -> TicketTask:
+    return next(t for t in load_dev_queue().tasks if t.client == client)
+
+
+def _session_for(client: str) -> Session:
+    return next(s for s in load_state().sessions if s.client == client)
+
+
+def _event_clients(consumer: str) -> list[object]:
+    return [
+        payload["client"]
+        for payload in _completed_events(f"{consumer}-completed")
+        + _requeued_events(f"{consumer}-requeued")
+    ]
+
+
+def test_a_tick_scoped_to_one_client_never_touches_another_clients_park(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2307 review round 1: the sweep acts only on the clients the reconcile
+    tick passes it. Both parks are requeue-eligible under ``auto``, so the
+    out-of-scope client's row surviving untouched proves the scope, not a
+    policy, held it back."""
+    sessions = _seed_two_client_parks(
+        tmp_config_dir,
+        tmp_path,
+        make_git_repo,
+        lane_policies={_CLIENT: ReapPolicy.AUTO, _OTHER_CLIENT: ReapPolicy.AUTO},
+    )
+    _no_codex_process(monkeypatch)
+    scope = {name: cfg for name, cfg in load_clients().items() if name == _CLIENT}
+
+    with sessions_lock():
+        requeued = run_codex_live_writer_reparks(
+            now=_NOW, config=_config(auto=True), clients=scope
+        )
+
+    assert requeued == [_TICKET]
+    assert _session_for(_CLIENT).status in TERMINAL_SESSION_STATUSES
+    assert _task_for(_CLIENT).status is QueueItemStatus.PENDING
+    other_session = _session_for(_OTHER_CLIENT)
+    assert other_session.status is SessionStatus.ACTIVE
+    assert other_session.completed_at is None
+    other = _task_for(_OTHER_CLIENT)
+    assert other.status is QueueItemStatus.BLOCKED_ON_USER
+    assert other.disposition == CODEX_ORPHANED_AT_BOOT_DISPOSITION
+    assert other.codex_orphan_session_id == sessions[_OTHER_CLIENT].id
+    assert other.codex_orphan_rescan_next_eligible_at is None
+    assert _event_clients("test-reparks-scoped") == [_CLIENT, _CLIENT]
+
+
+@pytest.mark.parametrize("global_auto", [True, False])
+def test_each_clients_own_lane_policy_governs_its_own_row(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    global_auto: bool,
+) -> None:
+    """#2307 review round 1: ``reap_policy`` resolves per row from that row's
+    own client and lane, never from the tick's global config. Whichever way
+    the global policy points, the ``auto`` lane's row requeues and the
+    ``signal_only`` lane's row stays parked. Both sessions close: the writer
+    is gone from each worktree, and closing needs no reap authority."""
+    sessions = _seed_two_client_parks(
+        tmp_config_dir,
+        tmp_path,
+        make_git_repo,
+        lane_policies={
+            _CLIENT: ReapPolicy.AUTO,
+            _OTHER_CLIENT: ReapPolicy.SIGNAL_ONLY,
+        },
+    )
+    _no_codex_process(monkeypatch)
+
+    with sessions_lock():
+        requeued = run_codex_live_writer_reparks(
+            now=_NOW, config=_config(auto=global_auto), clients=load_clients()
+        )
+
+    assert requeued == [_TICKET]
+    assert _task_for(_CLIENT).status is QueueItemStatus.PENDING
+    other = _task_for(_OTHER_CLIENT)
+    assert other.status is QueueItemStatus.BLOCKED_ON_USER
+    assert other.disposition == CODEX_ORPHANED_AT_BOOT_DISPOSITION
+    assert other.codex_orphan_session_id is None
+    for client in (_CLIENT, _OTHER_CLIENT):
+        assert _session_for(client).status in TERMINAL_SESSION_STATUSES
+    consumer = f"test-reparks-per-row-{global_auto}"
+    assert {
+        (p["client"], p["disposition"], p["detail"])
+        for p in _completed_events(f"{consumer}-completed")
+    } == {
+        (_CLIENT, "requeued", CODEX_ORPHAN_CLEAN_REQUEUE_REASON),
+        (_OTHER_CLIENT, "parked", _PARK_REASON_REAP_POLICY_NOT_AUTO),
+    }
+    assert [
+        (p["client"], p["session_id"]) for p in _requeued_events(f"{consumer}-requeued")
+    ] == [(_CLIENT, sessions[_CLIENT].id)]
 
 
 @pytest.mark.parametrize(

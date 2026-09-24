@@ -27,6 +27,7 @@ from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import HookContextConflictError
 from cw.models import (
+    DEFAULT_LANE,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -79,9 +80,13 @@ def _write_clients_yaml(
     backend: str,
     *,
     names: tuple[str, ...] = ("client-a",),
+    lane_reap_policies: dict[str, ReapPolicy] | None = None,
 ) -> None:
+    """*lane_reap_policies* maps a client name to the ``reap_policy`` its
+    default lane declares; a client absent from it declares no lanes."""
     config_dir = tmp_config_dir / ".config" / "cw"
     config_dir.mkdir(parents=True, exist_ok=True)
+    policies = lane_reap_policies or {}
     body = "".join(
         f"  {name}:\n"
         f"    workspace_path: {workspace}\n"
@@ -90,6 +95,13 @@ def _write_clients_yaml(
         "      executors:\n"
         "        review:\n"
         f"          backend: {backend}\n"
+        + (
+            "    lanes:\n"
+            f"      - name: {DEFAULT_LANE}\n"
+            f"        reap_policy: {policies[name]}\n"
+            if name in policies
+            else ""
+        )
         for name in names
     )
     (config_dir / "clients.yaml").write_text(f"clients:\n{body}")
