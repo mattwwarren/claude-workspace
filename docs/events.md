@@ -124,6 +124,13 @@ itself confirms with `ticket.requeued` or `session.needs_attention` once it
 lands. A session whose worktree may still hold a live codex writer is never
 closed (and never signalled): it stays ACTIVE and its reap is proposed via
 `session.reap_proposed` instead, so no `session.completed` is emitted for it.
+Its parked row keeps the session's id (`TicketTask.codex_orphan_session_id`,
+#2307), and every reconcile tick re-scans for the writer
+(`run_codex_live_writer_reparks` in `cw.reconcile.codex_reparks`, at most once
+per 300 s per row). Once the scan affirmatively finds no writer, that sweep
+closes the session with this same payload under `"reason":
+"codex_orphaned_at_reconcile"`, and a requeue it performs is reported as
+`ticket.requeued` with `"reason": "codex_orphan_clean_requeue_at_reconcile"`.
 The dispatch loop consumes this event (consumer cursor `"dispatch"`) to
 transition the matching `TicketTask` to COMPLETED.
 

@@ -975,6 +975,46 @@ class TestConciergeAndEscalationWiring:
         escalation_mock.assert_called_once()
 
 
+class TestCodexLiveWriterRepark:
+    """#2307: wiring-only — the live-writer codex-orphan re-evaluation runs
+    exactly once per reconcile() tick, in both branches of _reconcile_locked.
+    Its behavior under the held sessions_lock is covered end to end in
+    tests/test_reconcile_codex_reparks.py."""
+
+    def test_no_phantoms_branch_calls_the_sweep_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        repark_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+        )
+
+        reconcile()
+
+        repark_mock.assert_called_once()
+        assert set(repark_mock.call_args.kwargs) == {"now", "config"}
+
+    def test_phantom_branch_calls_the_sweep_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = CwState(sessions=[_mk_session("phantom-1", "missing-ref")])
+        save_state(state)
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "unrelated1"}],
+        )
+        repark_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+        )
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == ["phantom-1"]
+        repark_mock.assert_called_once()
+
+
 class TestFixDispatchRunsPostLock:
     """#2064: run_fix_dispatch's spawn reaches spawn_create_impl's own
     sessions_lock() acquisition, so it must run strictly AFTER reconcile()'s

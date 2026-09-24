@@ -38,6 +38,7 @@ from cw.reconcile._shared import (
     feature_branch_key,
     ticket_id_for_session,
 )
+from cw.reconcile.codex_reparks import run_codex_live_writer_reparks
 from cw.reconcile.concierge import run_concierge_recoveries
 from cw.reconcile.escalation import run_escalation_sweep
 from cw.reconcile.fix_dispatch import run_fix_dispatch
@@ -102,6 +103,9 @@ def _run_terminal_backstops_and_sweeps(
     completed_silent_ticket_ids = revert_completed_silent_tasks()
     park_terminal_sibling_tasks()
     run_concierge_recoveries(now=now, native_live=native_live, config=config)
+    # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
+    # session (live or unprovable writer). Unconditional, like the boot pass.
+    run_codex_live_writer_reparks(now=now, config=config)
     run_gate_recipes(now=now, config=config)
     run_review_recipes(config=config)
     run_escalation_sweep(now=now)
