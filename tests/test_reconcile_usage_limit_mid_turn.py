@@ -569,8 +569,13 @@ def test_act_is_silent_noop_when_row_moved_between_detect_and_act(
     task = load_dev_queue().tasks[0]
     assert task.status is raced_status
     assert task.session_id == raced_session_id
-    assert load_state().sessions[0].status is SessionStatus.ACTIVE
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert session.reap_proposed_at is None
+    assert state.sessions[0].reap_proposed_at is None
     assert daemon.stop_calls == []
+    assert _events(OrchestratorEventType.SESSION_REAP_PROPOSED) == []
+    assert _events(OrchestratorEventType.SESSION_COMPLETED) == []
     assert _events(OrchestratorEventType.USAGE_LIMIT_ARMED) == []
     assert _events(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
     assert _lockout() == {}

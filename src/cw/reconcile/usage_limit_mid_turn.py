@@ -12,8 +12,9 @@ owning a RUNNING row, whose last content-bearing transcript record matches
 ``USAGE_LIMIT_RE`` with no sentinel anywhere in the transcript -- and acts on it
 as positive evidence of a usage-limit stop, never on elapsed time (ADR-0014).
 
-Every candidate is proposed via ``session.reap_proposed`` (ADR-0006 invariant
-3) and the act is gated by the lane's ``reap_policy`` (ADR-0006 invariant 2):
+Every candidate whose row survives the identity-checked queue transition is
+proposed via ``session.reap_proposed`` (ADR-0006 invariant 3) and the act is
+gated by the lane's ``reap_policy`` (ADR-0006 invariant 2):
 
 - ``auto``: the row goes RUNNING -> PENDING with ``next_eligible_at`` set to the
   reset instant, so the existing claim gate releases it at the reset with no
@@ -282,7 +283,9 @@ def _act_on_mid_turn_usage_limit_candidates(
     Only ``reap_policy: auto`` reverts (and so appears in the returned list);
     any other policy parks the row BLOCKED_ON_USER. The transcript tail is
     re-read first -- if it no longer shows a mid-turn stop, nothing is
-    proposed, mutated, or armed this tick.
+    proposed, mutated, or armed this tick. The identity-checked row transition
+    runs before the reap proposal, so a row that moved or was reclaimed since
+    detect is likewise a silent no-op.
     """
     session_by_id = {s.id: s for s in state.sessions}
     reverted: list[str] = []
@@ -310,12 +313,13 @@ def _act_on_mid_turn_usage_limit_candidates(
             now, reset_at, config.usage_limit_backoff_seconds
         )
         auto = resolve_reap_policy(candidate, clients, config) is ReapPolicy.AUTO
-        _emit_reap_proposed(state, [candidate], native_live=native_live, now=now)
         mutate: Callable[[TicketTask], None] = (
             partial(_revert_to_pending, until=until) if auto else _park_blocked_on_user
         )
+        # Race check first, as #2285 corrected: a lost race proposes nothing.
         if not _mutate_owned_running_row(ticket_id, session.id, mutate):
             continue
+        _emit_reap_proposed(state, [candidate], native_live=native_live, now=now)
         if auto:
             _complete_usage_limited_session(state, session, ticket_id, now=now)
             reverted.append(ticket_id)
