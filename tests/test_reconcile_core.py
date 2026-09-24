@@ -7,6 +7,7 @@ import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,7 +18,7 @@ from cw.config import (
     sessions_lock,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.events import read_events
+from cw.events import read_events, record_event
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -33,9 +34,11 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
     TicketTask,
+    UsageLimitAct,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
+    ReconcileReport,
     _verify_supervisor_session_id,
     reconcile,
     revert_timed_out_tasks,
@@ -1400,3 +1403,112 @@ def test_reconcile_contains_a_failed_mid_turn_decision_and_retries_it(
     assert task.unproductive_attempts == before
     assert task.next_eligible_at is not None
     assert load_state().sessions[0].reap_reason is ReapReason.USAGE_LIMIT_MID_TURN
+
+
+def _assert_act_still_in_flight(*, unproductive_attempts: int) -> None:
+    """The row is RUNNING under its intent and was charged nothing."""
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.session_id == _MID_TURN_TICKET
+    assert task.usage_limit_act is not None
+    assert task.unproductive_attempts == unproductive_attempts
+
+
+def _assert_act_finished_uncharged(
+    report: ReconcileReport, *, unproductive_attempts: int
+) -> None:
+    assert _MID_TURN_TICKET in report.reverted_ticket_ids
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.PENDING
+    assert task.usage_limit_act is None
+    assert task.unproductive_attempts == unproductive_attempts
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    assert session.completed_reason is CompletionReason.USAGE_LIMITED
+    assert session.reap_reason is ReapReason.USAGE_LIMIT_MID_TURN
+
+
+def test_reconcile_backstop_skips_row_whose_act_closed_the_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final transition fails after the session was closed (#2324).
+
+    Later in the same tick the COMPLETED-session backstop finds a closed
+    session over a RUNNING row -- the shape it reverts, charging an attempt.
+    The row carries the act's intent, so the backstop leaves it, and the next
+    tick's resume finishes it uncharged.
+    """
+    _seed_mid_turn_limit(
+        tmp_path, monkeypatch, config=_auto_config(), with_phantom=False
+    )
+    before = load_dev_queue().tasks[0].unproductive_attempts
+    _fail_mid_turn_dev_queue_save(monkeypatch, nth=3)
+
+    assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    _assert_act_still_in_flight(unproductive_attempts=before)
+
+    _assert_act_finished_uncharged(reconcile(), unproductive_attempts=before)
+
+
+def test_reconcile_phantom_sweep_skips_session_whose_act_stopped_it(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session the act stopped but has not closed is not a crash (#2324).
+
+    An earlier tick's act stopped the surface and died before the close, so
+    the session is ACTIVE and off the roster: a phantom by shape. This tick's
+    resume fails at its first step, and the phantom sweep that runs after it
+    would crash-complete the session and revert the row with a charge. It
+    skips the row carrying the intent instead; the next tick finishes it.
+    """
+    _seed_mid_turn_limit(
+        tmp_path, monkeypatch, config=_auto_config(), with_phantom=False
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "someone-else-0000-4000-8000-000000000000"}],
+    )
+    now = datetime.now(UTC)
+    store = load_dev_queue()
+    store.tasks[0].usage_limit_act = UsageLimitAct(
+        session_id=_MID_TURN_TICKET,
+        branch="auto",
+        started_at=now,
+        reset_at=None,
+        until=now + timedelta(minutes=30),
+        audited_at=now,
+    )
+    save_dev_queue(store)
+    before = store.tasks[0].unproductive_attempts
+    calls: list[int] = []
+
+    def _lockout_audit_failing_once(
+        etype: OrchestratorEventType,
+        payload: dict[str, Any] | None = None,
+        *,
+        correlation_id: str | None = None,
+    ) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            msg = "inbox write failed"
+            raise OSError(msg)
+        record_event(etype, payload, correlation_id=correlation_id)
+
+    monkeypatch.setattr("cw.dispatch_state.record_event", _lockout_audit_failing_once)
+
+    report = reconcile()
+
+    assert _MID_TURN_TICKET not in report.reverted_ticket_ids
+    assert _MID_TURN_TICKET not in report.phantom_session_ids
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert session.completed_reason is None
+    _assert_act_still_in_flight(unproductive_attempts=before)
+    assert read_events(event_types=[OrchestratorEventType.SESSION_REAP_PROPOSED]) == []
+
+    _assert_act_finished_uncharged(reconcile(), unproductive_attempts=before)

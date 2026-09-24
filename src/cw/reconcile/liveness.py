@@ -240,6 +240,23 @@ def _is_parked_stopped_without_sentinel(
     )
 
 
+def _has_usage_limit_act_for(task: TicketTask | None, session: Session) -> bool:
+    """True iff *task* carries a mid-turn usage-limit act for *session* (#2324).
+
+    That act already paged through its own ``session.needs_attention`` and is
+    dispositioning the row, so a ``session_unresponsive`` page for the same
+    quiet session is noise. Matched by the intent's ``session_id`` for the
+    same ticket-keyed-lookup reason as
+    :func:`_is_parked_stopped_without_sentinel`: a collision fails open to
+    paging.
+    """
+    return (
+        task is not None
+        and task.usage_limit_act is not None
+        and task.usage_limit_act.session_id == session.id
+    )
+
+
 def _detect_liveness_candidates(
     state: CwState,
     *,
@@ -334,6 +351,7 @@ def _detect_liveness_candidates(
             is_top_bucket
             and not _has_terminal_sentinel(session)
             and not _is_parked_stopped_without_sentinel(task, session)
+            and not _has_usage_limit_act_for(task, session)
         )
         spawn_age = (
             _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)

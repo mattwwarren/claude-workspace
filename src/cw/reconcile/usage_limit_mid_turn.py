@@ -139,6 +139,20 @@ class _Stop(Enum):
     ABANDONED = "abandoned"
 
 
+def sessions_with_act_in_flight(tasks: Iterable[TicketTask]) -> frozenset[str]:
+    """The sessions whose row carries an unfinished mid-turn usage-limit act.
+
+    The generic phantom sweep skips these: a session this sweep has stopped
+    but not yet closed is not a crash, and reverting its row there would
+    charge the attempt the act exists to spare.
+    """
+    return frozenset(
+        task.usage_limit_act.session_id
+        for task in tasks
+        if task.usage_limit_act is not None
+    )
+
+
 def _mid_turn_limit_detection(session: Session) -> UsageLimitDetection | None:
     """Return the usage-limit detection iff *session*'s tail is a mid-turn stop.
 

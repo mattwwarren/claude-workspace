@@ -105,6 +105,11 @@ def _revert_running_tasks_for_sessions(
                 continue
             if task.session_id not in session_ids:
                 continue
+            if task.usage_limit_act is not None:
+                # #2324: the mid-turn usage-limit act closed this session and
+                # has not yet transitioned its row; it resumes and finishes
+                # that, uncharged. Reverting it here would charge an attempt.
+                continue
             if task.session_id in dirty:
                 transition_task_status(
                     task,
@@ -523,7 +528,9 @@ def revert_timed_out_tasks() -> list[str]:
     backstop_session_ids = {
         t.session_id
         for t in store.tasks
-        if t.status == QueueItemStatus.RUNNING and t.session_id in session_ids
+        if t.status == QueueItemStatus.RUNNING
+        and t.session_id in session_ids
+        and t.usage_limit_act is None
     }
     # Why: stamp in place + save_state, NOT mutate_state — the caller
     # already holds sessions_lock, and the lock is a per-open-fd flock,
@@ -584,7 +591,9 @@ def revert_completed_silent_tasks() -> list[str]:
     backstop_session_ids = {
         t.session_id
         for t in store.tasks
-        if t.status == QueueItemStatus.RUNNING and t.session_id in session_ids
+        if t.status == QueueItemStatus.RUNNING
+        and t.session_id in session_ids
+        and t.usage_limit_act is None
     }
     # Why: stamp in place + save_state, NOT mutate_state — the caller
     # already holds sessions_lock, and the lock is a per-open-fd flock,
