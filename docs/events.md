@@ -895,7 +895,7 @@ open enum; consumers MUST tolerate unknown values. Known values:
   the same `dev_queue_lock`, records `TicketTask.usage_limit_act`
   (`session_id`, `branch: "auto" | "park"` from the lane's `reap_policy`,
   `started_at`, the parsed `reset_at` and the resolved `until`; dev-queue
-  schema v39). That one row write is the decision. The same tick, and every
+  schema v40). That one row write is the decision. The same tick, and every
   later tick that finds the intent, resumes it, doing only the steps not yet
   done: arm the lockout unless the sidecar already covers `until`; emit this
   event, the `session.reap_proposed` and (auto) a `session.completed`
