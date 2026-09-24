@@ -3,7 +3,8 @@
 When :func:`~cw.worktree.create_worktree` reuses an existing worktree with
 ``refresh_on_reuse`` set, this module decides whether the tree is occupied
 by a live session or daemon worker, fetches ``origin/<branch>``, and
-fast-forwards a behind, unoccupied tree.
+fast-forwards a behind, unoccupied tree, syncing submodules a fast-forward
+brings in (#2233).
 """
 
 from __future__ import annotations
@@ -89,10 +90,10 @@ class ReuseRefreshReport:
     - ``notes``: one single-line entry per refresh FAILURE the caller cannot
       otherwise see, each naming the worktree and the reason -- the fetch
       failed (with git's reason), git refused the fast-forward, the branch
-      diverged from origin, or an OS error aborted the refresh. A caller with a
-      friction surface prints them. Designed non-actions add nothing: branch
-      absent from origin, already equal or ahead, or a worktree that is
-      occupied.
+      diverged from origin, an OS error aborted the refresh, or a submodule
+      sync failed. A caller with a friction surface prints them. Designed
+      non-actions add nothing: branch absent from origin, already equal or
+      ahead, or a worktree that is occupied.
     - ``outcome`` / ``reason``: the refresh's verdict (:class:`RefreshOutcome`)
       and why, or ``None`` when no refresh ran. It is filled in BEFORE
       ``create_worktree`` returns or raises, so a caller that catches
@@ -157,6 +158,75 @@ def _record_fast_forward(
         )
 
 
+def _sync_reused_submodules(
+    client: ClientConfig,
+    branch: str,
+    wt_path: Path,
+    report: ReuseRefreshReport,
+    *,
+    daemon: NativeDaemonClient,
+) -> RefreshResult | None:
+    """Sync submodules after a fast-forward that may have moved ``.gitmodules`` (#2233).
+
+    Runs only when *wt_path* carries a ``.gitmodules`` file after the fast-
+    forward already landed (``--ff-only`` updates the working tree to match
+    the new HEAD on success, so this reads the post-merge tree, mirroring
+    the first-time-creation check in
+    :func:`~cw.worktree._lifecycle.create_worktree`, which checks the main
+    checkout instead since it has no reused tree yet). Nothing to do
+    otherwise: repositories without submodules see no change.
+
+    Re-runs the full occupancy predicate (:func:`_occupancy_verdict`) first,
+    exactly as :func:`_ff_reused_worktree` does before the merge itself: the
+    fast-forward that just landed was local and fast, but
+    ``git submodule update`` can itself fetch over the network, and must not
+    run once a live session or worker may be operating in the tree. A live
+    occupant (or a branch switch, which raises :exc:`StaleWorktreeError` the
+    same way the pre-merge check does) overrides the fast-forward's own
+    ``REFRESHED`` verdict for the CALLER's purposes: the fast-forward is not
+    undone -- HEAD already moved and stays moved -- but nothing may spawn
+    into, dispatch against or further mutate a tree another worker may now
+    be using, and syncing submodules is itself such a mutation.
+
+    A failed ``git submodule update --init --recursive`` is logged at
+    WARNING and noted on *report* -- never raised, never turned into
+    ``NOT_REFRESHED``, and the worktree is left exactly as the failed sync
+    left it. Init and update only: never ``deinit``, reset or delete a
+    submodule.
+    """
+    if not (wt_path / ".gitmodules").exists():
+        return None
+    verdict = _occupancy_verdict(
+        client,
+        branch,
+        wt_path,
+        action=(
+            "reused worktree occupied after the fast-forward; submodule "
+            "sync skipped, using worktree as-is"
+        ),
+        raise_on_branch_mismatch=True,
+        daemon=daemon,
+    )
+    if verdict is not None:
+        return verdict
+    sync = _run_git(
+        "submodule", "update", "--init", "--recursive", cwd=wt_path, check=False
+    )
+    if sync.returncode != 0:
+        reason = _first_line(sync.stderr) or f"git exited {sync.returncode}"
+        _log.warning(
+            "create_worktree: submodule sync of %s in reused worktree %s failed: %s",
+            branch,
+            wt_path,
+            reason,
+        )
+        report.notes.append(
+            f"submodule sync of {branch} in reused worktree {wt_path} failed "
+            f"({reason}); submodules may be pointing at stale commits"
+        )
+    return None
+
+
 def _ff_reused_worktree(
     client: ClientConfig,
     branch: str,
@@ -199,7 +269,11 @@ def _ff_reused_worktree(
     (:func:`_record_fast_forward`), carrying *ticket_id* (``None`` when the
     caller has none). Nothing is recorded when nothing moved (a merge that says
     "Already up to date"), and a failed audit write never undoes or
-    reclassifies the completed fast-forward.
+    reclassifies the completed fast-forward. When the new HEAD carries a
+    ``.gitmodules`` file, a successful merge also triggers a submodule sync
+    (:func:`_sync_reused_submodules`, #2233), whose own occupancy re-check can
+    turn a would-be ``REFRESHED`` into the same abort the pre-merge re-check
+    above gives.
     """
     verdict = _occupancy_verdict(
         client,
@@ -251,6 +325,11 @@ def _ff_reused_worktree(
             old_sha=old_sha,
             new_sha=new_sha,
         )
+        sync_stop = _sync_reused_submodules(
+            client, branch, wt_path, report, daemon=daemon
+        )
+        if sync_stop is not None:
+            return sync_stop
     return RefreshResult(
         RefreshOutcome.REFRESHED,
         f"fast-forwarded {branch} {old_sha[:_SHA_LOG_CHARS]} -> "
@@ -830,6 +909,15 @@ def _refresh_reused_worktree(
        the tree is stale, not merely unrefreshed. Otherwise, the fast-forward. A
        fast-forward that moved HEAD records one ``worktree.fast_forwarded``
        audit event carrying *ticket_id*; no other path records anything.
+    5. Submodule sync (#2233): when the fast-forward moved HEAD and the new
+       tree carries a ``.gitmodules`` file, the occupancy predicate is re-run a
+       THIRD time and, if still clear, ``git submodule update --init
+       --recursive`` runs (see :func:`_sync_reused_submodules`). A live
+       occupant found here overrides the fast-forward's own ``REFRESHED``
+       verdict the same way step 4's re-check does -- the fast-forward is not
+       undone, but nothing further may run. A sync failure is reported on
+       *report* and logged at WARNING; it never changes the outcome away from
+       ``REFRESHED``.
 
     *report* is the caller-supplied surface (see :class:`ReuseRefreshReport`).
     Every FAILURE the caller cannot otherwise see -- a failed fetch, a diverged
@@ -880,9 +968,10 @@ def _raise_if_occupied(result: RefreshResult, branch: str, wt_path: Path) -> Non
         case RefreshOutcome.OCCUPIED_BY_LIVE_SESSION:
             msg = (
                 f"Refusing to reuse worktree at {wt_path} for branch {branch!r}: "
-                f"another worker may be operating in it ({result.reason}). The "
-                "worktree was not moved or otherwise touched. Retry once the "
-                "occupant is gone."
+                f"another worker may be operating in it ({result.reason}). HEAD "
+                "may already have moved if a fast-forward landed before this "
+                "occupant was found; the worktree was not removed and nothing "
+                "was spawned into it. Retry once the occupant is gone."
             )
             raise WorktreeOccupiedError(msg, path=wt_path, reason=result.reason)
         case RefreshOutcome.REFRESHED | RefreshOutcome.NOT_REFRESHED:

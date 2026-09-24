@@ -1632,18 +1632,34 @@ def _push_submodule_add_to_origin(
 
 
 def _seed_behind_with_submodule(
-    tmp_path: Path, make_git_repo: Callable[..., Path]
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[ClientConfig, Path, Path, str, str, Path]:
     """``_seed_behind`` plus an upstream commit that adds a submodule (#2233).
 
-    Returns ``(client, wt, workspace, old_sha, new_sha, sub_origin)``. Sets
-    ``protocol.file.allow=always`` on *workspace*'s repo config (shared by the
-    worktree ``wt`` via the common ``.git`` dir) so the PRODUCTION
-    ``git submodule update --init --recursive`` call -- which passes no
-    ``-c`` flags of its own -- can clone the synthetic local submodule origin.
+    Returns ``(client, wt, workspace, old_sha, new_sha, sub_origin)``. Git's
+    CVE-2022-39253 file-transport hardening reads ``protocol.file.allow``
+    only from global/system config or an explicit ``-c`` -- never from a
+    repo's own LOCAL config, by design (a hostile repo must not be able to
+    re-enable its own transports). The PRODUCTION ``git submodule update
+    --init --recursive`` call this exercises (:func:`_sync_reused_submodules`)
+    passes no ``-c`` of its own, so setting ``protocol.file.allow`` on
+    *workspace*'s local config (shared by the worktree ``wt``) would not
+    reach it. Instead this points ``HOME``/``XDG_CONFIG_HOME`` at a
+    throwaway directory carrying only ``protocol.file.allow=always`` in a
+    global-scope config file -- honored by git, and isolated to this test by
+    ``monkeypatch`` rather than touching the real machine's git config.
     """
+    home = tmp_path / "fake-home"
+    (home / ".config" / "git").mkdir(parents=True, exist_ok=True)
+    (home / ".config" / "git" / "config").write_text(
+        '[protocol "file"]\n\tallow = always\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+
     client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
-    git_in(workspace, "config", "protocol.file.allow", "always")
     old_sha = git_in(wt, "rev-parse", "HEAD")
     sub_origin = _make_bare_repo_with_commit(tmp_path, "sub")
     new_sha = _push_submodule_add_to_origin(
@@ -1733,10 +1749,13 @@ class TestReuseSubmoduleSync:
     submodules; one that doesn't leaves repos without submodules untouched."""
 
     def test_submodule_sync_after_fast_forward_that_adds_gitmodules(
-        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         client, wt, _workspace, old_sha, new_sha, _sub = _seed_behind_with_submodule(
-            tmp_path, make_git_repo
+            tmp_path, make_git_repo, monkeypatch
         )
         assert old_sha != new_sha
 
@@ -1779,7 +1798,7 @@ class TestReuseSubmoduleSync:
         ``WorktreeOccupiedError``, exactly the "abort" contract #2213 gives a
         caller that would otherwise spawn/dispatch/mutate an occupied tree."""
         client, wt, workspace, _old_sha, new_sha, _sub = _seed_behind_with_submodule(
-            tmp_path, make_git_repo
+            tmp_path, make_git_repo, monkeypatch
         )
 
         def merge_then_occupy(
@@ -1808,10 +1827,11 @@ class TestReuseSubmoduleSync:
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         client, wt, _workspace, _old_sha, new_sha, sub_origin = (
-            _seed_behind_with_submodule(tmp_path, make_git_repo)
+            _seed_behind_with_submodule(tmp_path, make_git_repo, monkeypatch)
         )
         shutil.rmtree(sub_origin)  # submodule clone will fail: origin is gone
         report = ReuseRefreshReport()

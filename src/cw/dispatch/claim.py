@@ -1152,7 +1152,8 @@ def _defer_occupied_claim(
     daemon-roster worker, or an indeterminate read of either (fail closed) may be
     operating in the ticket's per-ticket worktree. Spawning a second worker into
     it is the hazard the ticket exists to prevent, so nothing is spawned and the
-    worktree is neither touched nor removed.
+    worktree is never removed -- though HEAD may already have moved if a
+    fast-forward landed just before the occupant was found (#2233).
 
     The stale-worktree path (a wrong-branch tree that ``create_worktree`` refuses
     with ``StaleWorktreeError``) routes here too when an occupant is present: it
@@ -1276,20 +1277,25 @@ def _spawn_claimed_task(
             # behind origin/<branch>, so ask for a best-effort refresh. NOTE
             # this does a network `git fetch` (can be slow) and fast-forwards
             # only an unoccupied (no live cw session or daemon-roster worker),
-            # clean, strictly-behind worktree. The refresh has two kinds of
-            # "did not move it", handled oppositely:
+            # clean, strictly-behind worktree. The refresh has two outcomes,
+            # handled oppositely -- OCCUPIED is not "did not move it": a
+            # fast-forward (and, #2233, its post-ff submodule sync) can land
+            # for real before an occupant is found:
             #   * NOT refreshed (dirty, diverged, failed fetch, branch absent):
             #     the tree is ours, just not up to date. create_worktree
             #     returns the path and we spawn on it; the reason is logged
             #     (cw.worktree) -- there is no friction-notes surface here.
             #   * OCCUPIED (a live session or worker may be using the tree, or
             #     that cannot be ruled out): create_worktree RAISES
-            #     WorktreeOccupiedError. That must never fall through to a
-            #     spawn, so it is handled by its own narrow ``except`` below
-            #     (not the StaleWorktreeError branch, which removes a tree:
-            #     an occupied one is never removed). A stale (wrong-branch)
-            #     tree gets its own occupancy check inside that branch and
-            #     reaches the same deferral.
+            #     WorktreeOccupiedError. HEAD may already have moved (a
+            #     fast-forward, and #2233's post-ff submodule sync, can land
+            #     before the occupancy re-check finds the occupant) -- that
+            #     move is never undone. The raise must never fall through to
+            #     a spawn, so it is handled by its own narrow ``except``
+            #     below (not the StaleWorktreeError branch, which removes a
+            #     tree: an occupied one is never removed). A stale
+            #     (wrong-branch) tree gets its own occupancy check inside
+            #     that branch and reaches the same deferral.
             # ticket_id: names the ticket on the worktree.fast_forwarded audit
             # event a refresh that moves HEAD records; no other effect.
             worktree_path = create_worktree(

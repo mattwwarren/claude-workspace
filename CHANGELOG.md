@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reuse fast-forward that brings in `.gitmodules` changes now syncs submodules instead of leaving them stale (#2233):** `create_worktree(refresh_on_reuse=True)`'s fast-forward (#2213) could land new or moved submodule commits without ever running `git submodule update`, leaving the reused worktree's submodules pointing at the old commits -- a silently wrong tree one level below what #2213's occupancy refusal protects. After a successful fast-forward, when the new HEAD carries a `.gitmodules` file, the reuse refresh now re-checks occupancy (a session can start during the sync's own network fetch, exactly as it can during the fast-forward's) and runs `git submodule update --init --recursive`. A sync failure is logged and reported through the same `ReuseRefreshReport.notes` friction channel a failed fetch or fast-forward already uses -- never raised, worktree left usable -- and repositories without `.gitmodules` see no change.
+
 ## [1.54.0] - 2026-09-24
 
 ### Added
