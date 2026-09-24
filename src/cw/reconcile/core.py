@@ -90,7 +90,9 @@ def _run_terminal_backstops_and_sweeps(
     own detect/act sweep, recover any RUNNING task whose session already
     went TIMED_OUT/COMPLETED without reverting it, park stale PENDING rows
     with a terminal sibling (#876), then run the mechanical recovery reactor
-    (opt-in) and durable escalation sweep (unconditional) from GitHub #1015.
+    (opt-in), the live-writer codex-orphan park re-evaluation (#2307,
+    unconditional), and durable escalation sweep (unconditional) from GitHub
+    #1015.
     All of these load their own fresh dev-queue/state snapshots rather than
     reusing the (possibly now-stale) locals in ``_reconcile_locked``.
     Extracted to one call site (instead of duplicating 4 lines in each
