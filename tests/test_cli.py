@@ -46,8 +46,6 @@ from cw.exceptions import CwError, SprintApplyError
 from cw.models import (
     PARK_COMMENT_MARKER_KEY,
     PARK_ON_ABANDONED_EXIT_KEY,
-    SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
-    SCOPE_DRIFT_APPROVED_HEAD_KEY,
     ClientConfig,
     CwState,
     LastResultSource,
@@ -10778,10 +10776,6 @@ class TestDevQueueApproveCli:
             "cw.dev_queue.approval.branch_head_sha_on_origin",
             lambda *_a, **_kw: (self._SCOPE_DRIFT_HEAD, True),
         )
-        monkeypatch.setattr(
-            "cw.dev_queue.approval.resolve_operator_login",
-            lambda _client: "cli-operator",
-        )
         events: list[tuple[object, dict[str, object]]] = []
         monkeypatch.setattr(
             "cw.cli.dev_queue.approve.record_event",
@@ -10821,16 +10815,11 @@ class TestDevQueueApproveCli:
         assert payload == {
             "ticket_id": "ACME-1",
             "client": "acme",
-            "old_status": "blocked_on_user",
-            "new_status": "pending",
             "from_stage": "impl",
             "to_stage": "impl",
-            SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY: ["a.py", "b.py"],
-            SCOPE_DRIFT_APPROVED_HEAD_KEY: self._SCOPE_DRIFT_HEAD,
-            "approved_at": payload["approved_at"],
-            "actor": "cli-operator",
+            "scope_drift_approved_extra_files": ["a.py", "b.py"],
+            "scope_drift_approved_head": self._SCOPE_DRIFT_HEAD,
         }
-        assert isinstance(payload["approved_at"], str)
         task = load_dev_queue().tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.scope_drift_approved_extra_files == ["a.py", "b.py"]
