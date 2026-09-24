@@ -1046,7 +1046,10 @@ class CodexExecutor:
         # own post-spawn stamp — session_id only, not the error-counter reset
         # or stage_base_ref — so backoff semantics keep a single owner.
         _stamp_session_id_on_running_task(
-            client_name=client.name, ticket_id=task.ticket_id, session_id=sid
+            client_name=client.name,
+            ticket_id=task.ticket_id,
+            session_id=sid,
+            created_at=task.created_at,
         )
 
         # Steps 3/4/4b/5 run off the dispatch_tick call stack (#1727).

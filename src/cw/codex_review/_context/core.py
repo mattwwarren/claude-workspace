@@ -498,6 +498,7 @@ def _merge_and_persist_finding_dispositions(
         _sync_finding_dispositions_to_running_task(
             client_name=task.client,
             ticket_id=task.ticket_id,
+            created_at=task.created_at,
             dispositions=parsed,
         )
     return merged, refused
