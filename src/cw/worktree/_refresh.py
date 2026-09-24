@@ -19,13 +19,19 @@ from cw.config import load_state
 from cw.events import record_event
 from cw.exceptions import StaleWorktreeError, WorktreeOccupiedError
 from cw.models import OrchestratorEventType, SessionStatus
-from cw.worktree._freshness import FetchOutcome, _ff_relation, fetch_feature_branch
+from cw.worktree._freshness import (
+    FetchOutcome,
+    _ff_relation,
+    fetch_default_branch,
+    fetch_feature_branch,
+)
 from cw.worktree._git import (
     _checked_out_branch,
     _first_line,
     _ref_exists,
     _run_git,
 )
+from cw.worktree._scope import _has_commits_beyond_base
 from cw.worktree._unsaved import unsaved_work_reason
 
 if TYPE_CHECKING:
@@ -92,8 +98,12 @@ class ReuseRefreshReport:
       failed (with git's reason), git refused the fast-forward, the branch
       diverged from origin, an OS error aborted the refresh, or a submodule
       sync failed. A caller with a friction surface prints them. Designed
-      non-actions add nothing: branch absent from origin, already equal or
-      ahead, or a worktree that is occupied.
+      non-actions add nothing: branch absent from origin with no commits of
+      its own, already equal or ahead, or a worktree that is occupied. One
+      exception (#2328): a branch absent from origin that DOES have commits
+      of its own also gets a note, even though leaving it untouched is the
+      designed action -- the reader (a fix_agent prompt, a later pipeline
+      stage) needs to know it may be building on a stale base.
     - ``outcome`` / ``reason``: the refresh's verdict (:class:`RefreshOutcome`)
       and why, or ``None`` when no refresh ran. It is filled in BEFORE
       ``create_worktree`` returns or raises, so a caller that catches
@@ -716,18 +726,79 @@ def _occupancy_verdict(
     return RefreshResult(outcome, reason)
 
 
+def _handle_branch_absent(
+    client: ClientConfig,
+    branch: str,
+    wt_path: Path,
+    report: ReuseRefreshReport,
+    *,
+    ticket_id: str | None,
+    daemon: NativeDaemonClient,
+) -> RefreshResult:
+    """Decide what to do with a branch absent from origin (#2328).
+
+    ``origin/<branch>`` not existing is not, on its own, a reason to leave the
+    worktree alone: a never-pushed branch with no commits beyond
+    ``origin/<default_branch>`` is exactly as stale as a pushed one that fell
+    behind, and gets the same fast-forward treatment (through the generalized
+    :func:`_refresh_from_tracking_ref`, reusing its occupancy re-check and
+    ``--ff-only`` safety verbatim). A branch WITH commits of its own is left
+    untouched -- that base is the caller's own work, not something to rebase
+    silently -- but is noted, since the reader may be building on it thinking
+    it is current.
+    """
+    default_fetch = fetch_default_branch(client)
+    if default_fetch.outcome is not FetchOutcome.FETCHED:
+        reason = default_fetch.reason or "no reason reported"
+        report.notes.append(
+            f"origin/{branch} does not exist and fetching "
+            f"origin/{client.default_branch} to check reused worktree {wt_path} "
+            f"for a stale base failed ({reason})"
+        )
+        return RefreshResult(
+            RefreshOutcome.NOT_REFRESHED, f"origin/{branch} does not exist yet"
+        )
+    if _has_commits_beyond_base(wt_path, client.default_branch):
+        report.notes.append(
+            f"origin/{branch} does not exist and reused worktree {wt_path} has "
+            f"commits of its own beyond origin/{client.default_branch}; it was "
+            "left untouched and may be building on a stale base"
+        )
+        return RefreshResult(
+            RefreshOutcome.NOT_REFRESHED, f"origin/{branch} does not exist yet"
+        )
+    return _refresh_from_tracking_ref(
+        client,
+        branch,
+        wt_path,
+        report,
+        target=f"refs/remotes/origin/{client.default_branch}",
+        target_label=f"origin/{client.default_branch}",
+        ticket_id=ticket_id,
+        daemon=daemon,
+    )
+
+
 def _fetch_gate(
-    client: ClientConfig, branch: str, wt_path: Path, report: ReuseRefreshReport
+    client: ClientConfig,
+    branch: str,
+    wt_path: Path,
+    report: ReuseRefreshReport,
+    *,
+    ticket_id: str | None,
+    daemon: NativeDaemonClient,
 ) -> RefreshResult | None:
     """Fetch ``origin/<branch>``; return a stopping result, or ``None`` if it landed.
 
     Handles :class:`FetchOutcome` exhaustively: only ``FETCHED`` lets the refresh
-    go on. ``BRANCH_ABSENT`` (never pushed) stops quietly: an expected state,
-    not friction. ``FAILED`` leaves the tracking ref at whatever it was before,
-    so fast-forwarding "to origin" would really move HEAD to stale state: it
-    stops, and is reported with git's reason. A member this function does not
-    know is a type error (and, at runtime, an ``AssertionError``), never a silent
-    "fetched".
+    go on. ``BRANCH_ABSENT`` (never pushed) delegates to
+    :func:`_handle_branch_absent`, which decides whether the branch has commits
+    of its own worth preserving as-is, or is stale enough to fast-forward to
+    ``origin/<default_branch>`` (#2328). ``FAILED`` leaves the tracking ref at
+    whatever it was before, so fast-forwarding "to origin" would really move
+    HEAD to stale state: it stops, and is reported with git's reason. A member
+    this function does not know is a type error (and, at runtime, an
+    ``AssertionError``), never a silent "fetched".
     """
     fetch = fetch_feature_branch(client, branch)
     outcome = fetch.outcome
@@ -735,8 +806,8 @@ def _fetch_gate(
         case FetchOutcome.FETCHED:
             return None
         case FetchOutcome.BRANCH_ABSENT:
-            return RefreshResult(
-                RefreshOutcome.NOT_REFRESHED, f"origin/{branch} does not exist yet"
+            return _handle_branch_absent(
+                client, branch, wt_path, report, ticket_id=ticket_id, daemon=daemon
             )
         case FetchOutcome.FAILED:
             reason = fetch.reason or "no reason reported"
@@ -767,12 +838,17 @@ def _refresh_from_tracking_ref(
     wt_path: Path,
     report: ReuseRefreshReport,
     *,
+    target: str,
+    target_label: str,
     ticket_id: str | None,
     daemon: NativeDaemonClient,
 ) -> RefreshResult:
-    """Classify HEAD against the freshly fetched ``origin/<branch>`` and act on it.
+    """Classify HEAD against the freshly fetched *target* and act on it.
 
-    The target is the branch's own ``refs/remotes/origin/<branch>``, NOT the
+    *target* is the ref to classify against (e.g. ``refs/remotes/origin/<branch>``
+    for the pushed-branch path, or ``refs/remotes/origin/<default_branch>`` for
+    the never-pushed-branch path, #2328) and *target_label* its
+    human-readable form for messages (e.g. ``origin/<branch>``). NOT the
     removed upstream-first ``_resolve_remote_ref`` helper (deleted in #2266):
     that ladder was upstream-first, and a misconfigured ``@{u}`` of
     ``origin/<default>`` (the #2114 failure mode) would have fast-forwarded a
@@ -785,7 +861,6 @@ def _refresh_from_tracking_ref(
     reconciling is not this function's job. Behind: the fast-forward, after the
     occupancy re-check (:func:`_ff_reused_worktree`).
     """
-    target = f"refs/remotes/origin/{branch}"
     if not _ref_exists(target, wt_path):
         return RefreshResult(
             RefreshOutcome.NOT_REFRESHED, f"{target} does not exist after the fetch"
@@ -795,22 +870,22 @@ def _refresh_from_tracking_ref(
         case "equal" | "ahead":
             return RefreshResult(
                 RefreshOutcome.NOT_REFRESHED,
-                f"already up to date with origin/{branch} ({relation})",
+                f"already up to date with {target_label} ({relation})",
             )
         case "diverged":
             _log.warning(
-                "create_worktree: reused worktree diverged from origin/%s; "
+                "create_worktree: reused worktree diverged from %s; "
                 "leaving untouched (client=%s, path=%s)",
-                branch,
+                target_label,
                 client.name,
                 wt_path,
             )
             report.notes.append(
-                f"reused worktree {wt_path} has diverged from origin/{branch}; it "
+                f"reused worktree {wt_path} has diverged from {target_label}; it "
                 "was left untouched and not refreshed"
             )
             return RefreshResult(
-                RefreshOutcome.NOT_REFRESHED, f"diverged from origin/{branch}"
+                RefreshOutcome.NOT_REFRESHED, f"diverged from {target_label}"
             )
         case "behind":
             return _ff_reused_worktree(
@@ -845,11 +920,20 @@ def _refresh_reused_worktree_steps(
     )
     if verdict is not None:
         return verdict
-    stopped = _fetch_gate(client, branch, wt_path, report)
+    stopped = _fetch_gate(
+        client, branch, wt_path, report, ticket_id=ticket_id, daemon=daemon
+    )
     if stopped is not None:
         return stopped
     return _refresh_from_tracking_ref(
-        client, branch, wt_path, report, ticket_id=ticket_id, daemon=daemon
+        client,
+        branch,
+        wt_path,
+        report,
+        target=f"refs/remotes/origin/{branch}",
+        target_label=f"origin/{branch}",
+        ticket_id=ticket_id,
+        daemon=daemon,
     )
 
 

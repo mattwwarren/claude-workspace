@@ -922,9 +922,13 @@ class TestCreateWorktreeReuseRefresh:
                 id="fetched",
             ),
             pytest.param(
+                # #2328: _seed_behind's dev/2213 has a real commit ("tracked.txt")
+                # beyond origin/main, so a simulated BRANCH_ABSENT now reaches
+                # _handle_branch_absent's own-commits arm and IS noted (unlike a
+                # genuinely never-pushed, no-own-commits branch).
                 FetchResult(FetchOutcome.BRANCH_ABSENT, "couldn't find remote ref"),
                 False,
-                0,
+                1,
                 RefreshOutcome.NOT_REFRESHED,
                 id="branch-absent",
             ),
@@ -1353,8 +1357,136 @@ class TestCreateWorktreeReuseRefresh:
         assert path == wt
         assert report.outcome is RefreshOutcome.NOT_REFRESHED
         assert report.reason is not None
-        assert "origin/dev/never-pushed" in report.reason
+        assert f"already up to date with origin/{client.default_branch}" in (
+            report.reason
+        )
         assert report.notes == []
+
+    def test_never_pushed_branch_with_no_commits_fast_forwards_to_default_branch(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """#2328: a never-pushed branch with no commits of its own is just as
+        stale relative to ``origin/main`` as a pushed one -- it now gets
+        fast-forwarded to the freshly fetched default branch instead of being
+        silently left alone."""
+        client, _wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        never_pushed = "dev/never-pushed"
+        wt2 = create_worktree(client, never_pushed)
+        origin_main_tip = push_commit_to_origin(
+            origin, "main", tmp_path / "side-main", "advance.txt"
+        )
+        report = ReuseRefreshReport()
+
+        path = create_worktree(
+            client,
+            never_pushed,
+            allow_dirty_reuse=True,
+            refresh_on_reuse=True,
+            refresh_report=report,
+        )
+
+        assert path == wt2
+        assert git_in(wt2, "rev-parse", "HEAD") == origin_main_tip
+        assert (wt2 / "advance.txt").exists()
+        assert report.outcome is RefreshOutcome.REFRESHED
+        assert report.notes == []
+        assert git_in(wt2, "branch", "--show-current") == never_pushed
+        events = read_events(
+            event_types=[OrchestratorEventType.WORKTREE_FAST_FORWARDED]
+        )
+        assert len(events) == 1
+
+    def test_never_pushed_branch_with_own_commits_is_left_alone_and_noted(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A never-pushed branch that DOES have commits of its own is left
+        untouched -- it may be building on a stale base, but that base is the
+        caller's own work, not something to silently rebase onto.
+
+        The pre-fetch occupancy gate (``unsaved_work_reason``) already treats
+        any unpushed commit as "unsaved work" via its own fallback ladder,
+        so it fires before ``_fetch_gate``/``_handle_branch_absent`` are ever
+        reached; occupancy is bypassed here (mirroring
+        ``test_fetch_ok_but_tracking_ref_absent_is_a_no_op`` above) to
+        exercise ``_handle_branch_absent``'s own-commits note on its own
+        terms -- the scenario it targets is a branch whose own upstream
+        tracking ref (not ``origin/<default_branch>``) already accounts for
+        its commits, so occupancy sees it as clean while it is still ahead of
+        the default branch."""
+        client, _wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        never_pushed = "dev/never-pushed"
+        wt2 = create_worktree(client, never_pushed)
+        git_in(wt2, "commit", "--allow-empty", "-m", "own unpushed work")
+        local_sha = git_in(wt2, "rev-parse", "HEAD")
+        push_commit_to_origin(origin, "main", tmp_path / "side-main", "advance.txt")
+        monkeypatch.setattr(
+            "cw.worktree._refresh._reuse_occupancy",
+            lambda *_args, **_kw: _Occupancy(
+                live=None, branch_mismatch=None, local=None
+            ),
+        )
+        report = ReuseRefreshReport()
+
+        result = _refresh_reused_worktree(
+            client,
+            never_pushed,
+            wt2,
+            report,
+            ticket_id=None,
+            daemon=native_daemon.get_native_daemon_client(),
+        )
+
+        assert git_in(wt2, "rev-parse", "HEAD") == local_sha
+        assert result.outcome is RefreshOutcome.NOT_REFRESHED
+        assert len(report.notes) == 1
+        assert str(wt2) in report.notes[0]
+        assert "commits of its own" in report.notes[0]
+        events = read_events(
+            event_types=[OrchestratorEventType.WORKTREE_FAST_FORWARDED]
+        )
+        assert events == []
+
+    def test_never_pushed_branch_default_fetch_failure_leaves_it_alone_and_notes(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A never-pushed, no-own-commits branch whose default-branch fetch
+        fails is left alone and noted -- same posture as a failed fetch on
+        the pushed-branch path (:func:`_fetch_gate`'s ``FAILED`` arm)."""
+        client, _wt, _origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
+        never_pushed = "dev/never-pushed"
+        wt2 = create_worktree(client, never_pushed)
+        head = git_in(wt2, "rev-parse", "HEAD")
+        patch_worktree(
+            monkeypatch,
+            "fetch_default_branch",
+            lambda _client: FetchResult(
+                FetchOutcome.FAILED, "rc=128: fatal: simulated"
+            ),
+        )
+        report = ReuseRefreshReport()
+
+        path = create_worktree(
+            client,
+            never_pushed,
+            allow_dirty_reuse=True,
+            refresh_on_reuse=True,
+            refresh_report=report,
+        )
+
+        assert path == wt2
+        assert git_in(wt2, "rev-parse", "HEAD") == head
+        assert report.outcome is RefreshOutcome.NOT_REFRESHED
+        assert len(report.notes) == 1
+        assert str(wt2) in report.notes[0]
+        assert "fatal: simulated" in report.notes[0]
 
     def test_refreshed_reports_the_move(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
