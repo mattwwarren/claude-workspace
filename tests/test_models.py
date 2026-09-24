@@ -392,9 +392,9 @@ class TestCwState:
         result = sample_state.find_by_name_or_id("nonexistent")
         assert result is None
 
-    def test_find_by_name_or_id_reverse_order(self) -> None:
-        """Most recent session with matching name should be returned."""
-        state = CwState(
+    @staticmethod
+    def _same_named_state() -> CwState:
+        return CwState(
             sessions=[
                 Session(
                     id="first",
@@ -412,9 +412,26 @@ class TestCwState:
                 ),
             ]
         )
-        result = state.find_by_name_or_id("c/impl")
-        assert result is not None
-        assert result.id == "second"
+
+    def test_find_by_name_or_id_ambiguous_name_raises(self) -> None:
+        """#2237: a name shared by several sessions raises, listing every id."""
+        from cw.exceptions import AmbiguousSessionIdentifierError
+
+        state = self._same_named_state()
+        with pytest.raises(AmbiguousSessionIdentifierError) as excinfo:
+            state.find_by_name_or_id("c/impl")
+        message = str(excinfo.value)
+        assert "first" in message
+        assert "second" in message
+        assert {s.id for s in excinfo.value.candidates} == {"first", "second"}
+
+    def test_find_by_name_or_id_ambiguous_name_id_still_resolves(self) -> None:
+        """An id is unique by construction, so it resolves despite the shared name."""
+        state = self._same_named_state()
+        for sid in ("first", "second"):
+            result = state.find_by_name_or_id(sid)
+            assert result is not None
+            assert result.id == sid
 
     def test_idled_sessions_filter(self) -> None:
         state = CwState(

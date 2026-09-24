@@ -7585,6 +7585,74 @@ class TestPeek:
         assert result.output.strip() == ""
 
 
+class TestAmbiguousSessionName:
+    """#2237: name-accepting commands refuse an ambiguous name, listing ids."""
+
+    _NAME = "test-client/impl"
+    _IDS = ("dupname1", "dupname2")
+
+    def _seed_same_named(
+        self, tmp_path: Path, *, status: SessionStatus = SessionStatus.BACKGROUNDED
+    ) -> None:
+        save_state(
+            CwState(
+                sessions=[
+                    _make_daemon_session(
+                        id=sid,
+                        name=self._NAME,
+                        client="test-client",
+                        origin=SessionOrigin.USER,
+                        status=status,
+                        workspace_path=tmp_path,
+                        worktree_path=None,
+                        surface_ref=None,
+                        claude_session_id="abc12345",
+                    )
+                    for sid in self._IDS
+                ]
+            )
+        )
+
+    def _assert_candidates_reported(self, result: Result) -> None:
+        assert result.exit_code != 0
+        for sid in self._IDS:
+            assert sid in result.output
+        assert "pass an id to choose" in result.output
+
+    def test_bg_ambiguous_name_reports_candidates(self, tmp_path: Path) -> None:
+        self._seed_same_named(tmp_path, status=SessionStatus.ACTIVE)
+        result = CliRunner().invoke(main, ["bg", self._NAME])
+        self._assert_candidates_reported(result)
+        assert all(s.status == SessionStatus.ACTIVE for s in load_state().sessions)
+
+    def test_resume_ambiguous_name_reports_candidates(self, tmp_path: Path) -> None:
+        self._seed_same_named(tmp_path)
+        result = CliRunner().invoke(main, ["resume", self._NAME])
+        self._assert_candidates_reported(result)
+
+    def test_done_ambiguous_name_reports_candidates(self, tmp_path: Path) -> None:
+        self._seed_same_named(tmp_path, status=SessionStatus.ACTIVE)
+        result = CliRunner().invoke(main, ["done", self._NAME])
+        self._assert_candidates_reported(result)
+        assert all(s.status == SessionStatus.ACTIVE for s in load_state().sessions)
+
+    def test_peek_ambiguous_name_reports_candidates(self, tmp_path: Path) -> None:
+        self._seed_same_named(tmp_path, status=SessionStatus.ACTIVE)
+        result = CliRunner().invoke(main, ["peek", self._NAME])
+        self._assert_candidates_reported(result)
+
+    def test_bg_all_with_duplicate_names_backgrounds_both_no_warning(
+        self, tmp_path: Path
+    ) -> None:
+        self._seed_same_named(tmp_path, status=SessionStatus.ACTIVE)
+        result = CliRunner().invoke(main, ["bg", "--all"])
+        assert result.exit_code == 0, result.output
+        assert "Warning: could not background" not in result.output
+        assert all(
+            s.status == SessionStatus.BACKGROUNDED for s in load_state().sessions
+        )
+
+
 class TestWatchCommand:
     def test_watch_help(self) -> None:
         from click.testing import CliRunner

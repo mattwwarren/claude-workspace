@@ -124,6 +124,37 @@ class TestHookContextConflictError:
         assert err.conflicting_session_id is None
 
 
+class TestAmbiguousSessionIdentifierError:
+    """#2237: an ambiguous session-name match lists every candidate."""
+
+    def test_message_lists_each_candidate_and_ends_with_hint(self) -> None:
+        from cw.exceptions import AmbiguousSessionIdentifierError
+        from cw.models import SessionStatus
+        from tests.conftest import _make_daemon_session
+
+        started_old = datetime(2026, 9, 1, 8, 0, tzinfo=UTC)
+        started_new = datetime(2026, 9, 2, 9, 30, tzinfo=UTC)
+        candidates = [
+            _make_daemon_session(
+                id="aaaa1111", status=SessionStatus.COMPLETED, started_at=started_old
+            ),
+            _make_daemon_session(
+                id="bbbb2222", status=SessionStatus.ACTIVE, started_at=started_new
+            ),
+        ]
+
+        err = AmbiguousSessionIdentifierError("client-a/auto-dev/T-1", candidates)
+
+        message = str(err)
+        assert "client-a/auto-dev/T-1" in message
+        assert f"aaaa1111  completed  started {started_old.isoformat()}" in message
+        assert f"bbbb2222  active  started {started_new.isoformat()}" in message
+        assert message.endswith("pass an id to choose")
+        assert err.identifier == "client-a/auto-dev/T-1"
+        assert [s.id for s in err.candidates] == ["aaaa1111", "bbbb2222"]
+        assert isinstance(err, CwError)
+
+
 class TestBranchHeldByWorktreeError:
     """#2034: a foreign worktree squats the requested branch.
 
