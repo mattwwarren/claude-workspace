@@ -529,6 +529,28 @@ def test_resolve_pipeline_stages_lane_override(
     ]
 
 
+def test_resolve_pipeline_stages_lane_executor_only_uses_client_stages(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """A lane executor override does not replace a custom client stage list."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(stages=[Stage.PLAN, Stage.REVIEW]),
+        lanes=[
+            LaneConfig(
+                name="debt",
+                pipeline=StagePipelineConfig(
+                    executors={Stage.PLAN: StageExecutorConfig(model="opus")}
+                ),
+            )
+        ],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", lane="debt")
+
+    assert resolve_pipeline_stages(task, client) == [Stage.PLAN, Stage.REVIEW]
+
+
 def test_resolve_pipeline_stages_lane_without_pipeline_uses_client_default(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:

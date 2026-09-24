@@ -7465,6 +7465,33 @@ class TestRequeueTicket:
         assert t.stage == Stage.IMPL
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
 
+    def test_requeue_current_stage_absent_from_lane_pipeline_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A lane pipeline must contain the current stage before requeue indexing."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _setup_client_with_pipeline_stages(
+            tmp_config_dir,
+            tmp_path,
+            ["plan", "impl", "review", "finalize"],
+            lane="restricted",
+            lane_stages=["plan", "review"],
+        )
+        task = _make_blocked_task(
+            stage=Stage.IMPL, session_id="sess9007", lane="restricted"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError, match="Stage 'impl'.*lane 'restricted'"):
+            requeue_ticket("GEN-500", "genhealth", stage_override="review")
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.IMPL
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
     def test_requeue_non_blocked_raises(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
