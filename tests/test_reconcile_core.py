@@ -38,6 +38,7 @@ from cw.reconcile import (
     reconcile,
     revert_timed_out_tasks,
 )
+from cw.reconcile import core as reconcile_core
 from tests._reconcile_helpers import (
     _auto_config,
     _mk_headless_daemon_session,
@@ -973,6 +974,92 @@ class TestConciergeAndEscalationWiring:
         assert report.phantom_session_ids == ["phantom-1"]
         concierge_mock.assert_called_once()
         escalation_mock.assert_called_once()
+
+
+class TestCodexLiveWriterRepark:
+    """#2307: wiring-only — the live-writer codex-orphan re-evaluation runs
+    exactly once per reconcile() tick, in both branches of _reconcile_locked,
+    scoped to the very clients mapping that tick reconciles (review round 1:
+    never a second, independent client load). Its behavior under the held
+    sessions_lock is covered end to end in
+    tests/test_reconcile_codex_reparks.py."""
+
+    @staticmethod
+    def _spy_load_clients(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> list[dict[str, ClientConfig]]:
+        """Record every clients mapping reconcile() loads, delegating."""
+        loaded: list[dict[str, ClientConfig]] = []
+        real = reconcile_core.load_clients
+
+        def _spy() -> dict[str, ClientConfig]:
+            clients = real()
+            loaded.append(clients)
+            return clients
+
+        monkeypatch.setattr(reconcile_core, "load_clients", _spy)
+        return loaded
+
+    def test_no_phantoms_branch_calls_the_sweep_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        loaded = self._spy_load_clients(monkeypatch)
+        repark_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+        )
+
+        reconcile()
+
+        repark_mock.assert_called_once()
+        assert set(repark_mock.call_args.kwargs) == {"now", "config", "clients"}
+        assert len(loaded) == 1
+        assert repark_mock.call_args.kwargs["clients"] is loaded[0]
+
+    def test_phantom_branch_calls_the_sweep_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = CwState(sessions=[_mk_session("phantom-1", "missing-ref")])
+        save_state(state)
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "unrelated1"}],
+        )
+        loaded = self._spy_load_clients(monkeypatch)
+        repark_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+        )
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == ["phantom-1"]
+        repark_mock.assert_called_once()
+        assert len(loaded) == 1
+        assert repark_mock.call_args.kwargs["clients"] is loaded[0]
+
+    def test_locked_tick_passes_its_own_client_scope_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A _reconcile_locked call handed a clients mapping scopes the sweep
+        to exactly that mapping, and reads clients.yaml no second time."""
+        save_state(CwState(sessions=[]))
+        loaded = self._spy_load_clients(monkeypatch)
+        repark_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+        )
+        scope = {
+            "client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))
+        }
+
+        with sessions_lock():
+            reconcile_core._reconcile_locked(clients=scope)
+
+        repark_mock.assert_called_once()
+        assert repark_mock.call_args.kwargs["clients"] is scope
+        assert loaded == []
 
 
 class TestFixDispatchRunsPostLock:

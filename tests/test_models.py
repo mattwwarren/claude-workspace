@@ -1099,7 +1099,24 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 38
+        assert DEV_QUEUE_SCHEMA_VERSION == 39
+
+    def test_ticket_task_old_row_without_codex_orphan_fields_defaults_none(
+        self,
+    ) -> None:
+        """#2307 (v39): a row persisted before the codex-orphan link existed
+        carries neither key, loads with both unset, and so is never picked up
+        by the reconcile-tick re-evaluation sweep — exactly today's behavior.
+        """
+        blob = {
+            "ticket_id": "T-38",
+            "client": "client-a",
+            "status": "blocked_on_user",
+            "disposition": "codex_review_orphaned_at_boot",
+        }
+        task = TicketTask.model_validate(blob)
+        assert task.codex_orphan_session_id is None
+        assert task.codex_orphan_rescan_next_eligible_at is None
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()

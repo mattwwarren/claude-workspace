@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`cw`'s reconcile tick now re-evaluates codex live-writer orphan parks, not just the boot-time pass (#2307):** a live-writer orphan park created by `codex_boot`'s boot-time scan previously sat until the next restart before reconcile would re-check it. A new codex live-writer repark sweep runs on every reconcile tick, scoped to the tick's own loaded clients, and re-checks each linked park's session before acting: a session belonging to a different client than the ticket, or one resumed between detect-time and act-time, is recognized as stale and the link is cleared rather than closed or requeued — only a genuinely still-orphaned, non-terminal session is closed.
+
+### Fixed
+
+- **A codex repark orphan is now closed regardless of its non-terminal status, and its stale-session reason constant is shared with `codex_boot` instead of duplicated (#2307).**
+
 ## [1.55.0] - 2026-09-24
 
 ### Added
