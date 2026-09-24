@@ -847,10 +847,11 @@ class UsageLimitDetection(NamedTuple):
     """Outcome of scanning a session transcript for a usage-limit message (#1345).
 
     ``detected`` is True iff any post-start assistant record's text matched
-    :data:`USAGE_LIMIT_RE`. ``matched_at`` is the ``timestamp`` of the LAST such
-    matching record that carried a parseable timestamp (last-match-wins
-    tie-break); ``None`` when nothing matched or no matching record had a usable
-    timestamp. ``transcript_tail_at`` is the timestamp of the transcript's last
+    :data:`USAGE_LIMIT_RE`. ``matched_at`` is the LAST matching record's own
+    ``timestamp`` (last-match-wins); ``None`` when nothing matched or that
+    record has no usable timestamp -- never an earlier match's timestamp, which
+    would make a stale anchor look current (#2324). ``transcript_tail_at`` is
+    the timestamp of the transcript's last
     content-bearing record — matched or not — via
     :func:`_last_content_entry_timestamp`; ``None`` when no record has a
     parseable timestamp. The recency gate (:func:`_usage_limit_is_recent`)
@@ -917,8 +918,8 @@ def _detect_usage_limit(session: Session) -> UsageLimitDetection:
 
     Returns a :class:`UsageLimitDetection`: ``detected`` True iff any assistant
     record's text matched :data:`USAGE_LIMIT_RE`, ``matched_at`` the LAST
-    matching record's timestamp (last-match-wins among records with a parseable
-    timestamp), ``transcript_tail_at`` the transcript's last content-bearing
+    matching record's own timestamp (``None`` if it has none),
+    ``transcript_tail_at`` the transcript's last content-bearing
     timestamp, ``matched_text`` the LAST matching record's text. Uses
     :func:`_locate_session_transcript` for precise per-session lookup
     (surface_ref-prefix glob, #541). Never raises; returns an all-empty
@@ -934,9 +935,11 @@ def _detect_usage_limit(session: Session) -> UsageLimitDetection:
     matched_at: datetime | None = None
     for ts, text in _iter_assistant_records(transcript):
         if USAGE_LIMIT_RE.search(text):
-            matched_text = text  # last-match-wins
-            if ts is not None:
-                matched_at = ts  # last-match-wins
+            # last-match-wins for both, from the SAME record: an untimestamped
+            # latest match leaves matched_at None (gap unknown) rather than
+            # keeping an older match's timestamp, which would fake a zero gap.
+            matched_text = text
+            matched_at = ts
     return UsageLimitDetection(
         detected=matched_text is not None,
         matched_at=matched_at,
