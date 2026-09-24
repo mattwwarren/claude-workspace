@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A never-pushed reused worktree with no commits of its own is no longer left permanently stale (#2328):** the reuse refresh's `BRANCH_ABSENT` case previously stopped unconditionally, even when the branch had zero commits beyond `origin/<default_branch>` and that default branch had moved on. It now fetches `origin/<default_branch>` and fast-forwards to it (through the same occupancy and `--ff-only` safety as the pushed-branch path) when the branch has no commits of its own, and leaves it untouched with a friction note when it does.
+
 ## [1.54.0] - 2026-09-24
 
 ### Added
