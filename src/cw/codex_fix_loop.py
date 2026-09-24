@@ -58,6 +58,7 @@ from cw.codex_fix_loop_convergence import (
     _survivors_only_verdict,
     _track_open_findings,
 )
+from cw.codex_fix_loop_push import push_and_verify_head
 from cw.codex_review import (
     _CATEGORY_TO_REASON,
     _MIN_ROLE_TIMEOUT_SECONDS,
@@ -285,6 +286,11 @@ def _commit_fix_cycle(
     first, before giving up — any git failure surviving the retry raises
     ``CalledProcessError``, which the caller treats identically to a
     fix-invocation failure.
+
+    A real commit is then pushed and its origin tip verified (#2354) via
+    :func:`~cw.codex_fix_loop_push.push_and_verify_head`, so a fix cycle's
+    work never exists only in the local worktree. A failed push or tip
+    mismatch raises ``CalledProcessError`` too, and parks the same way.
     """
     status = subprocess.check_output(
         ["git", "status", "--porcelain"], cwd=worktree, text=True
@@ -320,9 +326,11 @@ def _commit_fix_cycle(
         subprocess.check_output(
             ["git", "commit", "-m", message], cwd=worktree, text=True
         )
-    return subprocess.check_output(
+    sha = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
     ).strip()
+    push_and_verify_head(worktree, sha)
+    return sha
 
 
 def _porcelain_changed_paths(worktree: Path) -> list[str]:

@@ -42,7 +42,7 @@ from cw.review_findings import (
     _dedup_key,
 )
 from tests._codex_review_helpers import _task
-from tests.conftest import _make_diff, _make_finding
+from tests.conftest import _make_diff, _make_finding, add_bare_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -446,7 +446,10 @@ class _FakeRereview:
 
 @pytest.fixture
 def loop_repo(make_git_repo: Callable[[str], Path]) -> Path:
-    return make_git_repo("wt-convergence")
+    repo = make_git_repo("wt-convergence")
+    # #2354: a committing fix cycle pushes, so the repo needs an origin.
+    add_bare_origin(repo)
+    return repo
 
 
 def _drive_loop(
