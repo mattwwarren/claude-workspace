@@ -15,6 +15,7 @@ from cw.cli import main
 from cw.doctor import (
     CheckResult,
     DoctorReport,
+    WedgeFinding,
     _check_attention_state_census,
     _check_review_recipe_liveness,
     format_report,
@@ -24,11 +25,19 @@ from tests.conftest import (
     _make_daemon_session,
     _make_tick_summary,
     _make_ticket_task,
+    _write_backend_clients_yaml,
     _write_idle_transcript,
 )
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig, Session, SessionPurpose, TicketTask
+    from cw.models import (
+        ClientConfig,
+        CwState,
+        DevQueueStore,
+        Session,
+        SessionPurpose,
+        TicketTask,
+    )
     from cw.native_daemon import FakeNativeDaemonClient
 
 
@@ -6912,6 +6921,329 @@ class TestWedgeActiveDaemonStaleNoSentinel:
             events[0].payload["proposed_action"]
             == "wedge/active-daemon-stale-no-sentinel"
         )
+
+
+_CLASS9 = "wedge/active-null-liveness-orphan"
+_CLASS9_SID = "orphan01"
+_BACKEND_UNRESOLVED_TEXT = "could not resolve its executor backend"
+
+
+class TestWedgeActiveNullLivenessOrphan:
+    """wedge/active-null-liveness-orphan (#2237): a DAEMON ACTIVE/IDLE session
+
+    with no daemon surface AND no local-process liveness record, past its
+    spawn grace, holding a ceiling slot no other detector can see. Advisory
+    only (ADR-0014): the finding names ``cw spawn close <id>`` and nothing is
+    mutated, even under ``--reap``. CODEX_BACKEND sessions are excluded
+    silently (owned by codex_boot, #2285/#2307).
+    """
+
+    def _make_session(
+        self,
+        tmp_path: Path,
+        *,
+        sid: str = _CLASS9_SID,
+        name: str | None = None,
+        **overrides: object,
+    ) -> Session:
+        from cw.models import SessionPurpose, SessionStatus
+
+        kwargs: dict[str, object] = {
+            "id": sid,
+            "name": name or f"client-a/auto-dev/{sid}",
+            "client": "client-a",
+            "purpose": SessionPurpose.IMPL,
+            "status": SessionStatus.ACTIVE,
+            "workspace_path": tmp_path / "ws",
+            "worktree_path": tmp_path / "wt",
+            "surface_ref": None,
+            "local_liveness": None,
+            "started_at": datetime(2026, 1, 1, tzinfo=UTC),
+        }
+        kwargs.update(overrides)
+        return _make_daemon_session(**kwargs)
+
+    def _make_task(
+        self, *, ticket_id: str = _CLASS9_SID, session_id: str | None = _CLASS9_SID
+    ) -> TicketTask:
+        from cw.models import QueueItemStatus, Stage, TicketTask
+
+        return TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.REVIEW,
+        )
+
+    def _seed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        sessions: list[Session],
+        tasks: list[TicketTask],
+        *,
+        backend: str | None = "claude-native",
+    ) -> tuple[CwState, DevQueueStore]:
+        """Persist *sessions*/*tasks*; write clients.yaml unless *backend* is None."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import CwState, DevQueueStore
+
+        if backend is not None:
+            workspace = tmp_path / "ws"
+            workspace.mkdir(exist_ok=True)
+            _write_backend_clients_yaml(tmp_config_dir, workspace, backend)
+        state = CwState(sessions=sessions)
+        queue = DevQueueStore(tasks=tasks)
+        save_state(state)
+        save_dev_queue(queue)
+        return state, queue
+
+    def _check(self, state: CwState, queue: DevQueueStore) -> list[WedgeFinding]:
+        from cw.doctor.wedge import _check_wedge_active_null_liveness_orphan
+
+        return [
+            f
+            for f in _check_wedge_active_null_liveness_orphan(state, queue)
+            if f.wedge_class == _CLASS9
+        ]
+
+    def _assert_untouched(self, *, sid: str = _CLASS9_SID) -> None:
+        """Session still ACTIVE/IDLE and every RUNNING task still RUNNING."""
+        from cw.config import load_state
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus, SessionStatus
+
+        sess = next(s for s in load_state().sessions if s.id == sid)
+        assert sess.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
+        for task in load_dev_queue().tasks:
+            assert task.status == QueueItemStatus.RUNNING
+
+    def _stub_daemon(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        roster_path.write_text(
+            json.dumps({"supervisorPid": 12345, "workers": {}}), encoding="utf-8"
+        )
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
+        )
+
+    def test_null_liveness_orphan_advisory_finding_no_mutation(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end run_doctor(reap=True): finding surfaced, nothing mutated."""
+        self._stub_daemon(tmp_path, monkeypatch)
+        self._seed(
+            tmp_config_dir,
+            tmp_path,
+            [self._make_session(tmp_path)],
+            [self._make_task()],
+        )
+
+        report = run_doctor(reap=True)
+
+        findings = [f for f in report.wedge_findings if f.wedge_class == _CLASS9]
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding.session_id == _CLASS9_SID
+        assert finding.ticket_id == _CLASS9_SID
+        assert f"cw spawn close {_CLASS9_SID}" in finding.recipe
+        assert "no liveness record past its spawn grace" in finding.recipe
+        self._assert_untouched()
+
+    def test_codex_backend_session_not_flagged(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        state, queue = self._seed(
+            tmp_config_dir,
+            tmp_path,
+            [self._make_session(tmp_path)],
+            [self._make_task()],
+            backend="codex",
+        )
+
+        assert self._check(state, queue) == []
+
+    def test_local_liveness_present_not_flagged(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.models import LocalLivenessHandle
+
+        sess = self._make_session(
+            tmp_path,
+            local_liveness=LocalLivenessHandle(pid=4242, start_time_ns=1),
+        )
+        state, queue = self._seed(tmp_config_dir, tmp_path, [sess], [self._make_task()])
+
+        assert self._check(state, queue) == []
+
+    def test_surface_ref_present_not_flagged(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        sess = self._make_session(tmp_path, surface_ref="abc123")
+        state, queue = self._seed(tmp_config_dir, tmp_path, [sess], [self._make_task()])
+
+        assert self._check(state, queue) == []
+
+    def test_within_grace_window_not_flagged(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        sess = self._make_session(tmp_path, started_at=datetime.now(UTC))
+        state, queue = self._seed(tmp_config_dir, tmp_path, [sess], [self._make_task()])
+
+        assert self._check(state, queue) == []
+
+    def test_orchestrate_purpose_not_flagged(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.models import SessionPurpose
+
+        sess = self._make_session(tmp_path, purpose=SessionPurpose.ORCHESTRATE)
+        state, queue = self._seed(tmp_config_dir, tmp_path, [sess], [self._make_task()])
+
+        assert self._check(state, queue) == []
+
+    def _assert_backend_unresolved(
+        self, findings: list[WedgeFinding], *, ticket_id: str | None = _CLASS9_SID
+    ) -> None:
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding.session_id == _CLASS9_SID
+        assert finding.ticket_id == ticket_id
+        assert _BACKEND_UNRESOLVED_TEXT in finding.recipe
+        assert f"cw spawn close {_CLASS9_SID}" in finding.recipe
+
+    def test_unresolvable_task_advisory_finding(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        state, queue = self._seed(
+            tmp_config_dir, tmp_path, [self._make_session(tmp_path)], []
+        )
+
+        findings = self._check(state, queue)
+
+        self._assert_backend_unresolved(findings)
+        assert "no RUNNING task" in findings[0].recipe
+        self._assert_untouched()
+
+    def test_unresolvable_client_advisory_finding(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        state, queue = self._seed(
+            tmp_config_dir,
+            tmp_path,
+            [self._make_session(tmp_path)],
+            [self._make_task()],
+            backend=None,
+        )
+
+        findings = self._check(state, queue)
+
+        self._assert_backend_unresolved(findings)
+        assert "no clients.yaml entry" in findings[0].recipe
+        self._assert_untouched()
+
+    def test_wrong_running_task_matched_advisory_finding(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A RUNNING row for the same (ticket, client) owned by ANOTHER session
+        is an identity mismatch -> backend unresolved, never a false match."""
+        state, queue = self._seed(
+            tmp_config_dir,
+            tmp_path,
+            [self._make_session(tmp_path)],
+            [self._make_task(session_id="someone-else")],
+            backend="codex",
+        )
+
+        findings = self._check(state, queue)
+
+        self._assert_backend_unresolved(findings)
+        assert "belongs to a different session" in findings[0].recipe
+        self._assert_untouched()
+
+    def test_idle_status_also_flagged(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.models import SessionStatus
+
+        sess = self._make_session(tmp_path, status=SessionStatus.IDLE)
+        state, queue = self._seed(tmp_config_dir, tmp_path, [sess], [self._make_task()])
+
+        findings = self._check(state, queue)
+
+        assert len(findings) == 1
+        assert f"cw spawn close {_CLASS9_SID}" in findings[0].recipe
+        self._assert_untouched()
+
+    def test_non_daemon_origin_not_flagged(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.models import SessionOrigin
+
+        sess = self._make_session(tmp_path, origin=SessionOrigin.USER)
+        state, queue = self._seed(tmp_config_dir, tmp_path, [sess], [self._make_task()])
+
+        assert self._check(state, queue) == []
+
+    def test_reap_wedge_findings_leaves_class9_untouched(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Neither daemon_reap_findings nor running_ticket_ids acts on class-9."""
+        from cw.config import state_file
+        from cw.doctor.wedge import _reap_wedge_findings
+
+        self._seed(
+            tmp_config_dir,
+            tmp_path,
+            [self._make_session(tmp_path)],
+            [self._make_task()],
+        )
+        finding = WedgeFinding(
+            wedge_class=_CLASS9,
+            session_id=_CLASS9_SID,
+            ticket_id=_CLASS9_SID,
+            recipe="advisory",
+            state_file=str(state_file()),
+        )
+
+        _reap_wedge_findings([finding])
+
+        self._assert_untouched()
+
+    def test_null_liveness_orphan_no_ticket_id_still_flagged(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A non-auto-dev/ name (plan-*/address-review-*) still surfaces (A8)."""
+        from cw.reconcile import ticket_id_for_session
+
+        name = f"client-a/plan-{_CLASS9_SID}"
+        assert ticket_id_for_session(name) is None
+        state, queue = self._seed(
+            tmp_config_dir,
+            tmp_path,
+            [self._make_session(tmp_path, name=name)],
+            [self._make_task()],
+        )
+
+        findings = self._check(state, queue)
+
+        self._assert_backend_unresolved(findings, ticket_id=None)
+        assert "session name does not encode a ticket id" in findings[0].recipe
+        self._assert_untouched()
 
 
 # ---------------------------------------------------------------------------
