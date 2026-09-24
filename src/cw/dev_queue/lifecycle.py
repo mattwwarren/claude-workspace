@@ -371,7 +371,6 @@ def transition_task_status(
     claim through two transitions cannot double-charge it. Callers that pass
     ``False`` are, in the same shape as disposition/pr_url/blocked_reason,
     supplying a fact this seam then stamps centrally.
-
     """
     old_status = task.status
     task.status = new_status

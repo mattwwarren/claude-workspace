@@ -343,11 +343,6 @@ class UsageLimitAct(BaseModel):
     # re-emit them. An emit that lands just before a crash is re-emitted: the
     # audit is at-least-once, keyed by (session_id, started_at).
     audited_at: datetime | None = None
-    # Set under ``dev_queue_lock`` immediately before the external daemon stop
-    # and retained until the stop returns. It is the durable hand-off
-    # reservation that lets queue mutation paths honoring ``usage_limit_act``
-    # leave the act's row alone while the external call runs.
-    stop_started_at: datetime | None = None
 
 
 # The two wire keys the #2102 plan-approval binding travels under. Each names a

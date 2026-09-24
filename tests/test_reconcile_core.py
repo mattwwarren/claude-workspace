@@ -1506,8 +1506,8 @@ def test_reconcile_signal_only_parks_mid_turn_ticket_without_reverting(
 def _fail_mid_turn_dev_queue_save(monkeypatch: pytest.MonkeyPatch, *, nth: int) -> None:
     """The sweep's *nth* dev-queue write raises; the others land.
 
-    Its writes are, in order: the decision (1), the audit mark (2), the stop
-    reservation (3) and the final transition (4).
+    Its writes are, in order: the decision (1), the audit mark (2) and the
+    final transition (3).
     """
     real_save = save_dev_queue
     saves: list[int] = []
@@ -1595,7 +1595,7 @@ def test_reconcile_backstop_skips_row_whose_act_closed_the_session(
         tmp_path, monkeypatch, config=_auto_config(), with_phantom=False
     )
     before = load_dev_queue().tasks[0].unproductive_attempts
-    _fail_mid_turn_dev_queue_save(monkeypatch, nth=4)
+    _fail_mid_turn_dev_queue_save(monkeypatch, nth=3)
 
     assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
     assert load_state().sessions[0].status is SessionStatus.COMPLETED

@@ -560,7 +560,6 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
                 reset_at=_RESET_AT,
                 until=_RESET_AT,
                 audited_at=_NOW,
-                stop_started_at=_NOW,
             ),
         )
     ]
@@ -579,14 +578,20 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     assert "re-enter the queue automatically" in attention[0]["breadcrumbs"]
 
 
-def test_stop_holds_queue_ownership_through_stop_invocation(
+def test_stop_releases_queue_lock_before_the_daemon_call(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
     daemon: FakeNativeDaemonClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fence cleared when the lock exits cannot cancel an already-run stop."""
+    """``dev_queue_lock`` is released before ``daemon.stop()``, not held across it.
+
+    ``dev_queue_lock`` is global: every queue writer (dispatch, CLI
+    approve/requeue, reconcile) blocks on it. Holding it across the external
+    daemon call and the roster poll would stall all of them for as long as
+    those take.
+    """
     state, _ = _seed(home, tmp_path, _limit_tail())
     intent = mid_turn._decide(
         state.sessions[0],
@@ -607,19 +612,29 @@ def test_stop_holds_queue_ownership_through_stop_invocation(
         now=_NOW,
     )
 
-    class _ClearIntentOnUnlock:
+    lock_held = False
+
+    class _TrackingLock:
         def __enter__(self) -> None:
-            return None
+            nonlocal lock_held
+            lock_held = True
 
         def __exit__(self, *_args: object) -> None:
-            store = load_dev_queue()
-            store.tasks[0].usage_limit_act = None
-            save_dev_queue(store)
+            nonlocal lock_held
+            lock_held = False
 
-    monkeypatch.setattr(mid_turn, "dev_queue_lock", _ClearIntentOnUnlock)
+    monkeypatch.setattr(mid_turn, "dev_queue_lock", _TrackingLock)
+    held_at_stop: list[bool] = []
+    real_stop = daemon.stop
+
+    def _stop(short_id: str) -> None:
+        held_at_stop.append(lock_held)
+        real_stop(short_id)
+
+    monkeypatch.setattr(daemon, "stop", _stop)
 
     assert mid_turn._stop_surface(act) is mid_turn._Stop.DONE
-    assert daemon.stop_calls == [_SURFACE]
+    assert held_at_stop == [False]
 
 
 def test_act_auto_falls_back_to_flat_backoff_on_unparseable_reset(
@@ -844,7 +859,12 @@ def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Losing ownership during the external stop prevents finalization."""
+    """An operator cancel mid-act clears the intent, so the act ends there.
+
+    Neither the session close nor the requeue lands: once the row no longer
+    carries the intent, the act owns neither, so the session is left open
+    and the cancelled row exactly as the operator left it.
+    """
     state, _ = _seed(home, tmp_path, _limit_tail())
     candidates = _detect(state)
     real_stop = daemon.stop
@@ -861,7 +881,8 @@ def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
         reverted = _act(state, candidates, _auto_config())
 
     assert reverted == []
-    assert load_state().sessions[0].status is SessionStatus.ACTIVE
+    assert any(_SID in m and "no longer carries" in m for m in _log_messages(caplog))
+    _assert_session_still_active(state)
     task = load_dev_queue().tasks[0]
     assert task.status is QueueItemStatus.CANCELLED
     assert task.usage_limit_act is None
@@ -891,12 +912,7 @@ def test_act_leaves_session_open_when_row_is_requeued_after_the_stop_confirms(
     def _confirm_then_requeue(*args: Any, **kwargs: Any) -> bool:
         confirmed = real_wait(*args, **kwargs)
         store = load_dev_queue()
-        # Model a writer that has already won the ownership race; this is
-        # intentionally a direct persisted mutation, not a transition, so
-        # the post-stop ownership check remains covered independently of the
-        # stop-fence guard in transition_task_status.
-        store.tasks[0].usage_limit_act = None
-        store.tasks[0].status = QueueItemStatus.PENDING
+        transition_task_status(store.tasks[0], QueueItemStatus.PENDING)
         store.tasks[0].session_id = None
         save_dev_queue(store)
         return confirmed
@@ -1118,11 +1134,7 @@ def _is_event(etype: OrchestratorEventType) -> Callable[..., bool]:
 
 
 def _inject(
-    point: str,
-    monkeypatch: pytest.MonkeyPatch,
-    daemon: FakeNativeDaemonClient,
-    *,
-    branch: str,
+    point: str, monkeypatch: pytest.MonkeyPatch, daemon: FakeNativeDaemonClient
 ) -> None:
     """Make the act fail once at *point*, the way a crash there would leave it.
 
@@ -1178,12 +1190,7 @@ def _inject(
     elif point == "close":
         _fail_once(monkeypatch, f"{mod}.save_state", real_save_state)
     elif point == "transition":
-        _fail_once(
-            monkeypatch,
-            f"{mod}.save_dev_queue",
-            save_dev_queue,
-            nth=4 if branch == "auto" else 3,
-        )
+        _fail_once(monkeypatch, f"{mod}.save_dev_queue", save_dev_queue, nth=3)
     else:  # pragma: no cover - a typo in the parametrize list
         msg = f"unknown injection point {point!r}"
         raise AssertionError(msg)
@@ -1226,7 +1233,7 @@ def test_interrupted_act_is_finished_next_tick_without_charge(
     state, _ = _seed(home, tmp_path, _limit_tail())
     config = _auto_config() if branch == "auto" else OrchestratorConfig()
     before = _owned_row().unproductive_attempts
-    _inject(point, monkeypatch, daemon, branch=branch)
+    _inject(point, monkeypatch, daemon)
 
     assert _tick(state, config, daemon, at=_NOW) == []
     _assert_row_still_running()

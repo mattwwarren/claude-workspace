@@ -374,22 +374,6 @@ def _row_carrying(tasks: Iterable[TicketTask], row: _ActRow) -> TicketTask | Non
     )
 
 
-def _row_carrying_stop_fence(
-    tasks: Iterable[TicketTask], row: _ActRow
-) -> TicketTask | None:
-    """Return the act row only while its stop-in-progress fence is present."""
-    return next(
-        (
-            task
-            for task in tasks
-            if _row_carrying((task,), row) is not None
-            and task.usage_limit_act is not None
-            and task.usage_limit_act.stop_started_at is not None
-        ),
-        None,
-    )
-
-
 def _mutate_act_row(row: _ActRow, mutate: Callable[[TicketTask], None]) -> bool:
     """Apply *mutate* under ``dev_queue_lock`` iff the row still carries the act."""
     with dev_queue_lock():
@@ -400,12 +384,6 @@ def _mutate_act_row(row: _ActRow, mutate: Callable[[TicketTask], None]) -> bool:
         mutate(target)
         save_dev_queue(store)
     return True
-
-
-def _mark_stop_started(target: TicketTask, *, at: datetime) -> None:
-    intent = target.usage_limit_act
-    if intent is not None and intent.stop_started_at is None:
-        target.usage_limit_act = intent.model_copy(update={"stop_started_at": at})
 
 
 def _lockout_covers(client: str, until: datetime, *, now: datetime) -> bool:
@@ -567,17 +545,9 @@ def _stop_surface(act: _Act) -> _Stop:
             session.id,
         )
         return _Stop.ABANDONED
-    # The stop is destructive to a still-live surface. The transcript check
-    # above can race with an operator disposition, so persist an explicit
-    # durable ownership fence and validate it under the queue lock. The fence
-    # remains on the row while the external stop runs. The queue lock below
-    # stays held through the external call, so no competing queue disposition
-    # or session rebind can win during the stop hand-off.
-    daemon = _deps.get_native_daemon_client()
     with dev_queue_lock():
         store = load_dev_queue()
-        target = _row_carrying(store.tasks, act.row)
-        if target is None:
+        if _row_carrying(store.tasks, act.row) is None:
             _log.info(
                 "usage_limit_mid_turn: row for ticket %s no longer carries the "
                 "act for session %s; surface left running",
@@ -585,28 +555,27 @@ def _stop_surface(act: _Act) -> _Stop:
                 session.id,
             )
             return _Stop.ABANDONED
-        _mark_stop_started(target, at=act.now)
-        save_dev_queue(store)
-        if _row_carrying_stop_fence(store.tasks, act.row) is None:
-            _log.info(
-                "usage_limit_mid_turn: stop fence for ticket %s session %s was "
-                "lost before daemon stop; surface left running",
-                act.row.ticket_id,
-                session.id,
-            )
-            return _Stop.ABANDONED
-        # Keep dev_queue_lock through the stop and roster confirmation. The
-        # persisted stop_started_at fence is the reservation, and this lock is
-        # the atomic hand-off that makes it enforceable by every queue writer.
-        daemon.stop(surface_ref)
-        if wait_for_roster_presence(
-            daemon,
-            surface_ref,
-            present=False,
-            timeout=_STOP_CONFIRM_TIMEOUT_SECS,
-            interval=_STOP_CONFIRM_INTERVAL_SECS,
-        ):
-            return _Stop.DONE
+    # dev_queue_lock is global -- every queue writer (dispatch, CLI
+    # approve/requeue, reconcile) blocks on it, so it must never be held
+    # across daemon.stop() (an external IPC call with no bound we control)
+    # or the roster poll below. An operator disposition can land in this
+    # window between the ownership check above and the stop; that is
+    # accepted, not engineered around. The surface being stopped is this
+    # act's own session's surface -- a worker already stuck on a usage
+    # limit -- so stopping it can never hit another session's work, and a
+    # re-dispatch spawns a new surface. Every write after the stop
+    # (``_persist_completed``, ``_finish``) re-checks ownership under the
+    # lock, so a row another writer has since taken is never mutated here.
+    daemon = _deps.get_native_daemon_client()
+    daemon.stop(surface_ref)
+    if wait_for_roster_presence(
+        daemon,
+        surface_ref,
+        present=False,
+        timeout=_STOP_CONFIRM_TIMEOUT_SECS,
+        interval=_STOP_CONFIRM_INTERVAL_SECS,
+    ):
+        return _Stop.DONE
     _log.warning(
         "usage_limit_mid_turn: surface %s for ticket %s session %s is still in "
         "the daemon roster (or the roster is unreadable) %.1fs after stop; the "
@@ -619,7 +588,7 @@ def _stop_surface(act: _Act) -> _Stop:
     return _Stop.RETRY
 
 
-def _persist_completed(act: _Act, *, require_stop_fence: bool) -> bool:
+def _persist_completed(act: _Act) -> bool:
     """``auto``: persist the session COMPLETED, unless it is already terminal.
 
     The stop confirmation can poll the roster for seconds, and another writer
@@ -635,11 +604,7 @@ def _persist_completed(act: _Act, *, require_stop_fence: bool) -> bool:
         return True
     with dev_queue_lock():
         tasks = load_dev_queue().tasks
-        owner = (
-            _row_carrying_stop_fence(tasks, act.row)
-            if require_stop_fence
-            else _row_carrying(tasks, act.row)
-        )
+        owner = _row_carrying(tasks, act.row)
         if owner is None:
             _log.warning(
                 "usage_limit_mid_turn: row for ticket %s no longer carries the "
@@ -673,40 +638,13 @@ def _park(target: TicketTask) -> None:
     )
 
 
-def _finish_mutation(
-    target: TicketTask, *, mutate: Callable[[TicketTask], None]
-) -> None:
-    """Release this act's stop reservation before its own final transition."""
-    intent = target.usage_limit_act
-    if intent is not None and intent.stop_started_at is not None:
-        target.usage_limit_act = intent.model_copy(update={"stop_started_at": None})
-    mutate(target)
-
-
-def _finish(row: _ActRow, *, require_stop_fence: bool) -> bool:
+def _finish(row: _ActRow) -> bool:
     """Transition the row, clearing the intent in the same write.
 
     Returns True iff an ``auto`` act requeued the row to PENDING.
     """
     mutate = partial(_requeue, until=row.intent.until) if row.auto else _park
-    if require_stop_fence:
-        with dev_queue_lock():
-            store = load_dev_queue()
-            if _row_carrying_stop_fence(store.tasks, row) is None:
-                _log.info(
-                    "usage_limit_mid_turn: stop fence for ticket %s session %s "
-                    "was lost; row left as found",
-                    row.ticket_id,
-                    row.intent.session_id,
-                )
-                return False
-            target = _row_carrying(store.tasks, row)
-            if target is None:
-                return False
-            _finish_mutation(target, mutate=mutate)
-            save_dev_queue(store)
-        return row.auto
-    if _mutate_act_row(row, partial(_finish_mutation, mutate=mutate)):
+    if _mutate_act_row(row, mutate):
         return row.auto
     _log.info(
         "usage_limit_mid_turn: row for ticket %s no longer carries the act for "
@@ -721,17 +659,11 @@ def _resume(act: _Act) -> bool:
     """Perform every step the act has not done yet; True iff it requeued."""
     if not _arm_lockout(act) or not _audit(act):
         return False
-    requires_stop_fence = act.row.auto and (
-        act.session.status not in TERMINAL_SESSION_STATUSES
-        and act.session.surface_ref is not None
-        and act.session.surface_ref in act.native_live
-    )
     if act.row.auto and (
-        _stop_surface(act) is not _Stop.DONE
-        or not _persist_completed(act, require_stop_fence=requires_stop_fence)
+        _stop_surface(act) is not _Stop.DONE or not _persist_completed(act)
     ):
         return False
-    return _finish(act.row, require_stop_fence=requires_stop_fence)
+    return _finish(act.row)
 
 
 def _resume_contained(
@@ -756,7 +688,7 @@ def _resume_contained(
                 row.intent.session_id,
                 row.ticket_id,
             )
-            return _finish(row, require_stop_fence=False)
+            return _finish(row)
         act = _Act(
             row=row, state=state, session=session, native_live=native_live, now=now
         )
