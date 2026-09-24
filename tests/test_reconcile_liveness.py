@@ -25,6 +25,7 @@ from cw.models import (
     SessionStatus,
     Stage,
     TicketTask,
+    UsageLimitAct,
 )
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
@@ -32,6 +33,7 @@ from cw.reconcile._shared import (
     _SESSION_UNRESPONSIVE_REASON,
     _STOPPED_WITHOUT_SENTINEL_REASON,
     _UNCONSUMED_QUEUE_NOTIFICATION_REASON,
+    _USAGE_LIMITED_MID_TURN_REASON,
 )
 from cw.reconcile.liveness import (
     _classify_liveness_bucket,
@@ -981,6 +983,108 @@ def test_suppressed_session_steady_state_and_recovery_latch_unchanged(
     assert latches[1]["old_bucket"] == "stale_45m"
     assert latches[1]["new_bucket"] == "live"
     assert _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
+
+
+def _acting_task(act_session_id: str) -> TicketTask:
+    """A RUNNING row carrying a mid-turn usage-limit act for *act_session_id*."""
+    return TicketTask(
+        ticket_id="T-1",
+        client="client-a",
+        stage=Stage.PLAN,
+        status=QueueItemStatus.RUNNING,
+        session_id=act_session_id,
+        usage_limit_act=UsageLimitAct(
+            session_id=act_session_id,
+            branch="auto",
+            started_at=_NOW,
+            reset_at=None,
+            until=_NOW + timedelta(minutes=30),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("act_for_this_session", "expect_distress"),
+    [
+        pytest.param(True, False, id="act-for-this-session"),
+        pytest.param(False, True, id="act-for-another-session"),
+    ],
+)
+def test_usage_limit_act_in_flight_suppresses_session_unresponsive(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    act_for_this_session: bool,
+    expect_distress: bool,
+) -> None:
+    """The mid-turn usage-limit act already paged and owns the row (#2324).
+
+    Signal-only, like the #2135 carve-out: the bucket still latches, only the
+    distress page is withheld -- and only for the act's own session.
+    """
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=60)
+    state = CwState(sessions=[sess])
+    task = _acting_task(sess.id if act_for_this_session else "some-other-session")
+
+    candidates = record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].distress is expect_distress
+    attention = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert len(attention) == (1 if expect_distress else 0)
+    _assert_top_bucket_latched(sess)
+
+
+@pytest.mark.parametrize(
+    ("park_for_this_session", "expect_distress"),
+    [
+        pytest.param(True, False, id="parked-for-this-session"),
+        pytest.param(False, True, id="parked-for-another-session"),
+    ],
+)
+def test_usage_limit_mid_turn_park_suppresses_session_unresponsive(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    park_for_this_session: bool,
+    expect_distress: bool,
+) -> None:
+    """A signal-only park stays quiet after its transition clears the intent.
+
+    The park transition clears ``usage_limit_act``, but leaves the session
+    alive, the row BLOCKED_ON_USER / ``usage_limited_mid_turn`` and its
+    ``session_id`` set -- already explained by the act's own page (#2324).
+    Only the parked session is withheld; another session's row fails open.
+    """
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=60)
+    state = CwState(sessions=[sess])
+    task = _parked_task(
+        sess.id if park_for_this_session else "some-other-session",
+        disposition=_USAGE_LIMITED_MID_TURN_REASON,
+    )
+    assert task.usage_limit_act is None
+
+    candidates = record_session_liveness_changes(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].distress is expect_distress
+    attention = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert len(attention) == (1 if expect_distress else 0)
+    _assert_top_bucket_latched(sess)
 
 
 def test_requeue_after_suppressed_crossing_pages_on_next_tick(

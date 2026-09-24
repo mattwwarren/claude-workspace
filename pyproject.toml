@@ -295,6 +295,13 @@ ignore = [
 # codex_boot above: claim.py imports cw.executor at module top and cw.executor
 # imports cw.reconcile, so this module must not reach back at import time.
 "src/cw/reconcile/fix_dispatch.py" = ["PLC0415"]
+# usage_limit_mid_turn defers cw.dispatch.claim._find_running_row inside
+# _decide (#2324) for the same cw.dispatch ↔ cw.reconcile cycle as the
+# tasks.py and phantom/_mutations entries above: cw.dispatch's package
+# __init__ imports cw.reconcile at module top, so this module's reach into
+# cw.dispatch.claim must be function-level. Inline import is the sanctioned
+# mechanism, not a workaround.
+"src/cw/reconcile/usage_limit_mid_turn.py" = ["PLC0415"]
 # claim defers the cw.dispatch.gating import inside _spawn_claimed_task to break
 # the gating ↔ claim circular dependency (#1310): gating imports claim at module
 # top, so claim's own reach back into gating must be function-level. Inline

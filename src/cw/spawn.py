@@ -7,7 +7,6 @@ import logging
 import os
 import shlex
 import subprocess
-import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -43,7 +42,11 @@ from cw.models import (
     SessionPurpose,
     TicketTask,
 )
-from cw.native_daemon import get_native_daemon_client, resolve_permission_mode
+from cw.native_daemon import (
+    get_native_daemon_client,
+    resolve_permission_mode,
+    wait_for_roster_presence,
+)
 from cw.reconcile import _csid_from_transcript, ticket_id_for_session
 from cw.session_retention import find_session_by_id
 
@@ -235,14 +238,10 @@ def _verify_roster_registration(
     Emits a ``SESSION_SPAWN_UNREGISTERED`` event before raising so the failure
     is diagnosable in the event inbox.
     """
-    deadline = time.monotonic() + timeout
-    while True:
-        if short_id in daemon.list_live_session_short_ids():
-            return
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        time.sleep(min(interval, remaining))
+    if wait_for_roster_presence(
+        daemon, short_id, present=True, timeout=timeout, interval=interval
+    ):
+        return
     _log.warning(
         "spawn_unregistered: worker %r absent from roster after %.0fs poll; "
         "treating spawn as failed (ticket=%s)",

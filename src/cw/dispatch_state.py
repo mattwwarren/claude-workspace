@@ -18,11 +18,13 @@ import contextlib
 import fcntl
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from cw.atomic import atomic_write_text
 from cw.config import STATE_DIR, refuse_real_state_write, state_dir
+from cw.events import record_event
+from cw.models import OrchestratorEventType
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -251,6 +253,73 @@ def _usage_limited_until_from_payload(
         if parsed is not None:
             windows[str(name)] = parsed
     return windows
+
+
+# Hard ceiling on a window derived from a PARSED reset instant (#1409). The
+# parser is already structurally bounded below 7 days, so this only guards a
+# reset_at set by some other producer (a future raiser, the test fake). It
+# matters because nothing clears the persisted window early:
+# _merge_persisted_usage_limited_until never shortens, and no operator command
+# nulls the sidecar.
+_MAX_PARSED_USAGE_LIMIT_WINDOW = timedelta(days=7)
+
+
+def resolve_usage_limited_until(
+    now: datetime,
+    reset_at: datetime | None,
+    backoff_seconds: int,
+) -> datetime:
+    """Pick the back-off deadline: the parsed reset, else the flat window (#1409).
+
+    Lives here rather than in ``cw.dispatch.loop`` so reconcile (which
+    ``cw.dispatch`` imports) can arm the same window without a cycle (#2324).
+
+    Independent of the parser's own checks on purpose (defense in depth): this
+    *now* is strictly later than the one the parse used, and any future producer
+    of *reset_at* — including ``FakeNativeDaemonClient`` — goes through here too.
+    Falls back to ``now + backoff_seconds`` when *reset_at* is absent, naive
+    (which would raise ``TypeError`` on the comparison and be silently dropped by
+    the sidecar), already passed, exactly *now*, or further out than the clamp.
+    Never returns a zero-length or past window.
+    """
+    flat = now + timedelta(seconds=backoff_seconds)
+    if reset_at is None or reset_at.utcoffset() is None:
+        return flat
+    if now < reset_at <= now + _MAX_PARSED_USAGE_LIMIT_WINDOW:
+        return reset_at
+    return flat
+
+
+# Provenance labels on the USAGE_LIMIT_ARMED payload: was the window taken
+# from a reset instant the usage-limit message named, or from the flat
+# usage_limit_backoff_seconds fallback? Shared by the dispatch loop's spawn-time
+# arm and reconcile's mid-turn arm (#2324).
+USAGE_LIMIT_SOURCE_PARSED_RESET = "parsed_reset"
+USAGE_LIMIT_SOURCE_FLAT_BACKOFF = "flat_backoff"
+
+
+def record_usage_limit_armed(
+    client: str, *, until: datetime, reset_at: datetime | None
+) -> str:
+    """Audit one client's usage-limit window arm; return its provenance label.
+
+    The single arming audit for both the dispatch loop's spawn-time arm (#1409)
+    and reconcile's mid-turn arm (#2324). *until* is the deadline
+    :func:`resolve_usage_limited_until` already picked from *reset_at*; it was
+    taken from the parsed reset iff the two are equal. Callers persist the
+    window only after this returns, so a failed event write never leaves a
+    lockout without its audit record.
+    """
+    source = (
+        USAGE_LIMIT_SOURCE_PARSED_RESET
+        if until == reset_at
+        else USAGE_LIMIT_SOURCE_FLAT_BACKOFF
+    )
+    record_event(
+        OrchestratorEventType.USAGE_LIMIT_ARMED,
+        {"client": client, "until": until.isoformat(), "source": source},
+    )
+    return source
 
 
 def merge_usage_limited_until(

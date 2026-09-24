@@ -46,16 +46,48 @@ USAGE_LIMIT_RE = re.compile(r"hit (?:your )?\S+ limit", re.IGNORECASE)
 #   Arabic-Indic "٣"), and a reset time written in them is not something we want
 #   to guess at.
 # - Unicode \s is kept so the NNBSP/NBSP separators Claude renders still match.
+# - The optional date prefix is a weekday (``Mon``) or a month-day (``Sep 26,``);
+#   the month-day form is the wording a running session's mid-turn limit stop
+#   prints (#2324).
 USAGE_LIMIT_RESET_RE = re.compile(
     r"\W{0,8}resets\s{1,4}"
-    r"(?:(?P<day>mon|tue|wed|thu|fri|sat|sun)[a-z]{0,6}\s{1,4})?"
+    r"(?:(?P<day>mon|tue|wed|thu|fri|sat|sun)[a-z]{0,6}\s{1,4}"
+    r"|(?P<month>[a-z]+)\.?"
+    r"\s{1,4}(?P<mday>[0-9]{1,2}),?\s{1,4})?"
     r"(?P<hour>[0-9]{1,2})(?::(?P<minute>[0-9]{2}))?\s?(?P<mer>[ap])\.?m\b",
     re.IGNORECASE,
 )
 
+_DAYS_PER_WEEK = 7
 # Weekday abbreviations in datetime.weekday() order (Monday == 0).
 _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-_DAYS_PER_WEEK = 7
+# Accepted month spellings. Keep the token validation explicit so an arbitrary
+# suffix cannot be silently accepted by slicing it down to an abbreviation.
+_MONTH_ALIASES = {
+    alias: month
+    for month, aliases in enumerate(
+        (
+            ("jan", "january"),
+            ("feb", "february"),
+            ("mar", "march"),
+            ("apr", "april"),
+            ("may",),
+            ("jun", "june"),
+            ("jul", "july"),
+            ("aug", "august"),
+            ("sep", "sept", "september"),
+            ("oct", "october"),
+            ("nov", "november"),
+            ("dec", "december"),
+        ),
+        start=1,
+    )
+    for alias in aliases
+}
+# Every accepted reset lies strictly under this far ahead. The time-only and
+# weekday forms cannot reach it; a month-day form can name any date, so it is
+# held to the same bound rather than trusted.
+_MAX_RESET_HORIZON = timedelta(days=_DAYS_PER_WEEK)
 _HOURS_PER_MERIDIEM = 12
 # Valid 12-hour-clock components. Kept as ranges so the membership tests read as
 # domain checks rather than PLR2004 magic-number comparisons.
@@ -108,6 +140,11 @@ def parse_usage_limit_reset(text: str, *, now: datetime) -> datetime | None:
       task, charging ``unproductive_attempts`` until the attempt ceiling
       parks it minutes later.
     - **R5** — the LAST usage-limit phrase in *text* is the anchor.
+    - **Month-day** (#2324) — ``resets Sep 26, 11pm``, the wording a running
+      session's mid-turn stop prints, names that date in *now*'s year (the
+      next year once it has passed, for a reset read across New Year). R1
+      applies unchanged: the wall clock is read in *now*'s zone, not the
+      annotation's. A date 7 days or more away yields None.
 
     The result is always strictly future, structurally under 7 days out, and
     returned as an aware UTC instant (the ``usage_limited_until`` sidecar
@@ -138,8 +175,9 @@ def _resolve_reset_candidate(
     """Turn a matched ``resets <time>`` fragment into an aware UTC instant.
 
     Split out of :func:`parse_usage_limit_reset` to keep both functions inside
-    the PLR0911 return budget. Returns None for any component out of range and
-    for any candidate that is not strictly in the future.
+    the PLR0911 return budget. Returns None for any component out of range, for
+    any candidate that is not strictly in the future, and for any candidate
+    :data:`_MAX_RESET_HORIZON` or further out.
     """
     hour = int(fragment["hour"])
     minute = int(fragment["minute"]) if fragment["minute"] else 0
@@ -149,12 +187,12 @@ def _resolve_reset_candidate(
     if fragment["mer"].lower() == "p":
         hour24 += _HOURS_PER_MERIDIEM
 
-    candidate = now.replace(hour=hour24, minute=minute, second=0, microsecond=0)
-    day = fragment["day"]
-    if day is not None:
-        delta = (_WEEKDAYS.index(day.lower()) - now.weekday()) % _DAYS_PER_WEEK
-        candidate += timedelta(days=delta)
-    # fold is applied AFTER the weekday shift because timedelta arithmetic
+    candidate = _reset_candidate_on_named_date(
+        fragment, now.replace(hour=hour24, minute=minute, second=0, microsecond=0)
+    )
+    if candidate is None:
+        return None
+    # fold is applied AFTER the date shift because timedelta arithmetic
     # resets it to 0. fold=1 selects the SECOND pass through an ambiguous wall
     # clock (the repeated hour on a fall-back day) -- the later instant, so the
     # spawn gate never reopens before the limit actually lifts. It has no
@@ -163,12 +201,47 @@ def _resolve_reset_candidate(
     # it with the post-transition offset, i.e. the EARLIER of the two readings,
     # which can only shorten the window (safe, and self-correcting on re-hit).
     candidate = candidate.replace(fold=1)
-    # One check covers both the time-only already-passed case (R2) and the
-    # weekday-names-today already-passed case (inverted R3); a positive weekday
-    # delta is always in the future, so nothing else can reach here past.
-    if candidate <= now:
+    # One check covers the time-only already-passed case (R2), the
+    # weekday-names-today already-passed case (inverted R3), and a month-day
+    # already passed this year; a positive weekday delta is always in the
+    # future, so nothing else can reach here past.
+    if candidate <= now or candidate - now >= _MAX_RESET_HORIZON:
         return None
     return candidate.astimezone(UTC)
+
+
+def _reset_candidate_on_named_date(
+    fragment: re.Match[str], today_at: datetime
+) -> datetime | None:
+    """Move *today_at* (the reset's wall clock, today) onto the named date.
+
+    A weekday names the next such day (today included). A month-day names that
+    date in the current year, or the next year when it has already passed --
+    so ``resets Jan 2`` read on Dec 30 lands in January; the horizon check in
+    :func:`_resolve_reset_candidate` rejects any other far-off roll. Returns
+    None for an impossible month-day such as ``Feb 30``. No named date leaves
+    *today_at* unchanged.
+    """
+    day = fragment["day"]
+    if day is not None:
+        delta = (_WEEKDAYS.index(day.lower()) - today_at.weekday()) % _DAYS_PER_WEEK
+        return today_at + timedelta(days=delta)
+    month = fragment["month"]
+    if month is None:
+        return today_at
+    month_number = _MONTH_ALIASES.get(month.lower())
+    if month_number is None:
+        return None
+    try:
+        candidate = today_at.replace(
+            month=month_number,
+            day=int(fragment["mday"]),
+        )
+        if candidate.date() < today_at.date():
+            candidate = candidate.replace(year=candidate.year + 1)
+    except ValueError:
+        return None
+    return candidate
 
 
 class CwError(Exception):

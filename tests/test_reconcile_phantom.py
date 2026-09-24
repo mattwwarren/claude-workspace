@@ -41,6 +41,7 @@ from cw.models import (
     SessionStatus,
     Stage,
     TicketTask,
+    UsageLimitAct,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
@@ -4156,6 +4157,75 @@ def test_merged_crash_shipped_never_charges_unproductive(
     assert t.status == QueueItemStatus.COMPLETED
     assert t.disposition == "shipped"
     assert t.unproductive_attempts == 0
+
+
+def test_phantom_revert_skips_same_ticket_row_carrying_usage_limit_act(
+    tmp_config_dir: Path,
+) -> None:
+    """#2324: a same-ticket phantom never reverts the row carrying an act.
+
+    Two RUNNING rows share a bare ticket id (the duplicate-row / cross-client
+    collision #2219 names). One carries the mid-turn usage-limit act's
+    write-ahead intent; the other belongs to a genuinely crashed phantom
+    whose ticket id lands in ``revert_set``. The sweep must revert only the
+    phantom's row and leave the act row RUNNING with its intent intact.
+    """
+    from cw.reconcile._shared import ProposedAction, ReapCandidate
+    from cw.reconcile.phantom import _apply_phantom_queue_mutations
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    ticket_id = "ph-2324-dup"
+    intent = UsageLimitAct(
+        session_id="act-sess",
+        branch="auto",
+        started_at=started_at,
+        reset_at=None,
+        until=started_at + timedelta(hours=1),
+    )
+    act_row = TicketTask(
+        ticket_id=ticket_id,
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="act-sess",
+        usage_limit_act=intent,
+    )
+    crash_row = TicketTask(
+        ticket_id=ticket_id,
+        client="client-b",
+        status=QueueItemStatus.RUNNING,
+        session_id="crash-sess",
+    )
+    save_dev_queue(DevQueueStore(tasks=[act_row, crash_row]))
+    crash_sess = _mk_phantom_daemon_session("crash-sess", started_at)
+    candidate = ReapCandidate(
+        session_id="crash-sess",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id=ticket_id,
+        client="client-b",
+    )
+    ticket_ids_to_revert: list[str] = []
+
+    _apply_phantom_queue_mutations(
+        {crash_sess.id: crash_sess},
+        [candidate],
+        [],
+        [],
+        [],
+        {},
+        set(),
+        ticket_ids_to_revert,
+        [],
+    )
+
+    tasks = load_dev_queue().tasks
+    kept = next(t for t in tasks if t.client == "client-a")
+    reverted = next(t for t in tasks if t.client == "client-b")
+    assert kept.status is QueueItemStatus.RUNNING
+    assert kept.session_id == "act-sess"
+    assert kept.usage_limit_act == intent
+    assert reverted.status is QueueItemStatus.PENDING
+    assert reverted.session_id is None
+    assert ticket_ids_to_revert == [ticket_id]
 
 
 def test_salvaged_completion_with_commits_is_productive(tmp_config_dir: Path) -> None:

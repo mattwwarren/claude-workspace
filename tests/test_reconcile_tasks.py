@@ -5,6 +5,7 @@ Dev-queue revert backstops and timed-out-merged completion.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from cw.models import (
     SessionStatus,
     Stage,
     TicketTask,
+    UsageLimitAct,
     WatchedPr,
 )
 from cw.pr_hydrate import hydrate_pr_states
@@ -85,6 +87,61 @@ def test_revert_completed_silent_tasks_happy_path(
     t = next(t for t in store.tasks if t.ticket_id == "TKT-CS1")
     assert t.status == QueueItemStatus.PENDING
     assert t.session_id is None
+
+
+@pytest.mark.parametrize(
+    ("make_session", "backstop"),
+    [
+        pytest.param(
+            _mk_daemon_completed_session,
+            revert_completed_silent_tasks,
+            id="completed-backstop",
+        ),
+        pytest.param(
+            lambda sid: _mk_timed_out_daemon_session(sid, "TKT-ULA", datetime.now(UTC)),
+            revert_timed_out_tasks,
+            id="timed-out-backstop",
+        ),
+    ],
+)
+def test_backstops_skip_row_carrying_a_usage_limit_act(
+    tmp_config_dir: Path,
+    make_session: Callable[[str], Session],
+    backstop: Callable[[], list[str]],
+) -> None:
+    """A row still carrying a mid-turn usage-limit act is never reverted (#2324).
+
+    The act closed the session and resumes to finish the row uncharged; a
+    backstop revert here would charge the attempt the act exists to spare,
+    and stamp a reap reason for a reap that never happened.
+    """
+    sess = make_session("act-sess-1")
+    save_state(CwState(sessions=[sess]))
+    now = datetime.now(UTC)
+    task = TicketTask(
+        ticket_id="TKT-ULA",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="act-sess-1",
+        usage_limit_act=UsageLimitAct(
+            session_id="act-sess-1",
+            branch="auto",
+            started_at=now,
+            reset_at=None,
+            until=now + timedelta(minutes=30),
+            audited_at=now,
+        ),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with sessions_lock():
+        assert backstop() == []
+
+    stored = load_dev_queue().tasks[0]
+    assert stored.status is QueueItemStatus.RUNNING
+    assert stored.unproductive_attempts == 0
+    assert stored.usage_limit_act is not None
+    assert load_state().sessions[0].reap_reason is None
 
 
 def test_revert_completed_silent_tasks_skips_user_origin(

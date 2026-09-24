@@ -355,6 +355,30 @@ class TestParseUsageLimitReset:
                 datetime(2026, 9, 20, 15, 45, tzinfo=_NY),
                 id="last-occurrence-wins-R5",
             ),
+            pytest.param(
+                "You've hit your weekly limit · resets Sep 26, 11pm (America/New_York)",
+                _SUNDAY_10AM_NY,
+                datetime(2026, 9, 26, 23, 0, tzinfo=_NY),
+                id="month-day-mid-turn-wording-2324",
+            ),
+            pytest.param(
+                "You've hit your weekly limit · resets Sept 21 9:30am",
+                _SUNDAY_10AM_NY,
+                datetime(2026, 9, 21, 9, 30, tzinfo=_NY),
+                id="month-day-long-month-no-comma",
+            ),
+            pytest.param(
+                "You've hit your weekly limit · resets Jan 2, 5pm",
+                datetime(2026, 12, 30, 12, 0, tzinfo=_NY),
+                datetime(2027, 1, 2, 17, 0, tzinfo=_NY),
+                id="month-day-rolls-into-next-year",
+            ),
+            pytest.param(
+                "You've hit your weekly limit · resets Sep 20, 11pm",
+                _SUNDAY_10AM_NY,
+                datetime(2026, 9, 20, 23, 0, tzinfo=_NY),
+                id="month-day-today-later",
+            ),
         ],
     )
     def test_resolves_expected_instant(
@@ -484,6 +508,36 @@ class TestParseUsageLimitReset:
                 "You've hit your session limit" + "." * 200 + "resets 3:45pm",
                 _SUNDAY_10AM_NY,
                 id="fragment-beyond-scan-window",
+            ),
+            pytest.param(
+                "You've hit your weekly limit · resets Feb 30, 3pm",
+                _SUNDAY_10AM_NY,
+                id="month-day-impossible-date",
+            ),
+            pytest.param(
+                "You've hit your weekly limit · resets Oct 30, 11pm",
+                _SUNDAY_10AM_NY,
+                id="month-day-beyond-seven-days",
+            ),
+            pytest.param(
+                "You've hit your weekly limit · resets Sep 19, 11pm",
+                _SUNDAY_10AM_NY,
+                id="month-day-already-passed-never-rolls-a-year",
+            ),
+            pytest.param(
+                "You've hit your weekly limit · resets Sep 20, 9am",
+                _SUNDAY_10AM_NY,
+                id="month-day-today-already-passed",
+            ),
+            pytest.param(
+                "You've hit your weekly limit · resets Sep, 11pm",
+                _SUNDAY_10AM_NY,
+                id="month-without-day",
+            ),
+            pytest.param(
+                "You've hit your weekly limit · resets Septic 21, 11pm",
+                _SUNDAY_10AM_NY,
+                id="month-arbitrary-suffix-rejected",
             ),
         ],
     )
