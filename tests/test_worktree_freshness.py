@@ -22,6 +22,7 @@ from cw.worktree import (
     _git_dir,
     check_main_ff_safety,
     fast_forward_main,
+    fetch_default_branch,
     fetch_feature_branch,
     is_main_behind_origin,
     is_main_checkout_dirty,
@@ -1270,6 +1271,96 @@ class TestFetchDefaultBranch:
                 r.levelno == logging.DEBUG and "freshness_check_skip" in r.getMessage()
                 for r in caplog.records
             )
+
+
+class TestFetchDefaultBranchWrapper:
+    """Tests for the public ``fetch_default_branch`` wrapper (#2328).
+
+    Named "Wrapper" (not "TestFetchDefaultBranch") to avoid colliding with the
+    existing ``TestFetchDefaultBranch`` class above, which covers the private
+    leaf helper ``_fetch_default_branch`` -- a same-named class here would
+    silently shadow it in the module namespace and drop its tests from
+    collection.
+    """
+
+    # Not tests.conftest.git_in: optional cwd and no -C, so bare
+    # "git init"/"git clone" callers pass no repo at all.
+    @staticmethod
+    def _run_bare_git(*args: str, cwd: Path | None = None) -> str:
+        """Run a git command stripped of GIT_* env vars; return stdout."""
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        result = subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(cwd) if cwd else None,
+            env=clean_env,
+        )
+        return result.stdout.strip()
+
+    def _setup_repo(self, tmp_path: Path) -> tuple[Path, Path, ClientConfig]:
+        """Create bare origin and parent clone. Returns (bare, parent, client)."""
+        bare = tmp_path / "bare.git"
+        bare.mkdir()
+        self._run_bare_git("init", "--bare", "-b", "main", str(bare))
+
+        parent = tmp_path / "parent"
+        self._run_bare_git("clone", str(bare), str(parent))
+        self._run_bare_git("config", "user.email", "test@example.com", cwd=parent)
+        self._run_bare_git("config", "user.name", "cw test", cwd=parent)
+        (parent / "README.md").write_text("init\n")
+        self._run_bare_git("add", "README.md", cwd=parent)
+        self._run_bare_git("commit", "-m", "initial", cwd=parent)
+        self._run_bare_git("push", "origin", "main", cwd=parent)
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=parent,
+            default_branch="main",
+        )
+        return bare, parent, client
+
+    def test_fetched(self, tmp_path: Path) -> None:
+        """FETCHED against a real bare origin with the default branch pushed."""
+        _bare, _parent, client = self._setup_repo(tmp_path)
+        result = fetch_default_branch(client)
+        assert result.outcome is FetchOutcome.FETCHED
+        assert result.reason is None
+
+    def test_missing_workspace_returns_failed(self, tmp_path: Path) -> None:
+        """FAILED without raising when the workspace directory is absent."""
+        client = ClientConfig(
+            name="absent",
+            workspace_path=tmp_path / "nonexistent",
+            default_branch="main",
+        )
+        result = fetch_default_branch(client)
+        assert result.outcome is FetchOutcome.FAILED
+        assert result.reason is not None
+        assert "workspace missing" in result.reason
+
+    def test_default_branch_absent_on_origin_is_branch_absent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """BRANCH_ABSENT when the client's configured default branch does not
+        exist on origin -- and, unlike ``fetch_feature_branch``, this is NOT
+        quieted to DEBUG: an absent/renamed default branch is anomalous, not
+        the expected never-pushed-yet state a feature branch can be in."""
+        monkeypatch.setenv("LC_ALL", "C")  # the marker is git's English message
+        _bare, _parent, client = self._setup_repo(tmp_path)
+        client = client.model_copy(update={"default_branch": "does-not-exist"})
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            result = fetch_default_branch(client)
+
+        assert result.outcome is FetchOutcome.BRANCH_ABSENT
+        assert result.reason is not None
+        assert "couldn't find remote ref" in result.reason
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
 class TestFetchFeatureBranch:
