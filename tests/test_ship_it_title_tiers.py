@@ -46,6 +46,8 @@ def _title_tier_script() -> str:
 def _run_title_tiers(
     make_git_repo: Callable[..., Path],
     commits: list[str],
+    *,
+    explicit_title: str = "",
 ) -> str:
     """Run the extracted tier ladder over a synthetic branch history.
 
@@ -55,6 +57,11 @@ def _run_title_tiers(
     repo itself as ``origin`` and fetching pins ``refs/remotes/origin/main``
     at the base commit, so every commit in ``commits`` lands in the
     ``origin/main..HEAD`` range the ladder scans.
+
+    *explicit_title* seeds ``EXPLICIT_TITLE`` (Step 1's ``--title`` parse
+    result) so a caller can exercise Tier 1 without hand-rolling the
+    ``$ARGUMENTS`` parse; the default preserves every pre-existing caller's
+    behavior byte-for-byte.
     """
     repo = make_git_repo("title-tiers")
     git_in(repo, "remote", "add", "origin", str(repo))
@@ -63,7 +70,7 @@ def _run_title_tiers(
         git_in(repo, "commit", "--allow-empty", "-m", subject)
 
     script = _title_tier_script() + '\nprintf "TITLE=%s\\n" "$TITLE"\n'
-    env = {**_clean_git_env(), "EXPLICIT_TITLE": "", "ARGUMENTS": ""}
+    env = {**_clean_git_env(), "EXPLICIT_TITLE": explicit_title, "ARGUMENTS": ""}
     result = subprocess.run(
         ["/bin/bash", "-c", script],
         cwd=str(repo),
@@ -155,3 +162,20 @@ def test_docs_only_branch_still_falls_to_tier4(
 ) -> None:
     title = _run_title_tiers(make_git_repo, ["docs: fix typo"])
     assert title == "docs: fix typo"
+
+
+def test_explicit_title_wins_over_first_commit_helper(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """The #2361/#2354 repro (#2362): finalize's composed ``--title`` must beat
+    Tier 3's first-substantive-commit heuristic, which would otherwise pick the
+    helper commit rather than the change the branch actually ships."""
+    title = _run_title_tiers(
+        make_git_repo,
+        [
+            "feat(codex): add push_and_verify_head helper for the codex fix loop",
+            "feat(codex): call push_and_verify_head from the fix loop's push step",
+        ],
+        explicit_title="feat(codex): make the codex fix loop push its commits (#2354)",
+    )
+    assert title == "feat(codex): make the codex fix loop push its commits (#2354)"
