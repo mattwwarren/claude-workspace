@@ -33,7 +33,7 @@ import typing
 from pathlib import Path
 
 from cw.auto_dev_result import _STAGE_REACHED_CANONICAL, StageReached
-from tests.conftest import _appendix, _cmd
+from tests.conftest import _appendix, _cmd, _step4c2_section
 
 ROOT = Path(__file__).parent.parent
 DOCS = ROOT / "docs"
@@ -41,13 +41,6 @@ DOCS = ROOT / "docs"
 
 def _doc(name: str) -> str:
     return (DOCS / name).read_text()
-
-
-def _step4c2_section() -> str:
-    content = _cmd("auto-dev-finalize.md")
-    start = content.index("#### Step 4c.2 — spawn the agent")
-    end = content.index("### Step 4c.5")
-    return content[start:end]
 
 
 def _prep_pr_step1_section() -> str:
