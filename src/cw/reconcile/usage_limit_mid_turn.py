@@ -548,6 +548,11 @@ def _stop_surface(act: _Act) -> _Stop:
     # The stop is destructive to a still-live surface.  The transcript check
     # above can race with an operator disposition, so re-check the exact
     # queue intent under the queue lock immediately before stopping.
+    daemon = _deps.get_native_daemon_client()
+    # Keep the ownership check and the external stop decision in one queue-lock
+    # critical section.  Otherwise an operator can clear the intent after the
+    # check but before stop(), leaving this act able to stop a surface it no
+    # longer owns.
     with dev_queue_lock():
         store = load_dev_queue()
         if _row_carrying(store.tasks, act.row) is None:
@@ -558,8 +563,7 @@ def _stop_surface(act: _Act) -> _Stop:
                 session.id,
             )
             return _Stop.ABANDONED
-    daemon = _deps.get_native_daemon_client()
-    daemon.stop(surface_ref)
+        daemon.stop(surface_ref)
     if wait_for_roster_presence(
         daemon,
         surface_ref,

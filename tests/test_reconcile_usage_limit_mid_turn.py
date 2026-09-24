@@ -578,6 +578,56 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     assert "re-enter the queue automatically" in attention[0]["breadcrumbs"]
 
 
+def test_stop_holds_queue_ownership_through_stop_invocation(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An intent cannot be cleared between its check and ``stop()``."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    intent = mid_turn._decide(
+        state.sessions[0],
+        _SID,
+        branch="auto",
+        config=_auto_config(),
+        now=_NOW,
+    )
+    assert intent is not None
+    row = mid_turn._ActRow(
+        ticket_id=_SID, client=_CLIENT, lane="default", intent=intent
+    )
+    act = mid_turn._Act(
+        row=row,
+        state=state,
+        session=state.sessions[0],
+        native_live={_SURFACE},
+        now=_NOW,
+    )
+
+    class _ClearIntentOnUnlock:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *_args: object) -> None:
+            store = load_dev_queue()
+            store.tasks[0].usage_limit_act = None
+            save_dev_queue(store)
+
+    monkeypatch.setattr(mid_turn, "dev_queue_lock", _ClearIntentOnUnlock)
+    real_stop = daemon.stop
+
+    def _stop(short_id: str) -> None:
+        assert load_dev_queue().tasks[0].usage_limit_act is not None
+        real_stop(short_id)
+
+    monkeypatch.setattr(daemon, "stop", _stop)
+
+    assert mid_turn._stop_surface(act) is mid_turn._Stop.DONE
+    assert daemon.stop_calls == [_SURFACE]
+
+
 def test_act_auto_falls_back_to_flat_backoff_on_unparseable_reset(
     tmp_config_dir: Path,
     tmp_path: Path,
