@@ -12541,6 +12541,50 @@ class TestUsageLimitActMigration:
         assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 40
         assert store.tasks[0].usage_limit_act is None
 
+    def test_v39_row_with_codex_orphan_link_migrates_to_v40(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A v39 row already carrying #2307's codex-orphan link, and no
+        usage_limit_act key, gains usage_limit_act=None at v40 and keeps the
+        link exactly as written."""
+        from cw.config import dev_queue_file
+
+        v39_data = {
+            "schema_version": 39,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-40",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "disposition": "codex_review_orphaned_at_boot",
+                    "codex_orphan_session_id": "sess-orphan",
+                    "codex_orphan_rescan_next_eligible_at": "2026-01-01T00:00:00Z",
+                }
+            ],
+        }
+        assert "usage_limit_act" not in v39_data["tasks"][0]
+
+        migrated = migrate_dev_queue(json.loads(json.dumps(v39_data)))
+        task_raw = migrated["tasks"][0]
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 40
+        assert task_raw["usage_limit_act"] is None
+        assert task_raw["codex_orphan_session_id"] == "sess-orphan"
+        assert task_raw["codex_orphan_rescan_next_eligible_at"] == (
+            "2026-01-01T00:00:00Z"
+        )
+
+        dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
+        dev_queue_file().write_text(json.dumps(v39_data))
+        store = load_dev_queue()
+        task = store.tasks[0]
+        assert store.schema_version == 40
+        assert task.usage_limit_act is None
+        assert task.codex_orphan_session_id == "sess-orphan"
+        assert task.codex_orphan_rescan_next_eligible_at == datetime(
+            2026, 1, 1, tzinfo=UTC
+        )
+
     def test_usage_limit_act_round_trips_through_the_store(
         self, tmp_config_dir: Path
     ) -> None:
