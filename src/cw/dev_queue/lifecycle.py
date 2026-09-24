@@ -449,6 +449,10 @@ def transition_task_status(
     # next episode. _stamp_session_id_mismatch_advisories re-derives it on the
     # next reconcile tick if the condition still holds.
     task.advisory_note = None
+    # GitHub #2324: the mid-turn usage-limit act's intent. Its own final
+    # transition clears it in the same row write; any other transition means
+    # someone else dispositioned the row, which ends the act.
+    task.usage_limit_act = None
     if old_status != new_status:
         # Why: emit inline while callers still hold dev_queue_lock. record_event
         # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the

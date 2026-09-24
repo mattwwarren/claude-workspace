@@ -1125,7 +1125,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 38
+        assert DEV_QUEUE_SCHEMA_VERSION == 39
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -2175,6 +2175,7 @@ class TestPackageExportCompleteness:
             "TERMINAL_QUEUE_STATUSES",
             "TERMINAL_SESSION_STATUSES",
             "TicketTask",
+            "UsageLimitAct",
             "WORKER_PURPOSES",
             "WatchedPr",
             "_DEFAULT_OPERATOR_EVENT_TYPES",
