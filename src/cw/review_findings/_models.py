@@ -46,7 +46,18 @@ Severity = Literal["MUST_FIX", "SHOULD_FIX", "DEBT", "NIT", "PRINCIPLE"]
 # fix loop structurally cannot act on it and it is posted to the tracker as an
 # operator checklist item instead. Also stamped exclusively by
 # ``cw.review_adjudication``.
-Disposition = Literal["fixed", "rejected", "deferred", "dropped", "operator_actionable"]
+#
+# "unresolved" (#2352) is stamped exclusively by
+# ``cw.codex_fix_loop_convergence._survivors_only_verdict`` for a MUST_FIX
+# finding still open when the fix loop exits on cycle-cap or budget
+# exhaustion. It is deliberately distinct from "deferred" — which means
+# non-blocking, an operator/adjudication-issued decision — because the
+# renderer must never display a still-blocking survivor as suppressed. Before
+# #2352 both cases shared the "deferred" literal, so a still-blocking survivor
+# rendered identically to a genuinely-deferred, non-blocking finding.
+Disposition = Literal[
+    "fixed", "rejected", "deferred", "dropped", "operator_actionable", "unresolved"
+]
 ReviewerHealthStatus = Literal["ok", "degraded", "failed"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 # The filesystem-capability mode reviewers actually ran under (#1709); see
@@ -425,6 +436,10 @@ class AcceptedFinding(BaseModel):
     fix-cycle diff does not substantiate), the second for an accepted MUST_FIX
     whose remedy lies outside this diff. :func:`consolidate_verdict`'s own
     contract is unchanged: optimistic default in, adapter overwrites it later.
+
+    ``"unresolved"`` (#2352) is likewise never stamped here — only
+    :func:`cw.codex_fix_loop_convergence._survivors_only_verdict` produces it,
+    for a fix-loop cap-exit survivor.
 
     ``disposition_detail`` is the free-text "why" paired with the closed
     ``disposition`` enum, mirroring :attr:`RejectedFinding.detail`'s pairing

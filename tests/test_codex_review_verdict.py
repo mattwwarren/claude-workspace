@@ -2385,9 +2385,7 @@ class TestHistoryNoteResolvedCount:
         verdict = verdict.model_copy(
             update={
                 "accepted": [
-                    verdict.accepted[0].model_copy(
-                        update={"disposition": "unresolved"}
-                    )
+                    verdict.accepted[0].model_copy(update={"disposition": "unresolved"})
                 ]
             }
         )

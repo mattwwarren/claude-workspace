@@ -364,7 +364,7 @@ class TestSurvivorsOnlyVerdict:
         assert rebuilt.accepted[0].disposition == "unresolved"
         assert rebuilt.accepted[1].disposition == "fixed"
 
-    def test_park_survivors_stamps_fingerprinted_survivor_as_unresolved_and_renders_without_suppression(
+    def test_park_survivors_stamps_survivor_unresolved_renders_without_suppression(
         self, tmp_path: Path
     ) -> None:
         survivor = _accepted(summary="Missing null check at line 10")
@@ -390,13 +390,11 @@ class TestSurvivorsOnlyVerdict:
         assert _result.blocker is not None
         assert "_(suppressed — deferred)_" not in _result.blocker.details
 
-    def test_park_survivors_renders_non_negative_history_when_admitted_new_exceeds_initial(
+    def test_park_survivors_renders_non_negative_history_when_admitted_exceeds_initial(
         self, tmp_path: Path
     ) -> None:
         survivor = _accepted(summary="Missing null check at line 10")
-        admitted_mid_loop = _accepted(
-            file="other.py", summary="admitted mid-loop"
-        )
+        admitted_mid_loop = _accepted(file="other.py", summary="admitted mid-loop")
         verdict = _verdict(survivor)
         open_findings = {
             _open_finding_key(survivor.finding): survivor,
