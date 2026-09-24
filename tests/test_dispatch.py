@@ -10324,6 +10324,7 @@ class TestApplyStagedDecision:
         ticket_id: str,
         stage: Stage = Stage.FINALIZE,
         scope_hint: str | None = None,
+        lane: str = DEFAULT_LANE,
     ) -> TicketTask:
         task = _make_ticket_task(
             ticket_id=ticket_id,
@@ -10331,6 +10332,7 @@ class TestApplyStagedDecision:
             status=QueueItemStatus.RUNNING,
             stage=stage,
             scope_hint=scope_hint,
+            lane=lane,
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
         return task
@@ -10990,6 +10992,34 @@ class TestApplyStagedDecision:
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == _INVALID_STAGE_REASON
+
+    def test_stage_advance_unchecked_honors_lane_pipeline_override(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+    ) -> None:
+        """A lane's pipeline.stages override, not the client default, governs
+        next-stage routing (#2216) -- the lane's one-stage pipeline makes
+        PLAN terminal even though the client default would advance to IMPL."""
+        from cw.dispatch import _stage_advance_unchecked
+        from cw.models import StagePipelineConfig
+
+        client_cfg = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[
+                LaneConfig(
+                    name="solo",
+                    pipeline=StagePipelineConfig(stages=[Stage.PLAN]),
+                )
+            ],
+        )
+        task = self._make_running_task("SOLO-1", stage=Stage.PLAN, lane="solo")
+
+        _stage_advance_unchecked(task, {"test-client": client_cfg})
+
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.stage == Stage.PLAN
 
     def test_blocked_at_finalize_regress_increments_counter(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
@@ -12810,6 +12840,50 @@ class TestApplyStagedDecision:
         }
         routed = apply_staged_decision(
             task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is False
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.stage == Stage.REVIEW
+
+    def test_apply_staged_decision_honors_lane_pipeline_for_stage_walk(
+        self, tmp_path: Path
+    ) -> None:
+        """A lane's pipeline.stages override, not the client default, governs
+        sentinel stage-position classification (#2216).
+
+        The client default pipeline includes IMPL, so an IMPL-mapped sentinel
+        against a REVIEW-stage task classifies as 'earlier' + non-advance-claim
+        and would normally route through Rule 5 (mirrors
+        ``test_earlier_stage_blocked_sentinel_now_routes_instead_of_refusing``).
+        The task's lane declares a narrower pipeline excluding IMPL entirely,
+        so the sentinel's mapped stage is absent from the *resolved* pipeline
+        -- fail-closed refuse, no fallback to the client default.
+        """
+        from cw.dispatch import apply_staged_decision
+        from cw.models import StagePipelineConfig
+
+        client_cfg = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[
+                LaneConfig(
+                    name="narrow",
+                    pipeline=StagePipelineConfig(
+                        stages=[Stage.PLAN, Stage.REVIEW, Stage.FINALIZE]
+                    ),
+                )
+            ],
+        )
+        task = self._make_running_task("NARROW-1", stage=Stage.REVIEW, lane="narrow")
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage2_impl",
+            "blocker": {"stage": "s2_impl", "reason": "plan_missing"},
+        }
+
+        routed = apply_staged_decision(
+            task, "blocked", last_result, {"test-client": client_cfg}
         )
 
         assert routed is False
