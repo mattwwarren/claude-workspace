@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+## [1.54.0] - 2026-09-24
 
 - **`dependency_unmerged` is now recognized as an operator-unavailable blocker reason (#2260):** `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` and `SIGNOFF_GATE_DISPOSITION`'s classification now include `dependency_unmerged` alongside `push_auth_failed` and `operator_unavailable`, so a ticket split into a dependency chain whose downstream leg can't proceed until the upstream PR merges is treated as a hold on an external dependency — not a broken leg — and routes the same way the existing operator-unavailable reasons do.
 - **A never-pushed reused worktree with no commits of its own is no longer left permanently stale (#2328):** the reuse refresh's `BRANCH_ABSENT` case previously stopped unconditionally, even when the branch had zero commits beyond `origin/<default_branch>` and that default branch had moved on. It now fetches `origin/<default_branch>` and fast-forwards to it (through the same occupancy and `--ff-only` safety as the pushed-branch path) when the branch has no commits of its own, and leaves it untouched with a friction note when it does.
@@ -17,6 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`dependency_unmerged` is now recognized as an operator-unavailable blocker reason (#2260):** `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` and `SIGNOFF_GATE_DISPOSITION`'s classification now include `dependency_unmerged` alongside `push_auth_failed` and `operator_unavailable`, so a ticket split into a dependency chain whose downstream leg can't proceed until the upstream PR merges is treated as a hold on an external dependency — not a broken leg — and routes the same way the existing operator-unavailable reasons do.
 - **Stop one unresolvable session/worker record from vetoing every worktree occupancy check (#2240):** worktree occupancy checks previously treated any single unresolvable session or worker record as grounds to defer the whole check, so one stale/bad record could block dispatch from claiming otherwise-free worktrees. Occupancy now skips the unresolvable record instead of vetoing the entire check.
 
 ## [1.53.0] - 2026-09-24
