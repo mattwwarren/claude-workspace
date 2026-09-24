@@ -70,6 +70,7 @@ from cw.reconcile._shared import (
     _SESSION_UNRESPONSIVE_REASON,
     _STOPPED_WITHOUT_SENTINEL_REASON,
     _UNCONSUMED_QUEUE_NOTIFICATION_REASON,
+    _USAGE_LIMITED_MID_TURN_REASON,
     DanglingToolUseEvidence,
     _detect_dangling_tool_use,
     _detect_unconsumed_queue_notification,
@@ -257,6 +258,28 @@ def _has_usage_limit_act_for(task: TicketTask | None, session: Session) -> bool:
     )
 
 
+def _is_parked_usage_limited_mid_turn(
+    task: TicketTask | None, session: Session
+) -> bool:
+    """True iff *task* is parked by the mid-turn usage-limit act FOR *session*.
+
+    The signal-only branch of that act parks the row BLOCKED_ON_USER /
+    ``usage_limited_mid_turn`` and leaves the session alive. The park
+    transition clears ``usage_limit_act``, so :func:`_has_usage_limit_act_for`
+    stops matching the moment it lands, yet the quiet session is still fully
+    explained by the act's earlier ``session.needs_attention``. Same shape and
+    same fail-open-to-paging ``session_id`` match as
+    :func:`_is_parked_stopped_without_sentinel`: the park deliberately leaves
+    ``session_id`` set (#2324).
+    """
+    return (
+        task is not None
+        and task.status is QueueItemStatus.BLOCKED_ON_USER
+        and task.disposition == _USAGE_LIMITED_MID_TURN_REASON
+        and task.session_id == session.id
+    )
+
+
 def _detect_liveness_candidates(
     state: CwState,
     *,
@@ -346,12 +369,17 @@ def _detect_liveness_candidates(
         # still fire below, and the predicate is re-evaluated every tick, so a
         # requeued row (status leaves BLOCKED_ON_USER) is distress-eligible
         # again with no special casing.
+        #
+        # #2324: the mid-turn usage-limit act is withheld on the same terms,
+        # both while its intent is in flight and once its signal-only park
+        # has landed (which clears the intent but leaves the session alive).
         is_top_bucket = new_bucket is LivenessBucket.STALE_45M
         distress_base = (
             is_top_bucket
             and not _has_terminal_sentinel(session)
             and not _is_parked_stopped_without_sentinel(task, session)
             and not _has_usage_limit_act_for(task, session)
+            and not _is_parked_usage_limited_mid_turn(task, session)
         )
         spawn_age = (
             _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
