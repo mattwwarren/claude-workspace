@@ -44,9 +44,8 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.dispatch_state import (
-    USAGE_LIMIT_SOURCE_FLAT_BACKOFF,
-    USAGE_LIMIT_SOURCE_PARSED_RESET,
     merge_and_save_usage_limited_until,
+    record_usage_limit_armed,
     resolve_usage_limited_until,
 )
 from cw.events import record_event
@@ -234,16 +233,8 @@ def _arm_lockout_and_notify(
     auto: bool,
 ) -> None:
     """Arm the client's spawn lockout and page the operator with the reset time."""
+    record_usage_limit_armed(session.client, until=until, reset_at=reset_at)
     merge_and_save_usage_limited_until({session.client: until})
-    source = (
-        USAGE_LIMIT_SOURCE_PARSED_RESET
-        if until == reset_at
-        else USAGE_LIMIT_SOURCE_FLAT_BACKOFF
-    )
-    record_event(
-        OrchestratorEventType.USAGE_LIMIT_ARMED,
-        {"client": session.client, "until": until.isoformat(), "source": source},
-    )
     disposition = (
         "parked without charge, will re-enter the queue automatically"
         if auto

@@ -33,6 +33,7 @@ from cw.dispatch.loop import run_dispatch_loop
 from cw.dispatch_state import (
     load_usage_limited_until,
     merge_and_save_usage_limited_until,
+    record_usage_limit_armed,
 )
 from cw.events import read_events
 from cw.models import (
@@ -386,6 +387,31 @@ class TestUsageLimitArmedEvent:
         assert by_client["client-a"]["until"] == parsed.isoformat()
         assert by_client["client-a"]["source"] == "parsed_reset"
         assert by_client["client-b"]["source"] == "flat_backoff"
+
+    def test_shared_helper_labels_source_and_emits(self, tmp_events_dir: Path) -> None:
+        """The one arm-audit helper the spawn path and reconcile both call (#2324)."""
+        now = datetime.now(UTC)
+        parsed = now + timedelta(hours=2)
+        flat = now + timedelta(hours=1)
+
+        assert (
+            record_usage_limit_armed("client-a", until=parsed, reset_at=parsed)
+            == "parsed_reset"
+        )
+        assert (
+            record_usage_limit_armed("client-b", until=flat, reset_at=None)
+            == "flat_backoff"
+        )
+
+        events = read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED])
+        assert [event.payload for event in events] == [
+            {
+                "client": "client-a",
+                "until": parsed.isoformat(),
+                "source": "parsed_reset",
+            },
+            {"client": "client-b", "until": flat.isoformat(), "source": "flat_backoff"},
+        ]
 
     def test_event_type_is_documented(self) -> None:
         """docs/events.md is the operator-facing contract for the bus."""

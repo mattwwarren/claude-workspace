@@ -431,8 +431,9 @@ restarted.
 
 ### `dispatch.usage_limit_armed`
 
-**Emitter:** `run_dispatch_loop` in `cw.dispatch.loop` (via
-`_arm_usage_limit_windows`); `reconcile` via the mid-turn usage-limit sweep in
+**Emitter:** `record_usage_limit_armed` in `cw.dispatch_state`, the one
+arming audit shared by `run_dispatch_loop` in `cw.dispatch.loop` (via
+`_arm_usage_limit_windows`) and `reconcile`'s mid-turn usage-limit sweep in
 `cw.reconcile.usage_limit_mid_turn` (#2324)
 **Payload:**
 ```json
@@ -877,8 +878,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
   BLOCKED_ON_USER` with `disposition="usage_limited_mid_turn"` and
   `session_id` left set, the session and its surface are untouched, and an
   operator clears the row. Neither branch charges `unproductive_attempts` — a
-  whole turn ran. If the tail changed between detect and act, nothing is
-  proposed, mutated, or armed that tick.
+  whole turn ran. If the tail changed between detect and act, or the row
+  moved off RUNNING or was reclaimed by another session in the meantime,
+  nothing is proposed, mutated, or armed that tick.
 - `"freshness_gate_blocked"` — A client's consecutive freshness-gate-block
   latch (`ClientConcurrencyOverride.consecutive_freshness_blocks`, RFC 0007
   §W2) reached `freshness_block_attention_threshold`. Client-scoped, not

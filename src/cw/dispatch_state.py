@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from cw.atomic import atomic_write_text
 from cw.config import STATE_DIR, refuse_real_state_write, state_dir
+from cw.events import record_event
+from cw.models import OrchestratorEventType
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -294,6 +296,30 @@ def resolve_usage_limited_until(
 # arm and reconcile's mid-turn arm (#2324).
 USAGE_LIMIT_SOURCE_PARSED_RESET = "parsed_reset"
 USAGE_LIMIT_SOURCE_FLAT_BACKOFF = "flat_backoff"
+
+
+def record_usage_limit_armed(
+    client: str, *, until: datetime, reset_at: datetime | None
+) -> str:
+    """Audit one client's usage-limit window arm; return its provenance label.
+
+    The single arming audit for both the dispatch loop's spawn-time arm (#1409)
+    and reconcile's mid-turn arm (#2324). *until* is the deadline
+    :func:`resolve_usage_limited_until` already picked from *reset_at*; it was
+    taken from the parsed reset iff the two are equal. Callers persist the
+    window only after this returns, so a failed event write never leaves a
+    lockout without its audit record.
+    """
+    source = (
+        USAGE_LIMIT_SOURCE_PARSED_RESET
+        if until == reset_at
+        else USAGE_LIMIT_SOURCE_FLAT_BACKOFF
+    )
+    record_event(
+        OrchestratorEventType.USAGE_LIMIT_ARMED,
+        {"client": client, "until": until.isoformat(), "source": source},
+    )
+    return source
 
 
 def merge_usage_limited_until(

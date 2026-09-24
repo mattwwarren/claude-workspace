@@ -31,13 +31,12 @@ from cw.dev_queue import (
     save_dev_queue,
 )
 from cw.dispatch_state import (
-    USAGE_LIMIT_SOURCE_FLAT_BACKOFF,
-    USAGE_LIMIT_SOURCE_PARSED_RESET,
     clear_all_executor_blocked_markers,
     load_usage_limit_armed_at,
     load_usage_limited_until,
     merge_and_save_usage_limited_until,
     merge_usage_limited_until,
+    record_usage_limit_armed,
     resolve_usage_limited_until,
     save_usage_limit_armed_at,
 )
@@ -323,15 +322,7 @@ def _arm_usage_limit_windows(
     for client, reset_at in detections.items():
         until = resolve_usage_limited_until(now, reset_at, backoff_seconds)
         armed[client] = until
-        source = (
-            USAGE_LIMIT_SOURCE_PARSED_RESET
-            if until == reset_at
-            else USAGE_LIMIT_SOURCE_FLAT_BACKOFF
-        )
-        record_event(
-            OrchestratorEventType.USAGE_LIMIT_ARMED,
-            {"client": client, "until": until.isoformat(), "source": source},
-        )
+        source = record_usage_limit_armed(client, until=until, reset_at=reset_at)
         _log.warning(
             "dispatch: usage limit detected for %s; backing off until %s (%s)",
             client,
