@@ -98,11 +98,14 @@ paths. Payload keys vary slightly by emitter; the Stop-hook shape is:
 Optional keys: `rescued: true` + `rescue_reason: "late_sentinel"` when a late
 Stop-hook sentinel salvaged an idle-parked task (#918); `salvaged: true` +
 `status: "<sentinel status>"` on reconcile's routed-sentinel backstop paths;
-`reason: "usage_limited_mid_turn"` (with `crashed: false`) when reconcile's
-mid-turn usage-limit sweep closes the session (#2324). The dispatch consumer
-skips that last one, as it does a `crashed: true` event: the sweep records it
-before requeueing the row and owns the row's disposition, including finishing
-a requeue interrupted after the close.
+`reason: "usage_limited_mid_turn"` (with `crashed: false`) plus
+`act_started_at` (the ISO 8601 `started_at` of the act's write-ahead intent)
+when reconcile's mid-turn usage-limit sweep closes the session (#2324). The
+dispatch consumer skips that one, as it does a `crashed: true` event: the
+sweep records it before stopping the session and owns the row's disposition,
+resuming an interrupted act on a later tick. It is at-least-once — a crash
+before the act marks its audit done re-emits it — and every copy of one act
+carries the same `(session_id, act_started_at)`.
 
 The boot pass over crash-orphaned codex reviews
 (`reap_orphaned_codex_sessions_at_boot` in `cw.reconcile.codex_boot`, #2285)
@@ -465,7 +468,9 @@ known client with `source: "flat_backoff"` for it. The mid-turn sweep (#2324)
 is different: it detects a roster-present worker whose transcript tail is the
 limit message, arms only that session's client, and parses the message's reset
 time, so it can report either `source` — see `"usage_limited_mid_turn"` under
-`session.needs_attention` below.
+`session.needs_attention` below. It arms only when the persisted window does
+not already reach its `until`, so resuming an interrupted act does not
+re-emit this event.
 
 Operator-relevant: this is how you find out a window is open and how long it
 runs, without reading the dispatch log. Nothing clears a window early —
@@ -874,32 +879,41 @@ open enum; consumers MUST tolerate unknown values. Known values:
   Unlike the signal-only liveness reasons above, this one **does
   disposition the row**, on transcript evidence rather than elapsed time
   (ADR-0014), gated by the lane's `reap_policy` exactly like the phantom sweep
-  (ADR-0006). Every act first re-checks, with no side effects, that the tail
+  (ADR-0006). The act spans the daemon, `sessions.json`, the dev queue and
+  the event inbox, which cannot commit together, so it runs from a
+  **write-ahead intent**: a gate with no side effects re-checks that the tail
   still ends on the limit message and the row is still RUNNING under this
-  session (keyed on `(ticket_id, client, session_id)`) — if not, nothing is
-  armed, emitted or mutated that tick — and then arms the lockout (a failed
-  arm is logged and the act continues). Under `reap_policy: auto` this event,
-  the `session.reap_proposed` and a `session.completed` (`crashed: false`,
-  `reason: "usage_limited_mid_turn"`) are all emitted **before** any effect;
-  then the tail is re-read once more, the daemon surface is stopped and the
-  stop verified against the daemon roster, the session is persisted
-  `COMPLETED` with `completed_reason: "usage_limited"`, and last the row goes
-  `RUNNING → PENDING` with `session_id` cleared and `next_eligible_at` set to
-  the reset instant, so the existing claim gate releases it at the reset. A
-  failed emit, a tail that changed before the stop, a failed stop, or a
-  surface still in the roster (or an unreadable roster) after a short bounded
-  poll leaves the session ACTIVE and the row RUNNING for the next tick to
-  retry (the events may then repeat); a requeue that loses a race to another
-  writer leaves the row as found and the stopped session closed. A requeue
-  interrupted after the close (a failed dev-queue write, or a crash) is
-  finished by a later reconcile tick, which recognises a RUNNING row bound to
-  a session already `COMPLETED`/`usage_limited` by this sweep and requeues it
-  without charge. Under any other policy (`signal_only`, the default) the row
-  parks `RUNNING → BLOCKED_ON_USER` with
-  `disposition="usage_limited_mid_turn"` and `session_id` left set, and only
-  then are the `session.reap_proposed` and this event emitted; the session and
-  its surface are untouched, and an operator clears the row. Neither branch
-  charges `unproductive_attempts` — a whole turn ran.
+  session (keyed on `(ticket_id, client, session_id)`) with no act already in
+  flight — if not, nothing is written, emitted or mutated — and then, under
+  the same `dev_queue_lock`, records `TicketTask.usage_limit_act`
+  (`session_id`, `branch: "auto" | "park"` from the lane's `reap_policy`,
+  `started_at`, the parsed `reset_at` and the resolved `until`; dev-queue
+  schema v39). That one row write is the decision. The same tick, and every
+  later tick that finds the intent, resumes it, doing only the steps not yet
+  done: arm the lockout unless the sidecar already covers `until`; emit this
+  event, the `session.reap_proposed` and (auto) a `session.completed`
+  (`crashed: false`, `reason: "usage_limited_mid_turn"`) unless the intent is
+  marked audited — this event and the `session.completed` carry
+  `act_started_at`, and all of them are at-least-once, so a crash before the
+  audit mark can repeat them; under `auto`, while the surface is still live,
+  re-read the tail right before stopping it — new content **abandons** the
+  act (the intent is cleared, the session and row are left as they are) —
+  then stop it and confirm it left the roster within a short bounded poll (a
+  surface still listed, or an unreadable roster, is retried next tick), and
+  persist the session `COMPLETED` with `completed_reason: "usage_limited"`
+  unless it is already terminal; finally transition the row, which clears the
+  intent in the same write: `auto` goes `RUNNING → PENDING` with `session_id`
+  cleared and `next_eligible_at` at `until`, so the existing claim gate
+  releases it at the reset; `park` (any policy other than `auto`, including
+  the `signal_only` default) goes `RUNNING → BLOCKED_ON_USER` with
+  `disposition="usage_limited_mid_turn"` and `session_id` left set, and the
+  session and its surface are untouched for an operator to clear. A step that
+  fails is logged and retried next tick. Any other transition of the row
+  clears the intent and ends the act. While the intent is set the phantom
+  sweep, the COMPLETED/TIMED_OUT-session backstops and the liveness sweep's
+  `session_unresponsive` page all leave the row and its session alone, so an
+  interrupted act is never charged. Neither branch charges
+  `unproductive_attempts` — a whole turn ran.
 - `"freshness_gate_blocked"` — A client's consecutive freshness-gate-block
   latch (`ClientConcurrencyOverride.consecutive_freshness_blocks`, RFC 0007
   §W2) reached `freshness_block_attention_threshold`. Client-scoped, not
