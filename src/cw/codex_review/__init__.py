@@ -65,6 +65,7 @@ from cw.codex_review._const import (
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
     CODEX_TIMEOUT,
+    CODEX_UNPUSHED_AT_EXIT,
     STAGE3_REVIEW,
 )
 from cw.codex_review._context import (
@@ -145,6 +146,7 @@ __all__ = [
     "CODEX_REVIEW_PARTIAL",
     "CODEX_REVIEW_UNPARSEABLE",
     "CODEX_TIMEOUT",
+    "CODEX_UNPUSHED_AT_EXIT",
     "STAGE3_REVIEW",
     "_AUDIT_ARGV_FLAGS",
     "_CATEGORY_TO_REASON",

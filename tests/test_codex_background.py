@@ -43,6 +43,8 @@ from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_REVIEW_UNPARSEABLE,
+    CODEX_UNPUSHED_AT_EXIT,
+    synthesize_codex_review_result,
 )
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
@@ -66,12 +68,15 @@ from tests.conftest import (
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
+    commit_tracked_file,
+    git_in,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from cw.codex_runner import CodexRunResult
+    from cw.review_findings import ReviewVerdict
 
 
 @pytest.fixture(autouse=True)
@@ -1733,3 +1738,194 @@ class TestStampSessionIdOnRunningTaskDuplicateRunning:
         )
 
         assert load_dev_queue().tasks[0].session_id == "sess-only"
+
+
+# ---------------------------------------------------------------------------
+# #2354: review-exit guard — never report clean while HEAD is not on origin
+# ---------------------------------------------------------------------------
+
+
+def _clean_result(
+    worktree: Path, ticket_id: str
+) -> tuple[AutoDevResult, ReviewVerdict]:
+    """A real stage_complete result + verdict, as a converged fix loop returns."""
+    result, verdict = synthesize_codex_review_result(
+        task=TicketTask(ticket_id=ticket_id, client="test", stage=Stage.REVIEW),
+        worktree=worktree,
+        documents=[_make_reviewer_doc(reviewer_role="Code Quality Reviewer")],
+        failures=[],
+        diff=_make_diff("def broken():", files={"new.py": [1]}),
+        reviewed_sha="sha-clean",
+        session_id="s-guard",
+        default_branch="main",
+        fix_loop_enabled=True,
+    )
+    assert result.blocker is None
+    assert verdict is not None
+    return result, verdict
+
+
+def _run_guarded(
+    worktree: Path,
+    *,
+    sid: str,
+    returned: tuple[AutoDevResult, ReviewVerdict | None],
+    fix_loop_enabled: bool = True,
+) -> tuple[AutoDevResult, MagicMock]:
+    """Run the review unit with the fix loop mocked to return *returned*.
+
+    Returns the persisted result and the ``_post_review_comment`` mock.
+    """
+    _seed_session(sid)
+    task = TicketTask(
+        ticket_id=returned[0].ticket_id, client="test", stage=Stage.REVIEW
+    )
+    with (
+        patch(
+            "cw.codex_background.load_effective_config",
+            return_value=OrchestratorConfig(
+                default_codex_fix_loop_enabled=fix_loop_enabled
+            ),
+        ),
+        patch("cw.codex_background.run_review_with_fix_loop", return_value=returned),
+        patch("cw.codex_background._post_review_comment") as post_mock,
+    ):
+        _run(sid=sid, task=task, worktree=worktree, client=_client(worktree))
+    persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+    return persisted, post_mock
+
+
+def test_run_codex_review_and_complete_self_heals_unpushed_head_before_clean_report(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    worktree, origin = make_git_repo_with_origin("wt-bg-guard-heal")
+    commit_tracked_file(worktree, "late.py")
+    local_sha = git_in(worktree, "rev-parse", "HEAD")
+    returned = _clean_result(worktree, "T-heal")
+
+    persisted, post_mock = _run_guarded(worktree, sid="bg-heal", returned=returned)
+
+    assert git_in(origin, "rev-parse", "refs/heads/feature") == local_sha
+    assert persisted == returned[0]
+    post_mock.assert_called_once()
+
+
+def test_run_codex_review_and_complete_parks_when_self_heal_push_fails(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-guard-park")
+    commit_tracked_file(worktree, "late.py")
+    local_sha = git_in(worktree, "rev-parse", "HEAD")
+    git_in(worktree, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    returned = _clean_result(worktree, "T-park")
+
+    with (
+        patch("cw.codex_background.render_verdict_comment") as render_mock,
+        patch("cw.codex_background._persist_structured_review_verdict") as json_mock,
+    ):
+        persisted, post_mock = _run_guarded(worktree, sid="bg-park", returned=returned)
+
+    assert persisted.status == "blocked"
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_UNPUSHED_AT_EXIT
+    assert f"local HEAD={local_sha}" in persisted.blocker.details
+    assert "not on origin/feature" in persisted.blocker.details
+    assert "(origin=None)" in persisted.blocker.details
+    assert persisted.blocker.retry_eligible is True
+    # verdict was dropped: no all-clear verdict is rendered or persisted, and
+    # the only comment posted is the park's own details.
+    render_mock.assert_not_called()
+    json_mock.assert_not_called()
+    post_mock.assert_called_once()
+    assert post_mock.call_args.args[1] == persisted.blocker.details
+
+
+def test_run_codex_review_and_complete_guard_skipped_when_fix_loop_disabled(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-guard-off")
+    commit_tracked_file(worktree, "late.py")
+    returned = _clean_result(worktree, "T-off")
+
+    with (
+        patch("cw.codex_background.remote_branch_tip") as tip_mock,
+        patch("cw.codex_background.push_and_verify_head") as push_mock,
+    ):
+        persisted, _ = _run_guarded(
+            worktree, sid="bg-off", returned=returned, fix_loop_enabled=False
+        )
+
+    tip_mock.assert_not_called()
+    push_mock.assert_not_called()
+    assert persisted == returned[0]
+
+
+def test_run_codex_review_and_complete_guard_skipped_on_blocked_result(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-guard-blocked")
+    commit_tracked_file(worktree, "late.py")
+    blocked = make_blocked(
+        ticket_id="T-blocked",
+        worktree=worktree,
+        reason=CODEX_MUST_FIX_FINDINGS,
+        stage_reached="stage3_review",
+    )
+
+    with (
+        patch("cw.codex_background.remote_branch_tip") as tip_mock,
+        patch("cw.codex_background.push_and_verify_head") as push_mock,
+    ):
+        persisted, _ = _run_guarded(
+            worktree, sid="bg-blocked", returned=(blocked, None)
+        )
+
+    tip_mock.assert_not_called()
+    push_mock.assert_not_called()
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_MUST_FIX_FINDINGS
+
+
+def test_run_codex_review_and_complete_guard_skipped_on_dirty_uncommitted_only(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    """Dirty-but-pushed stays on the dirty_worktree park path, not this guard."""
+    worktree, origin = make_git_repo_with_origin("wt-bg-guard-dirty")
+    (worktree / "feature.py").write_text("uncommitted = 2\n", encoding="utf-8")
+    (worktree / "untracked.py").write_text("u = 1\n", encoding="utf-8")
+    head = git_in(worktree, "rev-parse", "HEAD")
+    assert git_in(origin, "rev-parse", "refs/heads/feature") == head
+    returned = _clean_result(worktree, "T-dirty")
+
+    with patch("cw.codex_background.push_and_verify_head") as push_mock:
+        persisted, _ = _run_guarded(worktree, sid="bg-dirty", returned=returned)
+
+    push_mock.assert_not_called()
+    assert persisted == returned[0]
+
+
+def test_run_codex_review_and_complete_guard_skipped_on_detached_head(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    """No checked-out branch means nothing to compare against origin."""
+    worktree, _origin = make_git_repo_with_origin("wt-bg-guard-detached")
+    commit_tracked_file(worktree, "late.py")
+    git_in(worktree, "checkout", "--detach", "HEAD")
+    returned = _clean_result(worktree, "T-detached")
+
+    with (
+        patch("cw.codex_background.remote_branch_tip") as tip_mock,
+        patch("cw.codex_background.push_and_verify_head") as push_mock,
+    ):
+        persisted, _ = _run_guarded(worktree, sid="bg-detached", returned=returned)
+
+    tip_mock.assert_not_called()
+    push_mock.assert_not_called()
+    assert persisted == returned[0]

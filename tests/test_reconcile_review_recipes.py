@@ -99,6 +99,7 @@ from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _clean_git_env,
     git_in,
+    init_bare_origin,
     occupy_worktree,
     push_commit_to_origin,
     tree_fingerprint,
@@ -2877,15 +2878,7 @@ def _seed_bare_origin_with_main(client: ClientConfig) -> None:
     for its own end-to-end fixtures.
     """
     repo = client.workspace_path
-    origin = repo.parent / f"{repo.name}-origin.git"
-    subprocess.run(
-        ["git", "init", "--bare", "-b", "main", str(origin)],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_clean_git_env(),
-    )
-    git_in(repo, "remote", "add", "origin", str(origin))
+    init_bare_origin(repo)
     (repo / "shared.txt").write_text("base\n", encoding="utf-8")
     git_in(repo, "add", "shared.txt")
     git_in(repo, "commit", "-m", "base file")
