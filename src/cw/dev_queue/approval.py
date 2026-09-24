@@ -19,11 +19,14 @@ Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypedDict
 
+from cw.atomic import atomic_write_text
 from cw.auto_dev_result import PLAN_SCOPE_DRIFT_BLOCKER_REASON
-from cw.config import get_client
+from cw.config import dev_queue_file, get_client
 from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
 from cw.dev_queue.lifecycle import (
     BRANCH_STALENESS_GATE_DISPOSITION,
@@ -48,6 +51,10 @@ from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from cw.models import DevQueueStore, Session, TicketTask
+
+
+_log = logging.getLogger(__name__)
+_SCOPE_DRIFT_RECOVERY_MARKER = "scope-drift-approval-recovery.jsonl"
 
 
 def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | None]:
@@ -503,6 +510,59 @@ class ScopeDriftApproval(TypedDict):
     approved_head: str
 
 
+def _write_scope_drift_recovery_marker(payload: dict[str, object]) -> None:
+    """Persist an operator-visible marker when approval audit repair is uncertain."""
+    path = dev_queue_file().with_name(_SCOPE_DRIFT_RECOVERY_MARKER)
+    try:
+        previous = path.read_text() if path.exists() else ""
+        atomic_write_text(path, previous + json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:  # noqa: BLE001
+        # The marker is the last-resort recovery path. If even it is unavailable,
+        # the critical log is the remaining operator alert; never hide the
+        # original queue/audit inconsistency behind a marker-write exception.
+        _log.critical(
+            "scope-drift approval recovery marker could not be persisted: %s",
+            payload,
+            exc_info=True,
+        )
+
+
+def _emit_scope_drift_compensation(
+    ticket_id: str,
+    client_name: str,
+    approval_payload: dict[str, object],
+    error: Exception,
+    *,
+    rolled_back: bool,
+) -> None:
+    """Correct a possibly-written approval event, failing loudly if repair fails."""
+    payload = {
+        "ticket_id": ticket_id,
+        "client": client_name,
+        "approval_event": OrchestratorEventType.TICKET_APPROVED.value,
+        "approval_payload": approval_payload,
+        "error": str(error),
+        "rolled_back": rolled_back,
+        "recovery_required": not rolled_back,
+    }
+    try:
+        record_event(
+            OrchestratorEventType.TICKET_APPROVAL_FAILED,
+            payload,
+            correlation_id=ticket_id,
+        )
+    except Exception:  # noqa: BLE001
+        # A failed compensating write must not silently leave a potentially
+        # false TICKET_APPROVED event standing alone.
+        _write_scope_drift_recovery_marker(payload)
+        _log.critical(
+            "scope-drift approval audit compensation failed for %s/%s",
+            client_name,
+            ticket_id,
+            exc_info=True,
+        )
+
+
 def approve_scope_drift_ticket(
     ticket_id: str,
     client_name: str,
@@ -597,21 +657,55 @@ def _approve_scope_drift_locked(
     task.scope_drift_approved_extra_files = approved_files
     task.scope_drift_approved_head = head_sha
     _reset_for_same_stage_requeue(task)
+    approval_payload: dict[str, object] = {
+        "ticket_id": ticket_id,
+        "client": client_name,
+        "from_stage": from_stage,
+        "to_stage": task.stage.value,
+        "scope_drift_approved_extra_files": approved_files,
+        "scope_drift_approved_head": head_sha,
+    }
     save_dev_queue(store)
     try:
         record_event(
             OrchestratorEventType.TICKET_APPROVED,
-            {
+            approval_payload,
+        )
+    except Exception as event_error:
+        try:
+            save_dev_queue(original_store)
+        except Exception as rollback_error:
+            recovery_payload = {
                 "ticket_id": ticket_id,
                 "client": client_name,
-                "from_stage": from_stage,
-                "to_stage": task.stage.value,
-                "scope_drift_approved_extra_files": approved_files,
-                "scope_drift_approved_head": head_sha,
-            },
+                "approval_payload": approval_payload,
+                "event_error": str(event_error),
+                "rollback_error": str(rollback_error),
+                "recovery_required": True,
+            }
+            _write_scope_drift_recovery_marker(recovery_payload)
+            _emit_scope_drift_compensation(
+                ticket_id,
+                client_name,
+                approval_payload,
+                rollback_error,
+                rolled_back=False,
+            )
+            _log.critical(
+                "scope-drift approval rollback failed for %s/%s; operator recovery"
+                " is required",
+                client_name,
+                ticket_id,
+                exc_info=True,
+            )
+            raise rollback_error from event_error
+        _emit_scope_drift_compensation(
+            ticket_id,
+            client_name,
+            approval_payload,
+            event_error,
+            rolled_back=True,
         )
-    except Exception:
-        save_dev_queue(original_store)
         raise
     return {
         "from_stage": from_stage,

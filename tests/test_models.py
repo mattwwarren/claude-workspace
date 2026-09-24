@@ -1650,6 +1650,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.SESSION_LIVENESS_CHANGED,
                 OrchestratorEventType.OPERATOR_ESCALATION,
                 OrchestratorEventType.GATE_AUTO_APPROVED,
+                OrchestratorEventType.TICKET_APPROVAL_FAILED,
                 OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
                 OrchestratorEventType.GATE_AUTO_APPROVE_HELD,
                 OrchestratorEventType.PR_ACTION_TAKEN,

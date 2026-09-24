@@ -6699,6 +6699,94 @@ class TestApproveScopeDrift:
 
         assert load_dev_queue().model_dump() == before
 
+    def test_written_approval_event_gets_compensating_event_on_failure(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A post-write event failure cannot leave approval audit uncorrected."""
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.models import OrchestratorEventType
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        before = load_dev_queue().model_dump()
+        events: list[OrchestratorEventType] = []
+
+        def _event_then_fail(
+            event_type: OrchestratorEventType,
+            _payload: dict[str, object],
+            **_kwargs: object,
+        ) -> None:
+            events.append(event_type)
+            if event_type == OrchestratorEventType.TICKET_APPROVED:
+                error = "simulated post-write failure"
+                raise OSError(error)
+
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.record_event", _event_then_fail
+        )
+
+        with pytest.raises(OSError, match="simulated post-write failure"):
+            approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        assert events == [
+            OrchestratorEventType.TICKET_APPROVED,
+            OrchestratorEventType.TICKET_APPROVAL_FAILED,
+        ]
+        assert load_dev_queue().model_dump() == before
+
+    def test_rollback_failure_writes_recovery_marker_and_alerts_operator(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A failed restore is durable and operator-visible, not silently masked."""
+        from cw.config import dev_queue_file
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.dev_queue.approval import save_dev_queue as real_save_dev_queue
+        from cw.models import OrchestratorEventType
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        save_calls = 0
+
+        def _save_with_failed_rollback(store: DevQueueStore) -> None:
+            nonlocal save_calls
+            save_calls += 1
+            if save_calls == 2:
+                error = "rollback unavailable"
+                raise OSError(error)
+            real_save_dev_queue(store)
+
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.save_dev_queue", _save_with_failed_rollback
+        )
+
+        def _event_then_fail(
+            event_type: OrchestratorEventType,
+            _payload: dict[str, object],
+            **_kwargs: object,
+        ) -> None:
+            if event_type == OrchestratorEventType.TICKET_APPROVED:
+                error = "event unavailable"
+                raise OSError(error)
+
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.record_event", _event_then_fail
+        )
+
+        with caplog.at_level("CRITICAL"), pytest.raises(
+            OSError, match="rollback unavailable"
+        ):
+            approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        marker = dev_queue_file().with_name("scope-drift-approval-recovery.jsonl")
+        assert marker.exists()
+        assert '"recovery_required": true' in marker.read_text()
+        assert any("rollback failed" in record.message for record in caplog.records)
+
 # ---------------------------------------------------------------------------
 # TestApproveTicketLockedResolved — _approve_ticket_locked(resolved_task=...)
 # ---------------------------------------------------------------------------
