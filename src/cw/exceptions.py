@@ -52,7 +52,7 @@ USAGE_LIMIT_RE = re.compile(r"hit (?:your )?\S+ limit", re.IGNORECASE)
 USAGE_LIMIT_RESET_RE = re.compile(
     r"\W{0,8}resets\s{1,4}"
     r"(?:(?P<day>mon|tue|wed|thu|fri|sat|sun)[a-z]{0,6}\s{1,4}"
-    r"|(?P<month>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}\.?"
+    r"|(?P<month>[a-z]+)\.?"
     r"\s{1,4}(?P<mday>[0-9]{1,2}),?\s{1,4})?"
     r"(?P<hour>[0-9]{1,2})(?::(?P<minute>[0-9]{2}))?\s?(?P<mer>[ap])\.?m\b",
     re.IGNORECASE,
@@ -61,21 +61,29 @@ USAGE_LIMIT_RESET_RE = re.compile(
 _DAYS_PER_WEEK = 7
 # Weekday abbreviations in datetime.weekday() order (Monday == 0).
 _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-# Month abbreviations in calendar order (January == index 0).
-_MONTHS = (
-    "jan",
-    "feb",
-    "mar",
-    "apr",
-    "may",
-    "jun",
-    "jul",
-    "aug",
-    "sep",
-    "oct",
-    "nov",
-    "dec",
-)
+# Accepted month spellings. Keep the token validation explicit so an arbitrary
+# suffix cannot be silently accepted by slicing it down to an abbreviation.
+_MONTH_ALIASES = {
+    alias: month
+    for month, aliases in enumerate(
+        (
+            ("jan", "january"),
+            ("feb", "february"),
+            ("mar", "march"),
+            ("apr", "april"),
+            ("may",),
+            ("jun", "june"),
+            ("jul", "july"),
+            ("aug", "august"),
+            ("sep", "sept", "september"),
+            ("oct", "october"),
+            ("nov", "november"),
+            ("dec", "december"),
+        ),
+        start=1,
+    )
+    for alias in aliases
+}
 # Every accepted reset lies strictly under this far ahead. The time-only and
 # weekday forms cannot reach it; a month-day form can name any date, so it is
 # held to the same bound rather than trusted.
@@ -221,12 +229,12 @@ def _reset_candidate_on_named_date(
     month = fragment["month"]
     if month is None:
         return today_at
+    month_number = _MONTH_ALIASES.get(month.lower())
+    if month_number is None:
+        return None
     try:
         candidate = today_at.replace(
-            # The regex accepts documented long month spellings (for example
-            # ``Sept``) as well as abbreviations; the resolver uses the
-            # canonical three-letter keys.
-            month=_MONTHS.index(month.lower()[:3]) + 1,
+            month=month_number,
             day=int(fragment["mday"]),
         )
         if candidate.date() < today_at.date():

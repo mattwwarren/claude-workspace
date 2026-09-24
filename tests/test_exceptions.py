@@ -534,6 +534,11 @@ class TestParseUsageLimitReset:
                 _SUNDAY_10AM_NY,
                 id="month-without-day",
             ),
+            pytest.param(
+                "You've hit your weekly limit · resets Septic 21, 11pm",
+                _SUNDAY_10AM_NY,
+                id="month-arbitrary-suffix-rejected",
+            ),
         ],
     )
     def test_returns_none(self, text: str, now: datetime) -> None:
