@@ -1063,7 +1063,12 @@ def test_detect_usage_limit_matched_text_is_last_matching_record_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """matched_text carries the LAST matching record's text, even untimestamped
-    (#2324: feeds parse_usage_limit_reset without a second transcript scan)."""
+    (#2324: feeds parse_usage_limit_reset without a second transcript scan).
+
+    matched_at is that same record's OWN timestamp: an untimestamped latest
+    match leaves it None rather than borrowing an older match's timestamp,
+    which would fake a zero gap to the recency gate (#2324 review round 2).
+    """
     from cw.reconcile import _detect_usage_limit
 
     home = tmp_path / "home"
@@ -1089,7 +1094,7 @@ def test_detect_usage_limit_matched_text_is_last_matching_record_text(
     detection = _detect_usage_limit(sess)
     assert detection.detected is True
     assert detection.matched_text == last_text
-    assert detection.matched_at == datetime.fromisoformat("2026-01-01T00:00:10+00:00")
+    assert detection.matched_at is None
 
 
 def test_detect_usage_limit_matched_text_none_when_nothing_matched(
