@@ -45,6 +45,8 @@ from cw.models import (
     PLAN_DRAFT_FINGERPRINT_KEY,
     OrchestratorEventType,
     QueueItemStatus,
+    SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
+    SCOPE_DRIFT_APPROVED_HEAD_KEY,
     Stage,
 )
 from cw.worktree import _git_dir
@@ -662,8 +664,8 @@ def _approve_scope_drift_locked(
         "client": client_name,
         "from_stage": from_stage,
         "to_stage": task.stage.value,
-        "scope_drift_approved_extra_files": approved_files,
-        "scope_drift_approved_head": head_sha,
+        SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY: approved_files,
+        SCOPE_DRIFT_APPROVED_HEAD_KEY: head_sha,
     }
     save_dev_queue(store)
     try:

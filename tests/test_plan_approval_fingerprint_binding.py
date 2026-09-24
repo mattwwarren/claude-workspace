@@ -208,11 +208,15 @@ def test_fingerprint_transport_keys_match_their_model_field_names() -> None:
     from cw.models import (
         PLAN_APPROVED_FINGERPRINT_KEY,
         PLAN_DRAFT_FINGERPRINT_KEY,
+        SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
+        SCOPE_DRIFT_APPROVED_HEAD_KEY,
         TicketTask,
     )
 
     assert PLAN_DRAFT_FINGERPRINT_KEY in AutoDevResult.model_fields
     assert PLAN_APPROVED_FINGERPRINT_KEY in TicketTask.model_fields
+    assert SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY in TicketTask.model_fields
+    assert SCOPE_DRIFT_APPROVED_HEAD_KEY in TicketTask.model_fields
 
 
 def test_checkpoint1_comparison_cites_named_fingerprint_rule() -> None:
