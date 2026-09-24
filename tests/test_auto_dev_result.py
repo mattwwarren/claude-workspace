@@ -21,6 +21,7 @@ from cw.auto_dev_result import (
     BLOCKER_REASON_VALIDATION_FAILED,
     DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON,
     EMPTY_DIFF_BLOCKER_REASON,
+    EXTERNAL_STATE_BLOCKER_REASON,
     FINALIZE_REGRESS_BLOCKER_REASONS,
     FREEFORM_BLOCKER_REASON_PREFIX,
     KNOWN_BLOCKER_REASONS,
@@ -941,6 +942,18 @@ class TestKnownBlockerReasons:
             AutoDevResult.model_validate(p)
         assert "blocker_reason_unknown" not in caplog.text
 
+    def test_external_state_block_reason_round_trips(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """external_state_block (#2320) is registered: it round-trips through
+        the model and logs no unknown-reason warning."""
+        p = _blocked_payload(EXTERNAL_STATE_BLOCKER_REASON)
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.reason == EXTERNAL_STATE_BLOCKER_REASON
+        assert "blocker_reason_unknown" not in caplog.text
+
     def test_freeform_prefix_suppresses_the_warning(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -965,6 +978,13 @@ class TestKnownBlockerReasons:
         assert STALE_DISPATCH_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
         assert FINALIZE_REGRESS_BLOCKER_REASONS <= KNOWN_BLOCKER_REASONS
         assert OPERATOR_UNAVAILABLE_BLOCKER_REASONS <= KNOWN_BLOCKER_REASONS
+
+    def test_external_state_block_reason_registered(self) -> None:
+        """external_state_block (#2320) is a known reason with the exact
+        literal value producer skills must emit."""
+        assert EXTERNAL_STATE_BLOCKER_REASON == "external_state_block"
+        assert EXTERNAL_STATE_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
+        assert is_known_blocker_reason(EXTERNAL_STATE_BLOCKER_REASON)
 
     def test_registry_covers_the_parse_side_synthetic_reasons(self) -> None:
         """Lockstep guard: parse.py owns these literals, the registry restates
