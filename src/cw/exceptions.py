@@ -14,8 +14,10 @@ from typing import TYPE_CHECKING
 # Sibling modules (``native_daemon``, ``dispatch/loop``) import it
 # unconditionally for the same reason.
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
+    from cw.models import Session
     from cw.sprint import AppliedBuildout
 
 # Usage-limit detection regex. Matches all documented Claude usage-limit phrasings:
@@ -405,6 +407,34 @@ class ApproveGateError(CwError):
     """Raised when a ticket cannot be approved because it is not at an approval gate."""
 
     __slots__ = ()
+
+
+class AmbiguousSessionIdentifierError(CwError):
+    """A session *name* matched more than one session (#2237).
+
+    Raised by :meth:`cw.models.CwState.find_by_name_or_id`. ``Session.name``
+    (``client/label``) repeats across retries by design, so resolving it to
+    one arbitrary row (the newest in one caller, the oldest in another) once
+    let a recovery command act on a terminal sibling while the live session
+    kept its slot. The message lists every candidate as
+    ``<id>  <status>  started <started_at>`` and tells the operator to pass
+    an id, which is unique by construction.
+    """
+
+    __slots__ = ("candidates", "identifier")
+
+    def __init__(self, identifier: str, candidates: Sequence[Session]) -> None:
+        lines = [
+            f"Session name {identifier!r} matches {len(candidates)} sessions:",
+            *(
+                f"  {s.id}  {s.status.value}  started {s.started_at.isoformat()}"
+                for s in candidates
+            ),
+            "pass an id to choose",
+        ]
+        super().__init__("\n".join(lines))
+        self.identifier = identifier
+        self.candidates = tuple(candidates)
 
 
 class DuplicatedHunkError(CwError):

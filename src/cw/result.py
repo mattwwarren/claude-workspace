@@ -14,7 +14,11 @@ from pydantic import ValidationError
 
 from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.config import load_state, save_state, sessions_lock
-from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
+from cw.exceptions import (
+    AmbiguousSessionIdentifierError,
+    EmitSessionNotFoundError,
+    EmitValidationError,
+)
 from cw.models import LastResultSource
 
 if TYPE_CHECKING:
@@ -420,6 +424,8 @@ def result_emit(path: str, session_id: str | None) -> None:
     On refusal (result already recorded): exits 0, prints
     'Result already recorded for session <id> (source=<source>); not
     overwritten.'
+    On ambiguous ``--session-id``: exits 1, prints the candidate listing and
+    'No session state was modified.' to stderr.
     """
     payload = _read_json_payload(path)
     # RFC 0012 A1 (#1457): emit_result_locked's validation widened to accept
@@ -436,6 +442,10 @@ def result_emit(path: str, session_id: str | None) -> None:
     except EmitValidationError as exc:
         for line in exc.errors:
             click.echo(line, err=True)
+        click.echo("No session state was modified.", err=True)
+        raise click.exceptions.Exit(1) from exc
+    except AmbiguousSessionIdentifierError as exc:
+        click.echo(str(exc), err=True)
         click.echo("No session state was modified.", err=True)
         raise click.exceptions.Exit(1) from exc
     except EmitSessionNotFoundError as exc:
