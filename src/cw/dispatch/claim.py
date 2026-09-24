@@ -632,6 +632,53 @@ class _SpawnOutcome:
     usage_limit_reset_at: datetime | None = None
 
 
+def _find_running_row(
+    store: DevQueueStore,
+    ticket_id: str,
+    client_name: str,
+    *,
+    created_at: datetime | None = None,
+    session_id: str | None = None,
+) -> TicketTask | None:
+    """Return the caller's own RUNNING row for ``(ticket_id, client_name)``.
+
+    The shared locked re-find (#2219) for every site that already holds one
+    specific row and must mutate *that* row, not whichever RUNNING row for the
+    ticket happens to come first. Duplicate RUNNING rows for one
+    ``(ticket_id, client)`` are reachable via add-after-terminal plus
+    ``requeue --from-completed``, so ``(ticket_id, client, RUNNING)`` alone is
+    not an identity.
+
+    Two identity kinds, AND-combined when both are supplied:
+
+    - ``created_at`` -- fixed at row creation and never reassigned, so it
+      works before any session exists (claim-time and pre-spawn callers,
+      mirroring :func:`_apply_plan_bypass_if_available`'s #1286 re-find).
+    - ``session_id`` -- ``TicketTask.session_id == Session.id`` for a row a
+      session has already been stamped onto (post-spawn callers, e.g.
+      ``cw.reconcile.codex_boot`` and ``cw.doctor.loop_health``).
+
+    Both default to ``None`` as defense-in-depth for a future caller this
+    module cannot anticipate -- not because any current caller still needs
+    the bare match: after #2219, every caller of every function that routes
+    through this helper (in this module, ``cw.codex_background``, and
+    ``cw.doctor.loop_health``) supplies an identity.
+
+    Read-only: the caller mutates the returned row and saves *store* itself,
+    under the ``dev_queue_lock()`` it loaded *store* under.
+    """
+    for stored_task in store.tasks:
+        if (
+            stored_task.ticket_id == ticket_id
+            and stored_task.client == client_name
+            and stored_task.status == QueueItemStatus.RUNNING
+            and (created_at is None or stored_task.created_at == created_at)
+            and (session_id is None or stored_task.session_id == session_id)
+        ):
+            return stored_task
+    return None
+
+
 def _revert_claimed_task_to_pending(
     client_name: str,
     ticket_id: str,
@@ -640,13 +687,14 @@ def _revert_claimed_task_to_pending(
     hook_context_conflict_session_id: str | None = None,
     defer_for: timedelta | None = None,
     expected_session_id: str | None = None,
+    created_at: datetime | None = None,
 ) -> bool:
     """Revert a still-RUNNING claimed task back to PENDING, clearing session_id.
 
     Returns whether a row was actually reverted: ``False`` when no RUNNING row
-    matched, including an ``expected_session_id`` mismatch. Callers that only
-    revert their own just-failed claim can ignore it; a caller that reports
-    the revert (an event, a log line) must gate on it.
+    matched, including an ``expected_session_id`` or ``created_at`` mismatch.
+    Callers that only revert their own just-failed claim can ignore it; a
+    caller that reports the revert (an event, a log line) must gate on it.
 
     Used by both the usage-limit and broad spawn-error paths: the task was
     claimed to RUNNING by :func:`_claim_next_pending` but spawn never
@@ -693,6 +741,12 @@ def _revert_claimed_task_to_pending(
     spawn-failure callers omit it -- they revert their own just-failed claim,
     so there is no snapshot to go stale.
 
+    ``created_at`` (#2219) is the same-tick callers' identity instead: they
+    pass their claimed task's ``created_at`` so a duplicate RUNNING row for
+    the same ``(ticket_id, client)`` is never reverted in their place. Both
+    identities route through :func:`_find_running_row`; in every real call
+    exactly one of them is supplied.
+
     # Why: task.attempts is NOT decremented on the FAILURE paths (no
     # *defer_for*). The increment-at-claim contract is intentional —
     # usage_limit deaths and spawn errors consume real dispatch budget and must
@@ -707,41 +761,38 @@ def _revert_claimed_task_to_pending(
     reverted = False
     with dev_queue_lock():
         store = load_dev_queue()
-        for stored_task in store.tasks:
-            if (
-                stored_task.ticket_id == ticket_id
-                and stored_task.client == client_name
-                and stored_task.status == QueueItemStatus.RUNNING
-                and (
-                    expected_session_id is None
-                    or stored_task.session_id == expected_session_id
+        stored_task = _find_running_row(
+            store,
+            ticket_id,
+            client_name,
+            created_at=created_at,
+            session_id=expected_session_id,
+        )
+        if stored_task is not None:
+            transition_task_status(
+                stored_task,
+                QueueItemStatus.PENDING,
+                unproductive=defer_for is None,
+            )
+            reverted = True
+            stored_task.session_id = None
+            if defer_for is not None:
+                stored_task.attempts = max(0, stored_task.attempts - 1)
+                stored_task.next_eligible_at = datetime.now(UTC) + defer_for
+            if hook_context_conflict_session_id is not None:
+                stored_task.hook_context_conflict_session_id = (
+                    hook_context_conflict_session_id
                 )
-            ):
-                transition_task_status(
-                    stored_task,
-                    QueueItemStatus.PENDING,
-                    unproductive=defer_for is None,
+            if stamp_backoff:
+                stored_task.spawn_error_count += 1
+                delay = min(
+                    _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS
+                    * (2 ** (stored_task.spawn_error_count - 1)),
+                    _SPAWN_ERROR_BACKOFF_CAP_SECONDS,
                 )
-                reverted = True
-                stored_task.session_id = None
-                if defer_for is not None:
-                    stored_task.attempts = max(0, stored_task.attempts - 1)
-                    stored_task.next_eligible_at = datetime.now(UTC) + defer_for
-                if hook_context_conflict_session_id is not None:
-                    stored_task.hook_context_conflict_session_id = (
-                        hook_context_conflict_session_id
-                    )
-                if stamp_backoff:
-                    stored_task.spawn_error_count += 1
-                    delay = min(
-                        _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS
-                        * (2 ** (stored_task.spawn_error_count - 1)),
-                        _SPAWN_ERROR_BACKOFF_CAP_SECONDS,
-                    )
-                    stored_task.next_eligible_at = datetime.now(UTC) + timedelta(
-                        seconds=delay
-                    )
-                break
+                stored_task.next_eligible_at = datetime.now(UTC) + timedelta(
+                    seconds=delay
+                )
         save_dev_queue(store)
     return reverted
 
@@ -1181,6 +1232,7 @@ def _defer_occupied_claim(
         client.name,
         task.ticket_id,
         defer_for=timedelta(seconds=_OCCUPIED_DEFER_SECONDS),
+        created_at=task.created_at,
     )
     if emit is not None:
         emit(
@@ -1453,7 +1505,9 @@ def _spawn_claimed_task(
             exc.reset_at,
         )
         # Revert the claimed task back to PENDING — spawn never succeeded.
-        _revert_claimed_task_to_pending(client.name, task.ticket_id)
+        _revert_claimed_task_to_pending(
+            client.name, task.ticket_id, created_at=task.created_at
+        )
         return _SpawnOutcome(
             usage_limit_detected=True, usage_limit_reset_at=exc.reset_at
         )
@@ -1478,6 +1532,7 @@ def _spawn_claimed_task(
             task.ticket_id,
             stamp_backoff=True,
             hook_context_conflict_session_id=exc.conflicting_session_id,
+            created_at=task.created_at,
         )
         return _SpawnOutcome(spawn_error=True, error=str(exc))
     except WorktreeOccupiedError as exc:
@@ -1507,7 +1562,12 @@ def _spawn_claimed_task(
             client.name,
             task.ticket_id,
         )
-        _revert_claimed_task_to_pending(client.name, task.ticket_id, stamp_backoff=True)
+        _revert_claimed_task_to_pending(
+            client.name,
+            task.ticket_id,
+            stamp_backoff=True,
+            created_at=task.created_at,
+        )
         return _SpawnOutcome(spawn_error=True, error=str(exc))
 
     return _SpawnOutcome(spawned=True)
