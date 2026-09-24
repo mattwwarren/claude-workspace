@@ -344,6 +344,7 @@ def _approve_ticket_locked(
         _should_force_hold_finalize,
         _should_gate_for_signoff,
     )
+    from cw.executor import resolve_pipeline_stages
 
     store = load_dev_queue()
     task = _resolve_approval_target(store, ticket_id, client_name, resolved_task)
@@ -357,12 +358,13 @@ def _approve_ticket_locked(
         raise ApproveGateError(msg)
 
     client_cfg = get_client(client_name)
-    stages = client_cfg.pipeline.stages
+    stages = resolve_pipeline_stages(task, client_cfg)
 
     if task.stage not in stages:
         msg = (
             f"Cannot approve ticket '{ticket_id}':"
-            f" stage {task.stage!r} not in pipeline."
+            f" stage {task.stage!r} not in pipeline for lane {task.lane!r} of"
+            f" client {client_name!r}. Lane pipeline stages: {stages}."
         )
         raise ApproveGateError(msg)
 
