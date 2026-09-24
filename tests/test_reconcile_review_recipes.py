@@ -3158,7 +3158,8 @@ def test_dispatch_fix_agent_refuses_an_occupied_worktree_and_mutates_nothing(
     message = str(excinfo.value)
     assert str(worktree) in message
     assert branch in message
-    assert "worktree was not touched" in message
+    assert "HEAD may already have moved" in message
+    assert "nothing further was spawned or dispatched into it" in message
     # The reason is named: which occupant, or that it could not be ruled out.
     assert {
         "roster": "live daemon worker",

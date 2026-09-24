@@ -6,6 +6,7 @@ import errno
 import json
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -43,10 +44,16 @@ from cw.worktree import (
     is_main_behind_origin,
     live_home_reason,
     live_session_worktree_paths,
+    unsaved_work_reason,
 )
 from cw.worktree_gc import _live_worktree_paths
 from tests._worktree_helpers import patch_worktree
-from tests.conftest import _symlink_loop, git_in, push_commit_to_origin
+from tests.conftest import (
+    _clean_git_env,
+    _symlink_loop,
+    git_in,
+    push_commit_to_origin,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1666,6 +1673,173 @@ def _seed_behind(
     return client, wt, workspace, old_sha, new_sha
 
 
+def _make_bare_repo_with_commit(tmp_path: Path, name: str) -> Path:
+    """Create a bare repo at ``tmp_path/<name>.git`` seeded with one commit.
+
+    Serves as a submodule's own origin for the reuse-refresh submodule-sync
+    tests (#2233).
+    """
+    seed = tmp_path / f"{name}-seed"
+    subprocess.run(
+        ["git", "init", "-b", "main", str(seed)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    (seed / "README.md").write_text("sub\n", encoding="utf-8")
+    git_in(seed, "add", "README.md")
+    git_in(
+        seed,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=cw test",
+        "commit",
+        "-m",
+        "seed",
+    )
+    bare = tmp_path / f"{name}.git"
+    subprocess.run(
+        ["git", "clone", "--bare", str(seed), str(bare)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    return bare
+
+
+def _push_submodule_add_to_origin(
+    origin: Path, branch: str, work_dir: Path, sub_origin: Path, sub_name: str = "sub"
+) -> str:
+    """Push a commit to *branch* on *origin* that adds *sub_origin* as a submodule.
+
+    Mirrors :func:`push_commit_to_origin`'s side-clone convention. Passes
+    ``protocol.file.allow=always`` on the ``submodule add`` invocation only:
+    git 2.38+ blocks local/``file://`` submodule transports by default (the
+    CVE-2022-39253 hardening); both origins here are synthetic tmp-path
+    repos, so this carries no real security relaxation. The *production*
+    ``git submodule update`` call this exercises reads the allowance from
+    repo config instead (see ``_seed_behind_with_submodule``).
+    """
+    if not work_dir.exists():
+        subprocess.run(
+            ["git", "clone", str(origin), str(work_dir)],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_clean_git_env(),
+        )
+    git_in(work_dir, "fetch", "origin")
+    git_in(work_dir, "checkout", "-B", branch, f"origin/{branch}")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(work_dir),
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            str(sub_origin),
+            sub_name,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    git_in(
+        work_dir,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=cw test",
+        "commit",
+        "-m",
+        "add submodule",
+    )
+    git_in(work_dir, "push", "origin", branch)
+    return git_in(work_dir, "rev-parse", "HEAD")
+
+
+def _allow_local_submodule_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point HOME/XDG_CONFIG_HOME at a throwaway global git config that
+    re-enables the local/``file://`` submodule transport, for this test only.
+
+    Git's CVE-2022-39253 file-transport hardening reads
+    ``protocol.file.allow`` only from global/system config or an explicit
+    ``-c`` -- never from a repo's own LOCAL config, by design (a hostile repo
+    must not be able to re-enable its own transports). The PRODUCTION ``git
+    submodule update --init --recursive`` call the submodule-sync tests
+    exercise (:func:`_sync_reused_submodules`) passes no ``-c`` of its own, so
+    setting ``protocol.file.allow`` on a worktree's local config would not
+    reach it. This is the only way to unblock it without touching the real
+    machine's git config, isolated per test via ``monkeypatch``.
+    """
+    home = tmp_path / "fake-home"
+    (home / ".config" / "git").mkdir(parents=True, exist_ok=True)
+    (home / ".config" / "git" / "config").write_text(
+        '[protocol "file"]\n\tallow = always\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+
+
+def _seed_behind_with_submodule(
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[ClientConfig, Path, Path, str, str, Path]:
+    """``_seed_behind`` plus an upstream commit that adds a submodule (#2233).
+
+    Returns ``(client, wt, workspace, old_sha, new_sha, sub_origin)``. See
+    :func:`_allow_local_submodule_transport` for why the file transport must
+    be unblocked via HOME/XDG_CONFIG_HOME rather than repo config.
+    """
+    _allow_local_submodule_transport(tmp_path, monkeypatch)
+
+    client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
+    old_sha = git_in(wt, "rev-parse", "HEAD")
+    sub_origin = _make_bare_repo_with_commit(tmp_path, "sub")
+    new_sha = _push_submodule_add_to_origin(
+        origin, _REUSE_BRANCH, tmp_path / "side-submodule", sub_origin
+    )
+    return client, wt, workspace, old_sha, new_sha, sub_origin
+
+
+def _seed_behind_with_two_submodules(
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[ClientConfig, Path, Path, str, str, Path, Path]:
+    """``_seed_behind_with_submodule`` but with TWO submodules (#2233 SHOULD_FIX).
+
+    ``git submodule update`` clones submodules one at a time, so deleting only
+    one submodule's origin lets a test force a genuine PARTIAL sync failure --
+    one submodule cloned, the other not -- rather than an all-or-nothing one.
+
+    Returns ``(client, wt, workspace, old_sha, new_sha, ok_origin, broken_origin)``.
+    """
+    _allow_local_submodule_transport(tmp_path, monkeypatch)
+
+    client, wt, origin, workspace = _seed_reuse(tmp_path, make_git_repo)
+    old_sha = git_in(wt, "rev-parse", "HEAD")
+    ok_origin = _make_bare_repo_with_commit(tmp_path, "sub-ok")
+    broken_origin = _make_bare_repo_with_commit(tmp_path, "sub-broken")
+    work_dir = tmp_path / "side-two-submodules"
+    _push_submodule_add_to_origin(
+        origin, _REUSE_BRANCH, work_dir, ok_origin, sub_name="sub_a_ok"
+    )
+    new_sha = _push_submodule_add_to_origin(
+        origin, _REUSE_BRANCH, work_dir, broken_origin, sub_name="sub_b_broken"
+    )
+    return client, wt, workspace, old_sha, new_sha, ok_origin, broken_origin
+
+
 def _refresh_with_debug(client: ClientConfig, caplog: pytest.LogCaptureFixture) -> Path:
     caplog.clear()  # drop seed-phase records
     with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
@@ -1740,6 +1914,158 @@ def _debug_reasons(caplog: pytest.LogCaptureFixture) -> list[str]:
         for r in _cw_worktree_records(caplog, logging.DEBUG)
         if r.levelno == logging.DEBUG
     ]
+
+
+class TestReuseSubmoduleSync:
+    """#2233: a reuse fast-forward that brings in ``.gitmodules`` changes syncs
+    submodules; one that doesn't leaves repos without submodules untouched."""
+
+    def test_submodule_sync_after_fast_forward_that_adds_gitmodules(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client, wt, _workspace, old_sha, new_sha, _sub = _seed_behind_with_submodule(
+            tmp_path, make_git_repo, monkeypatch
+        )
+        assert old_sha != new_sha
+
+        result = create_worktree(
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+        )
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+        assert (wt / ".gitmodules").exists()
+        assert (wt / "sub" / "README.md").exists()
+
+    def test_no_submodule_call_without_gitmodules(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client, wt, _workspace, _old, new_sha = _seed_behind(tmp_path, make_git_repo)
+        calls = _spy_git(monkeypatch)
+
+        result = create_worktree(
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+        )
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha
+        assert not any(args and args[0] == "submodule" for args, _cwd in calls)
+
+    def test_occupancy_change_after_ff_aborts_before_submodule_sync(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A session appearing between the fast-forward and the submodule sync
+        aborts the WHOLE refresh -- the ff already moved HEAD (not undone),
+        but the submodule sync never runs and the caller gets
+        ``WorktreeOccupiedError``, exactly the "abort" contract #2213 gives a
+        caller that would otherwise spawn/dispatch/mutate an occupied tree."""
+        client, wt, workspace, _old_sha, new_sha, _sub = _seed_behind_with_submodule(
+            tmp_path, make_git_repo, monkeypatch
+        )
+
+        def merge_then_occupy(
+            *args: str, cwd: Path, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            result = _run_git(*args, cwd=cwd, check=check)
+            if args and args[0] == "merge":
+                _seed_session(workspace, wt, SessionStatus.ACTIVE)
+            return result
+
+        patch_worktree(monkeypatch, "_run_git", merge_then_occupy)
+
+        with (
+            caplog.at_level(logging.DEBUG, logger="cw.worktree"),
+            pytest.raises(WorktreeOccupiedError),
+        ):
+            create_worktree(
+                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            )
+
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha  # ff not undone
+        assert not (wt / "sub" / "README.md").exists()  # sync never ran
+        assert any("submodule sync skipped" in m for m in _debug_reasons(caplog))
+
+    def test_submodule_sync_failure_is_reported_as_friction_and_does_not_abort(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client, wt, _workspace, _old_sha, new_sha, sub_origin = (
+            _seed_behind_with_submodule(tmp_path, make_git_repo, monkeypatch)
+        )
+        shutil.rmtree(sub_origin)  # submodule clone will fail: origin is gone
+        report = ReuseRefreshReport()
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            result = create_worktree(
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh_on_reuse=True,
+                refresh_report=report,
+            )
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha  # ff still landed
+        assert not (wt / "sub" / "README.md").exists()  # sync failed, no clone
+        assert len(report.notes) == 1
+        assert "submodule sync" in report.notes[0]
+        assert str(wt) in report.notes[0]
+        assert any(
+            "submodule sync" in r.getMessage()
+            for r in _cw_worktree_records(caplog, logging.WARNING)
+        )
+
+    def test_submodule_sync_failure_can_leave_worktree_dirty_for_next_refresh(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed ``git submodule update`` does not just leave submodules
+        stale -- it can leave the SUPERPROJECT itself uncommitted-dirty
+        (#2233 SHOULD_FIX). Verified empirically: with two submodules and
+        only one origin deleted, ``git`` registers (fetches into
+        ``.git/modules/``) whichever submodule it reaches before the
+        failure, but its checkout pass never runs for EITHER submodule --
+        so ``git status --porcelain`` on the superproject itself goes from
+        clean to non-empty purely from that partial registration, with no
+        submodule actually checked out. The next reuse refresh's own
+        occupancy check (:func:`unsaved_work_reason`) then reads this
+        worktree as having unsaved work and declines to fast-forward it
+        again until a human intervenes."""
+        client, wt, _workspace, _old_sha, new_sha, _ok_origin, broken_origin = (
+            _seed_behind_with_two_submodules(tmp_path, make_git_repo, monkeypatch)
+        )
+        assert unsaved_work_reason(client, _REUSE_BRANCH, wt_path=wt) is None
+        shutil.rmtree(broken_origin)  # one submodule's clone will fail
+        report = ReuseRefreshReport()
+
+        result = create_worktree(
+            client,
+            _REUSE_BRANCH,
+            allow_dirty_reuse=True,
+            refresh_on_reuse=True,
+            refresh_report=report,
+        )
+
+        assert result == wt
+        assert git_in(wt, "rev-parse", "HEAD") == new_sha  # ff still landed
+        assert len(report.notes) == 1
+        assert "partial" in report.notes[0]
+        assert unsaved_work_reason(client, _REUSE_BRANCH, wt_path=wt) is not None
 
 
 class TestReuseOccupancyRosterAndPaths:

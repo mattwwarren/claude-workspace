@@ -199,8 +199,10 @@ def create_worktree(
       the tree. This function RAISES :exc:`~cw.exceptions.WorktreeOccupiedError`
       (carrying ``path`` and ``reason``) rather than returning the path, so a
       caller cannot spawn into, dispatch against or mutate the tree by
-      forgetting a check. The worktree is not touched and not removed. It is
-      not a :exc:`StaleWorktreeError`: never remove an occupied worktree.
+      forgetting a check. HEAD may already have moved if a fast-forward
+      landed before the occupant was found (#2233); the worktree is never
+      removed and nothing is spawned into it. It is not a
+      :exc:`StaleWorktreeError`: never remove an occupied worktree.
     - **Not refreshed -- PROCEED, returned.** The tree is the caller's to use as
       it is, just not (known to be) up to date: unsaved work (uncommitted,
       untracked or unpushed -- what ``allow_dirty_reuse`` tolerates), the fetch
@@ -217,7 +219,8 @@ def create_worktree(
     *refresh_report* (#2213) is an out-parameter (:class:`ReuseRefreshReport`)
     for callers that want more than the path. Its ``notes`` receive one line per
     refresh FAILURE (fetch failed, with git's reason; fast-forward refused by
-    git; diverged; an OS error), each naming the worktree and the reason. Its
+    git; diverged; an OS error; a submodule sync failed), each naming the
+    worktree and the reason. Its
     ``outcome`` and ``reason`` are the verdict, filled in before this function
     returns or raises. The occupancy refusal does not depend on it: it is the
     exception. Ignored unless *refresh_on_reuse* is set.

@@ -283,13 +283,19 @@ def dispatch_fix_agent(
     except WorktreeOccupiedError as exc:
         # A live session or worker may be homed on this worktree. Every step
         # below mutates it (fetch, merge, hook-context write, spawn), so none
-        # may run: skip the whole dispatch, worktree untouched, and let the
-        # caller's transient-conflict handling retry.
+        # may run: skip the whole dispatch and let the caller's
+        # transient-conflict handling retry. HEAD may already have moved if
+        # create_worktree's fast-forward (and, #2233, its post-ff submodule
+        # sync) landed before the occupancy re-check raised this -- that
+        # move is never undone, but nothing further is spawned, dispatched,
+        # or removed.
         msg = (
             f"dispatch_fix_agent: worktree {exc.path} for {branch} may be held "
             f"by a live session or daemon worker ({exc.reason}). "
-            "Refusing to fetch, merge or dispatch the fix agent into it; the "
-            "worktree was not touched."
+            "Refusing to fetch, merge or dispatch the fix agent into it; HEAD "
+            "may already have moved if a fast-forward landed before the "
+            "occupant was found, but nothing further was spawned or "
+            "dispatched into it."
         )
         raise HookContextConflictError(msg) from exc
     effective_prompt = (
