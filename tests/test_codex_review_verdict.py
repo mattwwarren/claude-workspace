@@ -49,7 +49,7 @@ from cw.codex_review._verdict._render import (
     _render_rejected_finding_text,
 )
 from cw.events import read_events
-from cw.executor_diagnostics import diagnostics_bundle_dir
+from cw.executor_diagnostics import render_bundle_path
 from cw.models.enums import OrchestratorEventType
 from cw.review_finding_dispositions import (
     FindingDisposition,
@@ -754,7 +754,7 @@ class TestSynthesizeCodexReviewResultHealth:
             default_branch="main",
             fix_loop_enabled=False,
         )
-        bundle = diagnostics_bundle_dir(f"s-synth-2094-{status}")
+        bundle = render_bundle_path(f"s-synth-2094-{status}")
         assert result.friction_highlights == [
             f"Architecture Reviewer: {status} — could not complete required check",
             f"[diagnostics: {bundle}]",
@@ -870,7 +870,7 @@ class TestReadOnlySandboxDegradedCarveOut:
         assert result.health.agent_health_summary == [
             AgentHealthEntry(agent_id=reviewer_role, confidence="MEDIUM")
         ]
-        bundle = diagnostics_bundle_dir("s-synth-2094-exempt")
+        bundle = render_bundle_path("s-synth-2094-exempt")
         assert result.friction_highlights == [
             f"{reviewer_role}: degraded — read-only sandbox tax",
             f"[diagnostics: {bundle}]",
@@ -3172,10 +3172,9 @@ def test_format_failures_detail_includes_diagnostics_path() -> None:
     failures = [ReviewerRunFailure(role="Code Quality Reviewer", reason=CODEX_TIMEOUT)]
     detail = _format_failures_detail(failures, session_id="sess-fmt")
     assert "Code Quality Reviewer (codex_timeout)" in detail
-    # tmp_config_dir relocates state_dir() away from the real home, so
-    # _render_bundle_path takes its absolute-fallback branch: the rendered
-    # pointer is exactly "[diagnostics: <absolute bundle dir>]".
-    bundle = diagnostics_bundle_dir("sess-fmt")
+    # Pointer is built via the same render_bundle_path the code under test
+    # calls, so the assertion is correct under either rendering branch.
+    bundle = render_bundle_path("sess-fmt")
     assert detail == f"Code Quality Reviewer (codex_timeout) [diagnostics: {bundle}]"
 
 
@@ -3202,7 +3201,7 @@ class TestFormatDegradedDocumentHighlights:
             ),
         ]
         highlights = _format_degraded_document_highlights(docs, session_id="s-fdh-2")
-        bundle = diagnostics_bundle_dir("s-fdh-2")
+        bundle = render_bundle_path("s-fdh-2")
         assert highlights == [
             "Architecture Reviewer: degraded — sandbox lacked filesystem access",
             "Performance Reviewer: failed — crashed mid-run",

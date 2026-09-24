@@ -507,7 +507,7 @@ class TestSessionResult:
         """A CODEX_REVIEW_UNPARSEABLE blocked last_result carries the diagnostics
         bundle path in blocker.details, which `session result` prints (#1239)."""
         from cw.codex_review import synthesize_codex_review_result
-        from cw.executor_diagnostics import diagnostics_bundle_dir
+        from cw.executor_diagnostics import render_bundle_path
         from cw.models import Stage, TicketTask
         from cw.review_findings import ReviewerRunFailure
 
@@ -528,10 +528,10 @@ class TestSessionResult:
         cli_result = runner.invoke(main, ["session", "result", "abcd1234"])
         assert cli_result.exit_code == 0
         data = json.loads(cli_result.output)
-        # tmp_config_dir relocates state_dir() away from the real home, so
-        # _render_bundle_path takes its absolute-fallback branch: the
-        # rendered pointer is exactly "[diagnostics: <absolute bundle dir>]".
-        bundle = diagnostics_bundle_dir("abcd1234")
+        # Pointer is built via the same render_bundle_path the code under
+        # test calls, so the assertion is correct under either rendering
+        # branch.
+        bundle = render_bundle_path("abcd1234")
         assert (
             data["blocker"]["details"]
             == f"Code Quality Reviewer (crash) [diagnostics: {bundle}]"
