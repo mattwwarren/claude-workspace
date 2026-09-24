@@ -864,23 +864,30 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `usage_limited_until` lockout was armed to — the message's parsed reset, or
   `usage_limit_backoff_seconds` from now when it did not parse — and whether
   the row will re-enter the queue on its own. A `dispatch.usage_limit_armed`
-  for the same client precedes it, and a `session.reap_proposed`
-  (`proposed_action: "revert_task"`, `reason: "usage_limit_mid_turn"`)
-  precedes both. Unlike the signal-only liveness reasons above, this one **does
+  for the same client precedes it, and it travels with a `session.reap_proposed`
+  (`proposed_action: "revert_task"`, `reason: "usage_limit_mid_turn"`).
+  Unlike the signal-only liveness reasons above, this one **does
   disposition the row**, on transcript evidence rather than elapsed time
   (ADR-0014), gated by the lane's `reap_policy` exactly like the phantom sweep
-  (ADR-0006). Under `reap_policy: auto` the row goes `RUNNING → PENDING` with
-  `session_id` cleared and `next_eligible_at` set to the reset instant, so the
-  existing claim gate releases it at the reset; the session closes
-  `COMPLETED` with `completed_reason: "usage_limited"` (a `session.completed`
-  with `crashed: false` is emitted) and its daemon surface is stopped. Under
-  any other policy (`signal_only`, the default) the row parks `RUNNING →
-  BLOCKED_ON_USER` with `disposition="usage_limited_mid_turn"` and
-  `session_id` left set, the session and its surface are untouched, and an
-  operator clears the row. Neither branch charges `unproductive_attempts` — a
-  whole turn ran. If the tail changed between detect and act, or the row
-  moved off RUNNING or was reclaimed by another session in the meantime,
-  nothing is proposed, mutated, or armed that tick.
+  (ADR-0006). Every act first re-checks, with no side effects, that the tail
+  still ends on the limit message and the row is still RUNNING under this
+  session — if not, nothing is armed, emitted or mutated that tick — and then
+  arms the lockout (a failed arm is logged and the act continues). Under
+  `reap_policy: auto` this event, the `session.reap_proposed` and a
+  `session.completed` (`crashed: false`) are all emitted **before** any effect;
+  then the daemon surface is stopped, the session is persisted `COMPLETED`
+  with `completed_reason: "usage_limited"`, and last the row goes
+  `RUNNING → PENDING` with `session_id` cleared and `next_eligible_at` set to
+  the reset instant, so the existing claim gate releases it at the reset. A
+  failed emit or a failed stop leaves the session ACTIVE and the row RUNNING
+  for the next tick to retry (the events may then repeat); a requeue that
+  loses a race to another writer leaves the row as found and the stopped
+  session closed. Under any other policy (`signal_only`, the default) the row
+  parks `RUNNING → BLOCKED_ON_USER` with
+  `disposition="usage_limited_mid_turn"` and `session_id` left set, and only
+  then are the `session.reap_proposed` and this event emitted; the session and
+  its surface are untouched, and an operator clears the row. Neither branch
+  charges `unproductive_attempts` — a whole turn ran.
 - `"freshness_gate_blocked"` — A client's consecutive freshness-gate-block
   latch (`ClientConcurrencyOverride.consecutive_freshness_blocks`, RFC 0007
   §W2) reached `freshness_block_attention_threshold`. Client-scoped, not

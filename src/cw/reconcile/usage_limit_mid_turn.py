@@ -12,29 +12,40 @@ owning a RUNNING row, whose last content-bearing transcript record matches
 ``USAGE_LIMIT_RE`` with no sentinel anywhere in the transcript -- and acts on it
 as positive evidence of a usage-limit stop, never on elapsed time (ADR-0014).
 
-Every candidate whose row survives the identity-checked queue transition is
-proposed via ``session.reap_proposed`` (ADR-0006 invariant 3) and the act is
-gated by the lane's ``reap_policy`` (ADR-0006 invariant 2):
+The act is gated by the lane's ``reap_policy`` (ADR-0006 invariant 2) and
+runs in one fixed order, each step's failure stopping the ones after it:
 
-- ``auto``: the row goes RUNNING -> PENDING with ``next_eligible_at`` set to the
-  reset instant, so the existing claim gate releases it at the reset with no
-  new sweep; the session closes COMPLETED/``usage_limited`` (not a crash) and
-  its surface is stopped so a live idle home cannot defer the re-claim.
-- any other policy (``signal_only`` default): the row parks BLOCKED_ON_USER
-  with ``disposition="usage_limited_mid_turn"``; the session, its surface and
-  the row's ``session_id`` are left untouched for an operator to clear.
+1. Gate, with no side effects: under ``dev_queue_lock``, re-read the tail and
+   check the row is still RUNNING and bound to the session. Either failing is
+   a no-op this tick.
+2. Arm the client's ``usage_limited_until`` lockout. A failure logs and
+   continues -- the next tick re-arms.
 
-Neither branch charges ``unproductive_attempts`` -- a whole turn ran. Both arm
-the client's ``usage_limited_until`` lockout and emit
-``session.needs_attention`` naming the reset instant. The evidence is re-read
-at act time; a tail that changed since detect is a silent no-op this tick.
+Under ``auto`` the row is then requeued and the session closed:
+
+3. Record the audit events -- ``session.needs_attention`` naming the reset
+   instant, ``session.reap_proposed`` (ADR-0006 invariant 3) and
+   ``session.completed`` -- before any effect. A failed write stops here.
+4. Stop the daemon surface, so a live idle home cannot defer the re-claim. A
+   failed stop stops here: the session stays ACTIVE, the row RUNNING.
+5. Persist the session COMPLETED/``usage_limited`` (not a crash).
+6. Requeue the row RUNNING -> PENDING with ``next_eligible_at`` at the reset
+   instant, through the identity-checked update, so the existing claim gate
+   releases it with no new sweep. A lost race is logged; the closed session
+   stays closed, since its process is gone.
+
+Any other policy (``signal_only`` default) instead parks the row
+BLOCKED_ON_USER with ``disposition="usage_limited_mid_turn"`` and only then
+proposes and pages; the session, its surface and the row's ``session_id`` are
+left untouched for an operator to clear. Neither branch charges
+``unproductive_attempts`` -- a whole turn ran.
 """
 
 from __future__ import annotations
 
 import logging
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.config import save_state
 from cw.dev_queue import (
@@ -80,6 +91,7 @@ if TYPE_CHECKING:
     from cw.models import (
         ClientConfig,
         CwState,
+        DevQueueStore,
         OrchestratorConfig,
         Session,
         TicketTask,
@@ -156,20 +168,72 @@ def _detect_mid_turn_usage_limit_candidates(
     return candidates
 
 
+class _ActContext(NamedTuple):
+    """One gated candidate's inputs, shared by every step of its act."""
+
+    state: CwState
+    session: Session
+    candidate: ReapCandidate
+    ticket_id: str
+    until: datetime
+    native_live: set[str]
+    now: datetime
+
+
+def _owned_running_row(
+    store: DevQueueStore, ticket_id: str, session_id: str
+) -> TicketTask | None:
+    """The row iff it is still RUNNING and bound to *session_id*, else None."""
+    lookup = _lookup_matching_task(store, ticket_id, session_id)
+    if lookup.target_status is not QueueItemStatus.RUNNING:
+        return None
+    return lookup.target
+
+
+def _gate(session: Session, ticket_id: str) -> UsageLimitDetection | None:
+    """Step 1: re-verify the evidence and the row's identity, with no side effects.
+
+    Under ``dev_queue_lock``, re-reads the transcript (the limit text must
+    still be the last content-bearing record) and checks the row is still
+    RUNNING and bound to *session*. Either failing is a no-op this tick:
+    nothing is written, emitted or stopped. The lock is released before any
+    effect, so step 6 re-runs the identity check for its own write.
+    """
+    with dev_queue_lock():
+        detection = _mid_turn_limit_detection(session)
+        owned = _owned_running_row(load_dev_queue(), ticket_id, session.id)
+    if detection is None:
+        _log.info(
+            "usage_limit_mid_turn: tail changed since detect for ticket %s "
+            "session %s; skipping this tick",
+            ticket_id,
+            session.id,
+        )
+        return None
+    if owned is None:
+        _log.info(
+            "usage_limit_mid_turn: row for ticket %s is no longer RUNNING under "
+            "session %s; skipping this tick",
+            ticket_id,
+            session.id,
+        )
+        return None
+    return detection
+
+
 def _mutate_owned_running_row(
     ticket_id: str, session_id: str, mutate: Callable[[TicketTask], None]
 ) -> bool:
     """Apply *mutate* to the row iff it is still RUNNING and owned by *session_id*.
 
-    Re-verified under ``dev_queue_lock`` because the detect-phase snapshot may
-    be stale: a row that moved off RUNNING or was reclaimed by another session
-    since detect is a silent no-op (returns False).
+    Re-verified under ``dev_queue_lock`` because the gate's check has been
+    released since: a row that moved off RUNNING or was reclaimed by another
+    session in the meantime is left as found (returns False).
     """
     with dev_queue_lock():
         store = load_dev_queue()
-        lookup = _lookup_matching_task(store, ticket_id, session_id)
-        target = lookup.target
-        if target is None or lookup.target_status is not QueueItemStatus.RUNNING:
+        target = _owned_running_row(store, ticket_id, session_id)
+        if target is None:
             return False
         mutate(target)
         save_dev_queue(store)
@@ -193,48 +257,32 @@ def _park_blocked_on_user(target: TicketTask) -> None:
     )
 
 
-def _complete_usage_limited_session(
-    state: CwState, session: Session, ticket_id: str, *, now: datetime
+def _arm_lockout(
+    client: str, ticket_id: str, *, until: datetime, reset_at: datetime | None
 ) -> None:
-    """Record the completion event, then close *session* and stop its surface.
+    """Step 2: arm the client's spawn lockout; a failure logs and continues.
 
-    Audit before effect, as ``_close_session_audited`` (#2285): a failed event
-    write raises before the session is touched, so it stays ACTIVE for the
-    next pass rather than being closed without its audit trail.
+    Idempotent and non-destructive, and what actually stops new spawns. The
+    shared helper audits before it persists, so a failed audit write leaves
+    no window saved; the next tick re-arms it.
     """
-    record_event(
-        OrchestratorEventType.SESSION_COMPLETED,
-        {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "ticket_id": ticket_id,
-            "claude_session_id": session.claude_session_id,
-            "crashed": False,
-        },
-        correlation_id=ticket_id,
-    )
-    session.status = SessionStatus.COMPLETED
-    session.completed_at = now
-    session.completed_reason = CompletionReason.USAGE_LIMITED
-    session.reap_reason = ReapReason.USAGE_LIMIT_MID_TURN
-    save_state(state)
-    if session.surface_ref is not None:
-        _deps.get_native_daemon_client().stop(session.surface_ref)
+    try:
+        record_usage_limit_armed(client, until=until, reset_at=reset_at)
+    except OSError:
+        _log.warning(
+            "usage_limit_mid_turn: arming the %s lockout for ticket %s failed; "
+            "continuing, the next tick re-arms",
+            client,
+            ticket_id,
+            exc_info=True,
+        )
+        return
+    merge_and_save_usage_limited_until({client: until})
 
 
-def _arm_lockout_and_notify(
-    session: Session,
-    candidate: ReapCandidate,
-    ticket_id: str,
-    *,
-    until: datetime,
-    reset_at: datetime | None,
-    auto: bool,
-) -> None:
-    """Arm the client's spawn lockout and page the operator with the reset time."""
-    record_usage_limit_armed(session.client, until=until, reset_at=reset_at)
-    merge_and_save_usage_limited_until({session.client: until})
+def _record_needs_attention(ctx: _ActContext, *, auto: bool) -> None:
+    """Record the usage-limit detection, naming the reset instant."""
+    session = ctx.session
     disposition = (
         "parked without charge, will re-enter the queue automatically"
         if auto
@@ -246,18 +294,140 @@ def _arm_lockout_and_notify(
             "session_id": session.id,
             "session_name": session.name,
             "client": session.client,
-            "ticket_id": ticket_id,
+            "ticket_id": ctx.ticket_id,
             "claude_session_id": session.claude_session_id,
             "paused_status": _USAGE_LIMITED_MID_TURN_REASON,
             "breadcrumbs": (
-                f"hit usage limit mid-turn; resets {until.isoformat()}; {disposition}"
+                f"hit usage limit mid-turn; resets {ctx.until.isoformat()}; "
+                f"{disposition}"
             ),
             "crashed": False,
-            "lane": candidate.lane,
+            "lane": ctx.candidate.lane,
         },
-        correlation_id=ticket_id,
+        correlation_id=ctx.ticket_id,
     )
+
+
+def _audit_auto_act(ctx: _ActContext) -> bool:
+    """Step 3: record every audit event before any effect; False if one failed.
+
+    The usage-limit detection, then the intent to stop and requeue (the reap
+    proposal), then the completion. A failed write stops the act here -- no
+    stop, no close, no requeue -- and the next tick retries.
+    """
+    session = ctx.session
+    try:
+        _record_needs_attention(ctx, auto=True)
+        _emit_reap_proposed(
+            ctx.state, [ctx.candidate], native_live=ctx.native_live, now=ctx.now
+        )
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": ctx.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "crashed": False,
+            },
+            correlation_id=ctx.ticket_id,
+        )
+    except OSError:
+        _log.warning(
+            "usage_limit_mid_turn: audit emit failed for ticket %s session %s; "
+            "no stop, close or requeue this tick",
+            ctx.ticket_id,
+            session.id,
+            exc_info=True,
+        )
+        return False
     _deps.fire_push_notification(session.name, session.client)
+    return True
+
+
+def _stop_surface(ctx: _ActContext) -> bool:
+    """Step 4: stop the live daemon session; False if the stop raised.
+
+    A session whose ``surface_ref`` is already cleared has nothing to stop.
+    On failure the session stays ACTIVE and the row RUNNING; the next tick
+    retries with the lockout already armed.
+    """
+    surface_ref = ctx.session.surface_ref
+    if surface_ref is None:
+        return True
+    try:
+        _deps.get_native_daemon_client().stop(surface_ref)
+    except OSError:
+        _log.warning(
+            "usage_limit_mid_turn: stopping surface %s for ticket %s session %s "
+            "failed; the session stays ACTIVE and the row RUNNING for the next tick",
+            surface_ref,
+            ctx.ticket_id,
+            ctx.session.id,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
+def _persist_completed(ctx: _ActContext) -> None:
+    """Step 5: persist the session COMPLETED, only after its stop succeeded."""
+    session = ctx.session
+    session.status = SessionStatus.COMPLETED
+    session.completed_at = ctx.now
+    session.completed_reason = CompletionReason.USAGE_LIMITED
+    session.reap_reason = ReapReason.USAGE_LIMIT_MID_TURN
+    save_state(ctx.state)
+
+
+def _act_auto(ctx: _ActContext) -> bool:
+    """Steps 3-6 of the ``reap_policy: auto`` act; True iff the row was requeued.
+
+    Step 6's identity-checked requeue can lose a race to another writer after
+    the session is already closed. That is logged and nothing further is
+    emitted; the session stays closed, which is right because its process is
+    gone.
+    """
+    if not _audit_auto_act(ctx) or not _stop_surface(ctx):
+        return False
+    _persist_completed(ctx)
+    requeued = _mutate_owned_running_row(
+        ctx.ticket_id,
+        ctx.session.id,
+        partial(_revert_to_pending, until=ctx.until),
+    )
+    if not requeued:
+        _log.info(
+            "usage_limit_mid_turn: requeue of ticket %s lost a race after "
+            "session %s was stopped and closed; row left as found",
+            ctx.ticket_id,
+            ctx.session.id,
+        )
+    return requeued
+
+
+def _act_signal_only(ctx: _ActContext) -> None:
+    """Park the row BLOCKED_ON_USER, then propose and page (non-auto policy).
+
+    The reap proposal is emitted only after the park's identity check
+    passes: a lost race proposes nothing and mutates nothing (#2285).
+    """
+    if not _mutate_owned_running_row(
+        ctx.ticket_id, ctx.session.id, _park_blocked_on_user
+    ):
+        _log.info(
+            "usage_limit_mid_turn: park of ticket %s lost a race; row no longer "
+            "RUNNING under session %s",
+            ctx.ticket_id,
+            ctx.session.id,
+        )
+        return
+    _emit_reap_proposed(
+        ctx.state, [ctx.candidate], native_live=ctx.native_live, now=ctx.now
+    )
+    _record_needs_attention(ctx, auto=False)
+    _deps.fire_push_notification(ctx.session.name, ctx.session.client)
 
 
 def _act_on_mid_turn_usage_limit_candidates(
@@ -269,14 +439,12 @@ def _act_on_mid_turn_usage_limit_candidates(
     config: OrchestratorConfig,
     now: datetime,
 ) -> list[str]:
-    """Propose, gate, and act on each candidate; return ticket ids reverted.
+    """Gate, arm, and act on each candidate; return the ticket ids requeued.
 
-    Only ``reap_policy: auto`` reverts (and so appears in the returned list);
-    any other policy parks the row BLOCKED_ON_USER. The transcript tail is
-    re-read first -- if it no longer shows a mid-turn stop, nothing is
-    proposed, mutated, or armed this tick. The identity-checked row transition
-    runs before the reap proposal, so a row that moved or was reclaimed since
-    detect is likewise a silent no-op.
+    Every candidate runs step 1 (the side-effect-free gate) and step 2 (the
+    client lockout). ``reap_policy: auto`` then runs steps 3-6 -- audit, stop,
+    close, requeue -- and only a candidate whose requeue lands appears in the
+    returned list. Any other policy parks the row BLOCKED_ON_USER instead.
     """
     session_by_id = {s.id: s for s in state.sessions}
     reverted: list[str] = []
@@ -285,14 +453,8 @@ def _act_on_mid_turn_usage_limit_candidates(
         ticket_id = candidate.ticket_id
         if session is None or ticket_id is None:
             continue
-        detection = _mid_turn_limit_detection(session)
+        detection = _gate(session, ticket_id)
         if detection is None:
-            _log.info(
-                "usage_limit_mid_turn: tail changed since detect for ticket %s "
-                "session %s; skipping this tick",
-                ticket_id,
-                session.id,
-            )
             continue
         text = detection.matched_text
         reset_at = (
@@ -303,20 +465,20 @@ def _act_on_mid_turn_usage_limit_candidates(
         until = resolve_usage_limited_until(
             now, reset_at, config.usage_limit_backoff_seconds
         )
-        auto = resolve_reap_policy(candidate, clients, config) is ReapPolicy.AUTO
-        mutate: Callable[[TicketTask], None] = (
-            partial(_revert_to_pending, until=until) if auto else _park_blocked_on_user
+        _arm_lockout(session.client, ticket_id, until=until, reset_at=reset_at)
+        ctx = _ActContext(
+            state=state,
+            session=session,
+            candidate=candidate,
+            ticket_id=ticket_id,
+            until=until,
+            native_live=native_live,
+            now=now,
         )
-        # Race check first, as #2285 corrected: a lost race proposes nothing.
-        if not _mutate_owned_running_row(ticket_id, session.id, mutate):
-            continue
-        _emit_reap_proposed(state, [candidate], native_live=native_live, now=now)
-        if auto:
-            _complete_usage_limited_session(state, session, ticket_id, now=now)
+        if resolve_reap_policy(candidate, clients, config) is not ReapPolicy.AUTO:
+            _act_signal_only(ctx)
+        elif _act_auto(ctx):
             reverted.append(ticket_id)
-        _arm_lockout_and_notify(
-            session, candidate, ticket_id, until=until, reset_at=reset_at, auto=auto
-        )
     return reverted
 
 
