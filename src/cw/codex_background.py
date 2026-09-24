@@ -25,6 +25,7 @@ vanishing mid-``git commit``. Threads still alive at that deadline are
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
 import time
 from datetime import UTC, datetime
@@ -34,7 +35,12 @@ from typing import TYPE_CHECKING
 from cw._git import capture_head_sha
 from cw.atomic import atomic_write_text
 from cw.codex_fix_loop import run_review_with_fix_loop
-from cw.codex_review import make_codex_blocked, render_verdict_comment
+from cw.codex_fix_loop_push import push_and_verify_head, remote_branch_tip
+from cw.codex_review import (
+    CODEX_UNPUSHED_AT_EXIT,
+    make_codex_blocked,
+    render_verdict_comment,
+)
 from cw.config import load_effective_config, sessions_lock
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.dispatch_state import (
@@ -51,12 +57,12 @@ from cw.models.orchestrator_config import CODEX_TIER_CLAIM_SUPPRESSION
 from cw.review_finding_dispositions import merge_finding_dispositions
 from cw.review_findings import render_review_verdict_envelope
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.worktree import _git_dir
+from cw.worktree import _checked_out_branch, _git_dir
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cw.auto_dev_result import Blocker
+    from cw.auto_dev_result import AutoDevResult, Blocker
     from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
     from cw.review_finding_dispositions import FindingDisposition
@@ -587,6 +593,65 @@ def _complete_session_as_unexpected_error(
         )
 
 
+def _refuse_unpushed_clean_exit(
+    *,
+    task: TicketTask,
+    worktree: Path,
+    result: AutoDevResult,
+    verdict: ReviewVerdict | None,
+) -> tuple[AutoDevResult, ReviewVerdict | None]:
+    """Never report a clean review while local HEAD is not on origin (#2354).
+
+    Backstop for the fix loop's per-cycle push: compares local HEAD with a
+    freshly fetched ``origin/<branch>`` and, on a mismatch, tries one self-heal
+    push. Only a push that also fails replaces the clean result with a
+    ``CODEX_UNPUSHED_AT_EXIT`` park and drops *verdict*, so no all-clear
+    comment is posted for a run that parked.
+
+    Deliberately narrow: commits only. Uncommitted or untracked paths never
+    trip it — a push would carry none of them — and stay on the existing
+    ``dirty_worktree`` park path. A detached HEAD has no branch to compare and
+    passes through.
+    """
+    branch = _checked_out_branch(worktree)
+    local_sha = capture_head_sha(worktree, strict=False)
+    if branch is None or not local_sha:
+        return result, verdict
+    origin_sha = remote_branch_tip(worktree, branch)
+    if origin_sha == local_sha:
+        return result, verdict
+    try:
+        push_and_verify_head(worktree, local_sha)
+    except subprocess.CalledProcessError as exc:
+        _log.warning(
+            "codex_unpushed_at_exit ticket=%s branch=%s head=%s origin=%s: %s",
+            task.ticket_id,
+            branch,
+            local_sha,
+            origin_sha,
+            exc.stderr or exc,
+        )
+        blocked = make_codex_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=CODEX_UNPUSHED_AT_EXIT,
+            details=(
+                f"local HEAD={local_sha} not on origin/{branch} (origin={origin_sha})"
+            ),
+            retry_eligible=True,
+        )
+        return blocked, None
+    _log.warning(
+        "codex review exit self-healed unpushed HEAD ticket=%s branch=%s "
+        "head=%s previous_origin=%s",
+        task.ticket_id,
+        branch,
+        local_sha,
+        origin_sha,
+    )
+    return result, verdict
+
+
 def _run_codex_review_and_complete(
     *,
     runner: CodexRunner,
@@ -673,6 +738,10 @@ def _run_codex_review_and_complete(
             claim_tier_enabled=claim_tier_enabled,
             disposition_drift_check_enabled=disposition_drift_check_enabled,
         )
+        if fix_loop_enabled and result.blocker is None:
+            result, verdict = _refuse_unpushed_clean_exit(
+                task=task, worktree=worktree, result=result, verdict=verdict
+            )
 
         # Step 4: persist result under sessions_lock.
         with sessions_lock():

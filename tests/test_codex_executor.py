@@ -56,7 +56,12 @@ from cw.models import (
     TicketTask,
 )
 from tests._codex_review_helpers import _mk_codex_proc
-from tests.conftest import _seed_completed_session, find_completed_session, git_in
+from tests.conftest import (
+    _seed_completed_session,
+    add_bare_origin,
+    find_completed_session,
+    git_in,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -98,6 +103,9 @@ def _worktree_with_change(
     (repo / filename).write_text(content, encoding="utf-8")
     git_in(repo, "add", filename)
     git_in(repo, "commit", "-m", f"add {filename}")
+    # #2354: fix-loop commits push, and the review-exit guard compares HEAD
+    # with origin/<branch>, so the feature branch needs a real origin.
+    add_bare_origin(repo)
     return repo
 
 

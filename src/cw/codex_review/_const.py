@@ -92,6 +92,11 @@ CODEX_REVIEW_PARTIAL = "codex_review_partial"
 # successful-but-out-of-policy fix, a distinct axis.
 CODEX_FIX_SCOPE_VIOLATION = "codex_fix_scope_violation"
 
+# Review-exit guard park (#2354): the fix loop converged clean, but local HEAD
+# is not on origin/<branch> and a self-heal push also failed. Reporting the
+# clean result anyway would hand a later stage work that exists only locally.
+CODEX_UNPUSHED_AT_EXIT = "codex_unpushed_at_exit"
+
 # A review whose only MUST_FIX finding(s) were MECHANICALLY rejected — dropped
 # by review_findings' validation (bad file/line anchor, evidence absent from
 # the diff, ...) before any adjudication could weigh them on their merits
