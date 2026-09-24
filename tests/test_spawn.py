@@ -2274,6 +2274,33 @@ class TestSpawnCLI:
         assert result.exit_code != 0
         assert "nonexistent-id" in result.output
 
+    def test_spawn_close_ambiguous_name_lists_candidates(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#2237: a shared name refuses and lists both ids instead of guessing."""
+        name = "client-a/auto-dev/2212"
+        save_state(
+            CwState(
+                sessions=[
+                    _make_daemon_session(
+                        id="done0001", name=name, status=SessionStatus.COMPLETED
+                    ),
+                    _make_daemon_session(id="live0002", name=name, surface_ref=None),
+                ]
+            )
+        )
+
+        result = CliRunner().invoke(main, ["spawn", "close", name])
+
+        assert result.exit_code != 0
+        assert "done0001" in result.output
+        assert "live0002" in result.output
+        assert "pass an id to choose" in result.output
+        assert all(
+            s.status != SessionStatus.COMPLETED or s.id == "done0001"
+            for s in load_state().sessions
+        )
+
     def test_cli_confirmed_dead_flag_accepted(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:

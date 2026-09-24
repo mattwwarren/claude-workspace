@@ -583,6 +583,14 @@ common wedge conditions:
   sentinel (a plain/non-headless spawn whose harness never re-fired the Stop
   hook that would have completed it) — marks the session `COMPLETED`, stops
   the daemon surface, and reverts the owning task to PENDING.
+- `wedge/active-null-liveness-orphan` (#2237) — an `ACTIVE`/`IDLE` DAEMON
+  session with no daemon surface and no local-process liveness record past its
+  spawn grace, holding a ceiling slot no other detector can see — advisory
+  only (ADR-0014: no roster/PID/terminal-result evidence backs it). `cw doctor`
+  reports it with the exact `cw spawn close <id>` command; nothing is reaped
+  automatically. Excludes `CODEX_BACKEND` sessions (owned by `codex_boot`,
+  #2285/#2307).
+
 Run `cw doctor --reap --json` for machine-readable output.
 
 #### `terminal_sibling` duplicate rows (GitHub #2100)
