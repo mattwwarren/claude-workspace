@@ -3066,8 +3066,8 @@ def test_dispatch_fix_agent_fast_forwards_behind_worktree(
     origin = Path(git_in(client.workspace_path, "remote", "get-url", "origin"))
     new_sha = push_commit_to_origin(origin, branch, tmp_path / "side", "upstream.txt")
     # Load-bearing: without this fetch the workspace's tracking ref still equals
-    # the worktree's HEAD, ``_resolve_remote_ref`` resolves to that stale ref,
-    # the HEAD-equals-remote check passes today, and this test is vacuous.
+    # the worktree's HEAD, ``_resolve_fix_remote_ref`` resolves to that stale
+    # ref, the HEAD-equals-remote check passes today, and this test is vacuous.
     git_in(client.workspace_path, "fetch", "origin")
     assert new_sha != old_sha
     assert git_in(worktree, "rev-parse", "HEAD") == old_sha
