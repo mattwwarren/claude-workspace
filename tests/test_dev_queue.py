@@ -6723,9 +6723,7 @@ class TestApproveScopeDrift:
                 error = "simulated post-write failure"
                 raise OSError(error)
 
-        monkeypatch.setattr(
-            "cw.dev_queue.approval.record_event", _event_then_fail
-        )
+        monkeypatch.setattr("cw.dev_queue.approval.record_event", _event_then_fail)
 
         with pytest.raises(OSError, match="simulated post-write failure"):
             approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
@@ -6773,12 +6771,11 @@ class TestApproveScopeDrift:
                 error = "event unavailable"
                 raise OSError(error)
 
-        monkeypatch.setattr(
-            "cw.dev_queue.approval.record_event", _event_then_fail
-        )
+        monkeypatch.setattr("cw.dev_queue.approval.record_event", _event_then_fail)
 
-        with caplog.at_level("CRITICAL"), pytest.raises(
-            OSError, match="rollback unavailable"
+        with (
+            caplog.at_level("CRITICAL"),
+            pytest.raises(OSError, match="rollback unavailable"),
         ):
             approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
 
@@ -6786,6 +6783,7 @@ class TestApproveScopeDrift:
         assert marker.exists()
         assert '"recovery_required": true' in marker.read_text()
         assert any("rollback failed" in record.message for record in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # TestApproveTicketLockedResolved — _approve_ticket_locked(resolved_task=...)
