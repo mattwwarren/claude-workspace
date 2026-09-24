@@ -228,7 +228,7 @@ def _apply_requeue_stage(
         return False
 
     target_stage = Stage(stage_override)
-    _validate_stage_in_pipeline(target_stage, stages, client=task.client)
+    _validate_stage_in_pipeline(target_stage, stages, client=task.client, lane=task.lane)
 
     current_idx = stages.index(task.stage)
     target_idx = stages.index(target_stage)
@@ -564,7 +564,8 @@ def requeue_ticket(
             the ticket is FAILED, or from_completed is True and the ticket
             is COMPLETED.
         RequeueStageError: if stage_override would regress without allow_regress,
-            is not in the client pipeline, regresses a non-blocked task, if
+            is not in the client's or lane's resolved pipeline, regresses a
+            non-blocked task, if
             allow_regress is set with no backward stage_override, or if a
             forward bypass targets stage 'impl' with no approved plan
             available locally or on the tracker (#1681).
@@ -576,12 +577,18 @@ def requeue_ticket(
         native_daemon=native_daemon or get_native_daemon_client(),
         ignore_session_ids=ignore_session_ids,
     )
+    # Deferred import of ``resolve_pipeline_stages`` to break the
+    # ``dev_queue -> executor -> codex_background -> dev_queue`` cycle (same
+    # precedent as ``_review_reentry_deliverable``'s deferred ``cw.executor``
+    # import above, see module docstring).
+    from cw.executor import resolve_pipeline_stages
+
     with _lock():
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
 
         client_cfg = get_client(client_name)
-        stages = client_cfg.pipeline.stages
+        stages = resolve_pipeline_stages(task, client_cfg)
 
         from_stage = task.stage
 
