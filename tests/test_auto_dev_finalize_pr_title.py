@@ -63,5 +63,7 @@ def test_ship_it_and_prep_pr_unchanged_by_this_fix() -> None:
     confined to finalize.md's Step 4c.2 prose."""
     ship_it = _cmd("ship-it.md")
     prep_pr = _cmd("prep-pr.md")
-    assert "# Tier 1: Explicit --title override (passed from /prep-pr --title)" in ship_it
+    assert (
+        "# Tier 1: Explicit --title override (passed from /prep-pr --title)" in ship_it
+    )
     assert "- `--title` if provided" in prep_pr
