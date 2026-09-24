@@ -17,6 +17,8 @@ from cw.config import load_state, orchestrator_config_file, save_state
 from cw.exceptions import CwError
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
+    SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
+    SCOPE_DRIFT_APPROVED_HEAD_KEY,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -3016,7 +3018,7 @@ class TestWriteHookContextTaskFields:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """The operator's plan_scope_drift approval (dev-queue v39, #2337)
+        """The operator's plan_scope_drift approval (dev-queue v40, #2337)
         reaches the worker verbatim, where Step 2.5 gate 2 feeds the files to
         the scope-conformance script once the head passes the ancestry check."""
         from cw.spawn import spawn_create_impl
@@ -3041,11 +3043,11 @@ class TestWriteHookContextTaskFields:
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
         metadata = context["queue_metadata"]
-        assert metadata["scope_drift_approved_extra_files"] == [
+        assert metadata[SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY] == [
             "src/a.py",
             "tests/test_a.py",
         ]
-        assert metadata["scope_drift_approved_head"] == "0123abcd" * 5
+        assert metadata[SCOPE_DRIFT_APPROVED_HEAD_KEY] == "0123abcd" * 5
 
     def test_scope_drift_approval_null_threaded_as_null(
         self,
@@ -3074,10 +3076,10 @@ class TestWriteHookContextTaskFields:
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
         metadata = context["queue_metadata"]
-        assert "scope_drift_approved_extra_files" in metadata
-        assert metadata["scope_drift_approved_extra_files"] is None
-        assert "scope_drift_approved_head" in metadata
-        assert metadata["scope_drift_approved_head"] is None
+        assert SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY in metadata
+        assert metadata[SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY] is None
+        assert SCOPE_DRIFT_APPROVED_HEAD_KEY in metadata
+        assert metadata[SCOPE_DRIFT_APPROVED_HEAD_KEY] is None
 
     def test_git_failure_sets_origin_sha_null(
         self,

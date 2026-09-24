@@ -173,13 +173,20 @@ from cw.review_finding_dispositions import FindingDisposition
 #      pair. A ``dict[str, bool] | None`` whose absence is indistinguishable
 #      from the ``None`` default, so no migration filler is needed (same as
 #      v13).
-# v39: added TicketTask.scope_drift_approved_extra_files +
+# v39: added TicketTask.codex_orphan_session_id/
+#      codex_orphan_rescan_next_eligible_at (GitHub #2307) — the durable link
+#      from a live-writer/inconclusive-scan codex-orphan park back to the
+#      Session the boot pass left ACTIVE, plus the fixed-interval backoff
+#      bounding how often cw.reconcile.codex_reparks re-scans the process
+#      table. Both describe the current park episode and are backfilled to
+#      None on every pre-v39 row.
+# v40: added TicketTask.scope_drift_approved_extra_files +
 #      scope_drift_approved_head (GitHub #2337) — the operator's
 #      `cw dev-queue approve --scope-drift` grant for a row parked with
 #      blocked_reason plan_scope_drift, bound to the branch head it was given
 #      for (the #2102 plan_approved_fingerprint shape). Both ``| None`` with a
 #      ``None`` default, so no migration filler is needed (same as v13/v38).
-DEV_QUEUE_SCHEMA_VERSION = 39
+DEV_QUEUE_SCHEMA_VERSION = 40
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -315,6 +322,8 @@ class PendingFixDispatch(BaseModel):
 # instead of silently severing the transport.
 PLAN_DRAFT_FINGERPRINT_KEY = "plan_draft_fingerprint"
 PLAN_APPROVED_FINGERPRINT_KEY = "plan_approved_fingerprint"
+SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY = "scope_drift_approved_extra_files"
+SCOPE_DRIFT_APPROVED_HEAD_KEY = "scope_drift_approved_head"
 
 # The single recognised key of the per-lane / per-ticket
 # ``park_on_abandoned_exit`` maps (#2135). Defined HERE, not in
@@ -477,7 +486,7 @@ class TicketTask(BaseModel):
     # fingerprint, or no draft existed at approval time. Checkpoint 1 treats
     # that as absent evidence, not as a wildcard match.
     plan_approved_fingerprint: str | None = None
-    # The operator's plan_scope_drift grant (v39, #2337): the sorted, deduped
+    # The operator's plan_scope_drift grant (v40, #2337): the sorted, deduped
     # repo-relative paths `cw dev-queue approve --scope-drift` allowed beyond
     # the plan's Files Modified. Stamped by dev_queue/approval.py's
     # _approve_scope_drift_locked, only on a row parked at IMPL with
@@ -563,6 +572,13 @@ class TicketTask(BaseModel):
     # non-terminal: that worktree cannot be reused until the session is closed,
     # so every requeue burns an attempt for nothing.
     hook_context_conflict_session_id: str | None = None
+    # GitHub #2307 — the Session a live-writer/inconclusive-scan codex-orphan
+    # park left ACTIVE. session_id is cleared on park, so this links the
+    # parked row back to the session for reconcile's re-scan.
+    codex_orphan_session_id: str | None = None
+    # GitHub #2307 — earliest time the linked codex-orphan park may be
+    # re-scanned. Fixed interval; cleared with the park episode.
+    codex_orphan_rescan_next_eligible_at: datetime | None = None
     # Hydrated GitHub PR state (merge/CI/review) persisted by the serve-tick
     # hydration pass (cw.pr_hydrate). None until first hydration or for pre-v8
     # legacy tasks. See GitHub #929.

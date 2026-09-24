@@ -168,17 +168,11 @@ def _tracker_is_github_or_unknown(client_name: str) -> bool:
 def _approve_scope_drift(ticket_id: str, resolved: str, scope_drift: str) -> None:
     """The ``--scope-drift`` branch of ``dev_queue_approve`` (#2337)."""
     extra_files = [path.strip() for path in scope_drift.split(",") if path.strip()]
-    result = approve_scope_drift_ticket(ticket_id, resolved, extra_files)
-    record_event(
-        OrchestratorEventType.TICKET_APPROVED,
-        {
-            "ticket_id": ticket_id,
-            "client": resolved,
-            "from_stage": result["from_stage"],
-            "to_stage": result["to_stage"],
-            "scope_drift_approved_extra_files": result["extra_files"],
-            "scope_drift_approved_head": result["approved_head"],
-        },
+    result = approve_scope_drift_ticket(
+        ticket_id,
+        resolved,
+        extra_files,
+        audit_event=record_event,
     )
     click.echo(
         f"Approved scope drift for {ticket_id} ({resolved}):"

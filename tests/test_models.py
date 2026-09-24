@@ -1099,7 +1099,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 39
+        assert DEV_QUEUE_SCHEMA_VERSION == 40
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -2078,7 +2078,8 @@ class TestPackageExportCompleteness:
     ``occupies_lane_slot`` = 55, plus #2102's two ``PLAN_*_FINGERPRINT_KEY``
     wire keys = 57, plus #2135's ``PARK_ON_ABANDONED_EXIT_KEY``,
     ``PARK_COMMENT_MARKER_KEY``, ``ParkCommentMarker`` and
-    ``read_park_comment_marker`` = 61) — hardcoded here, NOT
+    ``read_park_comment_marker`` = 61, plus #2337's two scope-drift wire keys
+    = 63) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2132,6 +2133,8 @@ class TestPackageExportCompleteness:
             "ParkCommentMarker",
             "PLAN_APPROVED_FINGERPRINT_KEY",
             "PLAN_DRAFT_FINGERPRINT_KEY",
+            "SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY",
+            "SCOPE_DRIFT_APPROVED_HEAD_KEY",
             "PendingFixDispatch",
             "PrState",
             "QueueItemStatus",
@@ -2409,7 +2412,7 @@ class TestParkCommentMarker:
 
 
 class TestScopeDriftApprovalFields:
-    """v39 (#2337): the operator's plan_scope_drift approval on the row."""
+    """v40 (#2337): the operator's plan_scope_drift approval on the row."""
 
     def test_fields_default_none(self) -> None:
         task = TicketTask(ticket_id="GEN-1", client="acme")

@@ -40,6 +40,8 @@ from cw.gh import branch_head_sha_on_origin
 from cw.models import (
     PLAN_APPROVED_FINGERPRINT_KEY,
     PLAN_DRAFT_FINGERPRINT_KEY,
+    SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
+    SCOPE_DRIFT_APPROVED_HEAD_KEY,
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
@@ -47,6 +49,8 @@ from cw.models import (
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cw.models import DevQueueStore, Session, TicketTask
 
 
@@ -504,7 +508,11 @@ class ScopeDriftApproval(TypedDict):
 
 
 def approve_scope_drift_ticket(
-    ticket_id: str, client_name: str, extra_files: list[str]
+    ticket_id: str,
+    client_name: str,
+    extra_files: list[str],
+    *,
+    audit_event: Callable[..., object] | None = None,
 ) -> ScopeDriftApproval:
     """Grant operator-directed scope growth to a ``plan_scope_drift`` park (#2337).
 
@@ -525,11 +533,20 @@ def approve_scope_drift_ticket(
         CwError: if no matching task is found.
     """
     with _lock():
-        return _approve_scope_drift_locked(ticket_id, client_name, extra_files)
+        return _approve_scope_drift_locked(
+            ticket_id,
+            client_name,
+            extra_files,
+            audit_event=audit_event or record_event,
+        )
 
 
 def _approve_scope_drift_locked(
-    ticket_id: str, client_name: str, extra_files: list[str]
+    ticket_id: str,
+    client_name: str,
+    extra_files: list[str],
+    *,
+    audit_event: Callable[..., object],
 ) -> ScopeDriftApproval:
     """Lock-free body of :func:`approve_scope_drift_ticket`.
 
@@ -571,6 +588,7 @@ def _approve_scope_drift_locked(
         raise ApproveGateError(msg)
 
     client_cfg = get_client(client_name)
+    audit_actor = client_cfg.operator_github_login or "cw.dev_queue.approval"
     branch = f"{client_cfg.feature_branch_prefix}/{ticket_id}"
     head_sha, _gh_available = branch_head_sha_on_origin(
         branch, cwd=_git_dir(client_cfg)
@@ -585,6 +603,29 @@ def _approve_scope_drift_locked(
         raise ApproveGateError(msg)
 
     from_stage = task.stage.value
+    old_status = task.status.value
+    to_stage = task.stage.value
+    new_status = QueueItemStatus.PENDING.value
+    approved_at = datetime.now(UTC).isoformat()
+
+    # Record the durable approval intent before the row write. This is the
+    # same event-before-mutation ordering used by the other auditable queue
+    # actions: an event-write failure leaves the load-bearing approval unapplied.
+    audit_event(
+        OrchestratorEventType.TICKET_APPROVED,
+        {
+            "ticket_id": ticket_id,
+            "client": client_name,
+            "old_status": old_status,
+            "new_status": new_status,
+            "from_stage": from_stage,
+            "to_stage": to_stage,
+            SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY: approved_files,
+            SCOPE_DRIFT_APPROVED_HEAD_KEY: head_sha,
+            "approved_at": approved_at,
+            "actor": audit_actor,
+        },
+    )
     task.scope_drift_approved_extra_files = approved_files
     task.scope_drift_approved_head = head_sha
     _reset_for_same_stage_requeue(task)

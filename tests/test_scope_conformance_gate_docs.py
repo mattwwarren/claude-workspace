@@ -32,6 +32,10 @@ from typing import TypedDict
 
 import pytest
 
+from cw.models import (
+    SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
+    SCOPE_DRIFT_APPROVED_HEAD_KEY,
+)
 from tests.conftest import (
     GUARD_FENCE_INVOKED,
     GUARD_MARKER_BAD_CASES,
@@ -977,8 +981,8 @@ def _scope_drift_metadata(
     if head == _BRANCH_HEAD:
         head = git_in(repo, "rev-parse", _GATE2_BRANCH)
     return {
-        "scope_drift_approved_extra_files": files,
-        "scope_drift_approved_head": head,
+        SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY: files,
+        SCOPE_DRIFT_APPROVED_HEAD_KEY: head,
     }
 
 
@@ -1356,8 +1360,8 @@ def test_gate2_reads_scope_drift_approval_and_checks_ancestry() -> None:
     """Gate 2 reads the operator's approval from ``queue_metadata`` and binds
     it by ancestry, not SHA equality (#2337)."""
     fence = _gate2_fence()
-    assert "scope_drift_approved_extra_files" in fence
-    assert "scope_drift_approved_head" in fence
+    assert SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY in fence
+    assert SCOPE_DRIFT_APPROVED_HEAD_KEY in fence
     assert "merge-base --is-ancestor" in fence
     assert "--approved-extra-files" in fence
     assert "scope_drift_approval_stale" in fence
