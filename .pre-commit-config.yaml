@@ -47,6 +47,16 @@ repos:
         pass_filenames: false
         files: ^(pyproject\.toml|uv\.lock)$
 
+      # Local mirror of CI's "Freeze released CHANGELOG sections" step (#2304).
+      # No --require-tags: a checkout without fetched tags warns and passes;
+      # CI is where a missing tag fails.
+      - id: changelog-frozen
+        name: CHANGELOG.md released sections frozen
+        entry: uv run python .claude/scripts/check_changelog_frozen.py
+        language: system
+        pass_filenames: false
+        files: ^CHANGELOG\.md$
+
       - id: pytest
         name: pytest
         entry: uv run pytest tests/ -x -q

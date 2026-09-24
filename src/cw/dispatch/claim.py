@@ -69,6 +69,7 @@ if TYPE_CHECKING:
         TicketTask,
     )
     from cw.native_daemon import NativeDaemonClient
+    from cw.worktree import UnresolvablePathWarningKey
 
 _log = logging.getLogger("cw.dispatch")
 
@@ -1189,7 +1190,11 @@ def _defer_occupied_claim(
 
 
 def _raise_if_stale_tree_occupied(
-    client: ClientConfig, branch: str, *, daemon: NativeDaemonClient
+    client: ClientConfig,
+    branch: str,
+    *,
+    daemon: NativeDaemonClient,
+    warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
 ) -> None:
     """Raise :exc:`WorktreeOccupiedError` if the stale tree must not be removed.
 
@@ -1206,9 +1211,15 @@ def _raise_if_stale_tree_occupied(
     raised error is caught by ``_spawn_claimed_task``'s
     ``except WorktreeOccupiedError`` and reaches :func:`_defer_occupied_claim`.
     Returns normally (no occupant) so the dirty check and removal may follow.
+    *warned_unresolvable* is forwarded to :func:`~cw.worktree.live_home_reason`
+    unchanged (#2240) -- the dispatch loop threads a process-lifetime set
+    through here so a poisoned session/worker record does not re-warn every
+    tick.
     """
     stale_tree = worktree_path_for(client, branch)
-    occupant = live_home_reason(stale_tree, daemon=daemon)
+    occupant = live_home_reason(
+        stale_tree, daemon=daemon, warned_unresolvable=warned_unresolvable
+    )
     if occupant is None:
         return
     msg = (
@@ -1226,6 +1237,7 @@ def _spawn_claimed_task(
     resolved_native_daemon: NativeDaemonClient,
     parent: str | None,
     emit: Callable[[str], None] | None,
+    warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
 ) -> _SpawnOutcome:
     """Spawn a Claude session for one already-claimed (RUNNING) task.
 
@@ -1330,7 +1342,12 @@ def _spawn_claimed_task(
             # returning that helper's outcome inline keeps this function within
             # the PLR0911 return budget and gives the reuse-refresh refusal and
             # this one a single exit.
-            _raise_if_stale_tree_occupied(client, branch, daemon=resolved_native_daemon)
+            _raise_if_stale_tree_occupied(
+                client,
+                branch,
+                daemon=resolved_native_daemon,
+                warned_unresolvable=warned_unresolvable,
+            )
             unsaved = unsaved_work_reason(client, branch)
             if unsaved is not None:
                 _log.warning(

@@ -105,6 +105,7 @@ from tests.conftest import (
     _make_daemon_session,
     _make_tick_summary,
     _make_ticket_task,
+    _symlink_loop,
     git_in,
     occupy_worktree,
     tree_fingerprint,
@@ -114,7 +115,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from cw.native_daemon import NativeDaemonClient
-    from cw.worktree import FetchWarningKey
+    from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
     from tests.conftest import CapturedEvent
 
 
@@ -3331,9 +3332,16 @@ class TestStaleWorktreeYieldsToLiveOccupant:
             msg = "Refusing to reuse stale worktree"
             raise StaleWorktreeError(msg)
 
-        def _live(wt_path: Path, *, daemon: FakeNativeDaemonClient) -> str | None:
+        def _live(
+            wt_path: Path,
+            *,
+            daemon: FakeNativeDaemonClient,
+            warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
+        ) -> str | None:
             calls.append("live")
-            return live_home_reason(wt_path, daemon=daemon)
+            return live_home_reason(
+                wt_path, daemon=daemon, warned_unresolvable=warned_unresolvable
+            )
 
         def _unsaved(_client: object, _branch: str) -> str | None:
             calls.append("unsaved")
@@ -3451,6 +3459,100 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         # Clean per git, yet NOT removed: "cannot tell" is not "free".
         assert calls == ["live"]
         self._assert_released_not_charged(stale_tree)
+
+    def test_unresolvable_worker_record_warning_deduped_across_dispatch_ticks(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The SAME poisoned worker record must not re-warn on a second tick
+        once ``warned_unresolvable`` threads through all six call layers."""
+        from freezegun import freeze_time
+
+        from cw.dispatch.claim import _OCCUPIED_DEFER_SECONDS
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        self._stub_stale(monkeypatch, unsaved=None)
+        daemon = FakeNativeDaemonClient()
+        daemon.seed_live_worker(_symlink_loop(tmp_dispatch_dirs, "poisoned"))
+        warned: set[UnresolvablePathWarningKey] = set()
+
+        caplog.set_level(logging.WARNING, logger="cw.worktree._refresh")
+        with freeze_time("2026-07-16 12:00:00") as frozen:
+            first = dispatch_tick(
+                simple_config, native_daemon=daemon, warned_unresolvable=warned
+            )
+            frozen.tick(delta=timedelta(seconds=_OCCUPIED_DEFER_SECONDS + 1))
+            second = dispatch_tick(
+                simple_config, native_daemon=daemon, warned_unresolvable=warned
+            )
+
+        assert first.spawned == 0
+        assert second.spawned == 0
+        assert (
+            sum(
+                1
+                for r in caplog.records
+                if r.name == "cw.worktree._refresh" and r.levelno == logging.WARNING
+            )
+            == 1
+        )
+
+    def test_unresolvable_worker_record_warning_not_deduped_for_a_different_bad_record(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A genuinely NEW bad record still warns even when the shared set
+        already holds an unrelated key."""
+        from freezegun import freeze_time
+
+        from cw.dispatch.claim import _OCCUPIED_DEFER_SECONDS
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        self._stub_stale(monkeypatch, unsaved=None)
+        daemon = FakeNativeDaemonClient()
+        daemon.seed_live_worker(_symlink_loop(tmp_dispatch_dirs, "poisoned"))
+        warned: set[UnresolvablePathWarningKey] = set()
+
+        caplog.set_level(logging.WARNING, logger="cw.worktree._refresh")
+        with freeze_time("2026-07-16 12:00:00") as frozen:
+            first = dispatch_tick(
+                simple_config, native_daemon=daemon, warned_unresolvable=warned
+            )
+            assert first.spawned == 0
+            assert (
+                sum(
+                    1
+                    for r in caplog.records
+                    if r.name == "cw.worktree._refresh" and r.levelno == logging.WARNING
+                )
+                == 1
+            )
+
+            daemon.seed_live_worker(_symlink_loop(tmp_dispatch_dirs, "poisoned-2"))
+            frozen.tick(delta=timedelta(seconds=_OCCUPIED_DEFER_SECONDS + 1))
+            second = dispatch_tick(
+                simple_config, native_daemon=daemon, warned_unresolvable=warned
+            )
+
+        assert second.spawned == 0
+        assert (
+            sum(
+                1
+                for r in caplog.records
+                if r.name == "cw.worktree._refresh" and r.levelno == logging.WARNING
+            )
+            == 2
+        )
 
     @pytest.mark.parametrize("source", _OCCUPANT_SOURCES)
     def test_outcome_is_the_occupied_deferral_not_a_spawn_error(
@@ -5443,6 +5545,7 @@ class TestRunDispatchLoopVerbose:
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
             warned_disk_pressure: set[str] | None = None,
+            warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
             usage_limited_until: Mapping[str, datetime] | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -5460,6 +5563,7 @@ class TestRunDispatchLoopVerbose:
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
                 warned_disk_pressure=warned_disk_pressure,
+                warned_unresolvable=warned_unresolvable,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -15516,6 +15620,7 @@ class TestWaveCollisionDetection:
             warned_collision: set[frozenset[str]] | None = None,
             warned_ssh_key: set[str] | None = None,
             warned_disk_pressure: set[str] | None = None,
+            warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
             usage_limited_until: Mapping[str, datetime] | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -15532,6 +15637,7 @@ class TestWaveCollisionDetection:
                 warned_collision=warned_collision,
                 warned_ssh_key=warned_ssh_key,
                 warned_disk_pressure=warned_disk_pressure,
+                warned_unresolvable=warned_unresolvable,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,

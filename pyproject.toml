@@ -1,6 +1,6 @@
 [project]
 name = "claude-workspace"
-version = "1.52.0"
+version = "1.53.0"
 description = "Multi-session workspace orchestrator for Claude Code"
 readme = "README.md"
 authors = [
@@ -69,6 +69,11 @@ build-backend = "hatchling.build"
 # src/cw/data — hatchling would add the same file twice and the wheel build
 # fails with "A second file is being added ... at the same path".
 packages = ["src/cw"]
+
+[tool.cw.changelog_freeze]
+# Released CHANGELOG sections are frozen for this tag and every later one;
+# older tags are accepted history (#2304).
+since_tag = "v1.51.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

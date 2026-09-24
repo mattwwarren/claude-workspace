@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     )
     from cw.native_daemon import NativeDaemonClient
     from cw.orchestrate import TickSummary
+    from cw.worktree import UnresolvablePathWarningKey
 from cw.dispatch.claim import (
     _claim_next_pending,
     _lane_occupants_for_client,
@@ -629,6 +630,7 @@ def _dispatch_client_lanes(
     resolved_native_daemon: NativeDaemonClient,
     parent: str | None,
     emit: Callable[[str], None] | None,
+    warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
     usage_limited_until: datetime | None = None,
     host_capacity: HostCapacityContext = _DEFAULT_HOST_CAPACITY,
 ) -> _ClientDispatchResult:
@@ -763,6 +765,7 @@ def _dispatch_client_lanes(
                 resolved_native_daemon=resolved_native_daemon,
                 parent=parent,
                 emit=emit,
+                warned_unresolvable=warned_unresolvable,
             )
             if outcome.usage_limit_detected:
                 limit_outcome = outcome
