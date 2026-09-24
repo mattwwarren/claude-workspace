@@ -570,9 +570,9 @@ def _stop_surface(act: _Act) -> _Stop:
     # The stop is destructive to a still-live surface. The transcript check
     # above can race with an operator disposition, so persist an explicit
     # durable ownership fence and validate it under the queue lock. The fence
-    # remains on the row while the external stop runs; queue mutation paths
-    # that honor usage_limit_act therefore leave this act's row alone without
-    # requiring the queue lock to span the daemon call.
+    # remains on the row while the external stop runs. The queue lock below
+    # stays held through the external call, so no competing queue disposition
+    # or session rebind can win during the stop hand-off.
     daemon = _deps.get_native_daemon_client()
     with dev_queue_lock():
         store = load_dev_queue()
@@ -595,17 +595,18 @@ def _stop_surface(act: _Act) -> _Stop:
                 session.id,
             )
             return _Stop.ABANDONED
-    # Never hold dev_queue_lock across an external daemon call. The persisted
-    # stop_started_at fence above is the hand-off reservation for this stop.
-    daemon.stop(surface_ref)
-    if wait_for_roster_presence(
-        daemon,
-        surface_ref,
-        present=False,
-        timeout=_STOP_CONFIRM_TIMEOUT_SECS,
-        interval=_STOP_CONFIRM_INTERVAL_SECS,
-    ):
-        return _Stop.DONE
+        # Keep dev_queue_lock through the stop and roster confirmation. The
+        # persisted stop_started_at fence is the reservation, and this lock is
+        # the atomic hand-off that makes it enforceable by every queue writer.
+        daemon.stop(surface_ref)
+        if wait_for_roster_presence(
+            daemon,
+            surface_ref,
+            present=False,
+            timeout=_STOP_CONFIRM_TIMEOUT_SECS,
+            interval=_STOP_CONFIRM_INTERVAL_SECS,
+        ):
+            return _Stop.DONE
     _log.warning(
         "usage_limit_mid_turn: surface %s for ticket %s session %s is still in "
         "the daemon roster (or the roster is unreadable) %.1fs after stop; the "
