@@ -588,7 +588,6 @@ def _approve_scope_drift_locked(
         raise ApproveGateError(msg)
 
     client_cfg = get_client(client_name)
-    audit_actor = client_cfg.operator_github_login or "cw.dev_queue.approval"
     branch = f"{client_cfg.feature_branch_prefix}/{ticket_id}"
     head_sha, _gh_available = branch_head_sha_on_origin(
         branch, cwd=_git_dir(client_cfg)
@@ -603,10 +602,7 @@ def _approve_scope_drift_locked(
         raise ApproveGateError(msg)
 
     from_stage = task.stage.value
-    old_status = task.status.value
     to_stage = task.stage.value
-    new_status = QueueItemStatus.PENDING.value
-    approved_at = datetime.now(UTC).isoformat()
 
     # Record the durable approval intent before the row write. This is the
     # same event-before-mutation ordering used by the other auditable queue
@@ -616,14 +612,10 @@ def _approve_scope_drift_locked(
         {
             "ticket_id": ticket_id,
             "client": client_name,
-            "old_status": old_status,
-            "new_status": new_status,
             "from_stage": from_stage,
             "to_stage": to_stage,
             SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY: approved_files,
             SCOPE_DRIFT_APPROVED_HEAD_KEY: head_sha,
-            "approved_at": approved_at,
-            "actor": audit_actor,
         },
     )
     task.scope_drift_approved_extra_files = approved_files
