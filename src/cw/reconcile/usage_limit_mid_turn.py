@@ -563,16 +563,35 @@ def _stop_surface(act: _Act) -> _Stop:
     return _Stop.RETRY
 
 
-def _persist_completed(act: _Act) -> None:
-    """``auto``: persist the session COMPLETED, unless it is already terminal."""
+def _persist_completed(act: _Act) -> bool:
+    """``auto``: persist the session COMPLETED, unless it is already terminal.
+
+    The stop confirmation can poll the roster for seconds, and another writer
+    (an operator requeue, another sweep) can re-disposition the row inside
+    that window. So, like every other resume step, the write is gated on the
+    row still carrying this act's exact intent, re-checked under
+    ``dev_queue_lock`` immediately before it. Returns False iff ownership was
+    lost and nothing was written; True when the session was closed or was
+    already terminal.
+    """
     session = act.session
     if session.status in TERMINAL_SESSION_STATUSES:
-        return
-    session.status = SessionStatus.COMPLETED
-    session.completed_at = act.now
-    session.completed_reason = CompletionReason.USAGE_LIMITED
-    session.reap_reason = ReapReason.USAGE_LIMIT_MID_TURN
-    save_state(act.state)
+        return True
+    with dev_queue_lock():
+        if _row_carrying(load_dev_queue().tasks, act.row) is None:
+            _log.warning(
+                "usage_limit_mid_turn: row for ticket %s no longer carries the "
+                "act for session %s; session and row left as found",
+                act.row.ticket_id,
+                session.id,
+            )
+            return False
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = act.now
+        session.completed_reason = CompletionReason.USAGE_LIMITED
+        session.reap_reason = ReapReason.USAGE_LIMIT_MID_TURN
+        save_state(act.state)
+    return True
 
 
 def _requeue(target: TicketTask, *, until: datetime) -> None:
@@ -613,10 +632,10 @@ def _resume(act: _Act) -> bool:
     """Perform every step the act has not done yet; True iff it requeued."""
     if not _arm_lockout(act) or not _audit(act):
         return False
-    if act.row.auto:
-        if _stop_surface(act) is not _Stop.DONE:
-            return False
-        _persist_completed(act)
+    if act.row.auto and (
+        _stop_surface(act) is not _Stop.DONE or not _persist_completed(act)
+    ):
+        return False
     return _finish(act.row)
 
 

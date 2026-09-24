@@ -46,6 +46,7 @@ from cw.reconcile import (
     _deps,
     detect_and_park_mid_turn_usage_limits,
 )
+from cw.reconcile import usage_limit_mid_turn as mid_turn
 from cw.reconcile.usage_limit_mid_turn import (
     ACT_STARTED_AT_KEY,
     _act_on_mid_turn_usage_limit_candidates,
@@ -789,10 +790,11 @@ def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An operator cancel mid-act clears the intent, so the requeue never lands.
+    """An operator cancel mid-act clears the intent, so the act ends there.
 
-    The session is still closed -- its process is already gone -- and the
-    cancelled row is left exactly as the operator left it.
+    Neither the session close nor the requeue lands: once the row no longer
+    carries the intent, the act owns neither, so the session is left open
+    and the cancelled row exactly as the operator left it.
     """
     state, _ = _seed(home, tmp_path, _limit_tail())
     candidates = _detect(state)
@@ -811,9 +813,56 @@ def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
 
     assert reverted == []
     assert any(_SID in m and "no longer carries" in m for m in _log_messages(caplog))
-    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    _assert_session_still_active(state)
     task = load_dev_queue().tasks[0]
     assert task.status is QueueItemStatus.CANCELLED
+    assert task.usage_limit_act is None
+    assert task.next_eligible_at is None
+
+
+def test_act_leaves_session_open_when_row_is_requeued_after_the_stop_confirms(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Closing the session re-checks ownership under the lock first.
+
+    The stop confirmation polls the roster for up to several seconds, and an
+    operator requeue can land inside that window. Once the row no longer
+    carries this act's intent, the act owns neither it nor the session: the
+    session is not stamped COMPLETED, ``save_state`` is not called, and the
+    row is left exactly as the operator left it.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    candidates = _detect(state)
+    real_wait = mid_turn.wait_for_roster_presence
+
+    def _confirm_then_requeue(*args: Any, **kwargs: Any) -> bool:
+        confirmed = real_wait(*args, **kwargs)
+        store = load_dev_queue()
+        transition_task_status(store.tasks[0], QueueItemStatus.PENDING)
+        store.tasks[0].session_id = None
+        save_dev_queue(store)
+        return confirmed
+
+    saves: list[CwState] = []
+    monkeypatch.setattr(mid_turn, "wait_for_roster_presence", _confirm_then_requeue)
+    monkeypatch.setattr(mid_turn, "save_state", saves.append)
+
+    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
+        reverted = _act(state, candidates, _auto_config())
+
+    assert reverted == []
+    assert daemon.stop_calls == [_SURFACE]
+    assert saves == []
+    _assert_session_still_active(state)
+    assert any(_SID in m and "no longer carries" in m for m in _log_messages(caplog))
+    task = _owned_row()
+    assert task.status is QueueItemStatus.PENDING
+    assert task.session_id is None
     assert task.usage_limit_act is None
     assert task.next_eligible_at is None
 
