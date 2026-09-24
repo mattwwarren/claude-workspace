@@ -658,15 +658,24 @@ def _find_running_row(
       session has already been stamped onto (post-spawn callers, e.g.
       ``cw.reconcile.codex_boot`` and ``cw.doctor.loop_health``).
 
-    Both default to ``None`` as defense-in-depth for a future caller this
-    module cannot anticipate -- not because any current caller still needs
-    the bare match: after #2219, every caller of every function that routes
-    through this helper (in this module, ``cw.codex_background``, and
-    ``cw.doctor.loop_health``) supplies an identity.
+    Both default to ``None``, but at least one is required: every production
+    caller of every function that routes through this helper (in this
+    module, ``cw.codex_background``, and ``cw.doctor.loop_health``) already
+    supplies an identity, so a bare ``(ticket_id, client_name, RUNNING)``
+    match here would only ever serve a caller that skipped disambiguating a
+    duplicate RUNNING row -- the exact hazard #2219 closes. Raises
+    :class:`ValueError` rather than silently falling back to that match.
 
     Read-only: the caller mutates the returned row and saves *store* itself,
     under the ``dev_queue_lock()`` it loaded *store* under.
     """
+    if created_at is None and session_id is None:
+        msg = (
+            "_find_running_row requires created_at or session_id (#2219): "
+            "a bare (ticket_id, client_name, RUNNING) match can mutate the "
+            "wrong duplicate row"
+        )
+        raise ValueError(msg)
     for stored_task in store.tasks:
         if (
             stored_task.ticket_id == ticket_id
