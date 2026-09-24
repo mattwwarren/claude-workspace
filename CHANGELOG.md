@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`dependency_unmerged` is now recognized as an operator-unavailable blocker reason (#2260):** `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` and `SIGNOFF_GATE_DISPOSITION`'s classification now include `dependency_unmerged` alongside `push_auth_failed` and `operator_unavailable`, so a ticket split into a dependency chain whose downstream leg can't proceed until the upstream PR merges is treated as a hold on an external dependency — not a broken leg — and routes the same way the existing operator-unavailable reasons do.
+
 ## [1.53.0] - 2026-09-24
 
 ### Added
