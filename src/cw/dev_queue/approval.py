@@ -20,7 +20,7 @@ Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from cw.auto_dev_result import PLAN_SCOPE_DRIFT_BLOCKER_REASON
 from cw.config import get_client
@@ -492,9 +492,20 @@ def _approve_ticket_locked(
     }
 
 
+class ScopeDriftApproval(TypedDict):
+    """What :func:`approve_scope_drift_ticket` stamped and where it moved."""
+
+    from_stage: str
+    to_stage: str
+    ticket_id: str
+    client: str
+    extra_files: list[str]
+    approved_head: str
+
+
 def approve_scope_drift_ticket(
     ticket_id: str, client_name: str, extra_files: list[str]
-) -> dict[str, str | list[str] | None]:
+) -> ScopeDriftApproval:
     """Grant operator-directed scope growth to a ``plan_scope_drift`` park (#2337).
 
     The row must be BLOCKED_ON_USER at Stage.IMPL with ``blocked_reason``
@@ -505,8 +516,7 @@ def approve_scope_drift_ticket(
     ancestry), then re-queues IMPL in place so a fresh session re-runs gate 2
     with the grant in its ``queue_metadata``.
 
-    Returns dict with from_stage, to_stage, ticket_id, client, extra_files
-    (as stamped), and approved_head.
+    Returns a :class:`ScopeDriftApproval` (extra_files as stamped).
 
     Raises:
         ApproveGateError: if the row is not parked for plan_scope_drift at
@@ -520,7 +530,7 @@ def approve_scope_drift_ticket(
 
 def _approve_scope_drift_locked(
     ticket_id: str, client_name: str, extra_files: list[str]
-) -> dict[str, str | list[str] | None]:
+) -> ScopeDriftApproval:
     """Lock-free body of :func:`approve_scope_drift_ticket`.
 
     The caller MUST already hold ``dev_queue_lock()`` (``_lock``), as for

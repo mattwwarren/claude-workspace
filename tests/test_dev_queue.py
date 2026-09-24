@@ -9938,7 +9938,7 @@ class TestCLIApprove:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         events = capture_events(
-            "cw.cli.dev_queue.crud", OrchestratorEventType.TICKET_APPROVED
+            "cw.cli.dev_queue.approve", OrchestratorEventType.TICKET_APPROVED
         )
         runner = CliRunner()
 
