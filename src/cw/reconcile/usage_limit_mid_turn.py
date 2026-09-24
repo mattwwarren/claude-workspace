@@ -569,10 +569,11 @@ def _stop_surface(act: _Act) -> _Stop:
         return _Stop.ABANDONED
     # The stop is destructive to a still-live surface.  The transcript check
     # above can race with an operator disposition, so persist an explicit
-    # ownership fence under the queue lock immediately before stopping.  The
-    # final read catches a lost reservation at the hand-off boundary, while
-    # transition_task_status() honors the persisted fence during the external
-    # call.
+    # ownership fence and keep the queue lock through the final validation and
+    # external stop.  This makes the check-to-stop hand-off atomic with every
+    # queue mutation that uses the same lock. No shared transition seam
+    # silently suppresses a competing caller; ownership is held by this
+    # lock-scoped operation instead.
     daemon = _deps.get_native_daemon_client()
     with dev_queue_lock():
         store = load_dev_queue()
@@ -587,15 +588,15 @@ def _stop_surface(act: _Act) -> _Stop:
             return _Stop.ABANDONED
         _mark_stop_started(target, at=act.now)
         save_dev_queue(store)
-    if _row_carrying_stop_fence(load_dev_queue().tasks, act.row) is None:
-        _log.info(
-            "usage_limit_mid_turn: stop fence for ticket %s session %s was lost "
-            "before daemon stop; surface left running",
-            act.row.ticket_id,
-            session.id,
-        )
-        return _Stop.ABANDONED
-    daemon.stop(surface_ref)
+        if _row_carrying_stop_fence(store.tasks, act.row) is None:
+            _log.info(
+                "usage_limit_mid_turn: stop fence for ticket %s session %s was "
+                "lost before daemon stop; surface left running",
+                act.row.ticket_id,
+                session.id,
+            )
+            return _Stop.ABANDONED
+        daemon.stop(surface_ref)
     if wait_for_roster_presence(
         daemon,
         surface_ref,

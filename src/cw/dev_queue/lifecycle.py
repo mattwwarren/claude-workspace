@@ -372,17 +372,7 @@ def transition_task_status(
     ``False`` are, in the same shape as disposition/pr_url/blocked_reason,
     supplying a fact this seam then stamps centrally.
 
-    A usage-limit act with ``stop_started_at`` set owns the live daemon-stop
-    hand-off. Competing queue dispositions are therefore no-ops until that
-    act either completes its own transition or resumes on a later tick; this
-    prevents them from clearing the stop reservation while the external stop
-    is in progress (#2324).
     """
-    if (
-        task.usage_limit_act is not None
-        and task.usage_limit_act.stop_started_at is not None
-    ):
-        return
     old_status = task.status
     task.status = new_status
     # GitHub #1750: the single increment seam for the unproductive counter,

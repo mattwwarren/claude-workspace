@@ -579,14 +579,14 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     assert "re-enter the queue automatically" in attention[0]["breadcrumbs"]
 
 
-def test_stop_does_not_run_after_stop_fence_is_cleared_at_handoff(
+def test_stop_holds_queue_ownership_through_stop_invocation(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
     daemon: FakeNativeDaemonClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A lost reservation at the lock-to-stop handoff leaves the surface live."""
+    """A fence cleared when the lock exits cannot cancel an already-run stop."""
     state, _ = _seed(home, tmp_path, _limit_tail())
     intent = mid_turn._decide(
         state.sessions[0],
@@ -618,14 +618,8 @@ def test_stop_does_not_run_after_stop_fence_is_cleared_at_handoff(
 
     monkeypatch.setattr(mid_turn, "dev_queue_lock", _ClearIntentOnUnlock)
 
-    def _stop(short_id: str) -> None:
-        message = f"daemon.stop unexpectedly called for {short_id}"
-        raise AssertionError(message)
-
-    monkeypatch.setattr(daemon, "stop", _stop)
-
-    assert mid_turn._stop_surface(act) is mid_turn._Stop.ABANDONED
-    assert daemon.stop_calls == []
+    assert mid_turn._stop_surface(act) is mid_turn._Stop.DONE
+    assert daemon.stop_calls == [_SURFACE]
 
 
 def test_act_auto_falls_back_to_flat_backoff_on_unparseable_reset(
@@ -850,11 +844,7 @@ def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An operator cancel during the stop is fenced out until the act ends.
-
-    The reservation prevents a competing transition from clearing ownership
-    while the external stop is in progress, so the act completes normally.
-    """
+    """Losing ownership during the external stop prevents finalization."""
     state, _ = _seed(home, tmp_path, _limit_tail())
     candidates = _detect(state)
     real_stop = daemon.stop
@@ -870,12 +860,12 @@ def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
     with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
         reverted = _act(state, candidates, _auto_config())
 
-    assert reverted == [_SID]
-    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    assert reverted == []
+    assert load_state().sessions[0].status is SessionStatus.ACTIVE
     task = load_dev_queue().tasks[0]
-    assert task.status is QueueItemStatus.PENDING
+    assert task.status is QueueItemStatus.CANCELLED
     assert task.usage_limit_act is None
-    assert task.next_eligible_at == _RESET_AT
+    assert task.next_eligible_at is None
 
 
 def test_act_leaves_session_open_when_row_is_requeued_after_the_stop_confirms(
