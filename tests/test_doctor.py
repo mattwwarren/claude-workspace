@@ -7156,6 +7156,32 @@ class TestWedgeActiveNullLivenessOrphan:
         assert "no clients.yaml entry" in findings[0].recipe
         self._assert_untouched()
 
+    def test_broken_clients_yaml_degrades_to_advisory_finding(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A clients.yaml load failure never crashes doctor; it degrades to {}."""
+        from cw.exceptions import CwError
+
+        def _broken() -> dict[str, ClientConfig]:
+            msg = "clients.yaml: invalid"
+            raise CwError(msg)
+
+        monkeypatch.setattr("cw.doctor._deps.load_clients", _broken)
+        state, queue = self._seed(
+            tmp_config_dir,
+            tmp_path,
+            [self._make_session(tmp_path)],
+            [self._make_task()],
+        )
+
+        findings = self._check(state, queue)
+
+        self._assert_backend_unresolved(findings)
+        assert "no clients.yaml entry" in findings[0].recipe
+
     def test_wrong_running_task_matched_advisory_finding(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
