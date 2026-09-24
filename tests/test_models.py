@@ -1099,7 +1099,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 38
+        assert DEV_QUEUE_SCHEMA_VERSION == 39
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -2406,3 +2406,50 @@ class TestParkCommentMarker:
             )
 
         assert f"{sorted([PARK_ON_ABANDONED_EXIT_KEY])}" in str(excinfo.value)
+
+
+class TestScopeDriftApprovalFields:
+    """v39 (#2337): the operator's plan_scope_drift approval on the row."""
+
+    def test_fields_default_none(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme")
+        assert task.scope_drift_approved_extra_files is None
+        assert task.scope_drift_approved_head is None
+
+    def test_fields_round_trip_through_json(self) -> None:
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            scope_drift_approved_extra_files=["a.py", "b.py"],
+            scope_drift_approved_head="0123abcd" * 5,
+        )
+        restored = TicketTask.model_validate_json(task.model_dump_json())
+        assert restored.scope_drift_approved_extra_files == ["a.py", "b.py"]
+        assert restored.scope_drift_approved_head == "0123abcd" * 5
+
+    def test_previous_schema_version_row_loads_with_fields_defaulted(self) -> None:
+        """A row persisted one schema version back carries neither key, and
+        loads under the current version with both default-filled to None. No
+        migration filler exists for them (same precedent as v13/v38)."""
+        from cw.dev_queue.migrate import migrate_dev_queue
+
+        previous_version = DEV_QUEUE_SCHEMA_VERSION - 1
+        raw: dict[str, object] = {
+            "schema_version": previous_version,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-2337",
+                    "client": "acme",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "stage": "impl",
+                    "blocked_reason": "plan_scope_drift",
+                }
+            ],
+        }
+        store = DevQueueStore.model_validate(migrate_dev_queue(raw))
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
+        task = store.tasks[0]
+        assert task.blocked_reason == "plan_scope_drift"
+        assert task.scope_drift_approved_extra_files is None
+        assert task.scope_drift_approved_head is None

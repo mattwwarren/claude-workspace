@@ -3010,6 +3010,75 @@ class TestWriteHookContextTaskFields:
         assert "plan_approved_fingerprint" in context["queue_metadata"]
         assert context["queue_metadata"]["plan_approved_fingerprint"] is None
 
+    def test_scope_drift_approval_threaded_into_queue_metadata(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """The operator's plan_scope_drift approval (dev-queue v39, #2337)
+        reaches the worker verbatim, where Step 2.5 gate 2 feeds the files to
+        the scope-conformance script once the head passes the ancestry check."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-scope-drift-approval")
+        task = _make_pending_task()
+        task.scope_drift_approved_extra_files = ["src/a.py", "tests/test_a.py"]
+        task.scope_drift_approved_head = "0123abcd" * 5
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev-impl GEN-2337 --headless",
+            label="auto-dev/GEN-2337",
+            native_daemon=daemon,
+            ticket_id="GEN-2337",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        metadata = context["queue_metadata"]
+        assert metadata["scope_drift_approved_extra_files"] == [
+            "src/a.py",
+            "tests/test_a.py",
+        ]
+        assert metadata["scope_drift_approved_head"] == "0123abcd" * 5
+
+    def test_scope_drift_approval_null_threaded_as_null(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """An unapproved row threads explicit nulls, not missing keys."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-scope-drift-approval-null")
+        task = _make_pending_task()
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev-impl GEN-2337 --headless",
+            label="auto-dev/GEN-2337",
+            native_daemon=daemon,
+            ticket_id="GEN-2337",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        metadata = context["queue_metadata"]
+        assert "scope_drift_approved_extra_files" in metadata
+        assert metadata["scope_drift_approved_extra_files"] is None
+        assert "scope_drift_approved_head" in metadata
+        assert metadata["scope_drift_approved_head"] is None
+
     def test_git_failure_sets_origin_sha_null(
         self,
         tmp_config_dir: Path,
@@ -3342,11 +3411,11 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (8 after the
-        queue_metadata.plan_approved_fingerprint addition)."""
+        """cw-context.json schema_version is current (9 after the
+        queue_metadata.scope_drift_approved_* addition)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 8
+        assert CW_CONTEXT_SCHEMA_VERSION == 9
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -3361,7 +3430,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 8
+        assert context["schema_version"] == 9
 
 
 class TestCwContextLaneStamp:

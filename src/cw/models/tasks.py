@@ -173,7 +173,13 @@ from cw.review_finding_dispositions import FindingDisposition
 #      pair. A ``dict[str, bool] | None`` whose absence is indistinguishable
 #      from the ``None`` default, so no migration filler is needed (same as
 #      v13).
-DEV_QUEUE_SCHEMA_VERSION = 38
+# v39: added TicketTask.scope_drift_approved_extra_files +
+#      scope_drift_approved_head (GitHub #2337) — the operator's
+#      `cw dev-queue approve --scope-drift` grant for a row parked with
+#      blocked_reason plan_scope_drift, bound to the branch head it was given
+#      for (the #2102 plan_approved_fingerprint shape). Both ``| None`` with a
+#      ``None`` default, so no migration filler is needed (same as v13/v38).
+DEV_QUEUE_SCHEMA_VERSION = 39
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -471,6 +477,26 @@ class TicketTask(BaseModel):
     # fingerprint, or no draft existed at approval time. Checkpoint 1 treats
     # that as absent evidence, not as a wildcard match.
     plan_approved_fingerprint: str | None = None
+    # The operator's plan_scope_drift grant (v39, #2337): the sorted, deduped
+    # repo-relative paths `cw dev-queue approve --scope-drift` allowed beyond
+    # the plan's Files Modified. Stamped by dev_queue/approval.py's
+    # _approve_scope_drift_locked, only on a row parked at IMPL with
+    # blocked_reason plan_scope_drift; threaded into the worker's
+    # cw-context.json queue_metadata at spawn (spawn.py), where Step 2.5 gate 2
+    # passes it to check_plan_scope_conformance.py as an allowlist.
+    #
+    # Unlike plan_approved_at above, a per-arrival marker, not a durable fact:
+    # cleared unconditionally by the next spawn (dispatch/claim.py's
+    # spawn-success block, beside regressed_into_stage), because the grant is
+    # for exactly the IMPL session the approval requeues and must never leak
+    # into a later stage entry or a later round's drift. None = no grant.
+    scope_drift_approved_extra_files: list[str] | None = None
+    # The branch's origin HEAD SHA when the grant above was given — its binding,
+    # in the role plan_approved_fingerprint plays for plan_approved_at. Gate 2
+    # honors the grant only while this SHA is an ancestor of origin/<branch>
+    # (more commits on top are fine; a force-push or rewrite voids it). Same
+    # stamp and clear seams as scope_drift_approved_extra_files, never its own.
+    scope_drift_approved_head: str | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.
     # Kept only so persisted dev-queue rows that carry the field keep loading.
