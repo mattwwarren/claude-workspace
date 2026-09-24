@@ -12739,7 +12739,7 @@ class TestCodexOrphanLinkMigration:
         task_raw = migrated["tasks"][0]
         assert task_raw["codex_orphan_session_id"] is None
         assert task_raw["codex_orphan_rescan_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 39
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 40
 
     def test_migrate_preserves_a_recorded_link_idempotently(self) -> None:
         raw: dict[str, object] = {
@@ -12784,7 +12784,7 @@ class TestCodexOrphanLinkMigration:
 
         store = load_dev_queue()
 
-        assert store.schema_version == 39
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 40
         assert store.tasks[0].codex_orphan_session_id is None
         assert store.tasks[0].codex_orphan_rescan_next_eligible_at is None
 
