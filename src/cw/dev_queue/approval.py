@@ -43,10 +43,10 @@ from cw.gh import branch_head_sha_on_origin
 from cw.models import (
     PLAN_APPROVED_FINGERPRINT_KEY,
     PLAN_DRAFT_FINGERPRINT_KEY,
-    OrchestratorEventType,
-    QueueItemStatus,
     SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
     SCOPE_DRIFT_APPROVED_HEAD_KEY,
+    OrchestratorEventType,
+    QueueItemStatus,
     Stage,
 )
 from cw.worktree import _git_dir
