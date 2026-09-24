@@ -1125,7 +1125,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 39
+        assert DEV_QUEUE_SCHEMA_VERSION == 40
 
     def test_ticket_task_old_row_without_codex_orphan_fields_defaults_none(
         self,

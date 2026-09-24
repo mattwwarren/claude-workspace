@@ -173,12 +173,7 @@ from cw.review_finding_dispositions import FindingDisposition
 #      pair. A ``dict[str, bool] | None`` whose absence is indistinguishable
 #      from the ``None`` default, so no migration filler is needed (same as
 #      v13).
-# v39: added TicketTask.usage_limit_act (GitHub #2324) — the write-ahead
-#      intent of reconcile's mid-turn usage-limit act. Written once, as the
-#      act's only deciding write; every later tick resumes the act from it
-#      until the row's final transition clears it. Backfilled to None on every
-#      pre-v39 row: no act was in flight under the older schema.
-#      Also added TicketTask.codex_orphan_session_id/
+# v39: added TicketTask.codex_orphan_session_id/
 #      codex_orphan_rescan_next_eligible_at (GitHub #2307) — the durable link
 #      from a live-writer/inconclusive-scan codex-orphan park back to the
 #      Session the boot pass left ACTIVE (the row's own session_id is cleared
@@ -187,7 +182,12 @@ from cw.review_finding_dispositions import FindingDisposition
 #      describe the current park episode, so both follow the v30
 #      unconditional-clear-on-every-transition convention. Backfilled to None
 #      on every pre-v39 row: an unlinked park is exactly today's behavior.
-DEV_QUEUE_SCHEMA_VERSION = 39
+# v40: added TicketTask.usage_limit_act (GitHub #2324) — the write-ahead
+#      intent of reconcile's mid-turn usage-limit act. Written once, as the
+#      act's only deciding write; every later tick resumes the act from it
+#      until the row's final transition clears it. Backfilled to None on every
+#      pre-v40 row: no act was in flight under the older schema.
+DEV_QUEUE_SCHEMA_VERSION = 40
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
