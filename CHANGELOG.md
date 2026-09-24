@@ -13,6 +13,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Every dev-queue stage operation now resolves a lane's `pipeline.stages` override consistently, instead of only per-stage executor/model pinning (#2216):** `approve`, `add`, `requeue`, next-stage routing, sentinel classification, and claim/plan-bypass now all route through the shared `resolve_pipeline_stages` helper, so a lane's `pipeline.stages` override wholly replaces the client default for every one of those operations rather than only some of them.
 - **A codex repark orphan is now closed regardless of its non-terminal status, and its stale-session reason constant is shared with `codex_boot` instead of duplicated (#2307).**
 
 ## [1.55.0] - 2026-09-24
