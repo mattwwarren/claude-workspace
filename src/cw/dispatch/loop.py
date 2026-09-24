@@ -100,6 +100,27 @@ def _resolve_loaded_version() -> str:
 _LOADED_VERSION: str = _resolve_loaded_version()
 
 
+def _reconcile_owns_completion(payload: Mapping[str, object]) -> bool:
+    """Is this SESSION_COMPLETED one whose row reconcile dispositions itself?
+
+    Crashed events are emitted by reconcile only. For DAEMON sessions
+    reconcile has already reverted the task RUNNING → PENDING; marking the
+    task COMPLETED here would shadow that revert and (worse) match the next
+    freshly-respawned RUNNING task for the same ticket_id, falsely retiring a
+    still-running session. For non-DAEMON crashed sessions reconcile does not
+    touch the queue, so a blanket skip is conservative-safe (no queue task is
+    expected to match anyway). See GitHub issue #97.
+
+    The mid-turn usage-limit act records its (non-crash) completion before
+    it stops the session, then transitions the row itself, resuming from the
+    row's ``usage_limit_act`` intent on a later tick if interrupted (#2324).
+    Routing that event here would park the row with no sentinel first.
+    """
+    return bool(payload.get("crashed")) or (
+        payload.get("reason") == _USAGE_LIMITED_MID_TURN_REASON
+    )
+
+
 def _apply_events_to_store(
     store: DevQueueStore,
     events: list[OrchestratorEvent],
@@ -129,22 +150,7 @@ def _apply_events_to_store(
     """
     completed = 0
     for event in events:
-        # Crashed events are emitted by reconcile only. For DAEMON
-        # sessions reconcile has already reverted the task
-        # RUNNING → PENDING; marking the task COMPLETED here would
-        # shadow that revert and (worse) match the next freshly-
-        # respawned RUNNING task for the same ticket_id, falsely
-        # retiring a still-running session. For non-DAEMON crashed
-        # sessions reconcile does not touch the queue, so a blanket
-        # skip is conservative-safe (no queue task is expected to
-        # match anyway). See GitHub issue #97.
-        if event.payload.get("crashed"):
-            continue
-        # The mid-turn usage-limit sweep records its (non-crash) completion
-        # before it requeues the row, and finishes a requeue interrupted after
-        # the close on a later reconcile tick (#2324). Reconcile owns that
-        # row: routing the event here would park it with no sentinel first.
-        if event.payload.get("reason") == _USAGE_LIMITED_MID_TURN_REASON:
+        if _reconcile_owns_completion(event.payload):
             continue
         ticket_id = event.payload.get("ticket_id")
         if not ticket_id:

@@ -1176,3 +1176,70 @@ def test_act_resumes_when_its_session_is_gone(
     assert task.status is QueueItemStatus.PENDING
     assert task.usage_limit_act is None
     assert task.next_eligible_at == _RESET_AT
+
+
+def test_act_retries_when_lockout_write_silently_does_not_land(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The sidecar write swallows its own errors, so the window is read back.
+
+    A window that did not persist stops the act before any audit or effect;
+    the next tick arms it and finishes.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn.merge_and_save_usage_limited_until",
+        dict,
+    )
+
+    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
+        assert _tick(state, _auto_config(), daemon, at=_NOW) == []
+
+    assert any(_SID in m and "did not persist" in m for m in _log_messages(caplog))
+    assert _lockout() == {}
+    assert _events(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
+    assert daemon.stop_calls == []
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn.merge_and_save_usage_limited_until",
+        merge_and_save_usage_limited_until,
+    )
+
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
+    assert _lockout() == {_CLIENT: _RESET_AT}
+
+
+def test_act_resumed_after_its_window_lapsed_skips_the_lockout(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    """A window already over needs no lockout; the rest of the act still runs."""
+    _seed(home, tmp_path, _limit_tail())
+    store = load_dev_queue()
+    store.tasks[0].usage_limit_act = UsageLimitAct(
+        session_id=_SID,
+        branch="auto",
+        started_at=_NOW,
+        reset_at=None,
+        until=_LATER,
+        audited_at=_NOW,
+    )
+    save_dev_queue(store)
+    after_window = _LATER + timedelta(minutes=1)
+
+    assert _tick(load_state(), _auto_config(), daemon, at=after_window) == [_SID]
+
+    assert _events(OrchestratorEventType.USAGE_LIMIT_ARMED) == []
+    task = _owned_row()
+    assert task.status is QueueItemStatus.PENDING
+    assert task.next_eligible_at == _LATER
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
