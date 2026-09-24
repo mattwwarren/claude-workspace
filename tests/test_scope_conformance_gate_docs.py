@@ -358,7 +358,7 @@ def test_gate2_greps_cw_script_version_marker_and_headless_blocks_on_stale() -> 
     assert 'blocker.reason: "impl_failed"' in blocking
     assert "Step 2.5 gate 2: HEADLESS BLOCK" in blocking
     assert "check_plan_scope_conformance.py at <resolved-path>" in blocking
-    assert "missing/stale cw-script-version marker (need >= 1)" in blocking
+    assert "missing/stale cw-script-version marker (need >= 2)" in blocking
     assert "STOP" in blocking
 
 
@@ -662,6 +662,22 @@ def _run_site_fence(
 
 _GATE2_SCRIPT = "check_plan_scope_conformance.py"
 
+# Gate 2's minimum moved past the shared v1 fixtures when the script gained
+# --approved-extra-files (#2337), so its fences are driven with markers at
+# gate 2's own table minimum; the shared v1 marker becomes a stale case here.
+_GATE2_MARKER_CURRENT = f"# cw-script-version: {_table_minimums()[_GATE2_SCRIPT][0]}\n"
+_GATE2_MARKER_GOOD_CASES: tuple[tuple[str, str], ...] = (
+    ("marker_first_line", _GATE2_MARKER_CURRENT),
+    (
+        "marker_third_line",
+        '#!/usr/bin/env python3\n"""Guard script."""\n' + _GATE2_MARKER_CURRENT,
+    ),
+)
+_GATE2_MARKER_BAD_CASES: tuple[tuple[str, str], ...] = (
+    *GUARD_MARKER_BAD_CASES,
+    ("previous_minimum", GUARD_MARKER_CURRENT),
+)
+
 
 def _gate2_fence() -> str:
     """Step 2.5 gate 2's own bash fence (#2141)."""
@@ -908,12 +924,14 @@ def _add_gate2_session_worktree(
     session_copy: str | None,
     context_ticket: str | None,
     plan: bool,
+    queue_metadata: dict[str, object] | None = None,
 ) -> None:
     """Provision the session worktree gate 2 must resolve to (#2141 round 8).
 
     Split out of ``_run_gate2_fence`` when round 8's two extra knobs pushed it
     past the statement ceiling; the four fixture shapes it plants (branch name,
-    context file, script copy, plan file) are one concern.
+    context file, script copy, plan file) are one concern. *queue_metadata*
+    (#2337) rides in the same context file, next to ``ticket_id``.
     """
     if session_branch == _GATE2_BRANCH:
         git_in(repo, "worktree", "add", str(session_wt), _GATE2_BRANCH)
@@ -930,8 +948,11 @@ def _add_gate2_session_worktree(
     if context_ticket is not None:
         context_dir = session_wt / ".claude"
         context_dir.mkdir(parents=True, exist_ok=True)
+        context: dict[str, object] = {"ticket_id": context_ticket}
+        if queue_metadata is not None:
+            context["queue_metadata"] = queue_metadata
         (context_dir / "cw-context.json").write_text(
-            json.dumps({"ticket_id": context_ticket}), encoding="utf-8"
+            json.dumps(context), encoding="utf-8"
         )
     if session_copy is not None:
         scripts = session_wt / ".claude" / "scripts"
@@ -941,6 +962,24 @@ def _add_gate2_session_worktree(
         cw_dir = session_wt / ".cw"
         cw_dir.mkdir(parents=True, exist_ok=True)
         (cw_dir / "plan.md").write_text("## Files Modified\n", encoding="utf-8")
+
+
+_BRANCH_HEAD = "<branch-head>"
+
+
+def _scope_drift_metadata(
+    repo: Path, approval: tuple[list[str], str] | None
+) -> dict[str, object] | None:
+    """The ``queue_metadata`` a scope-drift approval plants (#2337)."""
+    if approval is None:
+        return None
+    files, head = approval
+    if head == _BRANCH_HEAD:
+        head = git_in(repo, "rev-parse", _GATE2_BRANCH)
+    return {
+        "scope_drift_approved_extra_files": files,
+        "scope_drift_approved_head": head,
+    }
 
 
 def _run_gate2_fence(
@@ -954,8 +993,14 @@ def _run_gate2_fence(
     break_git_diff: bool = False,
     session_branch: str = _GATE2_BRANCH,
     context_ticket: str | None = None,
+    scope_drift_approval: tuple[list[str], str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute gate 2's own fence against real worktrees (#2141 round 4/5).
+
+    *scope_drift_approval* (#2337) is ``(extra_files, approved_head)``, planted
+    as ``queue_metadata`` in the session worktree's context file (so it needs
+    *context_ticket*); ``_BRANCH_HEAD`` as the head resolves to the branch's
+    real tip. The approved-files scratch file is echoed after the fence.
 
     Deliberately not the shared ``run_guard_fence``: gate 2's resolver reads
     ``git -C "$TMPWT" worktree list``, so only a fixture with an actual detached
@@ -1002,6 +1047,7 @@ def _run_gate2_fence(
     git_in(repo, "fetch", "origin")
 
     if session_worktree:
+        queue_metadata = _scope_drift_metadata(repo, scope_drift_approval)
         _add_gate2_session_worktree(
             repo,
             tmp_path / "session-wt",
@@ -1009,6 +1055,7 @@ def _run_gate2_fence(
             session_copy=session_copy,
             context_ticket=context_ticket,
             plan=plan,
+            queue_metadata=queue_metadata,
         )
 
     home = tmp_path / "home"
@@ -1032,7 +1079,8 @@ def _run_gate2_fence(
             {"branch-name": _GATE2_BRANCH, "ticket-id": _GATE2_TICKET},
         )
         + '\necho "${SCOPE_CONFORMANCE_OUTPUT-}"'
-        + f'\ncat "/tmp/touched_files-{session}" 2>/dev/null\n'
+        + f'\ncat "/tmp/touched_files-{session}" 2>/dev/null'
+        + f'\ncat "/tmp/approved-extra-{session}" 2>/dev/null || true\n'
     )
     try:
         return subprocess.run(
@@ -1060,6 +1108,7 @@ def _run_gate2_fence(
         )
         shutil.rmtree(tmpwt, ignore_errors=True)
         Path(f"/tmp/touched_files-{session}").unlink(missing_ok=True)
+        Path(f"/tmp/approved-extra-{session}").unlink(missing_ok=True)
 
 
 def test_gate2_fence_resolves_the_session_worktree_from_the_gate_worktree(
@@ -1068,7 +1117,7 @@ def test_gate2_fence_resolves_the_session_worktree_from_the_gate_worktree(
     """The round-4 contract, executed: cwd is the detached gate worktree, no
     anchor is inherited, and the fence still finds the session worktree's script
     and passes it the session worktree's absolute ``.cw/plan.md`` (#2141)."""
-    result = _run_gate2_fence(tmp_path, session_copy=GUARD_MARKER_CURRENT)
+    result = _run_gate2_fence(tmp_path, session_copy=_GATE2_MARKER_CURRENT)
     assert result.returncode == 0, result.stderr
     assert _INVOKED in result.stdout
     session_wt = (tmp_path / "session-wt").resolve()
@@ -1090,7 +1139,7 @@ def test_gate2_fence_derives_tmpwt_and_fork_point_itself(tmp_path: Path) -> None
     ``origin/main``, so an empty (or errored) diff means the merge-base never
     ran.
     """
-    result = _run_gate2_fence(tmp_path, session_copy=GUARD_MARKER_CURRENT)
+    result = _run_gate2_fence(tmp_path, session_copy=_GATE2_MARKER_CURRENT)
     assert result.returncode == 0, result.stderr
     assert _INVOKED in result.stdout
     session_wt = (tmp_path / "session-wt").resolve()
@@ -1110,7 +1159,7 @@ def test_gate2_fence_hard_stops_when_the_gate_worktree_is_missing(
     looking like it ran, so the fence checks the directory up front.
     """
     result = _run_gate2_fence(
-        tmp_path, session_copy=GUARD_MARKER_CURRENT, gate_worktree=False
+        tmp_path, session_copy=_GATE2_MARKER_CURRENT, gate_worktree=False
     )
     assert result.returncode == 3, result.stdout
     assert _INVOKED not in result.stdout
@@ -1131,7 +1180,7 @@ def test_gate2_fence_hard_stops_when_the_touched_file_diff_fails(
     failure this fence already hard-stops on.
     """
     result = _run_gate2_fence(
-        tmp_path, session_copy=GUARD_MARKER_CURRENT, break_git_diff=True
+        tmp_path, session_copy=_GATE2_MARKER_CURRENT, break_git_diff=True
     )
     assert result.returncode == 3, result.stdout
     assert _INVOKED not in result.stdout, (
@@ -1146,7 +1195,7 @@ def test_gate2_fence_hard_stops_when_the_session_worktree_is_absent(
     """No worktree on the branch → exit 3, not a fall-through to the gate
     worktree or to ``$HOME`` (#2141 round 4)."""
     result = _run_gate2_fence(
-        tmp_path, session_worktree=False, global_copy=GUARD_MARKER_CURRENT
+        tmp_path, session_worktree=False, global_copy=_GATE2_MARKER_CURRENT
     )
     assert result.returncode == 3, result.stdout
     assert _INVOKED not in result.stdout
@@ -1158,14 +1207,14 @@ def test_gate2_fence_hard_stops_when_the_plan_file_is_missing(
 ) -> None:
     """A resolved current script with no ``.cw/plan.md`` must not be invoked
     with a path that does not exist (#2141 round 4)."""
-    result = _run_gate2_fence(tmp_path, session_copy=GUARD_MARKER_CURRENT, plan=False)
+    result = _run_gate2_fence(tmp_path, session_copy=_GATE2_MARKER_CURRENT, plan=False)
     assert result.returncode == 3, result.stdout
     assert _INVOKED not in result.stdout
     assert "plan.md not found" in result.stdout
 
 
 @pytest.mark.parametrize("location", _GATE2_LOCATIONS)
-@pytest.mark.parametrize(("label", "script_body"), GUARD_MARKER_BAD_CASES)
+@pytest.mark.parametrize(("label", "script_body"), _GATE2_MARKER_BAD_CASES)
 def test_gate2_fence_hard_stops_without_invoking(
     tmp_path: Path, location: str, label: str, script_body: str
 ) -> None:
@@ -1177,7 +1226,7 @@ def test_gate2_fence_hard_stops_without_invoking(
 
 
 @pytest.mark.parametrize("location", _GATE2_LOCATIONS)
-@pytest.mark.parametrize(("label", "script_body"), GUARD_MARKER_GOOD_CASES)
+@pytest.mark.parametrize(("label", "script_body"), _GATE2_MARKER_GOOD_CASES)
 def test_gate2_fence_reaches_the_script_on_a_current_marker(
     tmp_path: Path, location: str, label: str, script_body: str
 ) -> None:
@@ -1196,7 +1245,7 @@ def test_gate2_fence_prefers_the_session_worktree_copy(tmp_path: Path) -> None:
     the marker gate (#2141)."""
     current_local = _run_gate2_fence(
         tmp_path / "a",
-        session_copy=GUARD_MARKER_CURRENT,
+        session_copy=_GATE2_MARKER_CURRENT,
         global_copy=GUARD_MARKER_STALE,
     )
     assert current_local.returncode == 0, current_local.stderr
@@ -1210,7 +1259,7 @@ def test_gate2_fence_prefers_the_session_worktree_copy(tmp_path: Path) -> None:
     stale_local = _run_gate2_fence(
         tmp_path / "b",
         session_copy=GUARD_MARKER_STALE,
-        global_copy=GUARD_MARKER_CURRENT,
+        global_copy=_GATE2_MARKER_CURRENT,
     )
     assert stale_local.returncode != 0, "a stale session-worktree copy was rescued"
     assert _INVOKED not in stale_local.stdout
@@ -1240,7 +1289,7 @@ def test_gate2_fence_resolves_a_session_worktree_on_another_branch(
     """
     result = _run_gate2_fence(
         tmp_path,
-        session_copy=GUARD_MARKER_CURRENT,
+        session_copy=_GATE2_MARKER_CURRENT,
         session_branch=_GATE2_LOCAL_BRANCH,
         context_ticket=_GATE2_TICKET,
     )
@@ -1258,7 +1307,7 @@ def test_gate2_fence_falls_back_to_the_branch_keyed_lookup(tmp_path: Path) -> No
     whose context file was cleaned up) carries none. Round 8 adds a primary
     lookup; it must not remove the one that worked.
     """
-    result = _run_gate2_fence(tmp_path, session_copy=GUARD_MARKER_CURRENT)
+    result = _run_gate2_fence(tmp_path, session_copy=_GATE2_MARKER_CURRENT)
     assert result.returncode == 0, result.stdout + result.stderr
     assert _INVOKED in result.stdout
     session_wt = (tmp_path / "session-wt").resolve()
@@ -1274,7 +1323,7 @@ def test_gate2_fence_hard_stops_when_neither_lookup_resolves(tmp_path: Path) -> 
     """
     result = _run_gate2_fence(
         tmp_path,
-        session_copy=GUARD_MARKER_CURRENT,
+        session_copy=_GATE2_MARKER_CURRENT,
         session_branch=_GATE2_LOCAL_BRANCH,
     )
     assert result.returncode == 3, result.stdout
@@ -1294,13 +1343,82 @@ def test_gate2_fence_ignores_a_context_file_for_another_ticket(
     """
     result = _run_gate2_fence(
         tmp_path,
-        session_copy=GUARD_MARKER_CURRENT,
+        session_copy=_GATE2_MARKER_CURRENT,
         session_branch=_GATE2_LOCAL_BRANCH,
         context_ticket="9999",
     )
     assert result.returncode == 3, result.stdout
     assert _INVOKED not in result.stdout
     assert "cannot locate cw session worktree" in result.stdout
+
+
+def test_gate2_reads_scope_drift_approval_and_checks_ancestry() -> None:
+    """Gate 2 reads the operator's approval from ``queue_metadata`` and binds
+    it by ancestry, not SHA equality (#2337)."""
+    fence = _gate2_fence()
+    assert "scope_drift_approved_extra_files" in fence
+    assert "scope_drift_approved_head" in fence
+    assert "merge-base --is-ancestor" in fence
+    assert "--approved-extra-files" in fence
+    assert "scope_drift_approval_stale" in fence
+    section = _gate2_section()
+    assert "ancestry" in section
+    assert "cw dev-queue approve" in section
+
+
+def test_gate2_fence_applies_an_approval_whose_head_is_an_ancestor(
+    tmp_path: Path,
+) -> None:
+    """Approved at the branch tip: the approved files reach the script."""
+    result = _run_gate2_fence(
+        tmp_path,
+        session_copy=_GATE2_MARKER_CURRENT,
+        context_ticket=_GATE2_TICKET,
+        scope_drift_approval=(["src/a.py", "src/b.py"], _BRANCH_HEAD),
+    )
+    assert result.returncode == 0, result.stderr
+    assert _INVOKED in result.stdout
+    session = _gate2_session(tmp_path)
+    assert f"--approved-extra-files /tmp/approved-extra-{session}" in result.stdout
+    assert "src/a.py\nsrc/b.py" in result.stdout
+    assert "scope_drift_approval_stale" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "head",
+    ["f" * 40, "not-a-sha"],
+    ids=["unknown_commit", "malformed_head"],
+)
+def test_gate2_fence_drops_an_approval_whose_head_is_not_an_ancestor(
+    tmp_path: Path, head: str
+) -> None:
+    """A head the pushed branch no longer descends from (force-push/rewrite)
+    invalidates the approval: the gate runs without it and says why."""
+    result = _run_gate2_fence(
+        tmp_path,
+        session_copy=_GATE2_MARKER_CURRENT,
+        context_ticket=_GATE2_TICKET,
+        scope_drift_approval=(["src/a.py"], head),
+    )
+    assert result.returncode == 0, result.stderr
+    assert _INVOKED in result.stdout
+    assert "--approved-extra-files" not in result.stdout
+    assert "scope_drift_approval_stale" in result.stdout
+
+
+def test_gate2_fence_runs_without_the_flag_when_no_approval(
+    tmp_path: Path,
+) -> None:
+    """No approval on the context file: the invocation is unchanged."""
+    result = _run_gate2_fence(
+        tmp_path,
+        session_copy=_GATE2_MARKER_CURRENT,
+        context_ticket=_GATE2_TICKET,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _INVOKED in result.stdout
+    assert "--approved-extra-files" not in result.stdout
+    assert "scope_drift_approval_stale" not in result.stdout
 
 
 def test_canonical_template_shows_the_hard_stop_shape() -> None:
