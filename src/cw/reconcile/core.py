@@ -326,7 +326,8 @@ def _reconcile_locked(
     orchestrator_config = load_orchestrator_config()
     # Load dev queue once here; pass to all sweeps to avoid duplicate
     # filesystem reads within the same reconcile tick. See GitHub issue #326.
-    shared_task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    shared_tasks = load_dev_queue().tasks
+    shared_task_by_ticket = {t.ticket_id: t for t in shared_tasks}
     stalled_candidates = _detect_stalled_candidates(
         state,
         task_by_ticket=shared_task_by_ticket,
@@ -424,7 +425,7 @@ def _reconcile_locked(
         native_live=native_live,
         config=orchestrator_config,
         clients=_deps.load_effective_clients(),
-        task_by_ticket=shared_task_by_ticket,
+        tasks=shared_tasks,
     )
 
     drift = compute_drift(state, native_live, now=now)

@@ -36,6 +36,7 @@ from cw.models import (
     QueueItemStatus,
     ReapReason,
     SessionStatus,
+    TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
@@ -170,15 +171,37 @@ def _append_record(transcript: Path, record: dict[str, object]) -> None:
     _stamp_after_start(transcript)
 
 
-def _task_by_ticket() -> dict[str, Any]:
-    return {t.ticket_id: t for t in load_dev_queue().tasks}
-
-
 def _detect(state: CwState, native_live: set[str] | None = None) -> list[Any]:
     return _detect_mid_turn_usage_limit_candidates(
         state,
         native_live={_SURFACE} if native_live is None else native_live,
-        task_by_ticket=_task_by_ticket(),
+        tasks=load_dev_queue().tasks,
+    )
+
+
+def _owned_row() -> TicketTask:
+    """This session's own row, found by the full (ticket, client, session) key."""
+    return next(
+        t
+        for t in load_dev_queue().tasks
+        if t.ticket_id == _SID and t.client == _CLIENT and t.session_id == _SID
+    )
+
+
+def _save_tasks_around_owned_row(
+    *, before: list[TicketTask], after: list[TicketTask]
+) -> None:
+    """Re-save the queue with *before* and *after* rows around the owned row."""
+    owned = load_dev_queue().tasks[0]
+    save_dev_queue(DevQueueStore(tasks=[*before, owned, *after]))
+
+
+def _running_row(*, client: str, session_id: str) -> TicketTask:
+    return _make_ticket_task(
+        ticket_id=_SID,
+        client=client,
+        status=QueueItemStatus.RUNNING,
+        session_id=session_id,
     )
 
 
@@ -305,6 +328,47 @@ def test_detect_skips_session_without_ticket_row(
 ) -> None:
     state, _ = _seed(home, tmp_path, _limit_tail())
     save_dev_queue(DevQueueStore(tasks=[]))
+
+    assert _detect(state) == []
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    [
+        pytest.param(
+            _running_row(client="client-b", session_id="b-session"),
+            id="other-client-same-ticket",
+        ),
+        pytest.param(
+            _running_row(client=_CLIENT, session_id="duplicate-session"),
+            id="duplicate-running-row",
+        ),
+    ],
+)
+def test_detect_finds_owned_row_despite_a_later_same_ticket_row(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, shadow: TicketTask
+) -> None:
+    """The row is keyed on (ticket_id, client, session_id), not ticket_id (#2219).
+
+    A same-ticket RUNNING row after the owned one -- another client's ticket
+    with the same id, or a duplicate RUNNING row -- must not shadow it.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _save_tasks_around_owned_row(before=[], after=[shadow])
+
+    candidates = _detect(state)
+
+    assert [c.session_id for c in candidates] == [_SID]
+
+
+def test_detect_skips_row_owned_by_session_under_another_client(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A row matching ticket and session but not the session's client is not its."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    save_dev_queue(
+        DevQueueStore(tasks=[_running_row(client="client-b", session_id=_SID)])
+    )
 
     assert _detect(state) == []
 
@@ -567,6 +631,33 @@ def test_act_auto_stops_at_step_4_when_daemon_stop_fails(
     # Steps 5-6 did not.
     _assert_session_still_active(state)
     _assert_row_still_running()
+
+
+def test_act_auto_requeues_only_the_row_keyed_to_the_sessions_client(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    """An earlier same-ticket row under another client is never the one mutated.
+
+    It matches the ticket and even the session id, so a ticket-and-session
+    lookup would take it first; only (ticket_id, client, session_id) is the
+    owned row's identity (#2219).
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    foreign = _running_row(client="client-b", session_id=_SID)
+    _save_tasks_around_owned_row(before=[foreign], after=[])
+
+    assert _act(state, _detect(state), _auto_config()) == [_SID]
+
+    tasks = load_dev_queue().tasks
+    assert tasks[0].client == "client-b"
+    assert tasks[0].status is QueueItemStatus.RUNNING
+    assert tasks[0].session_id == _SID
+    assert tasks[1].client == _CLIENT
+    assert tasks[1].status is QueueItemStatus.PENDING
+    assert tasks[1].next_eligible_at == _RESET_AT
 
 
 def test_act_auto_leaves_session_closed_when_requeue_loses_race(
@@ -835,7 +926,7 @@ def test_act_auto_skips_stop_when_surface_ref_already_cleared(
 # ---------------------------------------------------------------------------
 
 
-def test_detect_and_park_loads_queue_when_task_by_ticket_omitted(
+def test_detect_and_park_loads_queue_when_tasks_omitted(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,

@@ -78,20 +78,18 @@ from cw.reconcile._shared import (
     ReapCandidate,
     UsageLimitDetection,
     _emit_reap_proposed,
-    _lookup_matching_task,
     _parse_any_sentinel_from_transcript,
     resolve_reap_policy,
     ticket_id_for_session,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Sequence
     from datetime import datetime
 
     from cw.models import (
         ClientConfig,
         CwState,
-        DevQueueStore,
         OrchestratorConfig,
         Session,
         TicketTask,
@@ -122,19 +120,43 @@ def _mid_turn_limit_detection(session: Session) -> UsageLimitDetection | None:
     return detection
 
 
+def _owned_running_row(
+    tasks: Iterable[TicketTask], ticket_id: str, client: str, session_id: str
+) -> TicketTask | None:
+    """The row iff one is RUNNING under ``(ticket_id, client, session_id)``.
+
+    That triple is the row's identity (see #2219): a ticket id alone can
+    resolve to another client's same-numbered ticket or to a duplicate
+    RUNNING row. This is the inline form of ``_find_running_row``'s
+    ``session_id`` predicate; switch to that helper once #2219 lands.
+    """
+    return next(
+        (
+            task
+            for task in tasks
+            if task.ticket_id == ticket_id
+            and task.client == client
+            and task.session_id == session_id
+            and task.status is QueueItemStatus.RUNNING
+        ),
+        None,
+    )
+
+
 def _detect_mid_turn_usage_limit_candidates(
     state: CwState,
     *,
     native_live: set[str],
-    task_by_ticket: dict[str, TicketTask],
+    tasks: Sequence[TicketTask],
 ) -> list[ReapCandidate]:
     """Classify roster-present sessions stopped mid-turn by a usage limit.
 
     Pure: no writes. Gating mirrors the liveness sweep (DAEMON origin, status
     in ``_LIVE_STATUSES``, ``surface_ref`` in *native_live*) -- a roster-absent
-    session belongs to the phantom sweep. The owning row must be RUNNING and
-    owned by this exact session, so a row already parked or reclaimed never
-    re-fires and an older session for the same ticket is never blamed.
+    session belongs to the phantom sweep. The owning row must be RUNNING under
+    this exact ``(ticket_id, client, session_id)``, so a row already parked or
+    reclaimed never re-fires, an older session for the same ticket is never
+    blamed, and another same-ticket row can never stand in for it.
     """
     candidates: list[ReapCandidate] = []
     for session in state.sessions:
@@ -145,12 +167,12 @@ def _detect_mid_turn_usage_limit_candidates(
         if session.surface_ref is None or session.surface_ref not in native_live:
             continue
         ticket_id = ticket_id_for_session(session.name)
-        task = task_by_ticket.get(ticket_id) if ticket_id else None
-        if (
-            task is None
-            or task.status is not QueueItemStatus.RUNNING
-            or task.session_id != session.id
-        ):
+        task = (
+            _owned_running_row(tasks, ticket_id, session.client, session.id)
+            if ticket_id
+            else None
+        )
+        if task is None:
             continue
         if _mid_turn_limit_detection(session) is None:
             continue
@@ -180,28 +202,21 @@ class _ActContext(NamedTuple):
     now: datetime
 
 
-def _owned_running_row(
-    store: DevQueueStore, ticket_id: str, session_id: str
-) -> TicketTask | None:
-    """The row iff it is still RUNNING and bound to *session_id*, else None."""
-    lookup = _lookup_matching_task(store, ticket_id, session_id)
-    if lookup.target_status is not QueueItemStatus.RUNNING:
-        return None
-    return lookup.target
-
-
 def _gate(session: Session, ticket_id: str) -> UsageLimitDetection | None:
     """Step 1: re-verify the evidence and the row's identity, with no side effects.
 
     Under ``dev_queue_lock``, re-reads the transcript (the limit text must
     still be the last content-bearing record) and checks the row is still
-    RUNNING and bound to *session*. Either failing is a no-op this tick:
-    nothing is written, emitted or stopped. The lock is released before any
-    effect, so step 6 re-runs the identity check for its own write.
+    RUNNING under ``(ticket_id, session.client, session.id)``. Either failing
+    is a no-op this tick: nothing is written, emitted or stopped. The lock is
+    released before any effect, so step 6 re-runs the identity check for its
+    own write.
     """
     with dev_queue_lock():
         detection = _mid_turn_limit_detection(session)
-        owned = _owned_running_row(load_dev_queue(), ticket_id, session.id)
+        owned = _owned_running_row(
+            load_dev_queue().tasks, ticket_id, session.client, session.id
+        )
     if detection is None:
         _log.info(
             "usage_limit_mid_turn: tail changed since detect for ticket %s "
@@ -222,9 +237,9 @@ def _gate(session: Session, ticket_id: str) -> UsageLimitDetection | None:
 
 
 def _mutate_owned_running_row(
-    ticket_id: str, session_id: str, mutate: Callable[[TicketTask], None]
+    session: Session, ticket_id: str, mutate: Callable[[TicketTask], None]
 ) -> bool:
-    """Apply *mutate* to the row iff it is still RUNNING and owned by *session_id*.
+    """Apply *mutate* to *session*'s row iff it is still RUNNING and owned by it.
 
     Re-verified under ``dev_queue_lock`` because the gate's check has been
     released since: a row that moved off RUNNING or was reclaimed by another
@@ -232,7 +247,7 @@ def _mutate_owned_running_row(
     """
     with dev_queue_lock():
         store = load_dev_queue()
-        target = _owned_running_row(store, ticket_id, session_id)
+        target = _owned_running_row(store.tasks, ticket_id, session.client, session.id)
         if target is None:
             return False
         mutate(target)
@@ -393,9 +408,7 @@ def _act_auto(ctx: _ActContext) -> bool:
         return False
     _persist_completed(ctx)
     requeued = _mutate_owned_running_row(
-        ctx.ticket_id,
-        ctx.session.id,
-        partial(_revert_to_pending, until=ctx.until),
+        ctx.session, ctx.ticket_id, partial(_revert_to_pending, until=ctx.until)
     )
     if not requeued:
         _log.info(
@@ -413,9 +426,7 @@ def _act_signal_only(ctx: _ActContext) -> None:
     The reap proposal is emitted only after the park's identity check
     passes: a lost race proposes nothing and mutates nothing (#2285).
     """
-    if not _mutate_owned_running_row(
-        ctx.ticket_id, ctx.session.id, _park_blocked_on_user
-    ):
+    if not _mutate_owned_running_row(ctx.session, ctx.ticket_id, _park_blocked_on_user):
         _log.info(
             "usage_limit_mid_turn: park of ticket %s lost a race; row no longer "
             "RUNNING under session %s",
@@ -489,23 +500,20 @@ def detect_and_park_mid_turn_usage_limits(
     native_live: set[str],
     config: OrchestratorConfig,
     clients: dict[str, ClientConfig],
-    task_by_ticket: dict[str, TicketTask] | None = None,
+    tasks: Sequence[TicketTask] | None = None,
 ) -> list[str]:
     """Detect and disposition mid-turn usage-limit stops (GitHub #2324).
 
     Combines the detect and act phases, mirroring
-    ``record_session_liveness_changes``. ``task_by_ticket`` may be pre-loaded by
-    the caller to avoid a duplicate dev-queue read within the same reconcile
+    ``record_session_liveness_changes``. ``tasks`` (every dev-queue row, not a
+    ticket-keyed map, which would collapse same-ticket rows) may be pre-loaded
+    by the caller to avoid a duplicate dev-queue read within the same reconcile
     tick; when omitted it is loaded here. Returns the ticket ids reverted to
     PENDING (``reap_policy: auto`` only).
     """
-    resolved_task_by_ticket = (
-        task_by_ticket
-        if task_by_ticket is not None
-        else {t.ticket_id: t for t in load_dev_queue().tasks}
-    )
+    resolved_tasks = tasks if tasks is not None else load_dev_queue().tasks
     candidates = _detect_mid_turn_usage_limit_candidates(
-        state, native_live=native_live, task_by_ticket=resolved_task_by_ticket
+        state, native_live=native_live, tasks=resolved_tasks
     )
     return _act_on_mid_turn_usage_limit_candidates(
         state,
