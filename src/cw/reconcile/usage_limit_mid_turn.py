@@ -569,8 +569,10 @@ def _stop_surface(act: _Act) -> _Stop:
         return _Stop.ABANDONED
     # The stop is destructive to a still-live surface.  The transcript check
     # above can race with an operator disposition, so persist an explicit
-    # ownership fence under the queue lock immediately before stopping, then
-    # release it before making the external daemon call.
+    # ownership fence under the queue lock immediately before stopping.  The
+    # final read catches a lost reservation at the hand-off boundary, while
+    # transition_task_status() honors the persisted fence during the external
+    # call.
     daemon = _deps.get_native_daemon_client()
     with dev_queue_lock():
         store = load_dev_queue()
@@ -585,6 +587,14 @@ def _stop_surface(act: _Act) -> _Stop:
             return _Stop.ABANDONED
         _mark_stop_started(target, at=act.now)
         save_dev_queue(store)
+    if _row_carrying_stop_fence(load_dev_queue().tasks, act.row) is None:
+        _log.info(
+            "usage_limit_mid_turn: stop fence for ticket %s session %s was lost "
+            "before daemon stop; surface left running",
+            act.row.ticket_id,
+            session.id,
+        )
+        return _Stop.ABANDONED
     daemon.stop(surface_ref)
     if wait_for_roster_presence(
         daemon,
@@ -660,6 +670,16 @@ def _park(target: TicketTask) -> None:
     )
 
 
+def _finish_mutation(
+    target: TicketTask, *, mutate: Callable[[TicketTask], None]
+) -> None:
+    """Release this act's stop reservation before its own final transition."""
+    intent = target.usage_limit_act
+    if intent is not None and intent.stop_started_at is not None:
+        target.usage_limit_act = intent.model_copy(update={"stop_started_at": None})
+    mutate(target)
+
+
 def _finish(row: _ActRow, *, require_stop_fence: bool) -> bool:
     """Transition the row, clearing the intent in the same write.
 
@@ -680,10 +700,10 @@ def _finish(row: _ActRow, *, require_stop_fence: bool) -> bool:
             target = _row_carrying(store.tasks, row)
             if target is None:
                 return False
-            mutate(target)
+            _finish_mutation(target, mutate=mutate)
             save_dev_queue(store)
         return row.auto
-    if _mutate_act_row(row, mutate):
+    if _mutate_act_row(row, partial(_finish_mutation, mutate=mutate)):
         return row.auto
     _log.info(
         "usage_limit_mid_turn: row for ticket %s no longer carries the act for "

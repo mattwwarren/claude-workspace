@@ -579,14 +579,14 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     assert "re-enter the queue automatically" in attention[0]["breadcrumbs"]
 
 
-def test_stop_holds_queue_ownership_through_stop_invocation(
+def test_stop_does_not_run_after_stop_fence_is_cleared_at_handoff(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
     daemon: FakeNativeDaemonClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The external stop runs after the queue lock releases."""
+    """A lost reservation at the lock-to-stop handoff leaves the surface live."""
     state, _ = _seed(home, tmp_path, _limit_tail())
     intent = mid_turn._decide(
         state.sessions[0],
@@ -617,19 +617,15 @@ def test_stop_holds_queue_ownership_through_stop_invocation(
             save_dev_queue(store)
 
     monkeypatch.setattr(mid_turn, "dev_queue_lock", _ClearIntentOnUnlock)
-    real_stop = daemon.stop
 
     def _stop(short_id: str) -> None:
-        # The lock scope has ended before the external daemon call. A
-        # concurrent disposition may clear the intent; the post-stop fence
-        # check then prevents this act from closing or requeuing the row.
-        assert load_dev_queue().tasks[0].usage_limit_act is None
-        real_stop(short_id)
+        message = f"daemon.stop unexpectedly called for {short_id}"
+        raise AssertionError(message)
 
     monkeypatch.setattr(daemon, "stop", _stop)
 
-    assert mid_turn._stop_surface(act) is mid_turn._Stop.DONE
-    assert daemon.stop_calls == [_SURFACE]
+    assert mid_turn._stop_surface(act) is mid_turn._Stop.ABANDONED
+    assert daemon.stop_calls == []
 
 
 def test_act_auto_falls_back_to_flat_backoff_on_unparseable_reset(
@@ -854,11 +850,10 @@ def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An operator cancel mid-act clears the intent, so the act ends there.
+    """An operator cancel during the stop is fenced out until the act ends.
 
-    Neither the session close nor the requeue lands: once the row no longer
-    carries the intent, the act owns neither, so the session is left open
-    and the cancelled row exactly as the operator left it.
+    The reservation prevents a competing transition from clearing ownership
+    while the external stop is in progress, so the act completes normally.
     """
     state, _ = _seed(home, tmp_path, _limit_tail())
     candidates = _detect(state)
@@ -875,13 +870,12 @@ def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
     with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
         reverted = _act(state, candidates, _auto_config())
 
-    assert reverted == []
-    assert any(_SID in m and "no longer carries" in m for m in _log_messages(caplog))
-    _assert_session_still_active(state)
+    assert reverted == [_SID]
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
     task = load_dev_queue().tasks[0]
-    assert task.status is QueueItemStatus.CANCELLED
+    assert task.status is QueueItemStatus.PENDING
     assert task.usage_limit_act is None
-    assert task.next_eligible_at is None
+    assert task.next_eligible_at == _RESET_AT
 
 
 def test_act_leaves_session_open_when_row_is_requeued_after_the_stop_confirms(
@@ -907,7 +901,12 @@ def test_act_leaves_session_open_when_row_is_requeued_after_the_stop_confirms(
     def _confirm_then_requeue(*args: Any, **kwargs: Any) -> bool:
         confirmed = real_wait(*args, **kwargs)
         store = load_dev_queue()
-        transition_task_status(store.tasks[0], QueueItemStatus.PENDING)
+        # Model a writer that has already won the ownership race; this is
+        # intentionally a direct persisted mutation, not a transition, so
+        # the post-stop ownership check remains covered independently of the
+        # stop-fence guard in transition_task_status.
+        store.tasks[0].usage_limit_act = None
+        store.tasks[0].status = QueueItemStatus.PENDING
         store.tasks[0].session_id = None
         save_dev_queue(store)
         return confirmed
