@@ -2556,6 +2556,7 @@ class TestPrepareReviewPassFindingDispositions:
             {
                 "client_name": "test",
                 "ticket_id": "T-1",
+                "created_at": task.created_at,
                 "dispositions": fresh,
             }
         ]

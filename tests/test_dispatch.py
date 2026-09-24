@@ -579,7 +579,7 @@ class TestConsumeCompletesTasks:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """Write a session.completed event with ticket_id; task becomes COMPLETED."""
+        """A session.completed event carrying session_id completes the task."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
         # Put a RUNNING task in the queue
@@ -587,6 +587,7 @@ class TestConsumeCompletesTasks:
             ticket_id="GEN-300",
             client="test-client",
             status=QueueItemStatus.RUNNING,
+            session_id="sess-300",
         )
         store = DevQueueStore(tasks=[task])
         save_dev_queue(store)
@@ -594,7 +595,7 @@ class TestConsumeCompletesTasks:
         # Write a session.completed event referencing the ticket
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
-            {"ticket_id": "GEN-300", "client": "test-client"},
+            {"ticket_id": "GEN-300", "session_id": "sess-300", "client": "test-client"},
         )
 
         # B2: no session/last_result -> Rule 6 -> BLOCKED_ON_USER
@@ -603,6 +604,35 @@ class TestConsumeCompletesTasks:
 
         updated_store = load_dev_queue()
         assert updated_store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_consume_skips_legacy_event_with_no_ticket_id_owning_client(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A genuinely legacy event (no session_id at all) is dropped rather
+        than matched by ticket_id alone (#2219) -- the single-row companion
+        to ``test_consume_skips_legacy_event_with_no_session_id_key`` below,
+        which covers the same shape against a duplicate-row queue.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-301",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-301", "client": "test-client"},
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
     def test_consume_ignores_events_without_ticket_id(
         self,
@@ -837,20 +867,22 @@ class TestConsumeCompletesTasks:
         assert completed == 1
         assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
-    def test_consume_falls_back_to_ticket_id_when_task_has_no_session_id(
+    def test_consume_skips_legacy_event_with_no_session_id_key(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """A genuinely legacy event (no session_id key at all) still matches
-        by ticket_id alone.
+        """A genuinely legacy event (no session_id key at all) is dropped,
+        not matched by ticket_id alone (#2219).
 
-        The ticket-id-only fallback is reserved for events that predate the
-        session_id field entirely -- distinct from GitHub #1692's raced-to-
-        terminal window, where the event DOES carry a session_id but the
-        task hasn't been stamped with one yet (see
-        test_consume_skips_session_tagged_event_against_unstamped_task).
+        A bare ticket-id-only fallback could complete the wrong duplicate
+        RUNNING row for this ticket_id -- the same hazard class #2219 closes
+        for every other locked RUNNING re-find in src/cw/. With no
+        session_id to disambiguate, the event is skipped and logged instead.
+        Distinct from GitHub #1692's raced-to-terminal window, where the
+        event DOES carry a session_id but the task hasn't been stamped with
+        one yet (see test_consume_skips_session_tagged_event_against_unstamped_task).
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
@@ -871,10 +903,9 @@ class TestConsumeCompletesTasks:
             },
         )
 
-        # B2: no session in state -> Rule 6 -> BLOCKED_ON_USER
         completed = consume_completed_sessions()
-        assert completed == 1
-        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
     def test_consume_skips_session_tagged_event_against_unstamped_task(
         self,
@@ -920,17 +951,63 @@ class TestConsumeCompletesTasks:
         assert completed == 0
         assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
-    def test_consume_falls_back_to_ticket_id_when_session_id_explicit_none(
+    def test_consume_duplicate_running_rows_only_session_id_matched_row_completes(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """An explicit ``"session_id": None`` is legacy, same as an absent key.
+        """Two RUNNING rows share one ticket_id (add-after-terminal plus
+        ``requeue --from-completed``, same reachability as every other
+        #2219 site); the event's own session_id must select the owning row,
+        not whichever RUNNING row for the ticket happens to be first.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
-        Round-2 binding: legacy detection is "key missing OR value is None",
-        not merely "key missing" -- a producer that always includes the key
-        but sometimes writes ``None`` must still hit the ticket-id fallback.
+        row_a = TicketTask(
+            ticket_id="GEN-DUP",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-a",
+        )
+        row_b = TicketTask(
+            ticket_id="GEN-DUP",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-b",
+        )
+        save_dev_queue(DevQueueStore(tasks=[row_a, row_b]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-DUP",
+                "session_id": "sess-b",
+                "client": "test-client",
+            },
+        )
+
+        # B2: no session "sess-b" in state -> Rule 6 -> BLOCKED_ON_USER
+        completed = consume_completed_sessions()
+        assert completed == 1
+        tasks_by_session = {t.session_id: t for t in load_dev_queue().tasks}
+        assert tasks_by_session["sess-b"].status == QueueItemStatus.BLOCKED_ON_USER
+        assert tasks_by_session["sess-a"].status == QueueItemStatus.RUNNING
+
+    def test_consume_skips_event_with_session_id_explicit_none(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """An explicit ``"session_id": None`` is legacy, same as an absent
+        key, and is likewise dropped rather than matched by ticket_id alone
+        (#2219).
+
+        Round-2 binding (unchanged): legacy detection is "key missing OR
+        value is None", not merely "key missing" -- a producer that always
+        includes the key but sometimes writes ``None`` must still hit the
+        no-identity skip path.
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
@@ -951,8 +1028,8 @@ class TestConsumeCompletesTasks:
         )
 
         completed = consume_completed_sessions()
-        assert completed == 1
-        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
     def test_consume_skips_event_with_empty_string_session_id(
         self,
@@ -1592,6 +1669,52 @@ class TestDispatchTickWithPlan:
 # ---------------------------------------------------------------------------
 
 
+def _seed_duplicate_running_rows(
+    sample_client_config: ClientConfig,
+    *,
+    status_a: QueueItemStatus = QueueItemStatus.RUNNING,
+    status_b: QueueItemStatus = QueueItemStatus.RUNNING,
+) -> tuple[Path, TicketTask, TicketTask]:
+    """Two rows for one (ticket_id, client), differing in ``created_at`` and
+    stage; the earlier row (A) sits first in the store.
+
+    Both default to RUNNING -- the duplicate-RUNNING state a bare
+    ``(ticket_id, client, RUNNING)`` first-match re-find cannot disambiguate
+    (#1286, #2219). *status_b* lets a test seed B as PENDING so a real claim
+    can move it to RUNNING beside an already-RUNNING A.
+
+    Returns ``(worktree, row_a, row_b)`` with a signed-off ``.cw/plan.md``
+    in the ticket's worktree so the plan-bypass predicate passes.
+    """
+    from cw.worktree import create_worktree
+    from tests.conftest import plan_body
+
+    branch = f"{sample_client_config.feature_branch_prefix}/GEN-DUP"
+    worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(parents=True, exist_ok=True)
+    (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
+
+    earlier = datetime(2026, 1, 1, tzinfo=UTC)
+    row_a = TicketTask(
+        ticket_id="GEN-DUP",
+        client="test-client",
+        status=status_a,
+        stage=Stage.REVIEW,
+        stage_high_water=Stage.REVIEW,
+        created_at=earlier,
+    )
+    row_b = TicketTask(
+        ticket_id="GEN-DUP",
+        client="test-client",
+        status=status_b,
+        stage=Stage.PLAN,
+        created_at=earlier + timedelta(days=1),
+    )
+    save_dev_queue(DevQueueStore(tasks=[row_a, row_b]))
+    return worktree, row_a, row_b
+
+
 class TestDispatchTickAutoBypassesApprovedPlan:
     """Claim-time auto-bypass PLAN->IMPL when a signed-off plan is already on
     disk (#1286). Closes the gap where every automatic re-entry at
@@ -2007,44 +2130,6 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         bypass_events = [p for _, p, cid in stage_changed if cid == "GEN-RACE"]
         assert bypass_events == []
 
-    @staticmethod
-    def _seed_duplicate_running_rows(
-        sample_client_config: ClientConfig,
-    ) -> tuple[Path, TicketTask, TicketTask]:
-        """Two RUNNING rows for one (ticket_id, client), differing in
-        ``created_at`` and stage; the earlier row (A) sits first in the store.
-
-        Returns ``(worktree, row_a, row_b)`` with a signed-off ``.cw/plan.md``
-        in the ticket's worktree so the bypass predicate passes.
-        """
-        from cw.worktree import create_worktree
-        from tests.conftest import plan_body
-
-        branch = f"{sample_client_config.feature_branch_prefix}/GEN-DUP"
-        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
-        cw_dir = worktree / ".cw"
-        cw_dir.mkdir(parents=True, exist_ok=True)
-        (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
-
-        earlier = datetime(2026, 1, 1, tzinfo=UTC)
-        row_a = TicketTask(
-            ticket_id="GEN-DUP",
-            client="test-client",
-            status=QueueItemStatus.RUNNING,
-            stage=Stage.REVIEW,
-            stage_high_water=Stage.REVIEW,
-            created_at=earlier,
-        )
-        row_b = TicketTask(
-            ticket_id="GEN-DUP",
-            client="test-client",
-            status=QueueItemStatus.RUNNING,
-            stage=Stage.PLAN,
-            created_at=earlier + timedelta(days=1),
-        )
-        save_dev_queue(DevQueueStore(tasks=[row_a, row_b]))
-        return worktree, row_a, row_b
-
     def test_plan_stage_bypass_advances_only_the_row_matching_created_at(
         self,
         tmp_dispatch_dirs: Path,
@@ -2062,7 +2147,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         import cw.dispatch.claim as claim_mod
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        worktree, row_a, row_b = self._seed_duplicate_running_rows(sample_client_config)
+        worktree, row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
         row_a_before = load_dev_queue().tasks[0].model_dump()
         stage_changed = capture_events(
             "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
@@ -2095,9 +2180,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         import cw.dispatch.claim as claim_mod
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        worktree, _row_a, row_b = self._seed_duplicate_running_rows(
-            sample_client_config
-        )
+        worktree, _row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
         before = [t.model_dump() for t in load_dev_queue().tasks]
         stage_changed = capture_events(
             "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
@@ -9475,6 +9558,7 @@ class TestParkRunningTaskExpectedSessionId:
             client_name="test-client",
             disposition="codex_review_orphaned_at_boot",
             breadcrumbs="orphan",
+            expected_session_id="sess-ran",
         )
 
         assert load_dev_queue().tasks[0].unproductive_attempts == 1
@@ -9485,14 +9569,13 @@ class TestParkRunningTaskExpectedSessionId:
         """#2114: the pre-spawn callers (dirty-worktree guard, codex capability
         gate) pass unproductive=False -- no session ever ran, and charging a
         park that re-derives on every claim ratchets it to attempt_cap_blocked."""
-        add_ticket(
-            TicketTask(
-                ticket_id="PARK-4",
-                client="test-client",
-                status=QueueItemStatus.RUNNING,
-                session_id="sess-never-spawned",
-            )
+        claimed = TicketTask(
+            ticket_id="PARK-4",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-never-spawned",
         )
+        add_ticket(claimed)
 
         _park_running_task_blocked_on_user(
             ticket_id="PARK-4",
@@ -9500,6 +9583,7 @@ class TestParkRunningTaskExpectedSessionId:
             disposition="dirty_worktree",
             breadcrumbs="/wt: 2 uncommitted path(s)",
             unproductive=False,
+            created_at=claimed.created_at,
         )
 
         task = load_dev_queue().tasks[0]
@@ -9537,30 +9621,52 @@ class TestParkRunningTaskExpectedSessionId:
         )
         assert events == []
 
-    def test_expected_session_id_omitted_preserves_pre_spawn_behavior(
+    def test_pre_spawn_callers_match_by_created_at(
         self, tmp_dispatch_dirs: Path
     ) -> None:
         """The two pre-spawn callers (dirty-worktree guard, codex capability
-        gate) pass no ``expected_session_id`` — park must proceed exactly as
-        it did before this parameter existed."""
-        add_ticket(
-            TicketTask(
-                ticket_id="PARK-3",
-                client="test-client",
-                status=QueueItemStatus.RUNNING,
-                session_id=None,
-            )
+        gate) pass ``created_at`` instead of ``expected_session_id`` (#2219):
+        no session_id is stamped yet, but the claimed row's ``created_at`` is
+        its fixed identity."""
+        claimed = TicketTask(
+            ticket_id="PARK-3",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=None,
         )
+        add_ticket(claimed)
 
         _park_running_task_blocked_on_user(
             ticket_id="PARK-3",
             client_name="test-client",
             disposition="dirty_worktree",
             breadcrumbs="/some/path",
+            created_at=claimed.created_at,
         )
 
         task = load_dev_queue().tasks[0]
         assert task.status is QueueItemStatus.BLOCKED_ON_USER
+
+    def test_no_identity_raises_value_error(self, tmp_dispatch_dirs: Path) -> None:
+        """Neither identity kwarg supplied (#2219): the helper refuses the
+        bare ``(ticket_id, client, RUNNING)`` match rather than silently
+        parking whichever row happens to come first."""
+        add_ticket(
+            TicketTask(
+                ticket_id="PARK-5",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id=None,
+            )
+        )
+
+        with pytest.raises(ValueError, match="2219"):
+            _park_running_task_blocked_on_user(
+                ticket_id="PARK-5",
+                client_name="test-client",
+                disposition="dirty_worktree",
+                breadcrumbs="/some/path",
+            )
 
 
 class TestRevertClaimedTaskExpectedSessionId:
@@ -9623,25 +9729,313 @@ class TestRevertClaimedTaskExpectedSessionId:
         assert task.session_id == "sess-new-successor"
         assert task.unproductive_attempts == 0
 
-    def test_expected_session_id_omitted_preserves_existing_behavior(
+    def test_spawn_failure_callers_match_by_created_at(
         self, tmp_dispatch_dirs: Path
     ) -> None:
-        """The five pre-existing callers pass no ``expected_session_id`` -- the
-        revert must match on (ticket_id, client, RUNNING) alone, as before."""
+        """The same-tick spawn-failure callers pass ``created_at`` instead of
+        ``expected_session_id`` (#2219): they revert their own just-claimed
+        row, whose ``created_at`` is its fixed identity."""
+        claimed = TicketTask(
+            ticket_id="REV-3",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-anything",
+        )
+        add_ticket(claimed)
+
+        assert (
+            _revert_claimed_task_to_pending(
+                "test-client", "REV-3", created_at=claimed.created_at
+            )
+            is True
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.PENDING
+        assert task.session_id is None
+
+    def test_no_identity_raises_value_error(self, tmp_dispatch_dirs: Path) -> None:
+        """Neither identity kwarg supplied (#2219): the helper refuses the
+        bare ``(ticket_id, client, RUNNING)`` match rather than silently
+        reverting whichever row happens to come first."""
         add_ticket(
             TicketTask(
-                ticket_id="REV-3",
+                ticket_id="REV-4",
                 client="test-client",
                 status=QueueItemStatus.RUNNING,
                 session_id="sess-anything",
             )
         )
 
-        assert _revert_claimed_task_to_pending("test-client", "REV-3") is True
+        with pytest.raises(ValueError, match="2219"):
+            _revert_claimed_task_to_pending("test-client", "REV-4")
 
-        task = load_dev_queue().tasks[0]
-        assert task.status is QueueItemStatus.PENDING
-        assert task.session_id is None
+
+class TestFindRunningRowRequiresIdentity:
+    """#2219: ``_find_running_row`` itself refuses a bare
+    ``(ticket_id, client_name, RUNNING)`` match -- every production caller
+    already supplies ``created_at`` or ``session_id``, so a silent fallback
+    to the bare match would only ever serve a caller that skipped
+    disambiguating a duplicate RUNNING row."""
+
+    def test_neither_identity_raises_value_error(self, tmp_dispatch_dirs: Path) -> None:
+        from cw.dispatch.claim import _find_running_row
+
+        add_ticket(
+            TicketTask(
+                ticket_id="FIND-1",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        store = load_dev_queue()
+
+        with pytest.raises(ValueError, match="2219"):
+            _find_running_row(store, "FIND-1", "test-client")
+
+
+# ---------------------------------------------------------------------------
+# #2219: duplicate RUNNING rows -- every locked re-find in claim.py matches the
+# caller's own row by identity, never the first (ticket_id, client, RUNNING)
+# ---------------------------------------------------------------------------
+
+
+def _rows_by_created_at() -> dict[datetime, TicketTask]:
+    return {t.created_at: t for t in load_dev_queue().tasks}
+
+
+class TestStampSpawnSuccessDuplicateRunning:
+    """#2219: ``_stamp_spawn_success`` stamps only the row matching the
+    spawned task's ``created_at``, not the first RUNNING row for the ticket.
+
+    Row A (earlier) precedes row B in the store; the spawn is for B. A bare
+    first-match would stamp B's session_id, counters and stage_base_ref onto
+    A -- a row doing unrelated work -- and leave B unattributed.
+    """
+
+    def test_only_the_created_at_matched_row_is_stamped(
+        self, tmp_dispatch_dirs: Path, sample_client_config: ClientConfig
+    ) -> None:
+        import cw.dispatch.claim as claim_mod
+
+        worktree, row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
+        row_a_before = _rows_by_created_at()[row_a.created_at].model_dump()
+
+        claim_mod._stamp_spawn_success(
+            row_b.model_copy(),
+            client_name="test-client",
+            session_id="sess-b",
+            worktree_path=worktree,
+        )
+
+        stored = _rows_by_created_at()
+        assert stored[row_a.created_at].model_dump() == row_a_before
+        assert stored[row_b.created_at].session_id == "sess-b"
+        assert stored[row_b.created_at].ever_spawned is True
+        assert stored[row_b.created_at].stage_base_ref
+
+    def test_single_running_row_is_stamped(
+        self, tmp_dispatch_dirs: Path, sample_client_config: ClientConfig
+    ) -> None:
+        import cw.dispatch.claim as claim_mod
+
+        worktree, _row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
+        save_dev_queue(DevQueueStore(tasks=[row_b]))
+
+        claim_mod._stamp_spawn_success(
+            row_b.model_copy(),
+            client_name="test-client",
+            session_id="sess-only",
+            worktree_path=worktree,
+        )
+
+        stored = load_dev_queue().tasks[0]
+        assert stored.session_id == "sess-only"
+        assert stored.ever_spawned is True
+
+    def test_no_row_matching_created_at_is_left_untouched(
+        self, tmp_dispatch_dirs: Path, sample_client_config: ClientConfig
+    ) -> None:
+        """A RUNNING row whose ``created_at`` differs is not the spawned row."""
+        import cw.dispatch.claim as claim_mod
+
+        worktree, _row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
+        before = [t.model_dump() for t in load_dev_queue().tasks]
+
+        claim_mod._stamp_spawn_success(
+            row_b.model_copy(update={"created_at": row_b.created_at + timedelta(1)}),
+            client_name="test-client",
+            session_id="sess-stranger",
+            worktree_path=worktree,
+        )
+
+        assert [t.model_dump() for t in load_dev_queue().tasks] == before
+
+
+class TestRevertClaimedTaskDuplicateRunning:
+    """#2219: ``_revert_claimed_task_to_pending`` reverts only the row whose
+    ``created_at`` the caller supplied, not the first RUNNING row."""
+
+    def test_only_the_created_at_matched_row_reverts(
+        self, tmp_dispatch_dirs: Path, sample_client_config: ClientConfig
+    ) -> None:
+        _worktree, row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
+        row_a_before = _rows_by_created_at()[row_a.created_at].model_dump()
+
+        reverted = _revert_claimed_task_to_pending(
+            "test-client", "GEN-DUP", stamp_backoff=True, created_at=row_b.created_at
+        )
+
+        assert reverted is True
+        stored = _rows_by_created_at()
+        assert stored[row_a.created_at].model_dump() == row_a_before
+        assert stored[row_b.created_at].status is QueueItemStatus.PENDING
+        assert stored[row_b.created_at].spawn_error_count == 1
+
+    def test_no_row_matching_created_at_reverts_nothing(
+        self, tmp_dispatch_dirs: Path, sample_client_config: ClientConfig
+    ) -> None:
+        _worktree, _row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
+        before = [t.model_dump() for t in load_dev_queue().tasks]
+
+        reverted = _revert_claimed_task_to_pending(
+            "test-client", "GEN-DUP", created_at=row_b.created_at + timedelta(1)
+        )
+
+        assert reverted is False
+        assert [t.model_dump() for t in load_dev_queue().tasks] == before
+
+    def test_spawn_error_handler_reverts_only_the_claimed_row(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End to end through ``_spawn_claimed_task``'s generic ``except
+        Exception`` handler (mirrors ``test_worktree_error_does_not_crash_loop``):
+        B is claimed beside an already-RUNNING A, the spawn fails, and only B
+        goes back to PENDING."""
+        from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _worktree, row_a, row_b = _seed_duplicate_running_rows(
+            sample_client_config, status_b=QueueItemStatus.PENDING
+        )
+        row_a_before = _rows_by_created_at()[row_a.created_at].model_dump()
+
+        def _boom(*_args: object, **_kwargs: object) -> Path:
+            msg = "git worktree add failed"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _boom)
+        task, _skipped = _claim_next_pending(
+            "test-client",
+            lane="default",
+            client=sample_client_config,
+            config=simple_config,
+        )
+        assert task is not None
+        assert task.created_at == row_b.created_at
+
+        outcome = _spawn_claimed_task(
+            task,
+            sample_client_config,
+            resolved_native_daemon=FakeNativeDaemonClient(),
+            parent=None,
+            emit=None,
+        )
+
+        assert outcome.spawn_error is True
+        stored = _rows_by_created_at()
+        assert stored[row_a.created_at].model_dump() == row_a_before
+        assert stored[row_b.created_at].status is QueueItemStatus.PENDING
+        assert stored[row_b.created_at].spawn_error_count == 1
+
+
+class TestParkPreSpawnDuplicateRunning:
+    """#2219: both pre-spawn park callers park only the claimed row, never a
+    RUNNING sibling for the same (ticket_id, client)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_capability_cache(self) -> None:
+        _reset_codex_capability_cache()
+
+    def test_codex_capability_gate_parks_only_the_claimed_row(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.executor import CODEX_NOT_FOUND, CodexCapabilityDiagnosis
+
+        monkeypatch.setattr(
+            "cw.dispatch.claim.codex_capability_diagnosis",
+            lambda **_kwargs: CodexCapabilityDiagnosis(
+                CODEX_NOT_FOUND, "codex binary not found on PATH"
+            ),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.claim.resolve_executor_config",
+            lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
+        )
+        _worktree, row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
+        row_a_before = _rows_by_created_at()[row_a.created_at].model_dump()
+
+        outcome = _codex_capability_gate(row_b.model_copy(), sample_client_config)
+
+        assert outcome is not None
+        assert outcome.capability_parked is True
+        stored = _rows_by_created_at()
+        assert stored[row_a.created_at].model_dump() == row_a_before
+        assert stored[row_b.created_at].status is QueueItemStatus.BLOCKED_ON_USER
+        assert stored[row_b.created_at].disposition == CODEX_NOT_FOUND
+
+    def test_dirty_worktree_guard_parks_only_the_claimed_row(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _worktree, row_a, row_b = _seed_duplicate_running_rows(
+            sample_client_config, status_b=QueueItemStatus.PENDING
+        )
+        row_a_before = _rows_by_created_at()[row_a.created_at].model_dump()
+
+        def _stale(*_args: object, **_kwargs: object) -> Path:
+            msg = "Refusing to reuse stale worktree"
+            raise StaleWorktreeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
+        monkeypatch.setattr(
+            "cw.dispatch.claim.unsaved_work_reason",
+            lambda _c, _b: "1 uncommitted path(s)",
+        )
+        task, _skipped = _claim_next_pending(
+            "test-client",
+            lane="default",
+            client=sample_client_config,
+            config=simple_config,
+        )
+        assert task is not None
+        assert task.created_at == row_b.created_at
+
+        _spawn_claimed_task(
+            task,
+            sample_client_config,
+            resolved_native_daemon=FakeNativeDaemonClient(),
+            parent=None,
+            emit=None,
+        )
+
+        stored = _rows_by_created_at()
+        assert stored[row_a.created_at].model_dump() == row_a_before
+        assert stored[row_b.created_at].status is QueueItemStatus.BLOCKED_ON_USER
+        assert stored[row_b.created_at].disposition == "dirty_worktree"
 
 
 # ---------------------------------------------------------------------------
