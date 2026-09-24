@@ -1652,6 +1652,37 @@ class TestBackgroundAllSessions:
         save_state(CwState())
         background_all_sessions()  # Should not raise
 
+    def test_background_all_sessions_resolves_by_id_not_name(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """#2237: two ACTIVE rows sharing a name are both backgrounded by id."""
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id=sid,
+                        name="test-client/impl",
+                        client="test-client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                    )
+                    for sid in ("dup00001", "dup00002")
+                ]
+            )
+        )
+
+        background_all_sessions()
+
+        assert [s.status for s in load_state().sessions] == [
+            SessionStatus.BACKGROUNDED,
+            SessionStatus.BACKGROUNDED,
+        ]
+        assert "Warning: could not background" not in capsys.readouterr().out
+
 
 # ---------------------------------------------------------------------------
 # Standalone tests

@@ -58,7 +58,7 @@ from cw.reconcile.codex_reparks import (
     run_codex_live_writer_reparks,
 )
 from tests._reconcile_helpers import _mk_headless_daemon_session
-from tests.conftest import commit_tracked_file, git_in
+from tests.conftest import _write_backend_clients_yaml, commit_tracked_file, git_in
 from tests.test_reconcile_codex_boot import (
     _STARTED_AT,
     _completed_events,
@@ -68,7 +68,6 @@ from tests.test_reconcile_codex_boot import (
     _no_codex_process,
     _requeued_events,
     _seed_clean_codex_orphan,
-    _write_clients_yaml,
 )
 
 if TYPE_CHECKING:
@@ -602,7 +601,7 @@ def _seed_two_client_parks(
     """
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    _write_clients_yaml(
+    _write_backend_clients_yaml(
         tmp_config_dir,
         workspace,
         "codex",

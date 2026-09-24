@@ -311,6 +311,37 @@ set, no `--model` flag is emitted and the worker inherits the operator default.
 the stage-resolved model. The autonomous pipeline routes through
 `executor.spawn` and is unaffected. See #626 follow-ons.
 
+### Lane Pipeline Stage-List Override (#2216)
+
+A lane's `pipeline.stages` list is a **wholesale replacement**, not a merge —
+2-level precedence, unlike the 4-level `executors[stage].model` precedence
+above:
+
+- **Lane stage list** — `lanes[].pipeline.stages`, when the lane declares a
+  `pipeline` block with a non-default `stages` list.
+- **Client stage list** — `pipeline.stages` (default
+  `[plan, impl, review, finalize]`).
+
+There is no partial merge: a lane declaring `stages` replaces the client's
+list entirely rather than adding to or overriding individual entries.
+
+This resolution (`resolve_pipeline_stages`) now governs **every** stage
+operation for a ticket in that lane, not just per-stage executor/model
+selection — `add`, `approve`, `requeue`, dispatch's next-stage routing, and
+sentinel stage-position classification (the walk that decides whether a
+worker's reported stage is earlier/same/later than the task's own stage) all
+resolve through the lane's pipeline before falling back to the client
+default. `dispatch/claim.py`'s existing IMPL auto-bypass gate and claim path
+already resolved this way (#1286); this ticket closed the remaining lane-blind
+call sites.
+
+**Consequence:** a lane whose `pipeline.stages` omits or reorders a stage
+makes that stage unreachable or inadmissible via any of the above for
+tickets in that lane, even when the client's own default pipeline includes
+it. `approve` and `requeue` refuse with a `CwError` naming the lane and its
+resolved stages when a target stage isn't in that resolved list — they never
+silently fall back to the client default.
+
 ### Recommended Per-Stage Defaults
 
 Recommended models per stage:
@@ -1112,6 +1143,7 @@ operator_channel_forward:
     - session.liveness_changed
     - operator.escalation
     - gate.auto_approved        # RFC 0009 — a gate recipe approved with no human review
+    - ticket.approval_failed    # #2337 — correction for an approval whose queue mutation did not remain durable
     - gate.auto_approve_failed
     - gate.auto_approve_held    # RFC 0011 A3 — a finalize hold declined an auto-approval
     - pr.action_taken           # RFC 0010 — a review recipe acted on a PR

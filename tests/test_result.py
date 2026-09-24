@@ -13,7 +13,7 @@ from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.cli import main
 from cw.config import load_state, save_state, sessions_lock
 from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
-from cw.models import LastResultSource, Session, SessionPurpose
+from cw.models import CwState, LastResultSource, Session, SessionPurpose
 from cw.result import (
     EmitOutcome,
     emit_result,
@@ -594,6 +594,33 @@ class TestResultEmit:
 
         sess = next(s for s in load_state().sessions if s.id == "test1234")
         assert sess.last_result is None
+
+    def test_result_emit_ambiguous_session_id_reports_candidates(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#2237: an ambiguous --session-id name lists candidates, writes nothing."""
+        name = "acme/auto-dev/GEN-1234"
+        save_state(
+            CwState(
+                sessions=[
+                    _in_memory_session(id=sid, name=name)
+                    for sid in ("ambig001", "ambig002")
+                ]
+            )
+        )
+
+        result = CliRunner().invoke(
+            main,
+            ["result", "emit", "-", "--session-id", name],
+            input=json.dumps(_valid_payload()),
+        )
+
+        assert result.exit_code == 1
+        assert "ambig001" in result.output
+        assert "ambig002" in result.output
+        assert "pass an id to choose" in result.output
+        assert "No session state was modified." in result.output
+        assert all(s.last_result is None for s in load_state().sessions)
 
     def test_missing_cw_context_is_loud_error(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

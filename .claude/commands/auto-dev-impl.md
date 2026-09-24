@@ -228,7 +228,7 @@ number and this table's minimum in the same commit.
 | Script | Minimum `cw-script-version` | Call site |
 |---|---|---|
 | `check_not_main_checkout.py` | 1 | `auto-dev-impl.md` Pre-mutation guard |
-| `check_plan_scope_conformance.py` | 1 | `auto-dev-impl.md` Step 2.5 gate 2 |
+| `check_plan_scope_conformance.py` | 2 | `auto-dev-impl.md` Step 2.5 gate 2 |
 | `check_impl_guard_staleness.py` | 1 | `auto-dev-impl-appendix.md` Pre-Stage Detector Guard |
 | `classify_merge_conflict.py` | 1 | `auto-dev-finalize.md` Step 4c.5 |
 
@@ -427,7 +427,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    fi
    FORK_POINT=$(git -C "$TMPWT" merge-base origin/main origin/<branch-name>) || {
      echo "IMPL_FAILED: Step 2.5 gate 2: merge-base failed"; exit 3; }
-   MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+   MIN_VERSION=2  # per the script version table in auto-dev-impl.md
    TOUCHED=$(git -C "$TMPWT" diff --name-only "$FORK_POINT") || {
      echo "IMPL_FAILED: Step 2.5 gate 2: git diff --name-only failed"; exit 3; }
    printf '%s\n' "$TOUCHED" | sort > "/tmp/touched_files-$CW_SESSION"
@@ -472,8 +472,25 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
        echo "IMPL_FAILED: Step 2.5 gate 2: $SESSION_WT/.cw/plan.md not found"
        exit 3
      fi
+     # Operator scope-drift approval (#2337): `cw dev-queue approve --scope-drift`
+     # threads it into this session's queue_metadata. Applied only while the
+     # head it was bound to is still an ancestor of the pushed branch.
+     APPROVED_ARGS=()
+     CTX_FILE="$SESSION_WT/.claude/cw-context.json"
+     APPROVED_HEAD=$(jq -r '.queue_metadata.scope_drift_approved_head // empty' "$CTX_FILE" 2>/dev/null)
+     APPROVED_FILES=$(jq -r '.queue_metadata.scope_drift_approved_extra_files // empty | .[]' "$CTX_FILE" 2>/dev/null)
+     if [ -n "$APPROVED_HEAD" ] && [ -n "$APPROVED_FILES" ]; then
+       if [[ "$APPROVED_HEAD" =~ ^[0-9a-f]{40,64}$ ]] && \
+          git -C "$TMPWT" merge-base --is-ancestor "$APPROVED_HEAD" "origin/<branch-name>" 2>/dev/null; then
+         printf '%s\n' "$APPROVED_FILES" > "/tmp/approved-extra-$CW_SESSION"
+         APPROVED_ARGS=(--approved-extra-files "/tmp/approved-extra-$CW_SESSION")
+       else
+         echo "scope_drift_approval_stale: approved head $APPROVED_HEAD not an ancestor of origin/<branch-name> — approval not applied"
+       fi
+     fi
      SCOPE_CONFORMANCE_OUTPUT=$(uv run python "$RESOLVED" \
-       --plan "$SESSION_WT/.cw/plan.md" --touched-files "/tmp/touched_files-$CW_SESSION")
+       --plan "$SESSION_WT/.cw/plan.md" --touched-files "/tmp/touched_files-$CW_SESSION" \
+       "${APPROVED_ARGS[@]}")
      SCOPE_CONFORMANCE_EXIT=$?
    fi
    ```
@@ -487,13 +504,15 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
 
    **Script absent from both locations** (no repo-local copy, no global install): log `"check_plan_scope_conformance: script absent, skipped"` in `friction_highlights` and continue to gate 3 — non-blocking. This is the honest label for a condition that previously fell through to the appendix's generic exit-2 "parse error" branch by accident (a missing file also exits 2). It is NOT the tooling-failure disposition (`impl_scope_conformance_unparsed` / `impl_failed`), which stays unchanged and applies only to a script that actually ran.
 
-   **Candidate found but its marker is missing or below minimum:** do NOT run it, and do NOT take the skip-and-continue path above — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — check_plan_scope_conformance.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP.
+   **Candidate found but its marker is missing or below minimum:** do NOT run it, and do NOT take the skip-and-continue path above — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — check_plan_scope_conformance.py at <resolved-path> — missing/stale cw-script-version marker (need >= 2)"`, and STOP.
 
    **Session worktree not locatable** (or, once a current script has resolved, `$SESSION_WT/.cw/plan.md` is missing): EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — cannot locate cw session worktree for <branch-name>"`, and STOP.
 
    **Gate worktree missing / merge-base failed / touched-file diff failed:** EXIT `blocked` with `blocker.reason: "impl_failed"` and STOP. The `git diff --name-only` extraction is in this class deliberately: its status is captured into `$TOUCHED` rather than piped into `sort`, because a pipeline reports only its *last* command's status — a failed diff would leave `sort` at 0, write an empty touched-file list, and let the file-set gate pass against zero delivered files. An empty list is never evidence of conformance; it is evidence the extraction did not run.
 
-   The script compares the delivered file set against the plan's `## Files Modified` enumeration and allows `max(SCOPE_DRIFT_ABS_FLOOR, round(plan_files * (SCOPE_DRIFT_RATIO - 1)))` unplanned files (v1: floor 5, ratio 1.5; per-repo override via `[tool.cw.scope_conformance]` in `pyproject.toml`). It prints a JSON verdict — `triggered`, `extra_files`, `allowed_extra`, `plan_file_count`, `delivered_file_count` — to stdout, captured above in `$SCOPE_CONFORMANCE_OUTPUT`.
+   The script compares the delivered file set against the plan's `## Files Modified` enumeration and allows `max(SCOPE_DRIFT_ABS_FLOOR, round(plan_files * (SCOPE_DRIFT_RATIO - 1)))` unplanned files (v1: floor 5, ratio 1.5; per-repo override via `[tool.cw.scope_conformance]` in `pyproject.toml`). It prints a JSON verdict — `triggered`, `extra_files`, `allowed_extra`, `plan_file_count`, `delivered_file_count`, `approved_extra_files` — to stdout, captured above in `$SCOPE_CONFORMANCE_OUTPUT`.
+
+   **Operator scope-drift approval (#2337).** When a prior round parked at `plan_scope_drift` and the operator granted the growth with `cw dev-queue approve <ticket> --scope-drift <paths>`, this session's `.claude/cw-context.json` carries `queue_metadata.scope_drift_approved_extra_files` and `queue_metadata.scope_drift_approved_head`. The fence passes the paths to the script as `--approved-extra-files`, an allowlist removed from `extra_files` (it never raises `allowed_extra`), and the verdict echoes the ones the diff touched as `approved_extra_files`. The binding is **ancestry, not equality**: the approval holds while `git merge-base --is-ancestor <approved-head> origin/<branch-name>` succeeds, because the operator approves at one round's head and this session may legitimately add commits on top before gate 2 runs, so exact-SHA equality would void every approval the moment work resumed. A force-push or history rewrite drops the approved head out of the branch's ancestry, and the approval is not applied. The fence then prints `scope_drift_approval_stale: approved head <sha> not an ancestor of origin/<branch-name> — approval not applied`; record that line in `friction_highlights` and continue with the ordinary disposition below. The gate blocks again rather than trusting a stale approval.
 
    Disposition by exit code: **exit 0 with an empty `extra_files`** — the
    delivered file set matches the plan's enumeration — is the common path;

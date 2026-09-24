@@ -152,6 +152,11 @@ DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON: Literal[
 # Deliberately absent from FINALIZE_REGRESS_BLOCKER_REASONS -- see that
 # constant's docstring. See GitHub #2320.
 EXTERNAL_STATE_BLOCKER_REASON: Literal["external_state_block"] = "external_state_block"
+# blocker.reason emitted by Step 2.5 gate 2 (check_plan_scope_conformance.py)
+# when the delivered diff outgrew the plan's file enumeration (#1779). Named so
+# `cw dev-queue approve --scope-drift` can gate on it: that path applies only
+# to a row parked with exactly this blocked_reason (#2337).
+PLAN_SCOPE_DRIFT_BLOCKER_REASON: Literal["plan_scope_drift"] = "plan_scope_drift"
 # Prefix reserving the explicit freeform half of the open enum (#2097). A
 # reason starting with it is *declared* experimental/producer-local, so it is
 # never warned about even though it is absent from KNOWN_BLOCKER_REASONS.
@@ -174,7 +179,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "review_blocked",
             "plan_deviation",
             "review_operator_actionable",
-            "plan_scope_drift",
+            PLAN_SCOPE_DRIFT_BLOCKER_REASON,
             "plan_unreviewable",
             "plan_unsound",
             "ambiguity_scan_unconverged",

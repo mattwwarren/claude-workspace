@@ -23,7 +23,11 @@ working unchanged.
 
 from __future__ import annotations
 
-from cw.dev_queue.approval import _approve_ticket_locked, approve_ticket
+from cw.dev_queue.approval import (
+    _approve_ticket_locked,
+    approve_scope_drift_ticket,
+    approve_ticket,
+)
 from cw.dev_queue.attention import task_attention_state
 from cw.dev_queue.crud import (
     DEFAULT_PRUNE_OLDER_THAN_DAYS,
@@ -136,6 +140,7 @@ __all__ = [
     "_stamp_salvage_stage",
     "_tracker_allows_github_fetch",
     "add_ticket",
+    "approve_scope_drift_ticket",
     "approve_ticket",
     "cancel_task_for_session",
     "cancel_ticket",

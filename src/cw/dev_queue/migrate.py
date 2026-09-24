@@ -276,11 +276,11 @@ def _fill_codex_orphan_link_default(task_raw: dict[str, Any]) -> None:
 
 
 def _fill_usage_limit_act_default(task_raw: dict[str, Any]) -> None:
-    """Fill usage_limit_act introduced in dev-queue schema v40 (GitHub #2324).
+    """Fill usage_limit_act introduced in dev-queue schema v41 (GitHub #2324).
     Idempotent, and additive by construction: an intent already on the row is
     never reset, since it is the only record of an act in flight.
 
-    None on every pre-v40 row: no act could have been in flight under a
+    None on every pre-v41 row: no act could have been in flight under a
     schema without the field.
     """
     if "usage_limit_act" not in task_raw:

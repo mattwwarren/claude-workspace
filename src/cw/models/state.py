@@ -1,13 +1,16 @@
 """Top-level persisted state model: CwState.
 
 Depends on ``cw.models.enums`` and ``cw.models.session`` — the DAG leaf. See
-``cw.models.__init__`` for the full ordering.
+``cw.models.__init__`` for the full ordering. Also imports
+``cw.exceptions``, which reaches back into ``cw.models`` only under
+``TYPE_CHECKING``, so no runtime cycle.
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from cw.exceptions import AmbiguousSessionIdentifierError
 from cw.models.enums import SessionStatus
 from cw.models.session import Session
 
@@ -62,9 +65,24 @@ class CwState(BaseModel):
             return None
         return max(matches, key=lambda s: s.started_at)
 
+    # A new caller (direct or indirect) must be captured by
+    # tests/test_ambiguous_session_lookup_guard.py's exhaustive AST-scan
+    # allowlist -- the test fails until the new call site is classified as
+    # id-only or user-name-reachable.
     def find_by_name_or_id(self, identifier: str) -> Session | None:
-        """Find a session by name (client/purpose) or ID."""
+        """Find a session by ID or by name (client/label).
+
+        An id is unique, so an id match resolves immediately. A name repeats
+        across retries by design; when it matches more than one session this
+        raises :class:`~cw.exceptions.AmbiguousSessionIdentifierError` listing
+        every candidate instead of silently picking one (#2237).
+        """
+        name_matches: list[Session] = []
         for s in reversed(self.sessions):
-            if identifier in (s.name, s.id):
+            if s.id == identifier:
                 return s
-        return None
+            if s.name == identifier:
+                name_matches.append(s)
+        if len(name_matches) > 1:
+            raise AmbiguousSessionIdentifierError(identifier, name_matches)
+        return name_matches[0] if name_matches else None

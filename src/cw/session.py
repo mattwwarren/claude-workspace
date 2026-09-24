@@ -359,7 +359,7 @@ def background_all_sessions(
     click.echo(f"Backgrounding {len(active)} active session(s)...")
     for session in active:
         try:
-            background_session(session.name, notify=notify, auto=auto)
+            background_session(session.id, notify=notify, auto=auto)
         except CwError as exc:
             click.echo(f"Warning: could not background {session.name}: {exc}")
 

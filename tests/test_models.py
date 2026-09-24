@@ -394,9 +394,9 @@ class TestCwState:
         result = sample_state.find_by_name_or_id("nonexistent")
         assert result is None
 
-    def test_find_by_name_or_id_reverse_order(self) -> None:
-        """Most recent session with matching name should be returned."""
-        state = CwState(
+    @staticmethod
+    def _same_named_state() -> CwState:
+        return CwState(
             sessions=[
                 Session(
                     id="first",
@@ -414,9 +414,26 @@ class TestCwState:
                 ),
             ]
         )
-        result = state.find_by_name_or_id("c/impl")
-        assert result is not None
-        assert result.id == "second"
+
+    def test_find_by_name_or_id_ambiguous_name_raises(self) -> None:
+        """#2237: a name shared by several sessions raises, listing every id."""
+        from cw.exceptions import AmbiguousSessionIdentifierError
+
+        state = self._same_named_state()
+        with pytest.raises(AmbiguousSessionIdentifierError) as excinfo:
+            state.find_by_name_or_id("c/impl")
+        message = str(excinfo.value)
+        assert "first" in message
+        assert "second" in message
+        assert {s.id for s in excinfo.value.candidates} == {"first", "second"}
+
+    def test_find_by_name_or_id_ambiguous_name_id_still_resolves(self) -> None:
+        """An id is unique by construction, so it resolves despite the shared name."""
+        state = self._same_named_state()
+        for sid in ("first", "second"):
+            result = state.find_by_name_or_id(sid)
+            assert result is not None
+            assert result.id == sid
 
     def test_idled_sessions_filter(self) -> None:
         state = CwState(
@@ -1125,7 +1142,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 40
+        assert DEV_QUEUE_SCHEMA_VERSION == 41
 
     def test_ticket_task_old_row_without_codex_orphan_fields_defaults_none(
         self,
@@ -1676,6 +1693,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.SESSION_LIVENESS_CHANGED,
                 OrchestratorEventType.OPERATOR_ESCALATION,
                 OrchestratorEventType.GATE_AUTO_APPROVED,
+                OrchestratorEventType.TICKET_APPROVAL_FAILED,
                 OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
                 OrchestratorEventType.GATE_AUTO_APPROVE_HELD,
                 OrchestratorEventType.PR_ACTION_TAKEN,
@@ -2121,7 +2139,8 @@ class TestPackageExportCompleteness:
     ``occupies_lane_slot`` = 55, plus #2102's two ``PLAN_*_FINGERPRINT_KEY``
     wire keys = 57, plus #2135's ``PARK_ON_ABANDONED_EXIT_KEY``,
     ``PARK_COMMENT_MARKER_KEY``, ``ParkCommentMarker`` and
-    ``read_park_comment_marker`` = 61) — hardcoded here, NOT
+    ``read_park_comment_marker`` = 61, plus #2337's two scope-drift wire keys
+    = 63) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2175,6 +2194,8 @@ class TestPackageExportCompleteness:
             "ParkCommentMarker",
             "PLAN_APPROVED_FINGERPRINT_KEY",
             "PLAN_DRAFT_FINGERPRINT_KEY",
+            "SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY",
+            "SCOPE_DRIFT_APPROVED_HEAD_KEY",
             "PendingFixDispatch",
             "PrState",
             "QueueItemStatus",
@@ -2450,3 +2471,50 @@ class TestParkCommentMarker:
             )
 
         assert f"{sorted([PARK_ON_ABANDONED_EXIT_KEY])}" in str(excinfo.value)
+
+
+class TestScopeDriftApprovalFields:
+    """v40 (#2337): the operator's plan_scope_drift approval on the row."""
+
+    def test_fields_default_none(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme")
+        assert task.scope_drift_approved_extra_files is None
+        assert task.scope_drift_approved_head is None
+
+    def test_fields_round_trip_through_json(self) -> None:
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            scope_drift_approved_extra_files=["a.py", "b.py"],
+            scope_drift_approved_head="0123abcd" * 5,
+        )
+        restored = TicketTask.model_validate_json(task.model_dump_json())
+        assert restored.scope_drift_approved_extra_files == ["a.py", "b.py"]
+        assert restored.scope_drift_approved_head == "0123abcd" * 5
+
+    def test_previous_schema_version_row_loads_with_fields_defaulted(self) -> None:
+        """A row persisted one schema version back carries neither key, and
+        loads under the current version with both default-filled to None. No
+        migration filler exists for them (same precedent as v13/v38)."""
+        from cw.dev_queue.migrate import migrate_dev_queue
+
+        previous_version = DEV_QUEUE_SCHEMA_VERSION - 1
+        raw: dict[str, object] = {
+            "schema_version": previous_version,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-2337",
+                    "client": "acme",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "stage": "impl",
+                    "blocked_reason": "plan_scope_drift",
+                }
+            ],
+        }
+        store = DevQueueStore.model_validate(migrate_dev_queue(raw))
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
+        task = store.tasks[0]
+        assert task.blocked_reason == "plan_scope_drift"
+        assert task.scope_drift_approved_extra_files is None
+        assert task.scope_drift_approved_head is None

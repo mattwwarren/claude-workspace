@@ -182,12 +182,20 @@ from cw.review_finding_dispositions import FindingDisposition
 #      describe the current park episode, so both follow the v30
 #      unconditional-clear-on-every-transition convention. Backfilled to None
 #      on every pre-v39 row: an unlinked park is exactly today's behavior.
-# v40: added TicketTask.usage_limit_act (GitHub #2324) — the write-ahead
+# v40: added TicketTask.scope_drift_approved_extra_files +
+#      scope_drift_approved_head (GitHub #2337) — the operator's
+#      `cw dev-queue approve --scope-drift` grant for a row parked with
+#      blocked_reason plan_scope_drift, bound to the branch head it was given
+#      for (the #2102 plan_approved_fingerprint shape). Both ``| None`` with a
+#      ``None`` default, so no migration filler is needed (same as v13/v38).
+# v41: added TicketTask.usage_limit_act (GitHub #2324) — the write-ahead
 #      intent of reconcile's mid-turn usage-limit act. Written once, as the
 #      act's only deciding write; every later tick resumes the act from it
 #      until the row's final transition clears it. Backfilled to None on every
-#      pre-v40 row: no act was in flight under the older schema.
-DEV_QUEUE_SCHEMA_VERSION = 40
+#      pre-v41 row: no act was in flight under the older schema. Renumbered
+#      from v40 to v41 during a main-sync merge: #2337 independently landed
+#      on main claiming v40 for a different field pair first.
+DEV_QUEUE_SCHEMA_VERSION = 41
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -356,6 +364,8 @@ class UsageLimitAct(BaseModel):
 # instead of silently severing the transport.
 PLAN_DRAFT_FINGERPRINT_KEY = "plan_draft_fingerprint"
 PLAN_APPROVED_FINGERPRINT_KEY = "plan_approved_fingerprint"
+SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY = "scope_drift_approved_extra_files"
+SCOPE_DRIFT_APPROVED_HEAD_KEY = "scope_drift_approved_head"
 
 # The single recognised key of the per-lane / per-ticket
 # ``park_on_abandoned_exit`` maps (#2135). Defined HERE, not in
@@ -518,6 +528,26 @@ class TicketTask(BaseModel):
     # fingerprint, or no draft existed at approval time. Checkpoint 1 treats
     # that as absent evidence, not as a wildcard match.
     plan_approved_fingerprint: str | None = None
+    # The operator's plan_scope_drift grant (v40, #2337): the sorted, deduped
+    # repo-relative paths `cw dev-queue approve --scope-drift` allowed beyond
+    # the plan's Files Modified. Stamped by dev_queue/approval.py's
+    # _approve_scope_drift_locked, only on a row parked at IMPL with
+    # blocked_reason plan_scope_drift; threaded into the worker's
+    # cw-context.json queue_metadata at spawn (spawn.py), where Step 2.5 gate 2
+    # passes it to check_plan_scope_conformance.py as an allowlist.
+    #
+    # Unlike plan_approved_at above, a per-arrival marker, not a durable fact:
+    # cleared unconditionally by the next spawn (dispatch/claim.py's
+    # spawn-success block, beside regressed_into_stage), because the grant is
+    # for exactly the IMPL session the approval requeues and must never leak
+    # into a later stage entry or a later round's drift. None = no grant.
+    scope_drift_approved_extra_files: list[str] | None = None
+    # The branch's origin HEAD SHA when the grant above was given — its binding,
+    # in the role plan_approved_fingerprint plays for plan_approved_at. Gate 2
+    # honors the grant only while this SHA is an ancestor of origin/<branch>
+    # (more commits on top are fine; a force-push or rewrite voids it). Same
+    # stamp and clear seams as scope_drift_approved_extra_files, never its own.
+    scope_drift_approved_head: str | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.
     # Kept only so persisted dev-queue rows that carry the field keep loading.

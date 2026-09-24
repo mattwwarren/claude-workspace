@@ -33,6 +33,8 @@ from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     MONITOR_TOOL_NAME,
     PLAN_APPROVED_FINGERPRINT_KEY,
+    SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
+    SCOPE_DRIFT_APPROVED_HEAD_KEY,
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
     Session,
@@ -91,7 +93,13 @@ _log = logging.getLogger(__name__)
 #     draft it is about to auto-skip; without it, v7's timestamp proves only
 #     that some approval happened, so a draft edited after approval resumed
 #     straight past the Large-scope carve-out.)
-CW_CONTEXT_SCHEMA_VERSION = 8
+# v9: added `queue_metadata.scope_drift_approved_extra_files` and
+#     `queue_metadata.scope_drift_approved_head` (dev-queue schema v40 —
+#     GitHub #2337 — the operator's `cw dev-queue approve --scope-drift` grant,
+#     as a path list and a commit SHA, or nulls. Step 2.5 gate 2 passes the
+#     paths to check_plan_scope_conformance.py as an allowlist while the SHA is
+#     still an ancestor of origin/<branch>.)
+CW_CONTEXT_SCHEMA_VERSION = 9
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -645,6 +653,12 @@ def _write_hook_context(
                     # Checkpoint 1 requires it to equal the resumed draft's own
                     # fingerprint before the approval counts as evidence.
                     PLAN_APPROVED_FINGERPRINT_KEY: task.plan_approved_fingerprint,
+                    # v9 (#2337): the operator's plan_scope_drift grant and the
+                    # branch head it is bound to, read by Step 2.5 gate 2.
+                    SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY: (
+                        task.scope_drift_approved_extra_files
+                    ),
+                    SCOPE_DRIFT_APPROVED_HEAD_KEY: task.scope_drift_approved_head,
                 },
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,
