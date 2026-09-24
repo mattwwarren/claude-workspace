@@ -761,6 +761,45 @@ class TestConsumeCompletesTasks:
         assert completed == 0
         assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
+    def test_consume_skips_usage_limited_mid_turn_events(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """The mid-turn usage-limit sweep's session.completed is reconcile-owned.
+
+        It is recorded before the sweep requeues the row, and a requeue
+        interrupted after the close is finished by reconcile on a later tick
+        (#2324). Routing it here would park the still-RUNNING row with no
+        sentinel -- and charge an attempt -- before reconcile can finish it.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-2324",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="limited-session",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "session_id": "limited-session",
+                "session_name": "test-client/auto-dev/GEN-2324",
+                "client": "test-client",
+                "ticket_id": "GEN-2324",
+                "crashed": False,
+                "reason": "usage_limited_mid_turn",
+            },
+        )
+
+        assert consume_completed_sessions() == 0
+        stored = load_dev_queue().tasks[0]
+        assert stored.status == QueueItemStatus.RUNNING
+        assert stored.unproductive_attempts == task.unproductive_attempts
+
     def test_consume_rejects_event_with_mismatched_session_id(
         self,
         tmp_dispatch_dirs: Path,
@@ -6909,7 +6948,7 @@ class TestUsageLimitResetThreading:
     def test_resolve_usage_limited_until(
         self, offset_seconds: int | None, aware: bool, expect_reset: bool
     ) -> None:
-        from cw.dispatch.loop import _resolve_usage_limited_until
+        from cw.dispatch_state import resolve_usage_limited_until
 
         now = datetime.now(UTC)
         backoff_seconds = 3600
@@ -6919,7 +6958,7 @@ class TestUsageLimitResetThreading:
             if not aware:
                 reset_at = reset_at.replace(tzinfo=None)
 
-        result = _resolve_usage_limited_until(now, reset_at, backoff_seconds)
+        result = resolve_usage_limited_until(now, reset_at, backoff_seconds)
 
         if expect_reset:
             assert result == reset_at
@@ -16472,6 +16511,8 @@ class TestSpawnErrorBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """A task with next_eligible_at in the future is not claimed."""
+        # Also the release gate for a #2324 mid-turn usage-limit park under
+        # reap_policy: auto, which sets next_eligible_at to the parsed reset.
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         # Pre-seed task with active backoff
         task = TicketTask(

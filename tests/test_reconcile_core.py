@@ -7,6 +7,7 @@ import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,7 +18,7 @@ from cw.config import (
     sessions_lock,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.events import read_events
+from cw.events import read_events, record_event
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -27,13 +28,17 @@ from cw.models import (
     OrchestratorEventType,
     PrState,
     QueueItemStatus,
+    ReapReason,
     Session,
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
     TicketTask,
+    UsageLimitAct,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
+    ReconcileReport,
     _verify_supervisor_session_id,
     reconcile,
     revert_timed_out_tasks,
@@ -382,6 +387,70 @@ def test_reconcile_usage_limited_true_from_phantom_path(
 
     assert report.usage_limited is True
     assert "phantom-ul-reconcile" in report.reverted_ticket_ids
+
+
+def test_reconcile_usage_limited_false_from_incomplete_phantom_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed tail cannot provide positive phantom usage-limit evidence."""
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-phantom-ul-incomplete"
+    surface_ref = "dead-ul-i"
+    sess = _mk_phantom_daemon_session(
+        "phantom-ul-incomplete",
+        started_at,
+        surface_ref=surface_ref,
+        worktree_path=worktree,
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="phantom-ul-incomplete",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="phantom-ul-incomplete",
+                )
+            ]
+        )
+    )
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _ul_record(
+                "You've hit your session limit · resets 3:40am",
+                "2026-01-01T00:00:20+00:00",
+            )
+        ],
+        filename=f"{surface_ref}-incomplete.jsonl",
+    )
+    transcript.write_text(transcript.read_text() + "{ malformed json\n")
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+
+    report = reconcile()
+
+    assert report.usage_limited is False
 
 
 def _setup_stalled_ul_session(
@@ -1310,3 +1379,287 @@ def test_stamp_advisory_respects_the_spawn_grace_window(tmp_config_dir: Path) ->
     # Past it: the same absence now is.
     later = now + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
     assert _advisory_sweep(state, set(), now=later)["T-fresh"] is not None
+
+
+# ---------------------------------------------------------------------------
+# #2324: mid-turn usage-limit sweep wiring
+# ---------------------------------------------------------------------------
+
+_MID_TURN_SURFACE = "live2324"
+# Real layout: the roster reports the full id and the transcript is named by it;
+# reconcile backfills it as claude_session_id, which locate_transcript then uses.
+_MID_TURN_FULL_ID = _MID_TURN_SURFACE + "-0000-4000-8000-000000000000"
+_MID_TURN_TICKET = "mid-2324"
+_PHANTOM_TICKET = "ph-2324"
+
+
+def _seed_mid_turn_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    config: OrchestratorConfig,
+    with_phantom: bool,
+) -> None:
+    """One roster-present worker stopped on a usage limit, plus an optional phantom."""
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", lambda: config)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": _MID_TURN_FULL_ID}],
+    )
+
+    started_at = datetime.now(UTC) - timedelta(hours=1)
+    worktree = tmp_path / "wt-mid-2324"
+    sessions = [
+        _mk_headless_daemon_session(
+            _MID_TURN_TICKET, worktree, started_at, surface_ref=_MID_TURN_SURFACE
+        )
+    ]
+    tasks = [
+        _make_ticket_task(
+            ticket_id=_MID_TURN_TICKET,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=_MID_TURN_TICKET,
+        )
+    ]
+    if with_phantom:
+        sessions.append(_mk_phantom_daemon_session(_PHANTOM_TICKET, started_at))
+        tasks.append(
+            _make_ticket_task(
+                ticket_id=_PHANTOM_TICKET,
+                client="client-a",
+                status=QueueItemStatus.RUNNING,
+                session_id=_PHANTOM_TICKET,
+            )
+        )
+    save_state(CwState(sessions=sessions))
+    save_dev_queue(DevQueueStore(tasks=tasks))
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _ul_record("working on it", "2026-09-24T00:20:00+00:00"),
+            _ul_record(
+                "You've hit your weekly limit · resets Sep 26, 11pm (America/New_York)",
+                "2026-09-24T00:50:00+00:00",
+            ),
+            {"type": "cost-state", "timestamp": "2026-09-24T00:50:01+00:00"},
+        ],
+        filename=f"{_MID_TURN_FULL_ID}.jsonl",
+    )
+    now_ts = datetime.now(UTC).timestamp()
+    os.utime(str(transcript), (now_ts, now_ts))
+
+
+@pytest.mark.parametrize("with_phantom", [False, True], ids=["no-phantom", "phantom"])
+def test_reconcile_auto_reverts_mid_turn_usage_limited_ticket(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_phantom: bool,
+) -> None:
+    """Under reap_policy: auto the mid-turn park lands in reverted_ticket_ids on
+    both of _reconcile_locked's all_reverted branches (#2324)."""
+    _seed_mid_turn_limit(
+        tmp_path, monkeypatch, config=_auto_config(), with_phantom=with_phantom
+    )
+
+    report = reconcile()
+
+    assert _MID_TURN_TICKET in report.reverted_ticket_ids
+    if with_phantom:
+        assert _PHANTOM_TICKET in report.reverted_ticket_ids
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == _MID_TURN_TICKET)
+    assert task.status is QueueItemStatus.PENDING
+    assert task.next_eligible_at is not None
+
+
+def test_reconcile_signal_only_parks_mid_turn_ticket_without_reverting(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under the signal_only default the row is parked, not reverted (#2324)."""
+    _seed_mid_turn_limit(
+        tmp_path, monkeypatch, config=OrchestratorConfig(), with_phantom=False
+    )
+
+    report = reconcile()
+
+    assert _MID_TURN_TICKET not in report.reverted_ticket_ids
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == "usage_limited_mid_turn"
+
+
+def _fail_mid_turn_dev_queue_save(monkeypatch: pytest.MonkeyPatch, *, nth: int) -> None:
+    """The sweep's *nth* dev-queue write raises; the others land.
+
+    Its writes are, in order: the decision (1), the audit mark (2) and the
+    final transition (3).
+    """
+    real_save = save_dev_queue
+    saves: list[int] = []
+
+    def _save_failing_once(store: DevQueueStore) -> None:
+        saves.append(1)
+        if len(saves) == nth:
+            msg = "dev-queue write failed"
+            raise OSError(msg)
+        real_save(store)
+
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn.save_dev_queue", _save_failing_once
+    )
+
+
+def test_reconcile_contains_a_failed_mid_turn_decision_and_retries_it(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed intent write decides nothing and does not abort the tick.
+
+    The next reconcile decides and finishes the act -- PENDING, no attempt
+    charged (#2324).
+    """
+    _seed_mid_turn_limit(
+        tmp_path, monkeypatch, config=_auto_config(), with_phantom=False
+    )
+    before = load_dev_queue().tasks[0].unproductive_attempts
+    _fail_mid_turn_dev_queue_save(monkeypatch, nth=1)
+
+    assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
+    assert load_state().sessions[0].status is SessionStatus.ACTIVE
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.usage_limit_act is None
+
+    report = reconcile()
+
+    assert _MID_TURN_TICKET in report.reverted_ticket_ids
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.PENDING
+    assert task.unproductive_attempts == before
+    assert task.next_eligible_at is not None
+    assert load_state().sessions[0].reap_reason is ReapReason.USAGE_LIMIT_MID_TURN
+
+
+def _assert_act_still_in_flight(*, unproductive_attempts: int) -> None:
+    """The row is RUNNING under its intent and was charged nothing."""
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.session_id == _MID_TURN_TICKET
+    assert task.usage_limit_act is not None
+    assert task.unproductive_attempts == unproductive_attempts
+
+
+def _assert_act_finished_uncharged(
+    report: ReconcileReport, *, unproductive_attempts: int
+) -> None:
+    assert _MID_TURN_TICKET in report.reverted_ticket_ids
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.PENDING
+    assert task.usage_limit_act is None
+    assert task.unproductive_attempts == unproductive_attempts
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    assert session.completed_reason is CompletionReason.USAGE_LIMITED
+    assert session.reap_reason is ReapReason.USAGE_LIMIT_MID_TURN
+
+
+def test_reconcile_backstop_skips_row_whose_act_closed_the_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final transition fails after the session was closed (#2324).
+
+    Later in the same tick the COMPLETED-session backstop finds a closed
+    session over a RUNNING row -- the shape it reverts, charging an attempt.
+    The row carries the act's intent, so the backstop leaves it, and the next
+    tick's resume finishes it uncharged.
+    """
+    _seed_mid_turn_limit(
+        tmp_path, monkeypatch, config=_auto_config(), with_phantom=False
+    )
+    before = load_dev_queue().tasks[0].unproductive_attempts
+    _fail_mid_turn_dev_queue_save(monkeypatch, nth=3)
+
+    assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    _assert_act_still_in_flight(unproductive_attempts=before)
+
+    _assert_act_finished_uncharged(reconcile(), unproductive_attempts=before)
+
+
+def test_reconcile_phantom_sweep_skips_session_whose_act_stopped_it(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session the act stopped but has not closed is not a crash (#2324).
+
+    An earlier tick's act stopped the surface and died before the close, so
+    the session is ACTIVE and off the roster: a phantom by shape. This tick's
+    resume fails at its first step, and the phantom sweep that runs after it
+    would crash-complete the session and revert the row with a charge. It
+    skips the row carrying the intent instead; the next tick finishes it.
+    """
+    _seed_mid_turn_limit(
+        tmp_path, monkeypatch, config=_auto_config(), with_phantom=False
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "someone-else-0000-4000-8000-000000000000"}],
+    )
+    now = datetime.now(UTC)
+    store = load_dev_queue()
+    store.tasks[0].usage_limit_act = UsageLimitAct(
+        session_id=_MID_TURN_TICKET,
+        branch="auto",
+        started_at=now,
+        reset_at=None,
+        until=now + timedelta(minutes=30),
+        audited_at=now,
+    )
+    save_dev_queue(store)
+    before = store.tasks[0].unproductive_attempts
+    calls: list[int] = []
+
+    def _lockout_audit_failing_once(
+        etype: OrchestratorEventType,
+        payload: dict[str, Any] | None = None,
+        *,
+        correlation_id: str | None = None,
+    ) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            msg = "inbox write failed"
+            raise OSError(msg)
+        record_event(etype, payload, correlation_id=correlation_id)
+
+    monkeypatch.setattr("cw.dispatch_state.record_event", _lockout_audit_failing_once)
+
+    report = reconcile()
+
+    assert _MID_TURN_TICKET not in report.reverted_ticket_ids
+    assert _MID_TURN_TICKET not in report.phantom_session_ids
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert session.completed_reason is None
+    _assert_act_still_in_flight(unproductive_attempts=before)
+    assert read_events(event_types=[OrchestratorEventType.SESSION_REAP_PROPOSED]) == []
+
+    _assert_act_finished_uncharged(reconcile(), unproductive_attempts=before)

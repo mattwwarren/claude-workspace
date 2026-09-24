@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -665,6 +666,48 @@ class FakeNativeDaemonClient:
         """Record call and drop from live set (idempotent)."""
         self.stop_calls.append(short_id)
         self._live.discard(short_id)
+
+
+def _roster_presence_is(
+    daemon: NativeDaemonClient, short_id: str, *, present: bool
+) -> bool:
+    """One roster read: is *short_id*'s presence the *present* being awaited?
+
+    Presence keeps the fail-open read spawn registration has always used: an
+    unreadable roster reads as "not registered yet". Absence is read fail
+    closed: an unreadable roster never confirms a worker is gone, because the
+    caller is about to act on that answer.
+    """
+    if present:
+        return short_id in daemon.list_live_session_short_ids()
+    live = daemon.list_live_session_short_ids_fail_closed()
+    return live is not None and short_id not in live
+
+
+def wait_for_roster_presence(
+    daemon: NativeDaemonClient,
+    short_id: str,
+    *,
+    present: bool,
+    timeout: float,
+    interval: float,
+) -> bool:
+    """Poll the roster until *short_id* is (or is no longer) in it; True iff it was.
+
+    The one bounded roster poller. ``present=True`` confirms a spawn registered
+    (``cw.spawn._verify_roster_registration``, #520); ``present=False``
+    confirms a stop took effect (reconcile's mid-turn usage-limit sweep,
+    #2324), since :meth:`NativeDaemonClient.stop` swallows its own failures.
+    Reads at least once, then every *interval* seconds until *timeout*.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if _roster_presence_is(daemon, short_id, present=present):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(interval, remaining))
 
 
 def get_native_daemon_client() -> NativeDaemonClient:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -220,6 +220,61 @@ def _iter_sentinel_text_blocks(transcript_path: Path) -> Iterator[str]:
         yield text
 
 
+def _parse_transcript_timestamp(raw: object) -> datetime | None:
+    """Parse a transcript record's top-level timestamp, if usable."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+class _TranscriptRecord(NamedTuple):
+    """The parsed facts shared by transcript consumers."""
+
+    timestamp: datetime | None
+    content_bearing: bool
+    text: str | None
+    record_type: str | None
+
+
+def _parse_transcript_record(line: str) -> _TranscriptRecord | None:
+    """Parse one transcript JSONL line into shared record facts.
+
+    ``JSONDecodeError`` intentionally propagates so a reconcile caller can
+    distinguish an incomplete scan from a cleanly parsed transcript. Callers
+    that historically tolerate malformed lines can catch it locally.
+    """
+    record = json.loads(line)
+    if not isinstance(record, dict):
+        return None
+    record_type = record.get("type")
+    message = record.get("message")
+    content_bearing = (
+        isinstance(record_type, str)
+        and record_type in {"user", "assistant"}
+        and isinstance(message, dict)
+    )
+    text: str | None = None
+    if content_bearing and isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, list):
+            text = "\n".join(
+                block["text"]
+                for block in content
+                if isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            )
+    return _TranscriptRecord(
+        timestamp=_parse_transcript_timestamp(record.get("timestamp")),
+        content_bearing=content_bearing,
+        text=text,
+        record_type=record_type if isinstance(record_type, str) else None,
+    )
+
+
 def _last_content_entry_timestamp(transcript_path: Path) -> datetime | None:
     """Return the timestamp of the last content-bearing transcript record.
 
@@ -252,22 +307,15 @@ def _last_content_entry_timestamp(transcript_path: Path) -> datetime | None:
         with transcript_path.open(encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 try:
-                    record = json.loads(line)
+                    record = _parse_transcript_record(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(record, dict):
-                    continue
-                if record.get("type") not in {"user", "assistant"}:
-                    continue
-                if not isinstance(record.get("message"), dict):
-                    continue
-                ts = record.get("timestamp")
-                if not isinstance(ts, str):
-                    continue
-                try:
-                    last_ts = datetime.fromisoformat(ts)
-                except ValueError:
-                    continue
+                if (
+                    record is not None
+                    and record.content_bearing
+                    and record.timestamp is not None
+                ):
+                    last_ts = record.timestamp
     except OSError:
         return None
     return last_ts

@@ -22,6 +22,8 @@ from cw._transcript import locate_transcript
 from cw._util import (
     _iter_sentinel_text_blocks,
     _last_content_entry_timestamp,
+    _parse_transcript_record,
+    _TranscriptRecord,
     claude_project_dir,
 )
 from cw.auto_dev_result import (
@@ -281,6 +283,11 @@ _STALLED_CAP_PARKED_REASON = "stalled_retry_cap_parked"
 # Not _NEEDS_SALVAGE_REASON: that constant is historical (its producer was
 # deleted by ADR-0014) and new detection must not be wired into it.
 _STOPPED_WITHOUT_SENTINEL_REASON = "stopped_without_sentinel"
+# Disposition stamped (and paused_status written to the SESSION_NEEDS_ATTENTION
+# event) when a still-roster-present worker's transcript tail is a usage-limit
+# message with no sentinel (GitHub #2324). Stamped on the BLOCKED_ON_USER park
+# a non-auto reap_policy routes to; the auto branch reverts to PENDING instead.
+_USAGE_LIMITED_MID_TURN_REASON = "usage_limited_mid_turn"
 # The 6-member reap-eligible disposition base shared verbatim by
 # concierge.py's _FALSE_PARK_ELIGIBLE_DISPOSITIONS (recipe 1: false-park
 # requeue) and escalation.py's _ELIGIBLE_DISPOSITIONS (BLOCKED_ON_USER
@@ -842,66 +849,88 @@ class UsageLimitDetection(NamedTuple):
     """Outcome of scanning a session transcript for a usage-limit message (#1345).
 
     ``detected`` is True iff any post-start assistant record's text matched
-    :data:`USAGE_LIMIT_RE`. ``matched_at`` is the ``timestamp`` of the LAST such
-    matching record that carried a parseable timestamp (last-match-wins
-    tie-break); ``None`` when nothing matched or no matching record had a usable
-    timestamp. ``transcript_tail_at`` is the timestamp of the transcript's last
-    content-bearing record — matched or not — via
-    :func:`_last_content_entry_timestamp`; ``None`` when no record has a
-    parseable timestamp. The recency gate (:func:`_usage_limit_is_recent`)
+    :data:`USAGE_LIMIT_RE`. ``matched_at`` is the LAST matching record's own
+    ``timestamp`` (last-match-wins); ``None`` when nothing matched or that
+    record has no usable timestamp -- never an earlier match's timestamp, which
+    would make a stale anchor look current (#2324). ``transcript_tail_at`` is
+    the timestamp of the transcript's last content-bearing record — matched or
+    not — from the same forward scan; ``None`` when no record has a parseable
+    timestamp. The recency gate (:func:`_usage_limit_is_recent`)
     compares the two so a stale limit message is not mistaken for a live cutoff.
+    ``matched_text`` is the LAST matching record's text, timestamped or not, so
+    a caller can parse its reset time without a second scan (#2324).
+    ``has_unparseable_content_after_match`` is true when a later
+    content-bearing record has no usable timestamp. In that case the apparent
+    zero-gap tail is unknown rather than empty.
+    ``transcript_scan_complete`` is false when the transcript could not be
+    read to EOF; callers that act on this evidence must fail closed.
     """
 
     detected: bool
     matched_at: datetime | None
     transcript_tail_at: datetime | None
+    matched_text: str | None = None
+    has_unparseable_content_after_match: bool = False
+    transcript_scan_complete: bool = True
 
 
-def _parse_iso_timestamp(raw: object) -> datetime | None:
-    """Parse a record's top-level ``"timestamp"`` value, or ``None`` if unusable."""
-    if not isinstance(raw, str):
-        return None
-    try:
-        return datetime.fromisoformat(raw)
-    except ValueError:
-        return None
+class _TranscriptRecordIterator:
+    """Forward transcript iterator with an explicit incomplete-scan marker."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._handle: Any = None
+        self._done = False
+        self.scan_complete = True
+
+    def __iter__(self) -> _TranscriptRecordIterator:
+        return self
+
+    def __next__(self) -> _TranscriptRecord:
+        if self._done:
+            raise StopIteration
+        if self._handle is None:
+            try:
+                self._handle = self._path.open(encoding="utf-8", errors="replace")
+            except OSError:
+                self.scan_complete = False
+                self._done = True
+                raise StopIteration from None
+        while True:
+            try:
+                line = next(self._handle)
+            except StopIteration:
+                self._handle.close()
+                self._done = True
+                raise
+            except OSError:
+                self.scan_complete = False
+                self._handle.close()
+                self._done = True
+                raise StopIteration from None
+            try:
+                record = _parse_transcript_record(line)
+            except json.JSONDecodeError:
+                self.scan_complete = False
+                continue
+            if record is not None:
+                return record
+
+
+def _iter_transcript_records(path: Path) -> _TranscriptRecordIterator:
+    """Yield parsed transcript records while exposing whether EOF was reached."""
+    return _TranscriptRecordIterator(path)
 
 
 def _iter_assistant_records(path: Path) -> Iterator[tuple[datetime | None, str]]:
-    """Yield ``(timestamp, text)`` for each assistant record in a jsonl transcript.
-
-    ``timestamp`` is the record's top-level ``"timestamp"`` parsed via
-    :func:`_parse_iso_timestamp`, or ``None`` when absent/malformed — the
-    record is still yielded, because its text may match even without a usable
-    anchor. ``text`` concatenates every text block of the assistant message.
-    Follows the top-level-``"timestamp"`` convention of
-    :func:`_last_content_entry_timestamp`. Yields nothing on any read error.
-    """
-    try:
-        with path.open() as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict) or record.get("type") != "assistant":
-                    continue
-                message = record.get("message")
-                if not isinstance(message, dict):
-                    continue
-                content = message.get("content")
-                if not isinstance(content, list):
-                    continue
-                text = "\n".join(
-                    block["text"]
-                    for block in content
-                    if isinstance(block, dict)
-                    and block.get("type") == "text"
-                    and isinstance(block.get("text"), str)
-                )
-                yield _parse_iso_timestamp(record.get("timestamp")), text
-    except OSError:
-        return
+    """Yield ``(timestamp, text)`` for each assistant record in a jsonl transcript."""
+    for record in _iter_transcript_records(path):
+        if (
+            record.record_type == "assistant"
+            and record.content_bearing
+            and record.text is not None
+        ):
+            yield record.timestamp, record.text
 
 
 def _detect_usage_limit(session: Session) -> UsageLimitDetection:
@@ -909,10 +938,11 @@ def _detect_usage_limit(session: Session) -> UsageLimitDetection:
 
     Returns a :class:`UsageLimitDetection`: ``detected`` True iff any assistant
     record's text matched :data:`USAGE_LIMIT_RE`, ``matched_at`` the LAST
-    matching record's timestamp (last-match-wins among records with a parseable
-    timestamp), ``transcript_tail_at`` the transcript's last content-bearing
-    timestamp. Uses :func:`_locate_session_transcript` for precise per-session
-    lookup (surface_ref-prefix glob, #541). Never raises; returns an all-empty
+    matching record's own timestamp (``None`` if it has none),
+    ``transcript_tail_at`` the transcript's last content-bearing
+    timestamp, ``matched_text`` the LAST matching record's text. Uses
+    :func:`_locate_session_transcript` for precise per-session lookup
+    (surface_ref-prefix glob, #541). Never raises; returns an all-empty
     detection when the project dir is absent, no matching .jsonl exists, or the
     transcript predates the session start.
     """
@@ -921,17 +951,38 @@ def _detect_usage_limit(session: Session) -> UsageLimitDetection:
         return UsageLimitDetection(
             detected=False, matched_at=None, transcript_tail_at=None
         )
-    detected = False
+    matched_text: str | None = None
     matched_at: datetime | None = None
-    for ts, text in _iter_assistant_records(transcript):
-        if USAGE_LIMIT_RE.search(text):
-            detected = True
-            if ts is not None:
-                matched_at = ts  # last-match-wins
+    has_unparseable_content_after_match = False
+    transcript_tail_at: datetime | None = None
+    scan = _iter_transcript_records(transcript)
+    matched = False
+    for record in scan:
+        if record.content_bearing:
+            if record.timestamp is not None:
+                transcript_tail_at = record.timestamp
+            elif matched:
+                has_unparseable_content_after_match = True
+        if (
+            record.record_type == "assistant"
+            and record.content_bearing
+            and record.text is not None
+            and USAGE_LIMIT_RE.search(record.text)
+        ):
+            # last-match-wins for both, from the SAME record: an untimestamped
+            # latest match leaves matched_at None (gap unknown) rather than
+            # keeping an older match's timestamp, which would fake a zero gap.
+            matched = True
+            matched_text = record.text
+            matched_at = record.timestamp
+            has_unparseable_content_after_match = False
     return UsageLimitDetection(
-        detected=detected,
+        detected=matched,
         matched_at=matched_at,
-        transcript_tail_at=_last_content_entry_timestamp(transcript),
+        transcript_tail_at=transcript_tail_at,
+        matched_text=matched_text,
+        has_unparseable_content_after_match=has_unparseable_content_after_match,
+        transcript_scan_complete=scan.scan_complete,
     )
 
 
@@ -1161,6 +1212,8 @@ def _usage_limit_is_recent(
 
     Contract (operator resolution, issue #1345):
     - not detected → ``False``;
+    - incomplete transcript scan → ``False`` (partial evidence is not
+      sufficient for a positive usage-limit disposition);
     - detected but either ``matched_at`` or ``transcript_tail_at`` is ``None``
       (no usable anchor) → return ``fail_open`` verbatim;
     - else → recent iff the message landed within ``window_seconds`` of the
@@ -1168,6 +1221,8 @@ def _usage_limit_is_recent(
       ``(transcript_tail_at - matched_at).total_seconds() <= window_seconds``.
     """
     if not detection.detected:
+        return False
+    if not detection.transcript_scan_complete:
         return False
     if detection.matched_at is None or detection.transcript_tail_at is None:
         return fail_open
