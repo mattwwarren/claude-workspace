@@ -21,6 +21,7 @@ from cw.native_daemon import (
     model_supports_auto,
     read_supervisor_resume_session_id,
     resolve_permission_mode,
+    wait_for_roster_presence,
 )
 
 if TYPE_CHECKING:
@@ -1158,6 +1159,70 @@ class TestFakeNativeDaemonClient:
 
 def test_get_native_daemon_client_returns_real_instance() -> None:
     assert isinstance(get_native_daemon_client(), RealNativeDaemonClient)
+
+
+class TestWaitForRosterPresence:
+    """The one bounded roster poller: spawn registration and stop confirmation."""
+
+    def test_present_true_once_the_worker_is_live(self, tmp_path: Path) -> None:
+        client = FakeNativeDaemonClient()
+        short_id = client.seed_live_worker(tmp_path)
+
+        assert wait_for_roster_presence(
+            client, short_id, present=True, timeout=0.0, interval=0.0
+        )
+
+    def test_present_false_when_never_registered(self) -> None:
+        client = FakeNativeDaemonClient()
+
+        assert not wait_for_roster_presence(
+            client, "deadbeef", present=True, timeout=0.0, interval=0.0
+        )
+
+    def test_absent_true_once_the_worker_is_stopped(self, tmp_path: Path) -> None:
+        client = FakeNativeDaemonClient()
+        short_id = client.seed_live_worker(tmp_path)
+        client.stop(short_id)
+
+        assert wait_for_roster_presence(
+            client, short_id, present=False, timeout=0.0, interval=0.0
+        )
+
+    def test_absent_false_while_the_worker_is_still_live(self, tmp_path: Path) -> None:
+        client = FakeNativeDaemonClient()
+        short_id = client.seed_live_worker(tmp_path)
+
+        assert not wait_for_roster_presence(
+            client, short_id, present=False, timeout=0.0, interval=0.0
+        )
+
+    def test_absent_fails_closed_on_an_unreadable_roster(self) -> None:
+        """An unreadable roster never confirms a worker is gone."""
+        client = FakeNativeDaemonClient()
+        client.roster_unreadable = True
+
+        assert not wait_for_roster_presence(
+            client, "deadbeef", present=False, timeout=0.0, interval=0.0
+        )
+
+    def test_polls_until_the_roster_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """It sleeps between reads and returns once the roster catches up."""
+        client = FakeNativeDaemonClient()
+        short_id = client.seed_live_worker(tmp_path)
+        sleeps: list[float] = []
+
+        def _sleep_then_stop(seconds: float) -> None:
+            sleeps.append(seconds)
+            client.stop(short_id)
+
+        monkeypatch.setattr("cw.native_daemon.time.sleep", _sleep_then_stop)
+
+        assert wait_for_roster_presence(
+            client, short_id, present=False, timeout=60.0, interval=0.25
+        )
+        assert sleeps == [0.25]
 
 
 class TestModelSupportsAuto:
