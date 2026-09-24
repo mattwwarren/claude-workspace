@@ -6537,6 +6537,9 @@ class TestApproveScopeDrift:
         monkeypatch.setattr(
             "cw.dev_queue.approval.branch_head_sha_on_origin", _fake_head
         )
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: "test-operator"
+        )
         return calls
 
     def test_happy_path_stamps_and_requeues_at_impl(
@@ -6691,6 +6694,28 @@ class TestApproveScopeDrift:
                 "GEN-500", "genhealth", ["a.py"], audit_event=fail_audit
             )
 
+        assert load_dev_queue().model_dump() == before
+
+    def test_missing_operator_identity_rejects_before_audit_or_mutation(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.exceptions import ApproveGateError
+
+        calls = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        before = load_dev_queue().model_dump()
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.resolve_operator_login", lambda _client: None
+        )
+        audit_calls: list[object] = []
+
+        with pytest.raises(ApproveGateError, match="operator identity is unavailable"):
+            approve_scope_drift_ticket(
+                "GEN-500", "genhealth", ["a.py"], audit_event=audit_calls.append
+            )
+
+        assert calls == []
+        assert audit_calls == []
         assert load_dev_queue().model_dump() == before
 
     def test_audit_actor_uses_configured_operator_identity(

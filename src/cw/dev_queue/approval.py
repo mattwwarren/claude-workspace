@@ -589,10 +589,16 @@ def _approve_scope_drift_locked(
         raise ApproveGateError(msg)
 
     client_cfg = get_client(client_name)
-    # Preserve the effective operator identity in the audit trail.  An
-    # unresolved runtime identity is explicit rather than being mistaken for
-    # a module name that looks like an actor.
-    audit_actor = resolve_operator_login(client_cfg) or "unknown"
+    # An approval must be attributable to an operator; never write a durable
+    # audit event with a placeholder actor.
+    audit_actor = resolve_operator_login(client_cfg)
+    if not audit_actor:
+        msg = (
+            f"Cannot approve scope drift for ticket '{ticket_id}': operator"
+            " identity is unavailable. Configure operator_github_login or"
+            " authenticate gh before approving."
+        )
+        raise ApproveGateError(msg)
     branch = f"{client_cfg.feature_branch_prefix}/{ticket_id}"
     head_sha, _gh_available = branch_head_sha_on_origin(
         branch, cwd=_git_dir(client_cfg)
