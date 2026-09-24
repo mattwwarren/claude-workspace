@@ -252,9 +252,15 @@ def _survivors_only_verdict(
     ``blocking`` is computed DIRECTLY from ``open_findings`` — NOT re-derived
     from ``bool(must_fix)`` over the disposition-stamped ``accepted`` list,
     which would spuriously read ``False`` once survivors are stamped
-    ``disposition="deferred"`` for reporting. Each surviving MUST_FIX finding is
-    stamped ``deferred`` in ``accepted``; every other accepted finding is
+    ``disposition="unresolved"`` for reporting. Each surviving MUST_FIX finding
+    is stamped ``unresolved`` in ``accepted``; every other accepted finding is
     unchanged. ``must_fix`` is exactly the survivor set.
+
+    The stamp is ``"unresolved"``, not ``"deferred"`` (#2352): the latter is
+    also used by :mod:`cw.review_adjudication` to mean a non-blocking,
+    operator-issued decision, and the renderer could not tell the two apart —
+    every still-blocking survivor rendered as if suppressed. See
+    :mod:`cw.review_adjudication`'s module docstring for the full contrast.
 
     Survivor membership is tested by finding IDENTITY, not by recomputing a key
     and looking it up: ``open_findings``'s keys are fingerprints now, so a
@@ -265,7 +271,7 @@ def _survivors_only_verdict(
     """
     survivor_findings = [af.finding for af in open_findings.values()]
     accepted = [
-        af.model_copy(update={"disposition": "deferred"})
+        af.model_copy(update={"disposition": "unresolved"})
         if af.finding.severity == _MUST_FIX and af.finding in survivor_findings
         else af
         for af in final_verdict.accepted

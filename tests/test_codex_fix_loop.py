@@ -935,7 +935,7 @@ class TestDeferredCumulativeTracking:
 
 
 class TestFixLoopBlockingIndependentOfDisposition:
-    def test_capped_verdict_blocking_despite_deferred_stamp(
+    def test_capped_verdict_blocking_despite_unresolved_stamp(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-blocking")
@@ -944,18 +944,18 @@ class TestFixLoopBlockingIndependentOfDisposition:
 
         assert out.status == "blocked"
         assert verdict is not None
-        # Survivors are stamped disposition="deferred" for reporting.
+        # Survivors are stamped disposition="unresolved" for reporting.
         mf_accepted = [
             af for af in verdict.accepted if af.finding.severity == "MUST_FIX"
         ]
         assert mf_accepted
-        assert all(af.disposition == "deferred" for af in mf_accepted)
+        assert all(af.disposition == "unresolved" for af in mf_accepted)
         # A NAIVE re-derivation off the disposition-stamped list reads False...
         naive_blocking = bool(
             [
                 af
                 for af in verdict.accepted
-                if af.finding.severity == "MUST_FIX" and af.disposition != "deferred"
+                if af.finding.severity == "MUST_FIX" and af.disposition != "unresolved"
             ]
         )
         assert naive_blocking is False

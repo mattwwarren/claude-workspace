@@ -21,14 +21,16 @@ only its serialization becomes mechanical.
 **Why this is a Claude-native-only seam, and why it must not be unified with
 the Codex path (#1805 R2 — the durable principle lives here rather than in a
 new ADR).** :func:`cw.codex_fix_loop._survivors_only_verdict` also stamps
-``disposition`` and recomputes ``blocking``, but its ``"deferred"`` means the
-opposite of this package's: there it means "the fix loop capped out, this
-MUST_FIX is still genuinely unresolved" (so ``blocking`` must stay ``True``
-for a deferred survivor, which is exactly why that function computes
-``blocking`` from the open-finding set rather than from dispositions). Here
-``"deferred"`` means "the coordinating session deliberately decided this may
-ship un-fixed" — so a deferred finding correctly stops blocking. The two
-shapes must NOT be unified by generalizing one to cover the other. If a
+``disposition`` and recomputes ``blocking``, but its ``"unresolved"`` (#2352;
+formerly the same ``"deferred"`` literal this package uses) means the
+opposite of this package's ``"deferred"``: there it means "the fix loop capped
+out, this MUST_FIX is still genuinely unresolved" (so ``blocking`` must stay
+``True`` for an unresolved survivor, which is exactly why that function
+computes ``blocking`` from the open-finding set rather than from
+dispositions). Here ``"deferred"`` means "the coordinating session
+deliberately decided this may ship un-fixed" — so a deferred finding
+correctly stops blocking. The two shapes must NOT be unified by generalizing
+one to cover the other. If a
 second consumer ever needs *this* seam (not merely the ``Disposition`` /
 :class:`AcceptedFinding` types, which are shared already), that is the trigger
 to write an ADR; until then this docstring is the record of why they differ.

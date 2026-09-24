@@ -224,7 +224,7 @@ def _disposition_annotation(accepted: AcceptedFinding) -> str:
     point of surfacing this on the posted comment rather than only in the
     persisted verdict artifact.
     """
-    if accepted.disposition == "fixed":
+    if accepted.disposition in ("fixed", "unresolved"):
         return ""
     # `disposition_detail` carries a ledger rationale and a finding summary
     # through `_render_suppression_signal`, so it is model/operator text.
@@ -335,6 +335,10 @@ def _render_clean_headline(review: Review, *, fix_loop_enabled: bool) -> str:
     headline rather than claiming findings were resolved.
     """
     if review.fix_cycles_used > 0:
+        # `_clean_exit` (the sole caller reaching this branch) is only invoked
+        # when `open_findings` is empty, so `review.deferred` is always `0`
+        # here — this formula's overflow guard (#2352) lives in
+        # `_render_history_note`, not here.
         resolved = review.must_fix_initial - review.deferred
         if review.had_real_commit is False:
             return (
@@ -371,6 +375,21 @@ def _render_history_note(review: Review, *, fix_loop_enabled: bool) -> list[str]
     if not fix_loop_enabled:
         return ["_Single-pass review — fix loop disabled for this lane._", ""]
     if review.fix_cycles_used > 0:
+        # #2352: `deferred` can exceed `must_fix_initial` once
+        # `_admit_new_must_fix` admits a genuinely-new MUST_FIX finding
+        # mid-loop — the two counts describe different populations, so
+        # subtracting them can go negative. Render both counts independently
+        # instead of deriving a "resolved" count in that case.
+        if review.deferred > review.must_fix_initial:
+            return [
+                f"_{review.must_fix_initial} originally-found MUST_FIX "
+                f"finding(s); {review.deferred} still open after "
+                f"{review.fix_cycles_used} fix cycle(s) — more MUST_FIX "
+                "finding(s) were admitted into the fix loop mid-run than "
+                "were originally found, so a resolved count cannot be "
+                "derived by subtracting the two._",
+                "",
+            ]
         resolved = review.must_fix_initial - review.deferred
         return [
             f"_{resolved} of {review.must_fix_initial} originally-found "
