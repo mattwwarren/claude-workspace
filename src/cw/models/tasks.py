@@ -344,9 +344,9 @@ class UsageLimitAct(BaseModel):
     # audit is at-least-once, keyed by (session_id, started_at).
     audited_at: datetime | None = None
     # Set under ``dev_queue_lock`` immediately before the external daemon stop
-    # and retained until the stop returns. It records the in-progress stop for
-    # the act's resume/finalization checks; the queue lock itself protects the
-    # check-to-stop hand-off from competing queue mutations.
+    # and retained until the stop returns. It is the durable hand-off
+    # reservation that lets queue mutation paths honoring ``usage_limit_act``
+    # leave the act's row alone while the external call runs.
     stop_started_at: datetime | None = None
 
 

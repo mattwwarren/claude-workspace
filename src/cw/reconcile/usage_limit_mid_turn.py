@@ -567,13 +567,12 @@ def _stop_surface(act: _Act) -> _Stop:
             session.id,
         )
         return _Stop.ABANDONED
-    # The stop is destructive to a still-live surface.  The transcript check
+    # The stop is destructive to a still-live surface. The transcript check
     # above can race with an operator disposition, so persist an explicit
-    # ownership fence and keep the queue lock through the final validation and
-    # external stop.  This makes the check-to-stop hand-off atomic with every
-    # queue mutation that uses the same lock. No shared transition seam
-    # silently suppresses a competing caller; ownership is held by this
-    # lock-scoped operation instead.
+    # durable ownership fence and validate it under the queue lock. The fence
+    # remains on the row while the external stop runs; queue mutation paths
+    # that honor usage_limit_act therefore leave this act's row alone without
+    # requiring the queue lock to span the daemon call.
     daemon = _deps.get_native_daemon_client()
     with dev_queue_lock():
         store = load_dev_queue()
@@ -596,7 +595,9 @@ def _stop_surface(act: _Act) -> _Stop:
                 session.id,
             )
             return _Stop.ABANDONED
-        daemon.stop(surface_ref)
+    # Never hold dev_queue_lock across an external daemon call. The persisted
+    # stop_started_at fence above is the hand-off reservation for this stop.
+    daemon.stop(surface_ref)
     if wait_for_roster_presence(
         daemon,
         surface_ref,
