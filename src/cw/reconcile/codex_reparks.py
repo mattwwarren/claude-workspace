@@ -38,6 +38,8 @@ inside it exactly as in the boot pass.
 
 Unconditional, like the boot pass: it acts only on the evidence bar the boot
 pass already applies, and it never touches a row the boot pass did not link.
+It is scoped to the clients mapping the reconcile tick passes in, and resolves
+``reap_policy`` per row from that row's own client and lane.
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from cw.config import load_clients, load_state
+from cw.config import load_state
 from cw.dev_queue import (
     dev_queue_lock,
     load_dev_queue,
@@ -320,11 +322,19 @@ def _act_on_live_writer_repark_candidates(
 
 
 def run_codex_live_writer_reparks(
-    *, now: datetime, config: OrchestratorConfig
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+    clients: dict[str, ClientConfig],
 ) -> list[str]:
     """Re-evaluate every live-writer codex-orphan park due a rescan.
 
-    Loads fresh state, dev-queue and client snapshots itself: by the time
+    Acts only on rows whose client is in *clients*: the mapping the calling
+    reconcile tick is reconciling, passed through rather than re-read from
+    clients.yaml, so a tick never closes or requeues another client's session
+    (#2307 review round 1). Each row's ``reap_policy`` resolves from its own
+    client and lane in that mapping, with *config* only as the global
+    fallback. Loads fresh state and dev-queue snapshots itself: by the time
     reconcile reaches this point, earlier sweeps this tick have already
     mutated and saved both files (``run_concierge_recoveries``' rationale).
     Safe under the caller's ``sessions_lock``; never acquires it.
@@ -337,6 +347,6 @@ def run_codex_live_writer_reparks(
     state = load_state()
     tasks = load_dev_queue().tasks
     candidates = _detect_live_writer_repark_candidates(
-        state, tasks, now=now, clients=load_clients(), config=config
+        state, tasks, now=now, clients=clients, config=config
     )
     return _act_on_live_writer_repark_candidates(candidates, now=now)

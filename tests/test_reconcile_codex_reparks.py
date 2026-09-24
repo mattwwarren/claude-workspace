@@ -96,9 +96,12 @@ def _config(*, auto: bool) -> OrchestratorConfig:
 
 
 def _run(*, auto: bool, now: datetime = _NOW) -> list[str]:
-    """Run the sweep the way reconcile does: under the held sessions_lock."""
+    """Run the sweep the way reconcile does: under the held sessions_lock,
+    scoped to every configured client."""
     with sessions_lock():
-        return run_codex_live_writer_reparks(now=now, config=_config(auto=auto))
+        return run_codex_live_writer_reparks(
+            now=now, config=_config(auto=auto), clients=load_clients()
+        )
 
 
 def _park_as_live_writer_orphan(
