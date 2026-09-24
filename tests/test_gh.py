@@ -13,6 +13,7 @@ from cw import gh
 from cw.gh import (
     add_pr_reviewer,
     branch_exists_on_origin,
+    branch_head_sha_on_origin,
     check_gh_availability,
     current_gh_login,
     fetch_approved_plan_comment,
@@ -752,6 +753,80 @@ class TestBranchExistsOnOrigin:
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
         branch_exists_on_origin("dev/808", cwd=want_cwd)
+        assert captured == [want_cwd]
+
+
+_HEAD_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+class TestBranchHeadShaOnOrigin:
+    """Tests for branch_head_sha_on_origin / _fetch_branch_head_sha_on_origin
+    (#2337): the same refs endpoint as branch_exists_on_origin, returning the
+    head commit SHA the scope-drift approval is bound to."""
+
+    def test_success_parses_object_sha_from_jq_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            seen.append(cmd)
+            return _make_run_result(0, f"{_HEAD_SHA}\n")
+
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
+        sha, gh_available = branch_head_sha_on_origin("dev/redact-api#1")
+
+        assert sha == _HEAD_SHA
+        assert gh_available is True
+        cmd = seen[0]
+        assert cmd[:2] == ["gh", "api"]
+        assert cmd[2].endswith("refs/heads/dev/redact-api%231")
+        assert cmd[cmd.index("--jq") + 1] == ".object.sha"
+
+    def test_404_returns_none_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        result = _make_run_result(1, "")
+        result.stderr = "error: HTTP 404: Not Found"
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: result)
+        assert branch_head_sha_on_origin("dev/808") == (None, True)
+
+    def test_non_sha_output_returns_none_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A zero exit whose output is not a commit SHA (e.g. jq's ``null``)
+        is not a head the approval can be bound to."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, "null\n")
+        )
+        assert branch_head_sha_on_origin("dev/808") == (None, True)
+
+    def test_file_not_found_returns_none_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: (_ for _ in ()).throw(FileNotFoundError("gh")),
+        )
+        assert branch_head_sha_on_origin("dev/808") == (None, False)
+
+    def test_timeout_returns_none_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                subprocess.TimeoutExpired("gh", 10)
+            ),
+        )
+        assert branch_head_sha_on_origin("dev/808") == (None, True)
+
+    def test_cwd_passed_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        want_cwd = Path("/some/client-a/repo")
+        captured: list[object] = []
+
+        def _fake_run(*_a: object, **kwargs: object) -> Any:
+            captured.append(kwargs.get("cwd"))
+            return _make_run_result(0, _HEAD_SHA)
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        branch_head_sha_on_origin("dev/808", cwd=want_cwd)
         assert captured == [want_cwd]
 
 

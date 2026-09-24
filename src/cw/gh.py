@@ -403,6 +403,56 @@ def branch_exists_on_origin(
     return _fetch_branch_exists_on_origin(branch, timeout, cwd=cwd)
 
 
+# A full commit SHA: 40 hex (SHA-1) or 64 hex (SHA-256 object format).
+_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _fetch_branch_head_sha_on_origin(
+    branch: str, timeout: int, *, cwd: Path | None = None
+) -> tuple[str | None, bool]:
+    """(head_sha, gh_available) via the refs endpoint + ``--jq .object.sha``.
+
+    Anything but one commit SHA (a 404, ``null``, GitHub's prefix-match
+    array) is (None, True)."""
+    ref_path = _urlquote(branch, safe="/")
+    try:
+        result = _sp.run(
+            [
+                "gh",
+                "api",
+                f"repos/{{owner}}/{{repo}}/git/refs/heads/{ref_path}",
+                "--jq",
+                ".object.sha",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except FileNotFoundError:
+        return None, False
+    except (OSError, _sp.TimeoutExpired):
+        return None, True
+
+    sha = result.stdout.strip()
+    if result.returncode == 0 and _COMMIT_SHA_RE.fullmatch(sha):
+        return sha, True
+    return None, True
+
+
+def branch_head_sha_on_origin(
+    branch: str, *, timeout: int = 10, cwd: Path | None = None
+) -> tuple[str | None, bool]:
+    """*branch*'s head commit SHA on origin as (sha, gh_available) (#2337).
+
+    (None, True) = absent/transient/unparseable; (None, False) = no gh. The
+    scope-drift approval refuses on (None, *): no head to bind to. *cwd*
+    scopes the call to a client's repo, as for branch_exists_on_origin.
+    """
+    return _fetch_branch_head_sha_on_origin(branch, timeout, cwd=cwd)
+
+
 def current_gh_login(*, timeout: int) -> str | None:
     """Return the login of the currently-authenticated ``gh`` identity.
 

@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`cw dev-queue approve <ticket> --scope-drift <paths>` approves operator-directed scope growth that parked a ticket at `plan_scope_drift` (#2337):** the comma-separated paths are recorded on the dev-queue row (schema v40), bound to the branch's origin head at approval time, and the ticket re-queues at IMPL. The next session's Step 2.5 gate 2 passes them to `check_plan_scope_conformance.py` (now v2, `--approved-extra-files`) as an allowlist while the approved head is still an ancestor of the pushed branch; a force-push voids the approval and the gate blocks again. Previously the only way past a legitimate review-round growth was a hand requeue that re-parked on the same drift. The `approve` command now lives in `src/cw/cli/dev_queue/approve.py`.
 - **`cw`'s reconcile tick now re-evaluates codex live-writer orphan parks, not just the boot-time pass (#2307):** a live-writer orphan park created by `codex_boot`'s boot-time scan previously sat until the next restart before reconcile would re-check it. A new codex live-writer repark sweep runs on every reconcile tick, scoped to the tick's own loaded clients, and re-checks each linked park's session before acting: a session belonging to a different client than the ticket, or one resumed between detect-time and act-time, is recognized as stale and the link is cleared rather than closed or requeued — only a genuinely still-orphaned, non-terminal session is closed.
 
 ### Fixed

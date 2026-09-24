@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-# cw-script-version: 1
+# cw-script-version: 2
 """Gate script: compare a delivered diff's file set against the plan's (#1779).
 
 Usage (from `/auto-dev` Stage 2.5, gate check 2):
     python .claude/scripts/check_plan_scope_conformance.py \\
-        --plan .cw/plan.md --touched-files /tmp/touched_files-$CW_SESSION
+        --plan .cw/plan.md --touched-files /tmp/touched_files-$CW_SESSION \\
+        [--approved-extra-files /tmp/approved-extra-$CW_SESSION]
+
+``--approved-extra-files`` (v2, #2337) names a newline-delimited list of paths
+the operator approved beyond the plan via ``cw dev-queue approve
+--scope-drift``. They are a pure allowlist: removed from ``extra_files`` before
+the allowance is compared, never added to the plan baseline the allowance is
+computed from. Gate 2 passes it only while the approval's bound head is still
+an ancestor of the pushed branch.
 
 Context: nothing in the pipeline used to measure the delivered diff against the
 approved plan's file enumeration. Step 2.5 gate 2 computed the touched-file set
@@ -37,11 +45,14 @@ Exit codes:
 
 The JSON verdict is written to stdout on exits 0 and 1:
     {"triggered": bool, "extra_files": [...], "allowed_extra": int,
-     "plan_file_count": int, "delivered_file_count": int}
+     "plan_file_count": int, "delivered_file_count": int,
+     "approved_extra_files": [...]}
 
 ``extra_files`` is sorted, and is the *entire* operator-authorization surface:
 Step 2.5 copies it verbatim into ``blocker.details`` so an operator deciding
 whether the growth was legitimate can see exactly which paths were unplanned.
+``approved_extra_files`` (v2) is the sorted subset of operator-approved paths
+the diff actually touched — empty when no approval was passed.
 """
 
 from __future__ import annotations
@@ -233,6 +244,7 @@ def check_scope_conformance(
     touched_files: list[str],
     ratio: float,
     abs_floor: int,
+    approved_extra: set[str] | None = None,
 ) -> dict[str, object]:
     """Compare the delivered file set against the plan's enumeration.
 
@@ -240,10 +252,15 @@ def check_scope_conformance(
     from the diff are deliberately not counted here — that is Step 2.5's
     separate "missing work" branch, and folding it in would let an under-
     delivering run masquerade as scope drift.
+
+    *approved_extra* (#2337) is the operator's allowlist: those paths leave
+    ``extra_files`` but do not raise ``allowed_extra``, which stays a function
+    of the plan's own size — an approval covers exactly the paths it names.
     """
+    approved = approved_extra or set()
     plan_set = set(plan_files)
     touched_set = set(touched_files)
-    extra_files = sorted(touched_set - plan_set)
+    extra_files = sorted(touched_set - plan_set - approved)
     allowed_extra = max(abs_floor, round(len(plan_set) * (ratio - 1)))
     return {
         "triggered": len(extra_files) > allowed_extra,
@@ -251,6 +268,7 @@ def check_scope_conformance(
         "allowed_extra": allowed_extra,
         "plan_file_count": len(plan_set),
         "delivered_file_count": len(touched_set),
+        "approved_extra_files": sorted(approved & touched_set),
     }
 
 
@@ -276,6 +294,14 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="Path to a newline-delimited list of touched files (git diff --name-only)",
     )
+    parser.add_argument(
+        "--approved-extra-files",
+        default=None,
+        help=(
+            "Path to a newline-delimited list of operator-approved paths beyond"
+            " the plan (cw dev-queue approve --scope-drift, #2337)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     plan_path = Path(args.plan)
@@ -287,6 +313,16 @@ def main(argv: list[str] | None = None) -> int:
     touched_text = _read_text(touched_path, "--touched-files")
     if touched_text is None:
         return 2
+    approved_extra: set[str] = set()
+    if args.approved_extra_files is not None:
+        approved_text = _read_text(
+            Path(args.approved_extra_files), "--approved-extra-files"
+        )
+        if approved_text is None:
+            return 2
+        approved_extra = {
+            line.strip() for line in approved_text.splitlines() if line.strip()
+        }
 
     plan_files = _parse_files_modified(plan_text)
     if not plan_files:
@@ -304,7 +340,9 @@ def main(argv: list[str] | None = None) -> int:
     touched_files = [line.strip() for line in touched_text.splitlines() if line.strip()]
 
     ratio, abs_floor = _load_scope_thresholds(plan_path)
-    verdict = check_scope_conformance(plan_files, touched_files, ratio, abs_floor)
+    verdict = check_scope_conformance(
+        plan_files, touched_files, ratio, abs_floor, approved_extra
+    )
     print(json.dumps(verdict, indent=2))
     return 1 if verdict["triggered"] else 0
 

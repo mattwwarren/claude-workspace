@@ -15,7 +15,6 @@ import types
 from pathlib import Path
 
 from tests.conftest import (
-    GUARD_MARKER_CURRENT,
     _plan_text,
     write_pyproject_override,
 )
@@ -613,9 +612,11 @@ def test_cli_exit_code_and_json_contract(tmp_path: Path) -> None:
         "allowed_extra",
         "plan_file_count",
         "delivered_file_count",
+        "approved_extra_files",
     }
     assert verdict["triggered"] is False
     assert verdict["extra_files"] == ["src/cw/extra.py"]
+    assert verdict["approved_extra_files"] == []
     assert verdict["allowed_extra"] == 7
     assert verdict["plan_file_count"] == 14
     assert verdict["delivered_file_count"] == 15
@@ -752,4 +753,139 @@ def test_check_plan_scope_conformance_declares_cw_script_version_header() -> Non
     preceding the first statement does not disturb ``__doc__`` binding.
     """
     lines = _SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert lines[1] == GUARD_MARKER_CURRENT.rstrip("\n")
+    # v2 (#2337): --approved-extra-files. Gate 2's MIN_VERSION moves with it.
+    assert lines[1] == "# cw-script-version: 2"
+
+
+# ---------------------------------------------------------------------------
+# Operator-approved extra files (#2337)
+# ---------------------------------------------------------------------------
+
+
+def _check_approved(
+    plan_files: list[str], touched_files: list[str], approved: set[str]
+) -> dict[str, object]:
+    ratio, abs_floor = _DEFAULTS
+    return dict(
+        _mod.check_scope_conformance(
+            plan_files, touched_files, ratio, abs_floor, approved_extra=approved
+        )
+    )
+
+
+def test_approved_extra_files_are_not_counted_as_drift() -> None:
+    """Every unplanned file was operator-approved: no drift, and the verdict
+    names the approved paths it consumed."""
+    planned = _paths("planned", 4)
+    approved = set(_paths("approved", 9))
+
+    verdict = _check_approved(planned, [*planned, *sorted(approved)], approved)
+
+    assert verdict["triggered"] is False
+    assert verdict["extra_files"] == []
+    assert verdict["approved_extra_files"] == sorted(approved)
+
+
+def test_unapproved_extra_files_still_trigger_with_approval_present() -> None:
+    """An approval covers only the paths it names; genuinely unplanned growth
+    beyond the allowance still trips the gate."""
+    planned = _paths("planned", 4)
+    approved = set(_paths("approved", 3))
+    unplanned = _paths("unplanned", 6)
+
+    verdict = _check_approved(
+        planned, [*planned, *sorted(approved), *unplanned], approved
+    )
+
+    assert verdict["triggered"] is True
+    assert verdict["extra_files"] == sorted(unplanned)
+    assert verdict["approved_extra_files"] == sorted(approved)
+
+
+def test_approved_extra_files_do_not_inflate_allowed_extra() -> None:
+    """Approved files are a pure allowlist, never a baseline input: the
+    allowance is still computed from the plan's own file count."""
+    planned = _paths("planned", 14)
+    approved = set(_paths("approved", 20))
+
+    with_approval = _check_approved(planned, planned, approved)
+    without = _check(planned, planned)
+
+    assert with_approval["allowed_extra"] == without["allowed_extra"] == 7
+    assert with_approval["plan_file_count"] == 14
+
+
+def test_approved_extra_files_not_touched_are_not_reported() -> None:
+    """``approved_extra_files`` lists only approved paths the diff touched."""
+    planned = _paths("planned", 2)
+
+    verdict = _check_approved(
+        planned, [*planned, "src/cw/used.py"], {"src/cw/used.py", "src/cw/unused.py"}
+    )
+
+    assert verdict["approved_extra_files"] == ["src/cw/used.py"]
+
+
+def test_cli_approved_extra_files_flag_applied(tmp_path: Path) -> None:
+    """--approved-extra-files turns a drift verdict into a conforming one."""
+    planned = _paths("planned", 2)
+    unplanned = _paths("unplanned", 8)
+    plan = tmp_path / "plan.md"
+    plan.write_text(_plan_text(planned), encoding="utf-8")
+    touched = tmp_path / "touched.txt"
+    touched.write_text("\n".join([*planned, *unplanned]) + "\n", encoding="utf-8")
+    approved = tmp_path / "approved.txt"
+    approved.write_text("\n".join(unplanned) + "\n\n", encoding="utf-8")
+
+    assert _run_cli(plan, touched).returncode == 1
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--plan",
+            str(plan),
+            "--touched-files",
+            str(touched),
+            "--approved-extra-files",
+            str(approved),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    verdict = json.loads(result.stdout)
+    assert verdict["triggered"] is False
+    assert verdict["extra_files"] == []
+    assert verdict["approved_extra_files"] == sorted(unplanned)
+
+
+def test_cli_missing_approved_extra_files_file_exits_2(tmp_path: Path) -> None:
+    """An unreadable --approved-extra-files is a usage error, like the other
+    two inputs -- never silently treated as an empty approval."""
+    planned = _paths("planned", 2)
+    plan = tmp_path / "plan.md"
+    plan.write_text(_plan_text(planned), encoding="utf-8")
+    touched = tmp_path / "touched.txt"
+    touched.write_text("\n".join(planned) + "\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--plan",
+            str(plan),
+            "--touched-files",
+            str(touched),
+            "--approved-extra-files",
+            str(tmp_path / "absent.txt"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "--approved-extra-files" in result.stderr

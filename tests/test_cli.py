@@ -10217,7 +10217,7 @@ class TestDevQueueApproveCli:
         if marker_present:
             comments.append({"body": f"Approved.\n{_PLAN_APPROVED_MARKER}\n"})
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.fetch_issue_comments",
+            "cw.cli.dev_queue.approve.fetch_issue_comments",
             lambda *_args, **_kwargs: comments,
         )
 
@@ -10235,7 +10235,7 @@ class TestDevQueueApproveCli:
         from cw.cli.dev_queue._plan_marker import _PLAN_APPROVED_MARKER
 
         self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             post_mock.return_value = subprocess.CompletedProcess(
                 args=["gh"], returncode=0, stdout=b"", stderr=b""
             )
@@ -10275,7 +10275,7 @@ class TestDevQueueApproveCli:
         self._seed_plan_pending(
             tmp_config_dir, tmp_path, monkeypatch, marker_present=True
         )
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             runner = CliRunner()
             result = runner.invoke(
                 main,
@@ -10301,7 +10301,7 @@ class TestDevQueueApproveCli:
     ) -> None:
         """--post-marker is PLAN-stage-only: warns and skips on REVIEW."""
         self._seed_review_pending(tmp_config_dir, tmp_path, signoff=False)
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             runner = CliRunner()
             result = runner.invoke(
                 main,
@@ -10351,7 +10351,7 @@ class TestDevQueueApproveCli:
         """Marker was just posted this invocation: the --post-marker
         reminder line is redundant and must not also print."""
         self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             post_mock.return_value = subprocess.CompletedProcess(
                 args=["gh"], returncode=0, stdout=b"", stderr=b""
             )
@@ -10384,10 +10384,10 @@ class TestDevQueueApproveCli:
         fail closed -- do not post a possible duplicate."""
         self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.fetch_issue_comments",
+            "cw.cli.dev_queue.approve.fetch_issue_comments",
             lambda *_args, **_kwargs: None,
         )
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             runner = CliRunner()
             result = runner.invoke(
                 main,
@@ -10417,8 +10417,8 @@ class TestDevQueueApproveCli:
         #1269/#1279, now on the read side (GitHub #1419 review)."""
         self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
         with (
-            patch("cw.cli.dev_queue.crud.fetch_issue_comments") as fetch_mock,
-            patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock,
+            patch("cw.cli.dev_queue.approve.fetch_issue_comments") as fetch_mock,
+            patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock,
         ):
             fetch_mock.return_value = []
             post_mock.return_value = subprocess.CompletedProcess(
@@ -10457,8 +10457,8 @@ class TestDevQueueApproveCli:
             tmp_path / "ws", "tracking:\n  primary:\n    system: linear\n"
         )
         with (
-            patch("cw.cli.dev_queue.crud.fetch_issue_comments") as fetch_mock,
-            patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock,
+            patch("cw.cli.dev_queue.approve.fetch_issue_comments") as fetch_mock,
+            patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock,
         ):
             runner = CliRunner()
             result = runner.invoke(
@@ -10525,7 +10525,7 @@ class TestDevQueueApproveCli:
         """post_issue_comment returning a non-zero returncode: --post-marker
         reports the failure on stderr instead of claiming success."""
         self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             post_mock.return_value = subprocess.CompletedProcess(
                 args=["gh"], returncode=1, stdout=b"", stderr=b"HTTP 404"
             )
@@ -10571,7 +10571,7 @@ class TestDevQueueApproveCli:
         self._seed_plan_pending(
             tmp_config_dir, tmp_path, monkeypatch, fingerprint=fingerprint
         )
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             self._ok_post(post_mock)
             result = self._run_approve()
         assert result.exit_code == 0, result.output
@@ -10602,7 +10602,7 @@ class TestDevQueueApproveCli:
                 f"Approved.\n<!-- auto-dev-plan-approved: {fingerprint} -->\n",
             ),
         )
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             result = self._run_approve()
         assert result.exit_code == 0, result.output
         post_mock.assert_not_called()
@@ -10632,7 +10632,7 @@ class TestDevQueueApproveCli:
                 f"<!-- auto-dev-plan-approved: {old_fingerprint} -->",
             ),
         )
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             self._ok_post(post_mock)
             result = self._run_approve()
         assert result.exit_code == 0, result.output
@@ -10659,7 +10659,7 @@ class TestDevQueueApproveCli:
             marker_present=True,
             fingerprint=fingerprint,
         )
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             self._ok_post(post_mock)
             result = self._run_approve()
         assert result.exit_code == 0, result.output
@@ -10686,7 +10686,7 @@ class TestDevQueueApproveCli:
             monkeypatch,
             existing_comment_bodies=(f"<!-- auto-dev-plan-approved: {'a' * 64} -->",),
         )
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             self._ok_post(post_mock)
             result = self._run_approve()
         assert result.exit_code == 0, result.output
@@ -10709,7 +10709,7 @@ class TestDevQueueApproveCli:
         self._seed_plan_pending(
             tmp_config_dir, tmp_path, monkeypatch, fingerprint=malformed
         )
-        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
             self._ok_post(post_mock)
             result = self._run_approve()
         assert result.exit_code == 0, result.output
@@ -10727,7 +10727,7 @@ class TestDevQueueApproveCli:
         the option object, since `--help` rewraps the hyphenated word."""
         from click import Option
 
-        from cw.cli.dev_queue.crud import dev_queue_approve
+        from cw.cli.dev_queue.approve import dev_queue_approve
 
         option = next(
             param
@@ -10736,6 +10736,170 @@ class TestDevQueueApproveCli:
         )
         assert option.help is not None
         assert "audit-only" in option.help
+
+    _SCOPE_DRIFT_HEAD = "0123456789abcdef0123456789abcdef01234567"
+
+    def _seed_scope_drift(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        blocked_reason: str = "plan_scope_drift",
+    ) -> list[tuple[object, dict[str, object]]]:
+        """Park ACME-1 at IMPL for *blocked_reason*; stub gh; capture events."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {ws}\n"
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="ACME-1",
+                        client="acme",
+                        stage=Stage.IMPL,
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        session_id="sess-scope-drift",
+                        blocked_reason=blocked_reason,
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.branch_head_sha_on_origin",
+            lambda *_a, **_kw: (self._SCOPE_DRIFT_HEAD, True),
+        )
+        events: list[tuple[object, dict[str, object]]] = []
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.record_event",
+            lambda event_type, payload, **_kw: events.append((event_type, payload)),
+        )
+        return events
+
+    def test_approve_scope_drift_happy_path(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--scope-drift stamps the approval, re-queues IMPL, and records the
+        grant on the TICKET_APPROVED event."""
+        from cw.dev_queue import load_dev_queue
+        from cw.models import OrchestratorEventType, QueueItemStatus
+
+        events = self._seed_scope_drift(tmp_config_dir, tmp_path, monkeypatch)
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--scope-drift",
+                " b.py, a.py,,a.py ",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "impl -> impl" in result.output
+        assert "a.py, b.py" in result.output
+        assert self._SCOPE_DRIFT_HEAD[:12] in result.output
+        assert len(events) == 1
+        event_type, payload = events[0]
+        assert event_type == OrchestratorEventType.TICKET_APPROVED
+        assert payload == {
+            "ticket_id": "ACME-1",
+            "client": "acme",
+            "from_stage": "impl",
+            "to_stage": "impl",
+            "scope_drift_approved_extra_files": ["a.py", "b.py"],
+            "scope_drift_approved_head": self._SCOPE_DRIFT_HEAD,
+        }
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.scope_drift_approved_extra_files == ["a.py", "b.py"]
+        assert task.scope_drift_approved_head == self._SCOPE_DRIFT_HEAD
+
+    def test_approve_scope_drift_and_post_marker_mutually_exclusive(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events = self._seed_scope_drift(tmp_config_dir, tmp_path, monkeypatch)
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--scope-drift",
+                "a.py",
+                "--post-marker",
+            ],
+        )
+
+        assert result.exit_code == 2
+        assert "mutually exclusive" in result.output
+        assert events == []
+
+    def test_approve_scope_drift_wrong_blocked_reason_errors_cleanly(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus
+
+        events = self._seed_scope_drift(
+            tmp_config_dir, tmp_path, monkeypatch, blocked_reason="impl_failed"
+        )
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--scope-drift",
+                "a.py",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "blocked_reason is 'impl_failed'" in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert events == []
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_approve_scope_drift_empty_value_errors_cleanly(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus
+
+        events = self._seed_scope_drift(tmp_config_dir, tmp_path, monkeypatch)
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--scope-drift",
+                " , ",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "no extra files" in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert events == []
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
 
 class TestPlanMarkerHelpers:

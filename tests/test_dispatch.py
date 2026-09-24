@@ -2881,6 +2881,37 @@ class TestDispatchTickSpawnErrors:
         assert task.regressed_into_stage is None
         assert task.regress_attempts == 1  # cumulative counter untouched
 
+    def test_successful_spawn_clears_scope_drift_approval(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """#2337: the operator's plan_scope_drift approval is for exactly the
+        next IMPL spawn -- once that spawn has it in queue_metadata, the row's
+        copy is consumed so no later stage entry inherits it."""
+        from cw.models import Stage
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-2337",
+                client="test-client",
+                stage=Stage.IMPL,
+                scope_drift_approved_extra_files=["src/a.py"],
+                scope_drift_approved_head="0123abcd" * 5,
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.scope_drift_approved_extra_files is None
+        assert task.scope_drift_approved_head is None
+
     def test_regress_marker_lost_when_first_spawn_dies_before_sentinel(
         self,
         tmp_dispatch_dirs: Path,

@@ -10,9 +10,12 @@ below is what registers those commands. Submodules:
   status-rendering constants shared across submodules.
 - ``_plan_marker`` — pure builders/matchers for the ``approve --post-marker``
   plan-approved audit comment (bare and draft-fingerprint-bound forms, #2194),
-  used by ``crud``.
-- ``crud`` — queue mutation commands (add, move, approve, requeue, unblock,
-  remove, cancel, clear, prune).
+  used by ``approve``.
+- ``approve`` — the ``approve`` command (plan/review/operator-signoff gate
+  clearing, ``--post-marker``, ``--scope-drift``), split out of ``crud``
+  (#2337).
+- ``crud`` — queue mutation commands (add, move, requeue, unblock, remove,
+  cancel, clear, prune).
 - ``status`` — aggregate status table + lane breakdown rendering.
 - ``run`` — dispatch-driving commands (run, serve, plan).
 - ``wait`` — the sentinel-aware ``dev-queue wait`` loop and its emit helpers.
@@ -23,6 +26,7 @@ below is what registers those commands. Submodules:
 from __future__ import annotations
 
 from cw.cli.dev_queue import (  # noqa: F401  (command registration side effects)
+    approve,
     crud,
     run,
     status,

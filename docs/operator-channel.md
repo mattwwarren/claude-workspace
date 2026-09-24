@@ -36,6 +36,7 @@ operator_channel_forward:
     - session.liveness_changed
     - operator.escalation
     - gate.auto_approved
+    - ticket.approval_failed
     - gate.auto_approve_failed
     - pr.action_taken
     - pr.action_failed

@@ -483,6 +483,10 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # human in the loop is operator-attention-worthy — forwarded by default
         # (contrast CONCIERGE_RECOVERED, excluded above as audit-only).
         OrchestratorEventType.GATE_AUTO_APPROVED,
+        # Forwarded alongside TICKET_APPROVED: without this correction, a
+        # failed queue write/rollback could leave an approval event standing
+        # alone as a false-positive operator signal (#2337).
+        OrchestratorEventType.TICKET_APPROVAL_FAILED,
         # Forwarded alongside GATE_AUTO_APPROVED: without this, a failed
         # act-phase mutation would leave GATE_AUTO_APPROVED standing alone on
         # the operator channel as an uncorrected false-positive "approved"
