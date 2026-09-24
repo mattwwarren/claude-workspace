@@ -173,17 +173,6 @@ def _approve_scope_drift(ticket_id: str, resolved: str, scope_drift: str) -> Non
         resolved,
         extra_files,
     )
-    record_event(
-        OrchestratorEventType.TICKET_APPROVED,
-        {
-            "ticket_id": ticket_id,
-            "client": resolved,
-            "from_stage": result["from_stage"],
-            "to_stage": result["to_stage"],
-            "scope_drift_approved_extra_files": result["extra_files"],
-            "scope_drift_approved_head": result["approved_head"],
-        },
-    )
     click.echo(
         f"Approved scope drift for {ticket_id} ({resolved}):"
         f" {result['from_stage']} -> {result['to_stage']}. Allowed extra files:"

@@ -10778,7 +10778,7 @@ class TestDevQueueApproveCli:
         )
         events: list[tuple[object, dict[str, object]]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.approve.record_event",
+            "cw.dev_queue.approval.record_event",
             lambda event_type, payload, **_kw: events.append((event_type, payload)),
         )
         return events
