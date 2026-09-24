@@ -20,6 +20,8 @@ jobs:
         with:
           # diff-cover needs main's history to compute the patch diff
           fetch-depth: 0
+          # check_changelog_frozen.py diffs CHANGELOG.md against release tags
+          fetch-tags: true
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
@@ -55,6 +57,12 @@ jobs:
 
       - name: Smoke-import .claude scripts
         run: uv run python .claude/scripts/check_imports.py
+
+      # Released `## [X.Y.Z]` sections must stay byte-identical to their tag's
+      # copy (#2304). --require-tags fails if tags were not fetched rather than
+      # warning and passing like the local pre-commit hook.
+      - name: Freeze released CHANGELOG sections
+        run: uv run python .claude/scripts/check_changelog_frozen.py --require-tags
 
       # Catches drift between .pre-commit-config.yaml hook pins and the
       # dedicated lint/format/mypy steps above. Skips the local pytest

@@ -70,6 +70,11 @@ build-backend = "hatchling.build"
 # fails with "A second file is being added ... at the same path".
 packages = ["src/cw"]
 
+[tool.cw.changelog_freeze]
+# Released CHANGELOG sections are frozen for this tag and every later one;
+# older tags are accepted history (#2304).
+since_tag = "v1.51.0"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

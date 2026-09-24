@@ -769,6 +769,7 @@ EXPECTED_REPO_GATES: list[tuple[str, str]] = [
     ("ruff-format", "uv run ruff format --check src/ tests/"),
     ("mypy", "uv run mypy --strict src/"),
     ("python", "uv run python .claude/scripts/check_imports.py"),
+    ("python-2", "uv run python .claude/scripts/check_changelog_frozen.py"),
     ("pre-commit", "uv run pre-commit run --all-files"),
     (
         "pytest-not-integration",
