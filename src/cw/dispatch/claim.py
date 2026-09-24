@@ -805,6 +805,7 @@ def _park_running_task_blocked_on_user(
     breadcrumbs: str,
     expected_session_id: str | None = None,
     unproductive: bool = True,
+    created_at: datetime | None = None,
 ) -> None:
     """Move a still-RUNNING claimed task to BLOCKED_ON_USER, clearing session_id.
 
@@ -840,6 +841,12 @@ def _park_running_task_blocked_on_user(
     before any session_id has been stamped, so there is no snapshot to go
     stale.
 
+    ``created_at`` (#2219) is the pre-spawn callers' identity instead: they
+    pass their claimed task's ``created_at`` so a duplicate RUNNING row for
+    the same ``(ticket_id, client)`` is never parked in their place. Both
+    identities route through :func:`_find_running_row`; in every real call
+    exactly one of them is supplied.
+
     Also emits SESSION_NEEDS_ATTENTION (#1257) using the canonical 9-field
     payload shape (see ``_route_scope_gated_approval`` in routing.py), reading
     ``stored_task.session_id``/``stored_task.lane`` before ``session_id`` is
@@ -850,39 +857,36 @@ def _park_running_task_blocked_on_user(
     """
     with dev_queue_lock():
         store = load_dev_queue()
-        for stored_task in store.tasks:
-            if (
-                stored_task.ticket_id == ticket_id
-                and stored_task.client == client_name
-                and stored_task.status == QueueItemStatus.RUNNING
-                and (
-                    expected_session_id is None
-                    or stored_task.session_id == expected_session_id
-                )
-            ):
-                transition_task_status(
-                    stored_task,
-                    QueueItemStatus.BLOCKED_ON_USER,
-                    disposition=disposition,
-                    unproductive=unproductive,
-                )
-                record_event(
-                    OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-                    {
-                        "session_id": stored_task.session_id or "",
-                        "session_name": "",
-                        "client": client_name,
-                        "ticket_id": ticket_id,
-                        "claude_session_id": None,
-                        "paused_status": disposition,
-                        "breadcrumbs": breadcrumbs,
-                        "crashed": False,
-                        "lane": stored_task.lane,
-                    },
-                    correlation_id=ticket_id,
-                )
-                stored_task.session_id = None
-                break
+        stored_task = _find_running_row(
+            store,
+            ticket_id,
+            client_name,
+            created_at=created_at,
+            session_id=expected_session_id,
+        )
+        if stored_task is not None:
+            transition_task_status(
+                stored_task,
+                QueueItemStatus.BLOCKED_ON_USER,
+                disposition=disposition,
+                unproductive=unproductive,
+            )
+            record_event(
+                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                {
+                    "session_id": stored_task.session_id or "",
+                    "session_name": "",
+                    "client": client_name,
+                    "ticket_id": ticket_id,
+                    "claude_session_id": None,
+                    "paused_status": disposition,
+                    "breadcrumbs": breadcrumbs,
+                    "crashed": False,
+                    "lane": stored_task.lane,
+                },
+                correlation_id=ticket_id,
+            )
+            stored_task.session_id = None
         save_dev_queue(store)
 
 
@@ -970,6 +974,7 @@ def _codex_capability_gate(
         disposition=probe.diagnosis,
         breadcrumbs=probe.detail,
         unproductive=False,
+        created_at=task.created_at,
     )
     _codex_capability_park_count[0] += 1
     breaker_engaged = (
@@ -1425,6 +1430,7 @@ def _spawn_claimed_task(
                     disposition="dirty_worktree",
                     breadcrumbs=f"{worktree_path_for(client, branch)}: {unsaved}",
                     unproductive=False,
+                    created_at=task.created_at,
                 )
             else:
                 with contextlib.suppress(WorktreeError, OSError):
