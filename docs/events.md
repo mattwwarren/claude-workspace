@@ -97,7 +97,12 @@ paths. Payload keys vary slightly by emitter; the Stop-hook shape is:
 
 Optional keys: `rescued: true` + `rescue_reason: "late_sentinel"` when a late
 Stop-hook sentinel salvaged an idle-parked task (#918); `salvaged: true` +
-`status: "<sentinel status>"` on reconcile's routed-sentinel backstop paths.
+`status: "<sentinel status>"` on reconcile's routed-sentinel backstop paths;
+`reason: "usage_limited_mid_turn"` (with `crashed: false`) when reconcile's
+mid-turn usage-limit sweep closes the session (#2324). The dispatch consumer
+skips that last one, as it does a `crashed: true` event: the sweep records it
+before requeueing the row and owns the row's disposition, including finishing
+a requeue interrupted after the close.
 
 The boot pass over crash-orphaned codex reviews
 (`reap_orphaned_codex_sessions_at_boot` in `cw.reconcile.codex_boot`, #2285)
@@ -871,18 +876,25 @@ open enum; consumers MUST tolerate unknown values. Known values:
   (ADR-0014), gated by the lane's `reap_policy` exactly like the phantom sweep
   (ADR-0006). Every act first re-checks, with no side effects, that the tail
   still ends on the limit message and the row is still RUNNING under this
-  session — if not, nothing is armed, emitted or mutated that tick — and then
-  arms the lockout (a failed arm is logged and the act continues). Under
-  `reap_policy: auto` this event, the `session.reap_proposed` and a
-  `session.completed` (`crashed: false`) are all emitted **before** any effect;
-  then the daemon surface is stopped, the session is persisted `COMPLETED`
-  with `completed_reason: "usage_limited"`, and last the row goes
+  session (keyed on `(ticket_id, client, session_id)`) — if not, nothing is
+  armed, emitted or mutated that tick — and then arms the lockout (a failed
+  arm is logged and the act continues). Under `reap_policy: auto` this event,
+  the `session.reap_proposed` and a `session.completed` (`crashed: false`,
+  `reason: "usage_limited_mid_turn"`) are all emitted **before** any effect;
+  then the tail is re-read once more, the daemon surface is stopped and the
+  stop verified against the daemon roster, the session is persisted
+  `COMPLETED` with `completed_reason: "usage_limited"`, and last the row goes
   `RUNNING → PENDING` with `session_id` cleared and `next_eligible_at` set to
   the reset instant, so the existing claim gate releases it at the reset. A
-  failed emit or a failed stop leaves the session ACTIVE and the row RUNNING
-  for the next tick to retry (the events may then repeat); a requeue that
-  loses a race to another writer leaves the row as found and the stopped
-  session closed. Under any other policy (`signal_only`, the default) the row
+  failed emit, a tail that changed before the stop, a failed stop, or a
+  surface still in the roster (or an unreadable roster) after a short bounded
+  poll leaves the session ACTIVE and the row RUNNING for the next tick to
+  retry (the events may then repeat); a requeue that loses a race to another
+  writer leaves the row as found and the stopped session closed. A requeue
+  interrupted after the close (a failed dev-queue write, or a crash) is
+  finished by a later reconcile tick, which recognises a RUNNING row bound to
+  a session already `COMPLETED`/`usage_limited` by this sweep and requeues it
+  without charge. Under any other policy (`signal_only`, the default) the row
   parks `RUNNING → BLOCKED_ON_USER` with
   `disposition="usage_limited_mid_turn"` and `session_id` left set, and only
   then are the `session.reap_proposed` and this event emitted; the session and

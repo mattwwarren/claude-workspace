@@ -27,6 +27,7 @@ from cw.models import (
     OrchestratorEventType,
     PrState,
     QueueItemStatus,
+    ReapReason,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -1346,3 +1347,47 @@ def test_reconcile_signal_only_parks_mid_turn_ticket_without_reverting(
     task = load_dev_queue().tasks[0]
     assert task.status is QueueItemStatus.BLOCKED_ON_USER
     assert task.disposition == "usage_limited_mid_turn"
+
+
+def test_reconcile_finishes_interrupted_mid_turn_requeue_without_charge(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A requeue that failed after the session closed is finished next tick.
+
+    The next reconcile must finish it as a usage-limit requeue -- PENDING, no
+    attempt charged -- and never fall through to the COMPLETED-session
+    backstop, which would charge one (#2324 round 3).
+    """
+    _seed_mid_turn_limit(
+        tmp_path, monkeypatch, config=_auto_config(), with_phantom=False
+    )
+    before = load_dev_queue().tasks[0].unproductive_attempts
+    real_save = save_dev_queue
+    saves: list[int] = []
+
+    def _save_failing_once(store: DevQueueStore) -> None:
+        saves.append(1)
+        if len(saves) == 1:
+            msg = "dev-queue write failed"
+            raise OSError(msg)
+        real_save(store)
+
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn.save_dev_queue", _save_failing_once
+    )
+
+    with pytest.raises(OSError, match="dev-queue write failed"):
+        reconcile()
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
+
+    report = reconcile()
+
+    assert _MID_TURN_TICKET in report.reverted_ticket_ids
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.PENDING
+    assert task.unproductive_attempts == before
+    assert task.next_eligible_at is not None
+    assert load_state().sessions[0].reap_reason is ReapReason.USAGE_LIMIT_MID_TURN

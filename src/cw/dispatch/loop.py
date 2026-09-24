@@ -54,6 +54,7 @@ from cw.orchestrate import latest_tick_summary_by_client
 from cw.pr_hydrate import hydrate_pr_states
 from cw.reconcile import (
     _CAUSE_USAGE_LIMIT,
+    _USAGE_LIMITED_MID_TURN_REASON,
     register_stale_dispatch_watched_prs,
     release_stale_gated_tasks,
     ticket_id_for_session,
@@ -174,6 +175,12 @@ def _apply_events_to_store(
         # skip is conservative-safe (no queue task is expected to
         # match anyway). See GitHub issue #97.
         if event.payload.get("crashed"):
+            continue
+        # The mid-turn usage-limit sweep records its (non-crash) completion
+        # before it requeues the row, and finishes a requeue interrupted after
+        # the close on a later reconcile tick (#2324). Reconcile owns that
+        # row: routing the event here would park it with no sentinel first.
+        if event.payload.get("reason") == _USAGE_LIMITED_MID_TURN_REASON:
             continue
         ticket_id = event.payload.get("ticket_id")
         if not ticket_id:

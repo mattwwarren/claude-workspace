@@ -731,6 +731,45 @@ class TestConsumeCompletesTasks:
         assert completed == 0
         assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
+    def test_consume_skips_usage_limited_mid_turn_events(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """The mid-turn usage-limit sweep's session.completed is reconcile-owned.
+
+        It is recorded before the sweep requeues the row, and a requeue
+        interrupted after the close is finished by reconcile on a later tick
+        (#2324). Routing it here would park the still-RUNNING row with no
+        sentinel -- and charge an attempt -- before reconcile can finish it.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-2324",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="limited-session",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "session_id": "limited-session",
+                "session_name": "test-client/auto-dev/GEN-2324",
+                "client": "test-client",
+                "ticket_id": "GEN-2324",
+                "crashed": False,
+                "reason": "usage_limited_mid_turn",
+            },
+        )
+
+        assert consume_completed_sessions() == 0
+        stored = load_dev_queue().tasks[0]
+        assert stored.status == QueueItemStatus.RUNNING
+        assert stored.unproductive_attempts == task.unproductive_attempts
+
     def test_consume_rejects_event_with_mismatched_session_id(
         self,
         tmp_dispatch_dirs: Path,

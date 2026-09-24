@@ -455,6 +455,8 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     assert len(completed) == 1
     assert completed[0]["crashed"] is False
     assert completed[0]["ticket_id"] == _SID
+    # Marks the event as reconcile-owned so the dispatch consumer skips it.
+    assert completed[0]["reason"] == "usage_limited_mid_turn"
     assert daemon.stop_calls == [_SURFACE]
     # Steps 2-3 (the lockout arm, then every audit event) all precede step 4's
     # stop; steps 5-6 (the session close and the requeue) both follow it.
@@ -1059,3 +1061,161 @@ def test_detect_and_park_is_idempotent_on_second_tick(
 
     assert len(_events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)) == 1
     assert len(_events(OrchestratorEventType.USAGE_LIMIT_ARMED)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Resumable step 6 -- a requeue interrupted after the session was closed
+# ---------------------------------------------------------------------------
+
+_LATER = _NOW + timedelta(minutes=10)
+
+
+def _tick(state: CwState, config: OrchestratorConfig, *, at: datetime) -> list[str]:
+    with freezegun.freeze_time(at):
+        return detect_and_park_mid_turn_usage_limits(
+            state,
+            now=at,
+            native_live={_SURFACE},
+            config=config,
+            clients={},
+        )
+
+
+def _fail_step_6_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first dev-queue save through this module raises; later ones land."""
+    real_save = save_dev_queue
+    calls: list[int] = []
+
+    def _save_failing_once(store: DevQueueStore) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            msg = "dev-queue write failed"
+            raise OSError(msg)
+        real_save(store)
+
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn.save_dev_queue", _save_failing_once
+    )
+
+
+@pytest.mark.parametrize(
+    ("limit_text", "expected_until"),
+    [
+        pytest.param(_LIMIT_TEXT, _RESET_AT, id="parsed-reset"),
+        # Anchored at the close, not the finishing tick's own now.
+        pytest.param(
+            _UNPARSEABLE_LIMIT_TEXT,
+            _NOW + timedelta(seconds=_BACKOFF_SECONDS),
+            id="flat-backoff",
+        ),
+    ],
+)
+def test_interrupted_requeue_is_finished_next_tick_without_charge(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    limit_text: str,
+    expected_until: datetime,
+) -> None:
+    """Step 6 fails once after the close; the next tick finishes the requeue.
+
+    The row is still RUNNING and bound to a session already COMPLETED with
+    the usage-limit reason. The next tick recognises that, and finishes it:
+    PENDING, ``next_eligible_at``, no attempt charged -- and a third tick
+    finds nothing left to do.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail(limit_text))
+    config = _auto_config(usage_limit_backoff_seconds=_BACKOFF_SECONDS)
+    before = _owned_row().unproductive_attempts
+    _fail_step_6_once(monkeypatch)
+
+    with pytest.raises(OSError, match="dev-queue write failed"):
+        _tick(state, config, at=_NOW)
+
+    closed = load_state().sessions[0]
+    assert closed.status is SessionStatus.COMPLETED
+    assert closed.completed_reason is CompletionReason.USAGE_LIMITED
+    _assert_row_still_running()
+    events_after_close = len(read_events())
+
+    state = load_state()
+    assert _tick(state, config, at=_LATER) == [_SID]
+
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.PENDING
+    assert task.unproductive_attempts == before
+    assert task.session_id is None
+    assert task.next_eligible_at == expected_until
+    # Finishing is not a second act: nothing stopped, re-armed or re-audited.
+    # The one new event is the requeue's own transition record, uncharged.
+    assert daemon.stop_calls == [_SURFACE]
+    new_events = read_events()[events_after_close:]
+    assert [e.type for e in new_events] == [OrchestratorEventType.TASK_TRANSITION]
+    assert new_events[0].payload["new_status"] == QueueItemStatus.PENDING
+    assert new_events[0].payload["unproductive_charge"] is False
+
+    assert _tick(load_state(), config, at=_LATER) == []
+    assert load_dev_queue().tasks[0] == task
+
+
+@pytest.mark.parametrize(
+    ("completed_reason", "reap_reason"),
+    [
+        pytest.param(
+            CompletionReason.CRASHED, ReapReason.PHANTOM_SURFACE, id="phantom-crash"
+        ),
+        pytest.param(
+            CompletionReason.USAGE_LIMITED,
+            ReapReason.PHANTOM_SURFACE,
+            id="other-reaper",
+        ),
+        pytest.param(
+            CompletionReason.NORMAL, ReapReason.USAGE_LIMIT_MID_TURN, id="normal"
+        ),
+    ],
+)
+def test_interrupted_requeue_ignores_sessions_this_sweep_did_not_close(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    completed_reason: CompletionReason,
+    reap_reason: ReapReason,
+) -> None:
+    """Only a close stamped by this sweep's act is finished; others are left."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    session = state.sessions[0]
+    session.status = SessionStatus.COMPLETED
+    session.completed_at = _NOW
+    session.completed_reason = completed_reason
+    session.reap_reason = reap_reason
+    save_state(state)
+
+    assert _tick(state, _auto_config(), at=_LATER) == []
+    _assert_row_still_running()
+
+
+def test_interrupted_requeue_leaves_row_keyed_to_another_client(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    """The finish uses the same (ticket_id, client, session_id) identity."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    session = state.sessions[0]
+    session.status = SessionStatus.COMPLETED
+    session.completed_at = _NOW
+    session.completed_reason = CompletionReason.USAGE_LIMITED
+    session.reap_reason = ReapReason.USAGE_LIMIT_MID_TURN
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(tasks=[_running_row(client="client-b", session_id=_SID)])
+    )
+
+    assert _tick(state, _auto_config(), at=_LATER) == []
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.session_id == _SID

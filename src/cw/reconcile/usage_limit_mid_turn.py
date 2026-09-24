@@ -25,7 +25,9 @@ Under ``auto`` the row is then requeued and the session closed:
 
 3. Record the audit events -- ``session.needs_attention`` naming the reset
    instant, ``session.reap_proposed`` (ADR-0006 invariant 3) and
-   ``session.completed`` -- before any effect. A failed write stops here.
+   ``session.completed`` -- before any effect. A failed write stops here. The
+   ``session.completed`` carries ``reason="usage_limited_mid_turn"``, which
+   the dispatch consumer skips: this sweep owns the row's disposition.
 4. Re-read the tail immediately before the stop, since steps 2-3 ran after
    the gate: a changed tail is the gate's no-op. Then stop the daemon
    surface, so a live idle home cannot defer the re-claim, and verify it:
@@ -37,7 +39,13 @@ Under ``auto`` the row is then requeued and the session closed:
 6. Requeue the row RUNNING -> PENDING with ``next_eligible_at`` at the reset
    instant, through the identity-checked update, so the existing claim gate
    releases it with no new sweep. A lost race is logged; the closed session
-   stays closed, since its process is gone.
+   stays closed, since its process is gone. Step 6 is resumable: the session
+   and queue stores cannot be written atomically, so if its write fails (the
+   error aborts the tick) or the process dies after step 5, a later tick
+   finds the row still RUNNING under a session already COMPLETED with this
+   sweep's usage-limit reason and finishes the requeue, idempotently and
+   without charge. It runs ahead of reconcile's COMPLETED-session backstop,
+   so such a row never falls through to that backstop's charged revert.
 
 Any other policy (``signal_only`` default) instead parks the row
 BLOCKED_ON_USER with ``disposition="usage_limited_mid_turn"`` and only then
@@ -284,6 +292,25 @@ def _park_blocked_on_user(target: TicketTask) -> None:
     )
 
 
+def _resolve_window(
+    matched_text: str | None, *, now: datetime, config: OrchestratorConfig
+) -> tuple[datetime | None, datetime]:
+    """The limit message's parsed reset instant (if any) and the window's end.
+
+    Deterministic in *now*, so finishing an interrupted requeue from the
+    session's ``completed_at`` reproduces the ``until`` its act computed.
+    """
+    reset_at = (
+        parse_usage_limit_reset(matched_text, now=now.astimezone(_deps.host_timezone()))
+        if matched_text
+        else None
+    )
+    until = resolve_usage_limited_until(
+        now, reset_at, config.usage_limit_backoff_seconds
+    )
+    return reset_at, until
+
+
 def _arm_lockout(
     client: str, ticket_id: str, *, until: datetime, reset_at: datetime | None
 ) -> None:
@@ -357,6 +384,9 @@ def _audit_auto_act(ctx: _ActContext) -> bool:
                 "ticket_id": ctx.ticket_id,
                 "claude_session_id": session.claude_session_id,
                 "crashed": False,
+                # Reconcile owns this row's disposition, including finishing
+                # an interrupted requeue, so the dispatch consumer skips it.
+                "reason": _USAGE_LIMITED_MID_TURN_REASON,
             },
             correlation_id=ctx.ticket_id,
         )
@@ -522,14 +552,8 @@ def _act_on_mid_turn_usage_limit_candidates(
         detection = _gate(session, ticket_id)
         if detection is None:
             continue
-        text = detection.matched_text
-        reset_at = (
-            parse_usage_limit_reset(text, now=now.astimezone(_deps.host_timezone()))
-            if text
-            else None
-        )
-        until = resolve_usage_limited_until(
-            now, reset_at, config.usage_limit_backoff_seconds
+        reset_at, until = _resolve_window(
+            detection.matched_text, now=now, config=config
         )
         _arm_lockout(session.client, ticket_id, until=until, reset_at=reset_at)
         ctx = _ActContext(
@@ -548,6 +572,74 @@ def _act_on_mid_turn_usage_limit_candidates(
     return reverted
 
 
+def _closed_by_this_sweep(session: Session) -> bool:
+    """Did step 5 of this sweep's ``auto`` act close *session*?
+
+    Only that step stamps the pair ``usage_limited`` /
+    ``usage_limit_mid_turn``; the phantom sweep and every other closer stamp
+    something else.
+    """
+    return (
+        session.origin is SessionOrigin.DAEMON
+        and session.status is SessionStatus.COMPLETED
+        and session.completed_reason is CompletionReason.USAGE_LIMITED
+        and session.reap_reason is ReapReason.USAGE_LIMIT_MID_TURN
+    )
+
+
+def _finish_interrupted_requeues(
+    state: CwState,
+    *,
+    tasks: Sequence[TicketTask],
+    config: OrchestratorConfig,
+    now: datetime,
+) -> list[str]:
+    """Finish a step-6 requeue interrupted after step 5 closed the session.
+
+    The session store and the dev queue cannot be written atomically, so a
+    failed or crashed step 6 leaves the session COMPLETED/``usage_limited``
+    while its row is still RUNNING under it. That pair is recognised here as
+    "usage-limit act interrupted after close" and finished exactly as step 6
+    would have: PENDING with ``next_eligible_at`` recomputed from the session's
+    ``completed_at`` (the act's own ``now``) and no attempt charged. The same
+    identity-checked write makes it idempotent -- a finished row is no longer
+    RUNNING under the session. Nothing is re-armed, re-emitted or re-stopped:
+    steps 2-5 already ran, and ``reap_policy`` authorised the act they began.
+
+    Reconcile runs this sweep before its COMPLETED-session backstop, and a
+    failed write here raises out of the tick, so such a row never falls
+    through to that backstop's attempt-charging revert. Returns the ticket
+    ids requeued.
+    """
+    finished: list[str] = []
+    for session in state.sessions:
+        if not _closed_by_this_sweep(session):
+            continue
+        ticket_id = ticket_id_for_session(session.name)
+        if (
+            ticket_id is None
+            or _owned_running_row(tasks, ticket_id, session.client, session.id) is None
+        ):
+            continue
+        closed_at = session.completed_at or now
+        _, until = _resolve_window(
+            _shared.detect_usage_limit(session).matched_text,
+            now=closed_at,
+            config=config,
+        )
+        if _mutate_owned_running_row(
+            session, ticket_id, partial(_revert_to_pending, until=until)
+        ):
+            _log.info(
+                "usage_limit_mid_turn: finished the requeue of ticket %s "
+                "interrupted after session %s was closed",
+                ticket_id,
+                session.id,
+            )
+            finished.append(ticket_id)
+    return finished
+
+
 def detect_and_park_mid_turn_usage_limits(
     state: CwState,
     *,
@@ -563,14 +655,18 @@ def detect_and_park_mid_turn_usage_limits(
     ``record_session_liveness_changes``. ``tasks`` (every dev-queue row, not a
     ticket-keyed map, which would collapse same-ticket rows) may be pre-loaded
     by the caller to avoid a duplicate dev-queue read within the same reconcile
-    tick; when omitted it is loaded here. Returns the ticket ids reverted to
-    PENDING (``reap_policy: auto`` only).
+    tick; when omitted it is loaded here. First finishes any ``auto`` requeue
+    interrupted after its session was closed. Returns the ticket ids reverted
+    to PENDING (``reap_policy: auto`` only), finished ones included.
     """
     resolved_tasks = tasks if tasks is not None else load_dev_queue().tasks
+    finished = _finish_interrupted_requeues(
+        state, tasks=resolved_tasks, config=config, now=now
+    )
     candidates = _detect_mid_turn_usage_limit_candidates(
         state, native_live=native_live, tasks=resolved_tasks
     )
-    return _act_on_mid_turn_usage_limit_candidates(
+    return finished + _act_on_mid_turn_usage_limit_candidates(
         state,
         candidates,
         native_live=native_live,
