@@ -55,8 +55,11 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import record_event
-from cw.models import OrchestratorEventType, QueueItemStatus
-from cw.reconcile._shared import _LIVE_STATUSES
+from cw.models import (
+    TERMINAL_SESSION_STATUSES,
+    OrchestratorEventType,
+    QueueItemStatus,
+)
 from cw.reconcile.codex_boot import (
     _close_session_audited,
     _OrphanDisposition,
@@ -206,18 +209,22 @@ def _clear_link(task: TicketTask) -> None:
     task.codex_orphan_rescan_next_eligible_at = None
 
 
-def _close_if_still_live(
+def _close_unless_terminal(
     session_id: str, ticket_id: str, disposition: _OrphanDisposition
 ) -> None:
     """Close the orphaned session with its audit event, unless already closed.
 
-    Caller holds ``sessions_lock`` (ambient) and ``dev_queue_lock``. An
-    already-terminal session is the crash-recovery case: its audit event was
-    recorded when it closed, so it gets no second one.
+    Any non-terminal status closes, not just ACTIVE/IDLE: an orphan that went
+    BACKGROUNDED after the park still holds its client-ceiling slot, and
+    requeueing past it would recreate the leak this sweep exists to remove
+    (#2307 review round 1). Caller holds ``sessions_lock`` (ambient) and
+    ``dev_queue_lock``. An already-terminal session is the crash-recovery
+    case: its audit event was recorded when it closed, so it gets no second
+    one.
     """
     state = load_state()
     session = next((s for s in state.sessions if s.id == session_id), None)
-    if session is None or session.status not in _LIVE_STATUSES:
+    if session is None or session.status in TERMINAL_SESSION_STATUSES:
         return
     _close_session_audited(
         state,
@@ -253,7 +260,9 @@ def _apply_decision(
             seconds=_LIVE_WRITER_RESCAN_BACKOFF_SECONDS
         )
         return False
-    _close_if_still_live(candidate.orphan_session_id, candidate.ticket_id, disposition)
+    _close_unless_terminal(
+        candidate.orphan_session_id, candidate.ticket_id, disposition
+    )
     if disposition.should_requeue:
         # Clears the link and backoff too (transition_task_status's
         # unconditional clear). BLOCKED_ON_USER -> PENDING is not a RUNNING
