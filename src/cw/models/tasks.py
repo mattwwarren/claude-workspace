@@ -178,6 +178,15 @@ from cw.review_finding_dispositions import FindingDisposition
 #      act's only deciding write; every later tick resumes the act from it
 #      until the row's final transition clears it. Backfilled to None on every
 #      pre-v39 row: no act was in flight under the older schema.
+#      Also added TicketTask.codex_orphan_session_id/
+#      codex_orphan_rescan_next_eligible_at (GitHub #2307) — the durable link
+#      from a live-writer/inconclusive-scan codex-orphan park back to the
+#      Session the boot pass left ACTIVE (the row's own session_id is cleared
+#      on park), plus the fixed-interval backoff bounding how often
+#      cw.reconcile.codex_reparks re-scans the process table for it. Both
+#      describe the current park episode, so both follow the v30
+#      unconditional-clear-on-every-transition convention. Backfilled to None
+#      on every pre-v39 row: an unlinked park is exactly today's behavior.
 DEV_QUEUE_SCHEMA_VERSION = 39
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
@@ -575,6 +584,20 @@ class TicketTask(BaseModel):
     # non-terminal: that worktree cannot be reused until the session is closed,
     # so every requeue burns an attempt for nothing.
     hook_context_conflict_session_id: str | None = None
+    # GitHub #2307 — the Session a live-writer/inconclusive-scan codex-orphan
+    # park left ACTIVE (cw.reconcile.codex_boot). session_id is cleared on
+    # park, so without this nothing links the parked row back to that
+    # session. Stamped by _park_running_task_blocked_on_user only for the
+    # parks whose session stays open; read by cw.reconcile.codex_reparks,
+    # which re-scans for the writer on reconcile ticks and closes the session
+    # once it is affirmatively gone. Unlike hook_context_conflict_session_id
+    # (cleared only by a successful spawn), this describes the current park
+    # episode, so transition_task_status clears it on every transition.
+    codex_orphan_session_id: str | None = None
+    # GitHub #2307 — earliest time codex_reparks may re-scan the process
+    # table for the row above. Fixed interval (a writer exits once; nothing
+    # worsens to justify an escalating curve), same unconditional clear.
+    codex_orphan_rescan_next_eligible_at: datetime | None = None
     # Hydrated GitHub PR state (merge/CI/review) persisted by the serve-tick
     # hydration pass (cw.pr_hydrate). None until first hydration or for pre-v8
     # legacy tasks. See GitHub #929.

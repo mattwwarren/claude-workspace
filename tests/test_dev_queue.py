@@ -10999,6 +10999,24 @@ class TestTransitionTaskStatus:
                 f"expected None after transition to {status}"
             )
 
+    def test_clears_codex_orphan_link_unconditionally(self) -> None:
+        """Any transition clears the codex-orphan link + rescan backoff (#2307):
+        they describe the current live-writer park episode only, so a
+        same-status re-park also starts them clean."""
+        for status in QueueItemStatus:
+            task = TicketTask(
+                ticket_id="T-co",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                codex_orphan_session_id="sess-orphan",
+                codex_orphan_rescan_next_eligible_at=datetime.now(UTC),
+            )
+            transition_task_status(task, status)
+            assert task.codex_orphan_session_id is None, (
+                f"expected None after transition to {status}"
+            )
+            assert task.codex_orphan_rescan_next_eligible_at is None
+
     def test_clears_advisory_note_unconditionally(self) -> None:
         """Any transition clears advisory_note (#1762).
 
@@ -12541,6 +12559,79 @@ class TestUsageLimitActMigration:
         assert loaded == intent
         assert loaded is not None
         assert loaded.audited_at is None
+
+
+class TestCodexOrphanLinkMigration:
+    """Schema v39 (#2307) adds the live-writer codex-orphan park's session link
+    and rescan backoff. A row written by v38 loads with both unset, so the
+    reconcile-tick re-evaluation sweep never selects it and it behaves exactly
+    as it did before the upgrade."""
+
+    def test_migrate_fills_codex_orphan_link_defaults(self) -> None:
+        raw: dict[str, object] = {
+            "schema_version": 38,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-39",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "disposition": "codex_review_orphaned_at_boot",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        task_raw = migrated["tasks"][0]
+        assert task_raw["codex_orphan_session_id"] is None
+        assert task_raw["codex_orphan_rescan_next_eligible_at"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 39
+
+    def test_migrate_preserves_a_recorded_link_idempotently(self) -> None:
+        raw: dict[str, object] = {
+            "schema_version": 39,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-39",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "codex_orphan_session_id": "sess-orphan",
+                    "codex_orphan_rescan_next_eligible_at": "2026-01-01T00:00:00Z",
+                }
+            ],
+        }
+        twice = migrate_dev_queue(migrate_dev_queue(raw))
+        task_raw = twice["tasks"][0]
+        assert task_raw["codex_orphan_session_id"] == "sess-orphan"
+        assert task_raw["codex_orphan_rescan_next_eligible_at"] == (
+            "2026-01-01T00:00:00Z"
+        )
+
+    def test_load_dev_queue_migrates_v38_file_without_the_link(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.config import dev_queue_file
+
+        v38_data = {
+            "schema_version": 38,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-39",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "disposition": "codex_review_orphaned_at_boot",
+                }
+            ],
+        }
+        dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
+        dev_queue_file().write_text(json.dumps(v38_data))
+
+        store = load_dev_queue()
+
+        assert store.schema_version == 39
+        assert store.tasks[0].codex_orphan_session_id is None
+        assert store.tasks[0].codex_orphan_rescan_next_eligible_at is None
 
 
 class TestPlanApprovedFingerprintStamp:

@@ -453,7 +453,11 @@ def _propose_reap(state: CwState, session: Session, ticket_id: str, lane: str) -
 
 
 def _close_audit_payload(
-    session: Session, ticket_id: str, disposition: _OrphanDisposition
+    session: Session,
+    ticket_id: str,
+    disposition: _OrphanDisposition,
+    *,
+    close_reason: str = CODEX_ORPHAN_CLOSE_REASON,
 ) -> dict[str, object]:
     """SESSION_COMPLETED payload for a session this pass closes.
 
@@ -461,7 +465,9 @@ def _close_audit_payload(
     why and how it was closed. ``disposition`` is the task transition decided
     on; the identity-checked transition itself confirms with TICKET_REQUEUED or
     SESSION_NEEDS_ATTENTION when it lands. ``crashed: True`` also keeps the
-    dispatch consumer from completing the task off this event.
+    dispatch consumer from completing the task off this event. *close_reason*
+    names the pass that closed it: the boot pass's default, or
+    ``cw.reconcile.codex_reparks``'s reconcile-tick reason (#2307).
     """
     return {
         "session_id": session.id,
@@ -470,7 +476,7 @@ def _close_audit_payload(
         "ticket_id": ticket_id,
         "crashed": True,
         "salvaged": False,
-        "reason": CODEX_ORPHAN_CLOSE_REASON,
+        "reason": close_reason,
         "disposition": (
             _CLOSE_DISPOSITION_REQUEUED
             if disposition.should_requeue
@@ -481,17 +487,26 @@ def _close_audit_payload(
 
 
 def _close_session_audited(
-    state: CwState, session: Session, ticket_id: str, disposition: _OrphanDisposition
+    state: CwState,
+    session: Session,
+    ticket_id: str,
+    disposition: _OrphanDisposition,
+    *,
+    close_reason: str = CODEX_ORPHAN_CLOSE_REASON,
 ) -> None:
     """Record the closure's audit event, then close and persist the session.
 
     Audit before effect, the settle ledger's ordering (#2232): a failed event
     write raises before anything is mutated, so a session is never closed
     without its audit trail and the next boot retries the whole disposition.
+    Lock-agnostic: the caller holds ``sessions_lock`` (see *close_reason* on
+    :func:`_close_audit_payload`).
     """
     record_event(
         OrchestratorEventType.SESSION_COMPLETED,
-        _close_audit_payload(session, ticket_id, disposition),
+        _close_audit_payload(
+            session, ticket_id, disposition, close_reason=close_reason
+        ),
         correlation_id=ticket_id,
     )
     session.status = SessionStatus.COMPLETED
@@ -652,12 +667,20 @@ def _close_orphaned_session_and_dispose(
                 stage=stage,
             )
         else:
+            # A park that leaves the session ACTIVE links the row back to it
+            # (#2307), since the park clears the row's own session_id:
+            # cw.reconcile.codex_reparks follows that link on reconcile ticks
+            # and closes the session once the writer is gone. Every other
+            # park closed the session above, so there is nothing to link.
             _park_running_task_blocked_on_user(
                 ticket_id=ticket_id,
                 client_name=snapshot.client,
                 expected_session_id=snapshot.id,
                 disposition=CODEX_ORPHANED_AT_BOOT_DISPOSITION,
                 breadcrumbs=f"{_ORPHAN_BREADCRUMBS} ({disposition.reason}).",
+                codex_orphan_session_id=(
+                    None if disposition.close_session else snapshot.id
+                ),
             )
     return True
 
