@@ -10238,6 +10238,25 @@ class TestApplyStagedDecision:
         assert task.disposition == "awaiting_operator"
         assert task.blocked_reason == "operator_unavailable"
 
+    def test_stage_failure_dependency_unmerged_stamps_awaiting_operator_disposition(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#2260: blocked + dependency_unmerged blocker reason →
+        BLOCKED_ON_USER with the hold-class disposition, not the verbatim status.
+        blocked_reason still carries the verbatim per-park diagnostic."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("HOLD-2", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "dependency_unmerged"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "awaiting_operator"
+        assert task.blocked_reason == "dependency_unmerged"
+
     def test_merge_gate_blocked_push_auth_failed_stamps_awaiting_operator_disposition(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
@@ -12958,7 +12977,7 @@ class TestApplyStagedDecision:
 
     @pytest.mark.parametrize(
         "reason",
-        ["push_auth_failed", "operator_unavailable"],
+        ["push_auth_failed", "operator_unavailable", "dependency_unmerged"],
     )
     def test_operator_unavailable_blocker_sets_awaiting_operator_paused_status(
         self,
@@ -13001,7 +13020,7 @@ class TestApplyStagedDecision:
 
     @pytest.mark.parametrize(
         "reason",
-        ["push_auth_failed", "operator_unavailable"],
+        ["push_auth_failed", "operator_unavailable", "dependency_unmerged"],
     )
     def test_blocked_at_finalize_operator_unavailable_reason_parks_without_regress(
         self,

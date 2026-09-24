@@ -9619,6 +9619,31 @@ class TestDevQueueTasksPrState:
         assert "x_producer_local" in result.output
         assert "?x_producer_local" not in result.output
 
+    def test_tasks_human_does_not_flag_dependency_unmerged_blocked_reason(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """`dependency_unmerged` is a known reason -- no `?` flag (#2260)."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-2260",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="awaiting_operator",
+                        blocked_reason="dependency_unmerged",
+                    )
+                ]
+            )
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert "dependency_unmerged" in result.output
+        assert "?dependency_unmerged" not in result.output
+
     def test_tasks_human_renders_em_dash_for_absent_blocked_reason(
         self, tmp_config_dir: Path
     ) -> None:

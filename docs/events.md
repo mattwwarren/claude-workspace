@@ -890,7 +890,7 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `disposition="abandoned"`). See #1117.
 - `"awaiting_operator_availability"` — Rule 5's `blocked` status carries a
   blocker reason in `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`
-  (`push_auth_failed`, `operator_unavailable`) — an operator/dependency
+  (`push_auth_failed`, `operator_unavailable`, `dependency_unmerged`) — an operator/dependency
   unavailability, not a broken leg (RFC 0011 A1). Overrides the generic
   `"blocked"` paused_status for this park only; `breadcrumbs` still carries
   the specific `blocker.reason` verbatim. The task is BLOCKED_ON_USER.

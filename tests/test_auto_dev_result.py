@@ -4540,7 +4540,9 @@ class TestOperatorUnavailableBlockerReasons:
 
     def test_operator_unavailable_reasons_frozenset_members(self) -> None:
         assert (
-            frozenset({"push_auth_failed", "operator_unavailable"})
+            frozenset(
+                {"push_auth_failed", "operator_unavailable", "dependency_unmerged"}
+            )
             == OPERATOR_UNAVAILABLE_BLOCKER_REASONS
         )
 
@@ -4549,6 +4551,12 @@ class TestOperatorUnavailableBlockerReasons:
     ) -> None:
         assert "push_auth_failed" not in FINALIZE_REGRESS_BLOCKER_REASONS
         assert "operator_unavailable" not in FINALIZE_REGRESS_BLOCKER_REASONS
+
+    def test_dependency_unmerged_excluded_from_finalize_regress(self) -> None:
+        assert "dependency_unmerged" not in FINALIZE_REGRESS_BLOCKER_REASONS
+
+    def test_dependency_unmerged_is_known_blocker_reason(self) -> None:
+        assert is_known_blocker_reason("dependency_unmerged")
 
     def test_finalize_regress_blocker_reasons_unchanged(self) -> None:
         assert frozenset({"agent_block"}) == FINALIZE_REGRESS_BLOCKER_REASONS
@@ -4561,6 +4569,16 @@ class TestOperatorUnavailableBlockerReasons:
         assert isinstance(result, AutoDevResult)
         assert result.blocker is not None
         assert result.blocker.reason == "operator_unavailable"
+        assert result.schema_version == p["schema_version"]
+
+    def test_blocked_dependency_unmerged_round_trips_without_bump(self) -> None:
+        """A blocked+dependency_unmerged blocker round-trips without a schema bump."""
+        p = _blocked_payload()
+        p["blocker"]["reason"] = "dependency_unmerged"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.blocker is not None
+        assert result.blocker.reason == "dependency_unmerged"
         assert result.schema_version == p["schema_version"]
 
 

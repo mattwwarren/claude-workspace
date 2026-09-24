@@ -72,8 +72,9 @@ _TERMINAL_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
 SIGNOFF_GATE_DISPOSITION = "signoff_gate"
 
 # Disposition stamped when a park is a *hold* -- "we could not reach the
-# operator or a dependency", not "this leg is broken" (RFC 0011 A1, #1254).
-# Textually distinct from dispatch.routing._AWAITING_OPERATOR_REASON
+# operator or a dependency" (e.g. blocker.reason == "dependency_unmerged",
+# #2260), not "this leg is broken" (RFC 0011 A1, #1254). Textually distinct
+# from dispatch.routing._AWAITING_OPERATOR_REASON
 # ("awaiting_operator_availability"): that one is a SESSION_NEEDS_ATTENTION
 # paused_status string, this one classifies TicketTask.disposition. Different
 # namespaces -- do not confuse them.
