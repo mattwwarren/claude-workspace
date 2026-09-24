@@ -58,6 +58,7 @@ from tests.conftest import (
     _make_finding,
     _make_reviewer_doc,
     _make_ticket_task,
+    add_bare_origin,
     git_in,
 )
 from tests.test_review_adjudication import _make_voided_finding
@@ -98,6 +99,9 @@ def _worktree(
         _write(repo / rel_path, text)
     git_in(repo, "add", *files.keys())
     git_in(repo, "commit", "-m", "add new.py")
+    # #2354: every committed fix cycle now pushes, so the feature branch needs
+    # a real origin to push to.
+    add_bare_origin(repo)
     return repo
 
 
@@ -696,6 +700,40 @@ class TestFixInvocation:
 
         counter_path = worktree / ".git" / "pre-commit-calls"
         assert counter_path.read_text().strip() == "2"
+
+    def test_commit_fix_cycle_pushes_after_commit(
+        self, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+    ) -> None:
+        """#2354: a committed fix cycle lands on origin, not only locally."""
+        worktree, origin = make_git_repo_with_origin("wt-fix-commit-push")
+        _write(worktree / "fix.py", "patched = 1\n")
+
+        sha = _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
+
+        assert sha is not None
+        assert git_in(origin, "rev-parse", "refs/heads/feature") == sha
+
+    def test_run_fix_and_commit_parks_on_push_failure(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
+        """#2354: a failed push parks exactly like a failed commit does.
+
+        Same ``codex_error`` reason and ``runtime_error`` diagnostics bundle as
+        ``test_commit_exception_treated_as_fix_failure`` — proof that
+        ``_run_fix_and_commit``'s existing ``except`` needed no change.
+        """
+        worktree = _worktree(make_git_repo, "wt-fix-push-fail")
+        git_in(worktree, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+        runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[_editor()])
+        out, _ = _run_loop(runner, worktree, session_id="s-fix-push-fail")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == "codex_error"  # runtime_error → codex_error
+        bundle = diagnostics_bundle_dir("s-fix-push-fail")
+        assert list(bundle.glob("fix-cycle-1-runtime_error-*.json"))
+        log = git_in(worktree, "log", "--format=%s")
+        assert log.splitlines()[0].startswith("fix(review): codex fix cycle 1")
 
 
 # ---------------------------------------------------------------------------

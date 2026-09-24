@@ -186,10 +186,24 @@ result per the two cases below:
 - Instruction to re-checkout the branch from origin AND refresh with main:
   ```bash
   git fetch origin
+  # Push any local commits origin lacks BEFORE the reset below (#2354): a
+  # fix-loop commit that exists only locally would otherwise be discarded by
+  # checkout -B (#2216).
+  AHEAD=$(git rev-list --count "origin/<branch-name>..HEAD" 2>/dev/null || echo 0)
+  if [ "$AHEAD" -gt 0 ]; then
+    if ! git push origin HEAD:refs/heads/<branch-name>; then
+      # BLOCK here — never fall through to checkout -B, which would discard
+      # these commits. Name the SHAs so the operator can recover/reconcile.
+      git log --oneline origin/<branch-name>..HEAD
+      exit 1
+    fi
+    git fetch origin
+  fi
   # -B (not -b): idempotent reset-to-origin. cw provisions the per-ticket
   # worktree on this same feature branch (#712), so -b would fail "already
-  # exists". The reset still pulls any fix-loop pushes to origin/<branch>
-  # not yet reflected locally (#1047).
+  # exists". By now origin/<branch-name> holds every local commit (the step
+  # above just pushed any it lacked), so the reset discards nothing; it still
+  # pulls fix-loop pushes made from another worktree (#1047).
   git checkout -B <branch-name> origin/<branch-name>
 
   # Refresh with latest main — catches upstream commits landed between the
@@ -198,6 +212,7 @@ result per the two cases below:
   git merge origin/main --no-edit
   ```
   If conflicts → BLOCK with file list; do NOT force.
+  If the ahead-push fails (origin diverged — e.g. force-pushed over) → do NOT run `git checkout -B`. STOP and return a BLOCK with `blocker.reason: "agent_block"` and `blocker.details` quoting the `git log --oneline origin/<branch-name>..HEAD` output and the push failure. Never discard or reset over unpushed local commits.
 - Once merged cleanly, push immediately — before any quality-gate work begins (GEN-5343: the merge commit must not exist only in this local worktree while `/prep-pr`'s quality gates run for up to 5400s):
   ```bash
   git push origin HEAD:refs/heads/<branch-name>

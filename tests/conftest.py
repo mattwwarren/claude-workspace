@@ -159,6 +159,18 @@ def _appendix(stage: str) -> str:
     )
 
 
+def _step4c2_section() -> str:
+    """Return ``auto-dev-finalize.md``'s Step 4c.2 agent-prompt region.
+
+    Hoisted from ``test_auto_dev_finalize_early_push.py`` (#2354) once
+    ``test_auto_dev_finalize_ahead_of_origin_push.py`` needed the same slice.
+    """
+    content = _cmd("auto-dev-finalize.md")
+    start = content.index("#### Step 4c.2 — spawn the agent")
+    end = content.index("### Step 4c.5")
+    return content[start:end]
+
+
 def _bash_fences(content: str) -> list[str]:
     """Return the body of every ```bash fenced block in *content* (#2141).
 
@@ -1871,6 +1883,56 @@ def push_commit_to_origin(
     )
     git_in(work_dir, "push", "origin", branch)
     return git_in(work_dir, "rev-parse", "HEAD")
+
+
+def init_bare_origin(repo: Path) -> Path:
+    """Create and attach a bare ``origin`` beside *repo*.
+
+    Scenario-specific callers decide which commits and branches to push after
+    this shared initialization and remote wiring.
+    """
+    origin = repo.parent / f"{repo.name}-origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(origin)],
+        capture_output=True,
+        check=True,
+        env=_clean_git_env(),
+    )
+    git_in(repo, "remote", "add", "origin", str(origin))
+    return origin
+
+
+def add_bare_origin(repo: Path) -> Path:
+    """Attach a bare ``origin`` beside *repo* and push every local branch to it.
+
+    Gives a ``make_git_repo`` repo the remote that the codex fix loop's
+    per-cycle push (#2354) needs. Every branch is pushed, not only the checked
+    out one, so ``origin/main`` exists for any diff-base resolution too.
+    Returns the bare origin's path.
+    """
+    origin = init_bare_origin(repo)
+    git_in(repo, "push", "origin", "--all")
+    git_in(repo, "fetch", "origin")
+    return origin
+
+
+@pytest.fixture
+def make_git_repo_with_origin(
+    make_git_repo: Callable[..., Path],
+) -> Callable[..., tuple[Path, Path]]:
+    """Factory: a repo on a feature *branch* already pushed to a bare origin.
+
+    Returns ``(worktree, origin)``. The feature branch carries one tracked
+    commit beyond ``main`` so it is a real, non-empty branch (#2354).
+    """
+
+    def _make(name: str, *, branch: str = "feature") -> tuple[Path, Path]:
+        repo = make_git_repo(name)
+        git_in(repo, "checkout", "-b", branch)
+        commit_tracked_file(repo, "feature.py")
+        return repo, add_bare_origin(repo)
+
+    return _make
 
 
 def tree_fingerprint(worktree: Path) -> tuple[str, str, str]:
