@@ -10817,11 +10817,16 @@ class TestDevQueueApproveCli:
         assert payload == {
             "ticket_id": "ACME-1",
             "client": "acme",
+            "old_status": "blocked_on_user",
+            "new_status": "pending",
             "from_stage": "impl",
             "to_stage": "impl",
             SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY: ["a.py", "b.py"],
             SCOPE_DRIFT_APPROVED_HEAD_KEY: self._SCOPE_DRIFT_HEAD,
+            "approved_at": payload["approved_at"],
+            "actor": "cw.dev_queue.approval",
         }
+        assert isinstance(payload["approved_at"], str)
         task = load_dev_queue().tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.scope_drift_approved_extra_files == ["a.py", "b.py"]
