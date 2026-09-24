@@ -545,6 +545,19 @@ def _stop_surface(act: _Act) -> _Stop:
             session.id,
         )
         return _Stop.ABANDONED
+    # The stop is destructive to a still-live surface.  The transcript check
+    # above can race with an operator disposition, so re-check the exact
+    # queue intent under the queue lock immediately before stopping.
+    with dev_queue_lock():
+        store = load_dev_queue()
+        if _row_carrying(store.tasks, act.row) is None:
+            _log.info(
+                "usage_limit_mid_turn: row for ticket %s no longer carries the "
+                "act for session %s; surface left running",
+                act.row.ticket_id,
+                session.id,
+            )
+            return _Stop.ABANDONED
     daemon = _deps.get_native_daemon_client()
     daemon.stop(surface_ref)
     if wait_for_roster_presence(
