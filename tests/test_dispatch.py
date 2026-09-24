@@ -9442,6 +9442,7 @@ class TestParkRunningTaskExpectedSessionId:
             client_name="test-client",
             disposition="codex_review_orphaned_at_boot",
             breadcrumbs="orphan",
+            expected_session_id="sess-ran",
         )
 
         assert load_dev_queue().tasks[0].unproductive_attempts == 1
@@ -9452,14 +9453,13 @@ class TestParkRunningTaskExpectedSessionId:
         """#2114: the pre-spawn callers (dirty-worktree guard, codex capability
         gate) pass unproductive=False -- no session ever ran, and charging a
         park that re-derives on every claim ratchets it to attempt_cap_blocked."""
-        add_ticket(
-            TicketTask(
-                ticket_id="PARK-4",
-                client="test-client",
-                status=QueueItemStatus.RUNNING,
-                session_id="sess-never-spawned",
-            )
+        claimed = TicketTask(
+            ticket_id="PARK-4",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-never-spawned",
         )
+        add_ticket(claimed)
 
         _park_running_task_blocked_on_user(
             ticket_id="PARK-4",
@@ -9467,6 +9467,7 @@ class TestParkRunningTaskExpectedSessionId:
             disposition="dirty_worktree",
             breadcrumbs="/wt: 2 uncommitted path(s)",
             unproductive=False,
+            created_at=claimed.created_at,
         )
 
         task = load_dev_queue().tasks[0]
@@ -9530,11 +9531,10 @@ class TestParkRunningTaskExpectedSessionId:
         task = load_dev_queue().tasks[0]
         assert task.status is QueueItemStatus.BLOCKED_ON_USER
 
-    def test_no_identity_supplied_single_row_still_matches(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
-        """Neither identity kwarg supplied: the defense-in-depth default still
-        matches the lone ``(ticket_id, client, RUNNING)`` row."""
+    def test_no_identity_raises_value_error(self, tmp_dispatch_dirs: Path) -> None:
+        """Neither identity kwarg supplied (#2219): the helper refuses the
+        bare ``(ticket_id, client, RUNNING)`` match rather than silently
+        parking whichever row happens to come first."""
         add_ticket(
             TicketTask(
                 ticket_id="PARK-5",
@@ -9544,15 +9544,13 @@ class TestParkRunningTaskExpectedSessionId:
             )
         )
 
-        _park_running_task_blocked_on_user(
-            ticket_id="PARK-5",
-            client_name="test-client",
-            disposition="dirty_worktree",
-            breadcrumbs="/some/path",
-        )
-
-        task = load_dev_queue().tasks[0]
-        assert task.status is QueueItemStatus.BLOCKED_ON_USER
+        with pytest.raises(ValueError, match="2219"):
+            _park_running_task_blocked_on_user(
+                ticket_id="PARK-5",
+                client_name="test-client",
+                disposition="dirty_worktree",
+                breadcrumbs="/some/path",
+            )
 
 
 class TestRevertClaimedTaskExpectedSessionId:
@@ -9640,11 +9638,10 @@ class TestRevertClaimedTaskExpectedSessionId:
         assert task.status is QueueItemStatus.PENDING
         assert task.session_id is None
 
-    def test_no_identity_supplied_single_row_still_matches(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
-        """Neither identity kwarg supplied: the defense-in-depth default still
-        matches the lone ``(ticket_id, client, RUNNING)`` row."""
+    def test_no_identity_raises_value_error(self, tmp_dispatch_dirs: Path) -> None:
+        """Neither identity kwarg supplied (#2219): the helper refuses the
+        bare ``(ticket_id, client, RUNNING)`` match rather than silently
+        reverting whichever row happens to come first."""
         add_ticket(
             TicketTask(
                 ticket_id="REV-4",
@@ -9654,11 +9651,31 @@ class TestRevertClaimedTaskExpectedSessionId:
             )
         )
 
-        assert _revert_claimed_task_to_pending("test-client", "REV-4") is True
+        with pytest.raises(ValueError, match="2219"):
+            _revert_claimed_task_to_pending("test-client", "REV-4")
 
-        task = load_dev_queue().tasks[0]
-        assert task.status is QueueItemStatus.PENDING
-        assert task.session_id is None
+
+class TestFindRunningRowRequiresIdentity:
+    """#2219: ``_find_running_row`` itself refuses a bare
+    ``(ticket_id, client_name, RUNNING)`` match -- every production caller
+    already supplies ``created_at`` or ``session_id``, so a silent fallback
+    to the bare match would only ever serve a caller that skipped
+    disambiguating a duplicate RUNNING row."""
+
+    def test_neither_identity_raises_value_error(self, tmp_dispatch_dirs: Path) -> None:
+        from cw.dispatch.claim import _find_running_row
+
+        add_ticket(
+            TicketTask(
+                ticket_id="FIND-1",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        store = load_dev_queue()
+
+        with pytest.raises(ValueError, match="2219"):
+            _find_running_row(store, "FIND-1", "test-client")
 
 
 # ---------------------------------------------------------------------------
