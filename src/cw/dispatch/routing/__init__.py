@@ -123,6 +123,7 @@ from cw.dispatch.routing.stage_walk import (
     _walk_stage_pointer_forward,
 )
 from cw.events import record_event
+from cw.executor import resolve_pipeline_stages
 from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
@@ -438,8 +439,7 @@ def _stage_advance_unchecked(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=_UNKNOWN_CLIENT_REASON
         )
         return
-    pipeline = client_cfg.pipeline
-    stages = pipeline.stages
+    stages = resolve_pipeline_stages(task, client_cfg)
     if task.stage not in stages:
         _log.warning(
             "dispatch: advance: stage %r not in pipeline for task %r",

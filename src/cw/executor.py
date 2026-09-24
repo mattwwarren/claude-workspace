@@ -217,12 +217,14 @@ def resolve_executor_config(
 def resolve_pipeline_stages(task: TicketTask, client: ClientConfig) -> list[Stage]:
     """Return the effective pipeline ``stages`` for a task, with lane override.
 
-    Lane override > client default -- the same lane walk (:func:`_lane_pipeline`)
-    that gives :func:`resolve_executor_config` its three-level priority: lane
-    stage config > client stage config > default.
+    An explicitly configured lane ``stages`` list overrides the client default;
+    a lane pipeline containing only executor overrides inherits the client's
+    stages. The same lane walk (:func:`_lane_pipeline`) gives
+    :func:`resolve_executor_config` its three-level priority: lane stage config
+    > client stage config > default.
     """
     lane_pipeline = _lane_pipeline(client, task.lane)
-    if lane_pipeline is not None:
+    if lane_pipeline is not None and "stages" in lane_pipeline.model_fields_set:
         return lane_pipeline.stages
     return client.pipeline.stages
 

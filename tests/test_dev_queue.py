@@ -1805,17 +1805,38 @@ class TestAddTicketLaneValidation:
 
 
 def _setup_client_with_pipeline_stages(
-    tmp_config_dir: Path, tmp_path: Path, stages: list[str]
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    stages: list[str],
+    lane: str | None = None,
+    lane_stages: list[str] | None = None,
 ) -> None:
-    """Write clients.yaml with a restricted pipeline for 'genhealth'."""
+    """Write clients.yaml with a restricted pipeline for 'genhealth'.
+
+    When ``lane`` is given (with ``lane_stages``), also emits a ``lanes:``
+    block declaring that lane with its own ``pipeline.stages`` override
+    (#2216) -- omitting both kwargs produces byte-identical YAML to before.
+    """
     config_dir = tmp_config_dir / ".config" / "cw"
     config_dir.mkdir(parents=True, exist_ok=True)
     ws = tmp_path / "ws"
     ws.mkdir(parents=True, exist_ok=True)
     stages_yaml = ", ".join(stages)
+    lanes_block = ""
+    if lane is not None:
+        assert lane_stages is not None
+        lane_stages_yaml = ", ".join(lane_stages)
+        lanes_block = (
+            f"    lanes:\n"
+            f"      - name: {lane}\n"
+            f"        max_parallel: 1\n"
+            f"        pipeline:\n"
+            f"          stages: [{lane_stages_yaml}]\n"
+        )
     (config_dir / "clients.yaml").write_text(
         f"clients:\n  genhealth:\n    workspace_path: {ws}\n"
         f"    pipeline:\n      stages: [{stages_yaml}]\n"
+        f"{lanes_block}"
     )
 
 
@@ -1911,6 +1932,26 @@ class TestAddTicketStagePlacement:
         assert result is True
         store = load_dev_queue()
         assert store.tasks[0].stage == Stage.IMPL
+
+    def test_add_ticket_honors_lane_pipeline_stages_override(
+        self, patched_queue: Path, tmp_config_dir: Path
+    ) -> None:
+        """A lane's pipeline.stages override, not the client default,
+        governs (#2216)."""
+        _setup_client_with_pipeline_stages(
+            tmp_config_dir,
+            patched_queue,
+            ["plan", "impl"],
+            lane="wide",
+            lane_stages=["plan", "impl", "review", "finalize"],
+        )
+        task = TicketTask(
+            ticket_id="GEN-24", client="genhealth", lane="wide", stage=Stage.REVIEW
+        )
+        result = add_ticket(task)
+        assert result is True
+        store = load_dev_queue()
+        assert store.tasks[0].stage == Stage.REVIEW
 
 
 # ---------------------------------------------------------------------------
@@ -5690,6 +5731,7 @@ def _make_blocked_task(
     status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
     disposition: str | None = None,
     scope_hint: str | None = None,
+    lane: str = DEFAULT_LANE,
     blocked_reason: str | None = None,
 ) -> TicketTask:
     return _make_ticket_task(
@@ -5700,6 +5742,7 @@ def _make_blocked_task(
         session_id=session_id,
         disposition=disposition,
         scope_hint=scope_hint,
+        lane=lane,
         blocked_reason=blocked_reason,
     )
 
@@ -6245,6 +6288,38 @@ class TestApproveTicket:
 
         with pytest.raises(ApproveGateError, match="not in pipeline"):
             approve_ticket("GEN-500", "genhealth")
+
+    def test_approve_honors_lane_pipeline_stages_override(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A lane's pipeline.stages override, not the client default, governs
+        the approve-gate stage check (#2216)."""
+        from cw.dev_queue import approve_ticket
+
+        _setup_client_with_pipeline_stages(
+            tmp_config_dir,
+            tmp_path,
+            ["plan", "impl", "review", "finalize"],
+            lane="harden-lane",
+            lane_stages=["plan", "harden", "review", "finalize"],
+        )
+        task = _make_blocked_task(
+            stage=Stage.HARDEN,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            lane="harden-lane",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["awaiting_signoff"] is False
+        assert result["from_stage"] == "harden"
+        assert result["to_stage"] == "review"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
 
     def test_approve_advance_emits_single_stage_changed(
         self,
@@ -7625,6 +7700,88 @@ class TestRequeueTicket:
 
         with pytest.raises(RequeueStageError, match="not in the pipeline"):
             requeue_ticket("GEN-500", "genhealth", stage_override="review")
+
+    def test_requeue_honors_lane_pipeline_stages_override(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A lane's pipeline.stages override, not the client default, governs
+        --stage validation (#2216)."""
+        from cw.dev_queue import requeue_ticket
+
+        _setup_client_with_pipeline_stages(
+            tmp_config_dir,
+            tmp_path,
+            ["plan", "impl"],
+            lane="wide",
+            lane_stages=["plan", "impl", "review", "finalize"],
+        )
+        task = _make_blocked_task(stage=Stage.IMPL, session_id="sess9005", lane="wide")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", stage_override="review")
+
+        assert result["from_stage"] == "impl"
+        assert result["to_stage"] == "review"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.REVIEW
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_stage_absent_from_lane_pipeline_raises_naming_lane(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A lane's narrower pipeline.stages override refuses a stage the
+        client default would have allowed -- no silent fallback to the
+        client default (#2216)."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _setup_client_with_pipeline_stages(
+            tmp_config_dir,
+            tmp_path,
+            ["plan", "impl", "review", "finalize"],
+            lane="restricted",
+            lane_stages=["plan", "impl"],
+        )
+        task = _make_blocked_task(
+            stage=Stage.IMPL, session_id="sess9006", lane="restricted"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError, match="lane 'restricted'"):
+            requeue_ticket("GEN-500", "genhealth", stage_override="review")
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.IMPL
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_requeue_current_stage_absent_from_lane_pipeline_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A lane pipeline must contain the current stage before requeue indexing."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _setup_client_with_pipeline_stages(
+            tmp_config_dir,
+            tmp_path,
+            ["plan", "impl", "review", "finalize"],
+            lane="restricted",
+            lane_stages=["plan", "review"],
+        )
+        task = _make_blocked_task(
+            stage=Stage.IMPL, session_id="sess9007", lane="restricted"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError, match=r"Stage 'impl'.*lane 'restricted'"):
+            requeue_ticket("GEN-500", "genhealth", stage_override="review")
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.IMPL
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_requeue_non_blocked_raises(
         self, tmp_config_dir: Path, tmp_path: Path

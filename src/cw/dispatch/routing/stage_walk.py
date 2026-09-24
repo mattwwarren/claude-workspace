@@ -48,6 +48,7 @@ from cw.dispatch.review_gates import (
     _should_gate_for_scope_hint,
     _should_gate_for_signoff,
 )
+from cw.executor import resolve_pipeline_stages
 from cw.models import Stage
 
 if TYPE_CHECKING:
@@ -179,7 +180,9 @@ def _classify_sentinel_stage_position(
         return "same", None, None
     # A non-matching stage needs the pipeline order to decide earlier vs later.
     client_cfg = clients.get(task.client)
-    stages = client_cfg.pipeline.stages if client_cfg is not None else None
+    stages = (
+        resolve_pipeline_stages(task, client_cfg) if client_cfg is not None else None
+    )
     if stages is None or task.stage not in stages or mapped not in stages:
         return "unresolvable", None, None
     sentinel_idx = stages.index(mapped)

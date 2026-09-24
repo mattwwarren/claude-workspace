@@ -291,6 +291,24 @@ def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
     return not_at_status_gate and not_at_disposition_gate
 
 
+def _raise_stage_not_in_pipeline(
+    ticket_id: str, task: TicketTask, stages: list[Stage], client_name: str
+) -> None:
+    """Raise ``ApproveGateError`` for a stage absent from the resolved pipeline.
+
+    Extracted to keep ``_approve_ticket_locked`` under ruff's PLR0915
+    statement-count gate -- the message names the lane and its resolved
+    stages so a lane pipeline.stages override is never silently reported as
+    a client-default mismatch (#2216).
+    """
+    msg = (
+        f"Cannot approve ticket '{ticket_id}':"
+        f" stage {task.stage!r} not in pipeline for lane {task.lane!r} of"
+        f" client {client_name!r}. Lane pipeline stages: {stages}."
+    )
+    raise ApproveGateError(msg)
+
+
 def _approve_ticket_locked(
     ticket_id: str,
     client_name: str,
@@ -358,6 +376,7 @@ def _approve_ticket_locked(
         _should_force_hold_finalize,
         _should_gate_for_signoff,
     )
+    from cw.executor import resolve_pipeline_stages
 
     store = load_dev_queue()
     task = _resolve_approval_target(store, ticket_id, client_name, resolved_task)
@@ -371,14 +390,10 @@ def _approve_ticket_locked(
         raise ApproveGateError(msg)
 
     client_cfg = get_client(client_name)
-    stages = client_cfg.pipeline.stages
+    stages = resolve_pipeline_stages(task, client_cfg)
 
     if task.stage not in stages:
-        msg = (
-            f"Cannot approve ticket '{ticket_id}':"
-            f" stage {task.stage!r} not in pipeline."
-        )
-        raise ApproveGateError(msg)
+        _raise_stage_not_in_pipeline(ticket_id, task, stages, client_name)
 
     if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:
         from_stage = task.stage.value
