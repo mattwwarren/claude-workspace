@@ -6,9 +6,10 @@ Step 3 Tier 3), which is usually a building block rather than the change itself
 — squash-merge then bakes that building-block subject into main's history. Two
 incidents on 2026-09-24 (#2358, #2361) were both fixed by hand before merge.
 
-The fix has finalize compose a `PR_TITLE` in its Step 4c.2 agent-prompt
-instructions and pass it through `/prep-pr --title`, which `ship-it.md`'s Tier 1
-already honors unconditionally ahead of every other tier — see
+The fix has the parent finalize worktree compose a `PR_TITLE` before spawning,
+put the fully rendered literal in the Step 4c.2 agent prompt, and pass it
+through `/prep-pr --title`, which `ship-it.md`'s Tier 1 already honors
+unconditionally ahead of every other tier — see
 ``tests/test_ship_it_title_tiers.py::test_explicit_title_wins_over_first_commit_helper``
 for the runtime pin on that side of the contract. This file follows the
 established five-file prose-guard precedent for `.claude/commands/*.md`
@@ -55,6 +56,14 @@ def test_numeric_ticket_guard_present_for_title_suffix() -> None:
 def test_title_length_cap_mirrors_ship_it_tier5() -> None:
     section = _step4c2_section()
     assert "cut -c1-72" in section
+
+
+def test_title_is_parent_rendered_before_isolated_spawn() -> None:
+    section = _step4c2_section()
+    assert "parent finalize worktree" in section
+    assert "before spawning" in section
+    assert "concrete, shell-quoted literal" in section
+    assert "never send an unresolved title variable" in section
 
 
 def test_ship_it_and_prep_pr_unchanged_by_this_fix() -> None:
