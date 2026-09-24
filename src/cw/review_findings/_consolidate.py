@@ -346,18 +346,16 @@ def write_review_verdict(verdict: ReviewVerdict, path: Path) -> None:
     atomic_write_text(path, verdict.model_dump_json(indent=2))
 
 
-def write_review_verdict_envelope(
-    verdict: ReviewVerdict, *, ticket_id: str, path: Path
-) -> None:
-    """Atomically write *verdict* to *path* wrapped in a :class:`ReviewVerdictEnvelope`.
+def render_review_verdict_envelope(verdict: ReviewVerdict, *, ticket_id: str) -> str:
+    """Render *verdict* wrapped in a :class:`ReviewVerdictEnvelope`, as JSON text.
 
     Sibling of :func:`write_review_verdict`, for the provenance-carrying
     variant worktree-facing consumers (#2223) need — the plain artifact has no
-    field naming which ticket it belongs to.
+    field naming which ticket it belongs to. Pure — no I/O — so the caller
+    that persists the text picks its own write path (#2223 review round 3):
+    :func:`cw.codex_background._persist_structured_review_verdict` writes it
+    through the shared best-effort ``_persist_worktree_artifact`` helper.
     """
-    atomic_write_text(
-        path,
-        ReviewVerdictEnvelope(ticket_id=ticket_id, verdict=verdict).model_dump_json(
-            indent=2
-        ),
+    return ReviewVerdictEnvelope(ticket_id=ticket_id, verdict=verdict).model_dump_json(
+        indent=2
     )

@@ -54,9 +54,9 @@ from cw.review_findings import (
     dedupe_findings,
     derive_review_counts,
     parse_reviewer_document,
+    render_review_verdict_envelope,
     validate_reviewer_document,
     write_review_verdict,
-    write_review_verdict_envelope,
 )
 from tests.conftest import (
     FindingKwargs,
@@ -4726,28 +4726,28 @@ class TestWriteReviewVerdictArtifact:
         )
 
 
-class TestWriteReviewVerdictEnvelope:
-    def test_atomic_write_round_trips(self, tmp_path: Path) -> None:
+class TestRenderReviewVerdictEnvelope:
+    def test_render_round_trips(self) -> None:
         doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"), reviewer_role="R1")
         verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="deadbeef")
-        path = tmp_path / "review-verdict.json"
-        write_review_verdict_envelope(verdict, ticket_id="T-1", path=path)
-        envelope = ReviewVerdictEnvelope.model_validate_json(path.read_text())
+        text = render_review_verdict_envelope(verdict, ticket_id="T-1")
+        envelope = ReviewVerdictEnvelope.model_validate_json(text)
         assert envelope.ticket_id == "T-1"
         assert envelope.verdict.reviewed_sha == "deadbeef"
         assert envelope.verdict.accepted[0].finding.evidence == "def broken():"
 
-    def test_full_replace_semantics(self, tmp_path: Path) -> None:
-        path = tmp_path / "review-verdict.json"
-        path.write_text('{"stale": true}')
+    def test_render_has_no_extra_keys(self) -> None:
+        # Pure function, no I/O -- the round-2/round-3 shape's stand-in for
+        # the old writer's full-replace-semantics guarantee: the rendered
+        # text is exactly {ticket_id, verdict}, nothing a stale on-disk copy
+        # could leak into.
         verdict = consolidate_verdict(
             [_make_reviewer_doc(_make_finding(severity="NIT"))],
             _make_diff(),
             reviewed_sha="sha",
         )
-        write_review_verdict_envelope(verdict, ticket_id="T-1", path=path)
-        data = json.loads(path.read_text())
-        assert "stale" not in data
+        text = render_review_verdict_envelope(verdict, ticket_id="T-1")
+        assert json.loads(text).keys() == {"ticket_id", "verdict"}
 
 
 class TestExecutorNeutralContract:

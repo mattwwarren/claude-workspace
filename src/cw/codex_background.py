@@ -49,7 +49,7 @@ from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.models.orchestrator_config import CODEX_TIER_CLAIM_SUPPRESSION
 from cw.review_finding_dispositions import merge_finding_dispositions
-from cw.review_findings import ReviewVerdictEnvelope
+from cw.review_findings import render_review_verdict_envelope
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
@@ -454,7 +454,7 @@ def _persist_structured_review_verdict(
 ) -> Path | None:
     """Write *verdict* to the worktree as JSON, wrapped for provenance (#2223).
 
-    Serializes via :class:`~cw.review_findings.ReviewVerdictEnvelope`
+    Renders via :func:`~cw.review_findings.render_review_verdict_envelope`
     (``ticket_id`` + ``verdict``, the latter already carrying its own
     ``reviewed_sha``) and delegates the actual write to
     :func:`_persist_worktree_artifact` directly -- never
@@ -464,9 +464,7 @@ def _persist_structured_review_verdict(
     Returns the path written, or None when the write failed (logged). Never
     raises: see :func:`_persist_worktree_artifact`.
     """
-    envelope_text = ReviewVerdictEnvelope(
-        ticket_id=ticket_id, verdict=verdict
-    ).model_dump_json(indent=2)
+    envelope_text = render_review_verdict_envelope(verdict, ticket_id=ticket_id)
     return _persist_worktree_artifact(
         worktree, envelope_text, relative_path=relative_path
     )

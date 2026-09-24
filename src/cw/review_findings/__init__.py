@@ -115,8 +115,8 @@ from cw.review_findings._classify import (
 from cw.review_findings._consolidate import (
     _select_rejected_must_fix,
     consolidate_verdict,
+    render_review_verdict_envelope,
     write_review_verdict,
-    write_review_verdict_envelope,
 )
 from cw.review_findings._dedup import (
     _dedup_key,
@@ -226,7 +226,7 @@ __all__ = [
     "dedupe_findings",
     "derive_review_counts",
     "parse_reviewer_document",
+    "render_review_verdict_envelope",
     "validate_reviewer_document",
     "write_review_verdict",
-    "write_review_verdict_envelope",
 ]

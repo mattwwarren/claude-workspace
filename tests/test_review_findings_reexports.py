@@ -51,9 +51,9 @@ EXPECTED_EXPORTS = {
     "dedupe_findings",
     "derive_review_counts",
     "parse_reviewer_document",
+    "render_review_verdict_envelope",
     "validate_reviewer_document",
     "write_review_verdict",
-    "write_review_verdict_envelope",
     # Private names with confirmed cross-module import sites
     "_LINE_ANCHOR_TOLERANCE",
     "_VALID_SEVERITIES",
