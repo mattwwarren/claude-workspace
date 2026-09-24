@@ -633,6 +633,98 @@ def test_act_auto_stops_at_step_4_when_daemon_stop_fails(
     _assert_row_still_running()
 
 
+def test_act_auto_stops_at_step_4_when_surface_still_in_roster_after_stop(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stop() that returned is not trusted: the roster must confirm it.
+
+    The real client swallows every ``claude stop`` failure, so a surface still
+    in the roster after the bounded poll is a step-4 failure: no close, no
+    requeue, and the next tick retries.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    candidates = _detect(state)
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn._STOP_CONFIRM_TIMEOUT_SECS", 0.0
+    )
+    monkeypatch.setattr(
+        daemon, "list_live_session_short_ids_fail_closed", lambda: {_SURFACE}
+    )
+
+    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
+        reverted = _act(state, candidates, _auto_config())
+
+    assert reverted == []
+    assert daemon.stop_calls == [_SURFACE]
+    assert any(_SID in m and "roster" in m for m in _log_messages(caplog))
+    _assert_session_still_active(state)
+    _assert_row_still_running()
+
+
+def test_act_auto_stops_at_step_4_when_roster_unreadable_after_stop(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable roster cannot confirm the stop, so it fails closed."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    candidates = _detect(state)
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn._STOP_CONFIRM_TIMEOUT_SECS", 0.0
+    )
+    daemon.roster_unreadable = True
+
+    assert _act(state, candidates, _auto_config()) == []
+    assert daemon.stop_calls == [_SURFACE]
+    _assert_session_still_active(state)
+    _assert_row_still_running()
+
+
+def test_act_auto_is_noop_when_tail_changes_before_the_stop(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The tail is re-read right before stop(), after steps 2-3 have run.
+
+    The worker resumes between the step-1 gate and the stop: nothing is
+    stopped, closed or requeued this tick.
+    """
+    state, transcript = _seed(home, tmp_path, _limit_tail())
+    candidates = _detect(state)
+
+    def _arm_then_resume(windows: dict[str, datetime]) -> dict[str, datetime]:
+        merged = merge_and_save_usage_limited_until(windows)
+        _append_record(transcript, _ul_record("back again, continuing", _T_AFTER))
+        return merged
+
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn.merge_and_save_usage_limited_until",
+        _arm_then_resume,
+    )
+
+    with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
+        reverted = _act(state, candidates, _auto_config())
+
+    assert reverted == []
+    assert daemon.stop_calls == []
+    assert any(
+        _SID in m and "tail changed before the stop" in m for m in _log_messages(caplog)
+    )
+    _assert_session_still_active(state)
+    _assert_row_still_running()
+
+
 def test_act_auto_requeues_only_the_row_keyed_to_the_sessions_client(
     tmp_config_dir: Path,
     tmp_path: Path,

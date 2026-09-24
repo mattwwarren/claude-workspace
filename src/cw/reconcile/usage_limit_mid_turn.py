@@ -26,8 +26,13 @@ Under ``auto`` the row is then requeued and the session closed:
 3. Record the audit events -- ``session.needs_attention`` naming the reset
    instant, ``session.reap_proposed`` (ADR-0006 invariant 3) and
    ``session.completed`` -- before any effect. A failed write stops here.
-4. Stop the daemon surface, so a live idle home cannot defer the re-claim. A
-   failed stop stops here: the session stays ACTIVE, the row RUNNING.
+4. Re-read the tail immediately before the stop, since steps 2-3 ran after
+   the gate: a changed tail is the gate's no-op. Then stop the daemon
+   surface, so a live idle home cannot defer the re-claim, and verify it:
+   ``stop()`` swallows its own failures, so the surface must leave the roster
+   within a short bounded poll. A raised stop, or a surface still listed (or
+   an unreadable roster), stops here: the session stays ACTIVE, the row
+   RUNNING, and the next tick retries.
 5. Persist the session COMPLETED/``usage_limited`` (not a crash).
 6. Requeue the row RUNNING -> PENDING with ``next_eligible_at`` at the reset
    instant, through the identity-checked update, so the existing claim gate
@@ -70,6 +75,7 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
+from cw.native_daemon import wait_for_roster_presence
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
@@ -101,6 +107,12 @@ _log = logging.getLogger(__name__)
 # nothing conversational may follow it. Trailing non-content records
 # (cost-state, last-prompt) never advance transcript_tail_at.
 _ZERO_GAP_SECONDS = 0.0
+
+# Step 4's stop confirmation: how long to poll the daemon roster for the
+# stopped surface to leave it. Short, because reconcile runs under
+# sessions_lock and ``claude stop`` has already returned by then.
+_STOP_CONFIRM_TIMEOUT_SECS = 5.0
+_STOP_CONFIRM_INTERVAL_SECS = 0.5
 
 
 def _mid_turn_limit_detection(session: Session) -> UsageLimitDetection | None:
@@ -361,18 +373,40 @@ def _audit_auto_act(ctx: _ActContext) -> bool:
     return True
 
 
-def _stop_surface(ctx: _ActContext) -> bool:
-    """Step 4: stop the live daemon session; False if the stop raised.
+def _tail_still_limited(ctx: _ActContext) -> bool:
+    """Step 4's precondition: re-read the transcript tail right before the stop.
 
-    A session whose ``surface_ref`` is already cleared has nothing to stop.
-    On failure the session stays ACTIVE and the row RUNNING; the next tick
-    retries with the lockout already armed.
+    Steps 2 and 3 ran since the step-1 gate read it, so a worker that resumed
+    in between must not be stopped. A changed tail is the gate's no-op: no
+    stop, close or requeue this tick.
+    """
+    if _mid_turn_limit_detection(ctx.session) is not None:
+        return True
+    _log.info(
+        "usage_limit_mid_turn: tail changed before the stop for ticket %s "
+        "session %s; skipping this tick",
+        ctx.ticket_id,
+        ctx.session.id,
+    )
+    return False
+
+
+def _stop_surface(ctx: _ActContext) -> bool:
+    """Step 4: stop the live daemon session and verify it left the roster.
+
+    ``stop()`` swallows its own failures, so it is not trusted: the roster
+    must stop listing the surface within a short bounded poll (an unreadable
+    roster confirms nothing). A raised stop or a surface still listed is a
+    step-4 failure -- the session stays ACTIVE and the row RUNNING, and the
+    next tick retries with the lockout already armed. A session whose
+    ``surface_ref`` is already cleared has nothing to stop.
     """
     surface_ref = ctx.session.surface_ref
     if surface_ref is None:
         return True
+    daemon = _deps.get_native_daemon_client()
     try:
-        _deps.get_native_daemon_client().stop(surface_ref)
+        daemon.stop(surface_ref)
     except OSError:
         _log.warning(
             "usage_limit_mid_turn: stopping surface %s for ticket %s session %s "
@@ -383,7 +417,24 @@ def _stop_surface(ctx: _ActContext) -> bool:
             exc_info=True,
         )
         return False
-    return True
+    if wait_for_roster_presence(
+        daemon,
+        surface_ref,
+        present=False,
+        timeout=_STOP_CONFIRM_TIMEOUT_SECS,
+        interval=_STOP_CONFIRM_INTERVAL_SECS,
+    ):
+        return True
+    _log.warning(
+        "usage_limit_mid_turn: surface %s for ticket %s session %s is still in "
+        "the daemon roster (or the roster is unreadable) %.1fs after stop; the "
+        "session stays ACTIVE and the row RUNNING for the next tick",
+        surface_ref,
+        ctx.ticket_id,
+        ctx.session.id,
+        _STOP_CONFIRM_TIMEOUT_SECS,
+    )
+    return False
 
 
 def _persist_completed(ctx: _ActContext) -> None:
@@ -404,7 +455,11 @@ def _act_auto(ctx: _ActContext) -> bool:
     emitted; the session stays closed, which is right because its process is
     gone.
     """
-    if not _audit_auto_act(ctx) or not _stop_surface(ctx):
+    if (
+        not _audit_auto_act(ctx)
+        or not _tail_still_limited(ctx)
+        or not _stop_surface(ctx)
+    ):
         return False
     _persist_completed(ctx)
     requeued = _mutate_owned_running_row(
