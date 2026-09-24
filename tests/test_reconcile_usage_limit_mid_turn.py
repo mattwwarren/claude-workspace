@@ -392,6 +392,43 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     assert "re-enter the queue automatically" in attention[0]["breadcrumbs"]
 
 
+def test_act_auto_leaves_session_active_when_completion_emit_fails(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    candidates = _detect(state)
+
+    def _failing_record_event(
+        etype: OrchestratorEventType,
+        payload: dict[str, Any] | None = None,
+        *,
+        correlation_id: str | None = None,
+    ) -> None:
+        if etype is OrchestratorEventType.SESSION_COMPLETED:
+            msg = "inbox write failed"
+            raise OSError(msg)
+        record_event(etype, payload, correlation_id=correlation_id)
+
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn.record_event", _failing_record_event
+    )
+
+    with pytest.raises(OSError, match="inbox write failed"):
+        _act(state, candidates, _auto_config())
+
+    assert state.sessions[0].status is SessionStatus.ACTIVE
+    assert state.sessions[0].completed_reason is None
+    persisted = load_state().sessions[0]
+    assert persisted.status is SessionStatus.ACTIVE
+    assert persisted.completed_at is None
+    assert persisted.completed_reason is None
+    assert daemon.stop_calls == []
+
+
 def test_act_auto_falls_back_to_flat_backoff_on_unparseable_reset(
     tmp_config_dir: Path,
     tmp_path: Path,

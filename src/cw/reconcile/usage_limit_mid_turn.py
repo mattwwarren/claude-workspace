@@ -196,15 +196,12 @@ def _park_blocked_on_user(target: TicketTask) -> None:
 def _complete_usage_limited_session(
     state: CwState, session: Session, ticket_id: str, *, now: datetime
 ) -> None:
-    """Close *session* as usage-limited, then stop its still-live surface.
+    """Record the completion event, then close *session* and stop its surface.
 
-    Emit-before-stop, matching ``emit_routed_sentinel_completion``.
+    Audit before effect, as ``_close_session_audited`` (#2285): a failed event
+    write raises before the session is touched, so it stays ACTIVE for the
+    next pass rather than being closed without its audit trail.
     """
-    session.status = SessionStatus.COMPLETED
-    session.completed_at = now
-    session.completed_reason = CompletionReason.USAGE_LIMITED
-    session.reap_reason = ReapReason.USAGE_LIMIT_MID_TURN
-    save_state(state)
     record_event(
         OrchestratorEventType.SESSION_COMPLETED,
         {
@@ -217,6 +214,11 @@ def _complete_usage_limited_session(
         },
         correlation_id=ticket_id,
     )
+    session.status = SessionStatus.COMPLETED
+    session.completed_at = now
+    session.completed_reason = CompletionReason.USAGE_LIMITED
+    session.reap_reason = ReapReason.USAGE_LIMIT_MID_TURN
+    save_state(state)
     if session.surface_ref is not None:
         _deps.get_native_daemon_client().stop(session.surface_ref)
 
