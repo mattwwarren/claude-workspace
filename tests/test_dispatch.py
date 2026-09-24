@@ -579,7 +579,7 @@ class TestConsumeCompletesTasks:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """Write a session.completed event with ticket_id; task becomes COMPLETED."""
+        """A session.completed event carrying session_id completes the task."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
         # Put a RUNNING task in the queue
@@ -587,6 +587,7 @@ class TestConsumeCompletesTasks:
             ticket_id="GEN-300",
             client="test-client",
             status=QueueItemStatus.RUNNING,
+            session_id="sess-300",
         )
         store = DevQueueStore(tasks=[task])
         save_dev_queue(store)
@@ -594,7 +595,7 @@ class TestConsumeCompletesTasks:
         # Write a session.completed event referencing the ticket
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
-            {"ticket_id": "GEN-300", "client": "test-client"},
+            {"ticket_id": "GEN-300", "session_id": "sess-300", "client": "test-client"},
         )
 
         # B2: no session/last_result -> Rule 6 -> BLOCKED_ON_USER
@@ -603,6 +604,35 @@ class TestConsumeCompletesTasks:
 
         updated_store = load_dev_queue()
         assert updated_store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_consume_skips_legacy_event_with_no_ticket_id_owning_client(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A genuinely legacy event (no session_id at all) is dropped rather
+        than matched by ticket_id alone (#2219) -- the single-row companion
+        to ``test_consume_skips_legacy_event_with_no_session_id_key`` below,
+        which covers the same shape against a duplicate-row queue.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-301",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-301", "client": "test-client"},
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
     def test_consume_ignores_events_without_ticket_id(
         self,
@@ -798,20 +828,22 @@ class TestConsumeCompletesTasks:
         assert completed == 1
         assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
-    def test_consume_falls_back_to_ticket_id_when_task_has_no_session_id(
+    def test_consume_skips_legacy_event_with_no_session_id_key(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """A genuinely legacy event (no session_id key at all) still matches
-        by ticket_id alone.
+        """A genuinely legacy event (no session_id key at all) is dropped,
+        not matched by ticket_id alone (#2219).
 
-        The ticket-id-only fallback is reserved for events that predate the
-        session_id field entirely -- distinct from GitHub #1692's raced-to-
-        terminal window, where the event DOES carry a session_id but the
-        task hasn't been stamped with one yet (see
-        test_consume_skips_session_tagged_event_against_unstamped_task).
+        A bare ticket-id-only fallback could complete the wrong duplicate
+        RUNNING row for this ticket_id -- the same hazard class #2219 closes
+        for every other locked RUNNING re-find in src/cw/. With no
+        session_id to disambiguate, the event is skipped and logged instead.
+        Distinct from GitHub #1692's raced-to-terminal window, where the
+        event DOES carry a session_id but the task hasn't been stamped with
+        one yet (see test_consume_skips_session_tagged_event_against_unstamped_task).
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
@@ -832,10 +864,9 @@ class TestConsumeCompletesTasks:
             },
         )
 
-        # B2: no session in state -> Rule 6 -> BLOCKED_ON_USER
         completed = consume_completed_sessions()
-        assert completed == 1
-        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
     def test_consume_skips_session_tagged_event_against_unstamped_task(
         self,
@@ -881,17 +912,63 @@ class TestConsumeCompletesTasks:
         assert completed == 0
         assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
-    def test_consume_falls_back_to_ticket_id_when_session_id_explicit_none(
+    def test_consume_duplicate_running_rows_only_session_id_matched_row_completes(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """An explicit ``"session_id": None`` is legacy, same as an absent key.
+        """Two RUNNING rows share one ticket_id (add-after-terminal plus
+        ``requeue --from-completed``, same reachability as every other
+        #2219 site); the event's own session_id must select the owning row,
+        not whichever RUNNING row for the ticket happens to be first.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
-        Round-2 binding: legacy detection is "key missing OR value is None",
-        not merely "key missing" -- a producer that always includes the key
-        but sometimes writes ``None`` must still hit the ticket-id fallback.
+        row_a = TicketTask(
+            ticket_id="GEN-DUP",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-a",
+        )
+        row_b = TicketTask(
+            ticket_id="GEN-DUP",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-b",
+        )
+        save_dev_queue(DevQueueStore(tasks=[row_a, row_b]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-DUP",
+                "session_id": "sess-b",
+                "client": "test-client",
+            },
+        )
+
+        # B2: no session "sess-b" in state -> Rule 6 -> BLOCKED_ON_USER
+        completed = consume_completed_sessions()
+        assert completed == 1
+        tasks_by_session = {t.session_id: t for t in load_dev_queue().tasks}
+        assert tasks_by_session["sess-b"].status == QueueItemStatus.BLOCKED_ON_USER
+        assert tasks_by_session["sess-a"].status == QueueItemStatus.RUNNING
+
+    def test_consume_skips_event_with_session_id_explicit_none(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """An explicit ``"session_id": None`` is legacy, same as an absent
+        key, and is likewise dropped rather than matched by ticket_id alone
+        (#2219).
+
+        Round-2 binding (unchanged): legacy detection is "key missing OR
+        value is None", not merely "key missing" -- a producer that always
+        includes the key but sometimes writes ``None`` must still hit the
+        no-identity skip path.
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
@@ -912,8 +989,8 @@ class TestConsumeCompletesTasks:
         )
 
         completed = consume_completed_sessions()
-        assert completed == 1
-        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
     def test_consume_skips_event_with_empty_string_session_id(
         self,
