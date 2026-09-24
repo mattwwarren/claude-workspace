@@ -325,6 +325,16 @@ def test_detect_skips_when_limit_text_is_not_the_tail(
     assert _detect(state) == []
 
 
+def test_detect_skips_when_later_content_timestamp_is_unknown(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """An untimestamped later record makes the apparent zero gap unknown."""
+    records = [*_limit_tail(), _ul_record("worker continued", None)]
+    state, _ = _seed(home, tmp_path, records)
+
+    assert _detect(state) == []
+
+
 def test_detect_skips_tail_without_limit_text(
     tmp_config_dir: Path, tmp_path: Path, home: Path
 ) -> None:

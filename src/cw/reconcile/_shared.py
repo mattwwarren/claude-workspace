@@ -858,12 +858,16 @@ class UsageLimitDetection(NamedTuple):
     compares the two so a stale limit message is not mistaken for a live cutoff.
     ``matched_text`` is the LAST matching record's text, timestamped or not, so
     a caller can parse its reset time without a second scan (#2324).
+    ``has_unparseable_content_after_match`` is true when a later
+    content-bearing record has no usable timestamp. In that case the apparent
+    zero-gap tail is unknown rather than empty.
     """
 
     detected: bool
     matched_at: datetime | None
     transcript_tail_at: datetime | None
     matched_text: str | None = None
+    has_unparseable_content_after_match: bool = False
 
 
 def _parse_iso_timestamp(raw: object) -> datetime | None:
@@ -933,6 +937,7 @@ def _detect_usage_limit(session: Session) -> UsageLimitDetection:
         )
     matched_text: str | None = None
     matched_at: datetime | None = None
+    has_unparseable_content_after_match = False
     for ts, text in _iter_assistant_records(transcript):
         if USAGE_LIMIT_RE.search(text):
             # last-match-wins for both, from the SAME record: an untimestamped
@@ -940,11 +945,52 @@ def _detect_usage_limit(session: Session) -> UsageLimitDetection:
             # keeping an older match's timestamp, which would fake a zero gap.
             matched_text = text
             matched_at = ts
+            has_unparseable_content_after_match = False
+    # ``_last_content_entry_timestamp`` intentionally skips unusable
+    # timestamps for its existing liveness callers. For this act-phase caller,
+    # however, a later content record with no timestamp means the tail gap is
+    # unknown and must not be treated as zero.
+    try:
+        with transcript.open(encoding="utf-8", errors="replace") as handle:
+            matched = False
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if record.get("type") not in {"user", "assistant"}:
+                    continue
+                if not isinstance(record.get("message"), dict):
+                    continue
+                message = record["message"]
+                timestamp = _parse_iso_timestamp(record.get("timestamp"))
+                content = message.get("content")
+                text = (
+                    "\n".join(
+                        block["text"]
+                        for block in content
+                        if isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and isinstance(block.get("text"), str)
+                    )
+                    if isinstance(content, list)
+                    else ""
+                )
+                if record.get("type") == "assistant" and USAGE_LIMIT_RE.search(text):
+                    matched = True
+                    has_unparseable_content_after_match = False
+                elif matched and timestamp is None:
+                    has_unparseable_content_after_match = True
+    except OSError:
+        pass
     return UsageLimitDetection(
         detected=matched_text is not None,
         matched_at=matched_at,
         transcript_tail_at=_last_content_entry_timestamp(transcript),
         matched_text=matched_text,
+        has_unparseable_content_after_match=has_unparseable_content_after_match,
     )
 
 

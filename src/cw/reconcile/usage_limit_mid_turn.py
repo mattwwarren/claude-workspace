@@ -161,6 +161,8 @@ def _mid_turn_limit_detection(session: Session) -> UsageLimitDetection | None:
     transcript also disqualifies the session -- the worker reported a result.
     """
     detection = _shared.detect_usage_limit(session)
+    if detection.has_unparseable_content_after_match:
+        return None
     if not _shared.usage_limit_is_recent(
         detection, window_seconds=_ZERO_GAP_SECONDS, fail_open=False
     ):
