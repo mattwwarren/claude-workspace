@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Stop one unresolvable session/worker record from vetoing every worktree occupancy check (#2240):** worktree occupancy checks previously treated any single unresolvable session or worker record as grounds to defer the whole check, so one stale/bad record could block dispatch from claiming otherwise-free worktrees. Occupancy now skips the unresolvable record instead of vetoing the entire check.
+
 ## [1.53.0] - 2026-09-24
 
 ### Added

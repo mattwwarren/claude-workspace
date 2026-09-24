@@ -802,6 +802,14 @@ def _headless_worktree(tmp_path: Path, name: str = "wt") -> Path:
     return worktree
 
 
+def _symlink_loop(base: Path, name: str = "loop") -> Path:
+    """Create two symlinks under *base* pointing at each other; return one."""
+    first, second = base / f"{name}-a", base / f"{name}-b"
+    first.symlink_to(second)
+    second.symlink_to(first)
+    return first
+
+
 def _write_clients_yaml(
     tmp_config_dir: Path,
     lane_value: str,
