@@ -1341,7 +1341,10 @@ class TestFetchDefaultBranchWrapper:
         assert "workspace missing" in result.reason
 
     def test_default_branch_absent_on_origin_is_branch_absent(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """BRANCH_ABSENT when the client's configured default branch does not
         exist on origin -- and, unlike ``fetch_feature_branch``, this is NOT

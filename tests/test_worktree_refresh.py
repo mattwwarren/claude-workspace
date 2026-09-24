@@ -39,7 +39,6 @@ from cw.worktree import (
     _reuse_occupancy,
     _run_git,
     create_worktree,
-    fetch_default_branch,
     fetch_feature_branch,
     is_main_behind_origin,
     live_home_reason,
@@ -917,9 +916,13 @@ class TestCreateWorktreeReuseRefresh:
                 id="fetched",
             ),
             pytest.param(
+                # #2328: _seed_behind's dev/2213 has a real commit ("tracked.txt")
+                # beyond origin/main, so a simulated BRANCH_ABSENT now reaches
+                # _handle_branch_absent's own-commits arm and IS noted (unlike a
+                # genuinely never-pushed, no-own-commits branch).
                 FetchResult(FetchOutcome.BRANCH_ABSENT, "couldn't find remote ref"),
                 False,
-                0,
+                1,
                 RefreshOutcome.NOT_REFRESHED,
                 id="branch-absent",
             ),
@@ -1393,29 +1396,47 @@ class TestCreateWorktreeReuseRefresh:
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A never-pushed branch that DOES have commits of its own is left
         untouched -- it may be building on a stale base, but that base is the
-        caller's own work, not something to silently rebase onto."""
+        caller's own work, not something to silently rebase onto.
+
+        The pre-fetch occupancy gate (``unsaved_work_reason``) already treats
+        any unpushed commit as "unsaved work" via its own fallback ladder,
+        so it fires before ``_fetch_gate``/``_handle_branch_absent`` are ever
+        reached; occupancy is bypassed here (mirroring
+        ``test_fetch_ok_but_tracking_ref_absent_is_a_no_op`` above) to
+        exercise ``_handle_branch_absent``'s own-commits note on its own
+        terms -- the scenario it targets is a branch whose own upstream
+        tracking ref (not ``origin/<default_branch>``) already accounts for
+        its commits, so occupancy sees it as clean while it is still ahead of
+        the default branch."""
         client, _wt, origin, _workspace = _seed_reuse(tmp_path, make_git_repo)
         never_pushed = "dev/never-pushed"
         wt2 = create_worktree(client, never_pushed)
         git_in(wt2, "commit", "--allow-empty", "-m", "own unpushed work")
         local_sha = git_in(wt2, "rev-parse", "HEAD")
         push_commit_to_origin(origin, "main", tmp_path / "side-main", "advance.txt")
+        monkeypatch.setattr(
+            "cw.worktree._refresh._reuse_occupancy",
+            lambda *_args, **_kw: _Occupancy(
+                live=None, branch_mismatch=None, local=None
+            ),
+        )
         report = ReuseRefreshReport()
 
-        path = create_worktree(
+        result = _refresh_reused_worktree(
             client,
             never_pushed,
-            allow_dirty_reuse=True,
-            refresh_on_reuse=True,
-            refresh_report=report,
+            wt2,
+            report,
+            ticket_id=None,
+            daemon=native_daemon.get_native_daemon_client(),
         )
 
-        assert path == wt2
         assert git_in(wt2, "rev-parse", "HEAD") == local_sha
-        assert report.outcome is RefreshOutcome.NOT_REFRESHED
+        assert result.outcome is RefreshOutcome.NOT_REFRESHED
         assert len(report.notes) == 1
         assert str(wt2) in report.notes[0]
         assert "commits of its own" in report.notes[0]
@@ -1440,7 +1461,9 @@ class TestCreateWorktreeReuseRefresh:
         patch_worktree(
             monkeypatch,
             "fetch_default_branch",
-            lambda _client: FetchResult(FetchOutcome.FAILED, "rc=128: fatal: simulated"),
+            lambda _client: FetchResult(
+                FetchOutcome.FAILED, "rc=128: fatal: simulated"
+            ),
         )
         report = ReuseRefreshReport()
 

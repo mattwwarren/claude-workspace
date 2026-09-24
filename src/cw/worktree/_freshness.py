@@ -207,6 +207,20 @@ def fetch_feature_branch(client: ClientConfig, branch_name: str) -> FetchResult:
     )
 
 
+def fetch_default_branch(client: ClientConfig) -> FetchResult:
+    """Fetch origin/<default_branch> into the client's git directory.
+
+    Sibling of :func:`fetch_feature_branch`, for the reuse refresh's
+    never-pushed-branch case (#2328): before deciding whether an unpushed
+    feature branch has commits of its own, the default branch must be
+    fetched fresh, or a stale local origin/<default_branch> could either
+    fast-forward to an already-stale target or misclassify a branch as
+    having "commits of its own" that are really just commits origin/<default>
+    hasn't caught up to yet.
+    """
+    return _fetch_default_branch(client.name, client.default_branch, _git_dir(client))
+
+
 def _get_behind_count(
     client_name: str, default_branch: str, git_dir: Path
 ) -> tuple[str, str, int] | None:

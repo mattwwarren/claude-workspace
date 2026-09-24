@@ -2407,10 +2407,18 @@ commits.
 successful `merge --ff-only`). Nothing is emitted on the no-op paths: the
 worktree already current, ahead of origin, or diverged from it; a fast-forward
 git refused; a worktree occupied by a live session or worker (the refusal is
-raised, nothing is touched); or one not refreshed (dirty, failed fetch, branch
-absent from origin, wrong branch). A record per turn would be noise. A merge
-that succeeds but leaves `HEAD` where it was ("Already up to date") also emits
-nothing.
+raised, nothing is touched); or one not refreshed (dirty, failed fetch, wrong
+branch, or a branch absent from origin that has commits of its own). A record
+per turn would be noise. A merge that succeeds but leaves `HEAD` where it was
+("Already up to date") also emits nothing.
+
+**Branch absent from origin is no longer an unconditional no-emit case
+(#2328):** a never-pushed branch with NO commits beyond
+`origin/<default_branch>` is exactly as stale as a pushed one that fell
+behind, so it is fast-forwarded to `origin/<default_branch>` through the same
+path as the pushed-branch case above, and CAN emit this event. Only a
+never-pushed branch that has commits of its own beyond `origin/<default_branch>`
+keeps the old no-emit behavior.
 
 The event is written after the fast-forward has completed and is best-effort:
 an `OSError` from the write (full disk, unwritable inbox) is logged at
