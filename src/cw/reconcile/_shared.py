@@ -851,16 +851,17 @@ class UsageLimitDetection(NamedTuple):
     ``timestamp`` (last-match-wins); ``None`` when nothing matched or that
     record has no usable timestamp -- never an earlier match's timestamp, which
     would make a stale anchor look current (#2324). ``transcript_tail_at`` is
-    the timestamp of the transcript's last
-    content-bearing record — matched or not — via
-    :func:`_last_content_entry_timestamp`; ``None`` when no record has a
-    parseable timestamp. The recency gate (:func:`_usage_limit_is_recent`)
+    the timestamp of the transcript's last content-bearing record — matched or
+    not — from the same forward scan; ``None`` when no record has a parseable
+    timestamp. The recency gate (:func:`_usage_limit_is_recent`)
     compares the two so a stale limit message is not mistaken for a live cutoff.
     ``matched_text`` is the LAST matching record's text, timestamped or not, so
     a caller can parse its reset time without a second scan (#2324).
     ``has_unparseable_content_after_match`` is true when a later
     content-bearing record has no usable timestamp. In that case the apparent
     zero-gap tail is unknown rather than empty.
+    ``transcript_scan_complete`` is false when the transcript could not be
+    read to EOF; callers that act on this evidence must fail closed.
     """
 
     detected: bool
@@ -868,6 +869,7 @@ class UsageLimitDetection(NamedTuple):
     transcript_tail_at: datetime | None
     matched_text: str | None = None
     has_unparseable_content_after_match: bool = False
+    transcript_scan_complete: bool = True
 
 
 def _parse_iso_timestamp(raw: object) -> datetime | None:
@@ -880,41 +882,98 @@ def _parse_iso_timestamp(raw: object) -> datetime | None:
         return None
 
 
-def _iter_assistant_records(path: Path) -> Iterator[tuple[datetime | None, str]]:
-    """Yield ``(timestamp, text)`` for each assistant record in a jsonl transcript.
+class _TranscriptRecord(NamedTuple):
+    """The parsed facts needed by transcript consumers."""
 
-    ``timestamp`` is the record's top-level ``"timestamp"`` parsed via
-    :func:`_parse_iso_timestamp`, or ``None`` when absent/malformed — the
-    record is still yielded, because its text may match even without a usable
-    anchor. ``text`` concatenates every text block of the assistant message.
-    Follows the top-level-``"timestamp"`` convention of
-    :func:`_last_content_entry_timestamp`. Yields nothing on any read error.
-    """
-    try:
-        with path.open() as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict) or record.get("type") != "assistant":
-                    continue
-                message = record.get("message")
-                if not isinstance(message, dict):
-                    continue
+    timestamp: datetime | None
+    content_bearing: bool
+    text: str | None
+    record_type: str | None
+
+
+class _TranscriptRecordIterator:
+    """Forward transcript iterator with an explicit incomplete-scan marker."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._handle: Any = None
+        self._done = False
+        self.scan_complete = True
+
+    def __iter__(self) -> _TranscriptRecordIterator:
+        return self
+
+    def __next__(self) -> _TranscriptRecord:
+        if self._done:
+            raise StopIteration
+        if self._handle is None:
+            try:
+                self._handle = self._path.open(encoding="utf-8", errors="replace")
+            except OSError:
+                self.scan_complete = False
+                self._done = True
+                raise StopIteration from None
+        while True:
+            try:
+                line = next(self._handle)
+            except StopIteration:
+                self._handle.close()
+                self._done = True
+                raise
+            except OSError:
+                self.scan_complete = False
+                self._handle.close()
+                self._done = True
+                raise StopIteration from None
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                # Keep the existing tolerant parsing behavior, but make an
+                # act-phase consumer aware that the scan was not complete.
+                self.scan_complete = False
+                continue
+            if not isinstance(record, dict):
+                continue
+            record_type = record.get("type")
+            message = record.get("message")
+            content_bearing = (
+                isinstance(record_type, str)
+                and record_type in {"user", "assistant"}
+                and isinstance(message, dict)
+            )
+            text: str | None = None
+            if content_bearing:
                 content = message.get("content")
-                if not isinstance(content, list):
-                    continue
-                text = "\n".join(
-                    block["text"]
-                    for block in content
-                    if isinstance(block, dict)
-                    and block.get("type") == "text"
-                    and isinstance(block.get("text"), str)
-                )
-                yield _parse_iso_timestamp(record.get("timestamp")), text
-    except OSError:
-        return
+                if isinstance(content, list):
+                    text = "\n".join(
+                        block["text"]
+                        for block in content
+                        if isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and isinstance(block.get("text"), str)
+                    )
+            return _TranscriptRecord(
+                timestamp=_parse_iso_timestamp(record.get("timestamp")),
+                content_bearing=content_bearing,
+                text=text,
+                record_type=record_type if isinstance(record_type, str) else None,
+            )
+
+
+def _iter_transcript_records(path: Path) -> _TranscriptRecordIterator:
+    """Yield parsed transcript records while exposing whether EOF was reached."""
+    return _TranscriptRecordIterator(path)
+
+
+def _iter_assistant_records(path: Path) -> Iterator[tuple[datetime | None, str]]:
+    """Yield ``(timestamp, text)`` for each assistant record in a jsonl transcript."""
+    for record in _iter_transcript_records(path):
+        if (
+            record.record_type == "assistant"
+            and record.content_bearing
+            and record.text is not None
+        ):
+            yield record.timestamp, record.text
 
 
 def _detect_usage_limit(session: Session) -> UsageLimitDetection:
@@ -938,59 +997,35 @@ def _detect_usage_limit(session: Session) -> UsageLimitDetection:
     matched_text: str | None = None
     matched_at: datetime | None = None
     has_unparseable_content_after_match = False
-    for ts, text in _iter_assistant_records(transcript):
-        if USAGE_LIMIT_RE.search(text):
+    transcript_tail_at: datetime | None = None
+    scan = _iter_transcript_records(transcript)
+    matched = False
+    for record in scan:
+        if record.content_bearing:
+            if record.timestamp is not None:
+                transcript_tail_at = record.timestamp
+            elif matched:
+                has_unparseable_content_after_match = True
+        if (
+            record.record_type == "assistant"
+            and record.content_bearing
+            and record.text is not None
+            and USAGE_LIMIT_RE.search(record.text)
+        ):
             # last-match-wins for both, from the SAME record: an untimestamped
             # latest match leaves matched_at None (gap unknown) rather than
             # keeping an older match's timestamp, which would fake a zero gap.
-            matched_text = text
-            matched_at = ts
+            matched = True
+            matched_text = record.text
+            matched_at = record.timestamp
             has_unparseable_content_after_match = False
-    # ``_last_content_entry_timestamp`` intentionally skips unusable
-    # timestamps for its existing liveness callers. For this act-phase caller,
-    # however, a later content record with no timestamp means the tail gap is
-    # unknown and must not be treated as zero.
-    try:
-        with transcript.open(encoding="utf-8", errors="replace") as handle:
-            matched = False
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                if record.get("type") not in {"user", "assistant"}:
-                    continue
-                if not isinstance(record.get("message"), dict):
-                    continue
-                message = record["message"]
-                timestamp = _parse_iso_timestamp(record.get("timestamp"))
-                content = message.get("content")
-                text = (
-                    "\n".join(
-                        block["text"]
-                        for block in content
-                        if isinstance(block, dict)
-                        and block.get("type") == "text"
-                        and isinstance(block.get("text"), str)
-                    )
-                    if isinstance(content, list)
-                    else ""
-                )
-                if record.get("type") == "assistant" and USAGE_LIMIT_RE.search(text):
-                    matched = True
-                    has_unparseable_content_after_match = False
-                elif matched and timestamp is None:
-                    has_unparseable_content_after_match = True
-    except OSError:
-        pass
     return UsageLimitDetection(
-        detected=matched_text is not None,
+        detected=matched,
         matched_at=matched_at,
-        transcript_tail_at=_last_content_entry_timestamp(transcript),
+        transcript_tail_at=transcript_tail_at,
         matched_text=matched_text,
         has_unparseable_content_after_match=has_unparseable_content_after_match,
+        transcript_scan_complete=scan.scan_complete,
     )
 
 
