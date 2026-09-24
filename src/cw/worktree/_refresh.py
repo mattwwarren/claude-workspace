@@ -200,9 +200,18 @@ def _sync_reused_submodules(
 
     A failed ``git submodule update --init --recursive`` is logged at
     WARNING and noted on *report* -- never raised, never turned into
-    ``NOT_REFRESHED``, and the worktree is left exactly as the failed sync
-    left it. Init and update only: never ``deinit``, reset or delete a
-    submodule.
+    ``NOT_REFRESHED``. With more than one submodule, a failure partway
+    through can leave the sync PARTIAL: git registers and fetches whatever
+    submodule(s) it reaches before the one that fails, without checking any
+    of them out (its checkout pass runs only after every submodule has been
+    fetched). That partial registration alone is enough to turn the
+    superproject's own ``git status --porcelain`` from clean to dirty, with
+    no submodule actually checked out -- so a failed sync here can make the
+    NEXT reuse refresh's occupancy check (:func:`unsaved_work_reason`) read
+    this worktree as having unsaved work and decline to fast-forward it
+    again until a human re-runs ``git submodule update`` or otherwise
+    cleans it up by hand. Init and update only: never ``deinit``, reset or
+    delete a submodule to recover from this.
     """
     if not (wt_path / ".gitmodules").exists():
         return None
@@ -232,7 +241,9 @@ def _sync_reused_submodules(
         )
         report.notes.append(
             f"submodule sync of {branch} in reused worktree {wt_path} failed "
-            f"({reason}); submodules may be pointing at stale commits"
+            f"({reason}); the sync may be partial (some submodules "
+            "registered but none checked out), which can leave the "
+            "worktree uncommitted-dirty until a human re-syncs it by hand"
         )
     return None
 
