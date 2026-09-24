@@ -72,9 +72,11 @@ def test_step4c2_pushes_before_prep_pr_invocation() -> None:
     """
     section = _step4c2_section()
     merge_idx = section.index("git merge origin/main --no-edit")
-    push_idx = section.index("git push origin HEAD:refs/heads/")
-    verify_idx = section.index("git rev-parse origin/")
-    head_idx = section.index("git rev-parse HEAD")
+    # Searched from the merge onward: #2354 added a pre-reset push of
+    # unpushed local commits earlier in the same section.
+    push_idx = section.index("git push origin HEAD:refs/heads/", merge_idx)
+    verify_idx = section.index("git rev-parse origin/", merge_idx)
+    head_idx = section.index("git rev-parse HEAD", merge_idx)
     assert merge_idx < push_idx
     assert merge_idx < verify_idx
     assert merge_idx < head_idx
