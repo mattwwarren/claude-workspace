@@ -52,6 +52,8 @@ re-exports. Submodules:
 - ``idle`` — emitted-sentinel router (#578).
 - ``liveness`` — transcript-staleness bucket sweep + operator distress
   signal (RFC 0008 W2; signal-only, no disposition).
+- ``usage_limit_mid_turn`` — roster-present usage-limit stop sweep (#2324;
+  ``reap_policy``-gated revert or BLOCKED_ON_USER park, plus lockout arm).
 - ``phantom`` — phantom (dead-surface) sweep.
 - ``tasks`` — dev-queue revert backstops and timed-out-merged completion.
 - ``core`` — ``reconcile`` / ``_reconcile_locked`` orchestration.
@@ -185,6 +187,7 @@ from cw.reconcile.tasks import (
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
+from cw.reconcile.usage_limit_mid_turn import detect_and_park_mid_turn_usage_limits
 
 __all__ = [
     "AUTO_DEV_LABEL_PREFIX",
@@ -268,6 +271,7 @@ __all__ = [
     "_worktree_dirty_reason_by_path",
     "complete_timed_out_merged_tasks",
     "compute_drift",
+    "detect_and_park_mid_turn_usage_limits",
     "feature_branch_key",
     "find_live_sessions_for_ticket",
     "find_running_task_for_session",

@@ -33,6 +33,7 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
     _verify_supervisor_session_id,
     reconcile,
@@ -1223,3 +1224,125 @@ def test_stamp_advisory_respects_the_spawn_grace_window(tmp_config_dir: Path) ->
     # Past it: the same absence now is.
     later = now + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
     assert _advisory_sweep(state, set(), now=later)["T-fresh"] is not None
+
+
+# ---------------------------------------------------------------------------
+# #2324: mid-turn usage-limit sweep wiring
+# ---------------------------------------------------------------------------
+
+_MID_TURN_SURFACE = "live2324"
+# Real layout: the roster reports the full id and the transcript is named by it;
+# reconcile backfills it as claude_session_id, which locate_transcript then uses.
+_MID_TURN_FULL_ID = _MID_TURN_SURFACE + "-0000-4000-8000-000000000000"
+_MID_TURN_TICKET = "mid-2324"
+_PHANTOM_TICKET = "ph-2324"
+
+
+def _seed_mid_turn_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    config: OrchestratorConfig,
+    with_phantom: bool,
+) -> None:
+    """One roster-present worker stopped on a usage limit, plus an optional phantom."""
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", lambda: config)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": _MID_TURN_FULL_ID}],
+    )
+
+    started_at = datetime.now(UTC) - timedelta(hours=1)
+    worktree = tmp_path / "wt-mid-2324"
+    sessions = [
+        _mk_headless_daemon_session(
+            _MID_TURN_TICKET, worktree, started_at, surface_ref=_MID_TURN_SURFACE
+        )
+    ]
+    tasks = [
+        _make_ticket_task(
+            ticket_id=_MID_TURN_TICKET,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=_MID_TURN_TICKET,
+        )
+    ]
+    if with_phantom:
+        sessions.append(_mk_phantom_daemon_session(_PHANTOM_TICKET, started_at))
+        tasks.append(
+            _make_ticket_task(
+                ticket_id=_PHANTOM_TICKET,
+                client="client-a",
+                status=QueueItemStatus.RUNNING,
+                session_id=_PHANTOM_TICKET,
+            )
+        )
+    save_state(CwState(sessions=sessions))
+    save_dev_queue(DevQueueStore(tasks=tasks))
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _ul_record("working on it", "2026-09-24T00:20:00+00:00"),
+            _ul_record(
+                "You've hit your weekly limit · resets Sep 26, 11pm (America/New_York)",
+                "2026-09-24T00:50:00+00:00",
+            ),
+            {"type": "cost-state", "timestamp": "2026-09-24T00:50:01+00:00"},
+        ],
+        filename=f"{_MID_TURN_FULL_ID}.jsonl",
+    )
+    now_ts = datetime.now(UTC).timestamp()
+    os.utime(str(transcript), (now_ts, now_ts))
+
+
+@pytest.mark.parametrize("with_phantom", [False, True], ids=["no-phantom", "phantom"])
+def test_reconcile_auto_reverts_mid_turn_usage_limited_ticket(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_phantom: bool,
+) -> None:
+    """Under reap_policy: auto the mid-turn park lands in reverted_ticket_ids on
+    both of _reconcile_locked's all_reverted branches (#2324)."""
+    _seed_mid_turn_limit(
+        tmp_path, monkeypatch, config=_auto_config(), with_phantom=with_phantom
+    )
+
+    report = reconcile()
+
+    assert _MID_TURN_TICKET in report.reverted_ticket_ids
+    if with_phantom:
+        assert _PHANTOM_TICKET in report.reverted_ticket_ids
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == _MID_TURN_TICKET)
+    assert task.status is QueueItemStatus.PENDING
+    assert task.next_eligible_at is not None
+
+
+def test_reconcile_signal_only_parks_mid_turn_ticket_without_reverting(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under the signal_only default the row is parked, not reverted (#2324)."""
+    _seed_mid_turn_limit(
+        tmp_path, monkeypatch, config=OrchestratorConfig(), with_phantom=False
+    )
+
+    report = reconcile()
+
+    assert _MID_TURN_TICKET not in report.reverted_ticket_ids
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == "usage_limited_mid_turn"

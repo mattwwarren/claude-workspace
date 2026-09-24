@@ -69,6 +69,7 @@ from cw.reconcile.tasks import (
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
+from cw.reconcile.usage_limit_mid_turn import detect_and_park_mid_turn_usage_limits
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, OrchestratorConfig, TicketTask
@@ -308,7 +309,10 @@ def _reconcile_locked(
     session off elapsed time or transcript quietness: the foreign-result and
     emitted-sentinel sweeps act only on positive completion evidence, the
     phantom sweep acts only on roster absence (the process is genuinely
-    gone), and the liveness sweep is signal-only.
+    gone), the mid-turn usage-limit sweep acts only on a transcript tail that
+    ends on a usage-limit message (#2324), and the liveness sweep is
+    signal-only. The phantom and usage-limit sweeps' destructive acts are both
+    gated by ``reap_policy`` (ADR-0006).
     """
     if clients is None:
         clients = load_clients()
@@ -410,6 +414,19 @@ def _reconcile_locked(
         task_by_ticket=shared_task_by_ticket,
     )
 
+    # Mid-turn usage-limit sweep (#2324): a roster-present worker whose
+    # transcript tail is a usage-limit message with no sentinel. Evidence-based,
+    # reap_policy-gated like the phantom sweep; returns only the tickets
+    # reverted to PENDING under auto (a signal_only park is not a revert).
+    mid_turn_usage_limit_reverted = detect_and_park_mid_turn_usage_limits(
+        state,
+        now=now,
+        native_live=native_live,
+        config=orchestrator_config,
+        clients=_deps.load_effective_clients(),
+        task_by_ticket=shared_task_by_ticket,
+    )
+
     drift = compute_drift(state, native_live, now=now)
     if not drift.phantom_session_ids:
         # No phantom sessions to reap, but still run the TIMED_OUT,
@@ -422,7 +439,11 @@ def _reconcile_locked(
             )
         )
         all_reverted = list(
-            dict.fromkeys(timed_out_ticket_ids + completed_silent_ticket_ids)
+            dict.fromkeys(
+                mid_turn_usage_limit_reverted
+                + timed_out_ticket_ids
+                + completed_silent_ticket_ids
+            )
         )
         return ReconcileReport(
             reverted_ticket_ids=all_reverted,
@@ -468,7 +489,12 @@ def _reconcile_locked(
         )
     )
     all_reverted = list(
-        dict.fromkeys(reverted + timed_out_ticket_ids + completed_silent_ticket_ids)
+        dict.fromkeys(
+            reverted
+            + mid_turn_usage_limit_reverted
+            + timed_out_ticket_ids
+            + completed_silent_ticket_ids
+        )
     )
 
     all_merged_completed = list(dict.fromkeys(merged_from_phantom + local_harvested))
