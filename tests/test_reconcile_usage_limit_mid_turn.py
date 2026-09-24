@@ -753,6 +753,34 @@ def test_act_auto_requeues_only_the_row_keyed_to_the_sessions_client(
     assert tasks[1].next_eligible_at == _RESET_AT
 
 
+def test_act_decides_on_the_session_matched_row_of_a_duplicate_pair(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    """``_decide`` writes the intent onto the session's own duplicate row.
+
+    An earlier duplicate RUNNING row for the same ``(ticket_id, client)`` is
+    reachable via add-after-terminal plus ``requeue --from-completed``
+    (#2219); a first-match lookup would bind the act to it. Only the row
+    stamped with this session's id is the act's.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    duplicate = _running_row(client=_CLIENT, session_id="duplicate-session")
+    _save_tasks_around_owned_row(before=[duplicate], after=[])
+
+    assert _act(state, _detect(state), _auto_config()) == [_SID]
+
+    tasks = load_dev_queue().tasks
+    assert tasks[0].session_id == "duplicate-session"
+    assert tasks[0].status is QueueItemStatus.RUNNING
+    assert tasks[0].usage_limit_act is None
+    assert tasks[0].next_eligible_at is None
+    assert tasks[1].status is QueueItemStatus.PENDING
+    assert tasks[1].next_eligible_at == _RESET_AT
+
+
 def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
     tmp_config_dir: Path,
     tmp_path: Path,
