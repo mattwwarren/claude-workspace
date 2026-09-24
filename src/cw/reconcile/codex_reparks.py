@@ -63,6 +63,7 @@ from cw.models import (
     QueueItemStatus,
 )
 from cw.reconcile.codex_boot import (
+    _STALE_SESSION_GONE,
     _close_session_audited,
     _OrphanDisposition,
     _resolve_orphan_action,
@@ -98,7 +99,6 @@ CODEX_ORPHAN_CLEAN_REQUEUE_REASON_AT_RECONCILE = (
 # a process-table walk. Same order as concierge's initial false-park backoff.
 _LIVE_WRITER_RESCAN_BACKOFF_SECONDS = 300
 
-_STALE_SESSION_GONE = "it is no longer in sessions.json"
 _STALE_SESSION_RESUMED = "it was resumed after the park"
 
 
