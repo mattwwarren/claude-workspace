@@ -1936,7 +1936,8 @@ class TestAddTicketStagePlacement:
     def test_add_ticket_honors_lane_pipeline_stages_override(
         self, patched_queue: Path, tmp_config_dir: Path
     ) -> None:
-        """A lane's pipeline.stages override, not the client default, governs (#2216)."""
+        """A lane's pipeline.stages override, not the client default,
+        governs (#2216)."""
         _setup_client_with_pipeline_stages(
             tmp_config_dir,
             patched_queue,
@@ -7456,9 +7457,7 @@ class TestRequeueTicket:
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
-        with pytest.raises(
-            RequeueStageError, match="lane 'restricted'"
-        ):
+        with pytest.raises(RequeueStageError, match="lane 'restricted'"):
             requeue_ticket("GEN-500", "genhealth", stage_override="review")
 
         store = load_dev_queue()
