@@ -449,6 +449,15 @@ def transition_task_status(
     # next episode. _stamp_session_id_mismatch_advisories re-derives it on the
     # next reconcile tick if the condition still holds.
     task.advisory_note = None
+    # GitHub #2307: same unconditional-clear treatment for the live-writer
+    # codex-orphan park's session link and its rescan backoff -- a status
+    # transition means that park episode has ended (requeued, unblocked,
+    # cancelled, or re-parked under a fresh disposition), so a stale link must
+    # never lead cw.reconcile.codex_reparks to a session the row no longer
+    # describes. _park_running_task_blocked_on_user re-stamps the link after
+    # its own transition when the new park leaves the session ACTIVE.
+    task.codex_orphan_session_id = None
+    task.codex_orphan_rescan_next_eligible_at = None
     if old_status != new_status:
         # Why: emit inline while callers still hold dev_queue_lock. record_event
         # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the

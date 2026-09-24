@@ -9660,6 +9660,65 @@ class TestParkRunningTaskExpectedSessionId:
                 breadcrumbs="/some/path",
             )
 
+    def test_codex_orphan_session_id_is_stamped_after_the_transition(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """#2307: the live-writer codex-orphan park links the row to the
+        session it leaves ACTIVE. The stamp lands after transition_task_status
+        has cleared the previous episode's link and rescan backoff."""
+        add_ticket(
+            TicketTask(
+                ticket_id="PARK-5",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-orphan",
+                codex_orphan_session_id="sess-previous-episode",
+                codex_orphan_rescan_next_eligible_at=datetime.now(UTC),
+            )
+        )
+
+        _park_running_task_blocked_on_user(
+            ticket_id="PARK-5",
+            client_name="test-client",
+            disposition="codex_review_orphaned_at_boot",
+            breadcrumbs="orphan",
+            expected_session_id="sess-orphan",
+            codex_orphan_session_id="sess-orphan",
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.BLOCKED_ON_USER
+        assert task.session_id is None
+        assert task.codex_orphan_session_id == "sess-orphan"
+        assert task.codex_orphan_rescan_next_eligible_at is None
+
+    def test_codex_orphan_session_id_omitted_leaves_the_link_cleared(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """Every other caller omits the link: a stale one is cleared by the
+        transition and nothing re-stamps it."""
+        add_ticket(
+            TicketTask(
+                ticket_id="PARK-6",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-any",
+                codex_orphan_session_id="sess-previous-episode",
+            )
+        )
+
+        _park_running_task_blocked_on_user(
+            ticket_id="PARK-6",
+            client_name="test-client",
+            disposition="dirty_worktree",
+            breadcrumbs="/some/path",
+            expected_session_id="sess-any",
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.BLOCKED_ON_USER
+        assert task.codex_orphan_session_id is None
+
 
 class TestRevertClaimedTaskExpectedSessionId:
     """#2285: ``expected_session_id`` closes the clean-orphan requeue TOCTOU.

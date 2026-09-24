@@ -27,6 +27,7 @@ from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import HookContextConflictError
 from cw.models import (
+    DEFAULT_LANE,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -79,9 +80,13 @@ def _write_clients_yaml(
     backend: str,
     *,
     names: tuple[str, ...] = ("client-a",),
+    lane_reap_policies: dict[str, ReapPolicy] | None = None,
 ) -> None:
+    """*lane_reap_policies* maps a client name to the ``reap_policy`` its
+    default lane declares; a client absent from it declares no lanes."""
     config_dir = tmp_config_dir / ".config" / "cw"
     config_dir.mkdir(parents=True, exist_ok=True)
+    policies = lane_reap_policies or {}
     body = "".join(
         f"  {name}:\n"
         f"    workspace_path: {workspace}\n"
@@ -90,6 +95,13 @@ def _write_clients_yaml(
         "      executors:\n"
         "        review:\n"
         f"          backend: {backend}\n"
+        + (
+            "    lanes:\n"
+            f"      - name: {DEFAULT_LANE}\n"
+            f"        reap_policy: {policies[name]}\n"
+            if name in policies
+            else ""
+        )
         for name in names
     )
     (config_dir / "clients.yaml").write_text(f"clients:\n{body}")
@@ -266,11 +278,21 @@ def _assert_session_left_active() -> Session:
     return session
 
 
-def _assert_parked(consumer: str, reason: str) -> None:
+def _assert_parked(consumer: str, reason: str, *, linked: bool = False) -> None:
+    """Assert the boot pass's park, including its #2307 session link.
+
+    *linked* is True only for the parks that leave the session ACTIVE (a live
+    or possibly-live writer): those carry ``codex_orphan_session_id`` so the
+    reconcile-tick sweep can re-evaluate them. Every other park already closed
+    the session, so there is nothing to link back to.
+    """
     task = load_dev_queue().tasks[0]
     assert task.status is QueueItemStatus.BLOCKED_ON_USER
     assert task.disposition == CODEX_ORPHANED_AT_BOOT_DISPOSITION
     assert task.session_id is None
+    expected_link = load_state().sessions[0].id if linked else None
+    assert task.codex_orphan_session_id == expected_link
+    assert task.codex_orphan_rescan_next_eligible_at is None
     payloads = _attention_events(consumer)
     assert len(payloads) == 1
     assert reason in str(payloads[0]["breadcrumbs"])
@@ -604,7 +626,7 @@ def test_lingering_writer_parks_with_no_signal_sent(
     assert writer.signals == []
     assert sent == []
     consumer = f"test-codex-boot-lingering-{auto}"
-    _assert_parked(consumer, "pid 4242")
+    _assert_parked(consumer, "pid 4242", linked=True)
     breadcrumbs = str(_attention_events(f"{consumer}-2")[0]["breadcrumbs"])
     assert _PARK_REASON_CODEX_PROCESS_RUNNING in breadcrumbs
     session = _assert_session_left_active()
@@ -655,7 +677,7 @@ def test_inconclusive_scan_never_counts_as_no_writer(
 
     assert reap_orphaned_codex_sessions_at_boot() == 1
 
-    _assert_parked("test-codex-boot-inconclusive", _SCAN_INCONCLUSIVE)
+    _assert_parked("test-codex-boot-inconclusive", _SCAN_INCONCLUSIVE, linked=True)
     session = _assert_session_left_active()
     assert session.reap_proposed_at is not None
     assert len(_reap_proposed_events("test-codex-boot-inconclusive-reap")) == 1
@@ -737,7 +759,9 @@ def test_already_proposed_session_is_not_proposed_again(
 
     assert reap_orphaned_codex_sessions_at_boot() == 1
 
-    _assert_parked("test-codex-boot-dedup", _PARK_REASON_CODEX_PROCESS_RUNNING)
+    _assert_parked(
+        "test-codex-boot-dedup", _PARK_REASON_CODEX_PROCESS_RUNNING, linked=True
+    )
     assert _assert_session_left_active().reap_proposed_at == _STARTED_AT
     assert _reap_proposed_events("test-codex-boot-dedup-reap") == []
 
@@ -760,7 +784,9 @@ def test_unscannable_process_table_parks_and_leaves_session_active(
     assert reap_orphaned_codex_sessions_at_boot() == 1
 
     _assert_parked(
-        f"test-codex-boot-noscan-{auto}", _PARK_REASON_PROCESS_SCAN_INCONCLUSIVE
+        f"test-codex-boot-noscan-{auto}",
+        _PARK_REASON_PROCESS_SCAN_INCONCLUSIVE,
+        linked=True,
     )
     _assert_session_left_active()
     proposals = _reap_proposed_events(f"test-codex-boot-noscan-reap-{auto}")

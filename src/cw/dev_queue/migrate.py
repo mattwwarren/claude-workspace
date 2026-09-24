@@ -262,7 +262,13 @@ def _fill_advisory_note_default(task_raw: dict[str, Any]) -> None:
 
 
 def _fill_codex_orphan_link_default(task_raw: dict[str, Any]) -> None:
-    """Fill the codex-orphan link fields introduced in schema v39 (#2307)."""
+    """Fill codex_orphan_session_id/codex_orphan_rescan_next_eligible_at
+    introduced in dev-queue schema v39 (GitHub #2307). Idempotent.
+
+    None on every pre-v39 row: a park written before the link existed carries
+    no session to follow, so the reconcile-tick re-evaluation sweep never
+    selects it and the row behaves exactly as it did before the upgrade.
+    """
     if "codex_orphan_session_id" not in task_raw:
         task_raw["codex_orphan_session_id"] = None
     if "codex_orphan_rescan_next_eligible_at" not in task_raw:

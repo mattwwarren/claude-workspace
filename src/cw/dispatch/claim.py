@@ -815,6 +815,7 @@ def _park_running_task_blocked_on_user(
     expected_session_id: str | None = None,
     unproductive: bool = True,
     created_at: datetime | None = None,
+    codex_orphan_session_id: str | None = None,
 ) -> None:
     """Move a still-RUNNING claimed task to BLOCKED_ON_USER, clearing session_id.
 
@@ -863,6 +864,15 @@ def _park_running_task_blocked_on_user(
     (e.g. the codex-capability probe's ``.detail`` string, or a stale
     worktree's path) -- distinct from ``disposition``, which is the short
     reason code also stamped as the task's ``disposition``.
+
+    ``codex_orphan_session_id`` (optional, #2307) is the session a
+    ``cw.reconcile.codex_boot`` park leaves ACTIVE because a codex writer may
+    still be alive in its worktree. It is stamped after the transition, which
+    has just cleared the previous episode's link, so ``session_id`` being
+    cleared below does not sever the row from that session:
+    ``cw.reconcile.codex_reparks`` follows the link on reconcile ticks. It
+    mirrors ``hook_context_conflict_session_id``'s conditional stamp in
+    :func:`_revert_claimed_task_to_pending`; every other caller omits it.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -896,6 +906,8 @@ def _park_running_task_blocked_on_user(
                 correlation_id=ticket_id,
             )
             stored_task.session_id = None
+            if codex_orphan_session_id is not None:
+                stored_task.codex_orphan_session_id = codex_orphan_session_id
         save_dev_queue(store)
 
 

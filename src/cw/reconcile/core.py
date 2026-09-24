@@ -38,6 +38,7 @@ from cw.reconcile._shared import (
     feature_branch_key,
     ticket_id_for_session,
 )
+from cw.reconcile.codex_reparks import run_codex_live_writer_reparks
 from cw.reconcile.concierge import run_concierge_recoveries
 from cw.reconcile.escalation import run_escalation_sweep
 from cw.reconcile.fix_dispatch import run_fix_dispatch
@@ -81,6 +82,7 @@ def _run_terminal_backstops_and_sweeps(
     now: datetime,
     native_live: set[str],
     config: OrchestratorConfig,
+    clients: dict[str, ClientConfig],
 ) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
@@ -89,9 +91,13 @@ def _run_terminal_backstops_and_sweeps(
     own detect/act sweep, recover any RUNNING task whose session already
     went TIMED_OUT/COMPLETED without reverting it, park stale PENDING rows
     with a terminal sibling (#876), then run the mechanical recovery reactor
-    (opt-in) and durable escalation sweep (unconditional) from GitHub #1015.
+    (opt-in), the live-writer codex-orphan park re-evaluation (#2307,
+    unconditional), and durable escalation sweep (unconditional) from GitHub
+    #1015.
     All of these load their own fresh dev-queue/state snapshots rather than
     reusing the (possibly now-stale) locals in ``_reconcile_locked``.
+    *clients* is the tick's own client scope; the codex re-park sweep acts
+    only within it (#2307 review round 1).
     Extracted to one call site (instead of duplicating 4 lines in each
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
@@ -102,6 +108,10 @@ def _run_terminal_backstops_and_sweeps(
     completed_silent_ticket_ids = revert_completed_silent_tasks()
     park_terminal_sibling_tasks()
     run_concierge_recoveries(now=now, native_live=native_live, config=config)
+    # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
+    # session (live or unprovable writer). Unconditional, like the boot pass,
+    # but scoped to this tick's clients: never another client's session.
+    run_codex_live_writer_reparks(now=now, config=config, clients=clients)
     run_gate_recipes(now=now, config=config)
     run_review_recipes(config=config)
     run_escalation_sweep(now=now)
@@ -302,7 +312,8 @@ def _reconcile_locked(
     They are consumed as-is by the phantom sweep below.
     clients comes from the same lockless pre-pass's `load_clients()` call
     (feature_branch_prefix SSOT, #728) — threaded through so the main-drift
-    sweep (#940) doesn't re-read clients.yaml a second time this tick.
+    sweep (#940) doesn't re-read clients.yaml a second time this tick, and
+    as the client scope of the codex live-writer re-park sweep (#2307).
 
     Since the process-kill-timeout removal, no sweep in here dispositions a
     session off elapsed time or transcript quietness: the foreign-result and
@@ -418,7 +429,10 @@ def _reconcile_locked(
         # are recovered, and stale PENDING rows with terminal siblings are parked.
         timed_out_ticket_ids, completed_silent_ticket_ids = (
             _run_terminal_backstops_and_sweeps(
-                now=now, native_live=native_live, config=orchestrator_config
+                now=now,
+                native_live=native_live,
+                config=orchestrator_config,
+                clients=clients,
             )
         )
         all_reverted = list(
@@ -464,7 +478,10 @@ def _reconcile_locked(
     # the sessions_lock this function runs under).
     timed_out_ticket_ids, completed_silent_ticket_ids = (
         _run_terminal_backstops_and_sweeps(
-            now=now, native_live=native_live, config=orchestrator_config
+            now=now,
+            native_live=native_live,
+            config=orchestrator_config,
+            clients=clients,
         )
     )
     all_reverted = list(
