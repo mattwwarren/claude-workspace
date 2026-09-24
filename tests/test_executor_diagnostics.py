@@ -263,6 +263,27 @@ def test_render_bundle_path_home_relative_success(
     assert not rendered.startswith("/")
 
 
+def test_render_bundle_path_absolute_fallback_when_outside_home(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the bundle dir does NOT sit under Path.home(), the rendered path
+    falls back to absolute (the fallback branch, mirrored against the
+    home-relative success case above)."""
+    from pathlib import Path as _Path
+
+    other_home = tmp_path.parent / f"{tmp_path.name}-unrelated-home"
+    other_home.mkdir()
+    monkeypatch.setattr(_Path, "home", lambda: other_home)
+
+    bundle = diagnostics_bundle_dir("sid-outside-home")
+    with pytest.raises(ValueError):
+        bundle.relative_to(other_home)
+
+    rendered = render_bundle_path("sid-outside-home")
+    assert rendered == str(bundle)
+    assert _Path(rendered).is_absolute()
+
+
 # ---------------------------------------------------------------------------
 # build_executor_failure
 # ---------------------------------------------------------------------------
