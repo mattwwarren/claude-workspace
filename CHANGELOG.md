@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.55.0] - 2026-09-24
+
 ### Added
 
 - **`external_state_block` is a new `AUTO_DEV_RESULT` blocker reason for a `/prep-pr` BLOCK whose root cause is state external to the branch (#2320):** a base-branch-state classifier in `auto-dev-finalize.md` now inspects a collapsed `/prep-pr` BLOCK for evidence the failure came from `origin/main`, not the branch's own diff, before defaulting to the generic `agent_block`. It parks `BLOCKED_ON_USER` at FINALIZE without regressing to IMPL — regressing wasted an attempt IMPL could never fix, since the branch's own code wasn't the problem (fixes the #2304 incident class).
