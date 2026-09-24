@@ -140,6 +140,18 @@ OPERATOR_UNAVAILABLE_BLOCKER_REASONS: frozenset[str] = frozenset(
 DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON: Literal[
     "destructive_directive_requires_operator"
 ] = "destructive_directive_requires_operator"
+# blocker.reason emitted at FINALIZE when the diagnosed root cause of a gate
+# failure is state on origin/main (or another external dependency) that
+# predates this branch's own changes -- a corrupted released CHANGELOG
+# section, a required external PR, an infrastructure gate -- so a fresh
+# IMPL session has nothing on the branch to fix. Distinct from
+# OPERATOR_UNAVAILABLE_BLOCKER_REASONS (RFC 0011 A1): that axis means "we
+# can't reach the operator/a dependency right now", self-healing nothing but
+# the reachability; this means the block is real and needs an operator to
+# actually act (fix main, land the dependency), not just become reachable.
+# Deliberately absent from FINALIZE_REGRESS_BLOCKER_REASONS -- see that
+# constant's docstring. See GitHub #2320.
+EXTERNAL_STATE_BLOCKER_REASON: Literal["external_state_block"] = "external_state_block"
 # Prefix reserving the explicit freeform half of the open enum (#2097). A
 # reason starting with it is *declared* experimental/producer-local, so it is
 # never warned about even though it is absent from KNOWN_BLOCKER_REASONS.
@@ -172,6 +184,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "agent_block",
             "tool_denied",
             DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON,
+            EXTERNAL_STATE_BLOCKER_REASON,
         }
     )
     # Documented outside that table: docs/headless-contract.md §4.2, the

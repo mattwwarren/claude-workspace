@@ -11941,6 +11941,30 @@ class TestApplyStagedDecision:
 
         assert FINALIZE_GATE_HELD_DISPOSITION not in FINALIZE_REGRESS_BLOCKER_REASONS
 
+    def test_external_state_block_never_in_finalize_regress_reasons(self) -> None:
+        """external_state_block must never trip Rule 5a's self-heal regress
+        to IMPL -- the diagnosed root cause is external to this branch, so a
+        regressed IMPL session has nothing on the branch to fix (#2320)."""
+        from cw.auto_dev_result import (
+            EXTERNAL_STATE_BLOCKER_REASON,
+            FINALIZE_REGRESS_BLOCKER_REASONS,
+        )
+
+        assert EXTERNAL_STATE_BLOCKER_REASON not in FINALIZE_REGRESS_BLOCKER_REASONS
+
+    def test_external_state_block_never_in_operator_unavailable_reasons(self) -> None:
+        """external_state_block is a genuine block needing operator action
+        (fix main, land the dependency), not a reachability wait -- it must
+        stay out of OPERATOR_UNAVAILABLE_BLOCKER_REASONS so paused_status
+        reports the real 'blocked' status rather than an availability
+        substitute (#2320)."""
+        from cw.auto_dev_result import (
+            EXTERNAL_STATE_BLOCKER_REASON,
+            OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
+        )
+
+        assert EXTERNAL_STATE_BLOCKER_REASON not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+
     def test_force_hold_without_flag_or_config_unchanged(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
@@ -13126,6 +13150,34 @@ class TestApplyStagedDecision:
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.stage == Stage.FINALIZE
+
+    def test_blocked_at_finalize_external_state_block_reason_parks_without_regress(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+    ) -> None:
+        """blocked at FINALIZE with external_state_block parks
+        BLOCKED_ON_USER without regressing to IMPL -- the root cause is state
+        on origin/main (or another external dependency) predating this
+        branch's own diff, so a regressed IMPL session would have nothing on
+        the branch to fix (#2320).
+        """
+        from cw.auto_dev_result import EXTERNAL_STATE_BLOCKER_REASON
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("ESB-FIN-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {
+                "stage": "s4_finalize",
+                "reason": EXTERNAL_STATE_BLOCKER_REASON,
+            },
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.FINALIZE
+        assert task.regress_attempts == 0
 
     def test_blocked_plan_scope_drift_at_impl_parks_without_regress(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
