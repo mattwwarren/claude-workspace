@@ -1143,6 +1143,7 @@ operator_channel_forward:
     - session.liveness_changed
     - operator.escalation
     - gate.auto_approved        # RFC 0009 — a gate recipe approved with no human review
+    - ticket.approval_failed    # #2337 — correction for an approval whose queue mutation did not remain durable
     - gate.auto_approve_failed
     - gate.auto_approve_held    # RFC 0011 A3 — a finalize hold declined an auto-approval
     - pr.action_taken           # RFC 0010 — a review recipe acted on a PR

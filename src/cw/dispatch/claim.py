@@ -1066,6 +1066,13 @@ def _stamp_spawn_success(
             # good -- evaluated and accepted, see the field's comment
             # in src/cw/models/tasks.py for the full reasoning.
             stored_task.regressed_into_stage = None
+            # #2337: the operator's plan_scope_drift grant is consumed the
+            # same way, and just as unconditionally -- it was written into
+            # this spawn's queue_metadata above and is meant for exactly the
+            # IMPL session the approval requeued. Surviving past it would let
+            # the grant cover a later round's drift it was never given for.
+            stored_task.scope_drift_approved_extra_files = None
+            stored_task.scope_drift_approved_head = None
             # #1730: stage-gated clear -- unlike regressed_into_stage
             # (cleared unconditionally at the next spawn), this marker
             # must survive an intervening non-REVIEW spawn (e.g. Rule
