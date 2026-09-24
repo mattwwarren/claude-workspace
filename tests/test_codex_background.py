@@ -13,6 +13,7 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, MagicMock, patch
@@ -33,6 +34,7 @@ from cw.codex_background import (
     _resolve_codex_fix_loop_enabled,
     _resolve_disposition_drift_check_enabled,
     _run_codex_review_and_complete,
+    _stamp_session_id_on_running_task,
     _start_daemon_thread,
     _sync_finding_dispositions_to_running_task,
     join_outstanding_codex_threads,
@@ -43,11 +45,12 @@ from cw.codex_review import (
     CODEX_REVIEW_UNPARSEABLE,
 )
 from cw.config import load_state, save_state
-from cw.dev_queue import add_ticket, load_dev_queue
+from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
 from cw.local_runner import UNEXPECTED_ERROR, make_blocked
 from cw.models import (
     ClientConfig,
     CwState,
+    DevQueueStore,
     LaneConfig,
     LastResultSource,
     OrchestratorConfig,
@@ -631,6 +634,54 @@ def test_run_codex_review_and_complete_exception_path(
     assert stored.session_id is None
     assert stored.spawn_error_count == 1
     assert stored.next_eligible_at is not None
+
+
+def test_run_codex_review_exception_reverts_only_the_session_matched_row(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2219: the failure-path revert matches the review's own session id, so
+    an earlier RUNNING row for the same (ticket_id, client) stays untouched."""
+    worktree = make_git_repo("wt-bg-exc-dup")
+    _seed_session("bg-exc-dup")
+    earlier = datetime(2026, 1, 1, tzinfo=UTC)
+    sibling = TicketTask(
+        ticket_id="T-exc",
+        client="test",
+        stage=Stage.REVIEW,
+        status=QueueItemStatus.RUNNING,
+        session_id="bg-sibling",
+        created_at=earlier,
+    )
+    own = TicketTask(
+        ticket_id="T-exc",
+        client="test",
+        stage=Stage.REVIEW,
+        status=QueueItemStatus.RUNNING,
+        session_id="bg-exc-dup",
+        created_at=earlier + timedelta(days=1),
+    )
+    save_dev_queue(DevQueueStore(tasks=[sibling, own]))
+    sibling_before = load_dev_queue().tasks[0].model_dump()
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            side_effect=RuntimeError("git boom"),
+        ),
+        patch("cw.codex_background._record_orchestrator_event"),
+    ):
+        _run(
+            sid="bg-exc-dup",
+            task=own.model_copy(),
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    stored = {t.created_at: t for t in load_dev_queue().tasks}
+    assert stored[sibling.created_at].model_dump() == sibling_before
+    assert stored[own.created_at].status is QueueItemStatus.PENDING
+    assert stored[own.created_at].session_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -1511,23 +1562,34 @@ class TestSyncFindingDispositionsToRunningTask:
         return TicketTask.model_validate(payload)
 
     def test_merges_entries_onto_the_matching_running_row(self) -> None:
-        add_ticket(self._running())
+        task = self._running()
+        add_ticket(task)
         fresh = _ledger_entry()
         _sync_finding_dispositions_to_running_task(
-            client_name="test", ticket_id="T-1838", dispositions=fresh
+            client_name="test",
+            ticket_id="T-1838",
+            created_at=task.created_at,
+            dispositions=fresh,
         )
         stored = load_dev_queue().tasks[0]
         assert stored.finding_dispositions == fresh
 
     def test_merge_is_additive_and_idempotent(self) -> None:
         old = _ledger_entry("src/cw/old.py", "Old bug")
-        add_ticket(self._running(finding_dispositions=old))
+        task = self._running(finding_dispositions=old)
+        add_ticket(task)
         fresh = _ledger_entry()
         _sync_finding_dispositions_to_running_task(
-            client_name="test", ticket_id="T-1838", dispositions=fresh
+            client_name="test",
+            ticket_id="T-1838",
+            created_at=task.created_at,
+            dispositions=fresh,
         )
         _sync_finding_dispositions_to_running_task(
-            client_name="test", ticket_id="T-1838", dispositions=fresh
+            client_name="test",
+            ticket_id="T-1838",
+            created_at=task.created_at,
+            dispositions=fresh,
         )
         stored = load_dev_queue().tasks[0]
         assert stored.finding_dispositions == {**old, **fresh}
@@ -1541,44 +1603,133 @@ class TestSyncFindingDispositionsToRunningTask:
         was, even if a caller forgets to filter it out first.
         """
         settled = _ledger_entry(rationale="the settled one")
-        add_ticket(self._running(finding_dispositions=settled))
+        task = self._running(finding_dispositions=settled)
+        add_ticket(task)
         hijack = _ledger_entry(
             actor="", rationale="hijack", recorded_at="2099-01-01T00:00:00Z"
         )
         _sync_finding_dispositions_to_running_task(
-            client_name="test", ticket_id="T-1838", dispositions=hijack
+            client_name="test",
+            ticket_id="T-1838",
+            created_at=task.created_at,
+            dispositions=hijack,
         )
         assert load_dev_queue().tasks[0].finding_dispositions == settled
 
     def test_an_invalid_record_is_not_persisted_as_a_new_entry(self) -> None:
-        add_ticket(self._running())
+        task = self._running()
+        add_ticket(task)
         _sync_finding_dispositions_to_running_task(
             client_name="test",
             ticket_id="T-1838",
+            created_at=task.created_at,
             dispositions=_ledger_entry(reviewed_sha=""),
         )
         assert load_dev_queue().tasks[0].finding_dispositions == {}
 
     def test_a_valid_newer_record_replaces_the_row_entry(self) -> None:
-        add_ticket(self._running(finding_dispositions=_ledger_entry(rationale="old")))
+        task = self._running(finding_dispositions=_ledger_entry(rationale="old"))
+        add_ticket(task)
         newer = _ledger_entry(rationale="new", recorded_at="2026-09-01T00:00:00Z")
         _sync_finding_dispositions_to_running_task(
-            client_name="test", ticket_id="T-1838", dispositions=newer
+            client_name="test",
+            ticket_id="T-1838",
+            created_at=task.created_at,
+            dispositions=newer,
         )
         assert load_dev_queue().tasks[0].finding_dispositions == newer
 
     def test_no_matching_running_row_is_a_no_op(self) -> None:
-        add_ticket(self._running(status=QueueItemStatus.PENDING))
+        task = self._running(status=QueueItemStatus.PENDING)
+        add_ticket(task)
         _sync_finding_dispositions_to_running_task(
             client_name="test",
             ticket_id="T-1838",
+            created_at=task.created_at,
             dispositions=_ledger_entry(),
         )
         assert load_dev_queue().tasks[0].finding_dispositions == {}
 
     def test_empty_dispositions_is_a_no_op(self) -> None:
-        add_ticket(self._running())
+        task = self._running()
+        add_ticket(task)
         _sync_finding_dispositions_to_running_task(
-            client_name="test", ticket_id="T-1838", dispositions={}
+            client_name="test",
+            ticket_id="T-1838",
+            created_at=task.created_at,
+            dispositions={},
         )
         assert load_dev_queue().tasks[0].finding_dispositions == {}
+
+    def test_duplicate_running_rows_only_the_created_at_matched_row_merges(
+        self,
+    ) -> None:
+        """#2219: two RUNNING rows for one (ticket_id, client) -- only the row
+        whose ``created_at`` the caller supplied gets the ledger, not the
+        first one in the store."""
+        earlier = datetime(2026, 1, 1, tzinfo=UTC)
+        row_a = self._running(created_at=earlier)
+        row_b = self._running(created_at=earlier + timedelta(days=1))
+        save_dev_queue(DevQueueStore(tasks=[row_a, row_b]))
+        fresh = _ledger_entry()
+
+        _sync_finding_dispositions_to_running_task(
+            client_name="test",
+            ticket_id="T-1838",
+            created_at=row_b.created_at,
+            dispositions=fresh,
+        )
+
+        stored = {t.created_at: t for t in load_dev_queue().tasks}
+        assert stored[row_a.created_at].finding_dispositions == {}
+        assert stored[row_b.created_at].finding_dispositions == fresh
+
+
+# ---------------------------------------------------------------------------
+# _stamp_session_id_on_running_task (#1727 R1, #2219)
+# ---------------------------------------------------------------------------
+
+
+class TestStampSessionIdOnRunningTaskDuplicateRunning:
+    """#2219: the pre-background session_id stamp lands only on the row whose
+    ``created_at`` the spawning task carries, never a RUNNING sibling."""
+
+    def _running(self, **overrides: object) -> TicketTask:
+        payload: dict[str, object] = {
+            "ticket_id": "T-2219",
+            "client": "test",
+            "stage": Stage.REVIEW,
+            "status": QueueItemStatus.RUNNING,
+        }
+        payload.update(overrides)
+        return TicketTask.model_validate(payload)
+
+    def test_only_the_created_at_matched_row_is_stamped(self) -> None:
+        earlier = datetime(2026, 1, 1, tzinfo=UTC)
+        row_a = self._running(created_at=earlier, session_id="sess-unrelated")
+        row_b = self._running(created_at=earlier + timedelta(days=1))
+        save_dev_queue(DevQueueStore(tasks=[row_a, row_b]))
+
+        _stamp_session_id_on_running_task(
+            client_name="test",
+            ticket_id="T-2219",
+            session_id="sess-b",
+            created_at=row_b.created_at,
+        )
+
+        stored = {t.created_at: t for t in load_dev_queue().tasks}
+        assert stored[row_a.created_at].session_id == "sess-unrelated"
+        assert stored[row_b.created_at].session_id == "sess-b"
+
+    def test_single_running_row_is_stamped(self) -> None:
+        task = self._running()
+        add_ticket(task)
+
+        _stamp_session_id_on_running_task(
+            client_name="test",
+            ticket_id="T-2219",
+            session_id="sess-only",
+            created_at=task.created_at,
+        )
+
+        assert load_dev_queue().tasks[0].session_id == "sess-only"
