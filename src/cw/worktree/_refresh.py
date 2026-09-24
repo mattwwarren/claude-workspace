@@ -693,10 +693,11 @@ def _refresh_from_tracking_ref(
 ) -> RefreshResult:
     """Classify HEAD against the freshly fetched ``origin/<branch>`` and act on it.
 
-    The target is the branch's own ``refs/remotes/origin/<branch>``, NOT
-    :func:`_resolve_remote_ref`: that ladder is upstream-first, and a
-    misconfigured ``@{u}`` of ``origin/<default>`` (the #2114 failure mode) would
-    fast-forward a feature branch onto main. Target absent (a fetch can succeed
+    The target is the branch's own ``refs/remotes/origin/<branch>``, NOT the
+    removed upstream-first ``_resolve_remote_ref`` helper (deleted in #2266):
+    that ladder was upstream-first, and a misconfigured ``@{u}`` of
+    ``origin/<default>`` (the #2114 failure mode) would have fast-forwarded a
+    feature branch onto main. Target absent (a fetch can succeed
     without creating the tracking ref, under a narrow ``remote.origin.fetch``
     refspec): nothing to move.
 

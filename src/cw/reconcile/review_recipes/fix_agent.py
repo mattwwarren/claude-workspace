@@ -104,9 +104,10 @@ def _resolve_fix_remote_ref(
     Selection is on tip-equality, not existence (#2209). A candidate that
     resolves but points somewhere other than HEAD is SKIPPED and the ladder
     keeps walking — it neither wins nor raises. That is the whole divergence
-    from :func:`cw.worktree._resolve_remote_ref`, which stops at the first ref
-    that merely exists and so cannot express "exists but stale, keep going":
-    under git's default ``branch.autoSetupMerge`` a cw dispatch worktree's
+    from the removed upstream-first ``_resolve_remote_ref`` helper (deleted
+    in #2266), which stopped at the first ref that merely exists and so
+    could not express "exists but stale, keep going": under git's default
+    ``branch.autoSetupMerge`` a cw dispatch worktree's
     ``@{u}`` is ``origin/<default_branch>``, which always exists and is never
     the fix branch, and treating that as the answer reproduced the exact
     review -> failed dispatch -> review loop #2209 exists to end.
