@@ -1006,72 +1006,73 @@ def _stamp_spawn_success(
     PLR statement budget, mirroring :func:`_codex_capability_gate`'s extraction
     for the same reason. Sole caller; it runs after the executor returns, so
     every write here is predicated on a spawn that genuinely succeeded.
+
+    The stored row is re-found by the spawned task's ``created_at`` via
+    :func:`_find_running_row` (#2219), so a duplicate RUNNING row for the same
+    ``(ticket_id, client)`` is never stamped with this session in its place.
     """
     with dev_queue_lock():
         store = load_dev_queue()
-        for stored_task in store.tasks:
-            if (
-                stored_task.ticket_id == task.ticket_id
-                and stored_task.client == client_name
-                and stored_task.status == QueueItemStatus.RUNNING
-            ):
-                stored_task.session_id = session_id
-                stored_task.spawn_error_count = 0
-                stored_task.next_eligible_at = None
-                # #1631: the single write site for the durable "a session was
-                # genuinely spawned for this row" fact. Unconditional and
-                # write-once-to-True -- reaching here IS the proof, and no
-                # revert/requeue path ever clears it. reconcile's
-                # timed-out-merged backstop reads it to tell a usage-limit-only
-                # attempt history (which leaves spawn_error_count at 0, so the
-                # counters alone cannot say) apart from a task that really ran
-                # and shipped.
-                stored_task.ever_spawned = True
-                # #1674: the worktree just proved reusable, so any recorded
-                # hook-context conflict is stale evidence — cleared here
-                # atomically with the other spawn-failure counters.
-                stored_task.hook_context_conflict_session_id = None
-                # #1794: executor.spawn above already wrote the in-memory
-                # task's regressed_into_stage into the new session's
-                # queue_metadata, so the per-arrival marker is consumed.
-                # Clear it so it never leaks into a later, unrelated stage
-                # entry (the false positive the cumulative regress_attempts
-                # counter would have produced).
-                # #1801: this clear is unconditional and runs BEFORE any
-                # reap could ever observe a no-sentinel death, which is
-                # why a spawn that dies silently loses the signal for
-                # good -- evaluated and accepted, see the field's comment
-                # in src/cw/models/tasks.py for the full reasoning.
-                stored_task.regressed_into_stage = None
-                # #1730: stage-gated clear -- unlike regressed_into_stage
-                # (cleared unconditionally at the next spawn), this marker
-                # must survive an intervening non-REVIEW spawn (e.g. Rule
-                # 5a's self-heal regresses to IMPL, not REVIEW) so it is
-                # only consumed when a REVIEW-stage session is actually
-                # about to read the delivered comments.
-                if stored_task.stage == Stage.REVIEW:
-                    stored_task.pending_operator_comment = False
-                # R5: stamp stage_base_ref -- non-fatal on failure
-                try:
-                    head_sha = subprocess.check_output(
-                        [
-                            "git",
-                            "-C",
-                            str(worktree_path),
-                            "rev-parse",
-                            "HEAD",
-                        ],
-                        text=True,
-                        timeout=5,
-                    )
-                    stored_task.stage_base_ref = head_sha.strip()
-                except subprocess.SubprocessError as exc:
-                    _log.warning(
-                        "dispatch: stage_base_ref failed for %s: %s",
-                        task.ticket_id,
-                        exc,
-                    )
-                break
+        stored_task = _find_running_row(
+            store, task.ticket_id, client_name, created_at=task.created_at
+        )
+        if stored_task is not None:
+            stored_task.session_id = session_id
+            stored_task.spawn_error_count = 0
+            stored_task.next_eligible_at = None
+            # #1631: the single write site for the durable "a session was
+            # genuinely spawned for this row" fact. Unconditional and
+            # write-once-to-True -- reaching here IS the proof, and no
+            # revert/requeue path ever clears it. reconcile's
+            # timed-out-merged backstop reads it to tell a usage-limit-only
+            # attempt history (which leaves spawn_error_count at 0, so the
+            # counters alone cannot say) apart from a task that really ran
+            # and shipped.
+            stored_task.ever_spawned = True
+            # #1674: the worktree just proved reusable, so any recorded
+            # hook-context conflict is stale evidence — cleared here
+            # atomically with the other spawn-failure counters.
+            stored_task.hook_context_conflict_session_id = None
+            # #1794: executor.spawn above already wrote the in-memory
+            # task's regressed_into_stage into the new session's
+            # queue_metadata, so the per-arrival marker is consumed.
+            # Clear it so it never leaks into a later, unrelated stage
+            # entry (the false positive the cumulative regress_attempts
+            # counter would have produced).
+            # #1801: this clear is unconditional and runs BEFORE any
+            # reap could ever observe a no-sentinel death, which is
+            # why a spawn that dies silently loses the signal for
+            # good -- evaluated and accepted, see the field's comment
+            # in src/cw/models/tasks.py for the full reasoning.
+            stored_task.regressed_into_stage = None
+            # #1730: stage-gated clear -- unlike regressed_into_stage
+            # (cleared unconditionally at the next spawn), this marker
+            # must survive an intervening non-REVIEW spawn (e.g. Rule
+            # 5a's self-heal regresses to IMPL, not REVIEW) so it is
+            # only consumed when a REVIEW-stage session is actually
+            # about to read the delivered comments.
+            if stored_task.stage == Stage.REVIEW:
+                stored_task.pending_operator_comment = False
+            # R5: stamp stage_base_ref -- non-fatal on failure
+            try:
+                head_sha = subprocess.check_output(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_path),
+                        "rev-parse",
+                        "HEAD",
+                    ],
+                    text=True,
+                    timeout=5,
+                )
+                stored_task.stage_base_ref = head_sha.strip()
+            except subprocess.SubprocessError as exc:
+                _log.warning(
+                    "dispatch: stage_base_ref failed for %s: %s",
+                    task.ticket_id,
+                    exc,
+                )
         save_dev_queue(store)
 
 
