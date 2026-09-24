@@ -228,9 +228,7 @@ def _apply_requeue_stage(
         return False
 
     target_stage = Stage(stage_override)
-    _validate_stage_in_pipeline(
-        task.stage, stages, client=task.client, lane=task.lane
-    )
+    _validate_stage_in_pipeline(task.stage, stages, client=task.client, lane=task.lane)
     _validate_stage_in_pipeline(
         target_stage, stages, client=task.client, lane=task.lane
     )

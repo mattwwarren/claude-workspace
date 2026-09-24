@@ -7484,7 +7484,7 @@ class TestRequeueTicket:
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
-        with pytest.raises(RequeueStageError, match="Stage 'impl'.*lane 'restricted'"):
+        with pytest.raises(RequeueStageError, match=r"Stage 'impl'.*lane 'restricted'"):
             requeue_ticket("GEN-500", "genhealth", stage_override="review")
 
         store = load_dev_queue()
