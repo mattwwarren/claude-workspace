@@ -773,6 +773,20 @@ class ReviewVerdict(BaseModel):
     stale_dispositions: list[StaleDisposition] = Field(default_factory=list)
 
 
+class ReviewVerdictEnvelope(BaseModel):
+    """A :class:`ReviewVerdict` wrapped with its owning ticket (#2223/#1108).
+
+    The JSON-native counterpart to ``REVIEW_VERDICT_OWNER_STAMP_FORMAT``'s
+    prose stamp on the rendered ``.claude/review-verdict.md`` (#2279/#2205):
+    JSON has no comment syntax, so provenance rides as a sibling field on this
+    wrapper instead of a leading comment line. No separate ``reviewed_sha``
+    field is needed — it is already required on :attr:`verdict` itself.
+    """
+
+    ticket_id: str
+    verdict: ReviewVerdict
+
+
 class CapturedDiff(BaseModel):
     """A captured diff: full text plus per-file line-level detail.
 
