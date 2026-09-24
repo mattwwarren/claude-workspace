@@ -432,7 +432,8 @@ restarted.
 ### `dispatch.usage_limit_armed`
 
 **Emitter:** `run_dispatch_loop` in `cw.dispatch.loop` (via
-`_arm_usage_limit_windows`)
+`_arm_usage_limit_windows`); `reconcile` via the mid-turn usage-limit sweep in
+`cw.reconcile.usage_limit_mid_turn` (#2324)
 **Payload:**
 ```json
 {
@@ -449,11 +450,16 @@ name, so a limit one client hit no longer parks the rest. A tick that arms
 three clients emits three events.
 
 `until` is the deadline that was persisted for that client. `source` says
-where it came from: `parsed_reset` when the spawn-time message named a reset
+where it came from: `parsed_reset` when the usage-limit message named a reset
 time that parsed (and survived the 7-day clamp), `flat_backoff` when it did
-not and the window fell back to `usage_limit_backoff_seconds`. A
-transcript-derived (reconcile) detection names no client at all, so it arms
-every known client with `source: "flat_backoff"`.
+not and the window fell back to `usage_limit_backoff_seconds`. The phantom
+sweep's transcript-derived detection (`ReconcileReport.usage_limited`, a
+roster-absent session) names no client at all, so the dispatch loop arms every
+known client with `source: "flat_backoff"` for it. The mid-turn sweep (#2324)
+is different: it detects a roster-present worker whose transcript tail is the
+limit message, arms only that session's client, and parses the message's reset
+time, so it can report either `source` — see `"usage_limited_mid_turn"` under
+`session.needs_attention` below.
 
 Operator-relevant: this is how you find out a window is open and how long it
 runs, without reading the dispatch log. Nothing clears a window early —
@@ -847,6 +853,32 @@ open enum; consumers MUST tolerate unknown values. Known values:
   rescues the row (#918); only a `RUNNING` row transitions, so a repeat Stop
   is idempotent. Evidence-driven, never a timer (ADR-0014). See
   `docs/session-disposition.md` §6c.
+- `"usage_limited_mid_turn"` — the reconcile mid-turn usage-limit sweep
+  (`cw.reconcile.usage_limit_mid_turn`, #2324) found a DAEMON session **still
+  in the daemon roster**, owning a RUNNING row, whose transcript's last
+  content-bearing record is an assistant message matching `USAGE_LIMIT_RE`
+  (e.g. `You've hit your weekly limit · resets Sep 26, 11pm`) with no sentinel
+  anywhere in the transcript — the worker's turn ended on the account usage
+  limit. `breadcrumbs` names the reset instant (ISO 8601) the client's
+  `usage_limited_until` lockout was armed to — the message's parsed reset, or
+  `usage_limit_backoff_seconds` from now when it did not parse — and whether
+  the row will re-enter the queue on its own. A `dispatch.usage_limit_armed`
+  for the same client precedes it, and a `session.reap_proposed`
+  (`proposed_action: "revert_task"`, `reason: "usage_limit_mid_turn"`)
+  precedes both. Unlike the signal-only liveness reasons above, this one **does
+  disposition the row**, on transcript evidence rather than elapsed time
+  (ADR-0014), gated by the lane's `reap_policy` exactly like the phantom sweep
+  (ADR-0006). Under `reap_policy: auto` the row goes `RUNNING → PENDING` with
+  `session_id` cleared and `next_eligible_at` set to the reset instant, so the
+  existing claim gate releases it at the reset; the session closes
+  `COMPLETED` with `completed_reason: "usage_limited"` (a `session.completed`
+  with `crashed: false` is emitted) and its daemon surface is stopped. Under
+  any other policy (`signal_only`, the default) the row parks `RUNNING →
+  BLOCKED_ON_USER` with `disposition="usage_limited_mid_turn"` and
+  `session_id` left set, the session and its surface are untouched, and an
+  operator clears the row. Neither branch charges `unproductive_attempts` — a
+  whole turn ran. If the tail changed between detect and act, nothing is
+  proposed, mutated, or armed that tick.
 - `"freshness_gate_blocked"` — A client's consecutive freshness-gate-block
   latch (`ClientConcurrencyOverride.consecutive_freshness_blocks`, RFC 0007
   §W2) reached `freshness_block_attention_threshold`. Client-scoped, not
