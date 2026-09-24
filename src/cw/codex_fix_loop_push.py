@@ -24,6 +24,8 @@ from __future__ import annotations
 import subprocess
 from typing import TYPE_CHECKING
 
+from cw._git import git_clean_env
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -49,6 +51,7 @@ def remote_branch_tip(worktree: Path, branch: str) -> str | None:
         capture_output=True,
         text=True,
         check=False,
+        env=git_clean_env(),
     )
     if fetch.returncode != 0:
         return None
@@ -58,6 +61,7 @@ def remote_branch_tip(worktree: Path, branch: str) -> str | None:
         capture_output=True,
         text=True,
         check=False,
+        env=git_clean_env(),
     )
     return resolved.stdout.strip() or None
 
@@ -70,7 +74,10 @@ def push_and_verify_head(worktree: Path, expected_sha: str) -> None:
     ``origin/<branch>`` does not equal *expected_sha* after a successful push.
     """
     branch = subprocess.check_output(
-        ["git", "branch", "--show-current"], cwd=worktree, text=True
+        ["git", "branch", "--show-current"],
+        cwd=worktree,
+        text=True,
+        env=git_clean_env(),
     ).strip()
     if not branch:
         raise subprocess.CalledProcessError(
@@ -85,6 +92,7 @@ def push_and_verify_head(worktree: Path, expected_sha: str) -> None:
         capture_output=True,
         text=True,
         check=True,
+        env=git_clean_env(),
     )
     origin_sha = remote_branch_tip(worktree, branch)
     if origin_sha != expected_sha:

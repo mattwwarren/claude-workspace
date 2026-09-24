@@ -1885,13 +1885,11 @@ def push_commit_to_origin(
     return git_in(work_dir, "rev-parse", "HEAD")
 
 
-def add_bare_origin(repo: Path) -> Path:
-    """Attach a bare ``origin`` beside *repo* and push every local branch to it.
+def init_bare_origin(repo: Path) -> Path:
+    """Create and attach a bare ``origin`` beside *repo*.
 
-    Gives a ``make_git_repo`` repo the remote that the codex fix loop's
-    per-cycle push (#2354) needs. Every branch is pushed, not only the checked
-    out one, so ``origin/main`` exists for any diff-base resolution too.
-    Returns the bare origin's path.
+    Scenario-specific callers decide which commits and branches to push after
+    this shared initialization and remote wiring.
     """
     origin = repo.parent / f"{repo.name}-origin.git"
     subprocess.run(
@@ -1901,6 +1899,18 @@ def add_bare_origin(repo: Path) -> Path:
         env=_clean_git_env(),
     )
     git_in(repo, "remote", "add", "origin", str(origin))
+    return origin
+
+
+def add_bare_origin(repo: Path) -> Path:
+    """Attach a bare ``origin`` beside *repo* and push every local branch to it.
+
+    Gives a ``make_git_repo`` repo the remote that the codex fix loop's
+    per-cycle push (#2354) needs. Every branch is pushed, not only the checked
+    out one, so ``origin/main`` exists for any diff-base resolution too.
+    Returns the bare origin's path.
+    """
+    origin = init_bare_origin(repo)
     git_in(repo, "push", "origin", "--all")
     git_in(repo, "fetch", "origin")
     return origin
