@@ -17,7 +17,11 @@ from typing import TYPE_CHECKING
 from cw.atomic import atomic_write_text
 from cw.review_findings._dedup import dedupe_findings, derive_review_counts
 from cw.review_findings._document import validate_reviewer_document
-from cw.review_findings._models import ReviewerRunRecord, ReviewVerdict
+from cw.review_findings._models import (
+    ReviewerRunRecord,
+    ReviewVerdict,
+    ReviewVerdictEnvelope,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -340,3 +344,18 @@ def write_review_verdict(verdict: ReviewVerdict, path: Path) -> None:
     any executor/CLI call site in this ticket.
     """
     atomic_write_text(path, verdict.model_dump_json(indent=2))
+
+
+def render_review_verdict_envelope(verdict: ReviewVerdict, *, ticket_id: str) -> str:
+    """Render *verdict* wrapped in a :class:`ReviewVerdictEnvelope`, as JSON text.
+
+    Sibling of :func:`write_review_verdict`, for the provenance-carrying
+    variant worktree-facing consumers (#2223) need — the plain artifact has no
+    field naming which ticket it belongs to. Pure — no I/O — so the caller
+    that persists the text picks its own write path (#2223 review round 3):
+    :func:`cw.codex_background._persist_structured_review_verdict` writes it
+    through the shared best-effort ``_persist_worktree_artifact`` helper.
+    """
+    return ReviewVerdictEnvelope(ticket_id=ticket_id, verdict=verdict).model_dump_json(
+        indent=2
+    )

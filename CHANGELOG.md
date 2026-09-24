@@ -9,6 +9,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **`dependency_unmerged` is now recognized as an operator-unavailable blocker reason (#2260):** `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` and `SIGNOFF_GATE_DISPOSITION`'s classification now include `dependency_unmerged` alongside `push_auth_failed` and `operator_unavailable`, so a ticket split into a dependency chain whose downstream leg can't proceed until the upstream PR merges is treated as a hold on an external dependency — not a broken leg — and routes the same way the existing operator-unavailable reasons do.
+### Added
+
+- **The codex reviewer's structured verdict is now persisted into the worktree alongside its markdown rendering (#2223):** a new `ReviewVerdictEnvelope` model and pure `render_review_verdict_envelope` function produce a ticket-stamped JSON rendering of a `ReviewVerdict`, written via the existing `_persist_review_verdict` helper (same mkdir/atomic-write/ownership-stamp contract as the markdown sibling) so a downstream consumer can read the structured verdict without re-parsing the rendered markdown.
+
+### Fixed
+
+- **Stop one unresolvable session/worker record from vetoing every worktree occupancy check (#2240):** worktree occupancy checks previously treated any single unresolvable session or worker record as grounds to defer the whole check, so one stale/bad record could block dispatch from claiming otherwise-free worktrees. Occupancy now skips the unresolvable record instead of vetoing the entire check.
 
 ## [1.53.0] - 2026-09-24
 
