@@ -6693,6 +6693,55 @@ class TestApproveScopeDrift:
 
         assert load_dev_queue().model_dump() == before
 
+    def test_audit_actor_uses_configured_operator_identity(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.config import clients_file
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        clients_path = clients_file()
+        clients_path.write_text(
+            clients_path.read_text().replace(
+                "workspace_path:",
+                "operator_github_login: configured-user\n    workspace_path:",
+            )
+        )
+        task = _make_blocked_task(stage=Stage.IMPL, blocked_reason="plan_scope_drift")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.branch_head_sha_on_origin",
+            lambda *_args, **_kwargs: (_APPROVED_HEAD, True),
+        )
+        events: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.record_event",
+            lambda _event_type, payload, **_kwargs: events.append(payload),
+        )
+
+        approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        assert events[0]["actor"] == "configured-user"
+
+    def test_audit_actor_uses_runtime_operator_identity(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: "runtime-user"
+        )
+        events: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.record_event",
+            lambda _event_type, payload, **_kwargs: events.append(payload),
+        )
+
+        approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        assert events[0]["actor"] == "runtime-user"
+
 
 # ---------------------------------------------------------------------------
 # TestApproveTicketLockedResolved — _approve_ticket_locked(resolved_task=...)

@@ -10778,6 +10778,9 @@ class TestDevQueueApproveCli:
             "cw.dev_queue.approval.branch_head_sha_on_origin",
             lambda *_a, **_kw: (self._SCOPE_DRIFT_HEAD, True),
         )
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.resolve_operator_login", lambda _client: None
+        )
         events: list[tuple[object, dict[str, object]]] = []
         monkeypatch.setattr(
             "cw.cli.dev_queue.approve.record_event",
@@ -10824,7 +10827,7 @@ class TestDevQueueApproveCli:
             SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY: ["a.py", "b.py"],
             SCOPE_DRIFT_APPROVED_HEAD_KEY: self._SCOPE_DRIFT_HEAD,
             "approved_at": payload["approved_at"],
-            "actor": "cw.dev_queue.approval",
+            "actor": "unknown",
         }
         assert isinstance(payload["approved_at"], str)
         task = load_dev_queue().tasks[0]
