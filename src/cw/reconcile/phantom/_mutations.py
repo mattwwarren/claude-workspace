@@ -152,6 +152,13 @@ def _apply_phantom_queue_mutations(
         for task in store.tasks:
             if task.status != QueueItemStatus.RUNNING:
                 continue
+            if task.usage_limit_act is not None:
+                # #2324: the mid-turn usage-limit act owns this row until its
+                # intent clears. Every set here is keyed by bare ticket id, so
+                # a different phantom sharing it (a duplicate RUNNING row or a
+                # cross-client id collision, #2219) would otherwise discard
+                # the write-ahead intent along with the row's status.
+                continue
             if task.ticket_id in revert_set:
                 if task.ticket_id in dirty_ticket_ids:
                     transition_task_status(
