@@ -560,6 +560,7 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
                 reset_at=_RESET_AT,
                 until=_RESET_AT,
                 audited_at=_NOW,
+                stop_started_at=_NOW,
             ),
         )
     ]
@@ -585,7 +586,7 @@ def test_stop_holds_queue_ownership_through_stop_invocation(
     daemon: FakeNativeDaemonClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An intent cannot be cleared between its check and ``stop()``."""
+    """The external stop runs after the queue lock releases."""
     state, _ = _seed(home, tmp_path, _limit_tail())
     intent = mid_turn._decide(
         state.sessions[0],
@@ -619,7 +620,10 @@ def test_stop_holds_queue_ownership_through_stop_invocation(
     real_stop = daemon.stop
 
     def _stop(short_id: str) -> None:
-        assert load_dev_queue().tasks[0].usage_limit_act is not None
+        # The lock scope has ended before the external daemon call. A
+        # concurrent disposition may clear the intent; the post-stop fence
+        # check then prevents this act from closing or requeuing the row.
+        assert load_dev_queue().tasks[0].usage_limit_act is None
         real_stop(short_id)
 
     monkeypatch.setattr(daemon, "stop", _stop)
@@ -1125,7 +1129,11 @@ def _is_event(etype: OrchestratorEventType) -> Callable[..., bool]:
 
 
 def _inject(
-    point: str, monkeypatch: pytest.MonkeyPatch, daemon: FakeNativeDaemonClient
+    point: str,
+    monkeypatch: pytest.MonkeyPatch,
+    daemon: FakeNativeDaemonClient,
+    *,
+    branch: str,
 ) -> None:
     """Make the act fail once at *point*, the way a crash there would leave it.
 
@@ -1181,7 +1189,12 @@ def _inject(
     elif point == "close":
         _fail_once(monkeypatch, f"{mod}.save_state", real_save_state)
     elif point == "transition":
-        _fail_once(monkeypatch, f"{mod}.save_dev_queue", save_dev_queue, nth=3)
+        _fail_once(
+            monkeypatch,
+            f"{mod}.save_dev_queue",
+            save_dev_queue,
+            nth=4 if branch == "auto" else 3,
+        )
     else:  # pragma: no cover - a typo in the parametrize list
         msg = f"unknown injection point {point!r}"
         raise AssertionError(msg)
@@ -1224,7 +1237,7 @@ def test_interrupted_act_is_finished_next_tick_without_charge(
     state, _ = _seed(home, tmp_path, _limit_tail())
     config = _auto_config() if branch == "auto" else OrchestratorConfig()
     before = _owned_row().unproductive_attempts
-    _inject(point, monkeypatch, daemon)
+    _inject(point, monkeypatch, daemon, branch=branch)
 
     assert _tick(state, config, daemon, at=_NOW) == []
     _assert_row_still_running()

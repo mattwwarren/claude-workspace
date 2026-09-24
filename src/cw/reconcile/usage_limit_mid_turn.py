@@ -374,6 +374,22 @@ def _row_carrying(tasks: Iterable[TicketTask], row: _ActRow) -> TicketTask | Non
     )
 
 
+def _row_carrying_stop_fence(
+    tasks: Iterable[TicketTask], row: _ActRow
+) -> TicketTask | None:
+    """Return the act row only while its stop-in-progress fence is present."""
+    return next(
+        (
+            task
+            for task in tasks
+            if _row_carrying((task,), row) is not None
+            and task.usage_limit_act is not None
+            and task.usage_limit_act.stop_started_at is not None
+        ),
+        None,
+    )
+
+
 def _mutate_act_row(row: _ActRow, mutate: Callable[[TicketTask], None]) -> bool:
     """Apply *mutate* under ``dev_queue_lock`` iff the row still carries the act."""
     with dev_queue_lock():
@@ -384,6 +400,12 @@ def _mutate_act_row(row: _ActRow, mutate: Callable[[TicketTask], None]) -> bool:
         mutate(target)
         save_dev_queue(store)
     return True
+
+
+def _mark_stop_started(target: TicketTask, *, at: datetime) -> None:
+    intent = target.usage_limit_act
+    if intent is not None and intent.stop_started_at is None:
+        target.usage_limit_act = intent.model_copy(update={"stop_started_at": at})
 
 
 def _lockout_covers(client: str, until: datetime, *, now: datetime) -> bool:
@@ -546,16 +568,14 @@ def _stop_surface(act: _Act) -> _Stop:
         )
         return _Stop.ABANDONED
     # The stop is destructive to a still-live surface.  The transcript check
-    # above can race with an operator disposition, so re-check the exact
-    # queue intent under the queue lock immediately before stopping.
+    # above can race with an operator disposition, so persist an explicit
+    # ownership fence under the queue lock immediately before stopping, then
+    # release it before making the external daemon call.
     daemon = _deps.get_native_daemon_client()
-    # Keep the ownership check and the external stop decision in one queue-lock
-    # critical section.  Otherwise an operator can clear the intent after the
-    # check but before stop(), leaving this act able to stop a surface it no
-    # longer owns.
     with dev_queue_lock():
         store = load_dev_queue()
-        if _row_carrying(store.tasks, act.row) is None:
+        target = _row_carrying(store.tasks, act.row)
+        if target is None:
             _log.info(
                 "usage_limit_mid_turn: row for ticket %s no longer carries the "
                 "act for session %s; surface left running",
@@ -563,7 +583,9 @@ def _stop_surface(act: _Act) -> _Stop:
                 session.id,
             )
             return _Stop.ABANDONED
-        daemon.stop(surface_ref)
+        _mark_stop_started(target, at=act.now)
+        save_dev_queue(store)
+    daemon.stop(surface_ref)
     if wait_for_roster_presence(
         daemon,
         surface_ref,
@@ -584,7 +606,7 @@ def _stop_surface(act: _Act) -> _Stop:
     return _Stop.RETRY
 
 
-def _persist_completed(act: _Act) -> bool:
+def _persist_completed(act: _Act, *, require_stop_fence: bool) -> bool:
     """``auto``: persist the session COMPLETED, unless it is already terminal.
 
     The stop confirmation can poll the roster for seconds, and another writer
@@ -599,7 +621,13 @@ def _persist_completed(act: _Act) -> bool:
     if session.status in TERMINAL_SESSION_STATUSES:
         return True
     with dev_queue_lock():
-        if _row_carrying(load_dev_queue().tasks, act.row) is None:
+        tasks = load_dev_queue().tasks
+        owner = (
+            _row_carrying_stop_fence(tasks, act.row)
+            if require_stop_fence
+            else _row_carrying(tasks, act.row)
+        )
+        if owner is None:
             _log.warning(
                 "usage_limit_mid_turn: row for ticket %s no longer carries the "
                 "act for session %s; session and row left as found",
@@ -632,12 +660,29 @@ def _park(target: TicketTask) -> None:
     )
 
 
-def _finish(row: _ActRow) -> bool:
+def _finish(row: _ActRow, *, require_stop_fence: bool) -> bool:
     """Transition the row, clearing the intent in the same write.
 
     Returns True iff an ``auto`` act requeued the row to PENDING.
     """
     mutate = partial(_requeue, until=row.intent.until) if row.auto else _park
+    if require_stop_fence:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            if _row_carrying_stop_fence(store.tasks, row) is None:
+                _log.info(
+                    "usage_limit_mid_turn: stop fence for ticket %s session %s "
+                    "was lost; row left as found",
+                    row.ticket_id,
+                    row.intent.session_id,
+                )
+                return False
+            target = _row_carrying(store.tasks, row)
+            if target is None:
+                return False
+            mutate(target)
+            save_dev_queue(store)
+        return row.auto
     if _mutate_act_row(row, mutate):
         return row.auto
     _log.info(
@@ -653,11 +698,17 @@ def _resume(act: _Act) -> bool:
     """Perform every step the act has not done yet; True iff it requeued."""
     if not _arm_lockout(act) or not _audit(act):
         return False
+    requires_stop_fence = act.row.auto and (
+        act.session.status not in TERMINAL_SESSION_STATUSES
+        and act.session.surface_ref is not None
+        and act.session.surface_ref in act.native_live
+    )
     if act.row.auto and (
-        _stop_surface(act) is not _Stop.DONE or not _persist_completed(act)
+        _stop_surface(act) is not _Stop.DONE
+        or not _persist_completed(act, require_stop_fence=requires_stop_fence)
     ):
         return False
-    return _finish(act.row)
+    return _finish(act.row, require_stop_fence=requires_stop_fence)
 
 
 def _resume_contained(
@@ -682,7 +733,7 @@ def _resume_contained(
                 row.intent.session_id,
                 row.ticket_id,
             )
-            return _finish(row)
+            return _finish(row, require_stop_fence=False)
         act = _Act(
             row=row, state=state, session=session, native_live=native_live, now=now
         )

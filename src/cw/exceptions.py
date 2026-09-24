@@ -221,7 +221,11 @@ def _reset_candidate_on_named_date(
         return today_at
     try:
         candidate = today_at.replace(
-            month=_MONTHS.index(month.lower()) + 1, day=int(fragment["mday"])
+            # The regex accepts documented long month spellings (for example
+            # ``Sept``) as well as abbreviations; the resolver uses the
+            # canonical three-letter keys.
+            month=_MONTHS.index(month.lower()[:3]) + 1,
+            day=int(fragment["mday"]),
         )
         if candidate.date() < today_at.date():
             candidate = candidate.replace(year=candidate.year + 1)
