@@ -1448,6 +1448,20 @@ def test_usage_limit_is_recent_fails_closed_when_missing_and_no_fail_open() -> N
     )
 
 
+def test_usage_limit_is_recent_fails_closed_on_incomplete_scan() -> None:
+    """A matching record in an incomplete transcript is not positive evidence."""
+    from cw.reconcile._shared import UsageLimitDetection, _usage_limit_is_recent
+
+    ts = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    detection = UsageLimitDetection(
+        detected=True,
+        matched_at=ts,
+        transcript_tail_at=ts,
+        transcript_scan_complete=False,
+    )
+    assert _usage_limit_is_recent(detection, window_seconds=300) is False
+
+
 def test_iter_assistant_records_skips_malformed_and_parses_valid(
     tmp_path: Path,
 ) -> None:

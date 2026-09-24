@@ -22,6 +22,8 @@ from cw._transcript import locate_transcript
 from cw._util import (
     _iter_sentinel_text_blocks,
     _last_content_entry_timestamp,
+    _parse_transcript_record,
+    _TranscriptRecord,
     claude_project_dir,
 )
 from cw.auto_dev_result import (
@@ -872,25 +874,6 @@ class UsageLimitDetection(NamedTuple):
     transcript_scan_complete: bool = True
 
 
-def _parse_iso_timestamp(raw: object) -> datetime | None:
-    """Parse a record's top-level ``"timestamp"`` value, or ``None`` if unusable."""
-    if not isinstance(raw, str):
-        return None
-    try:
-        return datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-
-
-class _TranscriptRecord(NamedTuple):
-    """The parsed facts needed by transcript consumers."""
-
-    timestamp: datetime | None
-    content_bearing: bool
-    text: str | None
-    record_type: str | None
-
-
 class _TranscriptRecordIterator:
     """Forward transcript iterator with an explicit incomplete-scan marker."""
 
@@ -926,38 +909,12 @@ class _TranscriptRecordIterator:
                 self._done = True
                 raise StopIteration from None
             try:
-                record = json.loads(line)
+                record = _parse_transcript_record(line)
             except json.JSONDecodeError:
-                # Keep the existing tolerant parsing behavior, but make an
-                # act-phase consumer aware that the scan was not complete.
                 self.scan_complete = False
                 continue
-            if not isinstance(record, dict):
-                continue
-            record_type = record.get("type")
-            message = record.get("message")
-            content_bearing = (
-                isinstance(record_type, str)
-                and record_type in {"user", "assistant"}
-                and isinstance(message, dict)
-            )
-            text: str | None = None
-            if content_bearing:
-                content = message.get("content")
-                if isinstance(content, list):
-                    text = "\n".join(
-                        block["text"]
-                        for block in content
-                        if isinstance(block, dict)
-                        and block.get("type") == "text"
-                        and isinstance(block.get("text"), str)
-                    )
-            return _TranscriptRecord(
-                timestamp=_parse_iso_timestamp(record.get("timestamp")),
-                content_bearing=content_bearing,
-                text=text,
-                record_type=record_type if isinstance(record_type, str) else None,
-            )
+            if record is not None:
+                return record
 
 
 def _iter_transcript_records(path: Path) -> _TranscriptRecordIterator:
@@ -1255,6 +1212,8 @@ def _usage_limit_is_recent(
 
     Contract (operator resolution, issue #1345):
     - not detected → ``False``;
+    - incomplete transcript scan → ``False`` (partial evidence is not
+      sufficient for a positive usage-limit disposition);
     - detected but either ``matched_at`` or ``transcript_tail_at`` is ``None``
       (no usable anchor) → return ``fail_open`` verbatim;
     - else → recent iff the message landed within ``window_seconds`` of the
@@ -1262,6 +1221,8 @@ def _usage_limit_is_recent(
       ``(transcript_tail_at - matched_at).total_seconds() <= window_seconds``.
     """
     if not detection.detected:
+        return False
+    if not detection.transcript_scan_complete:
         return False
     if detection.matched_at is None or detection.transcript_tail_at is None:
         return fail_open
