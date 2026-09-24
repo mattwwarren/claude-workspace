@@ -21,6 +21,7 @@ from cw.config import load_state, save_state
 from cw.disk import DiskUsage
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
+    DEFAULT_LANE,
     HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
     CwState,
@@ -45,6 +46,8 @@ from cw.review_findings import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
+
+    from cw.models import ReapPolicy
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
 CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
@@ -834,6 +837,47 @@ def _write_clients_yaml(
         "      - name: fast\n"
         f"        {field_name}: {lane_value}\n"
     )
+
+
+def _write_backend_clients_yaml(
+    tmp_config_dir: Path,
+    workspace: Path,
+    backend: str,
+    *,
+    names: tuple[str, ...] = ("client-a",),
+    lane_reap_policies: dict[str, ReapPolicy] | None = None,
+) -> None:
+    """Write a clients.yaml whose clients run the review stage on *backend*.
+
+    Every client in *names* gets ``pipeline.executors.review.backend:
+    <backend>``. *lane_reap_policies* maps a client name to the
+    ``reap_policy`` its default lane declares; a client absent from it
+    declares no lanes. Hoisted from ``test_reconcile_codex_boot.py`` (#2237)
+    once ``test_doctor.py``'s class-9 wedge tests needed the same
+    backend-resolution shape; named apart from :func:`_write_clients_yaml`
+    above, an unrelated lane-guard-override helper.
+    """
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    policies = lane_reap_policies or {}
+    body = "".join(
+        f"  {name}:\n"
+        f"    workspace_path: {workspace}\n"
+        "    default_branch: main\n"
+        "    pipeline:\n"
+        "      executors:\n"
+        "        review:\n"
+        f"          backend: {backend}\n"
+        + (
+            "    lanes:\n"
+            f"      - name: {DEFAULT_LANE}\n"
+            f"        reap_policy: {policies[name]}\n"
+            if name in policies
+            else ""
+        )
+        for name in names
+    )
+    (config_dir / "clients.yaml").write_text(f"clients:\n{body}")
 
 
 def _write_global_toggle(tmp_config_dir: Path, toggle: str, value: str) -> None:
