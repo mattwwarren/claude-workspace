@@ -4,7 +4,8 @@ A still-roster-present worker whose transcript tail is a usage-limit message
 with no sentinel is detected, the client's ``usage_limited_until`` lockout is
 armed, and the dev-queue row is dispositioned without an unproductive-attempt
 charge -- RUNNING->PENDING (+ ``next_eligible_at``) under ``reap_policy: auto``,
-RUNNING->BLOCKED_ON_USER under ``signal_only``.
+RUNNING->BLOCKED_ON_USER under ``signal_only``. The act is decided by one
+write-ahead intent on the row and resumed from it on any later tick.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
@@ -21,12 +22,12 @@ import freezegun
 import pytest
 
 from cw.config import load_state, save_state
-from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dev_queue import load_dev_queue, save_dev_queue, transition_task_status
 from cw.dispatch_state import (
     load_usage_limited_until,
     merge_and_save_usage_limited_until,
 )
-from cw.events import read_events, record_event
+from cw.events import read_events
 from cw.models import (
     CompletionReason,
     CwState,
@@ -37,6 +38,7 @@ from cw.models import (
     ReapReason,
     SessionStatus,
     TicketTask,
+    UsageLimitAct,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
@@ -45,6 +47,7 @@ from cw.reconcile import (
     detect_and_park_mid_turn_usage_limits,
 )
 from cw.reconcile.usage_limit_mid_turn import (
+    ACT_STARTED_AT_KEY,
     _act_on_mid_turn_usage_limit_candidates,
     _detect_mid_turn_usage_limit_candidates,
 )
@@ -57,6 +60,9 @@ from tests._reconcile_helpers import (
 )
 from tests.conftest import _make_ticket_task
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 # Verbatim from the #2324 ticket: the text all three stalled workers ended on.
 _LIMIT_TEXT = "You've hit your weekly limit · resets Sep 26, 11pm (America/New_York)"
 _UNPARSEABLE_LIMIT_TEXT = "You've hit your weekly limit · resets soon"
@@ -67,6 +73,7 @@ _SURFACE = "fake-short-id"
 _CLIENT = "client-a"
 _STARTED_AT = datetime(2026, 9, 24, 0, 0, tzinfo=UTC)
 _NOW = datetime(2026, 9, 24, 1, 0, tzinfo=UTC)
+_LATER = _NOW + timedelta(minutes=10)
 _RESET_AT = datetime(2026, 9, 26, 23, 0, tzinfo=_NY).astimezone(UTC)
 _BACKOFF_SECONDS = 1800
 
@@ -123,7 +130,9 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def daemon(monkeypatch: pytest.MonkeyPatch) -> FakeNativeDaemonClient:
+    """A fake daemon whose roster lists the worker until it is stopped."""
     fake = FakeNativeDaemonClient()
+    fake._live.add(_SURFACE)
     monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: fake)
     return fake
 
@@ -180,11 +189,9 @@ def _detect(state: CwState, native_live: set[str] | None = None) -> list[Any]:
 
 
 def _owned_row() -> TicketTask:
-    """This session's own row, found by the full (ticket, client, session) key."""
+    """This session's own row, found by its (ticket, client) key."""
     return next(
-        t
-        for t in load_dev_queue().tasks
-        if t.ticket_id == _SID and t.client == _CLIENT and t.session_id == _SID
+        t for t in load_dev_queue().tasks if t.ticket_id == _SID and t.client == _CLIENT
     )
 
 
@@ -221,6 +228,24 @@ def _act(
         )
 
 
+def _tick(
+    state: CwState,
+    config: OrchestratorConfig,
+    daemon: FakeNativeDaemonClient,
+    *,
+    at: datetime,
+) -> list[str]:
+    """One reconcile pass of the sweep, with the roster as the fake reports it."""
+    with freezegun.freeze_time(at):
+        return detect_and_park_mid_turn_usage_limits(
+            state,
+            now=at,
+            native_live=daemon.list_live_session_short_ids(),
+            config=config,
+            clients={},
+        )
+
+
 def _events(event_type: OrchestratorEventType) -> list[dict[str, Any]]:
     return [e.payload for e in read_events(event_types=[event_type])]
 
@@ -228,6 +253,28 @@ def _events(event_type: OrchestratorEventType) -> list[dict[str, Any]]:
 def _lockout() -> dict[str, datetime]:
     with freezegun.freeze_time(_NOW):
         return load_usage_limited_until()
+
+
+def _log_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records]
+
+
+def _assert_session_still_active(state: CwState) -> None:
+    """The session was not closed: it is ACTIVE in memory and on disk."""
+    assert state.sessions[0].status is SessionStatus.ACTIVE
+    persisted = load_state().sessions[0]
+    assert persisted.status is SessionStatus.ACTIVE
+    assert persisted.completed_at is None
+    assert persisted.completed_reason is None
+    assert persisted.reap_reason is None
+
+
+def _assert_row_still_running() -> None:
+    """The row was not transitioned: RUNNING and bound to the session."""
+    task = _owned_row()
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.session_id == _SID
+    assert task.next_eligible_at is None
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +379,24 @@ def test_detect_skips_session_without_ticket_row(
     assert _detect(state) == []
 
 
+def test_detect_skips_row_already_carrying_an_act(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A row with an act in flight is resumed from its intent, never re-decided."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    store = load_dev_queue()
+    store.tasks[0].usage_limit_act = UsageLimitAct(
+        session_id=_SID,
+        branch="park",
+        started_at=_NOW,
+        reset_at=_RESET_AT,
+        until=_RESET_AT,
+    )
+    save_dev_queue(store)
+
+    assert _detect(state) == []
+
+
 @pytest.mark.parametrize(
     "shadow",
     [
@@ -402,7 +467,7 @@ def test_detect_skips_when_latest_limit_match_has_no_timestamp(
 
 
 # ---------------------------------------------------------------------------
-# Act phase -- reap_policy: auto
+# Act -- reap_policy: auto
 # ---------------------------------------------------------------------------
 
 
@@ -413,17 +478,21 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     daemon: FakeNativeDaemonClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The auto act runs in order: gate, arm, audit, stop, close, requeue."""
+    """Decide, then arm, audit, stop, close and requeue, in that order."""
     state, _ = _seed(home, tmp_path, _limit_tail())
-    seen_at_stop: list[tuple[list[str], SessionStatus, QueueItemStatus]] = []
+    seen_at_stop: list[
+        tuple[list[str], SessionStatus, QueueItemStatus, UsageLimitAct | None]
+    ] = []
     real_stop = daemon.stop
 
     def _recording_stop(short_id: str) -> None:
+        row = load_dev_queue().tasks[0]
         seen_at_stop.append(
             (
                 [e.type.value for e in read_events()],
                 load_state().sessions[0].status,
-                load_dev_queue().tasks[0].status,
+                row.status,
+                row.usage_limit_act,
             )
         )
         real_stop(short_id)
@@ -444,6 +513,8 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     assert task.unproductive_attempts == before
     assert task.session_id is None
     assert task.next_eligible_at == _RESET_AT
+    # The requeue cleared the intent in the same write.
+    assert task.usage_limit_act is None
 
     session = load_state().sessions[0]
     assert session.status is SessionStatus.COMPLETED
@@ -457,9 +528,10 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     assert completed[0]["ticket_id"] == _SID
     # Marks the event as reconcile-owned so the dispatch consumer skips it.
     assert completed[0]["reason"] == "usage_limited_mid_turn"
+    assert completed[0][ACT_STARTED_AT_KEY] == _NOW.isoformat()
     assert daemon.stop_calls == [_SURFACE]
-    # Steps 2-3 (the lockout arm, then every audit event) all precede step 4's
-    # stop; steps 5-6 (the session close and the requeue) both follow it.
+    # The intent was persisted first, and by the stop the lockout arm and
+    # every audit event had landed; the session close and the requeue follow.
     assert seen_at_stop == [
         (
             [
@@ -470,6 +542,14 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
             ],
             SessionStatus.ACTIVE,
             QueueItemStatus.RUNNING,
+            UsageLimitAct(
+                session_id=_SID,
+                branch="auto",
+                started_at=_NOW,
+                reset_at=_RESET_AT,
+                until=_RESET_AT,
+                audited_at=_NOW,
+            ),
         )
     ]
 
@@ -482,317 +562,9 @@ def test_act_auto_reverts_row_completes_session_and_arms_lockout(
     attention = _events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
     assert len(attention) == 1
     assert attention[0]["paused_status"] == "usage_limited_mid_turn"
+    assert attention[0][ACT_STARTED_AT_KEY] == _NOW.isoformat()
     assert _RESET_AT.isoformat() in attention[0]["breadcrumbs"]
     assert "re-enter the queue automatically" in attention[0]["breadcrumbs"]
-
-
-def _assert_session_still_active(state: CwState) -> None:
-    """Step 5 did not run: the session is ACTIVE in memory and on disk."""
-    assert state.sessions[0].status is SessionStatus.ACTIVE
-    persisted = load_state().sessions[0]
-    assert persisted.status is SessionStatus.ACTIVE
-    assert persisted.completed_at is None
-    assert persisted.completed_reason is None
-    assert persisted.reap_reason is None
-
-
-def _assert_row_still_running() -> None:
-    """Step 6 did not run: the row is still RUNNING and bound to the session."""
-    task = load_dev_queue().tasks[0]
-    assert task.status is QueueItemStatus.RUNNING
-    assert task.session_id == _SID
-    assert task.next_eligible_at is None
-
-
-def _log_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [r.getMessage() for r in caplog.records]
-
-
-def test_act_logs_and_continues_when_lockout_arm_fails(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    home: Path,
-    daemon: FakeNativeDaemonClient,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Step 2 failure: log and continue, since the next tick re-arms."""
-    state, _ = _seed(home, tmp_path, _limit_tail())
-    candidates = _detect(state)
-
-    def _failing_record_event(
-        etype: OrchestratorEventType,
-        payload: dict[str, Any] | None = None,
-        *,
-        correlation_id: str | None = None,
-    ) -> None:
-        msg = "inbox write failed"
-        raise OSError(msg)
-
-    monkeypatch.setattr("cw.dispatch_state.record_event", _failing_record_event)
-
-    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
-        reverted = _act(state, candidates, _auto_config())
-
-    # The shared helper audits before it persists, so no window was saved.
-    assert _lockout() == {}
-    assert any(_SID in m and "lockout" in m for m in _log_messages(caplog))
-    # Steps 3-6 still ran.
-    assert reverted == [_SID]
-    assert len(_events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)) == 1
-    assert daemon.stop_calls == [_SURFACE]
-    assert load_state().sessions[0].status is SessionStatus.COMPLETED
-    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
-
-
-@pytest.mark.parametrize(
-    "failing_event",
-    [
-        pytest.param(
-            OrchestratorEventType.SESSION_NEEDS_ATTENTION, id="needs-attention"
-        ),
-        pytest.param(OrchestratorEventType.SESSION_REAP_PROPOSED, id="reap-proposed"),
-        pytest.param(OrchestratorEventType.SESSION_COMPLETED, id="completed"),
-    ],
-)
-def test_act_auto_stops_at_step_3_when_an_audit_emit_fails(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    home: Path,
-    daemon: FakeNativeDaemonClient,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    failing_event: OrchestratorEventType,
-) -> None:
-    """Step 3 failure: no stop, no close, no requeue; the next tick retries."""
-    state, _ = _seed(home, tmp_path, _limit_tail())
-    candidates = _detect(state)
-
-    def _failing_record_event(
-        etype: OrchestratorEventType,
-        payload: dict[str, Any] | None = None,
-        *,
-        correlation_id: str | None = None,
-    ) -> None:
-        if etype is failing_event:
-            msg = "inbox write failed"
-            raise OSError(msg)
-        record_event(etype, payload, correlation_id=correlation_id)
-
-    # The reap proposal is recorded through _shared's binding, the rest here.
-    for target in (
-        "cw.reconcile.usage_limit_mid_turn.record_event",
-        "cw.reconcile._shared.record_event",
-    ):
-        monkeypatch.setattr(target, _failing_record_event)
-
-    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
-        reverted = _act(state, candidates, _auto_config())
-
-    assert reverted == []
-    assert any(_SID in m and "audit" in m for m in _log_messages(caplog))
-    # Step 2 ran before the failed emit.
-    assert _lockout() == {_CLIENT: _RESET_AT}
-    assert _events(failing_event) == []
-    # Steps 4-6 did not.
-    assert daemon.stop_calls == []
-    _assert_session_still_active(state)
-    _assert_row_still_running()
-    cast("MagicMock", _deps.fire_push_notification).assert_not_called()
-
-
-def test_act_auto_stops_at_step_4_when_daemon_stop_fails(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    home: Path,
-    daemon: FakeNativeDaemonClient,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Step 4 failure: the session stays ACTIVE and the row stays RUNNING."""
-    state, _ = _seed(home, tmp_path, _limit_tail())
-    candidates = _detect(state)
-
-    def _failing_stop(short_id: str) -> None:
-        daemon.stop_calls.append(short_id)
-        msg = "claude stop failed"
-        raise OSError(msg)
-
-    monkeypatch.setattr(daemon, "stop", _failing_stop)
-
-    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
-        reverted = _act(state, candidates, _auto_config())
-
-    assert reverted == []
-    assert daemon.stop_calls == [_SURFACE]
-    assert any(_SID in m and "stop" in m for m in _log_messages(caplog))
-    # Steps 2-3 ran: the lockout is already armed for the retry.
-    assert _lockout() == {_CLIENT: _RESET_AT}
-    assert len(_events(OrchestratorEventType.SESSION_REAP_PROPOSED)) == 1
-    assert len(_events(OrchestratorEventType.SESSION_COMPLETED)) == 1
-    # Steps 5-6 did not.
-    _assert_session_still_active(state)
-    _assert_row_still_running()
-
-
-def test_act_auto_stops_at_step_4_when_surface_still_in_roster_after_stop(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    home: Path,
-    daemon: FakeNativeDaemonClient,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A stop() that returned is not trusted: the roster must confirm it.
-
-    The real client swallows every ``claude stop`` failure, so a surface still
-    in the roster after the bounded poll is a step-4 failure: no close, no
-    requeue, and the next tick retries.
-    """
-    state, _ = _seed(home, tmp_path, _limit_tail())
-    candidates = _detect(state)
-    monkeypatch.setattr(
-        "cw.reconcile.usage_limit_mid_turn._STOP_CONFIRM_TIMEOUT_SECS", 0.0
-    )
-    monkeypatch.setattr(
-        daemon, "list_live_session_short_ids_fail_closed", lambda: {_SURFACE}
-    )
-
-    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
-        reverted = _act(state, candidates, _auto_config())
-
-    assert reverted == []
-    assert daemon.stop_calls == [_SURFACE]
-    assert any(_SID in m and "roster" in m for m in _log_messages(caplog))
-    _assert_session_still_active(state)
-    _assert_row_still_running()
-
-
-def test_act_auto_stops_at_step_4_when_roster_unreadable_after_stop(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    home: Path,
-    daemon: FakeNativeDaemonClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unreadable roster cannot confirm the stop, so it fails closed."""
-    state, _ = _seed(home, tmp_path, _limit_tail())
-    candidates = _detect(state)
-    monkeypatch.setattr(
-        "cw.reconcile.usage_limit_mid_turn._STOP_CONFIRM_TIMEOUT_SECS", 0.0
-    )
-    daemon.roster_unreadable = True
-
-    assert _act(state, candidates, _auto_config()) == []
-    assert daemon.stop_calls == [_SURFACE]
-    _assert_session_still_active(state)
-    _assert_row_still_running()
-
-
-def test_act_auto_is_noop_when_tail_changes_before_the_stop(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    home: Path,
-    daemon: FakeNativeDaemonClient,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The tail is re-read right before stop(), after steps 2-3 have run.
-
-    The worker resumes between the step-1 gate and the stop: nothing is
-    stopped, closed or requeued this tick.
-    """
-    state, transcript = _seed(home, tmp_path, _limit_tail())
-    candidates = _detect(state)
-
-    def _arm_then_resume(windows: dict[str, datetime]) -> dict[str, datetime]:
-        merged = merge_and_save_usage_limited_until(windows)
-        _append_record(transcript, _ul_record("back again, continuing", _T_AFTER))
-        return merged
-
-    monkeypatch.setattr(
-        "cw.reconcile.usage_limit_mid_turn.merge_and_save_usage_limited_until",
-        _arm_then_resume,
-    )
-
-    with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
-        reverted = _act(state, candidates, _auto_config())
-
-    assert reverted == []
-    assert daemon.stop_calls == []
-    assert any(
-        _SID in m and "tail changed before the stop" in m for m in _log_messages(caplog)
-    )
-    _assert_session_still_active(state)
-    _assert_row_still_running()
-
-
-def test_act_auto_requeues_only_the_row_keyed_to_the_sessions_client(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    home: Path,
-    daemon: FakeNativeDaemonClient,
-) -> None:
-    """An earlier same-ticket row under another client is never the one mutated.
-
-    It matches the ticket and even the session id, so a ticket-and-session
-    lookup would take it first; only (ticket_id, client, session_id) is the
-    owned row's identity (#2219).
-    """
-    state, _ = _seed(home, tmp_path, _limit_tail())
-    foreign = _running_row(client="client-b", session_id=_SID)
-    _save_tasks_around_owned_row(before=[foreign], after=[])
-
-    assert _act(state, _detect(state), _auto_config()) == [_SID]
-
-    tasks = load_dev_queue().tasks
-    assert tasks[0].client == "client-b"
-    assert tasks[0].status is QueueItemStatus.RUNNING
-    assert tasks[0].session_id == _SID
-    assert tasks[1].client == _CLIENT
-    assert tasks[1].status is QueueItemStatus.PENDING
-    assert tasks[1].next_eligible_at == _RESET_AT
-
-
-def test_act_auto_leaves_session_closed_when_requeue_loses_race(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    home: Path,
-    daemon: FakeNativeDaemonClient,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Step 6 race loss: log, emit nothing further, keep the session closed."""
-    state, _ = _seed(home, tmp_path, _limit_tail())
-    candidates = _detect(state)
-    real_stop = daemon.stop
-    events_at_stop: list[int] = []
-
-    def _stop_then_reclaim(short_id: str) -> None:
-        real_stop(short_id)
-        events_at_stop.append(len(read_events()))
-        store = load_dev_queue()
-        store.tasks[0].session_id = "reclaimer"
-        save_dev_queue(store)
-
-    monkeypatch.setattr(daemon, "stop", _stop_then_reclaim)
-
-    with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
-        reverted = _act(state, candidates, _auto_config())
-
-    assert reverted == []
-    assert any(_SID in m and "race" in m for m in _log_messages(caplog))
-    # Step 5 ran: the session is closed, which is right -- its process is gone.
-    session = load_state().sessions[0]
-    assert session.status is SessionStatus.COMPLETED
-    assert session.completed_reason is CompletionReason.USAGE_LIMITED
-    # Step 6 lost: the reclaimer's row is untouched.
-    task = load_dev_queue().tasks[0]
-    assert task.status is QueueItemStatus.RUNNING
-    assert task.session_id == "reclaimer"
-    assert task.next_eligible_at is None
-    # Nothing was emitted after the stop.
-    assert len(read_events()) == events_at_stop[0]
 
 
 def test_act_auto_falls_back_to_flat_backoff_on_unparseable_reset(
@@ -820,13 +592,14 @@ def test_act_auto_falls_back_to_flat_backoff_on_unparseable_reset(
     assert _lockout() == {_CLIENT: expected_until}
 
 
-def test_act_auto_is_noop_when_tail_changed_since_detect(
+def test_act_decides_nothing_when_tail_changed_since_detect(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
     daemon: FakeNativeDaemonClient,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """The gate re-reads the tail: a changed one writes no intent at all."""
     state, transcript = _seed(home, tmp_path, _limit_tail())
     candidates = _detect(state)
     assert len(candidates) == 1
@@ -836,19 +609,206 @@ def test_act_auto_is_noop_when_tail_changed_since_detect(
         reverted = _act(state, candidates, _auto_config())
 
     assert reverted == []
-    assert _events(OrchestratorEventType.SESSION_REAP_PROPOSED) == []
-    assert _events(OrchestratorEventType.USAGE_LIMIT_ARMED) == []
-    assert _events(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
-    assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
+    assert read_events() == []
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is None
     assert load_state().sessions[0].status is SessionStatus.ACTIVE
     assert daemon.stop_calls == []
     assert _lockout() == {}
-    messages = [r.getMessage() for r in caplog.records]
-    assert any(_SID in m and "tail changed" in m for m in messages)
+    assert any(
+        _SID in m and "tail changed since detect" in m for m in _log_messages(caplog)
+    )
+
+
+def test_act_auto_abandons_when_tail_changes_before_the_stop(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The worker resumes after the decision: the act is abandoned cleanly.
+
+    The tail is re-read right before the stop. New content clears the intent
+    and leaves the session and row exactly as they are -- nothing stopped,
+    closed or requeued -- and a later tick finds nothing to resume.
+    """
+    state, transcript = _seed(home, tmp_path, _limit_tail())
+    candidates = _detect(state)
+
+    def _arm_then_resume(windows: dict[str, datetime]) -> dict[str, datetime]:
+        merged = merge_and_save_usage_limited_until(windows)
+        _append_record(transcript, _ul_record("back again, continuing", _T_AFTER))
+        return merged
+
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn.merge_and_save_usage_limited_until",
+        _arm_then_resume,
+    )
+
+    with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
+        reverted = _act(state, candidates, _auto_config())
+
+    assert reverted == []
+    assert daemon.stop_calls == []
+    assert any(_SID in m and "abandoned" in m for m in _log_messages(caplog))
+    _assert_session_still_active(state)
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is None
+    events_after = len(read_events())
+
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == []
+    assert daemon.stop_calls == []
+    _assert_row_still_running()
+    assert len(read_events()) == events_after
+
+
+def test_act_auto_retries_stop_while_surface_still_in_roster(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stop() that returned is not trusted: the roster must confirm it.
+
+    The real client swallows every ``claude stop`` failure, so a surface still
+    in the roster after the bounded poll leaves the session open and the row
+    RUNNING under its intent; the next tick stops it again and finishes.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn._STOP_CONFIRM_TIMEOUT_SECS", 0.0
+    )
+    real_stop = daemon.stop
+    # A stop that returns but never takes effect.
+    monkeypatch.setattr(daemon, "stop", daemon.stop_calls.append)
+
+    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
+        assert _tick(state, _auto_config(), daemon, at=_NOW) == []
+
+    assert daemon.stop_calls == [_SURFACE]
+    assert any(_SID in m and "roster" in m for m in _log_messages(caplog))
+    _assert_session_still_active(state)
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+
+    monkeypatch.setattr(daemon, "stop", real_stop)
+
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
+    assert daemon.stop_calls == [_SURFACE, _SURFACE]
+    assert _owned_row().status is QueueItemStatus.PENDING
+    assert load_state().sessions[0].completed_at == _LATER
+
+
+def test_act_auto_retries_stop_when_roster_unreadable(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable roster cannot confirm the stop, so it fails closed."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    candidates = _detect(state)
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn._STOP_CONFIRM_TIMEOUT_SECS", 0.0
+    )
+    daemon.roster_unreadable = True
+
+    assert _act(state, candidates, _auto_config()) == []
+    assert daemon.stop_calls == [_SURFACE]
+    _assert_session_still_active(state)
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+
+
+def test_act_auto_requeues_only_the_row_keyed_to_the_sessions_client(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    """An earlier same-ticket row under another client is never the one mutated.
+
+    It matches the ticket and even the session id, so a ticket-and-session
+    lookup would take it first; only (ticket_id, client, session_id) is the
+    owned row's identity (#2219).
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    foreign = _running_row(client="client-b", session_id=_SID)
+    _save_tasks_around_owned_row(before=[foreign], after=[])
+
+    assert _act(state, _detect(state), _auto_config()) == [_SID]
+
+    tasks = load_dev_queue().tasks
+    assert tasks[0].client == "client-b"
+    assert tasks[0].status is QueueItemStatus.RUNNING
+    assert tasks[0].session_id == _SID
+    assert tasks[0].usage_limit_act is None
+    assert tasks[1].client == _CLIENT
+    assert tasks[1].status is QueueItemStatus.PENDING
+    assert tasks[1].next_eligible_at == _RESET_AT
+
+
+def test_act_ends_when_another_writer_dispositions_the_row_mid_act(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An operator cancel mid-act clears the intent, so the requeue never lands.
+
+    The session is still closed -- its process is already gone -- and the
+    cancelled row is left exactly as the operator left it.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    candidates = _detect(state)
+    real_stop = daemon.stop
+
+    def _stop_then_cancel(short_id: str) -> None:
+        real_stop(short_id)
+        store = load_dev_queue()
+        transition_task_status(store.tasks[0], QueueItemStatus.CANCELLED)
+        save_dev_queue(store)
+
+    monkeypatch.setattr(daemon, "stop", _stop_then_cancel)
+
+    with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
+        reverted = _act(state, candidates, _auto_config())
+
+    assert reverted == []
+    assert any(_SID in m and "no longer carries" in m for m in _log_messages(caplog))
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.CANCELLED
+    assert task.usage_limit_act is None
+    assert task.next_eligible_at is None
+
+
+def test_act_auto_skips_stop_when_surface_ref_already_cleared(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    candidates = _detect(state)
+    # Located by csid instead, so the transcript is still found.
+    state.sessions[0].claude_session_id = "fake-short-id-sess-1076"
+    state.sessions[0].surface_ref = None
+
+    assert _act(state, candidates, _auto_config()) == [_SID]
+    assert daemon.stop_calls == []
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
 
 
 # ---------------------------------------------------------------------------
-# Act phase -- reap_policy: signal_only (default)
+# Act -- reap_policy: signal_only (default)
 # ---------------------------------------------------------------------------
 
 
@@ -874,6 +834,7 @@ def test_act_signal_only_parks_blocked_on_user_without_touching_session(
     assert task.unproductive_attempts == before
     assert task.session_id == _SID
     assert task.next_eligible_at is None
+    assert task.usage_limit_act is None
 
     session = load_state().sessions[0]
     assert session.status is SessionStatus.ACTIVE
@@ -888,6 +849,7 @@ def test_act_signal_only_parks_blocked_on_user_without_touching_session(
     assert attention[0]["paused_status"] == "usage_limited_mid_turn"
     assert attention[0]["ticket_id"] == _SID
     assert attention[0]["crashed"] is False
+    assert attention[0][ACT_STARTED_AT_KEY] == _NOW.isoformat()
     assert _RESET_AT.isoformat() in attention[0]["breadcrumbs"]
     assert "needs an operator" in attention[0]["breadcrumbs"]
     push = cast("MagicMock", _deps.fire_push_notification)
@@ -895,7 +857,7 @@ def test_act_signal_only_parks_blocked_on_user_without_touching_session(
 
 
 # ---------------------------------------------------------------------------
-# Act phase -- race re-verify under dev_queue_lock
+# Gate -- re-verified under dev_queue_lock before anything is decided
 # ---------------------------------------------------------------------------
 
 
@@ -935,52 +897,14 @@ def test_act_is_silent_noop_when_row_moved_between_detect_and_act(
     task = load_dev_queue().tasks[0]
     assert task.status is raced_status
     assert task.session_id == raced_session_id
+    assert task.usage_limit_act is None
     session = load_state().sessions[0]
     assert session.status is SessionStatus.ACTIVE
     assert session.reap_proposed_at is None
     assert state.sessions[0].reap_proposed_at is None
     assert daemon.stop_calls == []
-    assert _events(OrchestratorEventType.SESSION_REAP_PROPOSED) == []
-    assert _events(OrchestratorEventType.SESSION_COMPLETED) == []
-    assert _events(OrchestratorEventType.USAGE_LIMIT_ARMED) == []
-    assert _events(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
+    assert read_events() == []
     assert _lockout() == {}
-
-
-def test_act_signal_only_proposes_nothing_when_park_loses_race_after_gate(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    home: Path,
-    daemon: FakeNativeDaemonClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The row is reclaimed between the gate and the park: steps 1-2 already
-    ran (the lockout stays armed), but the park and its proposal do not."""
-    state, _ = _seed(home, tmp_path, _limit_tail())
-    candidates = _detect(state)
-
-    def _arm_then_reclaim(windows: dict[str, datetime]) -> dict[str, datetime]:
-        merged = merge_and_save_usage_limited_until(windows)
-        store = load_dev_queue()
-        store.tasks[0].session_id = "reclaimer"
-        save_dev_queue(store)
-        return merged
-
-    monkeypatch.setattr(
-        "cw.reconcile.usage_limit_mid_turn.merge_and_save_usage_limited_until",
-        _arm_then_reclaim,
-    )
-
-    reverted = _act(state, candidates, OrchestratorConfig())
-
-    assert reverted == []
-    assert _lockout() == {_CLIENT: _RESET_AT}
-    task = load_dev_queue().tasks[0]
-    assert task.status is QueueItemStatus.RUNNING
-    assert task.session_id == "reclaimer"
-    assert state.sessions[0].reap_proposed_at is None
-    assert _events(OrchestratorEventType.SESSION_REAP_PROPOSED) == []
-    assert _events(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
 
 
 def test_act_skips_candidate_whose_session_vanished(
@@ -994,25 +918,9 @@ def test_act_skips_candidate_whose_session_vanished(
     state.sessions.clear()
 
     assert _act(state, candidates, _auto_config()) == []
-    assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
+    assert _owned_row().status is QueueItemStatus.RUNNING
+    assert _owned_row().usage_limit_act is None
     assert _events(OrchestratorEventType.USAGE_LIMIT_ARMED) == []
-
-
-def test_act_auto_skips_stop_when_surface_ref_already_cleared(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    home: Path,
-    daemon: FakeNativeDaemonClient,
-) -> None:
-    state, _ = _seed(home, tmp_path, _limit_tail())
-    candidates = _detect(state)
-    # Located by csid instead, so the transcript is still found.
-    state.sessions[0].claude_session_id = "fake-short-id-sess-1076"
-    state.sessions[0].surface_ref = None
-
-    assert _act(state, candidates, _auto_config()) == [_SID]
-    assert daemon.stop_calls == []
-    assert load_state().sessions[0].status is SessionStatus.COMPLETED
 
 
 # ---------------------------------------------------------------------------
@@ -1028,16 +936,7 @@ def test_detect_and_park_loads_queue_when_tasks_omitted(
 ) -> None:
     state, _ = _seed(home, tmp_path, _limit_tail())
 
-    with freezegun.freeze_time(_NOW):
-        reverted = detect_and_park_mid_turn_usage_limits(
-            state,
-            now=_NOW,
-            native_live={_SURFACE},
-            config=_auto_config(),
-            clients={},
-        )
-
-    assert reverted == [_SID]
+    assert _tick(state, _auto_config(), daemon, at=_NOW) == [_SID]
     assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
 
 
@@ -1050,172 +949,230 @@ def test_detect_and_park_is_idempotent_on_second_tick(
     state, _ = _seed(home, tmp_path, _limit_tail())
 
     for _ in range(2):
-        with freezegun.freeze_time(_NOW):
-            detect_and_park_mid_turn_usage_limits(
-                state,
-                now=_NOW,
-                native_live={_SURFACE},
-                config=OrchestratorConfig(),
-                clients={},
-            )
+        _tick(state, OrchestratorConfig(), daemon, at=_NOW)
 
     assert len(_events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)) == 1
     assert len(_events(OrchestratorEventType.USAGE_LIMIT_ARMED)) == 1
+    assert len(_events(OrchestratorEventType.TASK_TRANSITION)) == 1
 
 
 # ---------------------------------------------------------------------------
-# Resumable step 6 -- a requeue interrupted after the session was closed
+# Resumability -- an interruption after any step is finished by the next tick
 # ---------------------------------------------------------------------------
 
-_LATER = _NOW + timedelta(minutes=10)
+
+def _fail_once(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    real: Callable[..., Any],
+    *,
+    nth: int = 1,
+    match: Callable[..., bool] = lambda *_a, **_k: True,
+) -> None:
+    """Patch *target* so its *nth* matching call raises OSError; others delegate."""
+    seen: list[int] = []
+
+    def _wrapper(*args: Any, **kwargs: Any) -> Any:
+        if match(*args, **kwargs):
+            seen.append(1)
+            if len(seen) == nth:
+                msg = f"injected failure in {target}"
+                raise OSError(msg)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(target, _wrapper)
 
 
-def _tick(state: CwState, config: OrchestratorConfig, *, at: datetime) -> list[str]:
-    with freezegun.freeze_time(at):
-        return detect_and_park_mid_turn_usage_limits(
-            state,
-            now=at,
-            native_live={_SURFACE},
-            config=config,
-            clients={},
+def _is_event(etype: OrchestratorEventType) -> Callable[..., bool]:
+    return lambda event_type, *_a, **_k: event_type is etype
+
+
+def _inject(
+    point: str, monkeypatch: pytest.MonkeyPatch, daemon: FakeNativeDaemonClient
+) -> None:
+    """Make the act fail once at *point*, the way a crash there would leave it.
+
+    The module's dev-queue writes are, in order: the decision (1), the audit
+    mark (2) and the final transition (3).
+    """
+    from cw import dispatch_state
+    from cw.config import save_state as real_save_state
+    from cw.events import record_event as real_record_event
+
+    mod = "cw.reconcile.usage_limit_mid_turn"
+    if point == "decision":
+        _fail_once(monkeypatch, f"{mod}.save_dev_queue", save_dev_queue, nth=1)
+    elif point == "lockout":
+        _fail_once(
+            monkeypatch, "cw.dispatch_state.record_event", dispatch_state.record_event
         )
+    elif point == "needs-attention":
+        _fail_once(
+            monkeypatch,
+            f"{mod}.record_event",
+            real_record_event,
+            match=_is_event(OrchestratorEventType.SESSION_NEEDS_ATTENTION),
+        )
+    elif point == "reap-proposed":
+        _fail_once(
+            monkeypatch,
+            "cw.reconcile._shared.record_event",
+            real_record_event,
+            match=_is_event(OrchestratorEventType.SESSION_REAP_PROPOSED),
+        )
+    elif point == "completed":
+        _fail_once(
+            monkeypatch,
+            f"{mod}.record_event",
+            real_record_event,
+            match=_is_event(OrchestratorEventType.SESSION_COMPLETED),
+        )
+    elif point == "audit-mark":
+        _fail_once(monkeypatch, f"{mod}.save_dev_queue", save_dev_queue, nth=2)
+    elif point == "stop":
+        real_stop = daemon.stop
+        calls: list[int] = []
+
+        def _stop_failing_once(short_id: str) -> None:
+            calls.append(1)
+            if len(calls) == 1:
+                msg = "claude stop failed"
+                raise OSError(msg)
+            real_stop(short_id)
+
+        monkeypatch.setattr(daemon, "stop", _stop_failing_once)
+    elif point == "close":
+        _fail_once(monkeypatch, f"{mod}.save_state", real_save_state)
+    elif point == "transition":
+        _fail_once(monkeypatch, f"{mod}.save_dev_queue", save_dev_queue, nth=3)
+    else:  # pragma: no cover - a typo in the parametrize list
+        msg = f"unknown injection point {point!r}"
+        raise AssertionError(msg)
 
 
-def _fail_step_6_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The first dev-queue save through this module raises; later ones land."""
-    real_save = save_dev_queue
-    calls: list[int] = []
-
-    def _save_failing_once(store: DevQueueStore) -> None:
-        calls.append(1)
-        if len(calls) == 1:
-            msg = "dev-queue write failed"
-            raise OSError(msg)
-        real_save(store)
-
-    monkeypatch.setattr(
-        "cw.reconcile.usage_limit_mid_turn.save_dev_queue", _save_failing_once
-    )
+_COMMON_POINTS = [
+    "decision",
+    "lockout",
+    "needs-attention",
+    "reap-proposed",
+    "audit-mark",
+    "transition",
+]
+_AUTO_ONLY_POINTS = ["completed", "stop", "close"]
 
 
 @pytest.mark.parametrize(
-    ("limit_text", "expected_until"),
+    ("branch", "point"),
     [
-        pytest.param(_LIMIT_TEXT, _RESET_AT, id="parsed-reset"),
-        # Anchored at the close, not the finishing tick's own now.
-        pytest.param(
-            _UNPARSEABLE_LIMIT_TEXT,
-            _NOW + timedelta(seconds=_BACKOFF_SECONDS),
-            id="flat-backoff",
-        ),
+        *[pytest.param("auto", p, id=f"auto-{p}") for p in _COMMON_POINTS],
+        *[pytest.param("auto", p, id=f"auto-{p}") for p in _AUTO_ONLY_POINTS],
+        *[pytest.param("park", p, id=f"park-{p}") for p in _COMMON_POINTS],
     ],
 )
-def test_interrupted_requeue_is_finished_next_tick_without_charge(
+def test_interrupted_act_is_finished_next_tick_without_charge(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
     daemon: FakeNativeDaemonClient,
     monkeypatch: pytest.MonkeyPatch,
-    limit_text: str,
-    expected_until: datetime,
+    branch: str,
+    point: str,
 ) -> None:
-    """Step 6 fails once after the close; the next tick finishes the requeue.
+    """A step fails once; the next tick resumes from the intent and finishes.
 
-    The row is still RUNNING and bound to a session already COMPLETED with
-    the usage-limit reason. The next tick recognises that, and finishes it:
-    PENDING, ``next_eligible_at``, no attempt charged -- and a third tick
-    finds nothing left to do.
+    No attempt is charged, and each side effect -- the lockout arm, the stop,
+    the session close and the row transition -- happens at most once. Only
+    the audit events may repeat, and every copy carries the same act key.
     """
-    state, _ = _seed(home, tmp_path, _limit_tail(limit_text))
-    config = _auto_config(usage_limit_backoff_seconds=_BACKOFF_SECONDS)
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    config = _auto_config() if branch == "auto" else OrchestratorConfig()
     before = _owned_row().unproductive_attempts
-    _fail_step_6_once(monkeypatch)
+    _inject(point, monkeypatch, daemon)
 
-    with pytest.raises(OSError, match="dev-queue write failed"):
-        _tick(state, config, at=_NOW)
-
-    closed = load_state().sessions[0]
-    assert closed.status is SessionStatus.COMPLETED
-    assert closed.completed_reason is CompletionReason.USAGE_LIMITED
+    assert _tick(state, config, daemon, at=_NOW) == []
     _assert_row_still_running()
-    events_after_close = len(read_events())
 
-    state = load_state()
-    assert _tick(state, config, at=_LATER) == [_SID]
+    requeued = _tick(load_state(), config, daemon, at=_LATER)
 
-    task = load_dev_queue().tasks[0]
-    assert task.status is QueueItemStatus.PENDING
+    decided_at = _LATER if point == "decision" else _NOW
+    task = _owned_row()
     assert task.unproductive_attempts == before
-    assert task.session_id is None
-    assert task.next_eligible_at == expected_until
-    # Finishing is not a second act: nothing stopped, re-armed or re-audited.
-    # The one new event is the requeue's own transition record, uncharged.
-    assert daemon.stop_calls == [_SURFACE]
-    new_events = read_events()[events_after_close:]
-    assert [e.type for e in new_events] == [OrchestratorEventType.TASK_TRANSITION]
-    assert new_events[0].payload["new_status"] == QueueItemStatus.PENDING
-    assert new_events[0].payload["unproductive_charge"] is False
+    assert task.usage_limit_act is None
+    session = load_state().sessions[0]
+    if branch == "auto":
+        assert requeued == [_SID]
+        assert task.status is QueueItemStatus.PENDING
+        assert task.session_id is None
+        assert task.next_eligible_at == _RESET_AT
+        assert session.status is SessionStatus.COMPLETED
+        assert session.completed_reason is CompletionReason.USAGE_LIMITED
+        # Closed by whichever tick got past the stop: only a failed final
+        # transition leaves the first tick's close in place.
+        closed_at = _NOW if point == "transition" else _LATER
+        assert session.completed_at == closed_at
+        assert daemon.list_live_session_short_ids() == set()
+    else:
+        assert requeued == []
+        assert task.status is QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "usage_limited_mid_turn"
+        assert task.session_id == _SID
+        assert session.status is SessionStatus.ACTIVE
+        assert daemon.stop_calls == []
 
-    assert _tick(load_state(), config, at=_LATER) == []
-    assert load_dev_queue().tasks[0] == task
+    # At most once: the lockout, the stop that landed and the transition.
+    assert len(_events(OrchestratorEventType.USAGE_LIMIT_ARMED)) == 1
+    assert _lockout() == {_CLIENT: _RESET_AT}
+    assert daemon.stop_calls.count(_SURFACE) == (1 if branch == "auto" else 0)
+    # The transition seam records task.transition inside the lock, ahead of
+    # the save, so a failed final save leaves one extra audit record for a
+    # transition that did not persist. Neither copy charges an attempt.
+    transitions = _events(OrchestratorEventType.TASK_TRANSITION)
+    assert len(transitions) == (2 if point == "transition" else 1)
+    assert {t["unproductive_charge"] for t in transitions} == {False}
+
+    # At least once: every audit event landed, each keyed to the one act.
+    audited = [OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+    if branch == "auto":
+        audited.append(OrchestratorEventType.SESSION_COMPLETED)
+    for etype in audited:
+        payloads = _events(etype)
+        assert 1 <= len(payloads) <= 2, etype
+        assert {p[ACT_STARTED_AT_KEY] for p in payloads} == {decided_at.isoformat()}
+    assert 1 <= len(_events(OrchestratorEventType.SESSION_REAP_PROPOSED)) <= 2
+
+    # A third tick finds nothing left to do.
+    events_after = len(read_events())
+    assert _tick(load_state(), config, daemon, at=_LATER) == []
+    assert _owned_row() == task
+    assert len(read_events()) == events_after
 
 
-@pytest.mark.parametrize(
-    ("completed_reason", "reap_reason"),
-    [
-        pytest.param(
-            CompletionReason.CRASHED, ReapReason.PHANTOM_SURFACE, id="phantom-crash"
-        ),
-        pytest.param(
-            CompletionReason.USAGE_LIMITED,
-            ReapReason.PHANTOM_SURFACE,
-            id="other-reaper",
-        ),
-        pytest.param(
-            CompletionReason.NORMAL, ReapReason.USAGE_LIMIT_MID_TURN, id="normal"
-        ),
-    ],
-)
-def test_interrupted_requeue_ignores_sessions_this_sweep_did_not_close(
+def test_act_resumes_when_its_session_is_gone(
     tmp_config_dir: Path,
     tmp_path: Path,
     home: Path,
     daemon: FakeNativeDaemonClient,
-    completed_reason: CompletionReason,
-    reap_reason: ReapReason,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Only a close stamped by this sweep's act is finished; others are left."""
-    state, _ = _seed(home, tmp_path, _limit_tail())
-    session = state.sessions[0]
-    session.status = SessionStatus.COMPLETED
-    session.completed_at = _NOW
-    session.completed_reason = completed_reason
-    session.reap_reason = reap_reason
-    save_state(state)
-
-    assert _tick(state, _auto_config(), at=_LATER) == []
-    _assert_row_still_running()
-
-
-def test_interrupted_requeue_leaves_row_keyed_to_another_client(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    home: Path,
-    daemon: FakeNativeDaemonClient,
-) -> None:
-    """The finish uses the same (ticket_id, client, session_id) identity."""
-    state, _ = _seed(home, tmp_path, _limit_tail())
-    session = state.sessions[0]
-    session.status = SessionStatus.COMPLETED
-    session.completed_at = _NOW
-    session.completed_reason = CompletionReason.USAGE_LIMITED
-    session.reap_reason = ReapReason.USAGE_LIMIT_MID_TURN
-    save_state(state)
-    save_dev_queue(
-        DevQueueStore(tasks=[_running_row(client="client-b", session_id=_SID)])
+    """A row carrying an act whose session has left the state still finishes."""
+    _seed(home, tmp_path, _limit_tail())
+    store = load_dev_queue()
+    store.tasks[0].usage_limit_act = UsageLimitAct(
+        session_id=_SID,
+        branch="auto",
+        started_at=_NOW,
+        reset_at=_RESET_AT,
+        until=_RESET_AT,
+        audited_at=_NOW,
     )
+    save_dev_queue(store)
+    save_state(CwState(sessions=[]))
 
-    assert _tick(state, _auto_config(), at=_LATER) == []
-    task = load_dev_queue().tasks[0]
-    assert task.status is QueueItemStatus.RUNNING
-    assert task.session_id == _SID
+    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
+        assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
+
+    assert any(_SID in m and "gone" in m for m in _log_messages(caplog))
+    task = _owned_row()
+    assert task.status is QueueItemStatus.PENDING
+    assert task.usage_limit_act is None
+    assert task.next_eligible_at == _RESET_AT

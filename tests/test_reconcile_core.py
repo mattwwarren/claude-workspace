@@ -1349,27 +1349,18 @@ def test_reconcile_signal_only_parks_mid_turn_ticket_without_reverting(
     assert task.disposition == "usage_limited_mid_turn"
 
 
-def test_reconcile_finishes_interrupted_mid_turn_requeue_without_charge(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A requeue that failed after the session closed is finished next tick.
+def _fail_mid_turn_dev_queue_save(monkeypatch: pytest.MonkeyPatch, *, nth: int) -> None:
+    """The sweep's *nth* dev-queue write raises; the others land.
 
-    The next reconcile must finish it as a usage-limit requeue -- PENDING, no
-    attempt charged -- and never fall through to the COMPLETED-session
-    backstop, which would charge one (#2324 round 3).
+    Its writes are, in order: the decision (1), the audit mark (2) and the
+    final transition (3).
     """
-    _seed_mid_turn_limit(
-        tmp_path, monkeypatch, config=_auto_config(), with_phantom=False
-    )
-    before = load_dev_queue().tasks[0].unproductive_attempts
     real_save = save_dev_queue
     saves: list[int] = []
 
     def _save_failing_once(store: DevQueueStore) -> None:
         saves.append(1)
-        if len(saves) == 1:
+        if len(saves) == nth:
             msg = "dev-queue write failed"
             raise OSError(msg)
         real_save(store)
@@ -1378,10 +1369,28 @@ def test_reconcile_finishes_interrupted_mid_turn_requeue_without_charge(
         "cw.reconcile.usage_limit_mid_turn.save_dev_queue", _save_failing_once
     )
 
-    with pytest.raises(OSError, match="dev-queue write failed"):
-        reconcile()
-    assert load_state().sessions[0].status is SessionStatus.COMPLETED
-    assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
+
+def test_reconcile_contains_a_failed_mid_turn_decision_and_retries_it(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed intent write decides nothing and does not abort the tick.
+
+    The next reconcile decides and finishes the act -- PENDING, no attempt
+    charged (#2324).
+    """
+    _seed_mid_turn_limit(
+        tmp_path, monkeypatch, config=_auto_config(), with_phantom=False
+    )
+    before = load_dev_queue().tasks[0].unproductive_attempts
+    _fail_mid_turn_dev_queue_save(monkeypatch, nth=1)
+
+    assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
+    assert load_state().sessions[0].status is SessionStatus.ACTIVE
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.usage_limit_act is None
 
     report = reconcile()
 
