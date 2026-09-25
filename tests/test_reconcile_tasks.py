@@ -205,7 +205,9 @@ def test_backstops_skip_row_carrying_pending_fix_dispatch(
             id="completed-backstop",
         ),
         pytest.param(
-            lambda sid: _mk_timed_out_daemon_session(sid, "TKT-FDSID", datetime.now(UTC)),
+            lambda sid: _mk_timed_out_daemon_session(
+                sid, "TKT-FDSID", datetime.now(UTC)
+            ),
             revert_timed_out_tasks,
             id="timed-out-backstop",
         ),
