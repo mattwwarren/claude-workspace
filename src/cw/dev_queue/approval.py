@@ -103,6 +103,35 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | N
         return _approve_ticket_locked(ticket_id, client_name, operator_initiated=True)
 
 
+def revoke_plan_approval(
+    ticket_id: str, client_name: str
+) -> dict[str, str | bool | None]:
+    """Clear both durable PLAN approval fields for a resolutions revision.
+
+    This is deliberately a separate mutation from ``requeue``: the resumed
+    plan worker may still be RUNNING, while the approval must be revoked under
+    the dev-queue lock before a later dispatch can consume stale evidence.
+    """
+    with _lock():
+        store = load_dev_queue()
+        task = _find_ticket(store, ticket_id, client_name)
+        had_approval = (
+            task.plan_approved_at is not None
+            or task.plan_approved_fingerprint is not None
+        )
+        previous_fingerprint = task.plan_approved_fingerprint
+        task.plan_approved_at = None
+        task.plan_approved_fingerprint = None
+        if had_approval:
+            save_dev_queue(store)
+        return {
+            "ticket_id": ticket_id,
+            "client": client_name,
+            "cleared": had_approval,
+            "previous_fingerprint": previous_fingerprint,
+        }
+
+
 def _resolve_approval_target(
     store: DevQueueStore,
     ticket_id: str,

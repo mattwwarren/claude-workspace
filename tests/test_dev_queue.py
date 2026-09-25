@@ -13431,6 +13431,25 @@ class TestPlanApprovedFingerprintStamp:
     happened, never which draft it was given for. Schema v36 binds it to the
     approved draft's content fingerprint (#2102)."""
 
+    def test_revoke_plan_approval_clears_both_row_fields(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Resolutions revision revokes durable row evidence under the queue lock."""
+        from cw.dev_queue import revoke_plan_approval
+
+        _seed_plan_pending(tmp_config_dir, tmp_path, session_id="sess-revoke")
+        task = load_dev_queue().tasks[0]
+        task.plan_approved_at = datetime(2026, 9, 25, tzinfo=UTC)
+        task.plan_approved_fingerprint = "a" * 64
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = revoke_plan_approval("GEN-500", "genhealth")
+
+        assert result["cleared"] is True
+        revoked = load_dev_queue().tasks[0]
+        assert revoked.plan_approved_at is None
+        assert revoked.plan_approved_fingerprint is None
+
     def test_migrate_fills_plan_approved_fingerprint_default(self) -> None:
         """migrate_dev_queue fills plan_approved_fingerprint=None (v36)."""
         raw: dict[str, object] = {
