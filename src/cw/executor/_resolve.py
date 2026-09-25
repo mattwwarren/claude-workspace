@@ -86,7 +86,7 @@ def resolve_executor(
     if config.backend == LOCAL_BACKEND:
         return LocalExecutor(config=config)
     if config.backend == CODEX_BACKEND:
-        return CodexExecutor(config=config)
+        return CodexExecutor(config=config, native_daemon=native_daemon)
     if config.backend == CLAUDE_NATIVE_BACKEND:
         return ClaudeNativeExecutor(config=config, native_daemon=native_daemon)
     if config.backend == OPENCODE_BACKEND:

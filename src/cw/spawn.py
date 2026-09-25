@@ -49,6 +49,7 @@ from cw.native_daemon import (
 )
 from cw.reconcile import _csid_from_transcript, ticket_id_for_session
 from cw.session_retention import find_session_by_id
+from cw.worktree import live_home_reason
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -478,6 +479,7 @@ def _write_hook_context(
     workspace_path: Path | None = None,
     lane: str | None = None,
     write_stop_hook: bool = True,
+    daemon: NativeDaemonClient | None = None,
 ) -> None:
     """Write hook config + correlation context into the worktree pre-spawn.
 
@@ -527,6 +529,15 @@ def _write_hook_context(
     not a Claude turn loop), there is no Stop hook to install. The DAEMON
     conflict check and ``cw-context.json`` itself (including
     ``prior_attempts_summary``) are unaffected — both still run.
+
+    *daemon* (#2077): when supplied, the DAEMON live-session conflict also
+    consults :func:`cw.worktree.live_home_reason` -- the same liveness
+    predicate the dispatch pre-claim occupancy screen and ``create_worktree``'s
+    reuse refresh use. If it confirms a live session or daemon worker is homed
+    on *worktree*, the raised error carries ``genuinely_live=True`` and a
+    message telling the operator NOT to close that session (the conflict
+    resolves itself). ``None`` (USER-origin callers, and any caller without a
+    resolved daemon) keeps the pre-#2077 message and ``genuinely_live=False``.
     """
     context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
     claude_dir = context_path.parent
@@ -555,14 +566,30 @@ def _write_hook_context(
                 prior_sess is not None
                 and prior_sess.status not in TERMINAL_SESSION_STATUSES
             ):
-                msg = (
-                    f"Cannot overwrite hook context: {context_path} references "
-                    f"live session {prior_session_id!r} "
-                    f"(status: {prior_sess.status}). "
-                    "Complete or close that session before reusing this worktree."
+                genuinely_live = daemon is not None and (
+                    live_home_reason(worktree, daemon=daemon) is not None
                 )
+                if genuinely_live:
+                    msg = (
+                        f"Worktree hook context at {context_path} is held by "
+                        f"session {prior_session_id!r} (status: "
+                        f"{prior_sess.status}), which is genuinely live and "
+                        "actively working there. This is not an error to act "
+                        "on -- it will resolve on its own once that session "
+                        "finishes. Do not close it."
+                    )
+                else:
+                    msg = (
+                        f"Cannot overwrite hook context: {context_path} references "
+                        f"live session {prior_session_id!r} "
+                        f"(status: {prior_sess.status}). "
+                        "Complete or close that session before reusing this "
+                        "worktree."
+                    )
                 raise HookContextConflictError(
-                    msg, conflicting_session_id=prior_session_id
+                    msg,
+                    conflicting_session_id=prior_session_id,
+                    genuinely_live=genuinely_live,
                 )
 
     if write_stop_hook:
@@ -745,7 +772,9 @@ def spawn_create_impl(
     # Inject Stop-hook config + correlation context into the worktree so
     # the spawned session emits a SESSION_COMPLETED event when its agent
     # turn finishes — works under ``claude --bg`` where env vars are not
-    # propagated. See GitHub issue #147.
+    # propagated. See GitHub issue #147. The daemon is resolved first so the
+    # hook-context conflict check can corroborate liveness with it (#2077).
+    daemon = native_daemon or get_native_daemon_client()
     _write_hook_context(
         worktree,
         session_id=sess.id,
@@ -760,6 +789,7 @@ def spawn_create_impl(
         default_branch=client.default_branch,
         workspace_path=client.workspace_path,
         lane=lane,
+        daemon=daemon,
     )
 
     final_extra: list[str] = []
@@ -775,7 +805,6 @@ def spawn_create_impl(
         client.worker_model, explicit=permission_mode
     )
 
-    daemon = native_daemon or get_native_daemon_client()
     sess.surface_ref = daemon.spawn_bg(
         cwd=worktree,
         prompt=prompt,

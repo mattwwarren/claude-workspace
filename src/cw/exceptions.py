@@ -350,15 +350,28 @@ class HookContextConflictError(CwError):
     task so concierge recipe 1 can refuse to requeue a row it already proved
     cannot spawn until that session is closed (GitHub #1674). It stays None
     for reason 1, whose raise site has no session to name.
+
+    ``genuinely_live`` (#2077) is True only for reason 2, and only when the
+    raise site independently corroborated the conflicting session's liveness
+    via :func:`cw.worktree.live_home_reason` (a live session or daemon worker
+    is actually homed on the worktree), not merely its non-terminal status in
+    cw state. The dispatch claim path releases such a conflict without
+    charging a spawn error -- it resolves on its own once that session
+    finishes. Reason 1 never sets it True.
     """
 
-    __slots__ = ("conflicting_session_id",)
+    __slots__ = ("conflicting_session_id", "genuinely_live")
 
     def __init__(
-        self, message: str, *, conflicting_session_id: str | None = None
+        self,
+        message: str,
+        *,
+        conflicting_session_id: str | None = None,
+        genuinely_live: bool = False,
     ) -> None:
         super().__init__(message)
         self.conflicting_session_id = conflicting_session_id
+        self.genuinely_live = genuinely_live
 
 
 class RemoteRefUnresolvedError(CwError):
