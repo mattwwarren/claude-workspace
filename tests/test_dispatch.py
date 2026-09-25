@@ -2088,12 +2088,16 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         that removed the RUNNING row must not advance or spawn at IMPL.
 
         Simulates the race by making the bypass's own ``load_dev_queue()``
-        call (the second of the three ``cw.dispatch.claim.load_dev_queue``
-        calls in this tick's happy path: claim, bypass, stamp-success) return
-        a store missing the row, while the claim and stamp-success calls see
-        the real store untouched.
+        call (the second of the three ``load_dev_queue`` calls in this tick's
+        happy path: claim, bypass, stamp-success) return a store missing the
+        row, while the claim and stamp-success calls see the real store
+        untouched. Each of the three reads ``load_dev_queue`` from its own
+        ``cw.dispatch.claim`` submodule's globals, so all three are patched
+        with the one counting fake.
         """
         import cw.dispatch.claim as claim_mod
+        import cw.dispatch.claim.claimed_row as claimed_row_mod
+        import cw.dispatch.claim.screening as screening_mod
         from cw.worktree import create_worktree
         from tests.conftest import plan_body
 
@@ -2109,7 +2113,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
             "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
 
-        real_load_dev_queue = claim_mod.load_dev_queue
+        real_load_dev_queue = screening_mod.load_dev_queue
         call_count = {"n": 0}
 
         def _fake_load_dev_queue() -> DevQueueStore:
@@ -2121,7 +2125,8 @@ class TestDispatchTickAutoBypassesApprovedPlan:
                 store.tasks = [t for t in store.tasks if t.ticket_id != "GEN-RACE"]
             return store
 
-        monkeypatch.setattr(claim_mod, "load_dev_queue", _fake_load_dev_queue)
+        for mod in (screening_mod, claim_mod, claimed_row_mod):
+            monkeypatch.setattr(mod, "load_dev_queue", _fake_load_dev_queue)
 
         daemon = FakeNativeDaemonClient()
         spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
@@ -4014,6 +4019,9 @@ class TestStaleWorktreeYieldsToLiveOccupant:
             calls.append(f"remove:{branch}:{force}")
 
         monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
+        # Two lookup sites: the pre-claim occupancy screen and the stale-tree
+        # guard each read live_home_reason from their own module's globals.
+        monkeypatch.setattr("cw.dispatch.claim.screening.live_home_reason", _live)
         monkeypatch.setattr("cw.dispatch.claim.live_home_reason", _live)
         monkeypatch.setattr("cw.dispatch.claim.unsaved_work_reason", _unsaved)
         monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _remove)
