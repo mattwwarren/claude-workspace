@@ -41,6 +41,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import shutil
@@ -58,6 +59,25 @@ try:
     import yaml
 except ImportError:  # pragma: no cover - downstream repo without PyYAML
     yaml = None  # type: ignore[assignment]
+
+
+def _load_project_config_module():
+    """Load the shared config reader without requiring the cw package."""
+    source = Path(__file__).resolve().parents[2] / "src" / "cw" / "project_config.py"
+    if not source.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("cw_project_config", source)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except ImportError:
+        return None
+    return module
+
+
+_project_config = _load_project_config_module()
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -241,13 +261,12 @@ def resolve_project_config_auto_merge(
     (#2046). Callers treat None as "unknown - fall back to allowed/required,"
     never as an implicit False.
     """
-    if yaml is None or not config_path.exists():
+    if _project_config is None or yaml is None:
         return None
-    try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return None
-    if not isinstance(raw, dict):
+    raw = _project_config.load_project_config_dict(
+        config_path.parent.parent, yaml_module=yaml
+    )
+    if raw is None:
         return None
     pr_block = raw.get("pr")
     if not isinstance(pr_block, dict):
