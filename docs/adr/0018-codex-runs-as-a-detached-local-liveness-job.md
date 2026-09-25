@@ -92,7 +92,13 @@ dead-PID detection is a crash-only fallback.
 
 - #2286, #1550, #2367, #2368, #2369, #2370
 
-## Tickets
+## Implementation
+
+The rollout is planned in RFC 0014
+(`docs/rfcs/0014-codex-runs-as-a-detached-job.md`), which carries the tickets.
+This ADR records the decision only.
+
+<!-- Original ticket list, superseded by RFC 0014's ## Tickets:
 
 1. `cw codex run` CLI entry point + driver module
    (`src/cw/codex_driver.py`).
@@ -121,3 +127,5 @@ dead-PID detection is a crash-only fallback.
    sweep until coverage is complete, failures are operator-resolved, and no
    unprocessed legacy sessions remain; publish the audit-reversal command or
    runbook with the migration.
+-->
+
