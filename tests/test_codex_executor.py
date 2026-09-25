@@ -740,8 +740,11 @@ def test_preflight_failure_persist_error_completes_session_and_reraises(
             msg = "door boom"
             raise OSError(msg)
 
+    # Two lookup sites: CodexExecutor.spawn's own binding, and the recovery
+    # write in cw.codex_background, which imports the name from the package.
     with (
         patch("cw.executor.codex._complete_session_via_door", _door),
+        patch("cw.executor._complete_session_via_door", _door),
         pytest.raises(OSError, match="door boom"),
     ):
         # Stage.PLAN trips the CODEX_REVIEW_ONLY pre-flight guard, so this
