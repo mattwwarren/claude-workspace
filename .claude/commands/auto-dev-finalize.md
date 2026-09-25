@@ -70,7 +70,7 @@ if [ -n "$RESOLVED" ]; then
     MUST_FIX_OVERRIDE_OUTPUT=$(uv run python "$RESOLVED" \
       --verdict "$GUARD_ROOT/.claude/review-verdict.json" \
       --context "$GUARD_ROOT/.claude/cw-context.json" \
-      --head "$(git -C "$GUARD_ROOT" rev-parse HEAD)")
+      --head "$(git -C "$GUARD_ROOT" rev-parse HEAD)" 2>&1)
     MUST_FIX_OVERRIDE_EXIT=$?
   fi
 fi
@@ -83,6 +83,7 @@ The script prints `{"status", "reviewed_sha", "findings", "override", "detail"}`
 - **Absent from both locations** → log `"check_must_fix_override: script absent, skipped"` in `friction_highlights` and continue to the Pre-Stage Detector Guard, the same non-blocking absence convention as the pipeline's other guard sites.
 - **Candidate found but its marker is missing or below minimum** → EXIT `blocked` with `blocker.reason: "agent_block"` (this doc's fixed catch-all convention), `blocker.details: "MUST_FIX Override Verification: HEADLESS BLOCK — check_must_fix_override.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP. A gate that cannot be trusted to have run must not let the branch ship.
 - **Exit 1 (`status: "blocked"`)** → do NOT create or reuse a PR. EXIT `blocked` with `blocker.stage: "stage4_must_fix_override"`, `blocker.reason: "codex_must_fix_findings"` (the Stage 3 park's own reason, never `agent_block`), `blocker.details`: `$MUST_FIX_OVERRIDE_OUTPUT` plus the remediation — the operator either fixes the findings or runs `cw dev-queue approve <ticket> --override-must-fix --reason "..."` and then `cw dev-queue requeue <ticket> --stage finalize` — and `retry_eligible: false`. `codex_must_fix_findings` is deliberately absent from `FINALIZE_REGRESS_BLOCKER_REASONS`, so dispatch parks the row BLOCKED_ON_USER for the operator instead of self-healing it back to IMPL.
+- **Any other nonzero exit (`$MUST_FIX_OVERRIDE_EXIT` is neither 0 nor 1)** → do NOT create or reuse a PR. EXIT `blocked` with `blocker.reason: "agent_block"` and tooling-failure details naming `check_must_fix_override.py`, the numeric exit status, and `$MUST_FIX_OVERRIDE_OUTPUT` (or the captured stderr if no JSON was produced). This is a guard/tooling failure, not a MUST_FIX finding disposition, and must never be treated as an override or shipped past.
 - **Exit 0 (`status: "clean"` or `"overridden"`)** → continue to the Pre-Stage Detector Guard. On `"overridden"`, keep `$MUST_FIX_OVERRIDE_OUTPUT`: Step 4d's PR-body step appends a `## Operator override` section from it, and append `"must_fix_operator_override"` to `friction_highlights`.
 
 ### Pre-Stage Detector Guard

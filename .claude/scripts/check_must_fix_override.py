@@ -53,6 +53,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Inline copy of cw.review_debt's fingerprint_v1 constants — keep in sync.
@@ -155,9 +156,26 @@ def _parse_override(raw: object) -> tuple[str, set[Fingerprint]] | None:
     """Return ``(reviewed_sha, finding_ids)``, or None for a malformed record."""
     if not isinstance(raw, dict):
         return None
+    actor = raw.get("actor")
+    reason = raw.get("reason")
     reviewed_sha = raw.get("reviewed_sha")
     finding_ids = raw.get("finding_ids")
-    if not isinstance(reviewed_sha, str) or not isinstance(finding_ids, list):
+    recorded_at = raw.get("recorded_at")
+    if (
+        not isinstance(actor, str)
+        or not actor.strip()
+        or not isinstance(reason, str)
+        or not reason.strip()
+        or not isinstance(reviewed_sha, str)
+        or not reviewed_sha.strip()
+        or not isinstance(recorded_at, str)
+        or not recorded_at.strip()
+        or not isinstance(finding_ids, list)
+    ):
+        return None
+    try:
+        datetime.fromisoformat(recorded_at.strip().replace("Z", "+00:00"))
+    except ValueError:
         return None
     ids: set[Fingerprint] = set()
     for pair in finding_ids:
@@ -246,7 +264,19 @@ def check_must_fix_override(
     context = _load_context(context_path)
     owner = doc.get("ticket_id")
     ticket = context.get("ticket_id")
-    if isinstance(ticket, str) and owner != ticket:
+    owner_valid = isinstance(owner, str) and bool(owner.strip())
+    ticket_valid = isinstance(ticket, str) and bool(ticket.strip())
+    if not owner_valid or not ticket_valid:
+        status = "blocked" if blocking else "clean"
+        return _result(
+            status,
+            (
+                "review verdict and cw-context must both contain non-empty string"
+                " ticket_id values before an override can be evaluated"
+            ),
+            reviewed_sha=reviewed_sha,
+        )
+    if owner != ticket:
         return _result(
             "clean",
             f"review verdict belongs to {owner!r}, not {ticket!r}; stale or"

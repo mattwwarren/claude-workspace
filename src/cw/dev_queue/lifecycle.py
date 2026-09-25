@@ -945,6 +945,10 @@ def _reset_for_same_stage_requeue(task: TicketTask) -> None:
     resets it itself immediately after calling this helper; the approve path
     never regresses, so it has no analogous reset to make.
     """
+    # A same-stage REVIEW requeue starts a new review round. An override is
+    # bound to the prior verdict and must not survive that re-entry (#2205).
+    if task.stage == Stage.REVIEW:
+        task.must_fix_override = None
     transition_task_status(task, QueueItemStatus.PENDING)
     task.session_id = None
     task.stage_base_ref = None
