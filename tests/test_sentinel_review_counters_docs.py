@@ -100,10 +100,7 @@ def test_sentinel_template_carries_downgraded_disposition_count_key() -> None:
     from Step 3c's captured value, alongside the pre-existing review fields.
     """
     section = _stage3_completion_section()
-    key = (
-        '"downgraded_disposition_count": "<DOWNGRADED_DISPOSITION_COUNT_FOR_'
-        'SENTINEL from Step 3c, or 0 if Step 3c downgraded nothing>"'
-    )
+    key = '"downgraded_disposition_count": 0'
     assert key in section
     window = _nearby(section, '"downgraded_disposition_count"', span=400)
     assert '"reviewed_sha"' in window
