@@ -133,13 +133,15 @@ A line whose content is anything other than the exact grammar above (trailing te
 <!-- plan-stage-scan-round: N -->
 <!-- plan-stage-last-evaluated: operator_comment=<v>|body_sha=<v> -->
 <!-- plan-stage-settled: A1: ADOPTED -->
-<!-- plan-stage-resolutions-attempted: source=comment:<id>; outcome=started; lease_until=<UTC> -->
-<!-- plan-stage-resolutions-attempted: source=comment:<id>; outcome=failed|succeeded -->
+<!-- plan-stage-resolutions-attempted: source=<resolution-source>; outcome=started; lease_until=<UTC> -->
+<!-- plan-stage-resolutions-attempted: source=<resolution-source>; outcome=failed|succeeded -->
 <!-- plan-stage-approval-revoked: at=<UTC>; fingerprint=<sha> -->
 <!-- plan-stage-resolutions-applied: source=comment:<id>|body:<sha>|none -->
 ```
 
 `plan-stage-resolutions-applied` is appended after every settlement, attempt, and revocation line (or after the fingerprint/round-counter line when those are the only earlier lines). The `started` attempt form carries a lease; an expired lease is recoverable and does not by itself consume the one-shot revision cap. These marker forms and this ordering are the sole definition used by the appendix.
+
+`<resolution-source>` is exactly one of `comment:<id>` or `body:<sha>`; that same source placeholder applies to both the `started` and terminal (`failed|succeeded`) attempted-marker forms.
 
 **Round counter (`plan-stage-scan-round`, #1683).** `.cw/plan-draft.md`'s literal first line, in the form `<!-- plan-stage-scan-round: N -->`, cap 2, incremented once per park EXIT — only the three Step 4c EXIT-bullet outcomes ever increment it; AUTO-CONTINUE never does, since nothing is parked. The cap check additionally resets `N` to 0 on a detected tracker-state delta (#2154) — see the cap check's tracker-state-delta reset below and Step 1c.0's fingerprint-read step.
 

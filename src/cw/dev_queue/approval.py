@@ -104,7 +104,11 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | N
 
 
 def revoke_plan_approval(
-    ticket_id: str, client_name: str
+    ticket_id: str,
+    client_name: str,
+    *,
+    resolutions_source: str = "step_1a.0b",
+    reason: str = "preflight_resolutions_delta",
 ) -> dict[str, str | bool | None]:
     """Clear both durable PLAN approval fields for a resolutions revision.
 
@@ -124,6 +128,19 @@ def revoke_plan_approval(
         task.plan_approved_fingerprint = None
         if had_approval:
             save_dev_queue(store)
+            record_event(
+                OrchestratorEventType.PLAN_APPROVAL_REVOKED,
+                {
+                    "ticket_id": ticket_id,
+                    "client": client_name,
+                    "previous_fingerprint": previous_fingerprint,
+                    "revoked_at": datetime.now(UTC).isoformat(),
+                    "initiating_service": "cw dev-queue revoke-plan-approval",
+                    "resolutions_source": resolutions_source,
+                    "reason": reason,
+                },
+                correlation_id=ticket_id,
+            )
         return {
             "ticket_id": ticket_id,
             "client": client_name,

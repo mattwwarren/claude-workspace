@@ -13436,6 +13436,7 @@ class TestPlanApprovedFingerprintStamp:
     ) -> None:
         """Resolutions revision revokes durable row evidence under the queue lock."""
         from cw.dev_queue import revoke_plan_approval
+        from cw.events import read_events
 
         _seed_plan_pending(tmp_config_dir, tmp_path, session_id="sess-revoke")
         task = load_dev_queue().tasks[0]
@@ -13443,12 +13444,34 @@ class TestPlanApprovedFingerprintStamp:
         task.plan_approved_fingerprint = "a" * 64
         save_dev_queue(DevQueueStore(tasks=[task]))
 
-        result = revoke_plan_approval("GEN-500", "genhealth")
+        result = revoke_plan_approval(
+            "GEN-500",
+            "genhealth",
+            resolutions_source="comment:123",
+            reason="new_preflight_resolutions",
+        )
 
         assert result["cleared"] is True
         revoked = load_dev_queue().tasks[0]
         assert revoked.plan_approved_at is None
         assert revoked.plan_approved_fingerprint is None
+        audit = read_events(
+            event_types=[OrchestratorEventType.PLAN_APPROVAL_REVOKED]
+        )
+        assert len(audit) == 1
+        payload = audit[0].payload
+        assert payload == {
+            "ticket_id": "GEN-500",
+            "client": "genhealth",
+            "previous_fingerprint": "a" * 64,
+            "revoked_at": payload["revoked_at"],
+            "initiating_service": "cw dev-queue revoke-plan-approval",
+            "resolutions_source": "comment:123",
+            "reason": "new_preflight_resolutions",
+        }
+        assert isinstance(payload["revoked_at"], str)
+        assert datetime.fromisoformat(payload["revoked_at"])
+        assert audit[0].created_at is not None
 
     def test_migrate_fills_plan_approved_fingerprint_default(self) -> None:
         """migrate_dev_queue fills plan_approved_fingerprint=None (v36)."""
