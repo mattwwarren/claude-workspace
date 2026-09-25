@@ -763,6 +763,44 @@ Two consequences worth knowing:
   applying a rule that does not apply. Check for a marker-bearing source before
   acting on that finding — the reviewer cannot see whether injection happened.
 
+### Ship past a codex MUST_FIX park (#2205)
+
+A ticket parked `BLOCKED_ON_USER` with `blocked_reason: codex_must_fix_findings`
+has a blocking codex review verdict. When you decide to ship the branch anyway
+(a false positive you accept, a finding a follow-up ticket will fix), record
+that decision first — `requeue --stage finalize` alone no longer ships it,
+because FINALIZE's MUST_FIX Override Verification step re-reads the worktree's
+`.claude/review-verdict.json` and parks the row again with the same reason:
+
+```bash
+# 1. Record the override: durable on the row, audited as TICKET_APPROVED
+#    (actor, reason, reviewed SHA, finding identities). Stamp-only.
+uv run cw dev-queue approve <TICKET> -c <CLIENT> --override-must-fix \
+  --reason "false positive: X is guarded by Y; follow-up #NNNN"
+
+# 2. Ship it.
+uv run cw dev-queue requeue <TICKET> -c <CLIENT> --stage finalize
+```
+
+The override is bound to the verdict it was given for: its `reviewed_sha` and
+the `fingerprint_v1` identity of every MUST_FIX finding on it. FINALIZE honors
+it only while the live verdict still has that SHA and finding set **and** HEAD
+has not moved past that SHA. A new review round, a new commit, or a regress into
+REVIEW (which clears the override) voids it. Record a fresh override for the
+new verdict, or fix the findings. `approve --override-must-fix` refuses without
+changing anything when the row is not parked for `codex_must_fix_findings`, the
+verdict file is missing, unreadable, or owned by another ticket, the verdict is
+not blocking, `--reason` is blank, or a MUST_FIX finding has no diff anchor
+(`file: "N/A"`, no identity to bind). On a successful ship, the PR body carries
+an `## Operator override` section with the actor, reason, reviewed SHA, and the
+overridden findings.
+
+**This is not `cw review settle`.** Settle writes a ledger entry that suppresses
+a finding in *future* review rounds. It does nothing to a park that already
+happened, and a `requeue --stage finalize` runs no new review round. Use the
+override to ship past this verdict. Use settle so the next round stops raising
+the finding. They can be combined.
+
 ### Settle a review finding for good (#1838)
 
 When a codex review round raises a finding you reject, and the *next* round
