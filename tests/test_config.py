@@ -1339,6 +1339,63 @@ class TestMigrateCwState:
         assert session["liveness_attention_next_eligible_at"] is None
         assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
 
+    @staticmethod
+    def _v18_session(
+        sid: str, local_liveness: dict[str, object] | None
+    ) -> dict[str, object]:
+        return {
+            "id": sid,
+            "parent_session_id": None,
+            "worker_session_ids": [],
+            "last_result": None,
+            "cost_usd": None,
+            "cost_breakdown": None,
+            "lane": None,
+            "stage": None,
+            "consecutive_salvage_skips": 0,
+            "liveness_bucket": "live",
+            "consecutive_park_vetoes": 0,
+            "last_result_source": None,
+            "consecutive_sentinel_mismatch_vetoes": 0,
+            "liveness_attention_next_eligible_at": None,
+            "local_liveness": local_liveness,
+        }
+
+    def test_v18_to_v19_fills_local_liveness_backend_default(self) -> None:
+        """migrate_cw_state fills local_liveness.backend='aider' on v18 handles
+        that lack the key, and leaves a None handle untouched (#2369)."""
+        raw = {
+            "schema_version": 18,
+            "sessions": [
+                self._v18_session("s1", {"pid": 1, "start_time_ns": 1}),
+                self._v18_session("s2", None),
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        with_handle, without_handle = migrated["sessions"]
+        assert with_handle["local_liveness"] == {
+            "pid": 1,
+            "start_time_ns": 1,
+            "backend": "aider",
+        }
+        assert without_handle["local_liveness"] is None
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_v18_local_liveness_backend_preserved_idempotently(self) -> None:
+        """An existing local_liveness.backend value survives a migration pass
+        unchanged (#2369)."""
+        raw = {
+            "schema_version": 18,
+            "sessions": [
+                self._v18_session(
+                    "s1", {"pid": 1, "start_time_ns": 1, "backend": "opencode"}
+                ),
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        assert migrated["sessions"][0]["local_liveness"]["backend"] == "opencode"
+        assert migrate_cw_state(migrated) == migrated
+
     def test_v17_consecutive_sentinel_mismatch_vetoes_preserved_idempotently(
         self,
     ) -> None:
@@ -1446,9 +1503,11 @@ class TestMigrateCwState:
         }
         migrated = migrate_cw_state(raw)
         session = migrated["sessions"][0]
+        # pid/start_time_ns kept as-is; the v19 pass adds only the backend key.
         assert session["local_liveness"] == {
             "pid": 4242,
             "start_time_ns": 1782938077013950000,
+            "backend": "aider",
         }
 
     # -----------------------------------------------------------------------

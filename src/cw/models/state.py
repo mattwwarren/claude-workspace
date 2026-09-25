@@ -33,7 +33,8 @@ from cw.models.session import Session
 # v16: added Session.last_result_source (RFC 0012 S2, #1456).
 # v17: added Session.consecutive_sentinel_mismatch_vetoes (#1449).
 # v18: added Session.liveness_attention_next_eligible_at (#1858).
-CW_STATE_SCHEMA_VERSION = 18
+# v19: added LocalLivenessHandle.backend (#2369).
+CW_STATE_SCHEMA_VERSION = 19
 
 
 class CwState(BaseModel):

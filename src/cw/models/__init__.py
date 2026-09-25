@@ -20,7 +20,7 @@ each submodule only imports from those above it (no cycles):
   live) only because that file is already past the module-size convention.
 - ``session_inbox`` — ``SessionInboxMessage``, one operator message in a
   session's inbound mailbox (#2212). Also a DAG root.
-- ``session`` — ``LocalLivenessHandle``, ``Session``.
+- ``session`` — ``LocalLivenessBackend``, ``LocalLivenessHandle``, ``Session``.
 - ``client`` — ``ClientConfig`` and ``DEFAULT_AUTO_PURPOSES``.
 - ``state`` — ``CwState`` and ``CW_STATE_SCHEMA_VERSION`` (the DAG leaf).
 
@@ -86,7 +86,7 @@ from cw.models.park_comment_marker import (
     ParkCommentMarker,
     read_park_comment_marker,
 )
-from cw.models.session import LocalLivenessHandle, Session
+from cw.models.session import LocalLivenessBackend, LocalLivenessHandle, Session
 from cw.models.session_inbox import SessionInboxMessage
 from cw.models.state import CW_STATE_SCHEMA_VERSION, CwState
 from cw.models.tasks import (
@@ -159,6 +159,7 @@ __all__ = [
     "LaneConfig",
     "LastResultSource",
     "LivenessBucket",
+    "LocalLivenessBackend",
     "LocalLivenessHandle",
     "OperatorChannelForward",
     "OrchestratorConfig",
