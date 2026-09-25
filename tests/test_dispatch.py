@@ -3830,7 +3830,16 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
         assert daemon.spawn_calls == []
         task = load_dev_queue().tasks[0]
         assert task.status == QueueItemStatus.PENDING
+        # Full no-charge fallback state (#2396 review SHOULD_FIX): the RELEASE
+        # path (defer_for) undoes the claim's own charges rather than billing
+        # a failure -- attempts decremented back, unproductive_attempts and
+        # spawn_error_count untouched, session_id cleared, and next_eligible_at
+        # stamped to prove the deferred-release branch actually ran.
         assert task.attempts == 0
+        assert task.unproductive_attempts == 0
+        assert task.spawn_error_count == 0
+        assert task.session_id is None
+        assert task.next_eligible_at is not None
 
 
 # ---------------------------------------------------------------------------
