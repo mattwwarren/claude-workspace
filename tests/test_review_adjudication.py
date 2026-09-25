@@ -511,6 +511,33 @@ class TestVerifyFixedDispositions:
             verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
         )
         assert result.downgraded_disposition_count == 0
+        # #2009: a confirmed zero on the sentinel block, not "not reported".
+        assert result.review.downgraded_disposition_count == 0
+
+    def test_downgrade_count_is_mirrored_onto_the_sentinel_review_block(
+        self,
+    ) -> None:
+        # #2009: the embedded sentinel `Review` carries the same count as the
+        # top-level field, so the artifact cannot disagree with itself.
+        verdict = _verdict(
+            _accepted(
+                _make_finding(file="src/cw/other.py", line_start=10, line_end=10),
+                disposition="fixed",
+            )
+        )
+        assert verdict.review.downgraded_disposition_count is None
+
+        result = verify_fixed_dispositions(
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
+        )
+
+        assert result.review.downgraded_disposition_count == 1
+        assert result.review.downgraded_disposition_count == (
+            result.downgraded_disposition_count
+        )
+        # The rest of the frozen block is untouched.
+        assert result.review.must_fix_initial == verdict.review.must_fix_initial
+        assert result.review.rejected_count == verdict.review.rejected_count
 
     def test_downgraded_count_is_fresh_not_accumulated(self) -> None:
         # #2000: computed from THIS call's own downgrades only. Stage 3 calls

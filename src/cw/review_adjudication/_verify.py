@@ -149,6 +149,16 @@ def verify_fixed_dispositions(
             },
             correlation_id=ticket_id,
         )
+    # #2009: mirrored onto the embedded sentinel `Review` block too, so the
+    # two copies in one artifact are identical by construction — the same
+    # treatment `rejected_count` gets at consolidate time.
+    review = verdict.review.model_copy(
+        update={"downgraded_disposition_count": downgraded}
+    )
     return verdict.model_copy(
-        update={"accepted": accepted, "downgraded_disposition_count": downgraded}
+        update={
+            "accepted": accepted,
+            "downgraded_disposition_count": downgraded,
+            "review": review,
+        }
     )
