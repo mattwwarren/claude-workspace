@@ -6,7 +6,9 @@ up to :data:`_MAX_FIX_CYCLES` cycles of ``codex exec --sandbox workspace-write``
 fix invocations, committing each cycle's real changes and re-running the full
 per-role review pass to see which findings cleared. The loop exits clean the
 moment no MUST_FIX finding remains open, or parks the ticket when the cap (or the
-shared wall-clock budget) is exhausted.
+shared wall-clock budget) is exhausted — or earlier, when the divergence guard in
+``codex_fix_loop_divergence`` sees the loop growing the diff without resolving
+any originally-found MUST_FIX (#2394).
 
 This is the multi-pass counterpart to ``run_review``'s single pass (#1236) built
 on the executor-neutral finding contract (#1237). ``CodexExecutor.spawn()``'s
@@ -59,6 +61,14 @@ from cw.codex_fix_loop_convergence import (
     _survivors_only_verdict,
     _track_open_findings,
 )
+from cw.codex_fix_loop_divergence import (
+    emit_divergence_event,
+    initial_divergence_state,
+    is_diverging,
+    net_lines_for_commit,
+    record_divergence_cycle,
+    render_divergence_report,
+)
 from cw.codex_fix_loop_push import push_and_verify_head
 from cw.codex_review import (
     _CATEGORY_TO_REASON,
@@ -67,6 +77,7 @@ from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_FIX_SCOPE_VIOLATION,
     CODEX_MUST_FIX_FINDINGS,
+    FIX_LOOP_DIVERGING,
     _capture_diff,
     _classify_codex_failure,
     _load_sensitive_hits,
@@ -88,11 +99,13 @@ from cw.executor_diagnostics import (
 from cw.local_runner import resolve_tier
 from cw.review_debt import dedupe_debt
 from cw.review_findings import write_review_verdict
+from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult, Health, Review, ScopeTier
+    from cw.codex_fix_loop_divergence import DivergenceState
     from cw.codex_review import _SensitiveHit
     from cw.codex_review._context import _ReviewPassInputs
     from cw.codex_runner import CodexRunner
@@ -509,12 +522,14 @@ def _park_survivors(
     retry_eligible: bool | None,
     snapshot: _PersistedSnapshot,
     had_real_commit: bool,
+    extra_details: str | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict]:
-    """Park a still-blocking review (cap or budget exhausted) with survivor detail.
+    """Park a still-blocking review (cap, budget, or divergence) with survivor detail.
 
     Builds the terminal ``Review`` and the survivor-only verdict, renders the
-    verdict comment into ``Blocker.details``, and sets ``fix_loop_escalated`` on
-    the health block when the cycle count reached the escalation threshold.
+    verdict comment into ``Blocker.details`` (followed by *extra_details*, when
+    given), and sets ``fix_loop_escalated`` on the health block when the cycle
+    count reached the escalation threshold.
 
     Finalizes the persisted snapshot from the ORIGINAL *verdict* argument, not
     the ``survivors`` object rebuilt below: ``_survivors_only_verdict``'s update
@@ -531,14 +546,17 @@ def _park_survivors(
         had_real_commit=had_real_commit,
     )
     survivors = _survivors_only_verdict(verdict, open_findings, review)
+    # Literal True: reached only after the fix loop has actually engaged
+    # (survivors are cross-cycle-tracked open findings), so the fix loop
+    # was, by construction, enabled for this run.
+    details = render_verdict_comment(survivors, fix_loop_enabled=True)
+    if extra_details:
+        details = f"{details}\n\n{extra_details}"
     blocked = make_codex_blocked(
         ticket_id=task.ticket_id,
         worktree=worktree,
         reason=reason,
-        # Literal True: reached only after the fix loop has actually engaged
-        # (survivors are cross-cycle-tracked open findings), so the fix loop
-        # was, by construction, enabled for this run.
-        details=render_verdict_comment(survivors, fix_loop_enabled=True),
+        details=details,
         retry_eligible=retry_eligible,
     )
     health = blocked.health.model_copy(
@@ -881,6 +899,56 @@ def _stamp_debt(
     return verdict.model_copy(update={"debt": dedupe_debt(list(debt_ledger.values()))})
 
 
+def _cycle_exit(
+    *,
+    result: AutoDevResult,
+    task: TicketTask,
+    worktree: Path,
+    session_id: str,
+    verdict: ReviewVerdict,
+    open_findings: dict[_OpenFindingKey, AcceptedFinding],
+    cycle0_review: Review,
+    cycle: int,
+    snapshot: _PersistedSnapshot,
+    had_real_commit: bool,
+    divergence_state: DivergenceState,
+) -> tuple[AutoDevResult, ReviewVerdict] | None:
+    """Return this cycle's terminal result, or ``None`` to run another cycle.
+
+    Convergence is checked BEFORE divergence (#2394): a cycle that cleared
+    every open finding exits clean even if the divergence history would
+    otherwise have tripped on it.
+    """
+    if not open_findings:
+        return _clean_exit(
+            result,
+            verdict,
+            cycle0_review,
+            open_findings,
+            cycle,
+            snapshot,
+            session_id=session_id,
+            had_real_commit=had_real_commit,
+        )
+    if not is_diverging(divergence_state):
+        return None
+    emit_divergence_event(state=divergence_state, ticket_id=task.ticket_id)
+    return _park_survivors(
+        task=task,
+        worktree=worktree,
+        session_id=session_id,
+        reason=FIX_LOOP_DIVERGING,
+        verdict=verdict,
+        open_findings=open_findings,
+        cycle0_review=cycle0_review,
+        cycle_count=cycle,
+        retry_eligible=None,
+        snapshot=snapshot,
+        had_real_commit=had_real_commit,
+        extra_details=render_divergence_report(divergence_state),
+    )
+
+
 def run_review_with_fix_loop(
     *,
     runner: CodexRunner,
@@ -956,6 +1024,14 @@ def run_review_with_fix_loop(
     )
     verdict = _stamp_debt(verdict, debt_ledger)
     snapshot = _persist_cycle_snapshot(verdict, session_id=session_id, cycle=0)
+    _, pre_loop_diff_lines = _parse_numstat_totals(
+        git_output(["diff", "--numstat", f"{default_branch}...HEAD"], cwd=worktree)
+    )
+    divergence_state = initial_divergence_state(
+        original_keys=frozenset(open_findings),
+        pre_loop_diff_lines=pre_loop_diff_lines,
+        pre_loop_head_sha=verdict.reviewed_sha,
+    )
     # #1723: true iff at least one fix cycle so far produced a real commit
     # (OR'd across cycles) — distinguishes a genuine fix from a fix loop
     # that converged purely because every cycle's fix invocation was a no-op.
@@ -1029,6 +1105,7 @@ def run_review_with_fix_loop(
                 ),
                 None,
             )
+        pre_open_keys = frozenset(open_findings)
         open_findings = _track_open_findings(
             open_findings,
             verdict.accepted,
@@ -1042,17 +1119,28 @@ def run_review_with_fix_loop(
         )
         verdict = _stamp_debt(verdict, debt_ledger)
         snapshot = _persist_cycle_snapshot(verdict, session_id=session_id, cycle=cycle)
-        if not open_findings:
-            return _clean_exit(
-                result,
-                verdict,
-                cycle0_review,
-                open_findings,
-                cycle,
-                snapshot,
-                session_id=session_id,
-                had_real_commit=had_real_commit,
-            )
+        divergence_state = record_divergence_cycle(
+            divergence_state,
+            cycle=cycle,
+            pre_open_keys=pre_open_keys,
+            post_open_keys=frozenset(open_findings),
+            net_lines_added=net_lines_for_commit(worktree, commit_sha),
+        )
+        cycle_exit = _cycle_exit(
+            result=result,
+            task=task,
+            worktree=worktree,
+            session_id=session_id,
+            verdict=verdict,
+            open_findings=open_findings,
+            cycle0_review=cycle0_review,
+            cycle=cycle,
+            snapshot=snapshot,
+            had_real_commit=had_real_commit,
+            divergence_state=divergence_state,
+        )
+        if cycle_exit is not None:
+            return cycle_exit
 
     return _park_survivors(
         task=task,

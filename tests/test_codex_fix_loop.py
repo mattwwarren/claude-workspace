@@ -31,6 +31,7 @@ from cw.codex_review import (
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_UNPARSEABLE,
+    FIX_LOOP_DIVERGING,
     render_verdict_comment,
     run_review,
     synthesize_codex_review_result,
@@ -38,9 +39,11 @@ from cw.codex_review import (
 from cw.codex_review import core as codex_review_core
 from cw.codex_review._capability import _PROBE_ARGV
 from cw.codex_runner import CodexRunResult
+from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
+from cw.models.enums import OrchestratorEventType
 from cw.review_finding_dispositions import (
     FindingDisposition,
     _disposition_key,
@@ -1231,6 +1234,96 @@ class TestFixLoopCapAndEscalation:
         assert any(
             "cycle-1 findings snapshot write failed" in r.getMessage()
             for r in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestFixLoopDivergence — #2394
+# ---------------------------------------------------------------------------
+
+_GROWN_LINES_PER_CYCLE = 100
+
+
+def _grown_content(cycle: int) -> str:
+    return "".join(f"grown_{cycle}_{i} = {i}\n" for i in range(_GROWN_LINES_PER_CYCLE))
+
+
+def _grown_finding(cycle: int) -> dict[str, object]:
+    """A MUST_FIX anchored in the file fix cycle *cycle* itself created."""
+    return {
+        **_finding_dict(
+            severity="MUST_FIX",
+            line=1,
+            evidence=f"grown_{cycle}_0 = 0",
+            summary=f"self-inflicted issue from cycle {cycle}",
+        ),
+        "file": f"fix{cycle}.py",
+    }
+
+
+def _growing_editors(cycles: int) -> list[_FixBehavior]:
+    return [
+        _editor(filename=f"fix{cycle}.py", content=_grown_content(cycle))
+        for cycle in range(1, cycles + 1)
+    ]
+
+
+class TestFixLoopDivergence:
+    def test_diverging_loop_parks_early_with_fix_loop_diverging(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-diverge")
+        pre_loop_sha = git_in(worktree, "rev-parse", "HEAD")
+        # Cycle-0's MUST_FIX never resolves; every re-review raises a fresh
+        # delta-anchored finding on the code the latest fix cycle just added.
+        runner = _FixLoopRunner(
+            [_MF_DOC, *(_doc([_MF_A, _grown_finding(c)]) for c in range(1, 6))],
+            fix_behaviors=_growing_editors(_MAX_FIX_CYCLES),
+        )
+        out, out_verdict = _run_loop(runner, worktree, session_id="s-diverge")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == FIX_LOOP_DIVERGING
+        assert runner.fix_calls == 2
+        assert runner.fix_calls < _MAX_FIX_CYCLES
+        assert out.review.fix_cycles_used == 2
+        assert out_verdict is not None
+        assert out_verdict.blocking is True
+        details = out.blocker.details
+        assert "BLOCKING" in details
+        assert pre_loop_sha in details
+        assert "cycle 1: MUST_FIX 1→2, originally-resolved 0, net lines +100" in details
+        assert "cycle 2: MUST_FIX 2→2, originally-resolved 0, net lines +100" in details
+        assert "(cumulative 200)" in details
+        events = read_events(
+            event_types=[OrchestratorEventType.FIX_LOOP_DIVERGENCE_DETECTED]
+        )
+        assert len(events) == 1
+        assert events[0].correlation_id == "T-1"
+        assert events[0].payload["pre_loop_head_sha"] == pre_loop_sha
+
+    def test_converging_loop_with_growth_never_trips_divergence(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-converge-growth")
+        # Stall, progress, stall, clean — the diff grows 100 lines every
+        # cycle, but no two stalled cycles are ever consecutive.
+        runner = _FixLoopRunner(
+            [_MF_AB_DOC, _MF_AB_DOC, _MF_DOC, _MF_DOC, _CLEAN_DOC],
+            fix_behaviors=_growing_editors(4),
+        )
+        out, _verdict = _run_loop(runner, worktree, session_id="s-converge-growth")
+
+        assert out.status == "stage_complete"
+        assert out.blocker is None
+        assert out.review.fix_cycles_used == 4
+        assert runner.fix_calls == 4
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.FIX_LOOP_DIVERGENCE_DETECTED]
+            )
+            == []
         )
 
 
