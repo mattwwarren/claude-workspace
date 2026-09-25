@@ -1995,6 +1995,15 @@ class TestConciergeAndEscalationModelSurface:
         cfg = OrchestratorConfig(ssh_key_gate_enabled=False)
         assert cfg.ssh_key_gate_enabled is False
 
+    # -- GitHub #2396 occupancy_gate operator escape hatch --------------------
+
+    def test_orchestrator_config_occupancy_gate_enabled_defaults_true(self) -> None:
+        assert OrchestratorConfig().occupancy_gate_enabled is True
+
+    def test_orchestrator_config_occupancy_gate_enabled_accepts_false(self) -> None:
+        cfg = OrchestratorConfig(occupancy_gate_enabled=False)
+        assert cfg.occupancy_gate_enabled is False
+
 
 class TestReviewRecipeKeyValidation:
     """RFC 0010 P4 (#1099): the review_recipes recognized-key set gains three
