@@ -48,7 +48,7 @@ from cw.auto_dev_result import (
     parse_stdout,
     queue_status_for_terminal_sentinel,
 )
-from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
+from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED, FIX_LOOP_DIVERGING
 from cw.models import QueueItemStatus
 
 # ---------------------------------------------------------------------------
@@ -1001,6 +1001,7 @@ class TestKnownBlockerReasons:
     def test_registry_covers_the_codex_review_reasons(self) -> None:
         """Same lockstep for cw.codex_review._const's blocker reasons."""
         assert CODEX_MUST_FIX_MECHANICALLY_REJECTED in KNOWN_BLOCKER_REASONS
+        assert FIX_LOOP_DIVERGING in KNOWN_BLOCKER_REASONS
 
 
 # ---------------------------------------------------------------------------

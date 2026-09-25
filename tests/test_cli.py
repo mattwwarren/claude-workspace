@@ -22,7 +22,11 @@ from click.testing import CliRunner, Result
 from freezegun import freeze_time
 
 from cw._util import claude_project_dir
-from cw.auto_dev_result import _CLOSE_SENTINEL, _OPEN_SENTINEL
+from cw.auto_dev_result import (
+    _CLOSE_SENTINEL,
+    _OPEN_SENTINEL,
+    BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
+)
 from cw.cli import (
     _complete_client,
     _complete_session,
@@ -3111,18 +3115,20 @@ class TestSignalStop:
 
         assert daemon.stop_calls == ["sfref-1189-race"]
 
-    def test_signal_stop_schema_version_unsupported_marks_failed(
+    def test_signal_stop_schema_version_unsupported_reverts_to_pending_under_cap(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """schema_version_unsupported sentinel → task FAILED on first occurrence.
+        """schema_version_unsupported sentinel with attempts < cap → task PENDING.
 
-        Regression for GitHub issue #263 Bug A: a BlockedResult with
-        reason='schema_version_unsupported' is a deterministic failure —
-        retrying will not produce a different schema_version in the running
-        parser binary.  Must be routed to FAILED (not PENDING).
+        GitHub #2401: a deterministic parse failure (retrying will not
+        produce a different schema_version in the running parser binary) no
+        longer lands the task terminal FAILED on the first occurrence -- it
+        now shares the same evidence-based attempt cap as validation_failed
+        (mirrors test_signal_stop_validation_failed_reverts_to_pending_under_
+        cap), landing FAILED only once the cap is reached.
         """
         import datetime as dt
 
@@ -3136,6 +3142,7 @@ class TestSignalStop:
             "worktree-263-schema-unsupported",
             surface_ref="sfref-263-schema",
         )
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
         dev_store = DevQueueStore(
             tasks=[
                 TicketTask(
@@ -3179,15 +3186,101 @@ class TestSignalStop:
         assert result.exit_code == 0, result.output
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+    def test_signal_stop_schema_version_unsupported_marks_failed_at_cap(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """schema_version_unsupported sentinel with attempts >= cap → task FAILED.
+
+        GitHub #2401: once a task hits the shared hard cap
+        (_VALIDATION_FAILED_MAX_ATTEMPTS=3) on repeated identical
+        deterministic-parse rejections, it must be marked FAILED to stop
+        infinite re-dispatch -- mirrors
+        test_signal_stop_validation_failed_marks_failed_at_cap. Preserves the
+        #1273 leaked-daemon-stop coverage the pre-#2401 unconditional-FAILED
+        test carried.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+        from cw.reconcile import _VALIDATION_FAILED_MAX_ATTEMPTS
+
+        worktree, session = self._setup_headless_session(
+            tmp_path,
+            "sess-263-schema-unsupported-cap",
+            "worktree-263-schema-unsupported-cap",
+            surface_ref="sfref-263-schema",
+        )
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        # Prefix must match surface_ref="sfref-263-schema" (stale-hook guard,
+        # sessions.py ~:731-737) or the hook is dropped before it's parsed.
+        claude_session_id = "sfref-263-schema-uuid"
+        fake_home = tmp_path / "fake-home-263-schema-unsupported-cap"
+        _write_stop_hook_transcript(
+            fake_home,
+            worktree,
+            claude_session_id,
+            _SENTINEL_263_SCHEMA_VERSION_UNSUPPORTED,
+        )
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
         # GitHub #1189: this same call lands the task terminal-FAILED via a
         # BlockedResult, so `routed` must be False and signal_stop must NOT
-        # also complete the session (pre-fix this asserted COMPLETED).
+        # also complete the session.
         assert updated.status != SessionStatus.COMPLETED
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.FAILED
         assert daemon.stop_calls == ["sfref-263-schema"]
+        # GitHub #2401: every FAILED/abandoned landing now persists the
+        # rejected sentinel (closes the #1266 gap for this branch).
+        assert task.last_blocked_result is not None
+        assert task.last_blocked_result["blocker"]["reason"] == (
+            BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED
+        )
 
     def test_signal_stop_unknown_blocker_reason_marks_failed(
         self,
@@ -5330,7 +5423,7 @@ _SENTINEL_316_AMBIGUITIES_PENDING_V2 = (
 
 # Sentinel for GitHub issue #263 regression tests.
 # schema_version=99 is not in SUPPORTED_SCHEMA_VERSIONS, so parse_stdout
-# returns BlockedResult(reason="schema_version_unsupported").
+# returns BlockedResult(reason=BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED).
 _SENTINEL_263_SCHEMA_VERSION_UNSUPPORTED = (
     "<<<AUTO_DEV_RESULT\n"
     '{"schema_version": 99, "status": "shipped"}\n'
@@ -7147,6 +7240,7 @@ def _write_staged_clients_yaml_for_test(
         f"  {client_name}:\n"
         f"    workspace_path: {workspace_path}\n"
         f"    default_branch: main\n"
+        f"    blocked_result_requeue_enabled: true\n"
         f"    pipeline:\n"
         f"      stages: [plan, impl, review, finalize]\n"
     )

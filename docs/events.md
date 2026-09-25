@@ -1872,8 +1872,9 @@ and reconcile's local/idle/phantom sweeps)
 terminal `FAILED` when an unparseable/unrecognized-reason `BlockedResult`
 (the catch-all: `status_unknown`, `multiple_result_blocks`, or any
 unrecognized `blocker.reason` — not the deterministic-parse-failure or
-`validation_failed` branches, which are unconditional) arrives but the
-session's transcript is still actively advancing
+`validation_failed` branches, which are instead bounded by the evidence-based
+attempt cap described in `sentinel.blocked_result_requeued` below, GitHub
+#2401) arrives but the session's transcript is still actively advancing
 (`0 <= transcript_age_seconds < TRANSCRIPT_LIVENESS_WINDOW_SECONDS`, 300s).
 Sibling closure to #1281's `session.sentinel_stage_mismatch_vetoed` (same
 incident shape, a different route to it): a malformed sentinel frame is
@@ -1885,6 +1886,41 @@ counter/cap bounding repeat vetoes against the same session.
 `transcript_age_seconds` is the measured staleness at veto time;
 `blocker_reason` is the sentinel's verbatim (unrecognized) `blocker.reason`.
 `correlation_id` is the `ticket_id`. Not in `_DEFAULT_OPERATOR_EVENT_TYPES`.
+
+### `sentinel.blocked_result_requeued`
+
+**Emitter:** `_requeue_blocked_result_under_cap` in `cw.reconcile._shared`
+(called from `_route_blocked_result_to_task` for both the deterministic-parse
+and `validation_failed` branches)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "session_id": "<str>",
+  "blocker_reason": "<str>",
+  "attempts": "<int>",
+  "attempt_cap": "<int>"
+}
+```
+**Semantics:** GitHub #2401. Closes the #2077 incident: a live worker's
+`schema_version_unsupported` `BlockedResult` landed its task terminal FAILED
+on the first occurrence, with no diagnostic, while the worker was still
+running — bypassing the #1406 liveness veto above, which only ever covered
+the unrecognized-reason catch-all. Emitted whenever a deterministic-parse or
+`validation_failed` `BlockedResult` re-queues a RUNNING task to PENDING
+(clearing `target.session_id`) because `target.attempts` is still under
+`_VALIDATION_FAILED_MAX_ATTEMPTS` (shared with `validation_failed`, not
+renamed). The cap is evidence-based — a repeated identical rejection count,
+never a transcript-age or clock comparison (ADR-0014) — deliberately
+distinct from `session.sentinel_liveness_vetoed`'s transcript-liveness
+mechanism, which this ticket does not extend. Once `attempts` reaches the
+cap, the branch instead lands terminal FAILED/abandoned and persists the
+rejected sentinel to `TicketTask.last_blocked_result` (closing the #1266 gap
+for both branches); a re-queue rejects nothing, so this event is the durable
+trace for the non-terminal outcome. `blocker_reason` is the sentinel's
+verbatim `blocker.reason`; `attempts` is `target.attempts` at decision time.
+`correlation_id` is the `ticket_id`.
 
 ### `gate.auto_approved`
 
@@ -2109,6 +2145,51 @@ Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
 (`orchestrator_config.py`), for the same reason: a gate refusal is the
 expected steady-state outcome on any branch with pre-existing debt, and the
 debt itself is already surfaced on the posted review comment.
+
+`correlation_id` is the `ticket_id`.
+
+### `review.fix_loop_divergence_detected`
+
+**Emitter:** `emit_divergence_event` (`cw.codex_fix_loop_divergence`),
+reached from `run_review_with_fix_loop` (`cw.codex_fix_loop`) at most once per
+run, immediately before the loop parks with `blocker.reason =
+"fix_loop_diverging"`.
+**Payload:**
+```json
+{
+  "pre_loop_head_sha": "<str>",
+  "cycles": [
+    {
+      "cycle": 1,
+      "must_fix_before": 1,
+      "must_fix_after": 2,
+      "originally_resolved": 0,
+      "net_lines_added": 100,
+      "cumulative_net_lines_added": 100
+    }
+  ],
+  "cumulative_net_lines_added": 200,
+  "stall_streak": 2
+}
+```
+**Semantics:** GitHub #2394. The fix loop resolved none of the originally-found
+(cycle-0) MUST_FIX findings for 2 consecutive cycles while its cumulative fix
+churn (added + removed lines across the cycles' commits, via `git diff
+--numstat`) exceeded `max(150, 0.5 × the pre-loop branch diff)`. Both
+conditions are required. The loop parks before reaching its cycle cap instead
+of spending the remaining cycles growing the diff further.
+
+`pre_loop_head_sha` is the cycle-0 reviewed head, so an operator can reset to
+it and discard every fix cycle's commits. `cycles` has one entry per fix cycle
+that ran. Resolving a finding the loop itself introduced does not count as
+progress. `cumulative_net_lines_added` never resets. Only `stall_streak`
+resets when a cycle resolves an original finding.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
+(`orchestrator_config.py`), matching `review.treadmill_detected`. The park
+itself already reaches the operator through the `BLOCKED_ON_USER`
+`task.transition` every fix-loop park emits, whatever its `blocker.reason`, and
+the same per-cycle breakdown is appended to `blocker.details`.
 
 `correlation_id` is the `ticket_id`.
 

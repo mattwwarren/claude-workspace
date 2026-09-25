@@ -380,6 +380,14 @@ class OrchestratorEventType(StrEnum):
     # tick), so a fresh session is dispatched on retry -- there is no
     # same-session repeat-veto risk to bound.
     SESSION_SENTINEL_LIVENESS_VETOED = "session.sentinel_liveness_vetoed"
+    # GitHub #2401 -- emitted by the new shared _requeue_blocked_result_under_
+    # cap helper whenever a deterministic-parse or validation_failed
+    # BlockedResult re-queues a RUNNING task to PENDING under the shared
+    # attempt cap. Sibling to SESSION_SENTINEL_LIVENESS_VETOED above, but the
+    # gating evidence is a repeated-rejection COUNT, never a clock/transcript-
+    # age comparison (ADR-0014) -- the two vetoes are deliberately distinct
+    # mechanisms and this ticket does not extend or widen the liveness veto.
+    SENTINEL_BLOCKED_RESULT_REQUEUED = "sentinel.blocked_result_requeued"
     # GitHub #1437 — ssh_key_gate operator escape hatch. Emitted by
     # _emit_ssh_key_bypass when the SSH-agent-key preflight probe (#927)
     # reports unavailable but the operator has set
@@ -440,6 +448,16 @@ class OrchestratorEventType(StrEnum):
     # REVIEW_FINDING_VOIDED above: the refusal is a mechanical decision nobody
     # asked to see, and this event is the only durable record it happened.
     REVIEW_TREADMILL_DETECTED = "review.treadmill_detected"
+    # GitHub #2394 -- the fix loop grew the diff for 2+ consecutive cycles
+    # while resolving none of the originally-found MUST_FIX findings. Sibling
+    # of REVIEW_TREADMILL_DETECTED (same review.* namespace, same "durable
+    # record of a mechanical decision nobody asked to see" rationale) but
+    # loop-wide rather than per-finding. Deliberately NOT added to
+    # _DEFAULT_OPERATOR_EVENT_TYPES, matching REVIEW_TREADMILL_DETECTED:
+    # attention-stream visibility for the park itself already comes from the
+    # BLOCKED_ON_USER TASK_TRANSITION every fix-loop park emits regardless of
+    # blocker.reason.
+    FIX_LOOP_DIVERGENCE_DETECTED = "review.fix_loop_divergence_detected"
     # GitHub #1838 -- one re-derived review finding was suppressed because a
     # prior round's operator adjudication had already REJECTED it. Namespaced
     # by its owning module (review_finding_dispositions.py), same convention as

@@ -50,7 +50,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import read_events, record_event
-from cw.exceptions import USAGE_LIMIT_RE
+from cw.exceptions import USAGE_LIMIT_RE, CwError
 from cw.executor_diagnostics import redact
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
@@ -819,6 +819,13 @@ _SALVAGE_TERMINAL_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
 # would read as productive and never trip a ceiling keyed on productivity.
 # #1750 moved only the GLOBAL ceiling (dispatch/claim.py, concierge.py) to the
 # new counter; this cap stays on the total claim count by design. See #756.
+# GitHub #2401: also gates the deterministic-parse branch below
+# (_DETERMINISTIC_PARSE_FAILURES) since the #2077 incident (session
+# f1dd7a30) showed a schema_version_unsupported BlockedResult landing FAILED
+# on the first occurrence can kill a worker that is, in fact, still working
+# -- the same "may have committed real work each time" rationale applies
+# identically to a deterministic parse failure as to validation_failed, so a
+# same-occurrence-count cap replaces the prior immediate-abandon there too.
 _VALIDATION_FAILED_MAX_ATTEMPTS = 3
 _DETERMINISTIC_PARSE_FAILURES: frozenset[str] = frozenset(
     {BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED}
@@ -1797,6 +1804,70 @@ def _apply_sentinel_to_task(
         )
 
 
+def _requeue_blocked_result_under_cap(
+    target: TicketTask, session: Session, sentinel: BlockedResult
+) -> bool:
+    """Land FAILED at the attempt cap, else re-queue to PENDING (GitHub #2401).
+
+    Shared by the deterministic-parse and validation_failed branches of
+    :func:`_route_blocked_result_to_task`, which became identical once both
+    were put under ``_VALIDATION_FAILED_MAX_ATTEMPTS``: a worker that keeps
+    emitting the same rejected sentinel may well have committed real work
+    each time, so the cap is evidence-based (repeated identical rejection),
+    never a transcript-age/clock comparison (ADR-0014).
+
+    At the cap: persists the rejected sentinel to ``last_blocked_result``
+    (#1266) and lands terminal FAILED/abandoned, returning False. Under the
+    cap: re-queues to PENDING, clears ``target.session_id``, and emits
+    ``SENTINEL_BLOCKED_RESULT_REQUEUED`` -- a re-queue rejects nothing, so
+    there is no rejected sentinel for the field, but the event still leaves
+    an operator-visible trace of what happened -- returning True.
+    """
+    if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
+        target.last_blocked_result = sentinel.model_dump(mode="json")
+        transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
+        return False
+    transition_task_status(target, QueueItemStatus.PENDING)
+    target.session_id = None
+    record_event(
+        OrchestratorEventType.SENTINEL_BLOCKED_RESULT_REQUEUED,
+        {
+            "ticket_id": target.ticket_id,
+            "client": target.client,
+            "session_id": session.id,
+            "blocker_reason": sentinel.blocker.reason,
+            "attempts": target.attempts,
+            "attempt_cap": _VALIDATION_FAILED_MAX_ATTEMPTS,
+        },
+        correlation_id=target.ticket_id,
+    )
+    return True
+
+
+def _deterministic_parse_requeue_enabled(
+    target: TicketTask, sentinel: BlockedResult
+) -> bool:
+    """Return the client's #2401 rollout setting, logging disabled shadowing."""
+    try:
+        enabled = get_client(target.client).blocked_result_requeue_enabled
+    except CwError:
+        # Fail closed when a legacy/local queue row has no usable clients.yaml
+        # entry; rollout must be explicitly enabled for the client.
+        enabled = False
+    if not enabled:
+        _log.warning(
+            "sentinel.blocked_result_requeue_shadowed: client=%s ticket=%s; "
+            "reason=%s attempts=%s attempt_cap=%s; deterministic-parse requeue "
+            "would apply, but blocked_result_requeue_enabled is false",
+            target.client,
+            target.ticket_id,
+            sentinel.blocker.reason,
+            target.attempts,
+            _VALIDATION_FAILED_MAX_ATTEMPTS,
+        )
+    return enabled
+
+
 def _route_blocked_result_to_task(
     target: TicketTask,
     session: Session,
@@ -1807,10 +1878,11 @@ def _route_blocked_result_to_task(
     """Route a malformed/unparseable BlockedResult to a RUNNING task's status.
 
     A BlockedResult means the sentinel failed to parse or was malformed.
-    Deterministic parse failures are terminal FAILED; validation_failed and
-    transient failures re-queue to PENDING (clearing session_id) until the
-    attempt cap. Extracted from _apply_sentinel_to_task to keep that function
-    under the branch cap (#918).
+    Deterministic parse failures and validation_failed both re-queue to
+    PENDING (clearing session_id) under a shared evidence-based attempt cap,
+    landing FAILED only once the cap is reached (GitHub #2401); transient
+    failures re-queue unconditionally. Extracted from _apply_sentinel_to_task
+    to keep that function under the branch cap (#918).
 
     Returns False when this call just landed the task terminal-FAILED (the
     caller must not also complete the owning session on that outcome), True
@@ -1822,29 +1894,28 @@ def _route_blocked_result_to_task(
     route to the same incident -- a still-advancing worker whose sentinel
     merely failed to *parse* was landed terminal-FAILED (and, via #1273's
     ``landed_terminal``, had its daemon stopped) while it was still working.
-    Only the catch-all is guarded: a deterministic parse failure reproduces
-    identically no matter how much further the worker gets, and
-    validation_failed already carries its own attempt-cap tolerance. ``now``
-    is the caller's sweep timestamp; it defaults to wall-clock ``now``.
+    Only the catch-all is guarded by transcript liveness: a deterministic
+    parse failure and validation_failed are instead bounded by the
+    evidence-based attempt cap above (ADR-0014 forbids widening the
+    transcript-age veto to a second branch; #2401 Plan Soundness Review).
+    ``now`` is the caller's sweep timestamp; it defaults to wall-clock
+    ``now``.
     """
-    # #1266: the two branches below (deterministic parse failures and
-    # validation_failed at the attempt cap) are deliberately out of scope for
-    # the last_blocked_result diagnostic write added below -- only the
-    # unrecognized-reason catch-all gets it. Follow-up: neither of these
-    # landings records *why* either, but widening scope here wasn't part of
-    # this fix.
+    # GitHub #2401: both branches below share _requeue_blocked_result_under_
+    # cap's attempt-cap gate, closing the #1266 last_blocked_result gap for
+    # both -- a FAILED/abandoned landing from either now records why, and a
+    # sub-cap re-queue leaves a SENTINEL_BLOCKED_RESULT_REQUEUED audit event
+    # since there is no rejected sentinel to store on a non-terminal landing.
     if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
-        transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
-        return False
-    if sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
-        if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
+        if not _deterministic_parse_requeue_enabled(target, sentinel):
+            target.last_blocked_result = sentinel.model_dump(mode="json")
             transition_task_status(
                 target, QueueItemStatus.FAILED, disposition="abandoned"
             )
             return False
-        transition_task_status(target, QueueItemStatus.PENDING)
-        target.session_id = None
-        return True
+        return _requeue_blocked_result_under_cap(target, session, sentinel)
+    if sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
+        return _requeue_blocked_result_under_cap(target, session, sentinel)
     if sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
         transition_task_status(target, QueueItemStatus.PENDING)
         target.session_id = None
