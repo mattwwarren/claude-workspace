@@ -2821,7 +2821,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         # closing the #1266 gap for this branch too.
         assert t.last_blocked_result == sentinel.model_dump(mode="json")
 
-    def test_running_task_blocked_result_deterministic_failure_under_cap_requeues_pending(
+    def test_running_task_blocked_result_deterministic_under_cap_requeues_pending(
         self, tmp_config_dir: Path
     ) -> None:
         """RUNNING + deterministic parse-failure BlockedResult below the
@@ -2911,7 +2911,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         # this validation_failed-at-cap branch is no longer untouched.
         assert t.last_blocked_result == sentinel.model_dump(mode="json")
 
-    def test_running_task_blocked_result_validation_failed_under_cap_emits_requeue_event(
+    def test_running_task_blocked_result_validation_failed_under_cap_emits_event(
         self, tmp_config_dir: Path
     ) -> None:
         """RUNNING + validation_failed below the attempt cap → PENDING,
