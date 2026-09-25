@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +14,8 @@ from cw.models import QueueItemStatus, Stage
 from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cw.models import ClientConfig, TicketTask
 
 _DRAFT_BODY = "# Plan\n\nreconciled draft body\n"
@@ -190,114 +191,112 @@ def test_draft_fingerprint_only_strips_leading_bookkeeping_lines() -> None:
     assert _draft_fingerprint(leading + body) != _draft_fingerprint(leading + interior)
 
 
-def test_promote_plan_draft_audit_failure_restores_plan_and_draft(
-    tmp_path: Path,
-    sample_client: ClientConfig,
-    monkeypatch: pytest.MonkeyPatch,
+def _record_events(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    recorded: list[object] = []
+
+    def _recording_event(*args: object, **_kwargs: object) -> None:
+        recorded.append(args[0])
+
+    monkeypatch.setattr("cw.dev_queue.plan_promotion.record_event", _recording_event)
+    return recorded
+
+
+def _clobbering_write(real_calls_after: int | None) -> Callable[[Path, str], None]:
+    """A write that leaves partial content then raises, until N calls in."""
+    calls: list[Path] = []
+
+    def _write(path: Path, text: str) -> None:
+        calls.append(path)
+        if real_calls_after is not None and len(calls) > real_calls_after:
+            path.write_text(text, encoding="utf-8")
+            return
+        path.write_text("partial", encoding="utf-8")
+        msg = "simulated disk full"
+        raise OSError(msg)
+
+    return _write
+
+
+def test_promote_plan_draft_write_failure_restores_prior_plan(
+    tmp_path: Path, sample_client: ClientConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cw_dir = _cw_dir(tmp_path)
     (cw_dir / "plan.md").write_text(_STALE_PLAN_BODY, encoding="utf-8")
     (cw_dir / "plan-draft.md").write_text(_DRAFT_BODY, encoding="utf-8")
+    recorded = _record_events(monkeypatch)
+    monkeypatch.setattr(
+        "cw.dev_queue.plan_promotion.atomic_write_text",
+        _clobbering_write(real_calls_after=1),
+    )
 
-    def _failing_event(*_args: object, **_kwargs: object) -> None:
-        msg = "event inbox unavailable"
-        raise OSError(msg)
-
-    monkeypatch.setattr("cw.dev_queue.plan_promotion.record_event", _failing_event)
-
-    with pytest.raises(ApproveGateError, match="audit failed"):
+    with pytest.raises(ApproveGateError) as excinfo:
         promote_plan_draft(
             _plan_task(cw_dir.parent),
             sample_client,
             expected_fingerprint=_DRAFT_FINGERPRINT,
         )
 
+    message = str(excinfo.value)
+    assert str(cw_dir / "plan.md") in message
+    assert str(cw_dir / "plan-draft.md") in message
+    assert "OSError: simulated disk full" in message
+    assert "was restored" in message
+    assert "RESTORE FAILED" not in message
     assert (cw_dir / "plan.md").read_text(encoding="utf-8") == _STALE_PLAN_BODY
     assert (cw_dir / "plan-draft.md").read_text(encoding="utf-8") == _DRAFT_BODY
+    assert recorded == []
 
 
-def test_promote_plan_draft_audit_failure_handles_non_oserror_rollback(
-    tmp_path: Path,
-    sample_client: ClientConfig,
-    monkeypatch: pytest.MonkeyPatch,
+def test_promote_plan_draft_write_failure_with_failed_restore_names_manual_step(
+    tmp_path: Path, sample_client: ClientConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cw_dir = _cw_dir(tmp_path)
     (cw_dir / "plan.md").write_text(_STALE_PLAN_BODY, encoding="utf-8")
+    (cw_dir / "plan-draft.md").write_text(_DRAFT_BODY, encoding="utf-8")
+    recorded = _record_events(monkeypatch)
+    monkeypatch.setattr(
+        "cw.dev_queue.plan_promotion.atomic_write_text",
+        _clobbering_write(real_calls_after=None),
+    )
+
+    with pytest.raises(ApproveGateError) as excinfo:
+        promote_plan_draft(
+            _plan_task(cw_dir.parent),
+            sample_client,
+            expected_fingerprint=_DRAFT_FINGERPRINT,
+        )
+
+    message = str(excinfo.value)
+    assert str(cw_dir.parent) in message
+    assert "RESTORE FAILED" in message
+    assert f"the approved draft is still intact at {cw_dir / 'plan-draft.md'}" in (
+        message
+    )
+    assert "re-run `cw dev-queue approve GEN-2342 --client test-client`" in message
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert (cw_dir / "plan-draft.md").read_text(encoding="utf-8") == _DRAFT_BODY
+    assert recorded == []
+
+
+def test_promote_plan_draft_audit_event_failure_is_non_fatal(
+    tmp_path: Path, sample_client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The promotion audit event is best-effort telemetry after success."""
+    cw_dir = _cw_dir(tmp_path)
     (cw_dir / "plan-draft.md").write_text(_DRAFT_BODY, encoding="utf-8")
 
     def _failing_event(*_args: object, **_kwargs: object) -> None:
         msg = "event inbox unavailable"
         raise OSError(msg)
 
-    def _failing_restore(*_args: object, **_kwargs: object) -> None:
-        msg = "rollback implementation failed"
-        raise RuntimeError(msg)
-
     monkeypatch.setattr("cw.dev_queue.plan_promotion.record_event", _failing_event)
-    monkeypatch.setattr(
-        "cw.dev_queue.plan_promotion._restore_after_audit_failure", _failing_restore
+
+    promoted = promote_plan_draft(
+        _plan_task(cw_dir.parent),
+        sample_client,
+        expected_fingerprint=_DRAFT_FINGERPRINT,
     )
 
-    with pytest.raises(ApproveGateError, match="recovery was recorded") as excinfo:
-        promote_plan_draft(
-            _plan_task(cw_dir.parent),
-            sample_client,
-            expected_fingerprint=_DRAFT_FINGERPRINT,
-        )
-
-    assert isinstance(excinfo.value.__cause__, OSError)
-    recovery = json.loads(
-        (cw_dir / "plan-promotion-recovery.json").read_text(encoding="utf-8")
-    )
-    assert recovery["restore_error"] == "RuntimeError: rollback implementation failed"
-    assert recovery["plan_path"] == str(cw_dir / "plan.md")
-    assert recovery["draft_path"] == str(cw_dir / "plan-draft.md")
-
-
-def test_promote_plan_draft_recovery_write_uses_alternate_durable_channel(
-    tmp_path: Path,
-    tmp_state_dir: Path,
-    sample_client: ClientConfig,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    cw_dir = _cw_dir(tmp_path)
-    (cw_dir / "plan.md").write_text(_STALE_PLAN_BODY, encoding="utf-8")
-    (cw_dir / "plan-draft.md").write_text(_DRAFT_BODY, encoding="utf-8")
-
-    def _failing_event(*_args: object, **_kwargs: object) -> None:
-        msg = "event inbox unavailable"
-        raise RuntimeError(msg)
-
-    def _failing_restore(*_args: object, **_kwargs: object) -> None:
-        msg = "rollback unavailable"
-        raise RuntimeError(msg)
-
-    def _failing_recovery(*_args: object, **_kwargs: object) -> None:
-        msg = "worktree recovery unavailable"
-        raise PermissionError(msg)
-
-    monkeypatch.setattr("cw.dev_queue.plan_promotion.record_event", _failing_event)
-    monkeypatch.setattr(
-        "cw.dev_queue.plan_promotion._restore_after_audit_failure", _failing_restore
-    )
-    monkeypatch.setattr(
-        "cw.dev_queue.plan_promotion._write_recovery_record", _failing_recovery
-    )
-
-    with pytest.raises(ApproveGateError, match="recovery was persisted") as excinfo:
-        promote_plan_draft(
-            _plan_task(cw_dir.parent),
-            sample_client,
-            expected_fingerprint=_DRAFT_FINGERPRINT,
-        )
-
-    fallback = tmp_state_dir / "plan-promotion-recovery.jsonl"
-    payload = json.loads(fallback.read_text(encoding="utf-8"))
-    assert payload["audit_error"] == "RuntimeError: event inbox unavailable"
-    assert payload["recovery_error"] == (
-        "PermissionError: worktree recovery unavailable"
-    )
-    assert payload["fallback_recovery_path"] == str(fallback)
-    assert payload["old_plan_text"] == _STALE_PLAN_BODY
-    assert payload["draft_text"] == _DRAFT_BODY
-    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert promoted is True
+    assert (cw_dir / "plan.md").read_text(encoding="utf-8") == _DRAFT_BODY
+    assert not (cw_dir / "plan-draft.md").exists()
