@@ -1085,6 +1085,21 @@ disk_pressure_gate_enabled: true
 # tuning per host/mount, not derived from a measured incident threshold.
 disk_pressure_min_free_gb: 5.0
 
+# Pre-claim worktree-occupancy screen operator escape hatch (GitHub #2396,
+# follow-up to #2077). Default true (gate stays enforced) -- same
+# already-live-safety-probe posture as ssh_key_gate_enabled and
+# disk_pressure_gate_enabled above. This field gates
+# resolve_occupied_ticket_ids, the pre-claim screen that reads cw session
+# state and the daemon roster (live_home_reason) to hold a PENDING ticket
+# unclaimed (WORKTREE_OCCUPIED) whenever it cannot positively prove that
+# ticket's worktree is free. Flip this to false if claims for a client
+# stall with repeated WORKTREE_OCCUPIED skips on tickets whose worktrees
+# are not actually in use -- setting it false skips the pre-claim
+# precompute entirely and falls back to #2077's post-claim occupancy
+# handling (WorktreeOccupiedError / HookContextConflictError), which still
+# refuses a genuinely occupied worktree, just one claim later.
+occupancy_gate_enabled: true
+
 # Minimum elapsed seconds between PR-state hydration passes in the serve tick
 # (GitHub #929). Gated off max(pr_state.hydrated_at) across dev-queue tasks —
 # no separate timer state. Each pass fetches `gh pr view` for every open PR
