@@ -3778,6 +3778,60 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
         assert tasks["GEN-2077-FREE"].status == QueueItemStatus.RUNNING
         assert tasks["GEN-2077-FREE"].session_id is not None
 
+    def test_occupancy_screen_disabled_by_config_toggle(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #2396: OrchestratorConfig.occupancy_gate_enabled=False is the
+        fleet-wide escape hatch mirroring pr_gate_enabled -- the pre-claim
+        resolver is never called, and a claim against an occupied worktree
+        falls back to #2077's post-claim WorktreeOccupiedError handling
+        (claims exactly as it did before #2077's screen: not spawned, reverted
+        to PENDING, no attempt/spawn_error charged)."""
+        from cw.dispatch.claim import resolve_occupied_ticket_ids
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        calls: list[str] = []
+        real_resolve = resolve_occupied_ticket_ids
+
+        def _spy(
+            client: ClientConfig,
+            queue_snapshot: DevQueueStore,
+            *,
+            daemon: NativeDaemonClient,
+            warned_unresolvable: set[UnresolvablePathWarningKey] | None,
+        ) -> dict[str, str]:
+            calls.append(client.name)
+            return real_resolve(
+                client,
+                queue_snapshot,
+                daemon=daemon,
+                warned_unresolvable=warned_unresolvable,
+            )
+
+        monkeypatch.setattr("cw.dispatch.lanes.resolve_occupied_ticket_ids", _spy)
+        daemon = FakeNativeDaemonClient()
+        _seed_occupied_ticket_worktree(
+            sample_client_config,
+            monkeypatch,
+            "roster",
+            daemon=daemon,
+            ticket_id="GEN-2396",
+        )
+        add_ticket(TicketTask(ticket_id="GEN-2396", client="test-client"))
+        config = simple_config.model_copy(update={"occupancy_gate_enabled": False})
+
+        dispatch_tick(config, native_daemon=daemon)
+
+        assert calls == []
+        assert daemon.spawn_calls == []
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 0
+
 
 # ---------------------------------------------------------------------------
 # TestStaleWorktreeYieldsToLiveOccupant (#2213 round 7)
