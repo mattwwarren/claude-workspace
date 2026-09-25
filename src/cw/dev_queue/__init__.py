@@ -13,6 +13,7 @@ module is now a package of focused submodules:
 * ``crud`` — operator-facing queue mutations (add/remove/cancel/move/clear/
   prune) and the ticket-resolution helpers (resolve/list/find).
 * ``approval`` — the plan/review approval + operator-signoff-clearing gates.
+* ``must_fix_override`` — the operator's override of a codex MUST_FIX park.
 * ``plan_promotion`` — promote an approved ``.cw/plan-draft.md`` to
   ``.cw/plan.md`` on the approve gate's plan->impl advance.
 * ``requeue`` — re-run a stage, regress, or clear a salvage park.
@@ -87,6 +88,7 @@ from cw.dev_queue.lifecycle import (
     wait_for_terminal,
 )
 from cw.dev_queue.migrate import migrate_dev_queue
+from cw.dev_queue.must_fix_override import approve_must_fix_override_ticket
 from cw.dev_queue.plan_promotion import promote_plan_draft
 from cw.dev_queue.requeue import (
     _apply_requeue_stage,
@@ -144,6 +146,7 @@ __all__ = [
     "_stamp_salvage_stage",
     "_tracker_allows_github_fetch",
     "add_ticket",
+    "approve_must_fix_override_ticket",
     "approve_scope_drift_ticket",
     "approve_ticket",
     "cancel_task_for_session",

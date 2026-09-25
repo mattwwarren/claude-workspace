@@ -15,6 +15,7 @@ from cw.models import (
     DEFAULT_AUTO_PURPOSES,
     DEFAULT_LANE,
     DEV_QUEUE_SCHEMA_VERSION,
+    MUST_FIX_OVERRIDE_KEY,
     TERMINAL_QUEUE_STATUSES,
     ClientConfig,
     CompletionReason,
@@ -22,6 +23,7 @@ from cw.models import (
     DevQueueStore,
     LaneConfig,
     LastResultSource,
+    MustFixOverride,
     OrchestratorConfig,
     OrchestratorEvent,
     OrchestratorEventType,
@@ -1158,7 +1160,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 41
+        assert DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_ticket_task_old_row_without_codex_orphan_fields_defaults_none(
         self,
@@ -2165,7 +2167,8 @@ class TestPackageExportCompleteness:
     wire keys = 57, plus #2135's ``PARK_ON_ABANDONED_EXIT_KEY``,
     ``PARK_COMMENT_MARKER_KEY``, ``ParkCommentMarker`` and
     ``read_park_comment_marker`` = 61, plus #2337's two scope-drift wire keys
-    = 63) — hardcoded here, NOT
+    = 63, plus #2205's ``MUST_FIX_OVERRIDE_KEY`` and ``MustFixOverride`` = 65)
+    — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2203,6 +2206,8 @@ class TestPackageExportCompleteness:
             "HookRule",
             "LOCAL_BACKEND",
             "MONITOR_TOOL_NAME",
+            "MUST_FIX_OVERRIDE_KEY",
+            "MustFixOverride",
             "LaneConcurrencyOverride",
             "LaneConfig",
             "LastResultSource",
@@ -2497,6 +2502,64 @@ class TestParkCommentMarker:
             )
 
         assert f"{sorted([PARK_ON_ABANDONED_EXIT_KEY])}" in str(excinfo.value)
+
+
+class TestMustFixOverrideField:
+    """v42 (#2205): the operator's codex MUST_FIX override on the row."""
+
+    def _override(self) -> MustFixOverride:
+        return MustFixOverride(
+            actor="octocat",
+            reason="shipping; follow-up filed as #9999",
+            reviewed_sha="0123abcd" * 5,
+            finding_ids=[("src/a.py", "bug here"), ("src/b.py", "leak")],
+            recorded_at=datetime(2026, 9, 25, 12, 0, tzinfo=UTC),
+        )
+
+    def test_field_defaults_none(self) -> None:
+        assert TicketTask(ticket_id="GEN-1", client="acme").must_fix_override is None
+
+    def test_key_names_the_field(self) -> None:
+        assert MUST_FIX_OVERRIDE_KEY == "must_fix_override"
+        assert MUST_FIX_OVERRIDE_KEY in TicketTask.model_fields
+
+    def test_model_round_trips_through_json_mode_dump(self) -> None:
+        override = self._override()
+        dumped = override.model_dump(mode="json")
+        assert dumped["finding_ids"] == [
+            ["src/a.py", "bug here"],
+            ["src/b.py", "leak"],
+        ]
+        assert MustFixOverride.model_validate(dumped) == override
+
+    def test_field_round_trips_on_the_row(self) -> None:
+        task = TicketTask(
+            ticket_id="GEN-1", client="acme", must_fix_override=self._override()
+        )
+        restored = TicketTask.model_validate_json(task.model_dump_json())
+        assert restored.must_fix_override == self._override()
+
+    def test_previous_schema_version_row_loads_with_field_defaulted(self) -> None:
+        """A pre-v42 row carries no key and loads with the field None -- no
+        migration filler exists for it (the v13/v38/v40 precedent)."""
+        from cw.dev_queue.migrate import migrate_dev_queue
+
+        raw: dict[str, object] = {
+            "schema_version": DEV_QUEUE_SCHEMA_VERSION - 1,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-2205",
+                    "client": "acme",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "stage": "review",
+                    "blocked_reason": "codex_must_fix_findings",
+                }
+            ],
+        }
+        store = DevQueueStore.model_validate(migrate_dev_queue(raw))
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
+        assert store.tasks[0].must_fix_override is None
 
 
 class TestScopeDriftApprovalFields:

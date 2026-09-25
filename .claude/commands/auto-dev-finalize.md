@@ -8,7 +8,7 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Agent", "AskUserQuesti
 
 **Orientation:** Read `.cw/context.json` for ticket context. The feature branch must be pushed to origin with review complete (Stage 3 complete). This stage creates the PR and waits on CI.
 
-**`.claude/review-verdict.md`, if present, is this worktree's own durable copy of a codex background review (#2095), written directly by `cw`'s codex-review daemon — never git-tracked as of #2279, so a fresh worktree never inherits one from `main` or a sibling ticket. Its first line is an ownership stamp: `<!-- cw-review-verdict-owner ticket_id=<id> reviewed_sha=<sha> -->`. If the file is present, check that stamped `ticket_id` matches this ticket before treating its content as informative — a mismatch or a missing/malformed stamp means the file is stale or foreign; disregard its content entirely in that case. Either way, this file is never authoritative for the halt/ship decision — the ticket's own dev-queue disposition and this stage's own review-completeness checks are the only authority.
+**`.claude/review-verdict.md`, if present, is this worktree's own durable copy of a codex background review (#2095), written directly by `cw`'s codex-review daemon — never git-tracked as of #2279, so a fresh worktree never inherits one from `main` or a sibling ticket. Its first line is an ownership stamp: `<!-- cw-review-verdict-owner ticket_id=<id> reviewed_sha=<sha> -->`. If the file is present, check that stamped `ticket_id` matches this ticket before treating its content as informative — a mismatch or a missing/malformed stamp means the file is stale or foreign; disregard its content entirely in that case. Either way, this file is never authoritative for the halt/ship decision — the ticket's own dev-queue disposition and this stage's MUST_FIX Override Verification step (below, which reads the structured sibling `.claude/review-verdict.json`, never this `.md`) are the only authority.
 
 In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage completes. In the interactive monolith chain: do NOT emit the sentinel here — `auto-dev.md` owns the single final sentinel AND the `done` stage event.
 
@@ -40,6 +40,51 @@ Use the resolved value in every sentinel `plan_source` field below.
 **R3 edge case:** `.cw/plan.md` and `.cw/deferred-findings.md` persist across a normal requeue (`allow_dirty_reuse=True`); the only loss path is a `StaleWorktreeError` rebuild, where the plan-marker step falls through to re-derivation and the deferred-findings section is legitimately omitted.
 
 ## Stage 4: PR Creation (Merge-Gated)
+
+### MUST_FIX Override Verification (#2205)
+
+Run this **first**, before the Pre-Stage Detector Guard, in every mode. A codex background review that found MUST_FIX findings parks the ticket with `blocked_reason: codex_must_fix_findings`; an operator may then run `cw dev-queue requeue --stage finalize`, which resets the row to PENDING and **clears `blocked_reason` before this session spawns** — so nothing on the row tells you the branch was parked. This step re-derives it from the worktree's structured verdict (`.claude/review-verdict.json`, ownership-checked by its `ticket_id`) and compares it with the operator's `cw dev-queue approve --override-must-fix` record, threaded into `.claude/cw-context.json` as `queue_metadata.must_fix_override`. The override counts only while it is bound to exactly this verdict: same `reviewed_sha`, HEAD not moved past it, same MUST_FIX finding set.
+
+```bash
+MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+RESOLVED=""
+for candidate in "$GUARD_ROOT/.claude/scripts/check_must_fix_override.py" "$HOME/.claude/scripts/check_must_fix_override.py"; do
+  if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
+done
+if [ -n "$RESOLVED" ]; then
+  FOUND_VERSION=$(head -n 5 "$RESOLVED" \
+    | sed -nE 's/^#[[:space:]]*cw-script-version:[[:space:]]*([^[:space:]]*)[[:space:]]*$/\1/p' \
+    | head -n 1)
+  # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+  # (which errors, evaluates false, and would fall through to the invocation).
+  if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+    echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+    # HARD STOP: EXIT blocked with agent_block (see bullet below); never run
+    # the check, and never ship past it.
+    exit 3
+  else
+    MUST_FIX_OVERRIDE_OUTPUT=$(uv run python "$RESOLVED" \
+      --verdict "$GUARD_ROOT/.claude/review-verdict.json" \
+      --context "$GUARD_ROOT/.claude/cw-context.json" \
+      --head "$(git -C "$GUARD_ROOT" rev-parse HEAD)" 2>&1)
+    MUST_FIX_OVERRIDE_EXIT=$?
+  fi
+fi
+```
+
+(Resolved repo-local-then-global and marker-verified by the same pattern as this pipeline's other guard scripts — see `auto-dev-impl.md`'s "Guard-script path resolution and staleness marker" subsection for the shared snippet and the version table.)
+
+The script prints `{"status", "reviewed_sha", "findings", "override", "detail"}` as JSON. `status` is `clean` (no verdict file, a foreign verdict, or a non-blocking one), `overridden`, or `blocked` (including an unreadable verdict, which fails closed).
+
+- **Absent from both locations** → log `"check_must_fix_override: script absent, skipped"` in `friction_highlights` and continue to the Pre-Stage Detector Guard, the same non-blocking absence convention as the pipeline's other guard sites.
+- **Candidate found but its marker is missing or below minimum** → EXIT `blocked` with `blocker.reason: "agent_block"` (this doc's fixed catch-all convention), `blocker.details: "MUST_FIX Override Verification: HEADLESS BLOCK — check_must_fix_override.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP. A gate that cannot be trusted to have run must not let the branch ship.
+- **Exit 1 (`status: "blocked"`)** → do NOT create or reuse a PR. EXIT `blocked` with `blocker.stage: "stage4_must_fix_override"`, `blocker.reason: "codex_must_fix_findings"` (the Stage 3 park's own reason, never `agent_block`), `blocker.details`: `$MUST_FIX_OVERRIDE_OUTPUT` plus the remediation — the operator either fixes the findings or runs `cw dev-queue approve <ticket> --override-must-fix --reason "..."` and then `cw dev-queue requeue <ticket> --stage finalize` — and `retry_eligible: false`. `codex_must_fix_findings` is deliberately absent from `FINALIZE_REGRESS_BLOCKER_REASONS`, so dispatch parks the row BLOCKED_ON_USER for the operator instead of self-healing it back to IMPL.
+- **Any other nonzero exit (`$MUST_FIX_OVERRIDE_EXIT` is neither 0 nor 1)** → do NOT create or reuse a PR. EXIT `blocked` with `blocker.reason: "agent_block"` and tooling-failure details naming `check_must_fix_override.py`, the numeric exit status, and `$MUST_FIX_OVERRIDE_OUTPUT` (or the captured stderr if no JSON was produced). This is a guard/tooling failure, not a MUST_FIX finding disposition, and must never be treated as an override or shipped past.
+- **Exit 0 (`status: "clean"` or `"overridden"`)** → continue to the Pre-Stage Detector Guard. On `"overridden"`, keep `$MUST_FIX_OVERRIDE_OUTPUT`: Step 4d's PR-body step appends a `## Operator override` section from it, and append `"must_fix_operator_override"` to `friction_highlights`.
 
 ### Pre-Stage Detector Guard
 
@@ -509,6 +554,22 @@ After `/prep-pr` returns with a PR number:
    The example above shows the bare (unstamped) shape — still valid, and exactly what a `.cw/deferred-findings.md` written before #1840 looks like. A round-stamped entry additionally carries `[round <N>, <recorded_at>] ` in front of its `Rejected` bullet and trailing `round:` / `recorded_at:` lines inside its sentinel-block entry, recording which adjudication round settled it. Copy whatever the file holds verbatim either way — the stamps are inside the block, so the sentinels Step H3 greps are unaffected. Because Stage 3 now merges rather than overwrites that file, one PR body can legitimately carry both a REJECT and a later DEFER of the same finding; the round stamps are what make that read as history rather than as a contradiction.
 
    One block per PR; list every deferred finding inside the single `DEFERRED-REVIEW-FINDINGS` comment (open/close sentinels exact — Step H3 greps them verbatim). Omit the section when `.cw/deferred-findings.md` is absent or empty. For pipeline exits that never create a PR (large-scope `review_pending_approval`, or a BLOCK) there is no body to write — rejections/deferrals stay in `friction_highlights` and surface in the structured output instead.
+
+   **Operator override (#2205).** When the MUST_FIX Override Verification step returned `status: "overridden"`, append a `## Operator override` section to the same PR-body write, built from `$MUST_FIX_OVERRIDE_OUTPUT` — never from `.claude/review-verdict.md`:
+
+   ```
+   ## Operator override
+
+   This branch shipped past a codex MUST_FIX review verdict on an operator override.
+
+   - actor: <override.actor, or "unresolved" when empty>
+   - reason: <override.reason, verbatim — including any follow-up ticket it names>
+   - reviewed_sha: <reviewed_sha>
+   - overridden findings:
+     - <file> — <summary>   (one line per entry in findings)
+   ```
+
+   Omit the section for `"clean"`. The section is idempotent across restarts: replace an existing `## Operator override` section rather than appending a second one.
 
 3. **Enable auto-merge:** first check the shared seam — `~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed` — and record its exit status. Exit `0` permits the arm; exit `1` means `.claude/project-config.yaml` sets `pr.auto_merge: false`, so skip this step, set the sentinel's `pr.auto_merge` to `false`, leave the PR open for manual merge, and skip the verification below. Any other exit status is an unexpected gate failure: BLOCK. When the seam permits it, run `gh pr merge <pr-number> --auto --squash`. Auto-merge may be enabled on a draft PR — it won't trigger until the PR is marked ready (`/review-monitor` does this when the stack parent merges) AND CI passes. Enable whenever the seam permits it, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless: then skip this step and set `pr.auto_merge` to `false` regardless of what the seam said.
 

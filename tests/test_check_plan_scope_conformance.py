@@ -1,23 +1,25 @@
 """Tests for .claude/scripts/check_plan_scope_conformance.py (#1779).
 
-Uses importlib to load the script directly (it lives outside the src/ tree),
-mirroring tests/test_prep_pr_state.py's loader pattern. All fixtures are
+Loads the script directly (it lives outside the src/ tree) through the shared
+``load_guard_script_module`` helper in ``tests/conftest.py``. All fixtures are
 deterministic string literals — no live plan document is ever read.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import subprocess
-import sys
-import types
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from tests.conftest import (
     _plan_text,
+    load_guard_script_module,
+    run_guard_script_cli,
     write_pyproject_override,
 )
+
+if TYPE_CHECKING:
+    import subprocess
 
 # ---------------------------------------------------------------------------
 # Script loader
@@ -27,19 +29,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "check_plan_scope_conformance.py"
 
 
-def _load_module() -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "check_plan_scope_conformance", _SCRIPT
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("check_plan_scope_conformance", mod)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_mod = _load_module()
+_mod = load_guard_script_module(_SCRIPT, "check_plan_scope_conformance")
 
 
 # ---------------------------------------------------------------------------
@@ -580,18 +570,8 @@ def test_pyproject_override_found_by_upward_search(tmp_path: Path) -> None:
 
 
 def _run_cli(plan: Path, touched: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            sys.executable,
-            str(_SCRIPT),
-            "--plan",
-            str(plan),
-            "--touched-files",
-            str(touched),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+    return run_guard_script_cli(
+        _SCRIPT, ["--plan", str(plan), "--touched-files", str(touched)]
     )
 
 
@@ -839,10 +819,9 @@ def test_cli_approved_extra_files_flag_applied(tmp_path: Path) -> None:
 
     assert _run_cli(plan, touched).returncode == 1
 
-    result = subprocess.run(
+    result = run_guard_script_cli(
+        _SCRIPT,
         [
-            sys.executable,
-            str(_SCRIPT),
             "--plan",
             str(plan),
             "--touched-files",
@@ -850,9 +829,6 @@ def test_cli_approved_extra_files_flag_applied(tmp_path: Path) -> None:
             "--approved-extra-files",
             str(approved),
         ],
-        capture_output=True,
-        text=True,
-        check=False,
     )
 
     assert result.returncode == 0, result.stderr
@@ -871,10 +847,9 @@ def test_cli_missing_approved_extra_files_file_exits_2(tmp_path: Path) -> None:
     touched = tmp_path / "touched.txt"
     touched.write_text("\n".join(planned) + "\n", encoding="utf-8")
 
-    result = subprocess.run(
+    result = run_guard_script_cli(
+        _SCRIPT,
         [
-            sys.executable,
-            str(_SCRIPT),
             "--plan",
             str(plan),
             "--touched-files",
@@ -882,9 +857,6 @@ def test_cli_missing_approved_extra_files_file_exits_2(tmp_path: Path) -> None:
             "--approved-extra-files",
             str(tmp_path / "absent.txt"),
         ],
-        capture_output=True,
-        text=True,
-        check=False,
     )
 
     assert result.returncode == 2

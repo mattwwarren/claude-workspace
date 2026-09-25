@@ -55,7 +55,10 @@ from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import OrchestratorEventType
 from cw.models.orchestrator_config import CODEX_TIER_CLAIM_SUPPRESSION
 from cw.review_finding_dispositions import merge_finding_dispositions
-from cw.review_findings import render_review_verdict_envelope
+from cw.review_findings import (
+    REVIEW_VERDICT_JSON_RELATIVE_PATH,
+    render_review_verdict_envelope,
+)
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _checked_out_branch, _git_dir
 
@@ -456,8 +459,9 @@ def _persist_review_verdict(
 # that helper's Markdown ownership-comment prefix makes the file invalid
 # JSON. Ownership instead rides as native fields (``ticket_id`` on the
 # wrapping ``ReviewVerdictEnvelope``, ``reviewed_sha`` already required on
-# ``verdict`` itself) -- see :func:`_persist_structured_review_verdict`.
-REVIEW_VERDICT_JSON_RELATIVE_PATH = Path(".claude") / "review-verdict.json"
+# ``verdict`` itself) -- see :func:`_persist_structured_review_verdict`. The
+# path constant, REVIEW_VERDICT_JSON_RELATIVE_PATH, lives in cw.review_findings
+# beside the envelope model (#2205).
 
 
 def _persist_structured_review_verdict(

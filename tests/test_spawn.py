@@ -17,11 +17,13 @@ from cw.config import load_state, orchestrator_config_file, save_state
 from cw.exceptions import CwError
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
+    MUST_FIX_OVERRIDE_KEY,
     SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
     SCOPE_DRIFT_APPROVED_HEAD_KEY,
     ClientConfig,
     CompletionReason,
     CwState,
+    MustFixOverride,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -3212,6 +3214,78 @@ class TestWriteHookContextTaskFields:
         assert SCOPE_DRIFT_APPROVED_HEAD_KEY in metadata
         assert metadata[SCOPE_DRIFT_APPROVED_HEAD_KEY] is None
 
+    def test_must_fix_override_threaded_into_queue_metadata(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """The operator's MUST_FIX override (dev-queue v42, #2205) reaches the
+        FINALIZE worker verbatim, where check_must_fix_override.py compares it
+        against the live verdict -- blocked_reason has been cleared by then."""
+        from cw.spawn import spawn_create_impl
+
+        assert MUST_FIX_OVERRIDE_KEY in TicketTask.model_fields
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-must-fix-override")
+        task = _make_pending_task()
+        task.must_fix_override = MustFixOverride(
+            actor="octocat",
+            reason="ship it",
+            reviewed_sha="0123abcd" * 5,
+            finding_ids=[("src/a.py", "bug here")],
+            recorded_at=datetime(2026, 9, 25, 12, 0, tzinfo=UTC),
+        )
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev-finalize GEN-2205 --headless",
+            label="auto-dev/GEN-2205",
+            native_daemon=daemon,
+            ticket_id="GEN-2205",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["queue_metadata"][MUST_FIX_OVERRIDE_KEY] == {
+            "actor": "octocat",
+            "reason": "ship it",
+            "reviewed_sha": "0123abcd" * 5,
+            "finding_ids": [["src/a.py", "bug here"]],
+            "recorded_at": "2026-09-25T12:00:00Z",
+        }
+
+    def test_must_fix_override_null_threaded_as_null(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """An unstamped row threads an explicit null, not a missing key."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-must-fix-override-null")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev-finalize GEN-2205 --headless",
+            label="auto-dev/GEN-2205",
+            native_daemon=daemon,
+            ticket_id="GEN-2205",
+            headless=True,
+            task=_make_pending_task(),
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert MUST_FIX_OVERRIDE_KEY in context["queue_metadata"]
+        assert context["queue_metadata"][MUST_FIX_OVERRIDE_KEY] is None
+
     def test_git_failure_sets_origin_sha_null(
         self,
         tmp_config_dir: Path,
@@ -3544,11 +3618,11 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (9 after the
-        queue_metadata.scope_drift_approved_* addition)."""
+        """cw-context.json schema_version is current (10 after the
+        queue_metadata.must_fix_override addition)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 9
+        assert CW_CONTEXT_SCHEMA_VERSION == 10
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -3563,7 +3637,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 9
+        assert context["schema_version"] == 10
 
 
 class TestCwContextLaneStamp:

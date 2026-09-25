@@ -231,8 +231,9 @@ number and this table's minimum in the same commit.
 | `check_plan_scope_conformance.py` | 2 | `auto-dev-impl.md` Step 2.5 gate 2 |
 | `check_impl_guard_staleness.py` | 1 | `auto-dev-impl-appendix.md` Pre-Stage Detector Guard |
 | `classify_merge_conflict.py` | 1 | `auto-dev-finalize.md` Step 4c.5 |
+| `check_must_fix_override.py` | 1 | `auto-dev-finalize.md` MUST_FIX Override Verification |
 
-`auto-dev-finalize.md`'s Step 4c.5 site references this subsection by name
+`auto-dev-finalize.md`'s Step 4c.5 and MUST_FIX Override Verification sites reference this subsection by name
 rather than duplicating the table; the shell snippet itself is repeated
 literally at each call site, because shell state does not persist between
 `Bash` tool calls (same convention as `prep-pr.md`'s `prep_pr_state.py`
