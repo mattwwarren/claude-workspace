@@ -313,6 +313,23 @@ def _is_fix_dispatch_held(task: TicketTask) -> bool:
     )
 
 
+def _is_backstop_exempt(task: TicketTask) -> bool:
+    """True iff a generic RUNNING->PENDING backstop revert must not touch *task*.
+
+    Composes the two known in-flight write-ahead intents a non-sentinel
+    revert (crash/phantom/stall/timeout sweep) must never clobber: the
+    mid-turn usage-limit act (#2324) and the fix-loop dispatch handoff
+    (#2075/#2204, via _is_fix_dispatch_held). Each owns its own resume/
+    consume seam elsewhere (usage_limit_mid_turn.py, fix_dispatch.py);
+    reverting the row out from under either charges an attempt neither
+    should ever cost, and in the fix-dispatch case strands the handoff --
+    fix_dispatch.py's _build_dispatch_jobs classifies an unconsumed
+    handoff on a non-RUNNING row as a stale handoff and drops it instead
+    of dispatching the fix session.
+    """
+    return task.usage_limit_act is not None or _is_fix_dispatch_held(task)
+
+
 # _screen_and_claim outcomes. "skipped" covers every held/parked case the two
 # claim loops treat identically (move to the next candidate, no flag raised).
 _CLAIM_CLAIMED = "claimed"

@@ -673,7 +673,7 @@ def _seed_completed_session(
 def find_completed_session(state: CwState) -> Session:
     """Return the sole session carrying a terminal last_result.
 
-    Shared by test_executor.py and test_codex_executor.py's completion-path
+    Shared by the test_executor_*.py and test_codex_executor.py completion-path
     tests so the `next((s for s in state.sessions if s.last_result is not
     None), None)` idiom isn't duplicated at every call site (GitHub #1458).
     Asserts exactly one such session exists.
@@ -1483,9 +1483,9 @@ def _hide_optional_binaries(
     """Default optional external CLIs to ABSENT so tests reproduce CI (#1753).
 
     Sibling of ``_mock_codex_capability_probe``, but at a different layer:
-    ``CodexExecutor.spawn()``'s pre-flight (``cw.executor.shutil.which`` at
-    ``src/cw/executor.py:884``) and ``codex_capability_diagnosis()``
-    (``executor.py:141``) call the bare ``shutil.which("codex")`` directly —
+    ``CodexExecutor.spawn()``'s pre-flight (``cw.executor.codex.shutil.which``
+    in ``src/cw/executor/codex.py``) and ``codex_capability_diagnosis()``
+    (``src/cw/executor/core.py``) call the bare ``shutil.which("codex")`` directly —
     there is no bespoke seam function to patch the way the fixtures above
     patch ``_which_codex``. ``opencode_runner.opencode_available()``
     (``src/cw/opencode_runner.py:96``) does the same for ``"opencode"``.
