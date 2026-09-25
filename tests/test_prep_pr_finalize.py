@@ -72,7 +72,7 @@ def test_monitor_call_site_uses_sys_executable(monkeypatch: pytest.MonkeyPatch) 
 
     def _fake_run(
         cmd: list[str], check: bool = False, capture: bool = True
-    ) -> subprocess.CompletedProcess:
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(list(cmd))
         if len(calls) == 1:
             return repo_view_result
@@ -106,7 +106,7 @@ def test_monitor_registered_catches_oserror(monkeypatch: pytest.MonkeyPatch) -> 
 
     def _fake_run(
         cmd: list[str], check: bool = False, capture: bool = True
-    ) -> subprocess.CompletedProcess:
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(list(cmd))
         if len(calls) == 1:
             return repo_view_result
@@ -245,7 +245,7 @@ def test_cmd_verify_downgrades_automerge_when_config_disabled(
 
     def _fake_run(
         cmd: list[str], check: bool = False, capture: bool = True
-    ) -> subprocess.CompletedProcess:
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:3] == ["gh", "pr", "view"]:
             payload = {
                 "number": 42,
