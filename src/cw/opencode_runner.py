@@ -147,6 +147,7 @@ class RealOpencodeRunner:
                 cwd=worktree,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
 
 
