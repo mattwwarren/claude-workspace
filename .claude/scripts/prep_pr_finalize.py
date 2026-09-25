@@ -48,6 +48,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
+from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -59,25 +60,28 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils.runtime_paths import review_monitor_script_path
 
 try:
-    import yaml
+    yaml: ModuleType | None = import_module("yaml")
 except ImportError:  # pragma: no cover - downstream repo without PyYAML
-    yaml: ModuleType | None = None
+    yaml = None
 
 
 def _load_project_config_module():
-    """Load the shared config reader without requiring the cw package."""
+    """Load the shared config reader from source or an installed package."""
     source = Path(__file__).resolve().parents[2] / "src" / "cw" / "project_config.py"
-    if not source.exists():
-        return None
-    spec = importlib.util.spec_from_file_location("cw_project_config", source)
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
+    if source.exists():
+        spec = importlib.util.spec_from_file_location("cw_project_config", source)
+        if spec is not None and spec.loader is not None:
+            module = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(module)
+            except ImportError:
+                pass
+            else:
+                return module
     try:
-        spec.loader.exec_module(module)
+        return import_module("cw.project_config")
     except ImportError:
         return None
-    return module
 
 
 _project_config = _load_project_config_module()
@@ -258,28 +262,20 @@ def resolve_project_config_auto_merge(
     """Read pr.auto_merge from .claude/project-config.yaml, or None on any failure.
 
     Mirrors cw.tracker.load_project_config_dict's safe-degrade shape (absent
-    file, unparseable YAML, non-dict root, absent/non-bool key -> None)
-    without importing the cw package: this script runs standalone in
-    arbitrary downstream repos that may not have cw (or PyYAML) installed
-    (#2046). Callers treat None as "unknown - fall back to allowed/required,"
-    never as an implicit False.
+    file, unparseable YAML, non-dict root, absent/non-bool key -> None) via
+    the shared project-config reader. If neither the checked-out source tree
+    nor an installed cw package is available, callers treat the result as
+    unknown and fall back to allowed/required, never as an implicit False
+    (#2046).
     """
     if yaml is None:
         return None
-    if _project_config is not None:
-        raw = _project_config.load_project_config_dict(
-            config_path.parent.parent, yaml_module=yaml
-        )
-    else:
-        # The script is installed independently in downstream repositories;
-        # keep the same safe-degrading reader available when this checkout's
-        # src/cw/project_config.py is not alongside it.
-        try:
-            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
-            return None
-        if not isinstance(raw, dict):
-            return None
+    project_config = _project_config or _load_project_config_module()
+    if project_config is None:
+        return None
+    raw = project_config.load_project_config_dict(
+        config_path.parent.parent, yaml_module=yaml
+    )
     if raw is None:
         return None
     pr_block = raw.get("pr")
