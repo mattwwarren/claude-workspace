@@ -382,15 +382,20 @@ Fetching `main` alongside `<branch-name>` ensures `origin/main` is current befor
 ```bash
 FORK_POINT=$(git merge-base origin/main origin/<branch-name>)
 : "${CW_SESSION:?CW_SESSION must be set}"
-TMPWT="/tmp/gate-wt-$CW_SESSION"
+TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"
+export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
+mkdir -p "$TMPDIR"
 # Deterministic path (keyed on $CW_SESSION, not $$) — reconstructable by an
 # external reconciler even if this invocation is SIGKILLed before any trap runs.
+# Off /tmp: a tmpfs-backed /tmp is exhausted by a few concurrent gate runs'
+# venvs + pytest/coverage/uv caches (ENOSPC across the host).
 # Self-heal: a prior invocation for this same session may have been killed
 # after `git worktree add` registered the entry but before cleanup ran.
 git worktree remove --force "$TMPWT" 2>/dev/null
 rm -rf "$TMPWT" 2>/dev/null
+rm -rf "$TMPDIR" 2>/dev/null
 git worktree prune
-gate_wt_cleanup() { git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null; }
+gate_wt_cleanup() { git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null; rm -rf "$TMPDIR" 2>/dev/null; }
 trap gate_wt_cleanup EXIT
 # INT/TERM must also actually stop the script — a trap alone only runs
 # cleanup and then resumes execution; without the explicit exit here the
@@ -420,7 +425,9 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    # Self-contained: shell state does not persist between fenced Bash calls, and
    # the ambient cwd may be $TMPWT. Every variable used below is derived here.
    : "${CW_SESSION:?CW_SESSION must be set}"
-   TMPWT="/tmp/gate-wt-$CW_SESSION"
+   TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"
+   export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
+   mkdir -p "$TMPDIR"
    if [ ! -d "$TMPWT" ]; then
      echo "IMPL_FAILED: Step 2.5 gate 2: gate worktree $TMPWT missing (run Gate setup first)"
      exit 3
@@ -528,11 +535,12 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
 
 3. **Test command exit code is 0:** Re-run the agent's claimed test command in `$TMPWT`:
    ```bash
+   export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
    cd "$TMPWT" && <test_command>
    ```
    Non-zero exit → `impl_failed`. The agent's pasted tail was either fabricated or stale.
 
-4. **Mypy/ruff clean on touched files** (if Python): Re-run ruff in `$TMPWT`; non-zero exit → `impl_failed`. Re-run mypy under the Stage 2 type-check gate rule, re-verifying (never trusting) the agent's baseline claim: no baseline, or a strict override applies → plain mypy on touched files, non-zero → `impl_failed`; a baseline applies → independently re-run the appendix's Detection steps against `$FORK_POINT` to derive your own `MYPY_BASELINE_FILE` / `MYPY_BASELINE_CMD` (never copy them from the friction report; a mismatch with the agent's reported values → `impl_failed`), then run that command and the no-growth check per `.claude/commands/auto-dev-impl-appendix.md`, section "Type check gate: mypy baseline detection and comparison" — any blocking error, or a baseline file that gained entries since `$FORK_POINT`, → `impl_failed`. Record baselined pre-existing errors in touched files to `.cw/deferred-findings.md` as that section specifies; they do not fail this gate.
+4. **Mypy/ruff clean on touched files** (if Python): Export `TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"` ahead of both re-runs below, same as gate 3, so ruff/mypy/uv caches also stay off tmpfs. Re-run ruff in `$TMPWT`; non-zero exit → `impl_failed`. Re-run mypy under the Stage 2 type-check gate rule, re-verifying (never trusting) the agent's baseline claim: no baseline, or a strict override applies → plain mypy on touched files, non-zero → `impl_failed`; a baseline applies → independently re-run the appendix's Detection steps against `$FORK_POINT` to derive your own `MYPY_BASELINE_FILE` / `MYPY_BASELINE_CMD` (never copy them from the friction report; a mismatch with the agent's reported values → `impl_failed`), then run that command and the no-growth check per `.claude/commands/auto-dev-impl-appendix.md`, section "Type check gate: mypy baseline detection and comparison" — any blocking error, or a baseline file that gained entries since `$FORK_POINT`, → `impl_failed`. Record baselined pre-existing errors in touched files to `.cw/deferred-findings.md` as that section specifies; they do not fail this gate.
 
 5. **Incremental commit discipline** (Mitigation 3): `git -C "$TMPWT" log --oneline "$FORK_POINT"..HEAD | wc -l` MUST be > 1 for any non-trivial change (>50 lines OR >3 files touched). A single commit on a large change → flag as discipline failure in friction (does NOT block, but compromises OOM recovery for any follow-up fix loop; record `"impl_no_incremental_commits"` in `friction_highlights`).
 

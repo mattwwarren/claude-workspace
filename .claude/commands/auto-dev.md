@@ -796,13 +796,18 @@ git rev-parse --verify origin/<branch-name> || { echo "IMPL_NOT_PUSHED"; exit 1;
 # Set up one trap-cleaned temp worktree at origin/<branch-name>
 FORK_POINT=$(git merge-base origin/main origin/<branch-name>)
 : "${CW_SESSION:?CW_SESSION must be set}"
-TMPWT="/tmp/gate-wt-$CW_SESSION"
+TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"
+export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
+mkdir -p "$TMPDIR"
 # Deterministic path (keyed on $CW_SESSION, not $$) — reconstructable by an
 # external reconciler even if this invocation is SIGKILLed before any trap runs.
+# Off /tmp: a tmpfs-backed /tmp is exhausted by a few concurrent gate runs'
+# venvs + pytest/coverage/uv caches (ENOSPC across the host).
 git worktree remove --force "$TMPWT" 2>/dev/null
 rm -rf "$TMPWT" 2>/dev/null
+rm -rf "$TMPDIR" 2>/dev/null
 git worktree prune
-gate_wt_cleanup() { git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null; }
+gate_wt_cleanup() { git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null; rm -rf "$TMPDIR" 2>/dev/null; }
 trap gate_wt_cleanup EXIT
 # INT/TERM must also actually stop the script — a trap alone only runs
 # cleanup and then resumes execution; without the explicit exit here the
@@ -821,6 +826,7 @@ comm -23 /tmp/touched_files-$$ /tmp/planned_files-$$ | wc -l
 # (output must be 0 — no unexpected file touches)
 
 # 3. If the plan lists a test command, run it.
+export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
 cd "$TMPWT" && timeout 600 <test_command> --tb=short > /tmp/test.log-$$ 2>&1
 # Foreground, sized timeout — never accept a background continuation for
 # this call: a timeout here is IMPL_FAILED, not something to resume later
