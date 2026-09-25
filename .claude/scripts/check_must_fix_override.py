@@ -174,7 +174,7 @@ def _parse_override(raw: object) -> tuple[str, set[Fingerprint]] | None:
     ):
         return None
     try:
-        datetime.fromisoformat(recorded_at.strip().replace("Z", "+00:00"))
+        datetime.fromisoformat(recorded_at.strip())
     except ValueError:
         return None
     ids: set[Fingerprint] = set()
