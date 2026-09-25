@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -5774,6 +5775,9 @@ def _make_session(
 
 
 _RECONCILED_DRAFT_BODY = "# Plan — reconciled draft\n\nreconciled body\n"
+_RECONCILED_DRAFT_FINGERPRINT = hashlib.sha256(
+    _RECONCILED_DRAFT_BODY.encode("utf-8")
+).hexdigest()
 
 
 def _seed_plan_worktree(
@@ -6625,7 +6629,10 @@ class TestApproveTicket:
                 sessions=[
                     _make_session(
                         session_id="sess-promote1",
-                        last_result={"status": "plan_pending_approval"},
+                        last_result={
+                            "status": "plan_pending_approval",
+                            "plan_draft_fingerprint": _RECONCILED_DRAFT_FINGERPRINT,
+                        },
                     )
                 ]
             )
@@ -10510,7 +10517,10 @@ class TestCLIApprove:
                 sessions=[
                     _make_session(
                         session_id="sess7101",
-                        last_result={"status": "plan_pending_approval"},
+                        last_result={
+                            "status": "plan_pending_approval",
+                            "plan_draft_fingerprint": _RECONCILED_DRAFT_FINGERPRINT,
+                        },
                     )
                 ]
             )

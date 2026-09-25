@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 
 _DRAFT_BODY = "# Plan\n\nreconciled draft body\n"
 _STALE_PLAN_BODY = "# Plan\n\nstale pre-reconciliation body\n"
+_DRAFT_FINGERPRINT = hashlib.sha256(_DRAFT_BODY.encode("utf-8")).hexdigest()
 
 
 def _plan_task(worktree: Path | None) -> TicketTask:
@@ -42,7 +44,11 @@ def test_promote_plan_draft_writes_plan_md_and_removes_draft(
     (cw_dir / "plan-draft.md").write_text(_DRAFT_BODY, encoding="utf-8")
     (cw_dir / "plan.md").write_text(_STALE_PLAN_BODY, encoding="utf-8")
 
-    promoted = promote_plan_draft(_plan_task(cw_dir.parent), sample_client)
+    promoted = promote_plan_draft(
+        _plan_task(cw_dir.parent),
+        sample_client,
+        expected_fingerprint=_DRAFT_FINGERPRINT,
+    )
 
     assert promoted is True
     assert (cw_dir / "plan.md").read_text(encoding="utf-8") == _DRAFT_BODY
@@ -77,7 +83,11 @@ def test_promote_plan_draft_read_failure_raises_approve_gate_error(
     (cw_dir / "plan-draft.md").mkdir()
 
     with pytest.raises(ApproveGateError):
-        promote_plan_draft(_plan_task(cw_dir.parent), sample_client)
+        promote_plan_draft(
+            _plan_task(cw_dir.parent),
+            sample_client,
+            expected_fingerprint=_DRAFT_FINGERPRINT,
+        )
 
     assert not (cw_dir / "plan.md").exists()
 
@@ -95,7 +105,11 @@ def test_promote_plan_draft_write_failure_raises_and_leaves_draft_intact(
     monkeypatch.setattr("cw.dev_queue.plan_promotion.atomic_write_text", _failing_write)
 
     with pytest.raises(ApproveGateError):
-        promote_plan_draft(_plan_task(cw_dir.parent), sample_client)
+        promote_plan_draft(
+            _plan_task(cw_dir.parent),
+            sample_client,
+            expected_fingerprint=_DRAFT_FINGERPRINT,
+        )
 
     assert (cw_dir / "plan-draft.md").read_text(encoding="utf-8") == _DRAFT_BODY
     assert not (cw_dir / "plan.md").exists()
@@ -115,7 +129,11 @@ def test_promote_plan_draft_error_names_worktree_path_and_exception(
     monkeypatch.setattr("cw.dev_queue.plan_promotion.atomic_write_text", _failing_write)
 
     with pytest.raises(ApproveGateError) as excinfo:
-        promote_plan_draft(task, sample_client)
+        promote_plan_draft(
+            task,
+            sample_client,
+            expected_fingerprint=_DRAFT_FINGERPRINT,
+        )
 
     message = str(excinfo.value)
     assert str(task.worktree_path) in message
@@ -138,8 +156,60 @@ def test_promote_plan_draft_draft_delete_failure_is_non_fatal(
 
     monkeypatch.setattr(Path, "unlink", _failing_unlink)
 
-    promoted = promote_plan_draft(_plan_task(cw_dir.parent), sample_client)
+    promoted = promote_plan_draft(
+        _plan_task(cw_dir.parent),
+        sample_client,
+        expected_fingerprint=_DRAFT_FINGERPRINT,
+    )
 
     assert promoted is True
     assert (cw_dir / "plan.md").read_text(encoding="utf-8") == _DRAFT_BODY
     assert (cw_dir / "plan-draft.md").exists()
+
+
+def test_promote_plan_draft_requires_a_valid_approval_fingerprint(
+    tmp_path: Path, sample_client: ClientConfig
+) -> None:
+    cw_dir = _cw_dir(tmp_path)
+    (cw_dir / "plan-draft.md").write_text(_DRAFT_BODY, encoding="utf-8")
+
+    with pytest.raises(ApproveGateError, match="valid approval fingerprint"):
+        promote_plan_draft(_plan_task(cw_dir.parent), sample_client)
+
+    assert not (cw_dir / "plan.md").exists()
+
+
+def test_draft_fingerprint_only_strips_leading_bookkeeping_lines() -> None:
+    from cw.dev_queue.plan_promotion import _draft_fingerprint
+
+    leading = "<!-- plan-stage-scan-round: 1 -->\n"
+    body = "<!-- plan-stage-settled: A1: ADOPTED -->\n\nbody\n"
+    interior = "body\n<!-- plan-stage-settled: A1: ADOPTED -->\n"
+
+    assert _draft_fingerprint(leading + body) != _draft_fingerprint(leading + interior)
+
+
+def test_promote_plan_draft_audit_failure_restores_plan_and_draft(
+    tmp_path: Path,
+    sample_client: ClientConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cw_dir = _cw_dir(tmp_path)
+    (cw_dir / "plan.md").write_text(_STALE_PLAN_BODY, encoding="utf-8")
+    (cw_dir / "plan-draft.md").write_text(_DRAFT_BODY, encoding="utf-8")
+
+    def _failing_event(*_args: object, **_kwargs: object) -> None:
+        msg = "event inbox unavailable"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.dev_queue.plan_promotion.record_event", _failing_event)
+
+    with pytest.raises(ApproveGateError, match="audit failed"):
+        promote_plan_draft(
+            _plan_task(cw_dir.parent),
+            sample_client,
+            expected_fingerprint=_DRAFT_FINGERPRINT,
+        )
+
+    assert (cw_dir / "plan.md").read_text(encoding="utf-8") == _STALE_PLAN_BODY
+    assert (cw_dir / "plan-draft.md").read_text(encoding="utf-8") == _DRAFT_BODY
