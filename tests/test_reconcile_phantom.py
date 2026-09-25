@@ -1512,14 +1512,15 @@ def test_phantom_sentinel_mismatch_veto_when_transcript_live(
     )
 
 
-def test_phantom_sentinel_mismatch_veto_falls_through_when_transcript_stale(
+def test_phantom_sentinel_mismatch_veto_fires_when_transcript_stale(
     tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A transcript stale beyond TRANSCRIPT_LIVENESS_WINDOW_SECONDS does not
-    veto the crash -- preserves the pre-#1281 CRASH_COMPLETE fall-through
-    once the grace window has elapsed (GitHub #1281).
+    """A transcript stale beyond TRANSCRIPT_LIVENESS_WINDOW_SECONDS still vetoes
+    the crash while the veto counter is under the cap (GitHub #2405, ADR-0014):
+    transcript age no longer decides the fall-through; only the attempt cap
+    does. Staleness is carried on the candidate as a diagnostic.
     """
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
@@ -1552,15 +1553,21 @@ def test_phantom_sentinel_mismatch_veto_falls_through_when_transcript_stale(
     candidates = _detect_phantom_candidates(state, phantom_set={sess.id}, now=now)
 
     assert len(candidates) == 1
-    assert candidates[0].proposed_action == ProposedAction.CRASH_COMPLETE
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
+    assert c.new_veto_count == 1
+    assert c.stale_minutes == pytest.approx(
+        (now - started_at - timedelta(minutes=1)).total_seconds() / 60.0
+    )
 
 
-def test_phantom_sentinel_mismatch_veto_falls_through_when_no_transcript(
+def test_phantom_sentinel_mismatch_veto_fires_when_no_transcript(
     tmp_config_dir: Path,
 ) -> None:
-    """An already_refused phantom with no locatable transcript falls through
-    to CRASH_COMPLETE (fail-toward-crash), mirroring
-    ``_liveness_veto_candidate``'s unlocatable-transcript contract (GitHub #1281).
+    """An already_refused phantom with no locatable transcript is vetoed while
+    the counter is under the cap (GitHub #2405): unlocatability is no longer a
+    fail-toward-crash shortcut past the attempt cap. ``stale_minutes`` is None
+    since there is no staleness to report.
     """
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
@@ -1576,7 +1583,183 @@ def test_phantom_sentinel_mismatch_veto_falls_through_when_no_transcript(
     )
 
     assert len(candidates) == 1
-    assert candidates[0].proposed_action == ProposedAction.CRASH_COMPLETE
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
+    assert c.new_veto_count == 1
+    assert c.stale_minutes is None
+
+
+@pytest.mark.parametrize(
+    "transcript_age_seconds",
+    [pytest.param(30, id="fresh"), pytest.param(None, id="unlocatable")],
+)
+@pytest.mark.parametrize("dirty", [False, True], ids=["clean", "dirty"])
+def test_phantom_sentinel_mismatch_veto_end_to_end_ignores_transcript_age(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transcript_age_seconds: int | None,
+    dirty: bool,
+) -> None:
+    """GitHub #2405: detect + act with the counter under the cap vetoes for any
+    transcript state -- including the unlocatable case that previously fell
+    straight through to CRASH_COMPLETE -- and a dirty worktree is not parked
+    BLOCKED_ON_USER while the veto holds. ``stale_minutes`` on the emitted
+    ``session.sentinel_stage_mismatch_vetoed`` is a diagnostic: populated when
+    the transcript is locatable, None otherwise.
+    """
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_reason_by_path",
+        lambda _c, _p: "2 uncommitted path(s)" if dirty else None,
+    )
+    from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+    sid = "veto-e2e-age-1"
+    worktree: Path | None = None
+    if transcript_age_seconds is not None:
+        worktree = tmp_path / "wt-veto-e2e-age"
+        _write_fresh_refused_transcript(
+            home,
+            worktree,
+            "csid-veto-e2e-age",
+            now,
+            stale_seconds=transcript_age_seconds,
+        )
+    sess = _mk_phantom_daemon_session(
+        sid, started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=sid,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sid,
+                )
+            ]
+        )
+    )
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+
+    cands = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=now, config=config
+    )
+    _act_on_phantom_candidates(state, cands, now=now, config=config)
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == sid)
+    assert t.status == QueueItemStatus.RUNNING
+    s = next(s for s in load_state().sessions if s.id == sid)
+    assert s.consecutive_sentinel_mismatch_vetoes == 1
+    vetoed = read_events(
+        consumer="test-veto-e2e-age",
+        event_types=[OrchestratorEventType.SESSION_SENTINEL_STAGE_MISMATCH_VETOED],
+    )
+    assert len(vetoed) == 1
+    if transcript_age_seconds is None:
+        assert vetoed[0].payload["stale_minutes"] is None
+    else:
+        assert vetoed[0].payload["stale_minutes"] == pytest.approx(
+            transcript_age_seconds / 60.0
+        )
+
+
+@pytest.mark.parametrize(
+    "transcript_age_seconds",
+    [
+        pytest.param(30, id="fresh"),
+        pytest.param(3600, id="stale"),
+        pytest.param(None, id="unlocatable"),
+    ],
+)
+def test_phantom_dirty_worktree_past_veto_cap_blocks_on_user_regardless_of_age(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transcript_age_seconds: int | None,
+) -> None:
+    """GitHub #2405: past the veto cap, a dirty already_refused phantom falls
+    through to BLOCKED_ON_USER for every transcript state -- the dirty/clean
+    routing downstream is decided by worktree evidence alone, and transcript age
+    no longer gates whether that routing is reached.
+    """
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_reason_by_path",
+        lambda _c, _p: "2 uncommitted path(s)",
+    )
+    from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(hours=2)
+    sid = "veto-dirty-cap-1"
+    worktree = tmp_path / "wt-veto-dirty-cap"
+    worktree.mkdir()
+    if transcript_age_seconds is not None:
+        _write_fresh_refused_transcript(
+            home,
+            worktree,
+            "csid-veto-dirty-cap",
+            now,
+            stale_seconds=transcript_age_seconds,
+        )
+    sess = _mk_phantom_daemon_session(
+        sid, started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    sess.consecutive_sentinel_mismatch_vetoes = 3  # past cap=2 (already escalated)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=sid,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sid,
+                )
+            ]
+        )
+    )
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+
+    cands = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=now, config=config
+    )
+    _act_on_phantom_candidates(state, cands, now=now, config=config)
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == sid)
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+    assert (
+        read_events(
+            consumer="test-veto-dirty-cap",
+            event_types=[OrchestratorEventType.SESSION_SENTINEL_STAGE_MISMATCH_VETOED],
+        )
+        == []
+    )
 
 
 def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
@@ -1606,9 +1789,7 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     )
     payload = _stage_complete_payload()  # stage_reached="stage2_impl" (IMPL)
     payload["ticket_id"] = "phantom-refusal-1"
-    transcript = _write_salvage_transcript(
-        home, worktree, "csid-phantom-refusal", payload
-    )
+    _write_salvage_transcript(home, worktree, "csid-phantom-refusal", payload)
     state = CwState(sessions=[sess])
     save_state(state)
     _write_staged_clients_yaml(tmp_config_dir, "client-a")
@@ -1649,13 +1830,12 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     assert task_after.stage == Stage.REVIEW
     assert task_after.status == QueueItemStatus.RUNNING
 
-    # #1281: the already_refused fall-through is now gated on transcript
-    # liveness -- backdate the transcript beyond the liveness window so this
-    # second pass exercises the pre-#1281 CRASH_COMPLETE fall-through (the
-    # "eventually crashes once the transcript goes quiet" branch), not the
-    # new veto.
-    stale_ts = (started_at + timedelta(minutes=1)).timestamp()
-    os.utime(str(transcript), (stale_ts, stale_ts))
+    # #1281/#2405: the already_refused fall-through is vetoed until the
+    # attempt cap is spent -- stamp the counter past the default cap so this
+    # second pass exercises the CRASH_COMPLETE fall-through, not the veto.
+    reloaded.consecutive_sentinel_mismatch_vetoes = (
+        OrchestratorConfig().sentinel_mismatch_veto_cap + 1
+    )
     now_2 = started_at + timedelta(hours=1)
 
     # Second detect pass over the now-marked session: the already_refused
@@ -1919,9 +2099,7 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
     payload = _stage_complete_payload()  # stage_reached="stage2_impl" (IMPL)
     payload["ticket_id"] = "phantom-preserve-1"
-    transcript = _write_salvage_transcript(
-        home, worktree, "csid-phantom-preserve", payload
-    )
+    _write_salvage_transcript(home, worktree, "csid-phantom-preserve", payload)
     state = CwState(sessions=[sess])
     save_state(state)
     _write_staged_clients_yaml(tmp_config_dir, "client-a")
@@ -1960,11 +2138,11 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     }
     assert _has_terminal_sentinel(reloaded) is False
 
-    # #1281: backdate the transcript beyond the liveness window so this
-    # second pass exercises the pre-#1281 CRASH_COMPLETE fall-through, not
-    # the new veto.
-    stale_ts = (started_at + timedelta(minutes=1)).timestamp()
-    os.utime(str(transcript), (stale_ts, stale_ts))
+    # #1281/#2405: stamp the veto counter past the default cap so this second
+    # pass exercises the CRASH_COMPLETE fall-through, not the veto.
+    reloaded.consecutive_sentinel_mismatch_vetoes = (
+        OrchestratorConfig().sentinel_mismatch_veto_cap + 1
+    )
     now_2 = started_at + timedelta(hours=1)
 
     # Second detect pass over the now-marked session: already_refused must
@@ -2696,10 +2874,10 @@ def test_sentinel_mismatch_veto_candidate_returns_none_once_cap_reached(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A LIVE already_refused phantom already at the cap returns
-    (None, True, stale_seconds): the veto is exhausted and the caller falls
-    through to CRASH_COMPLETE, carrying the staleness the decision was made on
-    (#1449)."""
+    """An already_refused phantom already at the cap returns
+    (None, True, stale_seconds) regardless of transcript state: the veto is
+    exhausted and the caller falls through to CRASH_COMPLETE, carrying the
+    staleness read on this tick as a diagnostic (#1449, #2405)."""
     from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
 
     home = tmp_path / "home"
@@ -2728,13 +2906,14 @@ def test_sentinel_mismatch_veto_candidate_already_escalated_no_stale_minutes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A LIVE already_refused phantom already PAST the cap (count > cap, not
+    """An already_refused phantom already PAST the cap (count > cap, not
     == cap -- i.e. already escalated on a prior tick) returns
-    (None, False, None): exhausted is False (edge-triggering: no re-escalation)
-    AND stale_seconds is None (#1449 fix cycle 3 regression test).
+    (None, False, None) regardless of transcript state: exhausted is False
+    (edge-triggering: no re-escalation) AND stale_seconds is None (#1449 fix
+    cycle 3 regression test; #2405 dropped the transcript-liveness gate).
 
     Guards against a fix-cycle-2 regression where this sub-case leaked a
-    non-None stale_seconds, which would have let a still-LIVE, already-escalated
+    non-None stale_seconds, which would have let an already-escalated
     session's CRASH_COMPLETE candidate carry a populated stale_minutes despite
     veto_cap_exhausted=False -- violating the field's cap-exhaustion-only
     invariant (caught in review before merge, never shipped)."""
@@ -2767,14 +2946,15 @@ def test_sentinel_mismatch_veto_candidate_already_escalated_no_stale_minutes(
     assert stale_seconds is None
 
 
-def test_sentinel_mismatch_veto_candidate_stale_transcript_not_exhausted(
+def test_sentinel_mismatch_veto_candidate_cap_fires_on_stale_transcript_too(
     tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A genuinely stale transcript returns (None, False, None) even with the
-    counter pinned at the cap: "not live" must never be misreported as "cap
-    fired" (#1449 — the two-source-of-truth requirement)."""
+    """A genuinely stale transcript with the counter at the cap reports the cap
+    as exhausted (GitHub #2405): staleness no longer overrides the attempt-cap
+    decision, so the escalation fires for stale and fresh transcripts alike,
+    carrying the stale age as a diagnostic."""
     from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
 
     home = tmp_path / "home"
@@ -2792,14 +2972,86 @@ def test_sentinel_mismatch_veto_candidate_stale_transcript_not_exhausted(
         home, worktree, "csid-veto-stale", now, stale_seconds=3600
     )
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
-    sess.consecutive_sentinel_mismatch_vetoes = 2  # at cap, but transcript stale
+    sess.consecutive_sentinel_mismatch_vetoes = 2  # at cap, transcript stale
 
     cand, exhausted, stale_seconds = _sentinel_mismatch_veto_candidate(
         sess, "veto-stale-1", "default", now=now, config=config
     )
     assert cand is None
-    assert exhausted is False
-    assert stale_seconds is None
+    assert exhausted is True
+    assert stale_seconds == pytest.approx(3600.0)
+
+
+@pytest.mark.parametrize(
+    "transcript_age_seconds",
+    [
+        pytest.param(0, id="age_0"),
+        pytest.param(30, id="fresh"),
+        pytest.param(TRANSCRIPT_LIVENESS_WINDOW_SECONDS, id="at_window"),
+        pytest.param(3600, id="stale"),
+        pytest.param(None, id="unlocatable"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("veto_count", "expect_veto", "expect_exhausted"),
+    [
+        pytest.param(0, True, False, id="count_0"),
+        pytest.param(1, True, False, id="count_cap_minus_1"),
+        pytest.param(2, False, True, id="count_at_cap"),
+        pytest.param(3, False, False, id="count_past_cap"),
+    ],
+)
+def test_sentinel_mismatch_veto_candidate_outcome_tracks_only_the_cap(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transcript_age_seconds: int | None,
+    veto_count: int,
+    expect_veto: bool,
+    expect_exhausted: bool,
+) -> None:
+    """GitHub #2405 (ADR-0014): ``(veto is not None, cap_exhausted)`` depends on
+    ``consecutive_sentinel_mismatch_vetoes`` vs. the cap alone, for every
+    transcript age including an unlocatable transcript. ``stale_seconds`` is
+    a diagnostic: the read age when locatable and the tick is under/at the cap,
+    None when unlocatable or already past the cap."""
+    from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(hours=2)
+    worktree: Path | None = None
+    if transcript_age_seconds is not None:
+        worktree = tmp_path / "wt-veto-sweep"
+        _write_fresh_refused_transcript(
+            home, worktree, "csid-veto-sweep", now, stale_seconds=transcript_age_seconds
+        )
+    sess = _mk_phantom_daemon_session(
+        "veto-sweep-1", started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    sess.consecutive_sentinel_mismatch_vetoes = veto_count
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+
+    cand, exhausted, stale_seconds = _sentinel_mismatch_veto_candidate(
+        sess, "veto-sweep-1", "default", now=now, config=config
+    )
+
+    assert (cand is not None) is expect_veto
+    assert exhausted is expect_exhausted
+    reports_staleness = transcript_age_seconds is not None and (
+        expect_veto or expect_exhausted
+    )
+    if reports_staleness:
+        assert stale_seconds == pytest.approx(float(transcript_age_seconds or 0))
+    else:
+        assert stale_seconds is None
+    if cand is not None:
+        assert cand.new_veto_count == veto_count + 1
+        assert cand.stale_minutes == (
+            stale_seconds / 60.0 if stale_seconds is not None else None
+        )
 
 
 def test_phantom_veto_bounded_falls_through_to_crash_complete(
@@ -4524,6 +4776,11 @@ def test_detect_phantom_already_refused_terminal_result_falls_through(
     payload["ticket_id"] = "ph-1762-refused"
     payload[_SENTINEL_ADVANCE_REFUSED_KEY] = True
     sess = _mk_terminal_result_phantom("ph-1762-refused", last_result=payload)
+    # #2405: the already_refused fall-through is vetoed until the attempt cap is
+    # spent; start past the default cap to reach the crash pipeline directly.
+    sess.consecutive_sentinel_mismatch_vetoes = (
+        OrchestratorConfig().sentinel_mismatch_veto_cap + 1
+    )
     state = CwState(sessions=[sess])
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
