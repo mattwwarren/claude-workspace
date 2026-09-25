@@ -249,6 +249,11 @@ def _fill_session_local_liveness_backend_default(session_raw: dict[str, Any]) ->
     """
     handle = session_raw.get("local_liveness")
     if isinstance(handle, dict) and "backend" not in handle:
+        logger.warning(
+            "session %s: local_liveness.backend missing during v18->v19 "
+            "migration; defaulting to 'aider' (GitHub #2369)",
+            session_raw.get("id", "<unknown>"),
+        )
         handle["backend"] = "aider"
 
 
