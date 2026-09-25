@@ -708,6 +708,311 @@ def test_revert_completed_silent_clean_worktree_routes_to_pending(
     assert "cs-clean" in reverted
 
 
+# ---------------------------------------------------------------------------
+# Completion-routing grace window (#2355)
+# ---------------------------------------------------------------------------
+
+
+def test_revert_completed_silent_tasks_within_grace_window_skips_dirty_check(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """COMPLETED session inside its post-completion grace window is left
+    RUNNING entirely -- the dirty check never even runs (#2355)."""
+    wt_path = tmp_path / "wt-grace-dirty"
+    completed_at = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
+    sess = _mk_daemon_session_with_worktree(
+        "grace-dirty", SessionStatus.COMPLETED, wt_path
+    ).model_copy(update={"completed_at": completed_at})
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="grace-dirty",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="grace-dirty",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/grace-dirty"
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    call_count = 0
+
+    def _record_call(_c: str, _b: str, **_kw: object) -> str:
+        nonlocal call_count
+        call_count += 1
+        return "2 uncommitted path(s)"
+
+    monkeypatch.setattr("cw.reconcile._shared.unsaved_work_reason", _record_call)
+
+    with freezegun.freeze_time(completed_at + timedelta(seconds=10)):
+        reverted = revert_completed_silent_tasks()
+
+    assert reverted == []
+    assert call_count == 0
+
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "grace-dirty")
+    assert updated_task.status == QueueItemStatus.RUNNING
+    assert updated_task.session_id == "grace-dirty"
+
+    events = read_events(
+        consumer="test-grace-dirty-attn",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert events == []
+
+
+def test_revert_completed_silent_tasks_within_grace_window_skips_clean_revert(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """COMPLETED session inside its grace window is left RUNNING even when
+    its worktree is clean -- the plain-revert-to-PENDING path is gated too,
+    not just the dirty-park path (#2355)."""
+    wt_path = tmp_path / "wt-grace-clean"
+    completed_at = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
+    sess = _mk_daemon_session_with_worktree(
+        "grace-clean", SessionStatus.COMPLETED, wt_path
+    ).model_copy(update={"completed_at": completed_at})
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="grace-clean",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="grace-clean",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/grace-clean"
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+    )
+
+    with freezegun.freeze_time(completed_at + timedelta(seconds=10)):
+        reverted = revert_completed_silent_tasks()
+
+    assert reverted == []
+
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "grace-clean")
+    assert updated_task.status == QueueItemStatus.RUNNING
+    assert updated_task.session_id == "grace-clean"
+
+
+def test_revert_completed_silent_tasks_past_grace_window_dirty_still_parks(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the grace window, a dirty COMPLETED session still parks to
+    BLOCKED_ON_USER/dirty_worktree -- today's safety net, unweakened, only
+    delayed (#2355 regression guard)."""
+    wt_path = tmp_path / "wt-grace-dirty-past"
+    completed_at = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
+    sess = _mk_daemon_session_with_worktree(
+        "grace-dirty-past", SessionStatus.COMPLETED, wt_path
+    ).model_copy(update={"completed_at": completed_at})
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="grace-dirty-past",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="grace-dirty-past",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch",
+        lambda _p: "auto-dev/grace-dirty-past",
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.unsaved_work_reason",
+        lambda _c, _b, **_kw: "2 uncommitted path(s)",
+    )
+
+    with freezegun.freeze_time(completed_at + timedelta(seconds=61)):
+        reverted = revert_completed_silent_tasks()
+
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "grace-dirty-past")
+    assert updated_task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert updated_task.session_id is None
+    assert "grace-dirty-past" not in reverted
+
+    events = read_events(
+        consumer="test-grace-dirty-past-attn",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    assert events[0].payload["paused_status"] == _DIRTY_WORKTREE_REASON
+
+
+def test_revert_completed_silent_tasks_past_grace_window_clean_still_reverts(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the grace window, a clean COMPLETED session still reverts to
+    PENDING -- no regression on the clean-past-grace path (#2355)."""
+    wt_path = tmp_path / "wt-grace-clean-past"
+    completed_at = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
+    sess = _mk_daemon_session_with_worktree(
+        "grace-clean-past", SessionStatus.COMPLETED, wt_path
+    ).model_copy(update={"completed_at": completed_at})
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="grace-clean-past",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="grace-clean-past",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch",
+        lambda _p: "auto-dev/grace-clean-past",
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+    )
+
+    with freezegun.freeze_time(completed_at + timedelta(seconds=61)):
+        reverted = revert_completed_silent_tasks()
+
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "grace-clean-past")
+    assert updated_task.status == QueueItemStatus.PENDING
+    assert updated_task.session_id is None
+    assert "grace-clean-past" in reverted
+
+
+def test_revert_completed_silent_tasks_missing_completed_at_gets_no_grace(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A COMPLETED session with completed_at=None gets no grace at all --
+    fail-safe direction: never silently grant indefinite protection (#2355)."""
+    wt_path = tmp_path / "wt-grace-no-completed-at"
+    sess = _mk_daemon_session_with_worktree(
+        "grace-no-completed-at", SessionStatus.COMPLETED, wt_path
+    )
+    assert sess.completed_at is None
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="grace-no-completed-at",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="grace-no-completed-at",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch",
+        lambda _p: "auto-dev/grace-no-completed-at",
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.unsaved_work_reason",
+        lambda _c, _b, **_kw: "2 uncommitted path(s)",
+    )
+
+    reverted = revert_completed_silent_tasks()
+
+    store = load_dev_queue()
+    updated_task = next(
+        t for t in store.tasks if t.ticket_id == "grace-no-completed-at"
+    )
+    assert updated_task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert updated_task.session_id is None
+    assert "grace-no-completed-at" not in reverted
+
+
+def test_revert_timed_out_tasks_within_grace_window_skips_dirty_check(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TIMED_OUT session inside its grace window is left RUNNING entirely --
+    the two revert wrappers must not silently diverge (#2355)."""
+    wt_path = tmp_path / "wt-grace-to-dirty"
+    completed_at = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
+    sess = _mk_daemon_session_with_worktree(
+        "grace-to-dirty", SessionStatus.TIMED_OUT, wt_path
+    ).model_copy(update={"completed_at": completed_at})
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="grace-to-dirty",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="grace-to-dirty",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/grace-to-dirty"
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    call_count = 0
+
+    def _record_call(_c: str, _b: str, **_kw: object) -> str:
+        nonlocal call_count
+        call_count += 1
+        return "2 uncommitted path(s)"
+
+    monkeypatch.setattr("cw.reconcile._shared.unsaved_work_reason", _record_call)
+
+    with freezegun.freeze_time(completed_at + timedelta(seconds=10)):
+        reverted = revert_timed_out_tasks()
+
+    assert reverted == []
+    assert call_count == 0
+
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "grace-to-dirty")
+    assert updated_task.status == QueueItemStatus.RUNNING
+    assert updated_task.session_id == "grace-to-dirty"
+
+    events = read_events(
+        consumer="test-grace-to-dirty-attn",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert events == []
+
+
 def test_build_dirty_session_ids_and_notify_returns_reason_dict(
     tmp_config_dir: Path,
     tmp_path: Path,
