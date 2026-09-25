@@ -2194,6 +2194,7 @@ class TestPackageExportCompleteness:
             "ParkCommentMarker",
             "PLAN_APPROVED_FINGERPRINT_KEY",
             "PLAN_DRAFT_FINGERPRINT_KEY",
+            "PLAN_PROMOTED_KEY",
             "SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY",
             "SCOPE_DRIFT_APPROVED_HEAD_KEY",
             "PendingFixDispatch",

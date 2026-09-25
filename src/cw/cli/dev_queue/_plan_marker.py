@@ -19,8 +19,11 @@ exactly what #2102/#2194 exist to prevent.
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
+
+from cw.plan_fingerprint import is_plan_draft_fingerprint
+
+_is_plan_draft_fingerprint = is_plan_draft_fingerprint
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -37,17 +40,6 @@ _PLAN_APPROVED_MARKER = "<!-- auto-dev-plan-approved -->"
 # substring of this one (it needs `approved -->`, this has `approved: <sha>
 # -->`), which is what makes exact-string containment a sufficient dedup.
 _PLAN_APPROVED_MARKER_BOUND = "<!-- auto-dev-plan-approved: {fingerprint} -->"
-
-# A plan-draft fingerprint is a full SHA-256 digest in lowercase hex. Used
-# with `.fullmatch` rather than an `^...$` pattern so a trailing newline is
-# rejected too (precedent: `_config_migrate.py`'s `.fullmatch`; the shape
-# itself mirrors `native_daemon.SHORT_SESSION_ID_RE`, which pins 8 hex chars).
-_PLAN_DRAFT_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
-
-
-def _is_plan_draft_fingerprint(value: str) -> bool:
-    """True iff *value* is a 64-character lowercase hex digest."""
-    return _PLAN_DRAFT_FINGERPRINT_RE.fullmatch(value) is not None
 
 
 def _plan_approved_marker(fingerprint: str | None) -> str:
