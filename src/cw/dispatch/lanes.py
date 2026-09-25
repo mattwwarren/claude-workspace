@@ -619,6 +619,7 @@ def _resolve_occupied_ticket_ids(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
     *,
+    config: OrchestratorConfig,
     available_client_slots: int,
     resolved_native_daemon: NativeDaemonClient,
     warned_unresolvable: set[UnresolvablePathWarningKey] | None,
@@ -627,12 +628,20 @@ def _resolve_occupied_ticket_ids(
     its #1862 stale-PR sibling -- skipped when this client has no capacity
     to claim anything this tick.
 
-    Unlike that sibling there is no config toggle: the resolve makes only
-    local reads (cw session state, the daemon roster), never a ``gh`` call,
-    and it only moves forward a refusal the post-claim occupancy handlers
-    would reach anyway.
+    The global ``OrchestratorConfig.occupancy_gate_enabled`` switch (#2396)
+    is the fleet-wide emergency escape hatch; a client's optional
+    ``occupancy_gate_enabled=False`` override supports staged rollout without
+    bypassing the screen for other clients. Disabling it does not remove the
+    refusal itself: it only skips this pre-claim precompute and falls back to
+    #2077's post-claim ``WorktreeOccupiedError``/``HookContextConflictError``
+    handling, which still refuses a genuinely occupied worktree, just one
+    claim later.
     """
-    if available_client_slots <= 0:
+    if (
+        not config.occupancy_gate_enabled
+        or client.occupancy_gate_enabled is False
+        or available_client_slots <= 0
+    ):
         return {}
     return resolve_occupied_ticket_ids(
         client,
@@ -736,9 +745,13 @@ def _dispatch_client_lanes(
     # _claim_next_pending holds dev_queue_lock() and must do no I/O. A row
     # named here is left PENDING instead of being claimed and then released
     # when create_worktree or the hook-context write finds the occupant.
+    # Operator escape hatches: the global OrchestratorConfig setting and the
+    # per-client ClientConfig override (#2396) -- see
+    # _resolve_occupied_ticket_ids's docstring for their semantics.
     occupied_ticket_reasons = _resolve_occupied_ticket_ids(
         client,
         queue_snapshot,
+        config=config,
         available_client_slots=available_client_slots,
         resolved_native_daemon=resolved_native_daemon,
         warned_unresolvable=warned_unresolvable,

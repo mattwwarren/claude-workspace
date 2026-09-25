@@ -318,6 +318,18 @@ class TestClientConfig:
         )
         assert c.quality_gate_commands == ""
 
+    def test_occupancy_gate_enabled_defaults_to_inherit(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.occupancy_gate_enabled is None
+
+    def test_occupancy_gate_enabled_accepts_false_override(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            occupancy_gate_enabled=False,
+        )
+        assert c.occupancy_gate_enabled is False
+
     def test_unknown_key_raises(self) -> None:
         """extra='forbid' rejects an unrecognized top-level key (#1200)."""
         with pytest.raises(ValidationError):
@@ -1994,6 +2006,15 @@ class TestConciergeAndEscalationModelSurface:
     def test_orchestrator_config_ssh_key_gate_enabled_accepts_false(self) -> None:
         cfg = OrchestratorConfig(ssh_key_gate_enabled=False)
         assert cfg.ssh_key_gate_enabled is False
+
+    # -- GitHub #2396 occupancy_gate operator escape hatch --------------------
+
+    def test_orchestrator_config_occupancy_gate_enabled_defaults_true(self) -> None:
+        assert OrchestratorConfig().occupancy_gate_enabled is True
+
+    def test_orchestrator_config_occupancy_gate_enabled_accepts_false(self) -> None:
+        cfg = OrchestratorConfig(occupancy_gate_enabled=False)
+        assert cfg.occupancy_gate_enabled is False
 
 
 class TestReviewRecipeKeyValidation:
