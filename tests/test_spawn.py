@@ -40,6 +40,8 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.native_daemon import NativeDaemonClient
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1470,6 +1472,7 @@ class TestWriteHookContextAtomicAndLiveSession:
         client: str = "test-client",
         purpose: str = "impl",
         ticket_id: str | None = "427",
+        daemon: NativeDaemonClient | None = None,
     ) -> None:
         from cw.spawn import _write_hook_context
 
@@ -1481,6 +1484,7 @@ class TestWriteHookContextAtomicAndLiveSession:
             purpose=purpose,
             ticket_id=ticket_id,
             origin=origin,
+            daemon=daemon,
         )
 
     def test_settings_written_via_atomic_write(
@@ -1667,6 +1671,107 @@ class TestWriteHookContextAtomicAndLiveSession:
             self._call(worktree, origin=SessionOrigin.DAEMON)
 
         assert excinfo.value.conflicting_session_id == "live1234"
+
+    def _seed_live_prior_context(
+        self, tmp_path: Path, *, homed_on_worktree: bool
+    ) -> Path:
+        """Seed an ACTIVE session referenced by the worktree's cw-context.json.
+
+        *homed_on_worktree* sets the session's ``worktree_path`` to the target
+        worktree, which is what lets ``live_home_reason`` corroborate liveness
+        independently of the bare non-terminal status (#2077).
+        """
+        from cw.models import (
+            CwState,
+            Session,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        workspace = tmp_path / "workspace" / "test-client"
+        workspace.mkdir(parents=True)
+        worktree = tmp_path / "worktree-genuinely-live"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+        live_sess = Session(
+            id="live2077",
+            name="test-client/auto-dev/LIVE-2077",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=workspace,
+            worktree_path=worktree if homed_on_worktree else None,
+        )
+        save_state(CwState(sessions=[live_sess]))
+        prior_context = {
+            "session_id": "live2077",
+            "session_name": "test-client/auto-dev/LIVE-2077",
+            "client": "test-client",
+            "purpose": "impl",
+            "ticket_id": "LIVE-2077",
+            "headless": False,
+        }
+        (claude_dir / "cw-context.json").write_text(json.dumps(prior_context))
+        return worktree
+
+    def test_daemon_overwrite_raises_genuinely_live_message_when_daemon_confirms_liveness(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2077: a prior session that ``live_home_reason`` independently
+        confirms is homed on the worktree raises with ``genuinely_live`` set and
+        a message that tells the operator NOT to close it."""
+        from cw.exceptions import HookContextConflictError
+
+        worktree = self._seed_live_prior_context(tmp_path, homed_on_worktree=True)
+
+        with pytest.raises(HookContextConflictError) as excinfo:
+            self._call(
+                worktree, origin=SessionOrigin.DAEMON, daemon=FakeNativeDaemonClient()
+            )
+
+        assert excinfo.value.genuinely_live is True
+        assert excinfo.value.conflicting_session_id == "live2077"
+        assert "genuinely live" in str(excinfo.value)
+        assert "Do not close it" in str(excinfo.value)
+        assert "Complete or close that session" not in str(excinfo.value)
+
+    def test_daemon_overwrite_raises_old_message_when_daemon_cannot_confirm_liveness(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2077: non-terminal in cw state but NOT corroborated by
+        ``live_home_reason`` (no session homed on the worktree, empty roster)
+        keeps the pre-#2077 message and ``genuinely_live=False``."""
+        from cw.exceptions import HookContextConflictError
+
+        worktree = self._seed_live_prior_context(tmp_path, homed_on_worktree=False)
+
+        with pytest.raises(HookContextConflictError) as excinfo:
+            self._call(
+                worktree, origin=SessionOrigin.DAEMON, daemon=FakeNativeDaemonClient()
+            )
+
+        assert excinfo.value.genuinely_live is False
+        assert excinfo.value.conflicting_session_id == "live2077"
+        assert (
+            "Complete or close that session before reusing this worktree."
+            in str(excinfo.value)
+        )
+
+    def test_daemon_overwrite_without_daemon_keeps_old_message(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2077: no *daemon* passed -- liveness is never probed, so even a
+        session homed on the worktree keeps the pre-#2077 message."""
+        from cw.exceptions import HookContextConflictError
+
+        worktree = self._seed_live_prior_context(tmp_path, homed_on_worktree=True)
+
+        with pytest.raises(HookContextConflictError) as excinfo:
+            self._call(worktree, origin=SessionOrigin.DAEMON)
+
+        assert excinfo.value.genuinely_live is False
+        assert "Complete or close that session" in str(excinfo.value)
 
     def test_daemon_overwrite_allowed_when_context_references_completed_session(
         self, tmp_config_dir: Path, tmp_path: Path
