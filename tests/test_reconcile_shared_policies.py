@@ -3018,11 +3018,13 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
     def test_running_task_blocked_result_unknown_reason_returns_routed_false(
         self, tmp_config_dir: Path
     ) -> None:
-        """RUNNING + unrecognised blocker reason → routed=False, FAILED.
+        """RUNNING + unrecognised blocker reason at the cap → routed=False, FAILED.
 
         Companion/superset of ``test_signal_stop_unknown_blocker_reason_marks_
         failed`` (tests/test_cli.py), which pins the same call through the real
         CLI-adjacent path and now also asserts ``outcome.routed is False``.
+        #2405: the catch-all shares the attempt cap, so the FAILED landing is
+        pinned at ``_VALIDATION_FAILED_MAX_ATTEMPTS``.
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-1189-unknown", "sess-1189-unknown"
@@ -3033,7 +3035,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             status=QueueItemStatus.RUNNING,
             session_id=session_id,
             stage=Stage.IMPL,
-            attempts=1,
+            attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
         sentinel = BlockedResult(
@@ -3068,10 +3070,8 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         (last_blocked_result=None) from "a rejected sentinel landed this
         FAILED."
 
-        #1406: doubles as the UNKNOWN-liveness regression pin --
-        ``worktree_path=None`` makes ``_transcript_age_seconds`` return None
-        (no project dir to glob), so the catch-all's new liveness veto cannot
-        fire and this FAILED landing must be preserved exactly.
+        #2405: the catch-all shares the attempt cap, so the FAILED landing is
+        pinned at ``_VALIDATION_FAILED_MAX_ATTEMPTS``.
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         target = TicketTask(
@@ -3080,7 +3080,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             status=QueueItemStatus.RUNNING,
             session_id="sess-1266-catchall",
             stage=Stage.IMPL,
-            attempts=1,
+            attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
         )
         sentinel = BlockedResult(
             blocker=Blocker(
@@ -3444,184 +3444,239 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         assert events[0].payload["excluded_status"] == QueueItemStatus.FAILED
 
 
-class TestRouteBlockedResultCatchAllLivenessGuard:
-    """GitHub #1406: the catch-all FAILED/abandoned landing must not fire while
-    the owning session's transcript is still actively advancing.
+class TestRouteBlockedResultCatchAllAttemptCap:
+    """GitHub #2405 (ADR-0014 audit): the unrecognized-reason catch-all is
+    gated purely by the shared evidence-based attempt cap, never by transcript
+    age.
 
-    Sibling closure to #1281, which added the same transcript-liveness veto to
-    the phantom sweep's stage-mismatch fall-through. #1406 closes the
-    alternative incident route that survived it: a RUNNING task whose
-    BlockedResult is merely *unparseable* (status_unknown,
-    multiple_result_blocks, any unrecognized reason) landed terminal-FAILED
-    even when the worker behind it was still making progress. LIVE now
-    re-queues to PENDING; DEAD (age past the window) and UNKNOWN (no locatable
-    transcript) both fall through to the pre-existing FAILED landing.
+    Replaces #1406's transcript-liveness veto, which let a transcript-age
+    comparison decide FAILED vs. PENDING. The catch-all now shares
+    ``_requeue_blocked_result_under_cap`` with the deterministic-parse and
+    validation_failed branches (#2401): under ``_VALIDATION_FAILED_MAX_ATTEMPTS``
+    it re-queues to PENDING and emits ``SENTINEL_BLOCKED_RESULT_REQUEUED``; at
+    the cap it lands FAILED/abandoned with ``last_blocked_result`` persisted.
+    Every test sweeps transcript age (fresh, around the old liveness window,
+    stale, future-dated, unlocatable) to prove it is inert, and pins that the
+    retired ``SESSION_SENTINEL_LIVENESS_VETOED`` event is never emitted.
     """
 
     CATCH_ALL_REASON = "unknown_reason_xyz"
 
-    def _live_session(
+    AGE_SWEEP = pytest.mark.parametrize(
+        "age_seconds",
+        [
+            pytest.param(0, id="age_0"),
+            pytest.param(30, id="age_30"),
+            pytest.param(TRANSCRIPT_LIVENESS_WINDOW_SECONDS - 1, id="just_inside"),
+            pytest.param(TRANSCRIPT_LIVENESS_WINDOW_SECONDS, id="at_window"),
+            pytest.param(TRANSCRIPT_LIVENESS_WINDOW_SECONDS + 60, id="stale"),
+            pytest.param(-30, id="future_dated"),
+            pytest.param(None, id="unlocatable"),
+        ],
+    )
+
+    def _session_with_transcript_age(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         *,
         session_id: str,
-        age_seconds: float,
-    ) -> tuple[Session, datetime]:
-        """Build a DAEMON session whose transcript is ``age_seconds`` old at now.
+        age_seconds: float | None,
+    ) -> Session:
+        """Build a DAEMON session whose transcript is ``age_seconds`` old now.
 
-        Returns ``(session, now)``.  ``now`` is a fixed offset past the
-        session's ``started_at`` so the transcript's ``os.utime``-stamped mtime
-        stays strictly after it -- ``_project_transcripts_latest_timestamp``'s
-        reused-worktree guard (#358/#372) discards any candidate older than
-        ``started_at``.
+        ``age_seconds=None`` yields a session with no ``worktree_path`` (no
+        locatable transcript). Otherwise the transcript mtime is stamped
+        relative to wall-clock now -- the routing function takes no clock, so
+        a pre-#2405 implementation would judge liveness against
+        ``datetime.now(UTC)`` too. ``started_at`` sits an hour earlier so the
+        stamped mtime clears ``_project_transcripts_latest_timestamp``'s
+        reused-worktree guard (#358/#372).
         """
+        if age_seconds is None:
+            return _make_daemon_session(id=session_id, worktree_path=None)
         home = tmp_path / "home"
         home.mkdir(exist_ok=True)
         monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / f"wt-{session_id}"
-        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-        now = started_at + timedelta(hours=1)
-
+        now = datetime.now(UTC)
         transcript = _write_salvage_transcript(
             home, worktree, f"csid-{session_id}", _stage_complete_payload()
         )
         mtime = (now - timedelta(seconds=age_seconds)).timestamp()
         os.utime(str(transcript), (mtime, mtime))
-
-        session = _make_daemon_session(
+        return _make_daemon_session(
             id=session_id,
             worktree_path=worktree,
             surface_ref="fake-short-id",
-            started_at=started_at,
+            started_at=now - timedelta(hours=1),
         )
-        return session, now
 
-    def _catch_all_sentinel(self) -> BlockedResult:
+    def _catch_all_sentinel(self, reason: str = CATCH_ALL_REASON) -> BlockedResult:
         return BlockedResult(
             blocker=Blocker(
                 stage="unknown",
-                reason=self.CATCH_ALL_REASON,
+                reason=reason,
                 details="test: unrecognised reason code",
             )
         )
 
-    def test_route_blocked_result_catch_all_live_transcript_requeues_pending(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """LIVE transcript → PENDING + cleared session_id instead of FAILED.
-
-        Mirrors the ``_TRANSIENT_PARSE_FAILURES`` branch's requeue, but
-        (unlike that branch) also emits ``SESSION_SENTINEL_LIVENESS_VETOED``
-        -- this veto overrides what would otherwise be a terminal FAILED
-        landing, so it needs a durable audit trail; a re-queue that never
-        would have been FAILED doesn't. Does NOT write the
-        ``last_blocked_result`` diagnostic (#1266): the veto is a re-queue,
-        not a rejection, so there is no rejected sentinel to record.
-        """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
-        session, now = self._live_session(
-            tmp_path, monkeypatch, session_id="sess-1406-live", age_seconds=30
-        )
-        target = TicketTask(
-            ticket_id="GH-1406-live",
+    def _running_target(self, session: Session, *, attempts: int) -> TicketTask:
+        return TicketTask(
+            ticket_id="GH-2405-catchall",
             client="staged-client",
             status=QueueItemStatus.RUNNING,
             session_id=session.id,
             stage=Stage.IMPL,
-            attempts=1,
+            attempts=attempts,
         )
+
+    @AGE_SWEEP
+    @pytest.mark.parametrize(
+        "attempts",
+        [
+            pytest.param(0, id="attempts_0"),
+            pytest.param(
+                _VALIDATION_FAILED_MAX_ATTEMPTS - 1, id="attempts_cap_minus_1"
+            ),
+        ],
+    )
+    def test_catch_all_under_cap_requeues_regardless_of_transcript_age(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        age_seconds: float | None,
+        attempts: int,
+    ) -> None:
+        """Under the cap → PENDING via the shared helper, for every age."""
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        session = self._session_with_transcript_age(
+            tmp_path, monkeypatch, session_id="sess-2405-under", age_seconds=age_seconds
+        )
+        target = self._running_target(session, attempts=attempts)
         sentinel = self._catch_all_sentinel()
 
-        routed = _route_blocked_result_to_task(target, session, sentinel, now=now)
+        routed = _route_blocked_result_to_task(target, session, sentinel)
 
         assert routed is True
         assert target.status == QueueItemStatus.PENDING
         assert target.session_id is None
         assert target.last_blocked_result is None
-        vetoed = [
-            e
-            for e in read_events()
-            if e.type == OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED
+        events = read_events()
+        assert OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED not in [
+            e.type for e in events
         ]
-        assert len(vetoed) == 1
-        assert vetoed[0].payload["ticket_id"] == "GH-1406-live"
-        assert vetoed[0].payload["client"] == "staged-client"
-        assert vetoed[0].payload["session_id"] == session.id
-        # Tolerance, not exact equality: transcript_age_seconds round-trips
-        # through a real os.utime write + disk stat() read-back (mtime
-        # fallback, since the salvage payload carries no content timestamp),
-        # matching the convention test_reconcile_shared_sentinels.py already
-        # uses for the same underlying value.
-        assert abs(vetoed[0].payload["transcript_age_seconds"] - 30) < 5
-        assert vetoed[0].payload["blocker_reason"] == self.CATCH_ALL_REASON
+        requeued = [
+            e
+            for e in events
+            if e.type == OrchestratorEventType.SENTINEL_BLOCKED_RESULT_REQUEUED
+        ]
+        assert len(requeued) == 1
+        assert requeued[0].payload == {
+            "ticket_id": "GH-2405-catchall",
+            "client": "staged-client",
+            "session_id": session.id,
+            "blocker_reason": self.CATCH_ALL_REASON,
+            "attempts": attempts,
+            "attempt_cap": _VALIDATION_FAILED_MAX_ATTEMPTS,
+        }
 
-    def test_route_blocked_result_catch_all_stale_transcript_falls_through_to_failed(
+    @AGE_SWEEP
+    @pytest.mark.parametrize(
+        "attempts",
+        [
+            pytest.param(_VALIDATION_FAILED_MAX_ATTEMPTS, id="attempts_at_cap"),
+            pytest.param(_VALIDATION_FAILED_MAX_ATTEMPTS + 1, id="attempts_past_cap"),
+        ],
+    )
+    def test_catch_all_at_cap_lands_failed_regardless_of_transcript_age(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        age_seconds: float | None,
+        attempts: int,
     ) -> None:
-        """DEAD transcript (age past the window) → the pre-#1406 FAILED landing.
+        """At/past the cap → FAILED/abandoned + last_blocked_result, every age.
 
-        Distinct from the UNKNOWN case pinned by
-        ``test_route_blocked_result_catch_all_writes_last_blocked_result``: here
-        the age is *known*, just past ``TRANSCRIPT_LIVENESS_WINDOW_SECONDS``.
+        A fresh transcript no longer vetoes the terminal landing (#2405): the
+        cap is the only evidence that decides it.
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
-        session, now = self._live_session(
+        session = self._session_with_transcript_age(
             tmp_path,
             monkeypatch,
-            session_id="sess-1406-stale",
-            age_seconds=TRANSCRIPT_LIVENESS_WINDOW_SECONDS + 60,
+            session_id="sess-2405-at-cap",
+            age_seconds=age_seconds,
         )
-        target = TicketTask(
-            ticket_id="GH-1406-stale",
-            client="staged-client",
-            status=QueueItemStatus.RUNNING,
-            session_id=session.id,
-            stage=Stage.IMPL,
-            attempts=1,
-        )
+        target = self._running_target(session, attempts=attempts)
         sentinel = self._catch_all_sentinel()
 
-        routed = _route_blocked_result_to_task(target, session, sentinel, now=now)
+        routed = _route_blocked_result_to_task(target, session, sentinel)
 
         assert routed is False
         assert target.status == QueueItemStatus.FAILED
         assert target.disposition == "abandoned"
         assert target.last_blocked_result == sentinel.model_dump(mode="json")
-        assert [
+        event_types = [e.type for e in read_events()]
+        assert OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED not in event_types
+        assert OrchestratorEventType.SENTINEL_BLOCKED_RESULT_REQUEUED not in event_types
+
+    @pytest.mark.parametrize(
+        "reason", ["status_unknown", "multiple_result_blocks", CATCH_ALL_REASON]
+    )
+    def test_catch_all_reasons_share_requeue_event(
+        self, tmp_config_dir: Path, reason: str
+    ) -> None:
+        """Every catch-all reason carries its own reason on the shared event."""
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        session = _make_daemon_session(id="sess-2405-reasons", worktree_path=None)
+        target = self._running_target(session, attempts=1)
+
+        routed = _route_blocked_result_to_task(
+            target, session, self._catch_all_sentinel(reason)
+        )
+
+        assert routed is True
+        requeued = [
             e
             for e in read_events()
-            if e.type == OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED
-        ] == []
+            if e.type == OrchestratorEventType.SENTINEL_BLOCKED_RESULT_REQUEUED
+        ]
+        assert [e.payload["blocker_reason"] for e in requeued] == [reason]
 
-    def test_apply_sentinel_catch_all_live_transcript_requeues_pending_via_apply(
+    @pytest.mark.parametrize(
+        ("attempts", "expect_status"),
+        [
+            pytest.param(1, QueueItemStatus.PENDING, id="under_cap"),
+            pytest.param(
+                _VALIDATION_FAILED_MAX_ATTEMPTS, QueueItemStatus.FAILED, id="at_cap"
+            ),
+        ],
+    )
+    def test_apply_sentinel_catch_all_fresh_transcript_follows_cap(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        attempts: int,
+        expect_status: QueueItemStatus,
     ) -> None:
-        """The veto reaches production through ``_apply_sentinel_to_task``.
+        """End-to-end through ``_apply_sentinel_to_task`` with a fresh transcript.
 
-        Pins the widened ``session``/``now`` threading end-to-end, and that
-        ``landed_terminal`` (#1273) derives False off the vetoed ``routed=True``
-        -- callers must NOT ``daemon.stop()`` a worker that is still advancing.
-        Also confirms the audit event survives the trip through
-        ``_apply_sentinel_to_task``'s own ``dev_queue_lock()`` -- record_event
-        nests _inbox_lock inside it, the established safe order (RFC 0008 W1,
-        #978 -- not #765, which is the opposite lesson: a deadlock from the
-        reverse mistake in a since-fixed call site).
+        ``landed_terminal`` (#1273) derives off the cap alone: a fresh
+        transcript under the cap re-queues (the daemon is not stopped), and the
+        same fresh transcript at the cap lands terminal. The requeue event also
+        survives the trip through ``_apply_sentinel_to_task``'s own
+        ``dev_queue_lock()`` -- record_event nests _inbox_lock inside it, the
+        established safe order (RFC 0008 W1, #978).
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
-        session, now = self._live_session(
-            tmp_path, monkeypatch, session_id="sess-1406-apply", age_seconds=30
+        session = self._session_with_transcript_age(
+            tmp_path, monkeypatch, session_id="sess-2405-apply", age_seconds=30
         )
-        ticket_id = "GH-1406-apply"
+        ticket_id = "GH-2405-apply"
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -3631,139 +3686,26 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
                         status=QueueItemStatus.RUNNING,
                         session_id=session.id,
                         stage=Stage.IMPL,
-                        attempts=1,
+                        attempts=attempts,
                     )
                 ]
             )
         )
-        sentinel = self._catch_all_sentinel()
 
-        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel, now=now)
+        outcome = _apply_sentinel_to_task(
+            ticket_id, session, self._catch_all_sentinel()
+        )
 
-        assert outcome.routed is True
-        assert outcome.landed_terminal is False
+        under_cap = expect_status == QueueItemStatus.PENDING
+        assert outcome.routed is under_cap
+        assert outcome.landed_terminal is not under_cap
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
-        assert t.status == QueueItemStatus.PENDING
-        assert t.session_id is None
-        vetoed = [
-            e
-            for e in read_events()
-            if e.type == OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED
-        ]
-        assert len(vetoed) == 1
-        assert vetoed[0].payload["ticket_id"] == ticket_id
-
-    def test_route_blocked_result_catch_all_negative_age_falls_through_to_failed(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The ``0 <= age`` floor: a transcript mtime *after* ``now`` is not LIVE.
-
-        A negative age (clock skew, or a caller-supplied fictional/frozen
-        ``now`` that predates a transcript's real wall-clock mtime) must not
-        be misclassified as freshly-live -- it falls through to the same
-        FAILED landing as DEAD/UNKNOWN. Pins the floor directly, rather than
-        relying on it as an incidental side effect of two unrelated tests
-        (``test_reconcile_idle.py`` and ``test_cli.py``'s ``TestSignalStop``)
-        that happen to combine a fictional/frozen ``now`` with a real
-        transcript mtime, neither of which names this invariant.
-        """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
-        session, now = self._live_session(
-            tmp_path, monkeypatch, session_id="sess-1406-negative-age", age_seconds=-30
-        )
-        target = TicketTask(
-            ticket_id="GH-1406-negative-age",
-            client="staged-client",
-            status=QueueItemStatus.RUNNING,
-            session_id=session.id,
-            stage=Stage.IMPL,
-            attempts=1,
-        )
-        sentinel = self._catch_all_sentinel()
-
-        routed = _route_blocked_result_to_task(target, session, sentinel, now=now)
-
-        assert routed is False
-        assert target.status == QueueItemStatus.FAILED
-        assert target.disposition == "abandoned"
-        assert target.last_blocked_result == sentinel.model_dump(mode="json")
-        assert [
-            e
-            for e in read_events()
-            if e.type == OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED
-        ] == []
-
-    @pytest.mark.parametrize(
-        ("age_seconds", "expect_routed", "expect_status", "expect_event_count"),
-        [
-            pytest.param(
-                TRANSCRIPT_LIVENESS_WINDOW_SECONDS - 1,
-                True,
-                QueueItemStatus.PENDING,
-                1,
-                id="just_inside_window",
-            ),
-            pytest.param(
-                TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
-                False,
-                QueueItemStatus.FAILED,
-                0,
-                id="exactly_at_window",
-            ),
-        ],
-    )
-    def test_route_blocked_result_catch_all_window_boundary(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        age_seconds: int,
-        expect_routed: bool,
-        expect_status: QueueItemStatus,
-        expect_event_count: int,
-    ) -> None:
-        """The window comparison is strict ``<``: exactly at the window is DEAD.
-
-        ``TRANSCRIPT_LIVENESS_WINDOW_SECONDS - 1`` (just inside) requeues to
-        PENDING and emits the veto event; ``TRANSCRIPT_LIVENESS_WINDOW_SECONDS``
-        exactly (not strictly less than the window) falls through to FAILED
-        with no event.
-        """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
-        session, now = self._live_session(
-            tmp_path,
-            monkeypatch,
-            session_id="sess-1406-boundary",
-            age_seconds=age_seconds,
-        )
-        target = TicketTask(
-            ticket_id="GH-1406-boundary",
-            client="staged-client",
-            status=QueueItemStatus.RUNNING,
-            session_id=session.id,
-            stage=Stage.IMPL,
-            attempts=1,
-        )
-        sentinel = self._catch_all_sentinel()
-
-        routed = _route_blocked_result_to_task(target, session, sentinel, now=now)
-
-        assert routed is expect_routed
-        assert target.status == expect_status
-        vetoed = [
-            e
-            for e in read_events()
-            if e.type == OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED
-        ]
-        assert len(vetoed) == expect_event_count
-        if expect_status == QueueItemStatus.PENDING:
-            assert target.session_id is None
-        else:
-            assert target.disposition == "abandoned"
-            assert target.last_blocked_result == sentinel.model_dump(mode="json")
+        assert t.status == expect_status
+        event_types = [e.type for e in read_events()]
+        assert OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED not in event_types
+        assert (
+            OrchestratorEventType.SENTINEL_BLOCKED_RESULT_REQUEUED in event_types
+        ) is under_cap
 
 
 def test_validation_failed_cap_still_reads_raw_attempts_not_unproductive(
