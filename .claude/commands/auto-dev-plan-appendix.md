@@ -9,9 +9,51 @@ it.
 
 ---
 
+## Step 1a.0b: binding-resolutions delta + approved-fingerprint fast path (resumed rounds only)
+
+Reached from Step 1a's item "0b." in the core doc, and only when Step 1a.0's resume branch fired this dispatch. A fresh dispatch never reaches here.
+
+**Step 1a.0b — binding-resolutions delta + approved-fingerprint fast path (resumed rounds only).** Fires only when Step 1a.0's resume branch fired this dispatch; on a fresh (non-resumed) dispatch skip straight to step 1 below.
+
+**Bookkeeping-line grammar.** `plan-stage-resolutions-applied` is a 4th leading bookkeeping line in `.cw/plan-draft.md`, recording the identity of the authoritative resolutions source last folded into the draft. Closed and exhaustive — these three forms are the ENTIRE grammar:
+
+```
+<!-- plan-stage-resolutions-applied: source=comment:<id> -->
+<!-- plan-stage-resolutions-applied: source=body:<sha> -->
+<!-- plan-stage-resolutions-applied: source=none -->
+```
+
+Ordinal position: always last, per the Bookkeeping-line order rule (`.claude/commands/auto-dev-plan.md`, Settlement marker grammar section) — appended after every `plan-stage-settled` marker line, or after the fingerprint line if none exist yet, or after the round-counter line if neither exists yet.
+
+1. **Resolutions-delta detection.** Re-run Step 1b setup's marker-discovery procedure (`.claude/commands/auto-dev-plan.md`, "Step 1b setup — Pre-flight Resolution pre-extraction") — the comment-marker grep, the body-marker grep, newest-wins across >1 marker comment, and body-over-comment precedence — fresh against the live-fetched comments/body. Cited by name here, not restated. The result is the current authoritative resolutions source identity: `comment:<id>`, `body:<sha of body's resolutions section>`, or `none`.
+
+2. **Delta comparison.** Compare the current source identity against the persisted `plan-stage-resolutions-applied` marker (absent ⇒ "never evaluated"):
+   - marker absent + current source `none` → no delta; persist the marker as `source=none` (bootstrap), continue to step 4.
+   - marker absent + current source concrete → **delta** (this resolutions source has never been folded in).
+   - marker present with value X, current source Y, X ≠ Y → **delta** (a newer resolutions source, or a body edit).
+   - X == Y → no delta; continue to step 4.
+
+3. **On delta: revise.** Spawn the **Plan** agent (`subagent_type: "Plan", model: "sonnet"`) on an independent axis inside Step 1f.4 (`.claude/commands/auto-dev-plan.md`) — modeled on the Format-only revision (defense-in-depth) precedent there — independent of, and does not consume, the standard 1-cycle MUST_FIX revision budget. Prompt: the current draft, plus a `## Binding Pre-flight Resolutions` injection (Step 1b setup's exact shape, cited by name, not restated), plus an instruction to revise the draft and re-emit/extend `## Pre-flight Resolution Conformance`. Invalidates BOTH `plan-spec-reviewed` and `plan-soundness-reviewed` signoff markers on the resulting draft — a resolutions redirect can implicate either station's prior verdict. Capped at **1 attempt per detected delta**. Checkpoint the revised draft per the Draft-rewrite rule (`.claude/commands/auto-dev-plan.md`). Persist `plan-stage-resolutions-applied` = the source identity just applied. **Telemetry:** none beyond the best-effort checkpoint write — a bare successful revision emits no new `stage.entered`/`stage.errored`. If the revision leaves a persisting MUST_FIX that later exhausts Step 1f.3's own cycle, Step 1f.3's existing `stage.errored` emission (unchanged) covers it — no gap.
+
+4. **Fingerprint fast-path check (runs regardless of whether step 3 fired).** Compute `draft_fp` per the *Plan-draft fingerprint rule* (`.claude/commands/auto-dev-plan.md`) of the draft as it now stands. Reuse Checkpoint 1's existing row-path evidence check by name (`.claude/commands/auto-dev-plan.md`, Checkpoint 1 — a non-null `queue_metadata.plan_approved_at` AND a `queue_metadata.plan_approved_fingerprint` equal to `draft_fp`) — do not re-derive it here.
+   - **Match → fast path.** Skip Step 1c's ambiguity/premise re-scan AND Step 1c.0's round-cap/settlement-folding machinery entirely — no Product Manager Reviewer spawn, nothing rewrites the draft — and proceed straight to Step 1d. Emit:
+     ```bash
+     cw event record stage.entered \
+       --correlation-id "$TICKET" \
+       --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"approved_fingerprint_match\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+     ```
+     — in place of, not in addition to, `s1_ambiguity_scan_complete`.
+   - **No match (or absent evidence) → proceed to Step 1c.0 / Step 1c as today**, now evaluated against the (possibly just-revised) draft.
+
+**Scope note on evidence source.** Step 4's evidence check is scoped to the row-path only (`cw dev-queue approve`) — matching the ticket's literal wording ("the row's `plan_approved_fingerprint` matches"). A comment-path-token-approved draft is unaffected by this section; it continues through today's slower path (Step 1c re-scan runs, Checkpoint 1 re-evaluates the comment-path token as it does today).
+
+Because step 3 (delta/revision) runs strictly before step 4 (fingerprint fast-path check), a new resolutions comment or body edit posted after approval automatically takes precedence over the fast path with no extra special-casing: the revision changes the draft text, so the freshly-computed `draft_fp` no longer equals the (now-stale) `plan_approved_fingerprint`, and the fast path simply doesn't match — falling through to the normal ambiguity re-scan → Checkpoint 1 re-park, with a freshly computed fingerprint.
+
+---
+
 ## Step 1c.0: round-cap read and settlement folding (resumed rounds only)
 
-Reached from `### Step 1c: Ambiguity Verification` in the core doc, and only when Step 1a.0's resume branch fired this dispatch. A fresh dispatch never reaches here.
+Reached from `### Step 1c: Ambiguity Verification` in the core doc, and only when Step 1a.0's resume branch fired this dispatch. A fresh dispatch never reaches here. Reached only when Step 1a.0b's fast path (above) did not already apply — a fast-path match this round skips this section entirely.
 
 **Step 1c.0 — Round-cap read + settlement folding (resumed rounds only).** Fires only when Step 1a.0's resume branch fired this dispatch; on a fresh (non-resumed) dispatch skip straight to step 1 below.
 
