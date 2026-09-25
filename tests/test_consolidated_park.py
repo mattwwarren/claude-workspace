@@ -15,7 +15,7 @@ before any human-gated exit and posts ONE ``## Pending Verification Scan``
 comment, so tickets converge in two rounds instead of 3-6.
 """
 
-from tests.conftest import _appendix, _cmd
+from tests.conftest import _appendix, _checkpoint1_section, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 PARK_ANCHOR = "**Consolidated park (single-exit rule, #1650).**"
@@ -32,13 +32,6 @@ def _step1a_section() -> str:
     content = _cmd("auto-dev-plan.md")
     start = content.index("### Step 1a: Check for Existing Plan")
     end = content.index("### Step 1b:")
-    return content[start:end]
-
-
-def _checkpoint1_section() -> str:
-    content = _cmd("auto-dev-plan.md")
-    start = content.index("### Checkpoint 1 (Plan Approval)")
-    end = content.index("### Step 1e:")
     return content[start:end]
 
 

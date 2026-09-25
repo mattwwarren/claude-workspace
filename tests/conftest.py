@@ -143,6 +143,14 @@ def _cmd(name: str) -> str:
     return (_COMMANDS_ROOT / name).read_text(encoding="utf-8")
 
 
+def _checkpoint1_section() -> str:
+    """Return ``auto-dev-plan.md``'s Checkpoint 1 plan-approval section."""
+    content = _cmd("auto-dev-plan.md")
+    start = content.index("### Checkpoint 1 (Plan Approval)")
+    end = content.index("### Step 1e:")
+    return content[start:end]
+
+
 def _appendix(stage: str) -> str:
     """Return the text of ``.claude/commands/auto-dev-<stage>-appendix.md`` (#1879).
 
