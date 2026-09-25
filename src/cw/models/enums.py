@@ -440,6 +440,16 @@ class OrchestratorEventType(StrEnum):
     # REVIEW_FINDING_VOIDED above: the refusal is a mechanical decision nobody
     # asked to see, and this event is the only durable record it happened.
     REVIEW_TREADMILL_DETECTED = "review.treadmill_detected"
+    # GitHub #2394 -- the fix loop grew the diff for 2+ consecutive cycles
+    # while resolving none of the originally-found MUST_FIX findings. Sibling
+    # of REVIEW_TREADMILL_DETECTED (same review.* namespace, same "durable
+    # record of a mechanical decision nobody asked to see" rationale) but
+    # loop-wide rather than per-finding. Deliberately NOT added to
+    # _DEFAULT_OPERATOR_EVENT_TYPES, matching REVIEW_TREADMILL_DETECTED:
+    # attention-stream visibility for the park itself already comes from the
+    # BLOCKED_ON_USER TASK_TRANSITION every fix-loop park emits regardless of
+    # blocker.reason.
+    FIX_LOOP_DIVERGENCE_DETECTED = "review.fix_loop_divergence_detected"
     # GitHub #1838 -- one re-derived review finding was suppressed because a
     # prior round's operator adjudication had already REJECTED it. Namespaced
     # by its owning module (review_finding_dispositions.py), same convention as

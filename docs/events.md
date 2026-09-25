@@ -2112,6 +2112,51 @@ debt itself is already surfaced on the posted review comment.
 
 `correlation_id` is the `ticket_id`.
 
+### `review.fix_loop_divergence_detected`
+
+**Emitter:** `emit_divergence_event` (`cw.codex_fix_loop_divergence`),
+reached from `run_review_with_fix_loop` (`cw.codex_fix_loop`) at most once per
+run, immediately before the loop parks with `blocker.reason =
+"fix_loop_diverging"`.
+**Payload:**
+```json
+{
+  "pre_loop_head_sha": "<str>",
+  "cycles": [
+    {
+      "cycle": 1,
+      "must_fix_before": 1,
+      "must_fix_after": 2,
+      "originally_resolved": 0,
+      "net_lines_added": 100,
+      "cumulative_net_lines_added": 100
+    }
+  ],
+  "cumulative_net_lines_added": 200,
+  "stall_streak": 2
+}
+```
+**Semantics:** GitHub #2394. The fix loop resolved none of the originally-found
+(cycle-0) MUST_FIX findings for 2 consecutive cycles while its cumulative fix
+churn (added + removed lines across the cycles' commits, via `git diff
+--numstat`) exceeded `max(150, 0.5 × the pre-loop branch diff)`. Both
+conditions are required. The loop parks before reaching its cycle cap instead
+of spending the remaining cycles growing the diff further.
+
+`pre_loop_head_sha` is the cycle-0 reviewed head, so an operator can reset to
+it and discard every fix cycle's commits. `cycles` has one entry per fix cycle
+that ran. Resolving a finding the loop itself introduced does not count as
+progress. `cumulative_net_lines_added` never resets. Only `stall_streak`
+resets when a cycle resolves an original finding.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
+(`orchestrator_config.py`), matching `review.treadmill_detected`. The park
+itself already reaches the operator through the `BLOCKED_ON_USER`
+`task.transition` every fix-loop park emits, whatever its `blocker.reason`, and
+the same per-cycle breakdown is appended to `blocker.details`.
+
+`correlation_id` is the `ticket_id`.
+
 ### `review.finding_disposition_suppressed`
 
 **Emitter:** `suppress_adjudicated_findings`
