@@ -12,12 +12,11 @@ from elsewhere must target the submodule that looks it up at call time
 
 - ``events`` — per-task ``dispatch.tick`` / ``SESSION_NEEDS_ATTENTION``
   emitters shared by the claim screen and the spawn path.
-- ``outcome`` — the ``_SpawnOutcome`` record (a leaf, so ``spawn`` can import
-  the codex gate at module top without a cycle).
 - ``claimed_row`` — locked load/re-find/mutate/save primitives for one
   claimed RUNNING row: revert, park, spawn-success stamp.
 - ``codex_capability`` — TTL-cached codex CLI probe and pre-spawn gate
-  (#1238).
+  (#1238); also holds the ``_SpawnOutcome`` record returned by both the gate
+  and the spawn path.
 - ``lane_stats`` — per-lane occupant lists and occupancy counts (ADR-0006).
 - ``screening`` — candidate screening and the atomic claim transaction.
 - ``spawn`` — worktree provisioning, the stale/occupied-worktree guards, the
@@ -43,6 +42,7 @@ from cw.dispatch.claim.codex_capability import (
     _codex_capability_gate,
     _codex_capability_park_count,
     _reset_codex_capability_cache,
+    _SpawnOutcome,
 )
 from cw.dispatch.claim.events import (
     _emit_attempt_cap_attention_event,
@@ -55,7 +55,6 @@ from cw.dispatch.claim.lane_stats import (
     _lane_occupants_for_client,
     _lane_stats_for_client,
 )
-from cw.dispatch.claim.outcome import _SpawnOutcome
 from cw.dispatch.claim.screening import (
     _CLAIM_BACKOFF,
     _CLAIM_CLAIMED,

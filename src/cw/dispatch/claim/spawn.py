@@ -27,9 +27,8 @@ from cw.dispatch.claim.claimed_row import (
     _revert_claimed_task_to_pending,
     _stamp_spawn_success,
 )
-from cw.dispatch.claim.codex_capability import _codex_capability_gate
+from cw.dispatch.claim.codex_capability import _codex_capability_gate, _SpawnOutcome
 from cw.dispatch.claim.events import _emit_worktree_occupied_skip_event
-from cw.dispatch.claim.outcome import _SpawnOutcome
 from cw.events import record_event
 from cw.exceptions import (
     HookContextConflictError,
