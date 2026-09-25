@@ -801,6 +801,10 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     (GitHub #2102) -- a regress into the plan stage means re-plan, and the
     approval the operator gave the previous plan must not carry over.
 
+    Also clears ``must_fix_override`` when *target_stage* is ``Stage.REVIEW``
+    (GitHub #2205) -- the re-review produces a new verdict, and an override
+    bound to the old one must not ship the new one.
+
     Also stamps ``pending_operator_comment = True`` (GitHub #1730) -- the
     sibling per-arrival marker saying this re-entry may carry an operator
     send-back the reviewer must treat as binding. Stamped unconditionally here,
@@ -842,6 +846,10 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     if target_stage == Stage.PLAN:
         task.plan_approved_at = None
         task.plan_approved_fingerprint = None
+    # A regress INTO review means a re-review, which supersedes the verdict the
+    # operator's MUST_FIX override was bound to (#2205).
+    if target_stage == Stage.REVIEW:
+        task.must_fix_override = None
     # unproductive=False (GitHub #1750): the shared chokepoint for every
     # regress (operator `--regress` via requeue.py, routing.py's Rule 5a
     # FINALIZE self-heal). A deliberate backward move is a pipeline-stage

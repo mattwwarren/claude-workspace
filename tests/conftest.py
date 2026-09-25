@@ -1249,6 +1249,45 @@ def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:
     )
 
 
+def write_review_verdict_envelope(
+    worktree: Path,
+    *,
+    ticket_id: str,
+    reviewed_sha: str,
+    must_fix: Sequence[Finding] = (),
+    blocking: bool | None = None,
+) -> Path:
+    """Write a real ``ReviewVerdictEnvelope`` to the worktree's verdict JSON (#2205).
+
+    Rendered by production's ``render_review_verdict_envelope`` from a
+    ``consolidate_verdict`` result, so the file has the shape codex's
+    background review persists. *blocking* defaults to "has must_fix".
+    """
+    from cw.review_findings import (
+        REVIEW_VERDICT_JSON_RELATIVE_PATH,
+        consolidate_verdict,
+        render_review_verdict_envelope,
+    )
+
+    base = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="NIT"))],
+        _make_diff(),
+        reviewed_sha=reviewed_sha,
+    )
+    verdict = base.model_copy(
+        update={
+            "must_fix": list(must_fix),
+            "blocking": bool(must_fix) if blocking is None else blocking,
+        }
+    )
+    path = worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        render_review_verdict_envelope(verdict, ticket_id=ticket_id), encoding="utf-8"
+    )
+    return path
+
+
 @pytest.fixture(autouse=True)
 def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect every cw state/config path to ``tmp_path``.
