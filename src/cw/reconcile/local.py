@@ -36,10 +36,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
-from cw.opencode_runner import (
-    OPENCODE_LOG_RELATIVE_PATH,
-    synthesize_opencode_result,
-)
+from cw.opencode_runner import synthesize_opencode_result
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
     ProposedAction,
@@ -50,11 +47,12 @@ from cw.reconcile._shared import (
 from cw.result import emit_result_on
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
-    from cw.models import CwState, LocalLivenessHandle
+    from cw.models import CwState, LocalLivenessBackend, LocalLivenessHandle
 
 
 def _local_process_alive(handle: LocalLivenessHandle) -> bool:
@@ -110,34 +108,56 @@ def _detect_local_harvest_candidates(
     return candidates
 
 
+def _harvest_via_git(
+    task: TicketTask, worktree: Path, default_branch: str, session_id: str
+) -> AutoDevResult:
+    return synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch=default_branch,
+        plan_source="none",
+        session_id=session_id,
+    )
+
+
+def _harvest_via_opencode_log(
+    task: TicketTask, worktree: Path, default_branch: str, session_id: str
+) -> AutoDevResult:
+    del default_branch  # the sentinel comes from the JSONL log, not git facts
+    return synthesize_opencode_result(
+        task=task, worktree=worktree, session_id=session_id
+    )
+
+
+# Harvest-time result synthesizer per LocalLivenessHandle.backend (#2369).
+# Each entry is normalized to (task, worktree, default_branch, session_id).
+_HARVEST_SYNTHESIZERS: dict[
+    LocalLivenessBackend,
+    Callable[[TicketTask, Path, str, str], AutoDevResult],
+] = {
+    "aider": _harvest_via_git,
+    "opencode": _harvest_via_opencode_log,
+}
+
+
 def _synthesize_harvest_sentinel(
     worktree: Path,
     task: TicketTask,
     default_branch: str,
     session_id: str,
+    backend: LocalLivenessBackend,
 ) -> AutoDevResult:
-    """Synthesize the harvest sentinel, choosing opencode or git synthesis.
+    """Synthesize the harvest sentinel with the synthesizer for *backend*.
 
-    If ``.cw/opencode.log`` exists, the session was spawned by OpencodeExecutor
-    — parse the JSONL log for the sentinel. Otherwise, fall back to git-fact
-    synthesis (aider path). A git/opencode failure on one candidate must not
-    abort the entire harvest sweep — returns a blocked result on exception.
+    Dispatches through ``_HARVEST_SYNTHESIZERS`` on the handle's recorded
+    backend (opencode → JSONL log parse, aider → git-fact synthesis); an
+    unregistered backend falls back to git synthesis. A git/opencode failure on
+    one candidate must not abort the entire harvest sweep — returns a blocked
+    result on exception.
     """
+    synthesize = _HARVEST_SYNTHESIZERS.get(backend, _harvest_via_git)
     try:
-        opencode_log = worktree / OPENCODE_LOG_RELATIVE_PATH
-        if opencode_log.exists():
-            return synthesize_opencode_result(
-                task=task,
-                worktree=worktree,
-                session_id=session_id,
-            )
-        return synthesize_git_result(
-            task=task,
-            worktree=worktree,
-            default_branch=default_branch,
-            plan_source="none",
-            session_id=session_id,
-        )
+        return synthesize(task, worktree, default_branch, session_id)
     except (OSError, subprocess.CalledProcessError):
         return make_blocked(
             ticket_id=task.ticket_id,
@@ -191,8 +211,10 @@ def _act_on_local_harvest_candidates(
 
     for candidate in candidates:
         session = session_by_id[candidate.session_id]
-        if candidate.worktree_path is None:
-            continue  # LOCAL DAEMON sessions always carry a worktree; defensive.
+        if candidate.worktree_path is None or session.local_liveness is None:
+            # Unreachable: detection admits only sessions with a worktree and a
+            # liveness handle; the guard narrows both for the calls below.
+            continue
         client_cfg = clients.get(session.client)
         default_branch = client_cfg.default_branch if client_cfg is not None else "main"
         task = _task_by_ticket.get(candidate.ticket_id) if candidate.ticket_id else None
@@ -208,6 +230,7 @@ def _act_on_local_harvest_candidates(
             task=task,
             default_branch=default_branch,
             session_id=candidate.session_id,
+            backend=session.local_liveness.backend,
         )
         # Task first (before the session status change) so the task is in its
         # terminal/advanced state when revert_completed_silent_tasks runs.
