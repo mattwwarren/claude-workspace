@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **New `cw codex run` subprocess entry point (#2386):** `cw.codex_driver` and its thin `cw codex run --stage <review|impl> --session-id <id> <ticket>` CLI wrapper give the codex review stage a process-boundary driver (RFC 0014 S1 / ADR-0018), re-deriving the session/task/client from persisted state instead of a Python closure. `--stage review` runs the same completion payload `CodexExecutor`'s in-process daemon thread produces today; `--stage impl` exits non-zero, naming #1550, until that stage is implemented. Not yet wired into `CodexExecutor.spawn()` — this ticket adds only the entry point.
 - **A `cw review verify-fixes` downgrade now leaves an event and a sentinel count, not only a log line (#2009):** each `"fixed"` disposition that `verify_fixed_dispositions` walks back to `"dropped"` now emits one `review.fixed_disposition_downgraded` event, recorded at the point of the downgrade and correlated to the ticket. The event payload carries the finding's file, lines, severity, summary, reviewers and `disposition_detail`. The count also reaches the terminal `AUTO_DEV_RESULT` sentinel as the new advisory `review.downgraded_disposition_count` field, which is `null` when the producer did not report it, with no `schema_version` bump (headless-contract Note A15). **Breaking for hand-written payloads:** `cw review verify-fixes` now requires `ticket_id`. `auto-dev-review.md` Step 3c sends it and records the count for the sentinel.
 
 ## [1.58.0] - 2026-09-25
