@@ -20,9 +20,9 @@ carves file-local sibling readers out of the #1787 helper-hoisting effort.
 """
 
 from tests.conftest import _appendix, _cmd
-from tests.test_auto_dev_preflight_resolutions import _after, _nearby
+from tests.test_auto_dev_preflight_resolutions import _after
 
-_TOKEN = "<!-- auto-dev-comment-approval -->"
+_APPROVAL_MARKER = "<!-- auto-dev-comment-approval -->"
 
 
 def _plan_doc() -> str:
@@ -39,7 +39,7 @@ def _checkpoint1_section() -> str:
 def test_checkpoint1_comment_path_requires_explicit_token() -> None:
     """The old unqualified sentence is gone, and the literal token appears."""
     section = _checkpoint1_section()
-    assert _TOKEN in section
+    assert _APPROVAL_MARKER in section
     assert "Already draft-scoped by construction" not in section
     assert "an operator reply approving the plan posted after" not in section
 
@@ -68,7 +68,7 @@ def test_checkpoint1_token_distinct_from_audit_marker() -> None:
     """The new token is described as distinct from the write-only #2194 CLI
     marker, without repeating that marker's literal HTML-comment grammar."""
     section = _checkpoint1_section()
-    window = _after(section, _TOKEN, span=500)
+    window = _after(section, _APPROVAL_MARKER, span=500)
     assert "post-marker" in window
     assert "audit-only" in window
     assert "never comment-path evidence" in window
@@ -117,7 +117,7 @@ def test_checkpoint1_row_side_evidence_window_still_intact() -> None:
 def test_appendix_approval_requested_prints_literal_token() -> None:
     """The park comment has to show the operator the exact string to paste."""
     window = _after(_appendix("plan"), "### Approval requested", span=900)
-    assert _TOKEN in window
+    assert _APPROVAL_MARKER in window
     assert "plan_approved_fingerprint" in window  # #2102 text still present
     assert "auto-dev-plan-approved" not in window  # protects the #2102 test
 
