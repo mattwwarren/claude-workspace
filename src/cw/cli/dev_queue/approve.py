@@ -19,12 +19,12 @@ from cw.models import (
     PLAN_PROMOTED_KEY,
     OrchestratorEventType,
 )
+from cw.plan_fingerprint import is_plan_draft_fingerprint
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
 from ._group import dev_queue
 from ._plan_marker import (
-    _is_plan_draft_fingerprint,
     _marker_present,
     _plan_approved_marker,
 )
@@ -56,7 +56,7 @@ def _bound_fingerprint(result: dict[str, str | bool | None]) -> str | None:
     raw = result[PLAN_APPROVED_FINGERPRINT_KEY]
     if not isinstance(raw, str):
         return None
-    if _is_plan_draft_fingerprint(raw):
+    if is_plan_draft_fingerprint(raw):
         return raw
     click.echo(
         "--post-marker: the approval's plan-draft fingerprint is not a"

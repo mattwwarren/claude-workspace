@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
+import logging
 import re
 from typing import TYPE_CHECKING
 
@@ -22,6 +24,7 @@ from cw.atomic import atomic_write_text
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
 from cw.models import OrchestratorEventType
+from cw.plan_fingerprint import is_plan_draft_fingerprint
 from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
@@ -40,7 +43,8 @@ _SETTLED_LINE = re.compile(
     r"(?:A[0-9]+: (?:ADOPTED|ALT-[a-z])|"
     r"P[0-9]+: (?:CONFIRMED|REFUTED|DEFERRED)) -->\n?"
 )
-_FINGERPRINT = re.compile(r"[0-9a-f]{64}")
+
+_log = logging.getLogger(__name__)
 
 
 def _draft_fingerprint(text: str) -> str:
@@ -73,6 +77,67 @@ def _restore_after_audit_failure(
     else:
         atomic_write_text(plan_path, old_plan_text)
     atomic_write_text(draft_path, draft_text)
+
+
+def _restoration_verified(
+    plan_path: Path,
+    old_plan_text: str | None,
+    draft_path: Path,
+    draft_text: str,
+) -> bool:
+    """Verify that both plan artifacts match their pre-promotion contents."""
+    try:
+        plan_restored = (
+            not plan_path.exists()
+            if old_plan_text is None
+            else plan_path.read_text(encoding="utf-8") == old_plan_text
+        )
+        draft_restored = draft_path.read_text(encoding="utf-8") == draft_text
+    except (OSError, UnicodeDecodeError):
+        return False
+    return plan_restored and draft_restored
+
+
+def _write_recovery_record(
+    recovery_path: Path,
+    *,
+    task: TicketTask,
+    wt_path: Path,
+    plan_path: Path,
+    draft_path: Path,
+    old_plan_text: str | None,
+    draft_text: str,
+    audit_error: Exception,
+    restore_error: Exception,
+) -> None:
+    """Persist the pair's contents when audit rollback cannot be verified."""
+    payload = {
+        "ticket_id": task.ticket_id,
+        "worktree_path": str(wt_path),
+        "plan_path": str(plan_path),
+        "draft_path": str(draft_path),
+        "old_plan_text": old_plan_text,
+        "draft_text": draft_text,
+        "audit_error": f"{audit_error.__class__.__name__}: {audit_error}",
+        "restore_error": f"{restore_error.__class__.__name__}: {restore_error}",
+        "recovery_required": True,
+    }
+    serialized = json.dumps(payload, sort_keys=True) + "\n"
+    try:
+        atomic_write_text(recovery_path, serialized)
+    except Exception:  # noqa: BLE001
+        # Keep the original approval failure authoritative. The fallback is
+        # deliberately non-atomic: it is only used when the atomic writer
+        # itself is unavailable, and leaves an operator-visible record if the
+        # filesystem still permits one.
+        try:
+            recovery_path.write_text(serialized, encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            _log.critical(
+                "plan promotion recovery record could not be persisted: %s",
+                recovery_path,
+                exc_info=True,
+            )
 
 
 def promote_plan_draft(
@@ -114,7 +179,7 @@ def promote_plan_draft(
             return False
         draft_text = draft_path.read_text(encoding="utf-8")
         new_fingerprint = _draft_fingerprint(draft_text)
-        if not isinstance(expected_fingerprint, str) or not _FINGERPRINT.fullmatch(
+        if not isinstance(expected_fingerprint, str) or not is_plan_draft_fingerprint(
             expected_fingerprint
         ):
             msg = (
@@ -161,11 +226,31 @@ def promote_plan_draft(
             correlation_id=task.ticket_id,
         )
     except Exception as audit_error:
+        restore_error: Exception | None = None
         try:
             _restore_after_audit_failure(
                 plan_path, old_plan_text, draft_path, draft_text
             )
-        except Exception as restore_error:
+            if not _restoration_verified(
+                plan_path, old_plan_text, draft_path, draft_text
+            ):
+                restore_error = RuntimeError(
+                    "restoration verification failed for the plan/draft pair"
+                )
+        except Exception as restore_exc:  # noqa: BLE001
+            restore_error = restore_exc
+        if restore_error is not None:
+            _write_recovery_record(
+                wt_path / ".cw" / "plan-promotion-recovery.json",
+                task=task,
+                wt_path=wt_path,
+                plan_path=plan_path,
+                draft_path=draft_path,
+                old_plan_text=old_plan_text,
+                draft_text=draft_text,
+                audit_error=audit_error,
+                restore_error=restore_error,
+            )
             msg = (
                 f"Cannot approve ticket {task.ticket_id!r}: plan draft"
                 f" promotion audit failed for worktree {wt_path}, and restoring"
