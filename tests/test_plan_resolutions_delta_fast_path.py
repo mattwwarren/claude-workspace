@@ -7,8 +7,9 @@ draft_fp`) skipped straight past Step 1c's ambiguity scan via Checkpoint 1's
 existing fast path -- but nothing on the resume path ever re-checked whether
 a `<!-- auto-dev-preflight-resolutions -->` comment or body edit had been
 posted *after* that approval. The resolutions were never folded into the
-draft, and the resumed round re-parked unrevised. This adds a 4th leading
-bookkeeping line (`plan-stage-resolutions-applied`) to `.cw/plan-draft.md`
+draft, and the resumed round re-parked unrevised. This adds durable
+resolutions-attempt and approval-revocation bookkeeping alongside the
+resolutions-applied line in `.cw/plan-draft.md`
 and a new Step 1a.0b that detects the delta, revises the draft when one
 exists, and only then re-evaluates the fingerprint fast path -- so a
 post-approval resolutions delta always takes precedence over the fast path.
@@ -190,7 +191,7 @@ def test_revision_branch_cites_step1f4_and_format_only_precedent_by_name() -> No
     """The revision branch cites Step 1f.4's re-spawn contract and the
     Format-only-revision independent-axis precedent, both by name."""
     section = _step1a0b_appendix_section()
-    window = _after(section, "**On delta: revise.**", span=600)
+    window = _after(section, "**On delta: revise.**", span=1400)
     assert "Step 1f.4" in window
     assert "Format-only revision (defense-in-depth) precedent" in window
     assert "independent of, and does not consume, the standard 1-cycle" in window
@@ -200,7 +201,7 @@ def test_revision_branch_invalidates_both_signoff_markers() -> None:
     """A resolutions redirect invalidates BOTH plan-spec and plan-soundness
     signoff markers -- either station's prior verdict can be implicated."""
     section = _step1a0b_appendix_section()
-    window = _after(section, "**On delta: revise.**", span=900)
+    window = _after(section, "**On delta: revise.**", span=2100)
     assert "`plan-spec-reviewed`" in window
     assert "`plan-soundness-reviewed`" in window
     assert "Invalidates BOTH" in window
@@ -209,8 +210,9 @@ def test_revision_branch_invalidates_both_signoff_markers() -> None:
 def test_revision_branch_states_one_attempt_per_detected_delta_cap() -> None:
     """The revision cycle is capped at 1 attempt per detected delta."""
     section = _step1a0b_appendix_section()
-    window = _after(section, "**On delta: revise.**", span=900)
-    assert "Capped at **1 attempt per detected delta**" in window
+    window = _after(section, "**On delta: revise.**", span=2100)
+    assert "1 attempt per detected source identity" in window
+    assert "not a per-dispatch cap" in window
 
 
 def test_revision_branch_telemetry_states_no_new_events_and_cites_step1f3() -> None:
@@ -289,22 +291,23 @@ def test_later_settlement_is_inserted_before_resolutions_marker() -> None:
 
 
 def test_delta_revision_failure_does_not_consume_source_marker() -> None:
-    """Failed one-shot revisions block and leave the delta eligible to retry."""
+    """Failed one-shot revisions persist their source and block later retries."""
     section = _step1a0b_appendix_section()
-    window = _after(section, "**On delta: revise.**", span=1800)
+    window = _after(section, "**On delta: revise.**", span=3400)
     assert "valid revised draft" in window
     assert "checkpoint fails" in window
-    assert "leave the resolutions marker unchanged" in window
-    assert "emit the existing blocking/error outcome" in window
-    assert "retry the same delta on the next dispatch" in window
+    assert "plan-stage-resolutions-attempted" in window
+    assert "outcome=failed" in window
+    assert "do not retry that unchanged source identity on a later dispatch" in window
 
 
 def test_delta_revokes_row_approval_even_when_fingerprint_is_unchanged() -> None:
     """A resolutions delta always requires fresh row-path approval."""
     section = _step1a0b_appendix_section()
-    window = _after(section, "**On delta: revise.**", span=2300)
-    assert "clearing (or otherwise revoking) both" in window
-    assert "even if the revised draft later has the same fingerprint" in window
+    window = _after(section, "**On delta: revise.**", span=3400)
+    assert "durable `<!-- plan-stage-approval-revoked:" in window
+    assert "Checkpoint 1 MUST honor it before evaluating row-path evidence" in window
+    assert "a later `plan_approved_at` supersedes it as a fresh approval" in window
     assert "requires fresh row-path approval via `cw dev-queue approve`" in window
 
 
@@ -410,7 +413,7 @@ def test_draft_rewrite_rule_names_step1a0b_as_third_rewrite_site() -> None:
     """The Draft-rewrite rule names Step 1a.0b's checkpoint as a third named
     rewrite site, alongside the two pre-existing ones."""
     section = _step1c_headless_section()
-    window = _after(section, "**Draft-rewrite rule", span=900)
+    window = _after(section, "**Draft-rewrite rule", span=1200)
     assert "Step 1b checkpoint above" in window
     assert "Step 1f.4 post-revision checkpoint below" in window
     assert "Step 1a.0b's resolutions-revision checkpoint" in window
