@@ -32,11 +32,21 @@ dead-PID detection is a crash-only fallback.
    worktree clean apart from verdict files, HEAD unmoved from
    `task.stage_base_ref`, `reap_policy is ReapPolicy.AUTO`) — mirroring
    `codex_boot.py`'s existing `_gate_clean_requeue`/`_resolve_orphan_action`
-   logic — else it parks the task. It must NOT run aider's git-fact
-   synthesis (`synthesize_git_result`) for a codex-origin candidate.
+   logic — else it parks the task. Before either transition, it must write a
+   durable, operator-visible recovery audit event containing the session and
+   task IDs, tenant, previous and resulting state, PID/start-time liveness
+   evidence, each gate check, timestamp, and executor/job identity. If that
+   event cannot be committed, neither transition occurs. The recorded prior
+   state and evidence must support an operator-visible recovery command or
+   runbook for reversing an incorrect transition. It must NOT run aider's
+   git-fact synthesis (`synthesize_git_result`) for a codex-origin candidate.
 5. `reconcile/codex_boot.py`'s psutil-based process-table boot sweep is
-   retired (obsolete once liveness is PID+start-time based, which is
-   deterministic and has no cwd-scan false positive/negative ambiguity).
+   retired only after a one-time legacy recovery has covered every pre-
+   migration ACTIVE Codex session with a null `local_liveness` handle,
+   requeuing only under the same audited clean gate and otherwise parking it.
+   This legacy pass is the final use of the cwd scan; normal recovery then
+   uses deterministic PID+start-time liveness and has no cwd-scan false
+   positive/negative ambiguity.
 
 ## What this means for callers
 
@@ -94,8 +104,8 @@ dead-PID detection is a crash-only fallback.
 3. `reconcile/local.py` per-executor harvest branch for codex's
    clean-requeue-or-park fallback (depends on #2369).
 4. Delete `codex_boot.py`'s psutil sweep + `codex_background`'s thread
-   registry + shutdown drain; update `DISPATCH_LOOP_EXITED` payload to drop
-   `codex_threads_still_running`.
+   registry + shutdown drain only after ticket 8's legacy migration; update
+   `DISPATCH_LOOP_EXITED` payload to drop `codex_threads_still_running`.
 5. Rewrite the `StageExecutor` Protocol docstring in `src/cw/executor.py`
    (currently calls `CodexExecutor` "an accepted, documented exception" —
    that carve-out goes away).
@@ -104,3 +114,10 @@ dead-PID detection is a crash-only fallback.
    (`test_spawn_returns_before_background_work_completes`, the
    `_sync_codex_executor` helper) for the Popen-based model.
 7. Extend the driver to `--stage impl` for #1550.
+8. Run the migration/rollout gate before ticket 4: deploy the audited
+   per-executor harvest path first, run one legacy boot recovery over all
+   null-handle ACTIVE Codex sessions, and record scanned/requeued/parked/
+   failed counts plus a durable completion marker. Do not remove the boot
+   sweep until coverage is complete, failures are operator-resolved, and no
+   unprocessed legacy sessions remain; publish the audit-reversal command or
+   runbook with the migration.
