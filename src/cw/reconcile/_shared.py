@@ -1851,10 +1851,9 @@ def _deterministic_parse_requeue_enabled(
     try:
         enabled = get_client(target.client).blocked_result_requeue_enabled
     except CwError:
-        # Some legacy/local queue rows have no clients.yaml entry. Preserve the
-        # field's enabled default rather than making sentinel routing depend on
-        # an otherwise unrelated client-config lookup.
-        enabled = True
+        # Fail closed when a legacy/local queue row has no usable clients.yaml
+        # entry; rollout must be explicitly enabled for the client.
+        enabled = False
     if not enabled:
         _log.warning(
             "sentinel.blocked_result_requeue_shadowed: client=%s ticket=%s; "

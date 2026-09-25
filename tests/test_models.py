@@ -322,6 +322,10 @@ class TestClientConfig:
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.occupancy_gate_enabled is None
 
+    def test_blocked_result_requeue_defaults_to_opt_in(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.blocked_result_requeue_enabled is False
+
     def test_occupancy_gate_enabled_accepts_false_override(self) -> None:
         c = ClientConfig(
             name="test",

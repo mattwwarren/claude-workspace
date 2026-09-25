@@ -3142,6 +3142,7 @@ class TestSignalStop:
             "worktree-263-schema-unsupported",
             surface_ref="sfref-263-schema",
         )
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
         dev_store = DevQueueStore(
             tasks=[
                 TicketTask(
@@ -3221,6 +3222,7 @@ class TestSignalStop:
             "worktree-263-schema-unsupported-cap",
             surface_ref="sfref-263-schema",
         )
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
         dev_store = DevQueueStore(
             tasks=[
                 TicketTask(
@@ -7238,6 +7240,7 @@ def _write_staged_clients_yaml_for_test(
         f"  {client_name}:\n"
         f"    workspace_path: {workspace_path}\n"
         f"    default_branch: main\n"
+        f"    blocked_result_requeue_enabled: true\n"
         f"    pipeline:\n"
         f"      stages: [plan, impl, review, finalize]\n"
     )

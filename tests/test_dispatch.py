@@ -223,6 +223,7 @@ def sample_client_config(workspace_dir: Path, tmp_path: Path) -> ClientConfig:
         workspace_path=workspace_dir,
         default_branch="main",
         worktree_base=tmp_path / "worktrees",
+        blocked_result_requeue_enabled=True,
     )
 
 
@@ -272,6 +273,8 @@ def _make_clients_yaml(
         lines.append(f"  {client.name}:\n")
         lines.append(f"    workspace_path: {client.workspace_path}\n")
         lines.append(f"    default_branch: {client.default_branch}\n")
+        if client.blocked_result_requeue_enabled:
+            lines.append("    blocked_result_requeue_enabled: true\n")
         if client.occupancy_gate_enabled is not None:
             token = str(client.occupancy_gate_enabled).lower()
             lines.append(f"    occupancy_gate_enabled: {token}\n")
