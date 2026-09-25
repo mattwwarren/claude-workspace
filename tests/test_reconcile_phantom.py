@@ -32,6 +32,7 @@ from cw.models import (
     DevQueueStore,
     OrchestratorConfig,
     OrchestratorEventType,
+    PendingFixDispatch,
     QueueItemStatus,
     ReapPolicy,
     ReapReason,
@@ -64,6 +65,7 @@ from tests._reconcile_helpers import (
     _blocked_result_payload,
     _client_with_lane,
     _inflate_scope,
+    _make_pending_fix_dispatch,
     _make_stale_base_repo,
     _make_terminal_payload,
     _mk_headless_daemon_session,
@@ -2217,6 +2219,52 @@ def test_act_on_phantom_crash_routes_pending(
     )
     assert len(events) == 1
     assert events[0].payload["worktree_dirty"] is False
+
+
+def test_phantom_revert_skips_row_carrying_fix_dispatch_hold(
+    tmp_config_dir: Path,
+) -> None:
+    """A row holding an unconsumed fix-loop handoff is never phantom-reverted (#2204).
+
+    Direct single-row analog of ``test_act_on_phantom_crash_routes_pending``:
+    same CRASH_COMPLETE candidate naming the row's own ticket id, but the row
+    carries ``pending_fix_dispatch`` and must be left alone -- it belongs to
+    ``cw.reconcile.fix_dispatch`` for the whole handoff, and reverting it here
+    would strand the handoff on a PENDING row for ``_build_dispatch_jobs`` to
+    classify as stale and drop.
+    """
+    from cw.reconcile._shared import ProposedAction, ReapCandidate
+    from cw.reconcile.phantom import _apply_phantom_queue_mutations
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("fdh-phantom-1", started_at)
+    pending: PendingFixDispatch = _make_pending_fix_dispatch()
+    task = TicketTask(
+        ticket_id="fdh-phantom-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="fdh-phantom-1",
+        pending_fix_dispatch=pending,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="fdh-phantom-1",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="fdh-phantom-1",
+        client="client-a",
+    )
+    ticket_ids_to_revert: list[str] = []
+
+    _apply_phantom_queue_mutations(
+        {sess.id: sess}, [candidate], [], [], [], {}, set(), ticket_ids_to_revert, []
+    )
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "fdh-phantom-1")
+    assert t.status == QueueItemStatus.RUNNING
+    assert t.session_id == "fdh-phantom-1"
+    assert t.pending_fix_dispatch is not None
+    assert ticket_ids_to_revert == []
 
 
 def test_act_on_phantom_dirty_routes_blocked(

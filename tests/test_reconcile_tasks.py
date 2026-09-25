@@ -26,6 +26,7 @@ from cw.models import (
     DevQueueStore,
     OrchestratorConfig,
     OrchestratorEventType,
+    PendingFixDispatch,
     PrState,
     QueueItemStatus,
     ReapPolicy,
@@ -53,6 +54,7 @@ from cw.reconcile.stale_dispatch_watch import register_stale_dispatch_watched_pr
 from cw.reconcile.tasks import _merged_pr_numbers_by_client
 from tests._reconcile_helpers import (
     _client_with_lane,
+    _make_pending_fix_dispatch,
     _mk_daemon_completed_session,
     _mk_daemon_session_with_worktree,
     _mk_session,
@@ -141,6 +143,104 @@ def test_backstops_skip_row_carrying_a_usage_limit_act(
     assert stored.status is QueueItemStatus.RUNNING
     assert stored.unproductive_attempts == 0
     assert stored.usage_limit_act is not None
+    assert load_state().sessions[0].reap_reason is None
+
+
+@pytest.mark.parametrize(
+    ("make_session", "backstop"),
+    [
+        pytest.param(
+            _mk_daemon_completed_session,
+            revert_completed_silent_tasks,
+            id="completed-backstop",
+        ),
+        pytest.param(
+            lambda sid: _mk_timed_out_daemon_session(sid, "TKT-FDH", datetime.now(UTC)),
+            revert_timed_out_tasks,
+            id="timed-out-backstop",
+        ),
+    ],
+)
+def test_backstops_skip_row_carrying_pending_fix_dispatch(
+    tmp_config_dir: Path,
+    make_session: Callable[[str], Session],
+    backstop: Callable[[], list[str]],
+) -> None:
+    """A row still carrying an unconsumed fix-loop handoff is never reverted (#2204).
+
+    The row belongs to cw.reconcile.fix_dispatch for the whole handoff; a
+    generic backstop revert here would strand pending_fix_dispatch on a
+    PENDING row, which _build_dispatch_jobs then classifies as a stale
+    handoff and drops instead of dispatching the fix session.
+    """
+    sess = make_session("fdh-sess-1")
+    save_state(CwState(sessions=[sess]))
+    pending: PendingFixDispatch = _make_pending_fix_dispatch()
+    task = TicketTask(
+        ticket_id="TKT-FDH",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="fdh-sess-1",
+        pending_fix_dispatch=pending,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with sessions_lock():
+        assert backstop() == []
+
+    stored = load_dev_queue().tasks[0]
+    assert stored.status is QueueItemStatus.RUNNING
+    assert stored.session_id == "fdh-sess-1"
+    assert stored.unproductive_attempts == 0
+    assert stored.pending_fix_dispatch is not None
+    assert load_state().sessions[0].reap_reason is None
+
+
+@pytest.mark.parametrize(
+    ("make_session", "backstop"),
+    [
+        pytest.param(
+            _mk_daemon_completed_session,
+            revert_completed_silent_tasks,
+            id="completed-backstop",
+        ),
+        pytest.param(
+            lambda sid: _mk_timed_out_daemon_session(sid, "TKT-FDSID", datetime.now(UTC)),
+            revert_timed_out_tasks,
+            id="timed-out-backstop",
+        ),
+    ],
+)
+def test_backstops_skip_row_carrying_fix_dispatch_session_id(
+    tmp_config_dir: Path,
+    make_session: Callable[[str], Session],
+    backstop: Callable[[], list[str]],
+) -> None:
+    """A row with a live fix_dispatch_session_id is never reverted (#2204).
+
+    Same exemption as pending_fix_dispatch, for the other half of the
+    handoff's lifetime: once the fix session has spawned, the row still
+    belongs to fix_dispatch until that session completes.
+    """
+    sess = make_session("fdsid-sess-1")
+    save_state(CwState(sessions=[sess]))
+    task = TicketTask(
+        ticket_id="TKT-FDSID",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="fdsid-sess-1",
+        fix_dispatch_session_id="fix-sess-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with sessions_lock():
+        assert backstop() == []
+
+    stored = load_dev_queue().tasks[0]
+    assert stored.status is QueueItemStatus.RUNNING
+    assert stored.session_id == "fdsid-sess-1"
+    assert stored.unproductive_attempts == 0
+    assert stored.fix_dispatch_session_id == "fix-sess-1"
     assert load_state().sessions[0].reap_reason is None
 
 
