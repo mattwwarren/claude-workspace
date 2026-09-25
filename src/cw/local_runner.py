@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, runtime_checkabl
 
 import psutil
 
+from cw._git import run_git
 from cw.auto_dev_result import (
     AutoDevResult,
     Blocker,
@@ -401,11 +402,8 @@ def _tracked_files(worktree: Path) -> list[str] | None:
     ``_local_preflight``'s existing plan-read suppression (executor.py).
     """
     try:
-        result = subprocess.run(
-            ["git", "-C", str(worktree), "ls-files"],
-            capture_output=True,
-            text=True,
-            check=True,
+        result = run_git(
+            ["-C", str(worktree), "ls-files"], capture_output=True, check=True
         )
     except (subprocess.CalledProcessError, OSError):
         return None
@@ -552,12 +550,7 @@ def _git_facts(worktree: Path, default_branch: str) -> _GitFacts:
     """Collect git metadata needed to synthesize an AutoDevResult."""
 
     def _git(*args: str) -> str:
-        result = subprocess.run(
-            ["git", "-C", str(worktree), *args],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = run_git(["-C", str(worktree), *args], capture_output=True, check=True)
         return result.stdout.strip()
 
     branch = _git("rev-parse", "--abbrev-ref", "HEAD")

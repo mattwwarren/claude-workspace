@@ -59,6 +59,7 @@ from tests.conftest import (
     _make_reviewer_doc,
     _make_ticket_task,
     add_bare_origin,
+    commit_tracked_file,
     git_in,
 )
 from tests.test_review_adjudication import _make_voided_finding
@@ -712,6 +713,34 @@ class TestFixInvocation:
 
         assert sha is not None
         assert git_in(origin, "rev-parse", "refs/heads/feature") == sha
+
+    def test_commit_fix_cycle_ignores_an_inherited_git_dir(
+        self,
+        make_git_repo: Callable[..., Path],
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2264: a hook's ``GIT_DIR`` cannot steer the fix commit elsewhere.
+
+        With the decoy's ``GIT_DIR`` inherited, an unsanitized ``git status``
+        reads the (clean) decoy and skips the commit; an unsanitized ``git
+        commit`` would land in the decoy. Either way the target's fix would be
+        stranded.
+        """
+        worktree, origin = make_git_repo_with_origin("wt-fix-commit-hostile")
+        decoy = make_git_repo("wt-fix-commit-decoy")
+        commit_tracked_file(decoy, "decoy.py", "decoy = True\n")
+        decoy_head = git_in(decoy, "rev-parse", "HEAD")
+        _write(worktree / "fix.py", "patched = 1\n")
+        monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+
+        sha = _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
+
+        assert sha is not None
+        assert sha == git_in(worktree, "rev-parse", "HEAD")
+        assert git_in(origin, "rev-parse", "refs/heads/feature") == sha
+        assert git_in(decoy, "rev-parse", "HEAD") == decoy_head
 
     def test_run_fix_and_commit_parks_on_push_failure(
         self, make_git_repo: Callable[..., Path], tmp_path: Path

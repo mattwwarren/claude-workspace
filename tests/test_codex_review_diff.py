@@ -6,11 +6,13 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from cw.codex_review import _capture_delta_diff, _capture_diff, _parse_unified_diff
-from tests.conftest import git_in
+from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +163,32 @@ class TestCaptureDiff:
             ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
         ).strip()
         assert reviewed_sha == head
+
+    def test_an_inherited_git_dir_cannot_redirect_the_diff(
+        self,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2264: the diff must describe the worktree the caller named.
+
+        Before the shared seam, ``reviewed_sha`` was already env-clean (via
+        ``capture_head_sha``) but the diff was not — so a hook's ``GIT_DIR``
+        paired the target's sha with the decoy's diff.
+        """
+        repo = make_git_repo("wt-capture-target")
+        git_in(repo, "checkout", "-b", "feature")
+        commit_tracked_file(repo, "new.py", "alpha = 1\n")
+        decoy = make_git_repo("wt-capture-decoy")
+        git_in(decoy, "checkout", "-b", "feature")
+        commit_tracked_file(decoy, "decoy.py", "decoy = True\n")
+        monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+
+        diff, reviewed_sha, changed_files = _capture_diff(repo, "main")
+
+        assert changed_files == ["new.py"]
+        assert "decoy.py" not in diff.text
+        assert reviewed_sha == git_in(repo, "rev-parse", "HEAD")
 
 
 class TestCaptureDeltaDiff:

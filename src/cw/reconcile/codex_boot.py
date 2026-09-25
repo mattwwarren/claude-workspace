@@ -76,7 +76,7 @@ from typing import TYPE_CHECKING
 
 import psutil
 
-from cw._git import capture_head_sha, git_clean_env
+from cw._git import capture_head_sha, run_git
 from cw.codex_background import (
     REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
     _resolve_codex_fix_loop_enabled,
@@ -222,13 +222,11 @@ def _worktree_porcelain_clean_except_verdict(worktree: Path) -> bool | None:
     touches a tracked file, which must never read as clean.
     """
     try:
-        completed = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
+        completed = run_git(
+            ["status", "--porcelain", "--untracked-files=all"],
             cwd=worktree,
             capture_output=True,
-            text=True,
             check=False,
-            env=git_clean_env(),
             timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from cw._git import git_output
 from cw.dev_queue import (
     STALE_DISPATCH_GATE_DISPOSITION,
     _impl_bypass_plan_available,
@@ -1083,16 +1084,8 @@ def _stamp_spawn_success(
                 stored_task.pending_operator_comment = False
             # R5: stamp stage_base_ref -- non-fatal on failure
             try:
-                head_sha = subprocess.check_output(
-                    [
-                        "git",
-                        "-C",
-                        str(worktree_path),
-                        "rev-parse",
-                        "HEAD",
-                    ],
-                    text=True,
-                    timeout=5,
+                head_sha = git_output(
+                    ["-C", str(worktree_path), "rev-parse", "HEAD"], timeout=5
                 )
                 stored_task.stage_base_ref = head_sha.strip()
             except subprocess.SubprocessError as exc:

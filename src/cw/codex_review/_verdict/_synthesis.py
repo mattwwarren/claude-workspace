@@ -10,9 +10,9 @@ constructor every park here goes through.
 from __future__ import annotations
 
 import logging
-import subprocess
 from typing import TYPE_CHECKING
 
+from cw._git import git_output
 from cw.auto_dev_result import (
     EMPTY_DIFF_BLOCKER_REASON,
     AutoDevResult,
@@ -371,9 +371,7 @@ def synthesize_codex_review_result(
             retry_eligible=_has_transient_failure(failures) or None,
         )
         return partial.model_copy(update={"review": verdict.review}), verdict
-    branch = subprocess.check_output(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree, text=True
-    ).strip()
+    branch = git_output(["rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree).strip()
     # Why: files/lines_actual were hardcoded 0/0 — a code-level placeholder that
     # reported "this review covered nothing" for every clean pass (#1487). Measure
     # them instead. compute_branch_diff_scope is called directly rather than
