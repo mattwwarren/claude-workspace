@@ -323,6 +323,32 @@ def test_cmd_check_automerge_allowed_reads_requested_repo_path(
     assert capsys.readouterr().out == "true\n"
 
 
+def test_cmd_check_automerge_allowed_reads_repo_path_outside_cwd(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    outside_repo = tmp_path / "outside"
+    outside_repo.mkdir()
+    _write_project_config_yaml(repo, "pr:\n  auto_merge: false\n")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "check-automerge-allowed",
+            "--repo-path",
+            str(repo),
+        ],
+        cwd=outside_repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == "false\n"
+
+
 def test_cmd_check_automerge_allowed_warns_on_stderr_when_pyyaml_unavailable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

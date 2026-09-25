@@ -213,12 +213,11 @@ if [ -f "$REPO_ROOT/.claude/scripts/prep_pr_finalize.py" ]; then
 else
   AUTOMERGE_CHECK="$HOME/.claude/scripts/prep_pr_finalize.py"
 fi
-if GATE_OUTPUT=$("$AUTOMERGE_CHECK" check-automerge-allowed 2>&1); then
+if "$AUTOMERGE_CHECK" check-automerge-allowed --repo-path "$REPO_ROOT"; then
   gh pr merge "$PR_NUMBER" --auto --squash
 else
   GATE_STATUS=$?
   if [ "$GATE_STATUS" -ne 1 ]; then
-    echo "$GATE_OUTPUT" >&2
     echo "Auto-merge gate failed unexpectedly (exit $GATE_STATUS) — BLOCK." >&2
     exit 1
   fi
