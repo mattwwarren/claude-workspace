@@ -11063,6 +11063,225 @@ class TestDevQueueApproveCli:
         assert events == []
         assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
+    _MUST_FIX_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+
+    _OVERRIDE_MUST_FIX_HELP = (
+        "Ship past a codex MUST_FIX park (#2205): records a durable"
+        " operator override on the ticket, bound to the reviewed commit"
+        " and the exact MUST_FIX findings on that verdict. The override"
+        " is recorded, audited (actor, reason, reviewed SHA, finding"
+        " identities), and does not itself advance the stage -- run"
+        " `cw dev-queue requeue --stage finalize` afterward. A later"
+        " review round or a moved HEAD invalidates it; FINALIZE"
+        " re-checks both before shipping. Requires --reason. Mutually"
+        " exclusive with --post-marker and --scope-drift."
+    )
+
+    _REASON_HELP = (
+        "Operator justification for --override-must-fix, recorded"
+        " verbatim on the override record and rendered into the PR"
+        " body's Operator override section. Required when"
+        " --override-must-fix is passed; ignored otherwise."
+    )
+
+    def _seed_must_fix(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        blocked_reason: str = "codex_must_fix_findings",
+    ) -> list[tuple[object, dict[str, object]]]:
+        """Park ACME-1 at REVIEW for *blocked_reason* with a blocking verdict."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+        from tests.conftest import _make_finding, write_review_verdict_envelope
+
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {ws}\n"
+        )
+        worktree = tmp_path / "wt-acme-1"
+        worktree.mkdir()
+        write_review_verdict_envelope(
+            worktree,
+            ticket_id="ACME-1",
+            reviewed_sha=self._MUST_FIX_SHA,
+            must_fix=[_make_finding(file="src/a.py", summary="Bug here")],
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="ACME-1",
+                        client="acme",
+                        stage=Stage.REVIEW,
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        session_id="sess-must-fix",
+                        blocked_reason=blocked_reason,
+                        worktree_path=worktree,
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: "octocat")
+        events: list[tuple[object, dict[str, object]]] = []
+        monkeypatch.setattr(
+            "cw.dev_queue.must_fix_override.record_event",
+            lambda event_type, payload, **_kw: events.append((event_type, payload)),
+        )
+        return events
+
+    def test_approve_override_must_fix_happy_path(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--override-must-fix stamps the override, leaves the row parked, and
+        tells the operator the requeue step that ships it."""
+        from cw.dev_queue import load_dev_queue
+        from cw.models import OrchestratorEventType, QueueItemStatus
+
+        events = self._seed_must_fix(tmp_config_dir, tmp_path, monkeypatch)
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--override-must-fix",
+                "--reason",
+                "known false positive; follow-up #77",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Recorded MUST_FIX override for ACME-1 (acme)" in result.output
+        assert "1 finding" in result.output
+        assert self._MUST_FIX_SHA[:12] in result.output
+        assert "octocat" in result.output
+        assert (
+            "cw dev-queue requeue ACME-1 --client acme --stage finalize"
+            in result.output
+        )
+        assert len(events) == 1
+        assert events[0][0] == OrchestratorEventType.TICKET_APPROVED
+        assert events[0][1]["reason"] == "known false positive; follow-up #77"
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.REVIEW
+        assert task.must_fix_override is not None
+        assert task.must_fix_override.finding_ids == [("src/a.py", "bug here")]
+
+    def test_approve_override_must_fix_requires_reason(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import load_dev_queue
+
+        events = self._seed_must_fix(tmp_config_dir, tmp_path, monkeypatch)
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--override-must-fix",
+            ],
+        )
+
+        assert result.exit_code == 2
+        assert "--override-must-fix requires --reason" in result.output
+        assert events == []
+        assert load_dev_queue().tasks[0].must_fix_override is None
+
+    @pytest.mark.parametrize(
+        "extra",
+        [["--post-marker"], ["--scope-drift", "a.py"]],
+        ids=["post_marker", "scope_drift"],
+    )
+    def test_approve_override_must_fix_mutually_exclusive(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        extra: list[str],
+    ) -> None:
+        events = self._seed_must_fix(tmp_config_dir, tmp_path, monkeypatch)
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--override-must-fix",
+                "--reason",
+                "why",
+                *extra,
+            ],
+        )
+
+        assert result.exit_code == 2
+        assert "mutually exclusive" in result.output
+        assert events == []
+
+    def test_approve_override_must_fix_gate_error_surfaces_cleanly(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import load_dev_queue
+
+        events = self._seed_must_fix(
+            tmp_config_dir, tmp_path, monkeypatch, blocked_reason="impl_failed"
+        )
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--override-must-fix",
+                "--reason",
+                "why",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "blocked_reason is 'impl_failed'" in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert events == []
+        assert load_dev_queue().tasks[0].must_fix_override is None
+
+    @pytest.mark.parametrize(
+        ("param_name", "expected_attr"),
+        [
+            ("override_must_fix", "_OVERRIDE_MUST_FIX_HELP"),
+            ("override_reason", "_REASON_HELP"),
+        ],
+    )
+    def test_approve_override_must_fix_help_text_is_pinned(
+        self, param_name: str, expected_attr: str
+    ) -> None:
+        """The literal help text states the binding and audit properties --
+        read off the option object, since `--help` rewraps it."""
+        from click import Option
+
+        from cw.cli.dev_queue.approve import dev_queue_approve
+
+        option = next(
+            param
+            for param in dev_queue_approve.params
+            if isinstance(param, Option) and param.name == param_name
+        )
+        assert option.help == getattr(self, expected_attr)
+
     def _seed_client(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         ws = tmp_path / "ws"
         ws.mkdir(parents=True, exist_ok=True)

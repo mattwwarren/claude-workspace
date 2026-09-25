@@ -25,7 +25,6 @@ from cw.auto_dev_result import AutoDevResult, Blocker
 from cw.codex_background import (
     _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
     REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
-    REVIEW_VERDICT_JSON_RELATIVE_PATH,
     REVIEW_VERDICT_OWNER_STAMP_FORMAT,
     _default_background,
     _persist_review_verdict,
@@ -62,7 +61,11 @@ from cw.models import (
     TicketTask,
 )
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
-from cw.review_findings import ReviewVerdictEnvelope, consolidate_verdict
+from cw.review_findings import (
+    REVIEW_VERDICT_JSON_RELATIVE_PATH,
+    ReviewVerdictEnvelope,
+    consolidate_verdict,
+)
 from tests.conftest import (
     _make_daemon_session,
     _make_diff,

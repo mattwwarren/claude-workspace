@@ -198,7 +198,12 @@ from cw.review_finding_dispositions import FindingDisposition
 #      pre-v41 row: no act was in flight under the older schema. Renumbered
 #      from v40 to v41 during a main-sync merge: #2337 independently landed
 #      on main claiming v40 for a different field pair first.
-DEV_QUEUE_SCHEMA_VERSION = 41
+# v42: added TicketTask.must_fix_override (GitHub #2205) — the operator's
+#      `cw dev-queue approve --override-must-fix` record for a codex MUST_FIX
+#      park, bound to the verdict's reviewed_sha and finding fingerprints.
+#      ``| None`` with a ``None`` default, so no migration filler is needed
+#      (same as v13/v38/v40).
+DEV_QUEUE_SCHEMA_VERSION = 42
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -356,6 +361,23 @@ class UsageLimitAct(BaseModel):
     audited_at: datetime | None = None
 
 
+class MustFixOverride(BaseModel):
+    """Operator override of a codex MUST_FIX park (GitHub #2205).
+
+    Bound to the verdict it was given for: ``reviewed_sha`` and the
+    ``cw.review_debt.fingerprint_v1`` identity of every MUST_FIX finding on it.
+    FINALIZE's ``check_must_fix_override.py`` honors it only while the live
+    verdict still carries that SHA and finding set and HEAD has not moved.
+    """
+
+    # NOT extra=forbid — persisted/runtime state, see #1200
+    actor: str
+    reason: str
+    reviewed_sha: str
+    finding_ids: list[tuple[str, str]]
+    recorded_at: datetime
+
+
 # The two wire keys the #2102 plan-approval binding travels under. Each names a
 # Pydantic field on the models below/beside it -- `plan_draft_fingerprint` on
 # `AutoDevResult` (read out of `Session.last_result`, an untyped dict) and
@@ -370,6 +392,7 @@ PLAN_APPROVED_FINGERPRINT_KEY = "plan_approved_fingerprint"
 PLAN_PROMOTED_KEY = "plan_promoted"
 SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY = "scope_drift_approved_extra_files"
 SCOPE_DRIFT_APPROVED_HEAD_KEY = "scope_drift_approved_head"
+MUST_FIX_OVERRIDE_KEY = "must_fix_override"
 
 # The single recognised key of the per-lane / per-ticket
 # ``park_on_abandoned_exit`` maps (#2135). Defined HERE, not in
@@ -552,6 +575,14 @@ class TicketTask(BaseModel):
     # (more commits on top are fine; a force-push or rewrite voids it). Same
     # stamp and clear seams as scope_drift_approved_extra_files, never its own.
     scope_drift_approved_head: str | None = None
+    # The operator's codex MUST_FIX override (v42, #2205), stamped by
+    # dev_queue/must_fix_override.py on a row parked BLOCKED_ON_USER with
+    # blocked_reason codex_must_fix_findings. Unlike blocked_reason, it survives
+    # the PENDING reset `requeue --stage finalize` performs, and is threaded
+    # into cw-context.json queue_metadata at every spawn (spawn.py) for
+    # FINALIZE's check_must_fix_override.py. Cleared only by _stage_regress
+    # into Stage.REVIEW: a re-review supersedes the verdict it was bound to.
+    must_fix_override: MustFixOverride | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.
     # Kept only so persisted dev-queue rows that carry the field keep loading.

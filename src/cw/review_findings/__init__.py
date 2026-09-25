@@ -131,6 +131,7 @@ from cw.review_findings._document import (
 )
 from cw.review_findings._models import (
     FINGERPRINT_VERSION,
+    REVIEW_VERDICT_JSON_RELATIVE_PATH,
     AcceptedFinding,
     AgentSpecSource,
     AgentSpecStatus,
@@ -175,6 +176,7 @@ from cw.review_findings._text_match import (
 
 __all__ = [
     "FINGERPRINT_VERSION",
+    "REVIEW_VERDICT_JSON_RELATIVE_PATH",
     "_LINE_ANCHOR_TOLERANCE",
     "_VALID_SEVERITIES",
     "AcceptedFinding",
