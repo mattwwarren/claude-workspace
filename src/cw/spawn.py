@@ -566,9 +566,15 @@ def _write_hook_context(
                 prior_sess is not None
                 and prior_sess.status not in TERMINAL_SESSION_STATUSES
             ):
-                genuinely_live = daemon is not None and (
-                    live_home_reason(worktree, daemon=daemon) is not None
+                occupancy_reason = (
+                    live_home_reason(worktree, daemon=daemon)
+                    if daemon is not None
+                    else None
                 )
+                genuinely_live = occupancy_reason in {
+                    "a live session is homed on this worktree",
+                    "a live daemon worker is homed on this worktree",
+                }
                 if genuinely_live:
                     msg = (
                         f"Worktree hook context at {context_path} is held by "
