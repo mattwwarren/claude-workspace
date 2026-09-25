@@ -318,6 +318,18 @@ class TestClientConfig:
         )
         assert c.quality_gate_commands == ""
 
+    def test_occupancy_gate_enabled_defaults_to_inherit(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.occupancy_gate_enabled is None
+
+    def test_occupancy_gate_enabled_accepts_false_override(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            occupancy_gate_enabled=False,
+        )
+        assert c.occupancy_gate_enabled is False
+
     def test_unknown_key_raises(self) -> None:
         """extra='forbid' rejects an unrecognized top-level key (#1200)."""
         with pytest.raises(ValidationError):

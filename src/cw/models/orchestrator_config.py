@@ -990,9 +990,10 @@ class OrchestratorConfig(BaseModel):
     # session state and the daemon roster) that fails a claim closed on any
     # indeterminate read, so a broad misclassification could otherwise
     # silently stop every PENDING task for a client from being claimed with no
-    # dispatch_tick failure and no fleet-wide lever. Setting this False is a
-    # plain global toggle (no lane/client override) that skips the pre-claim
-    # precompute entirely and falls back to #2077's post-claim
+    # dispatch_tick failure. Use ClientConfig.occupancy_gate_enabled=False
+    # for a staged per-client rollout; setting this False is the explicitly
+    # audited fleet-wide emergency control. Either setting skips the pre-claim
+    # precompute and falls back to #2077's post-claim
     # WorktreeOccupiedError/HookContextConflictError handling, which still
     # refuses a genuinely occupied worktree, just one claim later.
     occupancy_gate_enabled: bool = True

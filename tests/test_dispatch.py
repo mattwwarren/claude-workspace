@@ -272,6 +272,9 @@ def _make_clients_yaml(
         lines.append(f"  {client.name}:\n")
         lines.append(f"    workspace_path: {client.workspace_path}\n")
         lines.append(f"    default_branch: {client.default_branch}\n")
+        if client.occupancy_gate_enabled is not None:
+            token = str(client.occupancy_gate_enabled).lower()
+            lines.append(f"    occupancy_gate_enabled: {token}\n")
         if client.worktree_base is not None:
             lines.append(f"    worktree_base: {client.worktree_base}\n")
         if client.lanes:
@@ -3840,6 +3843,40 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
         assert task.spawn_error_count == 0
         assert task.session_id is None
         assert task.next_eligible_at is not None
+
+    def test_occupancy_screen_can_be_disabled_for_one_client(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A client override supports staged rollout while other clients inherit
+        the global gate setting.
+        """
+        client = sample_client_config.model_copy(
+            update={"occupancy_gate_enabled": False}
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+
+        def _unexpected_resolve(*_args: object, **_kwargs: object) -> dict[str, str]:
+            pytest.fail("client override did not bypass")
+
+        monkeypatch.setattr(
+            "cw.dispatch.lanes.resolve_occupied_ticket_ids",
+            _unexpected_resolve,
+        )
+        daemon = FakeNativeDaemonClient()
+        _seed_occupied_ticket_worktree(
+            client, monkeypatch, "roster", daemon=daemon, ticket_id="GEN-2396-CLIENT"
+        )
+        add_ticket(TicketTask(ticket_id="GEN-2396-CLIENT", client="test-client"))
+
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 0
 
 
 # ---------------------------------------------------------------------------
