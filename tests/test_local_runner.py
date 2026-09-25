@@ -108,6 +108,25 @@ def test_real_runner_launch_raises_on_missing_binary(tmp_path: Path) -> None:
         runner.launch(tmp_path, ["aider-nonexistent-binary-xyz"], {})
 
 
+def test_real_runner_launch_passes_start_new_session(tmp_path: Path) -> None:
+    """RealAiderRunner.launch() passes start_new_session=True to Popen."""
+    runner = RealAiderRunner()
+    with patch("cw.local_runner.subprocess.Popen") as mock_popen:
+        runner.launch(tmp_path, ["sh", "-c", "true"], {})
+    assert mock_popen.call_args.kwargs["start_new_session"] is True
+
+
+def test_real_runner_launch_child_gets_own_process_group(tmp_path: Path) -> None:
+    """The real child's pgid differs from the test process's own pgid."""
+    runner = RealAiderRunner()
+    proc = runner.launch(tmp_path, ["sleep", "60"], dict(os.environ))
+    try:
+        assert os.getpgid(proc.pid) != os.getpgid(0)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
 # ---------------------------------------------------------------------------
 # read_process_start_time_ns
 # ---------------------------------------------------------------------------

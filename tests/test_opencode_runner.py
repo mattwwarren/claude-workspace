@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -212,6 +214,25 @@ def test_real_runner_creates_log_file(tmp_path: Path) -> None:
     assert log_path.exists()
     content = log_path.read_text(encoding="utf-8")
     assert "test-output" in content
+
+
+def test_real_runner_launch_passes_start_new_session(tmp_path: Path) -> None:
+    """RealOpencodeRunner.launch() passes start_new_session=True to Popen."""
+    runner = RealOpencodeRunner()
+    with patch("cw.opencode_runner.subprocess.Popen") as mock_popen:
+        runner.launch(tmp_path, ["echo", "test-output"], {})
+    assert mock_popen.call_args.kwargs["start_new_session"] is True
+
+
+def test_real_runner_launch_child_gets_own_process_group(tmp_path: Path) -> None:
+    """The real child's pgid differs from the test process's own pgid."""
+    runner = RealOpencodeRunner()
+    proc = runner.launch(tmp_path, ["sleep", "60"], {"PATH": os.environ["PATH"]})
+    try:
+        assert os.getpgid(proc.pid) != os.getpgid(0)
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 # ---------------------------------------------------------------------------
