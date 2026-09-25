@@ -384,7 +384,6 @@ FORK_POINT=$(git merge-base origin/main origin/<branch-name>)
 : "${CW_SESSION:?CW_SESSION must be set}"
 TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"
 export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
-mkdir -p "$TMPDIR"
 # Deterministic path (keyed on $CW_SESSION, not $$) — reconstructable by an
 # external reconciler even if this invocation is SIGKILLed before any trap runs.
 # Off /tmp: a tmpfs-backed /tmp is exhausted by a few concurrent gate runs'
@@ -394,6 +393,7 @@ mkdir -p "$TMPDIR"
 git worktree remove --force "$TMPWT" 2>/dev/null
 rm -rf "$TMPWT" 2>/dev/null
 rm -rf "$TMPDIR" 2>/dev/null
+mkdir -p "$TMPDIR" || { echo "IMPL_FAILED: unable to create TMPDIR: $TMPDIR"; exit 1; }
 git worktree prune
 gate_wt_cleanup() { git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null; rm -rf "$TMPDIR" 2>/dev/null; }
 trap gate_wt_cleanup EXIT
