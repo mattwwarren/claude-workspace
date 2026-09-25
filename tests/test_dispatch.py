@@ -272,6 +272,9 @@ def _make_clients_yaml(
         lines.append(f"  {client.name}:\n")
         lines.append(f"    workspace_path: {client.workspace_path}\n")
         lines.append(f"    default_branch: {client.default_branch}\n")
+        if client.occupancy_gate_enabled is not None:
+            token = str(client.occupancy_gate_enabled).lower()
+            lines.append(f"    occupancy_gate_enabled: {token}\n")
         if client.worktree_base is not None:
             lines.append(f"    worktree_base: {client.worktree_base}\n")
         if client.lanes:
@@ -3842,6 +3845,103 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
         assert result.spawned == 0
         assert daemon.spawn_calls == []
         assert load_dev_queue().tasks[0].status == QueueItemStatus.PENDING
+
+    def test_occupancy_screen_disabled_by_config_toggle(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #2396: OrchestratorConfig.occupancy_gate_enabled=False is the
+        fleet-wide escape hatch mirroring pr_gate_enabled -- the pre-claim
+        resolver is never called, and a claim against an occupied worktree
+        falls back to #2077's post-claim WorktreeOccupiedError handling
+        (claims exactly as it did before #2077's screen: not spawned, reverted
+        to PENDING, no attempt/spawn_error charged)."""
+        from cw.dispatch.claim import resolve_occupied_ticket_ids
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        calls: list[str] = []
+        real_resolve = resolve_occupied_ticket_ids
+
+        def _spy(
+            client: ClientConfig,
+            queue_snapshot: DevQueueStore,
+            *,
+            daemon: NativeDaemonClient,
+            warned_unresolvable: set[UnresolvablePathWarningKey] | None,
+        ) -> dict[str, str]:
+            calls.append(client.name)
+            return real_resolve(
+                client,
+                queue_snapshot,
+                daemon=daemon,
+                warned_unresolvable=warned_unresolvable,
+            )
+
+        monkeypatch.setattr("cw.dispatch.lanes.resolve_occupied_ticket_ids", _spy)
+        daemon = FakeNativeDaemonClient()
+        _seed_occupied_ticket_worktree(
+            sample_client_config,
+            monkeypatch,
+            "roster",
+            daemon=daemon,
+            ticket_id="GEN-2396",
+        )
+        add_ticket(TicketTask(ticket_id="GEN-2396", client="test-client"))
+        config = simple_config.model_copy(update={"occupancy_gate_enabled": False})
+
+        dispatch_tick(config, native_daemon=daemon)
+
+        assert calls == []
+        assert daemon.spawn_calls == []
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        # Full no-charge fallback state (#2396 review SHOULD_FIX): the RELEASE
+        # path (defer_for) undoes the claim's own charges rather than billing
+        # a failure -- attempts decremented back, unproductive_attempts and
+        # spawn_error_count untouched, session_id cleared, and next_eligible_at
+        # stamped to prove the deferred-release branch actually ran.
+        assert task.attempts == 0
+        assert task.unproductive_attempts == 0
+        assert task.spawn_error_count == 0
+        assert task.session_id is None
+        assert task.next_eligible_at is not None
+
+    def test_occupancy_screen_can_be_disabled_for_one_client(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A client override supports staged rollout while other clients inherit
+        the global gate setting.
+        """
+        client = sample_client_config.model_copy(
+            update={"occupancy_gate_enabled": False}
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+
+        def _unexpected_resolve(*_args: object, **_kwargs: object) -> dict[str, str]:
+            pytest.fail("client override did not bypass")
+
+        monkeypatch.setattr(
+            "cw.dispatch.lanes.resolve_occupied_ticket_ids",
+            _unexpected_resolve,
+        )
+        daemon = FakeNativeDaemonClient()
+        _seed_occupied_ticket_worktree(
+            client, monkeypatch, "roster", daemon=daemon, ticket_id="GEN-2396-CLIENT"
+        )
+        add_ticket(TicketTask(ticket_id="GEN-2396-CLIENT", client="test-client"))
+
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 0
 
 
 # ---------------------------------------------------------------------------

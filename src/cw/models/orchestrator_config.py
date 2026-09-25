@@ -983,6 +983,20 @@ class OrchestratorConfig(BaseModel):
     # client -- the operator's escape hatch if a `gh`-probe fan-out ever stalls
     # a dispatch tick (e.g. a large cold-cache PLAN/IMPL backlog).
     pr_gate_enabled: bool = True
+    # GitHub #2396 — operator escape hatch for #2077's pre-claim
+    # worktree-occupancy screen (cw.dispatch.claim.resolve_occupied_ticket_ids).
+    # Default True (gate stays enforced), mirroring pr_gate_enabled's fail-safe
+    # default: it gates an already-live probe (live_home_reason reads cw
+    # session state and the daemon roster) that fails a claim closed on any
+    # indeterminate read, so a broad misclassification could otherwise
+    # silently stop every PENDING task for a client from being claimed with no
+    # dispatch_tick failure. Use ClientConfig.occupancy_gate_enabled=False
+    # for a staged per-client rollout; setting this False is the explicitly
+    # audited fleet-wide emergency control. Either setting skips the pre-claim
+    # precompute and falls back to #2077's post-claim
+    # WorktreeOccupiedError/HookContextConflictError handling, which still
+    # refuses a genuinely occupied worktree, just one claim later.
+    occupancy_gate_enabled: bool = True
     # Tool-name patterns forwarded to EVERY DAEMON worker spawn as a single
     # `--disallowed-tools=<comma-joined>` token (cw.spawn.build_disallowed_tools_arg).
     # Default empty: cw forces no tool restriction on workers. Replaces the

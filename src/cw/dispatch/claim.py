@@ -368,8 +368,12 @@ def resolve_occupied_ticket_ids(
     that sibling this makes no gh call -- only the same local reads (cw
     session state, the daemon roster) create_worktree's reuse-refresh and
     the stale-worktree claim handler already consult via
-    live_home_reason -- so it always runs, with no feature-flag escape
-    hatch.
+    live_home_reason. Its fleet-wide feature-flag escape hatch is
+    ``OrchestratorConfig.occupancy_gate_enabled`` (#2396), with a staged
+    per-client override on ``ClientConfig``; both are resolved in the
+    ``cw.dispatch.lanes`` caller exactly as ``pr_gate_enabled`` gates
+    ``resolve_stale_pr_ticket_ids`` -- this function's own body and
+    signature are unaffected by the toggles.
 
     Scans every PENDING task for *client* across all lanes and stages
     (occupancy is per-ticket, not per-lane: a ticket's worktree is the

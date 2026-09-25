@@ -84,6 +84,11 @@ class ClientConfig(BaseModel):
     # logged-in gh identity differs from the login this client should treat
     # as "self."
     operator_github_login: str | None = None
+    # Per-client rollout override for the #2077 worktree-occupancy screen.
+    # None inherits OrchestratorConfig.occupancy_gate_enabled; False skips
+    # the pre-claim probe for this client only. The global switch remains the
+    # fleet-wide emergency control.
+    occupancy_gate_enabled: bool | None = None
     auto_background_threshold: int | None = None
     notifications: bool = False
     lanes: list[LaneConfig] = Field(default_factory=list)
