@@ -49,7 +49,7 @@ from cw.native_daemon import (
 )
 from cw.reconcile import _csid_from_transcript, ticket_id_for_session
 from cw.session_retention import find_session_by_id
-from cw.worktree import live_home_reason
+from cw.worktree import is_genuinely_live_home_reason, live_home_reason
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -571,10 +571,7 @@ def _write_hook_context(
                     if daemon is not None
                     else None
                 )
-                genuinely_live = occupancy_reason in {
-                    "a live session is homed on this worktree",
-                    "a live daemon worker is homed on this worktree",
-                }
+                genuinely_live = is_genuinely_live_home_reason(occupancy_reason)
                 if genuinely_live:
                     msg = (
                         f"Worktree hook context at {context_path} is held by "
