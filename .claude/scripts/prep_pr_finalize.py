@@ -16,8 +16,21 @@ Checks (all required unless flagged optional):
   - Branch is pushed to origin and origin SHA matches local HEAD
   - PR exists for this branch (gh pr view succeeds)
   - PR head SHA matches local HEAD
-  - Auto-merge is enabled (optional, --require-automerge)
+  - Auto-merge is enabled (optional, --require-automerge; downgraded to
+    optional regardless when .claude/project-config.yaml sets
+    pr.auto_merge: false — see check-automerge-allowed below)
   - Monitor is registered (optional, --require-monitor)
+
+Subcommands:
+  verify                   Run all checks above, exit non-zero if any
+                            required check fails.
+  check-automerge-allowed  Print "true"/"false" (exit 0/1) for whether
+                            .claude/project-config.yaml's pr.auto_merge
+                            permits `gh pr merge --auto`. The shared seam
+                            every markdown arm site (ship-it.md,
+                            auto-dev-finalize.md, review-monitor.md,
+                            cw-session-watch/SKILL.md) shells out to
+                            before arming auto-merge (#2046).
 
 Exit codes:
   0  all checks passed
@@ -28,23 +41,58 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
+from importlib import import_module
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.runtime_paths import review_monitor_script_path
+
+try:
+    yaml: ModuleType | None = import_module("yaml")
+except ImportError:  # pragma: no cover - downstream repo without PyYAML
+    yaml = None
+
+
+def _load_project_config_module():
+    """Load the shared config reader from source or an installed package."""
+    source = Path(__file__).resolve().parents[2] / "src" / "cw" / "project_config.py"
+    if source.exists():
+        spec = importlib.util.spec_from_file_location("cw_project_config", source)
+        if spec is not None and spec.loader is not None:
+            module = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(module)
+            except ImportError:
+                pass
+            else:
+                return module
+    try:
+        return import_module("cw.project_config")
+    except ImportError:
+        return None
+
+
+_project_config = _load_project_config_module()
+
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 PROTECTED_BRANCHES = {"main", "master"}
 MONITOR_SCRIPT = review_monitor_script_path()
+PROJECT_CONFIG_PATH = Path(".claude") / "project-config.yaml"
 
 
 # --- Data Models ---
@@ -82,7 +130,7 @@ class ShipSummary:
     checks: list[CheckResult] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -91,7 +139,7 @@ class ShipSummary:
 
 def run(
     cmd: list[str], check: bool = False, capture: bool = True
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[str]:
     """Run a shell command. Default: capture, do not raise."""
     return subprocess.run(
         cmd,
@@ -206,6 +254,65 @@ def check_pr_sha_matches(summary: ShipSummary) -> CheckResult:
     return CheckResult(
         name="pr-sha-matches", passed=True, detail=summary.pr_head_sha[:8]
     )
+
+
+def resolve_project_config_auto_merge(
+    config_path: Path = PROJECT_CONFIG_PATH,
+) -> bool | None:
+    """Read pr.auto_merge from .claude/project-config.yaml, or None on any failure.
+
+    Mirrors cw.tracker.load_project_config_dict's safe-degrade shape (absent
+    file, unparseable YAML, non-dict root, absent/non-bool key -> None) via
+    the shared project-config reader. If neither the checked-out source tree
+    nor an installed cw package is available, callers treat the result as
+    unknown and fall back to allowed/required, never as an implicit False
+    (#2046).
+    """
+    if yaml is None:
+        return None
+    project_config = _project_config or _load_project_config_module()
+    if project_config is None:
+        return None
+    raw = project_config.load_project_config_dict(
+        config_path.parent.parent, yaml_module=yaml
+    )
+    if raw is None:
+        return None
+    pr_block = raw.get("pr")
+    if not isinstance(pr_block, dict):
+        return None
+    auto_merge = pr_block.get("auto_merge")
+    return auto_merge if isinstance(auto_merge, bool) else None
+
+
+def automerge_allowed(config_path: Path = PROJECT_CONFIG_PATH) -> bool:
+    """True unless .claude/project-config.yaml explicitly sets pr.auto_merge: false.
+
+    The single shared seam every `gh pr merge --auto` call site — this
+    script's own --require-automerge check, plus the markdown-orchestrated
+    bash arm sites in ship-it.md, auto-dev-finalize.md, review-monitor.md,
+    and cw-session-watch/SKILL.md — must consult before arming, so a
+    project's declared pr.auto_merge: false is honored everywhere instead of
+    re-implemented as N independent YAML reads (#2046).
+    """
+    return resolve_project_config_auto_merge(config_path) is not False
+
+
+def resolve_effective_automerge_required(base_required: bool) -> bool:
+    """Downgrade a caller's --require-automerge when pr.auto_merge is false.
+
+    pr.auto_merge: false in .claude/project-config.yaml means this repo has
+    declared it cannot rely on `gh pr merge --auto` (commonly: no branch
+    protection to gate a pending merge on, so the command merges
+    immediately instead of arming one). Treating the resulting
+    automerge-enabled failure as required led headless /prep-pr Step 9 to
+    retry `gh pr merge --auto`, forcing an unreviewed, CI-unconfirmed merge
+    (#2046). Any other config state (absent file/key, auto_merge: true,
+    unparseable YAML, no PyYAML) leaves the caller's own flag untouched.
+    """
+    if not base_required:
+        return False
+    return automerge_allowed()
 
 
 def check_automerge(summary: ShipSummary, required: bool) -> CheckResult:
@@ -398,6 +505,20 @@ def cmd_verify(args: argparse.Namespace) -> int:
     summary = ShipSummary()
     summary.branch = args.branch or detect_branch()
 
+    effective_require_automerge = resolve_effective_automerge_required(
+        args.require_automerge
+    )
+    if effective_require_automerge != args.require_automerge:
+        summary.warnings.append(
+            "pr.auto_merge: false in .claude/project-config.yaml — "
+            "automerge-enabled check treated as optional, not required (#2046)"
+        )
+    elif yaml is None and PROJECT_CONFIG_PATH.exists():
+        summary.warnings.append(
+            "could not read pr.auto_merge: PyYAML unavailable; "
+            "treating auto-merge as required"
+        )
+
     summary.checks.append(check_not_protected(summary.branch, summary))
     summary.checks.append(check_branch_pushed(summary.branch, summary))
 
@@ -405,7 +526,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
     summary.checks.append(pr_check)
     if pr_check.passed:
         summary.checks.append(check_pr_sha_matches(summary))
-        summary.checks.append(check_automerge(summary, required=args.require_automerge))
+        summary.checks.append(
+            check_automerge(summary, required=effective_require_automerge)
+        )
         summary.checks.append(
             check_monitor_registered(summary, required=args.require_monitor)
         )
@@ -413,7 +536,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         # No PR means downstream checks are all skipped/failed.
         for name, required in [
             ("pr-sha-matches", True),
-            ("automerge-enabled", args.require_automerge),
+            ("automerge-enabled", effective_require_automerge),
             ("monitor-registered", args.require_monitor),
         ]:
             summary.checks.append(
@@ -435,6 +558,32 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 1 if failed_required else 0
 
 
+def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
+    """Print "true"/"false" for whether pr.auto_merge permits `gh pr merge --auto`.
+
+    The shared seam every markdown arm site shells out to before its own
+    `gh pr merge --auto` call, so .claude/project-config.yaml is read once,
+    not independently by each of ship-it.md, auto-dev-finalize.md,
+    review-monitor.md, and cw-session-watch/SKILL.md (#2046). Exit 0 +
+    "true" means arming is allowed; exit 1 + "false" means pr.auto_merge:
+    false disallows it and the caller must skip the arm and leave the PR
+    open. Never raises on missing/malformed config or absent PyYAML.
+    """
+    config_path = (
+        Path(args.repo_path) / PROJECT_CONFIG_PATH
+        if args.repo_path
+        else PROJECT_CONFIG_PATH
+    )
+    if yaml is None and config_path.exists():
+        sys.stderr.write(
+            "WARNING: could not read pr.auto_merge: PyYAML unavailable; "
+            "treating auto-merge as allowed\n"
+        )
+    allowed = automerge_allowed(config_path)
+    print("true" if allowed else "false")
+    return 0 if allowed else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="prep_pr_finalize.py", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -447,7 +596,11 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument(
         "--require-automerge",
         action="store_true",
-        help="Treat auto-merge-not-enabled as a required failure",
+        help=(
+            "Treat auto-merge-not-enabled as a required failure "
+            "(downgraded to optional when .claude/project-config.yaml "
+            "sets pr.auto_merge: false)"
+        ),
     )
     verify.add_argument(
         "--require-monitor",
@@ -459,13 +612,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify.set_defaults(func=cmd_verify)
 
+    check_allowed = sub.add_parser(
+        "check-automerge-allowed",
+        help=(
+            "Print true/false + exit 0/1 for whether pr.auto_merge "
+            "permits `gh pr merge --auto`"
+        ),
+    )
+    check_allowed.add_argument(
+        "--repo-path",
+        type=Path,
+        help="Repository root whose .claude/project-config.yaml should be read",
+    )
+    check_allowed.set_defaults(func=cmd_check_automerge_allowed)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    return cast("int", args.func(args))
 
 
 if __name__ == "__main__":

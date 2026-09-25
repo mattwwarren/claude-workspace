@@ -11,6 +11,12 @@ named as the eventual home for the triplicated ``_git_clean_env`` helper
 are deliberately left in place here: consolidating them is a separate change
 with its own blast radius. What lives here is the copy every NEW git
 subprocess call should use.
+
+Every ``git`` subprocess outside those three copies (and the worktree
+package's own ``cw.worktree._git``) runs through :func:`run_git` or
+:func:`git_output` (#2264). Neither accepts ``env=``, so a call site cannot
+forget the ``GIT_*`` strip or override it: routing a call through the seam IS
+the strip.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 
@@ -35,9 +42,60 @@ def git_clean_env() -> dict[str, str]:
     repository answers.
 
     Mirrors ``spawn._git_clean_env`` and ``worktree_gc._git_clean_env``; see
-    the module docstring for why those copies still exist.
+    the module docstring for why those copies still exist. New callers should
+    reach for :func:`run_git` or :func:`git_output` first, which apply this
+    env themselves rather than trusting every call site to pass it.
     """
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def run_git(
+    argv: Sequence[str],
+    *,
+    cwd: Path | str | None = None,
+    check: bool = False,
+    capture_output: bool = False,
+    text: bool = True,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``git *argv`` with ``GIT_*`` stripped from the inherited environment.
+
+    Every keyword is named explicitly — no ``**kwargs`` passthrough — so a
+    caller structurally cannot pass ``env=``: doing so is a ``TypeError`` from
+    Python itself, not a runtime check this function has to remember to make.
+    ``check``/``capture_output`` default to ``subprocess.run``'s own defaults;
+    ``text`` defaults to ``True`` because every caller wants ``str``.
+    """
+    return subprocess.run(
+        ["git", *argv],
+        cwd=cwd,
+        check=check,
+        capture_output=capture_output,
+        text=text,
+        timeout=timeout,
+        env=git_clean_env(),
+    )
+
+
+def git_output(
+    argv: Sequence[str],
+    *,
+    cwd: Path | str | None = None,
+    timeout: float | None = None,
+) -> str:
+    """``subprocess.check_output(["git", *argv])`` with ``GIT_*`` stripped.
+
+    Always decodes as text — hardcoded rather than a parameter, since no
+    caller wants bytes. ``check_output`` raises ``CalledProcessError`` on a
+    non-zero exit by contract, so there is no ``check`` to expose.
+    """
+    return subprocess.check_output(
+        ["git", *argv],
+        cwd=cwd,
+        timeout=timeout,
+        text=True,
+        env=git_clean_env(),
+    )
 
 
 def capture_head_sha(
@@ -76,13 +134,11 @@ def capture_head_sha(
     unknown rather than to a confident "not stale".
     """
     try:
-        completed = subprocess.run(
-            ["git", "rev-parse", ref],
+        completed = run_git(
+            ["rev-parse", ref],
             cwd=worktree,
             capture_output=True,
-            text=True,
             check=strict,
-            env=git_clean_env(),
             timeout=timeout,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):

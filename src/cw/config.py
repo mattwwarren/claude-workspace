@@ -9,7 +9,6 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import sys
 import threading
 from io import StringIO
@@ -23,6 +22,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from cw import _config_migrate
+from cw._git import run_git
 from cw.atomic import atomic_write_text
 from cw.exceptions import (
     ConfigValidationError,
@@ -720,14 +720,11 @@ def show_config() -> None:
 def _is_git_repo(path: Path) -> bool:
     """Check if a path is inside a git repository."""
     try:
-        # Strip GIT_* env vars so leaked worktree env doesn't affect detection.
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+        # run_git strips GIT_* so leaked worktree env doesn't affect detection.
+        result = run_git(
+            ["-C", str(path), "rev-parse", "--is-inside-work-tree"],
             capture_output=True,
-            text=True,
             check=False,
-            env=clean_env,
         )
     except OSError:
         return False

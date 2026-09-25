@@ -1982,7 +1982,8 @@ class TestWedgeRepoAheadOfQueue:
                 return _Proc(0, "[]\n")
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge.run_git", fake_run)
+        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert len(findings) == 1
         f = findings[0]
@@ -2015,7 +2016,8 @@ class TestWedgeRepoAheadOfQueue:
                 return _Proc(0, json.dumps([{"state": "OPEN"}]))
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge.run_git", fake_run)
+        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert len(findings) == 1
         assert "cw spawn-complete" in findings[0].recipe
@@ -2042,7 +2044,8 @@ class TestWedgeRepoAheadOfQueue:
                 return _Proc(0, "")  # empty — not ahead
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge.run_git", fake_run)
+        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert findings == []
 
@@ -2068,7 +2071,8 @@ class TestWedgeRepoAheadOfQueue:
                 return _Proc(1, "")  # failure
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge.run_git", fake_run)
+        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert findings == []
 
@@ -2142,7 +2146,8 @@ class TestWedgeRepoAheadOfQueue:
                 return _Proc(0, "[]\n")
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge.run_git", fake_run)
+        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
         _check_wedge_repo_ahead(state, queue)
         # The ls-remote call must reference my-branch, not auto-dev/TST-R6
         assert any("my-branch" in str(a) for a in ls_remote_args_seen)
@@ -2171,7 +2176,8 @@ class TestWedgeRepoAheadOfQueue:
                 raise subprocess.TimeoutExpired(cmd=args, timeout=10)
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge.run_git", fake_run)
+        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert findings == []
 
@@ -2201,7 +2207,8 @@ class TestWedgeRepoAheadOfQueue:
                 raise subprocess.TimeoutExpired(cmd=args, timeout=10)
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge.run_git", fake_run)
+        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
         # TimeoutExpired on gh pr list → treated as no PRs → recipe mentions no open PR
         findings = _check_wedge_repo_ahead(state, queue)
         assert len(findings) == 1
@@ -2236,7 +2243,8 @@ class TestWedgeRepoAheadOfQueue:
             return _Proc(1, "")
 
         monkeypatch.setattr("cw.doctor._deps.load_clients", _raise)
-        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge.run_git", fake_run)
+        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
         # The CwError from load_clients must be swallowed (degrade to no
         # clients), not propagate out of the wedge check.
         assert _check_wedge_repo_ahead(state, queue) == []

@@ -94,6 +94,13 @@ def _revert_running_tasks_for_sessions(
     if not session_ids:
         return []
 
+    # Deferred, not module-top: cw.dispatch's package __init__ imports
+    # cw.reconcile, so a top-level import of any cw.dispatch submodule here
+    # is a real circular import at package-init time (same precedent as the
+    # deferred cw.dispatch.routing import below and phantom/_mutations.py's
+    # deferred cw.dispatch.productivity import).
+    from cw.dispatch.claim import _is_backstop_exempt
+
     dirty = dirty_session_reasons or {}
     reverted: list[str] = []
     changed = False
@@ -105,10 +112,13 @@ def _revert_running_tasks_for_sessions(
                 continue
             if task.session_id not in session_ids:
                 continue
-            if task.usage_limit_act is not None:
+            if _is_backstop_exempt(task):
                 # #2324: the mid-turn usage-limit act closed this session and
                 # has not yet transitioned its row; it resumes and finishes
-                # that, uncharged. Reverting it here would charge an attempt.
+                # that, uncharged. #2204: a row mid-fix-loop handoff belongs
+                # to cw.reconcile.fix_dispatch for the whole handoff. Either
+                # way, reverting it here would charge an attempt it should
+                # never cost.
                 continue
             if task.session_id in dirty:
                 transition_task_status(
@@ -508,6 +518,8 @@ def revert_timed_out_tasks() -> list[str]:
     can emit queue.session_reaped (#380) without false events on the happy
     path (sessions whose task already completed normally are not stamped).
     """
+    from cw.dispatch.claim import _is_backstop_exempt
+
     state = load_state()
     target_sessions = [
         s
@@ -530,7 +542,7 @@ def revert_timed_out_tasks() -> list[str]:
         for t in store.tasks
         if t.status == QueueItemStatus.RUNNING
         and t.session_id in session_ids
-        and t.usage_limit_act is None
+        and not _is_backstop_exempt(t)
     }
     # Why: stamp in place + save_state, NOT mutate_state — the caller
     # already holds sessions_lock, and the lock is a per-open-fd flock,
@@ -571,6 +583,8 @@ def revert_completed_silent_tasks() -> list[str]:
     can emit queue.session_reaped (#380) without false events on the happy
     path (sessions whose task already completed normally are not stamped).
     """
+    from cw.dispatch.claim import _is_backstop_exempt
+
     state = load_state()
     target_sessions = [
         s
@@ -593,7 +607,7 @@ def revert_completed_silent_tasks() -> list[str]:
         for t in store.tasks
         if t.status == QueueItemStatus.RUNNING
         and t.session_id in session_ids
-        and t.usage_limit_act is None
+        and not _is_backstop_exempt(t)
     }
     # Why: stamp in place + save_state, NOT mutate_state — the caller
     # already holds sessions_lock, and the lock is a per-open-fd flock,

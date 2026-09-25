@@ -53,6 +53,7 @@ import subprocess
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw._git import git_output
 from cw.codex_fix_loop_convergence import (
     _OpenFindingKey,
     _survivors_only_verdict,
@@ -292,9 +293,7 @@ def _commit_fix_cycle(
     work never exists only in the local worktree. A failed push or tip
     mismatch raises ``CalledProcessError`` too, and parks the same way.
     """
-    status = subprocess.check_output(
-        ["git", "status", "--porcelain"], cwd=worktree, text=True
-    )
+    status = git_output(["status", "--porcelain"], cwd=worktree)
     if not status.strip():
         _log.warning(
             "codex fix cycle %d produced no changes; skipping commit "
@@ -302,12 +301,10 @@ def _commit_fix_cycle(
             cycle,
         )
         return None
-    subprocess.check_output(["git", "add", "-A"], cwd=worktree, text=True)
+    git_output(["add", "-A"], cwd=worktree)
     message = f"fix(review): codex fix cycle {cycle} — {_fix_commit_summary(findings)}"
     try:
-        subprocess.check_output(
-            ["git", "commit", "-m", message], cwd=worktree, text=True
-        )
+        git_output(["commit", "-m", message], cwd=worktree)
     except subprocess.CalledProcessError:
         # why: a repo-local pre-commit hook that REWRITES files (e.g.
         # ruff-format) exits non-zero on the run where it changes something —
@@ -322,13 +319,9 @@ def _commit_fix_cycle(
             "rewrite); re-staging and retrying once",
             cycle,
         )
-        subprocess.check_output(["git", "add", "-A"], cwd=worktree, text=True)
-        subprocess.check_output(
-            ["git", "commit", "-m", message], cwd=worktree, text=True
-        )
-    sha = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
-    ).strip()
+        git_output(["add", "-A"], cwd=worktree)
+        git_output(["commit", "-m", message], cwd=worktree)
+    sha = git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
     push_and_verify_head(worktree, sha)
     return sha
 
@@ -346,10 +339,8 @@ def _porcelain_changed_paths(worktree: Path) -> list[str]:
     collapsed to a single ``?? some/dir/`` entry — the scope/sensitivity check
     below needs the actual file path, not its containing directory.
     """
-    status = subprocess.check_output(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
-        cwd=worktree,
-        text=True,
+    status = git_output(
+        ["status", "--porcelain", "--untracked-files=all"], cwd=worktree
     )
     paths: list[str] = []
     for line in status.splitlines():

@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import itertools
 import logging
-import subprocess
 from typing import TYPE_CHECKING
 
+from cw._git import run_git
 from cw.events import record_event
 from cw.models import OrchestratorEventType, QueueItemStatus
 
@@ -38,10 +38,9 @@ def _git_changed_files(worktree: Path, base_ref: str) -> frozenset[str]:
     if not worktree.exists():
         return frozenset()
     try:
-        result = subprocess.run(
-            ["git", "-C", str(worktree), "diff", "--name-only", base_ref, "HEAD"],
+        result = run_git(
+            ["-C", str(worktree), "diff", "--name-only", base_ref, "HEAD"],
             capture_output=True,
-            text=True,
             check=False,
         )
     except OSError:

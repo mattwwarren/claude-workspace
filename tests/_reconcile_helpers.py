@@ -20,6 +20,7 @@ from typing import Any
 from cw.models import (
     ClientConfig,
     OrchestratorConfig,
+    PendingFixDispatch,
     ReapPolicy,
     Session,
     SessionOrigin,
@@ -82,6 +83,26 @@ def _mk_headless_daemon_session(
         '{"headless": true, "session_id": "' + sid + '"}'
     )
     return sess
+
+
+def _make_pending_fix_dispatch(**overrides: Any) -> PendingFixDispatch:
+    """Minimal-but-valid ``PendingFixDispatch`` with keyword overrides.
+
+    Dict-merge + model-construct idiom matching ``_make_ticket_task``
+    (``tests/conftest.py``); shared so ``tests/test_reconcile_fix_dispatch.py``,
+    ``tests/test_dispatch.py``, and the backstop-exemption tests
+    (``tests/test_reconcile_tasks.py``, ``tests/test_reconcile_phantom.py``)
+    do not each hand-roll their own ``PendingFixDispatch(...)`` defaults.
+    """
+    kwargs: dict[str, Any] = {
+        "prompt": "fix the MUST_FIX items\n",
+        "label": "fix-T-1",
+        "cycle": 1,
+        "requested_by_session_id": "review-sess",
+        "requested_at": datetime(2026, 1, 1, tzinfo=UTC),
+    }
+    kwargs.update(overrides)
+    return PendingFixDispatch(**kwargs)
 
 
 def _shipped_salvage_payload() -> dict[str, Any]:

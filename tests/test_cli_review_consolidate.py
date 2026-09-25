@@ -18,6 +18,7 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.cli.review import _build_captured_diff
+from cw.cli.review._diff_integrity import _check_diff_matches_base
 from cw.codex_review import _parse_unified_diff
 from cw.review_findings import ReviewerRunFailure
 from tests._cli_review_helpers import (
@@ -33,6 +34,7 @@ from tests.conftest import (
     _make_reviewer_doc,
     _plan_text,
     _without_evidence,
+    commit_tracked_file,
 )
 
 if TYPE_CHECKING:
@@ -1453,10 +1455,10 @@ class TestReviewConsolidateBaseFlag:
 
         def _boom(*args: object, **kwargs: object) -> object:
             calls.append(args)
-            msg = "subprocess.run must not be called without --base"
+            msg = "run_git must not be called without --base"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.cli.review._diff_integrity.subprocess.run", _boom)
+        monkeypatch.setattr("cw.cli.review._diff_integrity.run_git", _boom)
         result = runner.invoke(
             main,
             ["review", "consolidate", "--no-base-check", "-"],
@@ -1487,6 +1489,23 @@ class TestReviewConsolidateBaseFlag:
         )
 
         assert result.exit_code == 0, result.output
+
+    def test_base_check_ignores_an_inherited_git_dir(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2264: a hook's ``GIT_DIR`` cannot redirect the base check.
+
+        The decoy does not contain the reviewed sha at all, so a ``git diff``
+        that answered for the decoy would fail and raise. Passing proves the
+        diff was computed in the worktree the caller named.
+        """
+        repo, sha, real_diff = _branch_repo(make_git_repo, "hostile-target")
+        decoy = make_git_repo("hostile-decoy")
+        commit_tracked_file(decoy, "decoy.py", "decoy = True\n")
+        monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+
+        _check_diff_matches_base(real_diff, "main", sha, repo)
 
     def test_base_mismatched_diff_errors(
         self, runner: CliRunner, make_git_repo: Callable[..., Path]

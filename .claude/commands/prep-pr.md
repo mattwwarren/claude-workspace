@@ -385,7 +385,7 @@ The script verifies:
 - Branch is pushed to origin and origin SHA matches local HEAD
 - A PR exists for the current branch (`gh pr view` succeeds)
 - PR head SHA matches local HEAD (push and PR are in sync)
-- Auto-merge is enabled (required — auto-dev relies on this)
+- Auto-merge is enabled (required — auto-dev relies on this) — downgraded to informational when `.claude/project-config.yaml`'s `pr.auto_merge` is explicitly `false` (e.g. no branch protection on a free plan); `prep_pr_finalize.py` itself makes this determination (#2046).
 - Monitor registered (reported as optional unless `--require-monitor` is passed)
 
 Output is the canonical Ship Summary (markdown). For programmatic callers (e.g. /auto-dev's subagent), pass `--json`.
@@ -394,6 +394,7 @@ Output is the canonical Ship Summary (markdown). For programmatic callers (e.g. 
 - Report the failed checks verbatim to the user
 - Do NOT claim success
 - Diagnose: most failures mean a /ship-it sub-step was skipped (no push, no PR, no auto-merge). Re-run the missing step rather than papering over it.
+- **Exception — `automerge-enabled`:** if this check shows as optional (`○`) rather than required (`✗`) in the Ship Summary, `.claude/project-config.yaml` has declared `pr.auto_merge: false` and the script already downgraded it — this is the repo's deliberate, permanent state, not a skipped step. Do NOT run `gh pr merge --auto` in response to it: on a repo without branch protection this command merges immediately (unreviewed, without waiting for CI) rather than arming a pending merge (#2046). Only retry sub-steps behind checks still marked required (`✗`).
 - **Headless:** after attempting the missing sub-step once, if `verify` still
   exits non-zero, emit a `HEADLESS BLOCK` (`gate: "Step 9 finalize verify"`,
   `details:` the verbatim failed checks). Never emit a Ship Summary that claims

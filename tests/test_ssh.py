@@ -324,7 +324,7 @@ class TestPushRemoteScheme:
             msg = "git"
             raise FileNotFoundError(msg)
 
-        monkeypatch.setattr("cw.ssh._sp.run", _raise)
+        monkeypatch.setattr("cw.ssh.run_git", _raise)
         assert push_remote_scheme(tmp_path) == "unknown"
 
     def test_timeout_resolves_unknown(
@@ -333,13 +333,13 @@ class TestPushRemoteScheme:
         def _raise(*_a: object, **_kw: object) -> Any:
             raise subprocess.TimeoutExpired(cmd="git", timeout=5)
 
-        monkeypatch.setattr("cw.ssh._sp.run", _raise)
+        monkeypatch.setattr("cw.ssh.run_git", _raise)
         assert push_remote_scheme(tmp_path) == "unknown"
 
     def test_empty_stdout_resolves_unknown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "cw.ssh._sp.run", lambda *_a, **_kw: _make_run_result(0, "\n")
+            "cw.ssh.run_git", lambda *_a, **_kw: _make_run_result(0, "\n")
         )
         assert push_remote_scheme(tmp_path) == "unknown"

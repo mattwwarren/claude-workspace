@@ -26,6 +26,7 @@ import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
+from cw._git import run_git
 from cw.dev_queue import (
     dev_queue_lock,
     load_dev_queue,
@@ -351,10 +352,9 @@ def _resolve_repo_slug(git_dir: Path) -> str | None:
     subprocess shape mirrors ``doctor.py``'s ``_check_wedge_repo_ahead``.
     """
     try:
-        result = subprocess.run(
-            ["git", "-C", str(git_dir), "remote", "get-url", "origin"],
+        result = run_git(
+            ["-C", str(git_dir), "remote", "get-url", "origin"],
             capture_output=True,
-            text=True,
             check=False,
             # Why: this runs under dev_queue_lock (a single, queue-wide lock —
             # see review_recipes.py call sites); a hung `git` process (stale

@@ -786,7 +786,7 @@ class TestResolveRepoSlug:
             msg = "git: not found"
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.pr_hydrate.subprocess.run", _raise)
+        monkeypatch.setattr("cw.pr_hydrate.run_git", _raise)
         assert _resolve_repo_slug(tmp_path) is None
 
     def test_subprocess_timeout_fails_open(
@@ -797,7 +797,7 @@ class TestResolveRepoSlug:
         def _raise(*_a: Any, **_k: Any) -> Any:
             raise subprocess.TimeoutExpired(cmd="git", timeout=5)
 
-        monkeypatch.setattr("cw.pr_hydrate.subprocess.run", _raise)
+        monkeypatch.setattr("cw.pr_hydrate.run_git", _raise)
         assert _resolve_repo_slug(tmp_path) is None
 
 

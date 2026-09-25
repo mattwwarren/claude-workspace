@@ -1084,7 +1084,7 @@ class TestWorktreePorcelainCleanExceptVerdict:
         def _hang(*_args: object, **_kwargs: object) -> None:
             raise subprocess.TimeoutExpired(cmd="git", timeout=10)
 
-        monkeypatch.setattr(subprocess, "run", _hang)
+        monkeypatch.setattr("cw.reconcile.codex_boot.run_git", _hang)
 
         assert _worktree_porcelain_clean_except_verdict(tmp_path) is None
 

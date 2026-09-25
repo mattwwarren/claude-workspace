@@ -14,12 +14,12 @@ diff verification cannot silently diverge.
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
 
+from cw._git import run_git
 from cw.exceptions import (
     DiffBaseMismatchError,
     DuplicatedHunkError,
@@ -169,11 +169,10 @@ def _check_diff_matches_base(
     thing" but does not match byte-for-byte was retyped. Called from both
     ``review_consolidate`` (#1924) and ``review_verify_fixes`` (#1988).
     """
-    completed = subprocess.run(
-        ["git", "diff", "--no-color", f"{base}...{reviewed_sha}"],
+    completed = run_git(
+        ["diff", "--no-color", f"{base}...{reviewed_sha}"],
         cwd=worktree,
         capture_output=True,
-        text=True,
         check=False,
     )
     if completed.returncode != 0:

@@ -130,6 +130,7 @@ def _apply_phantom_queue_mutations(
     # cw.dispatch submodule here is a real circular import at package-init
     # time. Same shape as the #698 reconcile._shared -> cw.dispatch precedent
     # and tasks.py's deferred cw.dispatch.routing import. See #1750.
+    from cw.dispatch.claim import _is_backstop_exempt
     from cw.dispatch.productivity import extract_claim_evidence, is_unproductive
 
     unresolved_spawn_ids = unresolved_spawn_ticket_ids or set()
@@ -152,12 +153,14 @@ def _apply_phantom_queue_mutations(
         for task in store.tasks:
             if task.status != QueueItemStatus.RUNNING:
                 continue
-            if task.usage_limit_act is not None:
+            if _is_backstop_exempt(task):
                 # #2324: the mid-turn usage-limit act owns this row until its
-                # intent clears. Every set here is keyed by bare ticket id, so
-                # a different phantom sharing it (a duplicate RUNNING row or a
-                # cross-client id collision, #2219) would otherwise discard
-                # the write-ahead intent along with the row's status.
+                # intent clears. #2204: a row mid-fix-loop handoff belongs to
+                # cw.reconcile.fix_dispatch for the whole handoff. Every set
+                # here is keyed by bare ticket id, so a different phantom
+                # sharing it (a duplicate RUNNING row or a cross-client id
+                # collision, #2219) would otherwise discard the write-ahead
+                # intent along with the row's status.
                 continue
             if task.ticket_id in revert_set:
                 if task.ticket_id in dirty_ticket_ids:

@@ -25,7 +25,7 @@ draft-persistence rule in Step 1c's headless branch that each exit clause
 references.
 """
 
-from tests.conftest import _cmd
+from tests.conftest import _checkpoint1_section, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 DRAFT_FILE = ".cw/plan-draft.md"
@@ -49,13 +49,6 @@ def _step1a_section() -> str:
     content = _cmd("auto-dev-plan.md")
     start = content.index("### Step 1a: Check for Existing Plan")
     end = content.index("### Step 1b:")
-    return content[start:end]
-
-
-def _checkpoint1_section() -> str:
-    content = _cmd("auto-dev-plan.md")
-    start = content.index("### Checkpoint 1 (Plan Approval)")
-    end = content.index("### Step 1e:")
     return content[start:end]
 
 

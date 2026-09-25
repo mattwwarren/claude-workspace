@@ -12,37 +12,19 @@ tracker-specific resolution built on top of that shared primitive.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import yaml
+from cw import project_config
 
-# Repo-relative path to the per-client tracker config the auto-dev skills read.
-PROJECT_CONFIG_RELPATH = Path(".claude") / "project-config.yaml"
+if TYPE_CHECKING:
+    from pathlib import Path
+
+PROJECT_CONFIG_RELPATH = project_config.PROJECT_CONFIG_RELPATH
+load_project_config_dict = project_config.load_project_config_dict
 
 # Canonical tracker-system identifier for GitHub Issues. Used at spawn/session
 # chokepoints to decide whether to withhold Linear MCP tools from headless workers.
 TRACKER_GITHUB_ISSUES = "github-issues"
-
-
-def load_project_config_dict(root: Path) -> dict[str, object] | None:
-    """Read <root>/.claude/project-config.yaml as a dict, or None on any failure.
-
-    Consolidates the safe-read walk (missing file, unparseable YAML, non-dict
-    root) shared by every ``.claude/project-config.yaml`` consumer — callers
-    then do their own ``.get(key)`` + type-narrowing for the section they need
-    (e.g. ``resolve_review_strategy``'s ``review_strategy`` block, ``cw
-    doctor``'s checks). Returns the raw root mapping unfiltered; a caller that
-    also needs "absent" distinguished from "present but wrong shape" for a
-    sub-key gets that from the returned dict directly.
-    """
-    path = root / PROJECT_CONFIG_RELPATH
-    if not path.exists():
-        return None
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return None
-    return raw if isinstance(raw, dict) else None
 
 
 def resolve_tracker(root: Path) -> str | None:

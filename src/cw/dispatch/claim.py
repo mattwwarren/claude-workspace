@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from cw._git import git_output
 from cw.dev_queue import (
     STALE_DISPATCH_GATE_DISPOSITION,
     _impl_bypass_plan_available,
@@ -310,6 +311,23 @@ def _is_fix_dispatch_held(task: TicketTask) -> bool:
         task.pending_fix_dispatch is not None
         or task.fix_dispatch_session_id is not None
     )
+
+
+def _is_backstop_exempt(task: TicketTask) -> bool:
+    """True iff a generic RUNNING->PENDING backstop revert must not touch *task*.
+
+    Composes the two known in-flight write-ahead intents a non-sentinel
+    revert (crash/phantom/stall/timeout sweep) must never clobber: the
+    mid-turn usage-limit act (#2324) and the fix-loop dispatch handoff
+    (#2075/#2204, via _is_fix_dispatch_held). Each owns its own resume/
+    consume seam elsewhere (usage_limit_mid_turn.py, fix_dispatch.py);
+    reverting the row out from under either charges an attempt neither
+    should ever cost, and in the fix-dispatch case strands the handoff --
+    fix_dispatch.py's _build_dispatch_jobs classifies an unconsumed
+    handoff on a non-RUNNING row as a stale handoff and drops it instead
+    of dispatching the fix session.
+    """
+    return task.usage_limit_act is not None or _is_fix_dispatch_held(task)
 
 
 # _screen_and_claim outcomes. "skipped" covers every held/parked case the two
@@ -1083,16 +1101,8 @@ def _stamp_spawn_success(
                 stored_task.pending_operator_comment = False
             # R5: stamp stage_base_ref -- non-fatal on failure
             try:
-                head_sha = subprocess.check_output(
-                    [
-                        "git",
-                        "-C",
-                        str(worktree_path),
-                        "rev-parse",
-                        "HEAD",
-                    ],
-                    text=True,
-                    timeout=5,
+                head_sha = git_output(
+                    ["-C", str(worktree_path), "rev-parse", "HEAD"], timeout=5
                 )
                 stored_task.stage_base_ref = head_sha.strip()
             except subprocess.SubprocessError as exc:
