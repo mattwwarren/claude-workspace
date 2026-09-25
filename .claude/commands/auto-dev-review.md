@@ -489,12 +489,12 @@ After all Stage 3 steps complete successfully in headless mode (review clean or 
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-review <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
 
-**Validating is not emitting (#1890).** `cw result validate -` confirms the JSON is well-formed — it does not emit the sentinel. Never narrate emission as a separate act from performing it: the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the validated JSON, MUST be the final characters of this same message.
+**Emit through cw, then frame (#2382).** Record the payload with `cw result emit -` per the *Sentinel emit rule* in `.claude/commands/auto-dev.md` — run it from the cw session worktree root, fix every `field.path: message` error it reports and re-run until it exits 0, and only then frame the recorded JSON. Recording is not framing (#1890): the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the same JSON, MUST be the final characters of this same message. Never narrate emission as a separate act from performing it.
 
 **No interactive escalation, ever (#1890).** In headless mode there is no listener. Never escalate a MUST_FIX / `review_blocked` / `plan_deviation` / `review_operator_actionable` / `empty_diff_blocked` finding by asking a question and ending your turn — headless adjudication is already autonomous (Checkpoint 3a: "no AskUserQuestion"). Escalate exclusively via this sentinel's `blocker` field with `status: "blocked"`.
 
 ```bash
-printf '%s' "$SENTINEL_JSON" | cw result validate -
+printf '%s' "$SENTINEL_JSON" | cw result emit -
 ```
 
 ```

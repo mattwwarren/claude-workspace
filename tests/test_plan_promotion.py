@@ -7,9 +7,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.dev_queue.plan_promotion import _draft_fingerprint, promote_plan_draft
+from cw.dev_queue.plan_promotion import promote_plan_draft
 from cw.exceptions import ApproveGateError
 from cw.models import QueueItemStatus, Stage
+from cw.plan_fingerprint import compute_plan_draft_fingerprint
 from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
 
 _DRAFT_BODY = "# Plan\n\nreconciled draft body\n"
 _STALE_PLAN_BODY = "# Plan\n\nstale pre-reconciliation body\n"
-_DRAFT_FINGERPRINT = _draft_fingerprint(_DRAFT_BODY)
+_DRAFT_FINGERPRINT = compute_plan_draft_fingerprint(_DRAFT_BODY)
 
 
 def _plan_task(worktree: Path | None) -> TicketTask:
@@ -184,16 +185,6 @@ def test_promote_plan_draft_rejects_missing_or_invalid_fingerprint(
 
     assert not (cw_dir / "plan.md").exists()
     assert (cw_dir / "plan-draft.md").read_text(encoding="utf-8") == _DRAFT_BODY
-
-
-def test_draft_fingerprint_only_strips_leading_bookkeeping_lines() -> None:
-    from cw.dev_queue.plan_promotion import _draft_fingerprint
-
-    leading = "<!-- plan-stage-scan-round: 1 -->\n"
-    body = "<!-- plan-stage-settled: A1: ADOPTED -->\n\nbody\n"
-    interior = "body\n<!-- plan-stage-settled: A1: ADOPTED -->\n"
-
-    assert _draft_fingerprint(leading + body) != _draft_fingerprint(leading + interior)
 
 
 def _record_events(monkeypatch: pytest.MonkeyPatch) -> list[object]:

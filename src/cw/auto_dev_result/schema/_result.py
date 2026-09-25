@@ -49,6 +49,7 @@ from cw.auto_dev_result.schema._vocab import (
     StageReached,
     Status,
 )
+from cw.plan_fingerprint import is_plan_draft_fingerprint
 
 _log = logging.getLogger(_LOGGER_NAME)
 
@@ -248,6 +249,23 @@ class AutoDevResult(BaseModel):
         cls, v: list[str], info: ValidationInfo
     ) -> list[str]:
         return _reject_empty_string_items(v, str(info.field_name))
+
+    # #2382: the fingerprint is agent-transcribed on the transcript path, and a
+    # 62-character copy of a 64-character digest once reached `cw dev-queue
+    # approve` and re-opened the approval gate on every round. A malformed
+    # value is a producer bug, never evidence, so it fails here -- loudly at
+    # `cw result emit` / `cw result validate`, where the worker can fix it and
+    # re-run, and as `validation_failed` on the transcript fallback.
+    @field_validator("plan_draft_fingerprint")
+    @classmethod
+    def _validate_plan_draft_fingerprint(cls, v: str | None) -> str | None:
+        if v is None or is_plan_draft_fingerprint(v):
+            return v
+        msg = (
+            "plan_draft_fingerprint must be a 64-character lowercase hex SHA-256"
+            f" digest or null (got {len(v)} characters)"
+        )
+        raise ValueError(msg)
 
     @field_validator("stage_reached", mode="before")
     @classmethod

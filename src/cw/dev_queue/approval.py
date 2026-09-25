@@ -51,6 +51,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
+from cw.plan_fingerprint import is_plan_draft_fingerprint
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -324,6 +325,18 @@ def _stamp_plan_approval(
         return None
     task.plan_approved_at = datetime.now(UTC)
     fingerprint = (session.last_result or {}).get(PLAN_DRAFT_FINGERPRINT_KEY)
+    if isinstance(fingerprint, str) and not is_plan_draft_fingerprint(fingerprint):
+        # #2382: a malformed digest is recorded absence, never a binding. The
+        # schema now rejects this shape on every door write, so this only
+        # fires for a `last_result` persisted before that validator shipped.
+        _log.warning(
+            "approve: session %s sentinel plan_draft_fingerprint is not a "
+            "64-character lowercase hex digest (got %d characters); "
+            "stamping plan_approved_fingerprint=None",
+            session.id,
+            len(fingerprint),
+        )
+        fingerprint = None
     task.plan_approved_fingerprint = (
         fingerprint if isinstance(fingerprint, str) else None
     )

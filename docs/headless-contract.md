@@ -96,6 +96,8 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 
 **Interactive mode:** this block is NOT emitted. Absence of sentinels in stdout is itself a signal that the run was not headless (or the skill failed before reaching the emit step — see §6).
 
+**Producer push (#2382).** A Claude-backed worker records the payload on its session with `cw result emit -` immediately before framing it (the *Sentinel emit rule* in `.claude/commands/auto-dev.md`). That write is the authoritative copy: the Stop hook takes an emitted result over the transcript frame (#536), so the bytes cw routes on are the bytes cw validated, not a re-typed copy in prose. `cw result emit` validates strictly — none of the §6 parse-boundary coercions apply — and exits 1 with `field.path: message` lines on a malformed payload, which the worker fixes and re-emits. A non-null `plan_draft_fingerprint` is treated as a claim only; the recorded digest is recomputed by cw from `.cw/plan-draft.md` (§3.3). The framed block in stdout is still required: it is the display copy, the transcript's forensic record, and the parse path (§6) whenever nothing was recorded — a worker whose `cw` predates `result emit`, a denied call, or an opencode worker (no `cw-context.json`, so no session to push onto).
+
 ### 3.2 Schema
 
 ```json
@@ -845,7 +847,7 @@ Every backend has a designated harvest authority that pushes `Session.last_resul
 
 | Authority mechanism | `LastResultSource` value | Backend(s) | Call site |
 |---|---|---|---|
-| Manual CLI push | `emit_cli` | operator / scripted | `cw.result.result_emit` |
+| Worker push at end of stage (#2382), or manual CLI push | `emit_cli` | detached Claude daemon (primary, per the *Sentinel emit rule*); operator / scripted | `cw.result.result_emit` |
 | Stop-hook harvest | `stop_hook_harvest` | detached Claude daemon | `cw.cli.stop_hook` |
 | Executor-direct | `executor_direct` | codex, aider/local (supervised-child, synchronous) | `cw.executor` |
 | Git-facts synthesis | `git_synthesis` | aider/local (no sentinel emitted) | `cw.reconcile.local` |

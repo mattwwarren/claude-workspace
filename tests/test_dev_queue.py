@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -13696,6 +13697,40 @@ class TestPlanApprovedFingerprintStamp:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
         assert t.plan_approved_at is not None
         assert t.plan_approved_fingerprint is None
+
+    def test_approve_stamps_null_fingerprint_when_sentinel_value_is_malformed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """#2382: a 62-character digest persisted before the schema validator
+        shipped is recorded absence, never a binding — and the warning names
+        the length, not the untrusted value."""
+        from cw.dev_queue import approve_ticket
+
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        _seed_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            session_id="sess-fp-bad",
+            last_result_extra={"plan_draft_fingerprint": "c" * 62},
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cw.dev_queue.approval"):
+            result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_approved_fingerprint"] is None
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.plan_approved_at is not None
+        assert t.plan_approved_fingerprint is None
+        assert "got 62 characters" in caplog.text
+        assert "c" * 62 not in caplog.text
 
     def test_approve_review_stage_never_stamps_fingerprint(
         self, tmp_config_dir: Path, tmp_path: Path

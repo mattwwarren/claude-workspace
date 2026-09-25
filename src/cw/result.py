@@ -19,12 +19,20 @@ from cw.exceptions import (
     EmitSessionNotFoundError,
     EmitValidationError,
 )
-from cw.models import LastResultSource
+from cw.models import PLAN_DRAFT_FINGERPRINT_KEY, LastResultSource
+from cw.plan_fingerprint import compute_plan_draft_fingerprint
 
 if TYPE_CHECKING:
     from cw.models import Session
 
 logger = logging.getLogger(__name__)
+
+# Where a plan-stage worker persists its draft, relative to the session
+# worktree (auto-dev-plan.md's draft-persistence rule). `cw result emit`
+# resolves it against the cwd, the same directory it resolves cw-context.json
+# from, so both lookups name the same worktree.
+PLAN_DRAFT_RELATIVE_PATH = Path(".cw") / "plan-draft.md"
+_NO_STATE_MODIFIED = "No session state was modified."
 
 
 def _format_errors(exc: ValidationError) -> list[str]:
@@ -176,6 +184,55 @@ def _resolve_emit_session_id(session_id: str | None) -> str:
         )
         raise click.exceptions.Exit(1)
     return ctx_session_id
+
+
+def _bind_plan_draft_fingerprint(payload: dict[str, Any], draft_path: Path) -> None:
+    """Replace a producer-claimed ``plan_draft_fingerprint`` with cw's own (#2382).
+
+    The field is agent-transcribed on the transcript path, and a 62-character
+    copy of a 64-character digest once reached ``cw dev-queue approve`` and
+    re-opened the approval gate on every round. On the emit path the value is
+    never taken from the payload: a non-null value is read only as the
+    producer's claim that a draft is in hand, and the digest itself is
+    recomputed from *draft_path* under the named *Plan-draft fingerprint rule*.
+    A ``null`` claim is left alone -- it is the contract's "no draft" value,
+    emitted by every non-plan-stage sentinel, and a stale draft on disk must
+    not turn it into a binding.
+
+    A claim without a draft file is a producer bug and exits 1 before any
+    state is read, matching the other pre-validation failures: the worker
+    sees which path was expected and either emits ``null`` or points
+    ``--plan-draft`` at the file.
+    """
+    claimed = payload.get(PLAN_DRAFT_FINGERPRINT_KEY)
+    if claimed is None:
+        return
+    if not draft_path.is_file():
+        click.echo(
+            f"{PLAN_DRAFT_FINGERPRINT_KEY}: payload claims a plan draft but none "
+            f"exists at {draft_path}; emit null when no draft is in hand, or pass "
+            "--plan-draft <path>.",
+            err=True,
+        )
+        click.echo(_NO_STATE_MODIFIED, err=True)
+        raise click.exceptions.Exit(1)
+    try:
+        draft_text = draft_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        click.echo(
+            f"{PLAN_DRAFT_FINGERPRINT_KEY}: cannot read {draft_path}: {exc}",
+            err=True,
+        )
+        click.echo(_NO_STATE_MODIFIED, err=True)
+        raise click.exceptions.Exit(1) from exc
+    computed = compute_plan_draft_fingerprint(draft_text)
+    if claimed != computed:
+        click.echo(
+            f"{PLAN_DRAFT_FINGERPRINT_KEY}: replaced the payload's value with the "
+            f"digest computed from {draft_path} (the payload's value differed).",
+            err=True,
+        )
+    payload[PLAN_DRAFT_FINGERPRINT_KEY] = computed
 
 
 def has_terminal_result(last_result: dict[str, Any] | None) -> bool:
@@ -404,11 +461,27 @@ def emit_result(
     default=None,
     help="Session id override; wins over cw-context.json.",
 )
-def result_emit(path: str, session_id: str | None) -> None:
+@click.option(
+    "--plan-draft",
+    "plan_draft",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help=(
+        "Plan draft the payload's plan_draft_fingerprint is recomputed from; "
+        "defaults to <cwd>/.cw/plan-draft.md."
+    ),
+)
+def result_emit(path: str, session_id: str | None, plan_draft: Path | None) -> None:
     """Record an AutoDevResult onto its session (push-based completion).
 
     PATH is a file path or '-' for stdin. The payload must be the inner JSON
     object only -- do NOT include the <<<AUTO_DEV_RESULT>>> delimiters.
+
+    This is the worker's terminal step in every headless stage (#2382): the
+    bytes recorded here are the bytes cw routes on, and the Stop hook takes an
+    emitted result over the transcript sentinel (#536). Validation is strict --
+    none of the transcript parser's leniency coercions apply -- so a payload
+    that fails here is fixed and re-emitted, never framed as-is.
 
     Write-only: validates the payload, resolves the target session
     (``--session-id`` wins, else the ``session_id`` from
@@ -416,6 +489,11 @@ def result_emit(path: str, session_id: str | None) -> None:
     the sessions lock. Emits NO event and changes NO session status -- the Stop
     hook remains the sole completion-event source. Validation strictly precedes
     any state read/write, so a bad payload leaves state untouched.
+
+    A non-null ``plan_draft_fingerprint`` is read only as a claim that a draft
+    is in hand: the digest recorded is recomputed by cw from
+    ``<cwd>/.cw/plan-draft.md`` (or ``--plan-draft``), never copied from the
+    payload. A claim with no draft file exits 1 with no state modified.
 
     On success: exits 0, prints
     'Recorded result for session <short_id>: status=<status>'.
@@ -428,13 +506,15 @@ def result_emit(path: str, session_id: str | None) -> None:
     'No session state was modified.' to stderr.
     """
     payload = _read_json_payload(path)
+    draft_path = plan_draft if plan_draft is not None else PLAN_DRAFT_RELATIVE_PATH
+    _bind_plan_draft_fingerprint(payload, draft_path)
     # RFC 0012 A1 (#1457): emit_result_locked's validation widened to accept
     # the parser-synthesized BlockedResult shape (for the Stop-hook harvest
     # write), but `cw result emit`'s CLI contract must not change alongside
     # it -- strictly re-validate against AutoDevResult only, byte-compatible
     # with the pre-#1457 behavior, before resolving the session or mutating
     # any state.
-    _validate_or_exit(payload, extra_stderr_line="No session state was modified.")
+    _validate_or_exit(payload, extra_stderr_line=_NO_STATE_MODIFIED)
     resolved_id = _resolve_emit_session_id(session_id)
 
     try:
@@ -442,11 +522,11 @@ def result_emit(path: str, session_id: str | None) -> None:
     except EmitValidationError as exc:
         for line in exc.errors:
             click.echo(line, err=True)
-        click.echo("No session state was modified.", err=True)
+        click.echo(_NO_STATE_MODIFIED, err=True)
         raise click.exceptions.Exit(1) from exc
     except AmbiguousSessionIdentifierError as exc:
         click.echo(str(exc), err=True)
-        click.echo("No session state was modified.", err=True)
+        click.echo(_NO_STATE_MODIFIED, err=True)
         raise click.exceptions.Exit(1) from exc
     except EmitSessionNotFoundError as exc:
         click.echo(
