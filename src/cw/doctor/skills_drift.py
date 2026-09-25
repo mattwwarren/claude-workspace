@@ -22,6 +22,7 @@ import subprocess as _sp
 from enum import StrEnum
 from pathlib import Path
 
+from cw._git import run_git
 from cw.doctor._shared import CheckResult
 from cw.doctor.versions import _resolve_cw_source_path
 
@@ -98,10 +99,9 @@ def _git_tracked_paths(source_path: Path) -> list[str] | None:
     Returns None on git-run failure (binary missing, non-zero exit, timeout).
     """
     try:
-        proc = _sp.run(
-            ["git", "-C", str(source_path), "ls-files", *_TRACKED_ROOTS],
+        proc = run_git(
+            ["-C", str(source_path), "ls-files", *_TRACKED_ROOTS],
             capture_output=True,
-            text=True,
             check=False,
             timeout=_GIT_TIMEOUT,
         )

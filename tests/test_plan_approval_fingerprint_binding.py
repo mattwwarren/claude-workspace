@@ -16,7 +16,7 @@ guards below pin that it is never an evidence source.
 
 import pytest
 
-from tests.conftest import _REPO_ROOT, _appendix, _cmd
+from tests.conftest import _REPO_ROOT, _appendix, _checkpoint1_section, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 _FINGERPRINT_RULE_NAME = "Plan-draft fingerprint rule"
@@ -59,13 +59,6 @@ def _window_around(
 
 def _plan_doc() -> str:
     return _cmd("auto-dev-plan.md")
-
-
-def _checkpoint1_section() -> str:
-    content = _plan_doc()
-    start = content.index("### Checkpoint 1 (Plan Approval)")
-    end = content.index("### Step 1e:")
-    return content[start:end]
 
 
 def _fingerprint_rule_section() -> str:

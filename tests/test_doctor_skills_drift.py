@@ -61,7 +61,7 @@ def test_no_drift_clean(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setattr("cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo)
     tracked = ".claude/skills/foo/SKILL.md\n.claude/commands/bar/cmd.md\n"
     monkeypatch.setattr(
-        "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+        "cw.doctor.skills_drift.run_git", lambda *_a, **_kw: _mk_proc(tracked)
     )
 
     result = _check_skills_commands_drift()
@@ -84,7 +84,7 @@ def test_missing_on_global_side(
     monkeypatch.setattr("cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo)
     tracked = ".claude/skills/foo/SKILL.md\n"
     monkeypatch.setattr(
-        "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+        "cw.doctor.skills_drift.run_git", lambda *_a, **_kw: _mk_proc(tracked)
     )
 
     result = _check_skills_commands_drift()
@@ -106,7 +106,7 @@ def test_content_differs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     monkeypatch.setattr("cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo)
     tracked = ".claude/skills/foo/SKILL.md\n"
     monkeypatch.setattr(
-        "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+        "cw.doctor.skills_drift.run_git", lambda *_a, **_kw: _mk_proc(tracked)
     )
 
     result = _check_skills_commands_drift()
@@ -133,7 +133,7 @@ def test_counterpart_is_symlink(
     monkeypatch.setattr("cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo)
     tracked = ".claude/skills/foo/SKILL.md\n"
     monkeypatch.setattr(
-        "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+        "cw.doctor.skills_drift.run_git", lambda *_a, **_kw: _mk_proc(tracked)
     )
 
     result = _check_skills_commands_drift()
@@ -165,7 +165,7 @@ def test_symlink_resolves_to_tracked_path_is_ok(
     monkeypatch.setattr("cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo)
     tracked = ".claude/skills/foo/SKILL.md\n"
     monkeypatch.setattr(
-        "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+        "cw.doctor.skills_drift.run_git", lambda *_a, **_kw: _mk_proc(tracked)
     )
 
     result = _check_skills_commands_drift()
@@ -198,7 +198,7 @@ def test_mixed_drift_aggregates_one_result(
         ".claude/commands/linked.md\n"
     )
     monkeypatch.setattr(
-        "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+        "cw.doctor.skills_drift.run_git", lambda *_a, **_kw: _mk_proc(tracked)
     )
 
     result = _check_skills_commands_drift()
@@ -251,7 +251,7 @@ def test_git_ls_files_failure_warns(
         msg = "git not found"
         raise FileNotFoundError(msg)
 
-    monkeypatch.setattr("cw.doctor.skills_drift._sp.run", _raise)
+    monkeypatch.setattr("cw.doctor.skills_drift.run_git", _raise)
 
     result = _check_skills_commands_drift()
     assert result.ok is True
@@ -269,7 +269,7 @@ def test_git_ls_files_nonzero_returncode_warns(
     monkeypatch.setattr("cw.doctor.skills_drift._CLAUDE_HOME", claude_home)
     monkeypatch.setattr("cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo)
     monkeypatch.setattr(
-        "cw.doctor.skills_drift._sp.run",
+        "cw.doctor.skills_drift.run_git",
         lambda *_a, **_kw: _mk_proc("", returncode=128),
     )
 
@@ -305,7 +305,7 @@ def test_examples_bounded_not_all_39(
     monkeypatch.setattr("cw.doctor.skills_drift._CLAUDE_HOME", claude_home)
     monkeypatch.setattr("cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo)
     monkeypatch.setattr(
-        "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+        "cw.doctor.skills_drift.run_git", lambda *_a, **_kw: _mk_proc(tracked)
     )
 
     result = _check_skills_commands_drift()
@@ -338,7 +338,7 @@ class TestExcludedCommands:
         )
         tracked = ".claude/commands/ship-it.md\n"
         monkeypatch.setattr(
-            "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+            "cw.doctor.skills_drift.run_git", lambda *_a, **_kw: _mk_proc(tracked)
         )
 
         result = _check_skills_commands_drift()
@@ -364,7 +364,7 @@ class TestExcludedCommands:
         )
         tracked = ".claude/commands/ship-it.md\n"
         monkeypatch.setattr(
-            "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+            "cw.doctor.skills_drift.run_git", lambda *_a, **_kw: _mk_proc(tracked)
         )
 
         result = _check_skills_commands_drift()
@@ -388,7 +388,7 @@ class TestExcludedCommands:
         )
         tracked = ".claude/commands/ship-it.md\n"
         monkeypatch.setattr(
-            "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+            "cw.doctor.skills_drift.run_git", lambda *_a, **_kw: _mk_proc(tracked)
         )
 
         result = _check_skills_commands_drift()
@@ -412,7 +412,7 @@ class TestScriptsTracked:
             "cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo
         )
         monkeypatch.setattr(
-            "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+            "cw.doctor.skills_drift.run_git", lambda *_a, **_kw: _mk_proc(tracked)
         )
 
     def test_git_ls_files_is_scoped_to_scripts_too(
@@ -431,7 +431,7 @@ class TestScriptsTracked:
         monkeypatch.setattr(
             "cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo
         )
-        monkeypatch.setattr("cw.doctor.skills_drift._sp.run", _run)
+        monkeypatch.setattr("cw.doctor.skills_drift.run_git", _run)
 
         _check_skills_commands_drift()
         assert seen[0][-3:] == [".claude/skills", ".claude/commands", ".claude/scripts"]

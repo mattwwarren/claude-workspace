@@ -36,7 +36,7 @@ class TestGitChangedFiles:
                 args=[], returncode=1, stdout="", stderr="error"
             )
 
-        monkeypatch.setattr("cw.collision.subprocess.run", _fail)
+        monkeypatch.setattr("cw.collision.run_git", _fail)
         result = _git_changed_files(tmp_path, base_ref="abc123")
         assert result == frozenset()
 
@@ -48,7 +48,7 @@ class TestGitChangedFiles:
         def _raise(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.collision.subprocess.run", _raise)
+        monkeypatch.setattr("cw.collision.run_git", _raise)
         result = _git_changed_files(tmp_path, base_ref="abc123")
         assert result == frozenset()
 
@@ -60,7 +60,7 @@ class TestGitChangedFiles:
                 args=[], returncode=0, stdout="src/a.py\n\nsrc/b.py\n", stderr=""
             )
 
-        monkeypatch.setattr("cw.collision.subprocess.run", _ok)
+        monkeypatch.setattr("cw.collision.run_git", _ok)
         result = _git_changed_files(tmp_path, base_ref="abc123")
         assert result == frozenset({"src/a.py", "src/b.py"})
 

@@ -1902,7 +1902,7 @@ class TestDispositionDrifted:
             msg = "equal shas must not shell out to git"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(subprocess, "run", _boom)
+        monkeypatch.setattr("cw._git.run_git", _boom)
         assert disposition_drifted(worktree, "abc1234", "abc1234", "f.py") is False
 
     @pytest.mark.parametrize(
@@ -1948,7 +1948,7 @@ class TestDispositionDrifted:
             msg = "git is gone"
             raise OSError(msg)
 
-        monkeypatch.setattr(subprocess, "run", _raise)
+        monkeypatch.setattr("cw._git.run_git", _raise)
         assert disposition_drifted(worktree, "aaa", "bbb", "src/cw/foo.py") is True
 
     def test_an_inherited_git_dir_cannot_redirect_the_diff(

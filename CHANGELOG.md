@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every `git` subprocess now ignores an inherited `GIT_DIR`/`GIT_WORK_TREE`, not just the three call sites #2232 fixed (#2264):** when `cw` ran inside a git hook, sixteen git calls, among them the review diff capture, the codex fix-loop commit, the `cw review --base` check, collision detection, the doctor wedge and skills-drift checks, and the dispatch `stage_base_ref` stamp, inherited the hook's `GIT_*` variables and silently answered for the hook's repository instead of the worktree they were given. `cw._git` now provides `run_git()` and `git_output()`. They strip `GIT_*` themselves and take no `env=` argument, so a caller cannot skip or override the strip, and every git call outside the spawn, daemon, worktree-GC and worktree-package helpers now goes through them. `config._is_git_repo`'s hand-rolled copy of the strip was removed.
+
 ## [1.57.0] - 2026-09-25
 
 ### Fixed

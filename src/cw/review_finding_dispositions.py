@@ -115,7 +115,6 @@ import hashlib
 import json
 import logging
 import re
-import subprocess
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
@@ -1045,8 +1044,9 @@ def disposition_drifted(
     existing ``git diff`` runner (``cw.cli.review._diff_integrity``) is
     CLI-scoped, so importing it would invert the dependency direction the
     split maintains. The one ``cw`` helper it does use —
-    :func:`cw._git.git_clean_env` — is a leaf module imported inside this
-    function body, the same shape as the deferred ``cw.events`` import below.
+    :func:`cw._git.run_git`, which strips ``GIT_*`` itself — lives in a leaf
+    module imported inside this function body, the same shape as the deferred
+    ``cw.events`` import below.
 
     That environment is **load-bearing, not hygiene** (#2232). ``cw`` can run
     inside a git hook, where an inherited ``GIT_DIR``/``GIT_WORK_TREE`` points
@@ -1058,23 +1058,14 @@ def disposition_drifted(
         return False
     if entry_reviewed_sha == current_sha:
         return False
-    from cw._git import git_clean_env
+    from cw._git import run_git
 
     try:
-        completed = subprocess.run(
-            [
-                "git",
-                "diff",
-                "--quiet",
-                entry_reviewed_sha,
-                current_sha,
-                "--",
-                file,
-            ],
+        completed = run_git(
+            ["diff", "--quiet", entry_reviewed_sha, current_sha, "--", file],
             cwd=worktree,
             capture_output=True,
             check=False,
-            env=git_clean_env(),
         )
     except OSError:
         _log.warning(

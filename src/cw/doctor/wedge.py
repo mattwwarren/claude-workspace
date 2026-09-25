@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 import yaml
 from pydantic import ValidationError
 
+from cw._git import run_git
 from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
 from cw.config import load_orchestrator_config, state_file
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
@@ -262,10 +263,9 @@ def _check_wedge_repo_ahead(
         branch = _resolve_wedge_branch(task, session_by_id, clients)
         # Get remote URL from worktree
         try:
-            remote_result = _sp.run(
-                ["git", "-C", str(task.worktree_path), "remote", "get-url", "origin"],
+            remote_result = run_git(
+                ["-C", str(task.worktree_path), "remote", "get-url", "origin"],
                 capture_output=True,
-                text=True,
                 check=False,
             )
             if remote_result.returncode != 0:
@@ -275,10 +275,9 @@ def _check_wedge_repo_ahead(
             continue
         # Check if branch exists on remote
         try:
-            ls_result = _sp.run(
-                ["git", "ls-remote", remote_url, f"refs/heads/{branch}"],
+            ls_result = run_git(
+                ["ls-remote", remote_url, f"refs/heads/{branch}"],
                 capture_output=True,
-                text=True,
                 check=False,
                 timeout=10,
             )

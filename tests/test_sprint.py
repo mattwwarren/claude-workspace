@@ -185,12 +185,10 @@ def test_parse_rfc_refuses_a_hard_wrapped_field_continuation_line() -> None:
 def test_load_rfc_text_prefers_origin_main(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    def fake_run(
-        cmd: list[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(cmd, 0, b"origin/main content", b"")
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, "origin/main content", "")
 
-    monkeypatch.setattr(sprint._sp, "run", fake_run)
+    monkeypatch.setattr(sprint, "run_git", fake_run)
     assert load_rfc_text("docs/rfcs/0011-x.md", tmp_path) == "origin/main content"
 
 
@@ -202,14 +200,12 @@ def test_load_rfc_text_falls_back_to_the_working_tree_on_a_nonzero_exit(
     rfc.parent.mkdir(parents=True)
     rfc.write_text("working tree content", encoding="utf-8")
 
-    def fake_run(
-        cmd: list[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[bytes]:
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
-            cmd, 1, b"", b"fatal: path not in origin/main"
+            argv, 1, "", "fatal: path not in origin/main"
         )
 
-    monkeypatch.setattr(sprint._sp, "run", fake_run)
+    monkeypatch.setattr(sprint, "run_git", fake_run)
     assert load_rfc_text("docs/rfcs/0011-x.md", tmp_path) == "working tree content"
 
 
@@ -221,13 +217,11 @@ def test_load_rfc_text_falls_back_to_the_working_tree_on_a_git_show_failure(
     rfc.parent.mkdir(parents=True)
     rfc.write_text("working tree content", encoding="utf-8")
 
-    def fake_run(
-        cmd: list[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[bytes]:
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         msg = "git not found"
         raise OSError(msg)
 
-    monkeypatch.setattr(sprint._sp, "run", fake_run)
+    monkeypatch.setattr(sprint, "run_git", fake_run)
     assert load_rfc_text("docs/rfcs/0011-x.md", tmp_path) == "working tree content"
 
 

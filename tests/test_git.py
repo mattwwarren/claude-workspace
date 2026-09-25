@@ -1,4 +1,4 @@
-"""Tests for cw._git: the shared clean-env and head-sha primitives (#2232)."""
+"""Tests for cw._git: the shared git-subprocess primitives (#2232, #2264)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw._git import capture_head_sha, git_clean_env
+from cw._git import capture_head_sha, git_clean_env, git_output, run_git
 from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
@@ -169,3 +169,160 @@ class TestCaptureHeadSha:
 
         with pytest.raises(subprocess.TimeoutExpired):
             capture_head_sha(tmp_path, strict=True, timeout=1)
+
+
+_RUN_TIMEOUT = 4.0
+
+
+def _hostile_git_env(
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> tuple[Path, Path]:
+    """Build a target repo plus a decoy whose ``GIT_DIR`` the env points at.
+
+    The decoy carries a commit of its own so its HEAD differs from the
+    target's (``make_git_repo``'s base commit is byte-identical everywhere).
+    """
+    repo = make_git_repo(f"{prefix}-target")
+    decoy = make_git_repo(f"{prefix}-decoy")
+    commit_tracked_file(decoy, "decoy.py", "decoy = True\n")
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    return repo, decoy
+
+
+class TestRunGit:
+    def test_it_runs_git_in_the_cwd_it_was_given(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("run-git-plain")
+
+        completed = run_git(
+            ["rev-parse", "HEAD"], cwd=repo, capture_output=True, check=True
+        )
+
+        assert completed.stdout.strip() == git_in(repo, "rev-parse", "HEAD")
+
+    def test_an_inherited_git_dir_cannot_redirect_it(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo, decoy = _hostile_git_env(make_git_repo, monkeypatch, "run-git")
+        expected = git_in(repo, "rev-parse", "HEAD")
+
+        via_cwd = run_git(["rev-parse", "HEAD"], cwd=repo, capture_output=True)
+        via_dash_c = run_git(
+            ["-C", str(repo), "rev-parse", "HEAD"], capture_output=True
+        )
+
+        assert via_cwd.stdout.strip() == expected
+        assert via_dash_c.stdout.strip() == expected
+        assert expected != git_in(decoy, "rev-parse", "HEAD")
+
+    def test_an_env_kwarg_is_a_type_error(self, tmp_path: Path) -> None:
+        """The seam's whole point: no caller can hand git its own env."""
+        bad_kwargs: dict[str, object] = {"env": {}}
+
+        with pytest.raises(TypeError, match="env"):
+            run_git(["status"], cwd=tmp_path, **bad_kwargs)
+
+    def test_kwargs_are_forwarded_with_a_clean_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
+        seen: list[tuple[object, dict[str, object]]] = []
+
+        def _record(args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            seen.append((args, kwargs))
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="")
+
+        monkeypatch.setattr("cw._git.subprocess.run", _record)
+
+        run_git(
+            ["status"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=False,
+            timeout=_RUN_TIMEOUT,
+        )
+        run_git(["status"])
+
+        (argv, kwargs), (_, defaults) = seen
+        assert argv == ["git", "status"]
+        assert kwargs["cwd"] == tmp_path
+        assert kwargs["check"] is True
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is False
+        assert kwargs["timeout"] == _RUN_TIMEOUT
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        assert not [k for k in env if k.startswith("GIT_")]
+        assert defaults["cwd"] is None
+        assert defaults["check"] is False
+        assert defaults["capture_output"] is False
+        assert defaults["text"] is True
+        assert defaults["timeout"] is None
+
+
+class TestGitOutput:
+    def test_it_returns_decoded_stdout_from_the_cwd_it_was_given(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("git-output-plain")
+
+        out = git_output(["rev-parse", "HEAD"], cwd=repo)
+
+        assert isinstance(out, str)
+        assert out.strip() == git_in(repo, "rev-parse", "HEAD")
+
+    def test_an_inherited_git_dir_cannot_redirect_it(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo, decoy = _hostile_git_env(make_git_repo, monkeypatch, "git-output")
+        expected = git_in(repo, "rev-parse", "HEAD")
+
+        assert git_output(["rev-parse", "HEAD"], cwd=repo).strip() == expected
+        assert git_output(["-C", str(repo), "rev-parse", "HEAD"]).strip() == expected
+        assert expected != git_in(decoy, "rev-parse", "HEAD")
+
+    def test_a_failing_command_raises_called_process_error(
+        self, tmp_path: Path
+    ) -> None:
+        plain = tmp_path / "plain"
+        plain.mkdir()
+
+        with pytest.raises(subprocess.CalledProcessError):
+            git_output(["rev-parse", "HEAD"], cwd=plain)
+
+    def test_an_env_kwarg_is_a_type_error(self, tmp_path: Path) -> None:
+        bad_kwargs: dict[str, object] = {"env": {}}
+
+        with pytest.raises(TypeError, match="env"):
+            git_output(["status"], cwd=tmp_path, **bad_kwargs)
+
+    def test_kwargs_are_forwarded_with_a_clean_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
+        seen: list[tuple[object, dict[str, object]]] = []
+
+        def _record(args: object, **kwargs: object) -> str:
+            seen.append((args, kwargs))
+            return "out\n"
+
+        monkeypatch.setattr("cw._git.subprocess.check_output", _record)
+
+        assert git_output(["status"], cwd=tmp_path, timeout=_RUN_TIMEOUT) == "out\n"
+        assert git_output(["status"]) == "out\n"
+
+        (argv, kwargs), (_, defaults) = seen
+        assert argv == ["git", "status"]
+        assert kwargs["cwd"] == tmp_path
+        assert kwargs["timeout"] == _RUN_TIMEOUT
+        assert kwargs["text"] is True
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        assert not [k for k in env if k.startswith("GIT_")]
+        assert defaults["cwd"] is None
+        assert defaults["timeout"] is None
