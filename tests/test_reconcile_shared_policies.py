@@ -2878,6 +2878,55 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         assert requeued[0].payload["attempts"] == 1
         assert requeued[0].payload["attempt_cap"] == _VALIDATION_FAILED_MAX_ATTEMPTS
 
+    def test_running_task_blocked_result_deterministic_requeue_disabled_lands_failed(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Deterministic-parse requeue gated off (#2401 rollout) → FAILED on
+        first occurrence, bypassing the attempt cap entirely.
+
+        No clients.yaml is written, so ``get_client`` raises ``CwError`` (the
+        "legacy/local queue row has no usable clients.yaml entry" case the
+        ``_deterministic_parse_requeue_enabled`` docstring calls out) and the
+        client fails closed to ``blocked_result_requeue_enabled=False``. The
+        shadow-mode warning fires and the FAILED landing persists the
+        rejected sentinel, same as the pre-#2401 unconditional-FAILED
+        behavior -- attempts=1 is already below ``_VALIDATION_FAILED_MAX_
+        ATTEMPTS``, proving the cap plays no part while disabled.
+        """
+        ticket_id, session_id = "GH-2401-schema-disabled", "sess-2401-disabled"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="unconfigured-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason=BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
+                details="test: unsupported schema_version, rollout disabled",
+            )
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cw.reconcile._shared"):
+            outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+        assert outcome.routed is False
+        assert outcome.rescued is False
+        assert outcome.landed_terminal is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED
+        assert t.disposition == "abandoned"
+        assert t.last_blocked_result == sentinel.model_dump(mode="json")
+        assert any(
+            "sentinel.blocked_result_requeue_shadowed" in r.message
+            for r in caplog.records
+        )
+
     def test_running_task_blocked_result_validation_failed_at_cap_returns_routed_false(
         self, tmp_config_dir: Path
     ) -> None:
