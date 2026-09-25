@@ -22,7 +22,11 @@ from click.testing import CliRunner, Result
 from freezegun import freeze_time
 
 from cw._util import claude_project_dir
-from cw.auto_dev_result import _CLOSE_SENTINEL, _OPEN_SENTINEL
+from cw.auto_dev_result import (
+    _CLOSE_SENTINEL,
+    _OPEN_SENTINEL,
+    BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
+)
 from cw.cli import (
     _complete_client,
     _complete_session,
@@ -3273,7 +3277,7 @@ class TestSignalStop:
         # rejected sentinel (closes the #1266 gap for this branch).
         assert task.last_blocked_result is not None
         assert task.last_blocked_result["blocker"]["reason"] == (
-            "schema_version_unsupported"
+            BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED
         )
 
     def test_signal_stop_unknown_blocker_reason_marks_failed(
@@ -5417,7 +5421,7 @@ _SENTINEL_316_AMBIGUITIES_PENDING_V2 = (
 
 # Sentinel for GitHub issue #263 regression tests.
 # schema_version=99 is not in SUPPORTED_SCHEMA_VERSIONS, so parse_stdout
-# returns BlockedResult(reason="schema_version_unsupported").
+# returns BlockedResult(reason=BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED).
 _SENTINEL_263_SCHEMA_VERSION_UNSUPPORTED = (
     "<<<AUTO_DEV_RESULT\n"
     '{"schema_version": 99, "status": "shipped"}\n'

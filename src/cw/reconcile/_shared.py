@@ -50,7 +50,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import read_events, record_event
-from cw.exceptions import USAGE_LIMIT_RE
+from cw.exceptions import USAGE_LIMIT_RE, CwError
 from cw.executor_diagnostics import redact
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
@@ -1844,6 +1844,31 @@ def _requeue_blocked_result_under_cap(
     return True
 
 
+def _deterministic_parse_requeue_enabled(
+    target: TicketTask, sentinel: BlockedResult
+) -> bool:
+    """Return the client's #2401 rollout setting, logging disabled shadowing."""
+    try:
+        enabled = get_client(target.client).blocked_result_requeue_enabled
+    except CwError:
+        # Some legacy/local queue rows have no clients.yaml entry. Preserve the
+        # field's enabled default rather than making sentinel routing depend on
+        # an otherwise unrelated client-config lookup.
+        enabled = True
+    if not enabled:
+        _log.warning(
+            "sentinel.blocked_result_requeue_shadowed: client=%s ticket=%s; "
+            "reason=%s attempts=%s attempt_cap=%s; deterministic-parse requeue "
+            "would apply, but blocked_result_requeue_enabled is false",
+            target.client,
+            target.ticket_id,
+            sentinel.blocker.reason,
+            target.attempts,
+            _VALIDATION_FAILED_MAX_ATTEMPTS,
+        )
+    return enabled
+
+
 def _route_blocked_result_to_task(
     target: TicketTask,
     session: Session,
@@ -1883,6 +1908,12 @@ def _route_blocked_result_to_task(
     # sub-cap re-queue leaves a SENTINEL_BLOCKED_RESULT_REQUEUED audit event
     # since there is no rejected sentinel to store on a non-terminal landing.
     if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
+        if not _deterministic_parse_requeue_enabled(target, sentinel):
+            target.last_blocked_result = sentinel.model_dump(mode="json")
+            transition_task_status(
+                target, QueueItemStatus.FAILED, disposition="abandoned"
+            )
+            return False
         return _requeue_blocked_result_under_cap(target, session, sentinel)
     if sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
         return _requeue_blocked_result_under_cap(target, session, sentinel)

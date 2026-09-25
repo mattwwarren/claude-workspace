@@ -89,6 +89,10 @@ class ClientConfig(BaseModel):
     # the pre-claim probe for this client only. The global switch remains the
     # fleet-wide emergency control.
     occupancy_gate_enabled: bool | None = None
+    # Per-client rollout/escape hatch for the #2401 deterministic-parse
+    # requeue policy. False preserves terminal handling for this client and
+    # logs the shadowed requeue decision for rollout reconciliation.
+    blocked_result_requeue_enabled: bool = True
     auto_background_threshold: int | None = None
     notifications: bool = False
     lanes: list[LaneConfig] = Field(default_factory=list)

@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cw.auto_dev_result import (
+    BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
     BLOCKER_REASON_VALIDATION_FAILED,
     AutoDevResult,
     BlockedResult,
@@ -2803,7 +2804,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         sentinel = BlockedResult(
             blocker=Blocker(
                 stage="unknown",
-                reason="schema_version_unsupported",
+                reason=BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
                 details="test: unsupported schema_version",
             )
         )
@@ -2849,7 +2850,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         sentinel = BlockedResult(
             blocker=Blocker(
                 stage="unknown",
-                reason="schema_version_unsupported",
+                reason=BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
                 details="test: unsupported schema_version",
             )
         )
@@ -2871,7 +2872,9 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         assert requeued[0].payload["ticket_id"] == ticket_id
         assert requeued[0].payload["client"] == "staged-client"
         assert requeued[0].payload["session_id"] == session_id
-        assert requeued[0].payload["blocker_reason"] == "schema_version_unsupported"
+        assert requeued[0].payload["blocker_reason"] == (
+            BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED
+        )
         assert requeued[0].payload["attempts"] == 1
         assert requeued[0].payload["attempt_cap"] == _VALIDATION_FAILED_MAX_ATTEMPTS
 
