@@ -336,8 +336,9 @@ gh pr create --base main --head dev/<ticket>-<slug> \
   --title "<commit subject>" --body "<body>" ${EXTRA_LABEL_ARGS}
 if ~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed; then
   if gh pr merge <PR#> --squash --auto; then
-    cw dev-queue remove <ticket> -c <client>
-    if [ "$(gh pr view <PR#> --json state --jq .state)" != "MERGED" ]; then
+    if [ "$(gh pr view <PR#> --json state --jq .state)" = "MERGED" ]; then
+      cw dev-queue remove <ticket> -c <client>
+    else
       echo "auto-merge armed; PR remains open pending merge"
     fi
   else
