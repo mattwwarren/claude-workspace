@@ -229,7 +229,7 @@ def test_checkpoint1_accepts_row_side_plan_approval_evidence() -> None:
     """The Large-scope carve-out names the queue_metadata record as evidence."""
     section = _checkpoint1_section()
     window = _after(
-        section, "the AUTO-SKIP additionally requires approval evidence", span=2400
+        section, "the AUTO-SKIP additionally requires approval evidence", span=2700
     )
     assert "`queue_metadata.plan_approved_at`" in window
     assert "`.claude/cw-context.json`" in window
