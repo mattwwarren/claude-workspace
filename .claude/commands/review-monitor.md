@@ -644,12 +644,18 @@ WORK:
     # skip and report. Why: default to NOT merging when intent is unclear; a
     # stalled PR is recoverable, a PR merged against the user's wishes is not.
     case "$DIS_ACTOR" in
-      ""|*"[bot]"|github-actions|*-bot) gh pr merge <N> --repo <repo> --auto --squash ;;
+      ""|*"[bot]"|github-actions|*-bot)
+        if ~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed; then
+          gh pr merge <N> --repo <repo> --auto --squash
+        else
+          echo "auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR open for manual merge"
+        fi
+        ;;
       *) echo "auto-merge disabled by '$DIS_ACTOR' (human) — deliberate hold, NOT re-arming" ;;
     esac
   fi
   ```
-  `gh pr merge --auto` is a no-op safety: if the PR is already queued it reports "already queued to merge" and exits non-zero — harmless. When the disable was a deliberate human hold, do NOT re-arm — report it in the Step 5 summary so the user knows their fix landed but the PR is intentionally held. Also do NOT re-arm a PR that genuinely needs the user (unresolved human threads, a real CHANGES_REQUESTED you could not address) — for those, report instead.
+  `gh pr merge --auto` is only a no-op in the narrow case of a PR already queued for auto-merge — there it reports "already queued to merge" and exits non-zero, harmless. On a repo with no required checks to gate a pending merge on, this same command merges immediately (exit 0, no error) instead of arming one — the reason this block now checks `check-automerge-allowed` first (#2046). When the disable was a deliberate human hold, do NOT re-arm — report it in the Step 5 summary so the user knows their fix landed but the PR is intentionally held. Also do NOT re-arm a PR that genuinely needs the user (unresolved human threads, a real CHANGES_REQUESTED you could not address) — for those, report instead.
 
 CONSTRAINTS:
 - Do NOT amend commits, do NOT --no-verify, do NOT modify CI configs or coverage thresholds
