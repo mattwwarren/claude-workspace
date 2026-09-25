@@ -110,6 +110,7 @@ def promote_plan_draft(
     client_cfg: ClientConfig | None,
     *,
     actor: str = "cw dev-queue approve",
+    expected_fingerprint: str | None = None,
 ) -> bool:
     """Promote the task's approved ``.cw/plan-draft.md`` to ``.cw/plan.md``.
 
@@ -119,7 +120,9 @@ def promote_plan_draft(
     best-effort restore of the prior ``.cw/plan.md``, and the raised error
     reports whether it succeeded. Clearing the draft and emitting
     ``PLAN_DRAFT_PROMOTED`` follow a successful write and are best-effort, as
-    in ``auto-dev-plan.md`` Step 1g.
+    in ``auto-dev-plan.md`` Step 1g. When ``expected_fingerprint`` is present,
+    the draft must match the approval session's fingerprint; ``None`` retains
+    the legacy no-fingerprint behavior.
 
     Raises:
         ApproveGateError: reading the draft or writing ``.cw/plan.md`` failed.
@@ -134,6 +137,17 @@ def promote_plan_draft(
             return False
         draft_text = draft_path.read_text(encoding="utf-8")
         new_fingerprint = _draft_fingerprint(draft_text)
+        if (
+            expected_fingerprint is not None
+            and new_fingerprint != expected_fingerprint
+        ):
+            msg = (
+                f"Cannot approve ticket {task.ticket_id!r}: approved plan draft"
+                f" fingerprint mismatch for worktree {wt_path}"
+                f" (expected {expected_fingerprint}, got {new_fingerprint})."
+                " Nothing was written or recorded."
+            )
+            raise ApproveGateError(msg)
         old_plan_text = (
             plan_path.read_text(encoding="utf-8") if plan_path.exists() else None
         )
