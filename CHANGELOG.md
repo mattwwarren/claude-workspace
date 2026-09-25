@@ -6,10 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-
-- **Approving a reconciled plan draft now promotes it to `.cw/plan.md`, instead of leaving the drift gate re-reading the stale pre-reconciliation plan forever (#2342):** `approve`'s direct plan→impl advance now calls a new `cw.dev_queue.plan_promotion.promote_plan_draft`, which fails loud (aborts `approve`, records nothing) on an I/O error and is a no-op when there is no draft to promote. Reported via a new `plan_promoted` key on `approve`'s return dict and CLI output; the `SCOPE_ROUTING_DECISION` audit event payload is unchanged.
-- **A durable PLAN approval can now be revoked before new resolutions apply, closing a window where a stale approval survived a resumed draft's edits (#2376):** a new `cw dev-queue revoke-plan-approval <ticket>` command and `cw.dev_queue.revoke_plan_approval` clear `plan_approved_at`/`plan_approved_fingerprint` under the dev-queue lock, recording the audit event before mutating the row (event-first ordering — no rollback machinery, since a failed save leaves the still-bound fingerprint unable to match the revised draft).
+## [1.59.0] - 2026-09-25
 
 ### Added
 
@@ -19,8 +16,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Approving a reconciled plan draft now promotes it to `.cw/plan.md`, instead of leaving the drift gate re-reading the stale pre-reconciliation plan forever (#2342):** `approve`'s direct plan→impl advance now calls a new `cw.dev_queue.plan_promotion.promote_plan_draft`, which fails loud (aborts `approve`, records nothing) on an I/O error and is a no-op when there is no draft to promote. Reported via a new `plan_promoted` key on `approve`'s return dict and CLI output; the `SCOPE_ROUTING_DECISION` audit event payload is unchanged.
+- **A durable PLAN approval can now be revoked before new resolutions apply, closing a window where a stale approval survived a resumed draft's edits (#2376):** a new `cw dev-queue revoke-plan-approval <ticket>` command and `cw.dev_queue.revoke_plan_approval` clear `plan_approved_at`/`plan_approved_fingerprint` under the dev-queue lock, recording the audit event before mutating the row (event-first ordering — no rollback machinery, since a failed save leaves the still-bound fingerprint unable to match the revised draft).
 - **The dispatcher no longer claims a ticket whose worktree its own live session already holds, and no longer charges the resulting spawn failure as an unproductive attempt (#2077):** a pre-claim occupancy screen (`resolve_occupied_ticket_ids`) now checks every PENDING task's per-ticket worktree via the same `live_home_reason` liveness predicate `create_worktree`'s reuse-refresh already uses, before the row is ever claimed — reported via a new `DispatchSkipReason.WORKTREE_OCCUPIED` `dispatch.tick` event, distinct from `spawn_error_backoff`. As a safety net for the remaining race window, a `HookContextConflictError` whose referenced session is independently confirmed genuinely live (not just non-terminal in cw state) is now released the same no-charge, no-breaker way `WorktreeOccupiedError` already was, and its error message no longer tells the operator to close a session that is actively working. `CodexExecutor` now carries `native_daemon` like `ClaudeNativeExecutor`, so the check also covers codex-backed lanes.
 - **`resolve_project_config_auto_merge` no longer silently treats a missing shared config reader as "auto-merge allowed" (#2373, follow-up to #2046):** when the shared `cw.project_config` module can't load (no source tree, no installed `cw` package), it now reads `config_path` directly with PyYAML, which is already confirmed importable at that point, instead of returning `None` and letting callers fall back to allowed/required even when `.claude/project-config.yaml` explicitly sets `pr.auto_merge: false`. Also fixed: the repo root used to look up the config was derived from an unverified `config_path.parent.parent` guess, which only worked when `config_path` was exactly `<root>/.claude/project-config.yaml`; it now reads exactly the path it was given.
+- **The auto-dev impl stage's gate worktree and temp directory no longer live on `/tmp` (#2400):** Step 2.5 built its gate worktree at `/tmp/gate-wt-<session>` and ran the full gate suite with the default `TMPDIR`, so on hosts where `/tmp` is a RAM-backed tmpfs a few workers gating at once could exhaust it and turn every command on the host into `ENOSPC` (observed twice on a 28G tmpfs). The gate worktree now defaults to `${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-<session>`, and the gate commands run with `TMPDIR` under the same root.
 
 ## [1.58.0] - 2026-09-25
 

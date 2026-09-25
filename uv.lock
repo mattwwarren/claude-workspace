@@ -176,7 +176,7 @@ wheels = [
 
 [[package]]
 name = "claude-workspace"
-version = "1.58.0"
+version = "1.59.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
