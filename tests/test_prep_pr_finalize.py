@@ -302,6 +302,27 @@ def test_cmd_check_automerge_allowed_prints_false_and_exits_1_when_config_false(
     assert captured.out == "false\n"
 
 
+def test_cmd_check_automerge_allowed_reads_requested_repo_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    allowed_repo = tmp_path / "allowed"
+    blocked_repo = tmp_path / "blocked"
+    _write_project_config_yaml(allowed_repo, "pr:\n  auto_merge: true\n")
+    _write_project_config_yaml(blocked_repo, "pr:\n  auto_merge: false\n")
+
+    args = _mod.build_parser().parse_args(
+        ["check-automerge-allowed", "--repo-path", str(blocked_repo)]
+    )
+    assert _mod.cmd_check_automerge_allowed(args) == 1
+    assert capsys.readouterr().out == "false\n"
+
+    args = _mod.build_parser().parse_args(
+        ["check-automerge-allowed", "--repo-path", str(allowed_repo)]
+    )
+    assert _mod.cmd_check_automerge_allowed(args) == 0
+    assert capsys.readouterr().out == "true\n"
+
+
 def test_cmd_check_automerge_allowed_warns_on_stderr_when_pyyaml_unavailable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -207,9 +207,21 @@ If PR creation fails, BLOCK with the `gh` error verbatim.
 
 ```bash
 PR_NUMBER=$(gh pr view --json number -q .number)
-if ~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed; then
+REPO_ROOT=$(git rev-parse --show-toplevel)
+if [ -f "$REPO_ROOT/.claude/scripts/prep_pr_finalize.py" ]; then
+  AUTOMERGE_CHECK="$REPO_ROOT/.claude/scripts/prep_pr_finalize.py"
+else
+  AUTOMERGE_CHECK="$HOME/.claude/scripts/prep_pr_finalize.py"
+fi
+if GATE_OUTPUT=$("$AUTOMERGE_CHECK" check-automerge-allowed 2>&1); then
   gh pr merge "$PR_NUMBER" --auto --squash
 else
+  GATE_STATUS=$?
+  if [ "$GATE_STATUS" -ne 1 ]; then
+    echo "$GATE_OUTPUT" >&2
+    echo "Auto-merge gate failed unexpectedly (exit $GATE_STATUS) — BLOCK." >&2
+    exit 1
+  fi
   echo "Auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR #$PR_NUMBER open for manual merge."
 fi
 ```

@@ -41,6 +41,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import shutil
@@ -58,6 +59,25 @@ try:
     import yaml
 except ImportError:  # pragma: no cover - downstream repo without PyYAML
     yaml = None  # type: ignore[assignment]
+
+
+def _load_project_config_module():
+    """Load the shared config reader without requiring the cw package."""
+    source = Path(__file__).resolve().parents[2] / "src" / "cw" / "project_config.py"
+    if not source.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("cw_project_config", source)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except ImportError:
+        return None
+    return module
+
+
+_project_config = _load_project_config_module()
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -240,13 +260,10 @@ def resolve_project_config_auto_merge(
     (#2046). Callers treat None as "unknown - fall back to allowed/required,"
     never as an implicit False.
     """
-    if yaml is None or not config_path.exists():
+    if _project_config is None or yaml is None or not config_path.exists():
         return None
-    try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return None
-    if not isinstance(raw, dict):
+    raw = _project_config.load_project_config_dict(config_path.parent.parent)
+    if raw is None:
         return None
     pr_block = raw.get("pr")
     if not isinstance(pr_block, dict):
@@ -255,7 +272,7 @@ def resolve_project_config_auto_merge(
     return auto_merge if isinstance(auto_merge, bool) else None
 
 
-def automerge_allowed() -> bool:
+def automerge_allowed(config_path: Path = PROJECT_CONFIG_PATH) -> bool:
     """True unless .claude/project-config.yaml explicitly sets pr.auto_merge: false.
 
     The single shared seam every `gh pr merge --auto` call site — this
@@ -265,7 +282,7 @@ def automerge_allowed() -> bool:
     project's declared pr.auto_merge: false is honored everywhere instead of
     re-implemented as N independent YAML reads (#2046).
     """
-    return resolve_project_config_auto_merge() is not False
+    return resolve_project_config_auto_merge(config_path) is not False
 
 
 def resolve_effective_automerge_required(base_required: bool) -> bool:
@@ -528,7 +545,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 1 if failed_required else 0
 
 
-def cmd_check_automerge_allowed(_args: argparse.Namespace) -> int:
+def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
     """Print "true"/"false" for whether pr.auto_merge permits `gh pr merge --auto`.
 
     The shared seam every markdown arm site shells out to before its own
@@ -539,12 +556,17 @@ def cmd_check_automerge_allowed(_args: argparse.Namespace) -> int:
     false disallows it and the caller must skip the arm and leave the PR
     open. Never raises on missing/malformed config or absent PyYAML.
     """
-    if yaml is None and PROJECT_CONFIG_PATH.exists():
+    config_path = (
+        Path(args.repo_path) / PROJECT_CONFIG_PATH
+        if args.repo_path
+        else PROJECT_CONFIG_PATH
+    )
+    if yaml is None and config_path.exists():
         sys.stderr.write(
             "WARNING: could not read pr.auto_merge: PyYAML unavailable; "
             "treating auto-merge as allowed\n"
         )
-    allowed = automerge_allowed()
+    allowed = automerge_allowed(config_path)
     print("true" if allowed else "false")
     return 0 if allowed else 1
 
@@ -583,6 +605,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Print true/false + exit 0/1 for whether pr.auto_merge "
             "permits `gh pr merge --auto`"
         ),
+    )
+    check_allowed.add_argument(
+        "--repo-path",
+        type=Path,
+        help="Repository root whose .claude/project-config.yaml should be read",
     )
     check_allowed.set_defaults(func=cmd_check_automerge_allowed)
 

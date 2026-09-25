@@ -645,7 +645,7 @@ WORK:
     # stalled PR is recoverable, a PR merged against the user's wishes is not.
     case "$DIS_ACTOR" in
       ""|*"[bot]"|github-actions|*-bot)
-        if ~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed; then
+        if ~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed --repo-path "<repo_path>"; then
           gh pr merge <N> --repo <repo> --auto --squash
         else
           echo "auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR open for manual merge"
