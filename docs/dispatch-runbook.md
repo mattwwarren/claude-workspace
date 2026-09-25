@@ -501,6 +501,18 @@ operator action as `stale_dispatch` above. The gate covers PLAN/IMPL-stage
 and fails open on any `gh` error, so it can hold a healthy ticket only if the
 PR is genuinely open.
 
+Also not a sentinel status, and not even a park:
+`worktree_occupied` (#2077) — a PENDING ticket's per-ticket worktree is
+currently held by a live session or daemon worker, caught either before the
+row is claimed (the pre-claim occupancy screen) or, if that screen's check
+raced with a `HookContextConflictError` during spawn, released again with no
+attempt charged. Recognizable by a `dispatch.tick` event carrying
+`skip_reason=worktree_occupied` and, in the second case, by the operator
+`emit` line's `OCCUPIED` prefix. No operator action: the condition resolves
+itself once the occupying session finishes. Do not close that session — see
+`cw-queue-peek`'s row/session-mismatch guidance for how to tell this apart
+from a genuine wedge.
+
 Also not a sentinel status:
 `validation_failed` — the sentinel was emitted but malformed. The queue
 auto-requeues the ticket to PENDING (clearing `session_id`) until the

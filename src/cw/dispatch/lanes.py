@@ -59,6 +59,7 @@ from cw.dispatch.claim import (
     _claim_next_pending,
     _lane_occupants_for_client,
     _spawn_claimed_task,
+    resolve_occupied_ticket_ids,
 )
 from cw.dispatch.pr_gate import resolve_stale_pr_ticket_ids
 
@@ -614,6 +615,33 @@ def _resolve_stale_pr_ticket_ids_if_gated(
     return resolve_stale_pr_ticket_ids(client, queue_snapshot)
 
 
+def _resolve_occupied_ticket_ids(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    available_client_slots: int,
+    resolved_native_daemon: NativeDaemonClient,
+    warned_unresolvable: set[UnresolvablePathWarningKey] | None,
+) -> dict[str, str]:
+    """The #2077 pre-claim occupancy screen's resolve call, slot-gated like
+    its #1862 stale-PR sibling -- skipped when this client has no capacity
+    to claim anything this tick.
+
+    Unlike that sibling there is no config toggle: the resolve makes only
+    local reads (cw session state, the daemon roster), never a ``gh`` call,
+    and it only moves forward a refusal the post-claim occupancy handlers
+    would reach anyway.
+    """
+    if available_client_slots <= 0:
+        return {}
+    return resolve_occupied_ticket_ids(
+        client,
+        queue_snapshot,
+        daemon=resolved_native_daemon,
+        warned_unresolvable=warned_unresolvable,
+    )
+
+
 def _dispatch_client_lanes(
     client: ClientConfig,
     effective_lanes: list[LaneConfig],
@@ -702,6 +730,19 @@ def _dispatch_client_lanes(
         config=config,
         available_client_slots=available_client_slots,
     )
+    # Pre-claim worktree-occupancy screen (#2077). Same once-per-client,
+    # lock-free placement as the stale-PR gate above, for the same reason:
+    # live_home_reason reads cw state and the daemon roster, and
+    # _claim_next_pending holds dev_queue_lock() and must do no I/O. A row
+    # named here is left PENDING instead of being claimed and then released
+    # when create_worktree or the hook-context write finds the occupant.
+    occupied_ticket_reasons = _resolve_occupied_ticket_ids(
+        client,
+        queue_snapshot,
+        available_client_slots=available_client_slots,
+        resolved_native_daemon=resolved_native_daemon,
+        warned_unresolvable=warned_unresolvable,
+    )
 
     for lane_cfg in effective_lanes:
         if available_client_slots <= 0:
@@ -754,6 +795,7 @@ def _dispatch_client_lanes(
                 priority_ticket_ids=priority_ids,
                 usage_limited_until=usage_limited_until,
                 stale_pr_ticket_ids=stale_pr_ticket_ids,
+                occupied_ticket_reasons=occupied_ticket_reasons,
             )
             spawn_backoff_skipped |= backoff_skipped
             if task is None:

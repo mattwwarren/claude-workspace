@@ -47,6 +47,17 @@ _log = logging.getLogger(__name__)
 # Abbreviated-SHA width for fast-forward log lines.
 _SHA_LOG_CHARS = 12
 
+_LIVE_SESSION_HOMED_REASON = "a live session is homed on this worktree"
+_LIVE_DAEMON_WORKER_HOMED_REASON = "a live daemon worker is homed on this worktree"
+_GENUINELY_LIVE_HOME_REASONS = frozenset(
+    {_LIVE_SESSION_HOMED_REASON, _LIVE_DAEMON_WORKER_HOMED_REASON}
+)
+
+
+def is_genuinely_live_home_reason(reason: str | None) -> bool:
+    """Return whether *reason* confirms a live session or daemon worker home."""
+    return reason in _GENUINELY_LIVE_HOME_REASONS
+
 
 class RefreshOutcome(enum.Enum):
     """What the reuse refresh did with a reused worktree, in the caller's terms (#2213).
@@ -517,9 +528,9 @@ def _home_match_reason(
     combined function over it.
     """
     if target in session_homes:
-        return "a live session is homed on this worktree"
+        return _LIVE_SESSION_HOMED_REASON
     if target in worker_homes:
-        return "a live daemon worker is homed on this worktree"
+        return _LIVE_DAEMON_WORKER_HOMED_REASON
     if skipped:
         plural = "" if skipped == 1 else "s"
         return (
