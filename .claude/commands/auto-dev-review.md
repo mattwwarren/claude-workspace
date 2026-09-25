@@ -511,7 +511,7 @@ printf '%s' "$SENTINEL_JSON" | cw result validate -
   "fork_point_sha": "<fork point sha>",
   "commits": ["<sha1>", "<sha2>"],
   "pr": null,
-  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0, "deferred": 0, "agents_run": 0, "rejected_count": null, "rejected_count_by_severity": null, "reviewed_sha": "<REVIEWED_SHA_FOR_SENTINEL from Step 3c>", "downgraded_disposition_count": 0},
+  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0, "deferred": 0, "agents_run": 0, "rejected_count": null, "rejected_count_by_severity": null, "reviewed_sha": "<REVIEWED_SHA_FOR_SENTINEL from Step 3c>", "downgraded_disposition_count": <DOWNGRADED_DISPOSITION_COUNT_FOR_SENTINEL or 0>},
   "health": {
     "lowest_agent_confidence": "<HIGH|MEDIUM|LOW>",
     "any_incomplete_risk": false,
