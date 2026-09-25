@@ -11,29 +11,14 @@ fix does not bind the comment-path token to draft_fp at all (see the plan's
 Ambiguity 1) and instead adds three independent content/provenance/ordering
 checks.
 
-`_checkpoint1_section()` and `_plan_doc()` below are file-local private
-copies, verbatim-identical to helpers in three sibling files in this
-directory (test_plan_approval_fingerprint_binding.py, test_consolidated_park.py,
-test_plan_persistence.py). That is the established convention here, not an
-oversight — see `tests/conftest.py`'s `_cmd` docstring, which explicitly
-carves file-local sibling readers out of the #1787 helper-hoisting effort.
+`_checkpoint1_section()` is shared through `tests.conftest`, alongside the
+other command-prose readers.
 """
 
-from tests.conftest import _appendix, _cmd
+from tests.conftest import _appendix, _checkpoint1_section
 from tests.test_auto_dev_preflight_resolutions import _after
 
 _APPROVAL_MARKER = "<!-- auto-dev-comment-approval -->"
-
-
-def _plan_doc() -> str:
-    return _cmd("auto-dev-plan.md")
-
-
-def _checkpoint1_section() -> str:
-    content = _plan_doc()
-    start = content.index("### Checkpoint 1 (Plan Approval)")
-    end = content.index("### Step 1e:")
-    return content[start:end]
 
 
 def test_checkpoint1_comment_path_requires_explicit_token() -> None:
@@ -84,12 +69,15 @@ def test_checkpoint1_disqualifies_settlement_source_comment() -> None:
     assert "settled" in window
 
 
-def test_checkpoint1_staleness_guard_names_both_fixed_headers() -> None:
+def test_checkpoint1_staleness_guard_names_all_fixed_headers() -> None:
     """A later park/block comment voids a stale comment-path approval."""
     section = _checkpoint1_section()
     window = _after(section, "Staleness guard", span=700)
+    assert "Comment provenance rule" in window
     assert "## Pending Verification Scan" in window
+    assert "## Multi-Marker Gate Blocked" in window
     assert "## Blocking Review Findings" in window
+    assert "## Operator-Actionable Review Findings" in window
 
 
 def test_checkpoint1_fingerprint_mismatch_subcase_untouched() -> None:
@@ -130,6 +118,13 @@ def test_appendix_approval_requested_states_separate_comment_requirement() -> No
 def test_step1c0_cross_references_disqualification() -> None:
     """Step 1c.0 step 3 points back at Checkpoint 1's no-double-duty rule."""
     content = _appendix("plan")
-    window = _after(content, "Locate the newest ordinary ticket comment", span=1200)
+    window = _after(
+        content,
+        "Locate **all** ordinary ticket comments posted after that park comment",
+        span=1200,
+    )
     assert "#2074" in window
     assert "Checkpoint 1" in window
+    assert "Locate **all** ordinary ticket comments" in window
+    assert "independent candidate" in window
+    assert "token-bearing comment" in window

@@ -186,10 +186,10 @@ def test_checkpoint1_resumed_draft_approval_requires_operator_authority() -> Non
 
 
 def test_step1c0_settlement_comment_must_carry_operator_authority() -> None:
-    """Step 1c.0's 'newest ordinary ticket comment' is provenance-gated."""
+    """Step 1c.0's ordinary ticket comments are provenance-gated."""
     window = _after(
         _appendix("plan"),
-        "Locate the newest ordinary ticket comment posted after that park comment",
+        "Locate **all** ordinary ticket comments posted after that park comment",
         span=800,
     )
     assert RULE_REFERENCE in window
