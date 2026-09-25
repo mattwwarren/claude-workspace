@@ -418,7 +418,11 @@ class TestReviewConsolidateCommand:
             # reason — dispatch's review-staleness gate reads the terminal
             # sentinel, not this artifact, so the sha has to survive into it.
             "reviewed_sha",
+            # #2009: stamped by `cw review verify-fixes`, not by consolidate,
+            # so it is emitted as null (not reported) here.
+            "downgraded_disposition_count",
         }
+        assert verdict["review"]["downgraded_disposition_count"] is None
 
     def test_empty_documents_all_failed_yields_zero_agents_run(
         self, runner: CliRunner
