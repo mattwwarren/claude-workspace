@@ -32,6 +32,7 @@ from cw.models import (
     BASH_TOOL_NAME,
     HOOK_CONTEXT_RELATIVE_PATH,
     MONITOR_TOOL_NAME,
+    MUST_FIX_OVERRIDE_KEY,
     PLAN_APPROVED_FINGERPRINT_KEY,
     SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
     SCOPE_DRIFT_APPROVED_HEAD_KEY,
@@ -100,7 +101,12 @@ _log = logging.getLogger(__name__)
 #     as a path list and a commit SHA, or nulls. Step 2.5 gate 2 passes the
 #     paths to check_plan_scope_conformance.py as an allowlist while the SHA is
 #     still an ancestor of origin/<branch>.)
-CW_CONTEXT_SCHEMA_VERSION = 9
+# v10: added `queue_metadata.must_fix_override` (dev-queue schema v42 —
+#     GitHub #2205 — the operator's `cw dev-queue approve --override-must-fix`
+#     record, as a JSON object or null. FINALIZE's check_must_fix_override.py
+#     compares it against the worktree's live review verdict; it rides here
+#     because the row's blocked_reason is cleared by the requeue to FINALIZE.)
+CW_CONTEXT_SCHEMA_VERSION = 10
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -689,6 +695,13 @@ def _write_hook_context(
                         task.scope_drift_approved_extra_files
                     ),
                     SCOPE_DRIFT_APPROVED_HEAD_KEY: task.scope_drift_approved_head,
+                    # v10 (#2205): the operator's MUST_FIX override, read by
+                    # FINALIZE's check_must_fix_override.py.
+                    MUST_FIX_OVERRIDE_KEY: (
+                        task.must_fix_override.model_dump(mode="json")
+                        if task.must_fix_override is not None
+                        else None
+                    ),
                 },
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,
