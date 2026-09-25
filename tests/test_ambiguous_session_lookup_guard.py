@@ -54,12 +54,13 @@ _SESSIONS_CLI = "cw/cli/sessions.py"
 _SPAWN_CLI = "cw/cli/spawn.py"
 _ORCHESTRATE_CLI = "cw/cli/orchestrate.py"
 _RESUME_TRIGGER = "cw/session_resume_trigger.py"
+_CODEX_CLI = "cw/cli/codex.py"
 
 # (module_relpath, qualified_function_name) -> (tag, owning Click commands).
 # Owners are listed only for user-name-reachable entries; id-only entries have
 # no user-facing entry point to check.
 _FIND_BY_NAME_OR_ID_ALLOWLIST: dict[tuple[str, str], _Classification] = {
-    # --- user-name-reachable (12) ---
+    # --- user-name-reachable (13) ---
     # `cw result emit --session-id <TEXT>`; the Stop-hook harvest path passes
     # session.id. Rendered by result_emit's explicit except arm (A9).
     ("cw/result.py", "emit_result_locked"): (
@@ -120,6 +121,11 @@ _FIND_BY_NAME_OR_ID_ALLOWLIST: dict[tuple[str, str], _Classification] = {
     (_SPAWN_CLI, "_spawn_complete_impl"): (
         "user-name-reachable:handle_errors",
         ((_SPAWN_CLI, "spawn_complete"),),
+    ),
+    # `cw codex run --session-id <TEXT>`.
+    ("cw/codex_driver.py", "_load_session"): (
+        "user-name-reachable:handle_errors",
+        ((_CODEX_CLI, "codex_run"),),
     ),
     # --- id-only (12) ---
     # prior_session_id is read back from cw-context.json, which cw writes.
