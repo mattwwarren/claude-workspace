@@ -1361,7 +1361,9 @@ class TestMigrateCwState:
             "local_liveness": local_liveness,
         }
 
-    def test_v18_to_v19_fills_local_liveness_backend_default(self) -> None:
+    def test_v18_to_v19_fills_local_liveness_backend_default(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """migrate_cw_state fills local_liveness.backend='aider' on v18 handles
         that lack the key, and leaves a None handle untouched (#2369)."""
         raw = {
@@ -1371,7 +1373,8 @@ class TestMigrateCwState:
                 self._v18_session("s2", None),
             ],
         }
-        migrated = migrate_cw_state(raw)
+        with caplog.at_level("WARNING", logger="cw._config_migrate"):
+            migrated = migrate_cw_state(raw)
         with_handle, without_handle = migrated["sessions"]
         assert with_handle["local_liveness"] == {
             "pid": 1,
@@ -1380,6 +1383,9 @@ class TestMigrateCwState:
         }
         assert without_handle["local_liveness"] is None
         assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+        assert any(
+            "local_liveness.backend missing" in rec.message for rec in caplog.records
+        )
 
     def test_v18_local_liveness_backend_preserved_idempotently(self) -> None:
         """An existing local_liveness.backend value survives a migration pass
