@@ -2095,9 +2095,9 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         ``cw.dispatch.claim`` submodule's globals, so all three are patched
         with the one counting fake.
         """
-        import cw.dispatch.claim as claim_mod
         import cw.dispatch.claim.claimed_row as claimed_row_mod
         import cw.dispatch.claim.screening as screening_mod
+        import cw.dispatch.claim.spawn as spawn_mod
         from cw.worktree import create_worktree
         from tests.conftest import plan_body
 
@@ -2125,7 +2125,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
                 store.tasks = [t for t in store.tasks if t.ticket_id != "GEN-RACE"]
             return store
 
-        for mod in (screening_mod, claim_mod, claimed_row_mod):
+        for mod in (screening_mod, spawn_mod, claimed_row_mod):
             monkeypatch.setattr(mod, "load_dev_queue", _fake_load_dev_queue)
 
         daemon = FakeNativeDaemonClient()
@@ -2490,7 +2490,7 @@ class TestDispatchTickSpawnErrors:
             raise WorktreeError(msg)
 
         # Patch the name as imported into cw.dispatch, not the source module.
-        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _boom)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _boom)
 
         daemon = FakeNativeDaemonClient()
 
@@ -2530,7 +2530,7 @@ class TestDispatchTickSpawnErrors:
             msg = "stop after recording the call"
             raise WorktreeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _record)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _record)
         daemon = FakeNativeDaemonClient()
 
         dispatch_tick(simple_config, native_daemon=daemon)
@@ -2572,8 +2572,8 @@ class TestDispatchTickSpawnErrors:
         ) -> None:
             removed.append((branch, force))
 
-        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
-        monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _record_remove)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.remove_worktree", _record_remove)
 
         daemon = FakeNativeDaemonClient()
         spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
@@ -2608,8 +2608,8 @@ class TestDispatchTickSpawnErrors:
             msg = "git worktree remove failed"
             raise WorktreeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
-        monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _remove_boom)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.remove_worktree", _remove_boom)
 
         daemon = FakeNativeDaemonClient()
         spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
@@ -2642,10 +2642,10 @@ class TestDispatchTickSpawnErrors:
         ) -> None:
             removed.append(branch)
 
-        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
-        monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _record_remove)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.remove_worktree", _record_remove)
         monkeypatch.setattr(
-            "cw.dispatch.claim.unsaved_work_reason",
+            "cw.dispatch.claim.spawn.unsaved_work_reason",
             lambda _c, _b: "1 uncommitted path(s)",
         )
 
@@ -2684,9 +2684,9 @@ class TestDispatchTickSpawnErrors:
             msg = "Refusing to reuse stale worktree"
             raise StaleWorktreeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _stale)
         monkeypatch.setattr(
-            "cw.dispatch.claim.unsaved_work_reason",
+            "cw.dispatch.claim.spawn.unsaved_work_reason",
             lambda _c, _b: "1 uncommitted path(s)",
         )
 
@@ -2731,10 +2731,10 @@ class TestDispatchTickSpawnErrors:
         ) -> None:
             removed.append((branch, force))
 
-        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
-        monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _record_remove)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.remove_worktree", _record_remove)
         monkeypatch.setattr(
-            "cw.dispatch.claim.unsaved_work_reason", lambda _c, _b: None
+            "cw.dispatch.claim.spawn.unsaved_work_reason", lambda _c, _b: None
         )
 
         daemon = FakeNativeDaemonClient()
@@ -3483,7 +3483,7 @@ class TestClaimRefusesOccupiedWorktree:
             )
 
         monkeypatch.setattr(
-            "cw.dispatch.claim.create_worktree", _raise_occupied_after_ff
+            "cw.dispatch.claim.spawn.create_worktree", _raise_occupied_after_ff
         )
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         task, _skipped = _claim_next_pending(
@@ -4018,13 +4018,13 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         def _remove(_client: object, branch: str, *, force: bool = False) -> None:
             calls.append(f"remove:{branch}:{force}")
 
-        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _stale)
         # Two lookup sites: the pre-claim occupancy screen and the stale-tree
         # guard each read live_home_reason from their own module's globals.
         monkeypatch.setattr("cw.dispatch.claim.screening.live_home_reason", _live)
-        monkeypatch.setattr("cw.dispatch.claim.live_home_reason", _live)
-        monkeypatch.setattr("cw.dispatch.claim.unsaved_work_reason", _unsaved)
-        monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _remove)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.live_home_reason", _live)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.unsaved_work_reason", _unsaved)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.remove_worktree", _remove)
         return calls
 
     def _occupy(
@@ -4394,7 +4394,9 @@ class TestDispatchCodexCapabilityGate:
             ),
         )
         spy = _SpyExecutor()
-        monkeypatch.setattr("cw.dispatch.claim.resolve_executor", lambda *_a, **_k: spy)
+        monkeypatch.setattr(
+            "cw.dispatch.claim.spawn.resolve_executor", lambda *_a, **_k: spy
+        )
 
         daemon = FakeNativeDaemonClient()
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
@@ -4437,7 +4439,9 @@ class TestDispatchCodexCapabilityGate:
             ),
         )
         spy = _SpyExecutor()
-        monkeypatch.setattr("cw.dispatch.claim.resolve_executor", lambda *_a, **_k: spy)
+        monkeypatch.setattr(
+            "cw.dispatch.claim.spawn.resolve_executor", lambda *_a, **_k: spy
+        )
 
         daemon = FakeNativeDaemonClient()
         dispatch_tick(simple_config, native_daemon=daemon)
@@ -4470,7 +4474,9 @@ class TestDispatchCodexCapabilityGate:
             ),
         )
         spy = _SpyExecutor()
-        monkeypatch.setattr("cw.dispatch.claim.resolve_executor", lambda *_a, **_k: spy)
+        monkeypatch.setattr(
+            "cw.dispatch.claim.spawn.resolve_executor", lambda *_a, **_k: spy
+        )
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon)
@@ -4500,7 +4506,9 @@ class TestDispatchCodexCapabilityGate:
             lambda **_kwargs: CodexCapabilityDiagnosis(None, "0.144.5"),
         )
         spy = _SpyExecutor()
-        monkeypatch.setattr("cw.dispatch.claim.resolve_executor", lambda *_a, **_k: spy)
+        monkeypatch.setattr(
+            "cw.dispatch.claim.spawn.resolve_executor", lambda *_a, **_k: spy
+        )
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon)
@@ -5880,7 +5888,7 @@ class TestDispatchDoesNotTouchMainCheckout:
         """
         workspace_dir = sample_client_config.workspace_path
         monkeypatch.setattr(
-            "cw.dispatch.claim.create_worktree",
+            "cw.dispatch.claim.spawn.create_worktree",
             lambda _client, _branch: workspace_dir,
         )
 
@@ -10465,7 +10473,7 @@ class TestRevertClaimedTaskDuplicateRunning:
             msg = "git worktree add failed"
             raise WorktreeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _boom)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _boom)
         task, _skipped = _claim_next_pending(
             "test-client",
             lane="default",
@@ -10547,9 +10555,9 @@ class TestParkPreSpawnDuplicateRunning:
             msg = "Refusing to reuse stale worktree"
             raise StaleWorktreeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _stale)
         monkeypatch.setattr(
-            "cw.dispatch.claim.unsaved_work_reason",
+            "cw.dispatch.claim.spawn.unsaved_work_reason",
             lambda _c, _b: "1 uncommitted path(s)",
         )
         task, _skipped = _claim_next_pending(
