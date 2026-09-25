@@ -6,13 +6,12 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
-from cw.executor.core import _PreflightOK, _spawn_fire_and_forget
+from cw.executor.core import FireAndForgetRunner, _PreflightOK, _spawn_fire_and_forget
 from cw.local_runner import (
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
     PLAN_MISSING,
     TASK_CONTEXT_RELATIVE_PATH,
-    AiderRunner,
     GithubIssuePlanFetcher,
     PlanFetcher,
     RealAiderRunner,
@@ -133,10 +132,12 @@ class LocalExecutor:
         self,
         *,
         config: StageExecutorConfig,
-        runner: AiderRunner | None = None,
+        runner: FireAndForgetRunner | None = None,
     ) -> None:
         self._config = config
-        self._runner: AiderRunner = runner if runner is not None else RealAiderRunner()
+        self._runner: FireAndForgetRunner = (
+            runner if runner is not None else RealAiderRunner()
+        )
 
     def spawn(
         self,

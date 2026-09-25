@@ -5,12 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
-from cw.executor.core import _PreflightOK, _spawn_fire_and_forget
+from cw.executor.core import FireAndForgetRunner, _PreflightOK, _spawn_fire_and_forget
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
     STAGE4A_MERGE_GATE,
     SUPPORTED_STAGES,
-    OpencodeRunner,
     RealOpencodeRunner,
     build_stage_prompt,
     opencode_available,
@@ -114,10 +113,10 @@ class OpencodeExecutor:
         self,
         *,
         config: StageExecutorConfig,
-        runner: OpencodeRunner | None = None,
+        runner: FireAndForgetRunner | None = None,
     ) -> None:
         self._config = config
-        self._runner: OpencodeRunner = (
+        self._runner: FireAndForgetRunner = (
             runner if runner is not None else RealOpencodeRunner()
         )
 
