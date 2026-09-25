@@ -269,7 +269,7 @@ def _promote_plan_draft_on_direct_advance(
         return False
     raw_fingerprint = (session.last_result or {}).get(PLAN_DRAFT_FINGERPRINT_KEY)
     expected_fingerprint = (
-        raw_fingerprint if isinstance(raw_fingerprint, str) else None
+        raw_fingerprint if isinstance(raw_fingerprint, str) else ""
     )
     return promote_plan_draft(
         task,

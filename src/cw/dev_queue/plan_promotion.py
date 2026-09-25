@@ -21,6 +21,7 @@ from cw.atomic import atomic_write_text
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
 from cw.models import OrchestratorEventType
+from cw.plan_fingerprint import is_plan_draft_fingerprint
 from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
@@ -120,9 +121,9 @@ def promote_plan_draft(
     best-effort restore of the prior ``.cw/plan.md``, and the raised error
     reports whether it succeeded. Clearing the draft and emitting
     ``PLAN_DRAFT_PROMOTED`` follow a successful write and are best-effort, as
-    in ``auto-dev-plan.md`` Step 1g. When ``expected_fingerprint`` is present,
-    the draft must match the approval session's fingerprint; ``None`` retains
-    the legacy no-fingerprint behavior.
+    in ``auto-dev-plan.md`` Step 1g. When a draft exists,
+    ``expected_fingerprint`` must be a valid approval-session fingerprint and
+    must match the draft; an absent or malformed fingerprint fails closed.
 
     Raises:
         ApproveGateError: reading the draft or writing ``.cw/plan.md`` failed.
@@ -135,12 +136,18 @@ def promote_plan_draft(
     try:
         if not draft_path.exists():
             return False
+        if not isinstance(expected_fingerprint, str) or not is_plan_draft_fingerprint(
+            expected_fingerprint
+        ):
+            msg = (
+                f"Cannot approve ticket {task.ticket_id!r}: approved plan draft"
+                f" at {draft_path} has no valid approval fingerprint for"
+                f" worktree {wt_path}. Nothing was written or recorded."
+            )
+            raise ApproveGateError(msg)
         draft_text = draft_path.read_text(encoding="utf-8")
         new_fingerprint = _draft_fingerprint(draft_text)
-        if (
-            expected_fingerprint is not None
-            and new_fingerprint != expected_fingerprint
-        ):
+        if new_fingerprint != expected_fingerprint:
             msg = (
                 f"Cannot approve ticket {task.ticket_id!r}: approved plan draft"
                 f" fingerprint mismatch for worktree {wt_path}"
