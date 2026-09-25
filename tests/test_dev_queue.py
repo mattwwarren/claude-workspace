@@ -13042,6 +13042,57 @@ def _seed_plan_pending(
     save_state(CwState(sessions=[session]))
 
 
+def _run_revoke_with_concurrent_approval_change(
+    monkeypatch: pytest.MonkeyPatch,
+    errors: list[BaseException],
+) -> tuple[threading.Event, threading.Thread, threading.Thread]:
+    """Run revoke_plan_approval while blocked on record_event, then attempt a
+    concurrent approval change; return once both threads have joined."""
+    from cw.dev_queue import revoke_plan_approval
+
+    event_started = threading.Event()
+    release_event = threading.Event()
+    approval_change_attempted = threading.Event()
+    approval_change_completed = threading.Event()
+
+    def _blocked_event(*_args: object, **_kwargs: object) -> None:
+        event_started.set()
+        if not release_event.wait(5):
+            msg = "test event was not released"
+            raise AssertionError(msg)
+
+    def _revoke() -> None:
+        try:
+            revoke_plan_approval("GEN-500", "genhealth")
+        except Exception as exc:  # noqa: BLE001 - surface worker failures
+            errors.append(exc)
+
+    def _change_approval() -> None:
+        approval_change_attempted.set()
+        with _lock():
+            changed_store = load_dev_queue()
+            changed_task = _find_ticket(changed_store, "GEN-500", "genhealth")
+            changed_task.plan_approved_at = datetime(2026, 9, 26, tzinfo=UTC)
+            changed_task.plan_approved_fingerprint = "b" * 64
+            save_dev_queue(changed_store)
+            approval_change_completed.set()
+
+    monkeypatch.setattr("cw.dev_queue.approval.record_event", _blocked_event)
+    revoke_thread = threading.Thread(target=_revoke, daemon=True)
+    approval_thread = threading.Thread(target=_change_approval, daemon=True)
+    revoke_thread.start()
+    assert event_started.wait(5)
+    approval_thread.start()
+    try:
+        assert approval_change_attempted.wait(5)
+        assert not approval_change_completed.wait(0.1)
+    finally:
+        release_event.set()
+    revoke_thread.join(5)
+    approval_thread.join(5)
+    return approval_change_completed, revoke_thread, approval_thread
+
+
 class TestPlanApprovedAtStamp:
     """`cw dev-queue approve` records the approval on the row itself, so the
     plan stage can read it on any tracker (schema v35)."""
@@ -13505,8 +13556,6 @@ class TestPlanApprovedFingerprintStamp:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An approval change waits until the revocation audit is recorded."""
-        from cw.dev_queue import revoke_plan_approval
-
         _seed_plan_pending(
             tmp_config_dir, tmp_path, session_id="sess-revoke-contention"
         )
@@ -13515,51 +13564,10 @@ class TestPlanApprovedFingerprintStamp:
         task.plan_approved_fingerprint = "a" * 64
         save_dev_queue(DevQueueStore(tasks=[task]))
 
-        event_started = threading.Event()
-        release_event = threading.Event()
-        approval_change_attempted = threading.Event()
-        approval_change_completed = threading.Event()
         errors: list[BaseException] = []
-
-        def _blocked_event(*_args: object, **_kwargs: object) -> None:
-            event_started.set()
-            if not release_event.wait(5):
-                msg = "test event was not released"
-                raise AssertionError(msg)
-
-        def _revoke() -> None:
-            try:
-                revoke_plan_approval("GEN-500", "genhealth")
-            except Exception as exc:  # noqa: BLE001 - surface worker failures
-                errors.append(exc)
-
-        def _change_approval() -> None:
-            approval_change_attempted.set()
-            with _lock():
-                changed_store = load_dev_queue()
-                changed_task = _find_ticket(
-                    changed_store, "GEN-500", "genhealth"
-                )
-                changed_task.plan_approved_at = datetime(
-                    2026, 9, 26, tzinfo=UTC
-                )
-                changed_task.plan_approved_fingerprint = "b" * 64
-                save_dev_queue(changed_store)
-                approval_change_completed.set()
-
-        monkeypatch.setattr("cw.dev_queue.approval.record_event", _blocked_event)
-        revoke_thread = threading.Thread(target=_revoke, daemon=True)
-        approval_thread = threading.Thread(target=_change_approval, daemon=True)
-        revoke_thread.start()
-        assert event_started.wait(5)
-        approval_thread.start()
-        try:
-            assert approval_change_attempted.wait(5)
-            assert not approval_change_completed.wait(0.1)
-        finally:
-            release_event.set()
-        revoke_thread.join(5)
-        approval_thread.join(5)
+        approval_change_completed, revoke_thread, approval_thread = (
+            _run_revoke_with_concurrent_approval_change(monkeypatch, errors)
+        )
 
         assert not errors
         assert not revoke_thread.is_alive()
