@@ -11,7 +11,12 @@ import click
 
 from cw.cli._base import handle_errors
 from cw.config import get_client, load_orchestrator_config
-from cw.dev_queue import approve_scope_drift_ticket, approve_ticket, resolve_client
+from cw.dev_queue import (
+    approve_scope_drift_ticket,
+    approve_ticket,
+    resolve_client,
+    revoke_plan_approval,
+)
 from cw.events import record_event
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments, post_issue_comment
 from cw.models import (
@@ -28,6 +33,25 @@ from ._plan_marker import (
     _marker_present,
     _plan_approved_marker,
 )
+
+
+@dev_queue.command(name="revoke-plan-approval")
+@click.argument("ticket_id")
+@click.option("--client", "client", "-c", default=None, help="Client name.")
+@handle_errors
+def revoke_plan_approval_command(ticket_id: str, client: str | None) -> None:
+    """Durably revoke a PLAN approval before applying new resolutions."""
+    config = load_orchestrator_config()
+    resolved = resolve_client(ticket_id, config, client)
+    result = revoke_plan_approval(ticket_id, resolved)
+    if result["cleared"]:
+        click.echo(
+            f"Revoked plan approval for {ticket_id} ({resolved}); "
+            "plan_approved_at and plan_approved_fingerprint cleared."
+        )
+    else:
+        click.echo(f"No durable plan approval to revoke for {ticket_id} ({resolved}).")
+
 
 # The plan-approved marker strings themselves live in `_plan_marker` (#2194),
 # alongside their shape validator -- and are distinct from lifecycle.py's

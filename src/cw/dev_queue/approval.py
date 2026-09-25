@@ -103,6 +103,87 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | N
         return _approve_ticket_locked(ticket_id, client_name, operator_initiated=True)
 
 
+def revoke_plan_approval(
+    ticket_id: str,
+    client_name: str,
+    *,
+    resolutions_source: str = "step_1a.0b",
+    reason: str = "preflight_resolutions_delta",
+) -> dict[str, str | bool | None]:
+    """Clear both durable PLAN approval fields for a resolutions revision.
+
+    This is deliberately a separate mutation from ``requeue``: the resumed
+    plan worker may still be RUNNING, while the approval must be revoked under
+    the dev-queue lock before a later dispatch can consume stale evidence.
+
+    Event-first ordering (no rollback machinery, #2394): the audit event is
+    recorded BEFORE the row is mutated. If recording raises, nothing has been
+    mutated and the error propagates -- the row is untouched, so there is
+    nothing to roll back. If the subsequent ``save_dev_queue`` raises, that
+    also propagates, but no compensating write is needed: the in-memory row
+    still shows the old approval, while the plan draft it was bound to has
+    already been revised, so the approval's fingerprint no longer matches
+    (#2102's fingerprint-binding rule) and the stale approval can never be
+    consumed. The already-recorded event is then a truthful record that a
+    revocation was attempted; an ERROR log line naming the ticket is the only
+    other trace needed.
+    """
+    with _lock():
+        store = load_dev_queue()
+        task = _find_ticket(store, ticket_id, client_name)
+        had_approval = (
+            task.plan_approved_at is not None
+            or task.plan_approved_fingerprint is not None
+        )
+        previous_fingerprint = task.plan_approved_fingerprint
+        if not had_approval:
+            return {
+                "ticket_id": ticket_id,
+                "client": client_name,
+                "cleared": False,
+                "previous_fingerprint": previous_fingerprint,
+            }
+
+        # Keep the event-first record-and-clear sequence serialized under the
+        # dev-queue lock: an approval change must not race the audit event.
+        audit_payload = {
+            "ticket_id": ticket_id,
+            "client": client_name,
+            "previous_fingerprint": previous_fingerprint,
+            "revoked_at": datetime.now(UTC).isoformat(),
+            "initiating_service": "cw dev-queue revoke-plan-approval",
+            "resolutions_source": resolutions_source,
+            "reason": reason,
+        }
+        record_event(
+            OrchestratorEventType.PLAN_APPROVAL_REVOKED,
+            audit_payload,
+            correlation_id=ticket_id,
+        )
+
+        task.plan_approved_at = None
+        task.plan_approved_fingerprint = None
+        try:
+            save_dev_queue(store)
+        except Exception:
+            _log.error(
+                "plan approval save failed for %s/%s after"
+                " PLAN_APPROVAL_REVOKED was recorded; row still shows the"
+                " old approval, but its fingerprint no longer matches the"
+                " revised draft, so it can never be consumed",
+                client_name,
+                ticket_id,
+                exc_info=True,
+            )
+            raise
+    return {
+        "ticket_id": ticket_id,
+        "client": client_name,
+        "cleared": True,
+        "previous_fingerprint": previous_fingerprint,
+    }
+
+
 def _resolve_approval_target(
     store: DevQueueStore,
     ticket_id: str,

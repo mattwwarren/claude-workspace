@@ -282,15 +282,20 @@ def test_interactive_cap_reached_asks_instead_of_blocking() -> None:
 
 
 def test_draft_persistence_rule_mentions_settled_items_counter_and_marker() -> None:
-    """The draft-persistence rule captures the new sections and marker lines."""
+    """The draft-persistence rule captures the new sections and cites the rewrite rule.
+
+    #2376: the literal bookkeeping-line templates were hoisted into a
+    citation to the Draft-rewrite rule (R2) -- this guard now asserts the
+    citation rather than the restated templates.
+    """
     section = _step1c_headless_section()
     window = _after(section, "**Draft-persistence rule", span=1600)
     assert "## Adopted Assumptions" in window
     assert "## Self-Verified Premises" in window
     assert "## Deferred Premises" in window
     assert SETTLED_SECTION in window
-    assert f"`<!-- {ROUND_MARKER}: N -->` round-counter first line" in window
-    assert f"every `<!-- {SETTLED_MARKER}: ... -->` marker line" in window
+    assert "carried forward per the Draft-rewrite rule below" in window
+    assert "never dropped on a rewrite" in window
 
 
 # ---------------------------------------------------------------------------
@@ -949,10 +954,15 @@ def test_last_evaluated_marker_grammar_documented() -> None:
 
 
 def test_draft_persistence_rule_preserves_fingerprint_line() -> None:
-    """The draft-persistence rule keeps the new fingerprint line across rewrites."""
+    """The draft-persistence rule cites the draft-rewrite rule across rewrites.
+
+    #2376: replaced the literal fingerprint-line template with a citation
+    to the Draft-rewrite rule (R2) -- the fingerprint line is still covered,
+    now by name instead of by restatement.
+    """
     section = _step1c_headless_section()
     window = _after(section, "**Draft-persistence rule", span=1600)
-    assert f"`<!-- {LAST_EVALUATED_MARKER}: ... -->` fingerprint" in window
+    assert "carried forward per the Draft-rewrite rule below" in window
     assert "never dropped on a rewrite" in window
 
 
@@ -1260,10 +1270,11 @@ def test_draft_with_both_bookkeeping_markers_present_parses_unambiguously() -> N
     """A draft carrying both a settlement marker and a fingerprint parses.
 
     Two independent statements of the same bookkeeping order must agree:
-    the settlement-marker grammar (this test's primary anchor) and the
-    draft-persistence rule. Both name round-counter/fingerprint/settlement-
-    marker in that order, so a draft carrying all three lines is
-    unambiguous under every reader.
+    the settlement-marker grammar (this test's primary anchor), which states
+    the round-counter/fingerprint/settlement-marker order directly, and the
+    draft-persistence rule, which (#2376) now cites the Draft-rewrite rule
+    for that same order rather than restating it. A draft carrying all the
+    bookkeeping lines is unambiguous under every reader either way.
     """
     grammar_section = _step1c_section()
     grammar_window = _after(
@@ -1278,8 +1289,5 @@ def test_draft_with_both_bookkeeping_markers_present_parses_unambiguously() -> N
     persistence_window = _after(
         persistence_section, "**Draft-persistence rule", span=1600
     )
-    assert f"`<!-- {ROUND_MARKER}: N -->` round-counter first line" in (
-        persistence_window
-    )
-    assert f"`<!-- {LAST_EVALUATED_MARKER}: ... -->` fingerprint" in persistence_window
-    assert f"every `<!-- {SETTLED_MARKER}: ... -->` marker line" in persistence_window
+    assert "carried forward per the Draft-rewrite rule below" in persistence_window
+    assert "never dropped on a rewrite" in persistence_window

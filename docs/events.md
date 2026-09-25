@@ -648,6 +648,7 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 | `ticket.enqueued` | `cw dev-queue add` | `{ticket_id, client, priority}` (see top of file) |
 | `ticket.moved` | `cw dev-queue move` | `{ticket_id, client, from_lane, to_lane}` |
 | `ticket.approved` | `cw dev-queue approve` | `{ticket_id, client, from_stage, to_stage}`; scope-drift approvals also carry `{old_status, new_status, scope_drift_approved_extra_files, scope_drift_approved_head, approved_at, actor}` |
+| `plan.approval_revoked` | `cw dev-queue revoke-plan-approval` | `{ticket_id, client, previous_fingerprint, revoked_at, initiating_service, resolutions_source, reason}` |
 | `ticket.approval_failed` | scope-drift approval compensation | `{ticket_id, client, approval_event, approval_payload, error, rolled_back, recovery_required}` |
 | `ticket.requeued` | `cw dev-queue requeue`, `cw dev-queue drain --held` (RFC 0011 A4, #1161), and dispatch's automatic FINALIZE→IMPL regress path (#770) | `{ticket_id, client, from_stage, to_stage, reason, regressed}` |
 | `ticket.unblocked` | `cw dev-queue unblock` | `{ticket_id, client}` |

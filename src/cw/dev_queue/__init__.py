@@ -29,6 +29,7 @@ from cw.dev_queue.approval import (
     _approve_ticket_locked,
     approve_scope_drift_ticket,
     approve_ticket,
+    revoke_plan_approval,
 )
 from cw.dev_queue.attention import task_attention_state
 from cw.dev_queue.crud import (
@@ -164,6 +165,7 @@ __all__ = [
     "remove_ticket",
     "requeue_ticket",
     "resolve_client",
+    "revoke_plan_approval",
     "save_dev_queue",
     "save_plan",
     "select_clearable_tickets",
