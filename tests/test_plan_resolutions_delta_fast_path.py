@@ -282,9 +282,9 @@ def test_later_settlement_is_inserted_before_resolutions_marker() -> None:
     """A later settlement cannot append past the always-last resolutions line."""
     appendix = _appendix("plan")
     window = _after(appendix, "5. For each settled (non-unmappable) item:", span=900)
+    assert "insert the new `plan-stage-settled` marker line" in window
     assert (
-        "insert the new `plan-stage-settled` marker line" in window
-        and "immediately before the existing `plan-stage-resolutions-applied` line"
+        "immediately before the existing `plan-stage-resolutions-applied` line"
         in window
     )
     assert "later round settles another item" in window

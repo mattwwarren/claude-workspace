@@ -59,21 +59,6 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 _SCOPE_DRIFT_RECOVERY_MARKER = "scope-drift-approval-recovery.jsonl"
-_PLAN_APPROVAL_RECOVERY_MARKER = "plan-approval-recovery.jsonl"
-
-
-def _write_plan_approval_recovery_marker(payload: dict[str, object]) -> None:
-    """Persist an operator-visible marker when approval rollback is uncertain."""
-    path = dev_queue_file().with_name(_PLAN_APPROVAL_RECOVERY_MARKER)
-    try:
-        previous = path.read_text() if path.exists() else ""
-        atomic_write_text(path, previous + json.dumps(payload, sort_keys=True) + "\n")
-    except Exception:  # noqa: BLE001
-        _log.critical(
-            "plan approval recovery marker could not be persisted: %s",
-            payload,
-            exc_info=True,
-        )
 
 
 def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | None]:
@@ -130,20 +115,28 @@ def revoke_plan_approval(
     This is deliberately a separate mutation from ``requeue``: the resumed
     plan worker may still be RUNNING, while the approval must be revoked under
     the dev-queue lock before a later dispatch can consume stale evidence.
+
+    Event-first ordering (no rollback machinery, #2394): the audit event is
+    recorded BEFORE the row is mutated. If recording raises, nothing has been
+    mutated and the error propagates -- the row is untouched, so there is
+    nothing to roll back. If the subsequent ``save_dev_queue`` raises, that
+    also propagates, but no compensating write is needed: the in-memory row
+    still shows the old approval, while the plan draft it was bound to has
+    already been revised, so the approval's fingerprint no longer matches
+    (#2102's fingerprint-binding rule) and the stale approval can never be
+    consumed. The already-recorded event is then a truthful record that a
+    revocation was attempted; an ERROR log line naming the ticket is the only
+    other trace needed.
     """
     with _lock():
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
-        original_store = store.model_copy(deep=True)
         had_approval = (
             task.plan_approved_at is not None
             or task.plan_approved_fingerprint is not None
         )
         previous_fingerprint = task.plan_approved_fingerprint
-        task.plan_approved_at = None
-        task.plan_approved_fingerprint = None
         if had_approval:
-            save_dev_queue(store)
             audit_payload = {
                 "ticket_id": ticket_id,
                 "client": client_name,
@@ -153,37 +146,25 @@ def revoke_plan_approval(
                 "resolutions_source": resolutions_source,
                 "reason": reason,
             }
+            record_event(
+                OrchestratorEventType.PLAN_APPROVAL_REVOKED,
+                audit_payload,
+                correlation_id=ticket_id,
+            )
+            task.plan_approved_at = None
+            task.plan_approved_fingerprint = None
             try:
-                record_event(
-                    OrchestratorEventType.PLAN_APPROVAL_REVOKED,
-                    audit_payload,
-                    correlation_id=ticket_id,
+                save_dev_queue(store)
+            except Exception:
+                _log.error(
+                    "plan approval save failed for %s/%s after"
+                    " PLAN_APPROVAL_REVOKED was recorded; row still shows the"
+                    " old approval, but its fingerprint no longer matches the"
+                    " revised draft, so it can never be consumed",
+                    client_name,
+                    ticket_id,
+                    exc_info=True,
                 )
-            except Exception as event_error:
-                try:
-                    save_dev_queue(original_store)
-                except Exception as rollback_error:
-                    _write_plan_approval_recovery_marker(
-                        {
-                            "ticket_id": ticket_id,
-                            "client": client_name,
-                            "approval_event": (
-                                OrchestratorEventType.PLAN_APPROVAL_REVOKED.value
-                            ),
-                            "approval_payload": audit_payload,
-                            "event_error": str(event_error),
-                            "rollback_error": str(rollback_error),
-                            "recovery_required": True,
-                        }
-                    )
-                    _log.critical(
-                        "plan approval rollback failed for %s/%s; operator recovery "
-                        "is required",
-                        client_name,
-                        ticket_id,
-                        exc_info=True,
-                    )
-                    raise rollback_error from event_error
                 raise
         return {
             "ticket_id": ticket_id,

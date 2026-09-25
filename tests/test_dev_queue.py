@@ -13455,9 +13455,7 @@ class TestPlanApprovedFingerprintStamp:
         revoked = load_dev_queue().tasks[0]
         assert revoked.plan_approved_at is None
         assert revoked.plan_approved_fingerprint is None
-        audit = read_events(
-            event_types=[OrchestratorEventType.PLAN_APPROVAL_REVOKED]
-        )
+        audit = read_events(event_types=[OrchestratorEventType.PLAN_APPROVAL_REVOKED])
         assert len(audit) == 1
         payload = audit[0].payload
         assert payload == {
@@ -13472,6 +13470,67 @@ class TestPlanApprovedFingerprintStamp:
         assert isinstance(payload["revoked_at"], str)
         assert datetime.fromisoformat(payload["revoked_at"])
         assert audit[0].created_at is not None
+
+    def test_revoke_plan_approval_event_failure_raises_without_mutation(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Event-first ordering: a failed audit write mutates nothing (#2394)."""
+        from cw.dev_queue import revoke_plan_approval
+
+        _seed_plan_pending(tmp_config_dir, tmp_path, session_id="sess-revoke-evt-fail")
+        task = load_dev_queue().tasks[0]
+        task.plan_approved_at = datetime(2026, 9, 25, tzinfo=UTC)
+        task.plan_approved_fingerprint = "a" * 64
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        before = load_dev_queue().model_dump()
+
+        def _raise_event(*_args: object, **_kwargs: object) -> None:
+            msg = "event inbox unavailable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.approval.record_event", _raise_event)
+
+        with pytest.raises(OSError, match="event inbox unavailable"):
+            revoke_plan_approval("GEN-500", "genhealth")
+
+        assert load_dev_queue().model_dump() == before
+
+    def test_revoke_plan_approval_save_failure_raises_with_event_recorded(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A save failure after the event lands still leaves a truthful audit
+        trail: the event stands, and an ERROR log names the ticket (#2394)."""
+        from cw.dev_queue import revoke_plan_approval
+        from cw.events import read_events
+
+        _seed_plan_pending(tmp_config_dir, tmp_path, session_id="sess-revoke-sav-fail")
+        task = load_dev_queue().tasks[0]
+        task.plan_approved_at = datetime(2026, 9, 25, tzinfo=UTC)
+        task.plan_approved_fingerprint = "a" * 64
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        def _raise_save(*_args: object, **_kwargs: object) -> None:
+            msg = "queue file unwritable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.approval.save_dev_queue", _raise_save)
+
+        with (
+            caplog.at_level("ERROR"),
+            pytest.raises(OSError, match="queue file unwritable"),
+        ):
+            revoke_plan_approval("GEN-500", "genhealth")
+
+        audit = read_events(event_types=[OrchestratorEventType.PLAN_APPROVAL_REVOKED])
+        assert len(audit) == 1
+        assert any("GEN-500" in record.message for record in caplog.records)
 
     def test_migrate_fills_plan_approved_fingerprint_default(self) -> None:
         """migrate_dev_queue fills plan_approved_fingerprint=None (v36)."""
