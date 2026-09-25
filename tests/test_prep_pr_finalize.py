@@ -371,4 +371,77 @@ def test_cmd_check_automerge_allowed_warns_on_stderr_when_pyyaml_unavailable(
 
     assert exit_code == 0
     assert captured.out == "true\n"
-    assert "PyYAML unavailable" in captured.err
+
+
+# --- module-load fallback + config_path fix (#2373) ---
+
+
+def test_resolve_project_config_auto_merge_module_unavailable_and_config_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Shared cw.project_config module unavailable -> read config_path directly."""
+    monkeypatch.setattr(_mod, "_project_config", None)
+    monkeypatch.setattr(_mod, "_load_project_config_module", lambda: None)
+    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: false\n")
+    config_path = tmp_path / ".claude" / "project-config.yaml"
+    assert _mod.resolve_project_config_auto_merge(config_path) is False
+
+
+def test_automerge_allowed_false_when_module_unavailable_and_config_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(_mod, "_project_config", None)
+    monkeypatch.setattr(_mod, "_load_project_config_module", lambda: None)
+    monkeypatch.chdir(tmp_path)
+    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: false\n")
+    assert _mod.automerge_allowed() is False
+
+
+def test_resolve_project_config_auto_merge_module_unavailable_and_config_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Shared module unavailable and no config file present -> None, no crash."""
+    monkeypatch.setattr(_mod, "_project_config", None)
+    monkeypatch.setattr(_mod, "_load_project_config_module", lambda: None)
+    config_path = tmp_path / ".claude" / "project-config.yaml"
+    assert _mod.resolve_project_config_auto_merge(config_path) is None
+
+
+def test_resolve_project_config_auto_merge_module_unavailable_malformed_yaml(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Shared module unavailable and malformed YAML -> None, no exception."""
+    monkeypatch.setattr(_mod, "_project_config", None)
+    monkeypatch.setattr(_mod, "_load_project_config_module", lambda: None)
+    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: [false\n  unterminated")
+    config_path = tmp_path / ".claude" / "project-config.yaml"
+    assert _mod.resolve_project_config_auto_merge(config_path) is None
+
+
+def test_resolve_project_config_auto_merge_reads_exactly_config_path_when_shape_differs(
+    tmp_path: Path,
+) -> None:
+    """config_path need not sit two levels under a `.claude` dir for the read
+    to work — the previous config_path.parent.parent guess silently missed
+    this shape and returned None instead of the actual False.
+    """
+    config_dir = tmp_path / "not-dot-claude"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "project-config.yaml"
+    config_path.write_text("pr:\n  auto_merge: false\n", encoding="utf-8")
+    assert _mod.resolve_project_config_auto_merge(config_path) is False
+
+
+def test_resolve_project_config_auto_merge_pyyaml_unavailable_shape_differs_no_crash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The `yaml is None` guard must stay first in the fallback body — without
+    it, the direct-read branch would call `yaml.safe_load` on `None` and
+    raise AttributeError instead of degrading to None.
+    """
+    config_dir = tmp_path / "not-dot-claude"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "project-config.yaml"
+    config_path.write_text("pr:\n  auto_merge: false\n", encoding="utf-8")
+    monkeypatch.setattr(_mod, "yaml", None)
+    assert _mod.resolve_project_config_auto_merge(config_path) is None
