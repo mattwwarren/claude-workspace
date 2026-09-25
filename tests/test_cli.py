@@ -10969,6 +10969,71 @@ class TestDevQueueApproveCli:
         assert events == []
         assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
+    def _seed_client(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {ws}\n"
+        )
+
+    def test_revoke_plan_approval_cli_clears_durable_approval(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A ticket with a durable plan approval has it cleared, with the
+        'cleared' confirmation message (#2376)."""
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        self._seed_client(tmp_config_dir, tmp_path)
+        task = TicketTask(
+            ticket_id="ACME-1",
+            client="acme",
+            stage=Stage.PLAN,
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            plan_approved_at=datetime(2026, 9, 25, tzinfo=UTC),
+            plan_approved_fingerprint="a" * 64,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = CliRunner().invoke(
+            main,
+            ["dev-queue", "revoke-plan-approval", "ACME-1", "--client", "acme"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Revoked plan approval for ACME-1 (acme)" in result.output
+        assert "plan_approved_at and plan_approved_fingerprint cleared" in result.output
+        cleared = load_dev_queue().tasks[0]
+        assert cleared.plan_approved_at is None
+        assert cleared.plan_approved_fingerprint is None
+
+    def test_revoke_plan_approval_cli_no_op_when_absent(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A ticket with no durable plan approval reports the no-op message
+        instead of a false 'Revoked' claim (#2376)."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        self._seed_client(tmp_config_dir, tmp_path)
+        task = TicketTask(
+            ticket_id="ACME-1",
+            client="acme",
+            stage=Stage.PLAN,
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = CliRunner().invoke(
+            main,
+            ["dev-queue", "revoke-plan-approval", "ACME-1", "--client", "acme"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "No durable plan approval to revoke for ACME-1 (acme)" in result.output
+
 
 class TestPlanMarkerHelpers:
     """Pure-function tests for ``cw.cli.dev_queue._plan_marker`` (#2194)."""
