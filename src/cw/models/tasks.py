@@ -364,6 +364,7 @@ class UsageLimitAct(BaseModel):
 # instead of silently severing the transport.
 PLAN_DRAFT_FINGERPRINT_KEY = "plan_draft_fingerprint"
 PLAN_APPROVED_FINGERPRINT_KEY = "plan_approved_fingerprint"
+PLAN_PROMOTED_KEY = "plan_promoted"
 SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY = "scope_drift_approved_extra_files"
 SCOPE_DRIFT_APPROVED_HEAD_KEY = "scope_drift_approved_head"
 

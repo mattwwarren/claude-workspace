@@ -14,13 +14,17 @@ from cw.config import get_client, load_orchestrator_config
 from cw.dev_queue import approve_scope_drift_ticket, approve_ticket, resolve_client
 from cw.events import record_event
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments, post_issue_comment
-from cw.models import PLAN_APPROVED_FINGERPRINT_KEY, OrchestratorEventType
+from cw.models import (
+    PLAN_APPROVED_FINGERPRINT_KEY,
+    PLAN_PROMOTED_KEY,
+    OrchestratorEventType,
+)
+from cw.plan_fingerprint import is_plan_draft_fingerprint
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
 from ._group import dev_queue
 from ._plan_marker import (
-    _is_plan_draft_fingerprint,
     _marker_present,
     _plan_approved_marker,
 )
@@ -52,7 +56,7 @@ def _bound_fingerprint(result: dict[str, str | bool | None]) -> str | None:
     raw = result[PLAN_APPROVED_FINGERPRINT_KEY]
     if not isinstance(raw, str):
         return None
-    if _is_plan_draft_fingerprint(raw):
+    if is_plan_draft_fingerprint(raw):
         return raw
     click.echo(
         "--post-marker: the approval's plan-draft fingerprint is not a"
@@ -291,7 +295,12 @@ def dev_queue_approve(
                 " marker comment on this ticket."
             )
     else:
+        promoted_note = (
+            " (promoted the approved .cw/plan-draft.md to .cw/plan.md)"
+            if result[PLAN_PROMOTED_KEY]
+            else ""
+        )
         click.echo(
             f"Approved {ticket_id} ({resolved}):"
-            f" {result['from_stage']} -> {result['to_stage']}"
+            f" {result['from_stage']} -> {result['to_stage']}{promoted_note}"
         )

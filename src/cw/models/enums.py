@@ -250,6 +250,7 @@ class OrchestratorEventType(StrEnum):
     FOCUS_CLEARED = "focus.cleared"
     TICKET_MOVED = "ticket.moved"
     TICKET_APPROVED = "ticket.approved"
+    PLAN_DRAFT_PROMOTED = "plan.draft_promoted"
     # Companion correction when a ticket approval event was written but the
     # queue mutation did not remain durable (#2337).
     TICKET_APPROVAL_FAILED = "ticket.approval_failed"
