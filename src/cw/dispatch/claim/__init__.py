@@ -47,6 +47,10 @@ from cw.dispatch.claim.events import (
     _emit_stale_dispatch_blocked_event,
     _emit_worktree_occupied_skip_event,
 )
+from cw.dispatch.claim.lane_stats import (
+    _lane_occupants_for_client,
+    _lane_stats_for_client,
+)
 from cw.dispatch.claim.outcome import (
     _SpawnOutcome,
 )
@@ -67,7 +71,6 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
-    occupies_lane_slot,
 )
 from cw.reconcile import resolve_attempt_ceiling
 from cw.worktree import (
@@ -453,90 +456,6 @@ def _claim_next_pending(
             if outcome == _CLAIM_BACKOFF:
                 spawn_backoff_skipped = True
     return None, spawn_backoff_skipped
-
-
-def _lane_occupants_for_client(
-    client: ClientConfig, queue_snapshot: DevQueueStore
-) -> dict[str, list[dict[str, str]]]:
-    """Per-lane occupant ``{ticket_id, status}`` list for dispatch.tick payloads.
-
-    Sibling of :func:`_lane_stats_for_client` -- same :func:`occupies_lane_slot`
-    join over ``client``/``lane``, but returns identifying detail instead
-    of counts, so a ``lane_cap_blocked`` reader can name the occupant
-    instead of inferring a (possibly phantom) cross-client cap. See #1243.
-
-    Deliberately a NEW top-level dispatch.tick payload key, never nested
-    inside ``lanes`` -- orchestrate.py's ``_extract_lanes`` hard-filters
-    ``lanes`` values to numerics, so a nested ticket-id string would be
-    silently stripped downstream.
-    """
-    occupants: dict[str, list[dict[str, str]]] = {}
-    for lane_cfg in client.effective_lanes:
-        occupants[lane_cfg.name] = [
-            {"ticket_id": t.ticket_id, "status": t.status.value}
-            for t in queue_snapshot.tasks
-            if t.client == client.name
-            and t.lane == lane_cfg.name
-            and occupies_lane_slot(t)
-        ]
-    return occupants
-
-
-def _lane_stats_for_client(
-    client: ClientConfig,
-    queue_snapshot: DevQueueStore,
-    *,
-    occupants: dict[str, list[dict[str, str]]] | None = None,
-) -> dict[str, dict[str, int]]:
-    """Per-lane ``{claimed, running, blocked, signoff, pending}`` counts for
-    event payloads.
-
-    Why task-based running: RUNNING/BLOCKED_ON_USER tasks carry ``lane``;
-    sessions carry ``lane`` as of #594, but occupancy counting stays task-join
-    based per ADR-0006 / Phase 4a scope (stamped-but-not-read by the
-    scheduler). BLOCKED_ON_USER occupies its lane slot per ADR-0006, so
-    ``running + blocked + signoff`` is the total occupied count. ``blocked``
-    and ``signoff`` are split out so operators can see at a glance why
-    claimed=0 when pending>0 (#588, #990). Derives running/blocked/signoff
-    from :func:`_lane_occupants_for_client` -- see #1243.
-
-    *occupants* lets a caller that already computed the occupant lookup (e.g.
-    to also emit ``lane_occupants``/``occupied`` on the same dispatch.tick
-    payload) pass it in and avoid a second full scan of ``queue_snapshot.tasks``.
-    """
-    if occupants is None:
-        occupants = _lane_occupants_for_client(client, queue_snapshot)
-    stats: dict[str, dict[str, int]] = {}
-    for lane_cfg in client.effective_lanes:
-        lane_occupants = occupants.get(lane_cfg.name, [])
-        running = sum(
-            1 for o in lane_occupants if o["status"] == QueueItemStatus.RUNNING.value
-        )
-        blocked = sum(
-            1
-            for o in lane_occupants
-            if o["status"] == QueueItemStatus.BLOCKED_ON_USER.value
-        )
-        signoff = sum(
-            1
-            for o in lane_occupants
-            if o["status"] == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF.value
-        )
-        pending = sum(
-            1
-            for t in queue_snapshot.tasks
-            if t.client == client.name
-            and t.lane == lane_cfg.name
-            and t.status == QueueItemStatus.PENDING
-        )
-        stats[lane_cfg.name] = {
-            "claimed": 0,
-            "running": running,
-            "blocked": blocked,
-            "signoff": signoff,
-            "pending": pending,
-        }
-    return stats
 
 
 def _apply_plan_bypass_if_available(
