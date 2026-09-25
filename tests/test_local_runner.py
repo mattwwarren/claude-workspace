@@ -468,7 +468,7 @@ def test_build_aiderignore_fails_open_when_git_ls_files_errors(
     worktree = make_git_repo("wt-aiderignore-git-fails")
 
     with patch(
-        "cw.local_runner.subprocess.run",
+        "cw.local_runner.run_git",
         side_effect=subprocess.CalledProcessError(1, ["git", "ls-files"]),
     ):
         result = build_aiderignore(worktree, ["src/in_scope.py"])

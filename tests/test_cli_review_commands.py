@@ -1640,10 +1640,10 @@ class TestReviewVerifyFixesBaseFlag:
 
         def _boom(*args: object, **kwargs: object) -> object:
             calls.append(args)
-            msg = "subprocess.run must not be called without --base"
+            msg = "run_git must not be called without --base"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.cli.review._diff_integrity.subprocess.run", _boom)
+        monkeypatch.setattr("cw.cli.review._diff_integrity.run_git", _boom)
         result = runner.invoke(
             main,
             ["review", "verify-fixes", "--no-base-check", "-"],

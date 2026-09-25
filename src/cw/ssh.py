@@ -13,6 +13,8 @@ import re
 import subprocess as _sp
 from typing import TYPE_CHECKING, Literal
 
+from cw._git import run_git
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -150,10 +152,9 @@ def push_remote_scheme(
     ``cw.pr_hydrate._resolve_repo_slug``.
     """
     try:
-        result = _sp.run(
-            ["git", "-C", str(repo_path), "remote", "get-url", "--push", remote],
+        result = run_git(
+            ["-C", str(repo_path), "remote", "get-url", "--push", remote],
             capture_output=True,
-            text=True,
             check=False,
             timeout=timeout,
         )

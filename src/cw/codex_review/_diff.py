@@ -9,10 +9,9 @@ subprocess (SHOULD_FIX 11, #1236). Consumed by ``core``'s review-pass assembly.
 from __future__ import annotations
 
 import re
-import subprocess
 from typing import TYPE_CHECKING
 
-from cw._git import capture_head_sha
+from cw._git import capture_head_sha, git_output
 from cw.review_findings import CapturedDiff
 
 if TYPE_CHECKING:
@@ -187,10 +186,8 @@ def _capture_diff(
     implemented by this docstring note.
     """
     reviewed_sha = _capture_head_sha(worktree)
-    diff_text = subprocess.check_output(
-        ["git", "diff", "--no-color", f"{default_branch}...HEAD"],
-        cwd=worktree,
-        text=True,
+    diff_text = git_output(
+        ["diff", "--no-color", f"{default_branch}...HEAD"], cwd=worktree
     )
     diff, changed_files = _build_captured_diff(diff_text)
     return diff, reviewed_sha, changed_files
@@ -210,9 +207,7 @@ def _capture_delta_diff(
     Returns ``(diff, changed_files)``. There is no ``reviewed_sha`` in the
     tuple because the caller already knows it: it is *to_sha*.
     """
-    diff_text = subprocess.check_output(
-        ["git", "diff", "--no-color", f"{from_sha}..{to_sha}"],
-        cwd=worktree,
-        text=True,
+    diff_text = git_output(
+        ["diff", "--no-color", f"{from_sha}..{to_sha}"], cwd=worktree
     )
     return _build_captured_diff(diff_text)

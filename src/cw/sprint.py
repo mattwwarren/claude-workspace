@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from pydantic import BaseModel, Field
 
 from cw import gh
+from cw._git import run_git
 from cw.exceptions import RfcContractError, SprintApplyError
 from cw.tracker import load_project_config_dict
 
@@ -107,17 +108,17 @@ def load_rfc_text(rfc_path: str, root: Path) -> str:
     binary missing, or hung past the timeout).
     """
     try:
-        result = _sp.run(
-            ["git", "show", f"origin/main:{rfc_path}"],
-            capture_output=True,
+        result = run_git(
+            ["show", f"origin/main:{rfc_path}"],
             cwd=root,
+            capture_output=True,
             timeout=_LOAD_RFC_TIMEOUT,
             check=False,
         )
     except (OSError, _sp.TimeoutExpired):
         result = None
     if result is not None and result.returncode == 0:
-        return result.stdout.decode("utf-8")
+        return result.stdout
     return (root / rfc_path).read_text(encoding="utf-8")
 
 
