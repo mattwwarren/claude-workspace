@@ -1821,7 +1821,8 @@ class TestApplySentinelToTaskStagedAdvance:
         A worker that emitted status='proceed' (not a valid Status) parses to a
         BlockedResult(status_unknown). The old `else → COMPLETED` fallback
         silently marked the ticket shipped despite no branch/PR (the #728 loss).
-        It must route to FAILED — never claim false success.
+        It must route to FAILED — never claim false success. #2405: the
+        catch-all shares the attempt cap, so FAILED is pinned at the cap.
         """
         client_name = "staged-client"
         _write_staged_clients_yaml(tmp_config_dir, client_name)
@@ -1834,6 +1835,7 @@ class TestApplySentinelToTaskStagedAdvance:
             status=QueueItemStatus.RUNNING,
             session_id=session_id,
             stage=Stage.PLAN,
+            attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 

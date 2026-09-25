@@ -3294,12 +3294,16 @@ class TestSignalStop:
         state must NOT be COMPLETED — a BlockedResult carries no success signal,
         and COMPLETED silently retires unshipped work as "shipped" (the #728
         loss). FAILED satisfies both: terminal (no re-burn) and honest
-        (operator-visible, not a phantom completion).
+        (operator-visible, not a phantom completion). #2405: re-dispatch is
+        bounded by the shared attempt cap, so FAILED is pinned at the cap.
         """
         from cw.auto_dev_result import BlockedResult, Blocker
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
-        from cw.reconcile import _apply_sentinel_to_task
+        from cw.reconcile import (
+            _VALIDATION_FAILED_MAX_ATTEMPTS,
+            _apply_sentinel_to_task,
+        )
 
         _worktree, session = self._setup_headless_session(
             tmp_path, "sess-263-unknown-reason", "worktree-263-unknown-reason"
@@ -3311,7 +3315,7 @@ class TestSignalStop:
                     client="test-client",
                     status=QueueItemStatus.RUNNING,
                     session_id=session.id,
-                    attempts=1,
+                    attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
                 )
             ]
         )
@@ -3347,11 +3351,13 @@ class TestSignalStop:
         ``landed_terminal=True``), and since that call itself just wrote the
         terminal state (not a stage mismatch or a race-to-terminal), signal_
         stop must stop the now-leaked DAEMON worker even though it never
-        marks the session COMPLETED.
+        marks the session COMPLETED. #2405: the catch-all shares the attempt
+        cap, so the terminal landing is pinned at the cap.
         """
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
         from cw.native_daemon import FakeNativeDaemonClient
+        from cw.reconcile import _VALIDATION_FAILED_MAX_ATTEMPTS
 
         worktree, session = self._setup_headless_session(
             tmp_path,
@@ -3366,7 +3372,7 @@ class TestSignalStop:
                     client="test-client",
                     status=QueueItemStatus.RUNNING,
                     session_id=session.id,
-                    attempts=1,
+                    attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
                 )
             ]
         )

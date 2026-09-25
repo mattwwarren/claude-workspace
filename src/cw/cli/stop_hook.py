@@ -453,9 +453,7 @@ def _resolve_and_complete_headless_session(
     rescued = False
     task_already_terminal = False
     if is_headless and parsed_sentinel is not None and isinstance(ticket_id_value, str):
-        outcome = _apply_sentinel_to_task(
-            ticket_id_value, session, parsed_sentinel, now=now
-        )
+        outcome = _apply_sentinel_to_task(ticket_id_value, session, parsed_sentinel)
         rescued = outcome.rescued
         task_already_terminal = outcome.task_already_terminal
         if not outcome.routed and not outcome.task_already_terminal:
