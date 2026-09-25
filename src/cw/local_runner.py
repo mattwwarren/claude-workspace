@@ -35,6 +35,7 @@ from cw.executor_diagnostics import (
     build_executor_failure,
     persist_diagnostics_bundle,
 )
+from cw.executor_launch import _launch_logged_subprocess
 from cw.gh import fetch_approved_plan_comment
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
 from cw.worktree import _parse_numstat_totals
@@ -62,8 +63,8 @@ UNEXPECTED_ERROR = "unexpected_error"
 LIVENESS_UNAVAILABLE = "liveness_unavailable"
 
 # The plan + ticket context handed to aider as a read-only reference (#1905).
-# Public (like CONTEXT_JSON_RELATIVE_PATH) because executor.py threads it onto
-# _PreflightOK and into build_argv's --read flag.
+# Public (like CONTEXT_JSON_RELATIVE_PATH) because cw.executor.local threads it
+# into build_argv's --read flag.
 TASK_CONTEXT_RELATIVE_PATH: Path = Path(".cw", "task_context.md")
 
 # The generated --aiderignore file (#1915). Blocks every git-tracked file
@@ -171,57 +172,7 @@ class RealAiderRunner:
         argv: list[str],
         env: dict[str, str],
     ) -> subprocess.Popen[bytes]:
-        # Redirect to a per-run log file (never PIPE — nothing reads the pipe on
-        # this fire-and-forget path, and an unread full pipe buffer deadlocks the
-        # child; a file has no such backpressure). Truncated ("w") on every call
-        # so a retry into the same worktree does not bleed a prior attempt's
-        # output into the next harvest read.
-        log_path = worktree / _AIDER_LOG_RELATIVE_PATH
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w") as log_file:
-            return subprocess.Popen(
-                argv,
-                env=env,
-                cwd=worktree,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-
-
-class FakeAiderRunner:
-    """Test double: records the launch call; returns a real live subprocess.
-
-    Returns ``Popen(["sleep", "60"])`` rather than a fast-exiting process so the
-    caller's ``read_process_start_time_ns`` lookup does not race a just-exited
-    PID. Mirrors FakeNativeDaemonClient in native_daemon.py.
-    Spawned processes are tracked in ``self.procs`` so tests can kill them.
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-        self.procs: list[subprocess.Popen[bytes]] = []
-
-    def launch(
-        self,
-        worktree: Path,
-        argv: list[str],
-        env: dict[str, str],
-    ) -> subprocess.Popen[bytes]:
-        self.calls.append(
-            {
-                "argv": list(argv),
-                "cwd": worktree,
-                "env": dict(env),
-            }
-        )
-        proc = subprocess.Popen(
-            ["sleep", "60"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        self.procs.append(proc)
-        return proc
+        return _launch_logged_subprocess(worktree, argv, env, _AIDER_LOG_RELATIVE_PATH)
 
 
 def read_process_start_time_ns(pid: int) -> int | None:
@@ -260,7 +211,8 @@ class FakePlanFetcher:
     """Test double for PlanFetcher.
 
     Returns a configurable plan body and records all ticket_id arguments
-    passed to fetch(). Mirrors FakeAiderRunner in test-double style.
+    passed to fetch(). Mirrors cw.executor.core.FakeFireAndForgetRunner in
+    test-double style.
     """
 
     def __init__(self, plan: str | None = None) -> None:

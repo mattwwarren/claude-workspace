@@ -237,7 +237,9 @@ def test_opencode_harvest_no_sentinel_parks_blocked(
         worktree, [{"type": "text", "part": {"text": "no sentinel here"}}]
     )
 
-    dead_handle = LocalLivenessHandle(pid=999_999_999, start_time_ns=1)
+    dead_handle = LocalLivenessHandle(
+        pid=999_999_999, start_time_ns=1, backend="opencode"
+    )
     sess = _mk_opencode_session("ses-no-sentinel", worktree, dead_handle)
     save_state(CwState(sessions=[sess]))
     save_dev_queue(

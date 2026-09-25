@@ -12,7 +12,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from cw.models import CW_STATE_SCHEMA_VERSION, SessionOrigin
+from cw.models import (
+    CW_STATE_SCHEMA_VERSION,
+    DEFAULT_LOCAL_LIVENESS_BACKEND,
+    SessionOrigin,
+)
 from cw.native_daemon import SHORT_SESSION_ID_RE
 
 logger = logging.getLogger(__name__)
@@ -86,6 +90,7 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
             _fill_session_last_result_source_default(session_raw)
             _fill_session_consecutive_sentinel_mismatch_vetoes_default(session_raw)
             _fill_session_liveness_attention_next_eligible_at_default(session_raw)
+            _fill_session_local_liveness_backend_default(session_raw)
     # Bump persisted schema_version to current after all migration steps.
     raw["schema_version"] = CW_STATE_SCHEMA_VERSION
     return raw
@@ -236,6 +241,24 @@ def _fill_session_liveness_attention_next_eligible_at_default(
     """
     if "liveness_attention_next_eligible_at" not in session_raw:
         session_raw["liveness_attention_next_eligible_at"] = None
+
+
+def _fill_session_local_liveness_backend_default(session_raw: dict[str, Any]) -> None:
+    """Fill LocalLivenessHandle.backend (schema v19, #2369).
+
+    ``"aider"`` matches the model default. The raw payload carries nothing
+    that identifies an opencode handle, so an opencode run still in flight
+    across the upgrade is harvested via git synthesis rather than its JSONL
+    log. A None handle is left untouched. Idempotent.
+    """
+    handle = session_raw.get("local_liveness")
+    if isinstance(handle, dict) and "backend" not in handle:
+        logger.warning(
+            "session %s: local_liveness.backend missing during v18->v19 "
+            "migration; defaulting to 'aider' (GitHub #2369)",
+            session_raw.get("id", "<unknown>"),
+        )
+        handle["backend"] = DEFAULT_LOCAL_LIVENESS_BACKEND
 
 
 def _clear_non_hex_surface_refs(session_raw: dict[str, Any]) -> None:
