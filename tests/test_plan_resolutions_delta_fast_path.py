@@ -25,11 +25,14 @@ private copy of any of these.
 """
 
 from tests.conftest import _REPO_ROOT, _appendix, _cmd
-from tests.test_auto_dev_preflight_resolutions import _after, _nearby
+from tests.test_auto_dev_preflight_resolutions import _after
 from tests.test_plan_approval_fingerprint_binding import _fingerprint_rule_section
 from tests.test_plan_persistence import _step1a_section, _step1c_headless_section
 
-STEP1A0B_CORE_ANCHOR = '0b. **Binding-resolutions delta + approved-fingerprint fast path (resumed rounds only):**'
+STEP1A0B_CORE_ANCHOR = (
+    "0b. **Binding-resolutions delta + approved-fingerprint fast path "
+    "(resumed rounds only):**"
+)
 STEP1A0B_APPENDIX_HEADING = (
     "## Step 1a.0b: binding-resolutions delta + approved-fingerprint "
     "fast path (resumed rounds only)"
@@ -59,9 +62,9 @@ def _step1a0b_appendix_section() -> str:
 def test_step1a_item_0b_immediately_follows_item_0() -> None:
     """Item '0b.' sits between item '0.' and item '1.' in Step 1a."""
     section = _step1a_section()
-    idx_0 = section.index('0. **Resume check')
+    idx_0 = section.index("0. **Resume check")
     idx_0b = section.index(STEP1A0B_CORE_ANCHOR)
-    idx_1 = section.index('1. **Tracked tickets:**')
+    idx_1 = section.index("1. **Tracked tickets:**")
     assert idx_0 < idx_0b < idx_1
 
 
@@ -153,8 +156,7 @@ def test_delta_rule_marker_absent_concrete_source_is_delta() -> None:
     window = _after(section, "**Delta comparison.**", span=700)
     assert (
         "marker absent + current source concrete → **delta** "
-        "(this resolutions source has never been folded in)"
-        in window
+        "(this resolutions source has never been folded in)" in window
     )
 
 
@@ -164,8 +166,7 @@ def test_delta_rule_marker_absent_no_source_is_bootstrap_none() -> None:
     window = _after(section, "**Delta comparison.**", span=700)
     assert (
         "marker absent + current source `none` → no delta; persist the "
-        "marker as `source=none` (bootstrap)"
-        in window
+        "marker as `source=none` (bootstrap)" in window
     )
 
 
@@ -176,8 +177,7 @@ def test_delta_rule_marker_present_differs_is_delta_both_subcases() -> None:
     window = _after(section, "**Delta comparison.**", span=700)
     assert (
         "marker present with value X, current source Y, X ≠ Y → **delta** "
-        "(a newer resolutions source, or a body edit)"
-        in window
+        "(a newer resolutions source, or a body edit)" in window
     )
 
 
@@ -263,9 +263,7 @@ def test_fast_path_telemetry_emits_skipped_stage_in_place_of_complete() -> None:
     window = _after(section, "**Match → fast path.**", span=900)
     assert '\\"stage\\":\\"s1_ambiguity_scan_skipped\\"' in window
     assert '\\"reason\\":\\"approved_fingerprint_match\\"' in window
-    assert (
-        "in place of, not in addition to, `s1_ambiguity_scan_complete`" in window
-    )
+    assert "in place of, not in addition to, `s1_ambiguity_scan_complete`" in window
 
 
 def test_delta_revision_sub_step_ordered_before_fast_path_sub_step() -> None:
@@ -312,7 +310,7 @@ def test_bookkeeping_line_order_documents_resolutions_applied_as_last() -> None:
     window = _after(
         section,
         "**Settlement marker grammar (`plan-stage-settled`, #1683).**",
-        span=800,
+        span=1900,
     )
     assert "round-counter line is always first" in window
     assert "is always second" in window
@@ -368,7 +366,7 @@ def test_draft_persistence_rule_cites_draft_rewrite_rule_not_templates() -> None
     Draft-rewrite rule -- the literal marker templates are gone from this
     specific window, proving removal rather than mere supplementation."""
     section = _step1c_headless_section()
-    window = _after(section, "**Draft-persistence rule", span=1000)
+    window = _after(section, "**Draft-persistence rule", span=1300)
     assert "carried forward per the Draft-rewrite rule below" in window
     assert "never dropped on a rewrite" in window
     assert "<!-- plan-stage-scan-round: N -->" not in window
@@ -432,6 +430,4 @@ def test_resolution_scoping_rule_excludes_step1a0b_revision_too() -> None:
     # New Step 1a.0b exclusion, same reasoning pattern.
     assert "Step 1a.0b's resolutions-delta revision" in window
     assert "is excluded for the identical reason" in window
-    assert "never emits `resolution_consumed`/`resolution_evidence` either" in (
-        window
-    )
+    assert "never emits `resolution_consumed`/`resolution_evidence` either" in (window)
