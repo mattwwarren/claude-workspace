@@ -371,6 +371,7 @@ def test_cmd_check_automerge_allowed_warns_on_stderr_when_pyyaml_unavailable(
 
     assert exit_code == 0
     assert captured.out == "true\n"
+    assert "PyYAML unavailable" in captured.err
 
 
 # --- module-load fallback + config_path fix (#2373) ---
