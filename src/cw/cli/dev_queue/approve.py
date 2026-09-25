@@ -1,5 +1,6 @@
 """Dev-queue ``approve`` command: plan/review/operator-signoff gate clearing,
-the ``--post-marker`` audit comment, and the ``--scope-drift`` grant (#2337).
+the ``--post-marker`` audit comment, the ``--scope-drift`` grant (#2337), and
+the ``--override-must-fix`` codex MUST_FIX override (#2205).
 
 Split out of ``crud`` (#2337) so the approve surface -- which carries its own
 tracker-comment machinery -- lives apart from the plain queue mutations.
@@ -12,6 +13,7 @@ import click
 from cw.cli._base import handle_errors
 from cw.config import get_client, load_orchestrator_config
 from cw.dev_queue import (
+    approve_must_fix_override_ticket,
     approve_scope_drift_ticket,
     approve_ticket,
     resolve_client,
@@ -210,6 +212,21 @@ def _approve_scope_drift(ticket_id: str, resolved: str, scope_drift: str) -> Non
     )
 
 
+def _approve_must_fix_override(ticket_id: str, resolved: str, reason: str) -> None:
+    """The ``--override-must-fix`` branch of ``dev_queue_approve`` (#2205)."""
+    result = approve_must_fix_override_ticket(ticket_id, resolved, reason)
+    count = len(result["finding_ids"])
+    noun = "finding" if count == 1 else "findings"
+    actor = result["actor"] or "<unresolved operator>"
+    click.echo(
+        f"Recorded MUST_FIX override for {ticket_id} ({resolved}) at"
+        f" {result['stage']}: {count} {noun} on reviewed commit"
+        f" {result['reviewed_sha'][:_HEAD_SHA_DISPLAY_LEN]}, by {actor}. The row"
+        " is unchanged; run `cw dev-queue requeue"
+        f" {ticket_id} --client {resolved} --stage finalize` to ship it."
+    )
+
+
 @dev_queue.command(name="approve")
 @click.argument("ticket_id")
 @click.option("--client", "-c", default=None, help="Client name.")
@@ -245,9 +262,42 @@ def _approve_scope_drift(ticket_id: str, resolved: str, scope_drift: str) -> Non
         " --post-marker."
     ),
 )
+@click.option(
+    "--override-must-fix",
+    "override_must_fix",
+    is_flag=True,
+    default=False,
+    help=(
+        "Ship past a codex MUST_FIX park (#2205): records a durable"
+        " operator override on the ticket, bound to the reviewed commit"
+        " and the exact MUST_FIX findings on that verdict. The override"
+        " is recorded, audited (actor, reason, reviewed SHA, finding"
+        " identities), and does not itself advance the stage -- run"
+        " `cw dev-queue requeue --stage finalize` afterward. A later"
+        " review round or a moved HEAD invalidates it; FINALIZE"
+        " re-checks both before shipping. Requires --reason. Mutually"
+        " exclusive with --post-marker and --scope-drift."
+    ),
+)
+@click.option(
+    "--reason",
+    "override_reason",
+    default=None,
+    help=(
+        "Operator justification for --override-must-fix, recorded"
+        " verbatim on the override record and rendered into the PR"
+        " body's Operator override section. Required when"
+        " --override-must-fix is passed; ignored otherwise."
+    ),
+)
 @handle_errors
 def dev_queue_approve(
-    ticket_id: str, client: str | None, post_marker: bool, scope_drift: str | None
+    ticket_id: str,
+    client: str | None,
+    post_marker: bool,
+    scope_drift: str | None,
+    override_must_fix: bool,
+    override_reason: str | None,
 ) -> None:
     """Approve a plan/review gate, or clear an operator-signoff gate.
 
@@ -273,10 +323,31 @@ def dev_queue_approve(
     was given for, and applies only to a row parked with blocked_reason
     plan_scope_drift. A head that moves before the next dispatch invalidates
     it, and the gate blocks again rather than trusting a stale approval.
+
+    --override-must-fix records an operator decision to ship past a codex
+    background review's MUST_FIX park (blocked_reason codex_must_fix_findings).
+    It is bound to the worktree verdict's reviewed commit and its exact MUST_FIX
+    findings, audited with --reason, and stamp-only: run `cw dev-queue requeue
+    --stage finalize` afterward. FINALIZE refuses it if a new review round or a
+    moved HEAD no longer matches. Distinct from `cw review settle`, which only
+    suppresses a finding in a future review round.
     """
     if scope_drift is not None and post_marker:
         msg = "--scope-drift and --post-marker are mutually exclusive"
         raise click.UsageError(msg)
+    if override_must_fix and (post_marker or scope_drift is not None):
+        msg = (
+            "--override-must-fix is mutually exclusive with --post-marker and"
+            " --scope-drift"
+        )
+        raise click.UsageError(msg)
+    if override_must_fix:
+        if override_reason is None:
+            msg = "--override-must-fix requires --reason"
+            raise click.UsageError(msg)
+        resolved = resolve_client(ticket_id, load_orchestrator_config(), client)
+        _approve_must_fix_override(ticket_id, resolved, override_reason)
+        return
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
     if scope_drift is not None:

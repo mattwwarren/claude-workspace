@@ -12,6 +12,7 @@ names from :mod:`cw.review_findings`, not from this private submodule.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -800,6 +801,13 @@ class ReviewVerdictEnvelope(BaseModel):
 
     ticket_id: str
     verdict: ReviewVerdict
+
+
+# Worktree-relative home of a rendered :class:`ReviewVerdictEnvelope`, written
+# by ``cw.codex_background`` and read by ``cw dev-queue approve
+# --override-must-fix`` (#2205). Defined beside the envelope rather than in
+# codex_background so cw.dev_queue can import it without a cycle.
+REVIEW_VERDICT_JSON_RELATIVE_PATH = Path(".claude") / "review-verdict.json"
 
 
 class CapturedDiff(BaseModel):

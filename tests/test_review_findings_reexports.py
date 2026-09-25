@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import cw.review_findings as rf
 
-# The complete re-export surface: 9 type aliases, FINGERPRINT_VERSION, the 14
+# The complete re-export surface: 9 type aliases, FINGERPRINT_VERSION and
+# REVIEW_VERDICT_JSON_RELATIVE_PATH (#2205), the 14
 # model classes, the 7 public functions, and the 23 private names that existing
 # cross-module call sites (``cw.codex_fix_loop_convergence``,
 # ``cw.review_adjudication``, ``cw.codex_review._roles``,
@@ -29,8 +30,9 @@ EXPECTED_EXPORTS = {
     "ReviewerHealthStatus",
     "Severity",
     "TrackingDisposition",
-    # Module-level constant
+    # Module-level constants
     "FINGERPRINT_VERSION",
+    "REVIEW_VERDICT_JSON_RELATIVE_PATH",
     # Models
     "AcceptedFinding",
     "AgentSpecStatus",

@@ -61,6 +61,7 @@ from cw.models import (
     DispatchPlan,
     DispatchSkipReason,
     LaneConfig,
+    MustFixOverride,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -3971,7 +3972,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -4015,7 +4016,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -4050,7 +4051,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -4093,7 +4094,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 0
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
         """Existing false-park-recovery backoff state survives a second
@@ -4135,7 +4136,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["gate_recipe_failed_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v12_gate_recipe_failed_at_preserved_idempotently(self) -> None:
         """Existing gate_recipe_failed_at timestamp survives a second
@@ -4173,7 +4174,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalate_merge_block_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v14_escalate_merge_block_fired_at_preserved_idempotently(self) -> None:
         """Existing escalate_merge_block_fired_at survives a second migration."""
@@ -4210,7 +4211,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["request_reviewer_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v16_request_reviewer_fired_at_preserved_idempotently(self) -> None:
         """Existing request_reviewer_fired_at survives a second migration."""
@@ -4247,7 +4248,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["auto_fix_ci_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v17_auto_fix_ci_fired_at_preserved_idempotently(self) -> None:
         """Existing auto_fix_ci_fired_at survives a second migration."""
@@ -4284,7 +4285,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["address_review_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v18_address_review_fired_at_preserved_idempotently(self) -> None:
         """Existing address_review_fired_at survives a second migration."""
@@ -4321,7 +4322,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["last_blocked_result"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v19_last_blocked_result_preserved_idempotently(self) -> None:
         """Existing last_blocked_result survives a second migration."""
@@ -4362,7 +4363,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["cross_repo_override"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v20_cross_repo_override_preserved_idempotently(self) -> None:
         """Existing cross_repo_override survives a second migration."""
@@ -4400,7 +4401,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage_high_water"] == "impl"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_migrate_dev_queue_fills_stage_high_water_default_when_stage_also_missing(
         self,
@@ -4422,7 +4423,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage"] == DEFAULT_STAGE.value == "plan"
         assert migrated["tasks"][0]["stage_high_water"] == DEFAULT_STAGE.value == "plan"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v21_stage_high_water_preserved_idempotently(self) -> None:
         """Existing stage_high_water survives a second migration pass unchanged,
@@ -4462,7 +4463,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["blocked_reason"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_migrate_dev_queue_fills_hold_finalize_default(self) -> None:
         """migrate_dev_queue fills hold_finalize=None on tasks missing the key
@@ -4480,7 +4481,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["hold_finalize"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v23_hold_finalize_preserved_idempotently(self) -> None:
         """An existing hold_finalize value survives a second migration pass."""
@@ -4518,7 +4519,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["attention_digest_buffered_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v24_attention_digest_buffered_at_preserved_idempotently(
         self,
@@ -4560,7 +4561,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["salvage_no_sentinel_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v25_salvage_no_sentinel_at_preserved_idempotently(self) -> None:
         """An existing salvage_no_sentinel_at value survives a second
@@ -4599,7 +4600,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["regressed_into_stage"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v27_regressed_into_stage_preserved_idempotently(self) -> None:
         """An already-stamped regressed_into_stage survives a second migration
@@ -4638,7 +4639,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finalize_regress_branch_head"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v28_finalize_regress_branch_head_preserved_idempotently(self) -> None:
         """An already-stamped finalize_regress_branch_head survives a second
@@ -4675,7 +4676,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pending_operator_comment"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v29_pending_operator_comment_preserved_idempotently(self) -> None:
         """An already-raised pending_operator_comment survives a second
@@ -4734,7 +4735,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finding_dispositions"] == {}
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v31_finding_dispositions_preserved_idempotently(self) -> None:
         """An already-populated ledger survives a second migration pass — the
@@ -4779,7 +4780,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["ever_spawned"] is True
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v33_ever_spawned_preserved_idempotently(self) -> None:
         """An explicit ever_spawned=False survives a second migration pass --
@@ -4815,7 +4816,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pending_fix_dispatch"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_migrate_dev_queue_fills_fix_dispatch_session_id_default(self) -> None:
         """migrate_dev_queue fills fix_dispatch_session_id=None (v34, #2017)."""
@@ -4891,7 +4892,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stale_gate_detected_at"] is None
         assert migrated["tasks"][0]["blocked_on_pr"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v31_migration_fills_both_v30_and_v31_fields_in_one_pass(self) -> None:
         """A single pre-v30 row gains BOTH #1713's and #1838's fields.
@@ -4916,7 +4917,7 @@ class TestMigrateDevQueue:
         assert migrated["tasks"][0]["stale_gate_detected_at"] is None
         assert migrated["tasks"][0]["blocked_on_pr"] is None
         assert migrated["tasks"][0]["finding_dispositions"] == {}
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_v32_migration_fills_both_v31_and_v32_fields_in_one_pass(self) -> None:
         """A single pre-v31 row gains BOTH #1838's and #1750's fields.
@@ -4942,14 +4943,14 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finding_dispositions"] == {}
         assert migrated["tasks"][0]["unproductive_attempts"] == 0
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_migrate_dev_queue_fills_watched_prs_default(self) -> None:
         """migrate_dev_queue fills watched_prs=[] on a store missing the key (v15)."""
         raw: dict[str, object] = {"schema_version": 14, "tasks": []}
         migrated = migrate_dev_queue(raw)
         assert migrated["watched_prs"] == []
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_migrate_dev_queue_preserves_existing_watched_prs(self) -> None:
         """An existing watched_prs list survives migration untouched (idempotent)."""
@@ -7077,6 +7078,411 @@ class TestApproveScopeDrift:
         assert marker.exists()
         assert '"recovery_required": true' in marker.read_text()
         assert any("rollback failed" in record.message for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# TestApproveMustFixOverride — approve_must_fix_override_ticket (#2205)
+# ---------------------------------------------------------------------------
+
+_REVIEWED_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+
+
+def _must_fix_override() -> MustFixOverride:
+    return MustFixOverride(
+        actor="octocat",
+        reason="ship it",
+        reviewed_sha=_REVIEWED_SHA,
+        finding_ids=[("src/a.py", "bug here")],
+        recorded_at=datetime(2026, 9, 25, tzinfo=UTC),
+    )
+
+
+class TestApproveMustFixOverride:
+    """#2205: the operator records a durable, audited override of a codex
+    MUST_FIX park, bound to the verdict's reviewed_sha and finding identities.
+    The row is stamped only -- never moved."""
+
+    def _seed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
+        blocked_reason: str | None = "codex_must_fix_findings",
+        must_fix: tuple[tuple[str, str], ...] = (
+            ("src/b.py", "Leak of 3 handles at line 40"),
+            ("src/a.py", "Bug  here"),
+        ),
+        verdict_ticket_id: str = "GEN-500",
+        write_verdict: bool = True,
+        login: str | None = "octocat",
+    ) -> tuple[Path, list[CapturedEvent]]:
+        """Persist one parked row with a verdict in its worktree; capture events."""
+        from tests.conftest import _make_finding, write_review_verdict_envelope
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        worktree = tmp_path / "wt-must-fix"
+        worktree.mkdir()
+        task = _make_blocked_task(
+            status=status, stage=Stage.REVIEW, blocked_reason=blocked_reason
+        )
+        task.worktree_path = worktree
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        verdict_path = worktree / ".claude" / "review-verdict.json"
+        if write_verdict:
+            verdict_path = write_review_verdict_envelope(
+                worktree,
+                ticket_id=verdict_ticket_id,
+                reviewed_sha=_REVIEWED_SHA,
+                must_fix=[
+                    _make_finding(file=file, summary=summary)
+                    for file, summary in must_fix
+                ],
+            )
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: login)
+        events: list[CapturedEvent] = []
+
+        def _capture(
+            event_type: OrchestratorEventType,
+            payload: dict[str, object],
+            *,
+            correlation_id: str | None = None,
+        ) -> None:
+            events.append((event_type, dict(payload), correlation_id))
+
+        monkeypatch.setattr("cw.dev_queue.must_fix_override.record_event", _capture)
+        return verdict_path, events
+
+    @freeze_time("2026-09-25 12:00:00")
+    def test_happy_path_stamps_override_and_leaves_row_parked(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+
+        _, events = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        result = approve_must_fix_override_ticket(
+            "GEN-500", "genhealth", "  shipping; follow-up #9999  "
+        )
+
+        expected_ids = [("src/a.py", "bug here"), ("src/b.py", "leak of N handles")]
+        assert result == {
+            "ticket_id": "GEN-500",
+            "client": "genhealth",
+            "stage": "review",
+            "actor": "octocat",
+            "reviewed_sha": _REVIEWED_SHA,
+            "finding_ids": expected_ids,
+        }
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.stage == Stage.REVIEW
+        assert t.blocked_reason == "codex_must_fix_findings"
+        assert t.must_fix_override == MustFixOverride(
+            actor="octocat",
+            reason="shipping; follow-up #9999",
+            reviewed_sha=_REVIEWED_SHA,
+            finding_ids=expected_ids,
+            recorded_at=datetime(2026, 9, 25, 12, 0, tzinfo=UTC),
+        )
+        assert events == [
+            (
+                OrchestratorEventType.TICKET_APPROVED,
+                {
+                    "ticket_id": "GEN-500",
+                    "client": "genhealth",
+                    "from_stage": "review",
+                    "to_stage": "review",
+                    "actor": "octocat",
+                    "reason": "shipping; follow-up #9999",
+                    "reviewed_sha": _REVIEWED_SHA,
+                    "finding_ids": [list(pair) for pair in expected_ids],
+                },
+                "GEN-500",
+            )
+        ]
+
+    def test_finding_ids_are_deduped(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+
+        self._seed(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            must_fix=(("src/a.py", "Bug here"), ("src/a.py", "bug   HERE")),
+        )
+
+        result = approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert result["finding_ids"] == [("src/a.py", "bug here")]
+
+    def test_unresolvable_operator_login_records_empty_actor(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch, login=None)
+
+        with caplog.at_level("WARNING"):
+            result = approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert result["actor"] == ""
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.must_fix_override is not None
+        assert t.must_fix_override.actor == ""
+        assert any("operator login" in r.message for r in caplog.records)
+
+    def test_rerun_overwrites_the_prior_record(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Newest wins: a second override on the same park replaces the first
+        rather than stacking."""
+        from cw.dev_queue import approve_must_fix_override_ticket
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        approve_must_fix_override_ticket("GEN-500", "genhealth", "first")
+        approve_must_fix_override_ticket("GEN-500", "genhealth", "second")
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.must_fix_override is not None
+        assert t.must_fix_override.reason == "second"
+
+    @pytest.mark.parametrize(
+        ("status", "blocked_reason", "match"),
+        [
+            (
+                QueueItemStatus.PENDING,
+                "codex_must_fix_findings",
+                "status is 'pending'",
+            ),
+            (
+                QueueItemStatus.BLOCKED_ON_USER,
+                "plan_scope_drift",
+                "blocked_reason is 'plan_scope_drift'",
+            ),
+            (
+                QueueItemStatus.BLOCKED_ON_USER,
+                None,
+                "blocked_reason is None",
+            ),
+        ],
+        ids=["not_blocked", "scope_drift_park", "no_blocked_reason"],
+    )
+    def test_rejects_a_row_not_parked_for_codex_must_fix(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        status: QueueItemStatus,
+        blocked_reason: str | None,
+        match: str,
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        _, events = self._seed(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            status=status,
+            blocked_reason=blocked_reason,
+        )
+        before = load_dev_queue().model_dump()
+
+        with pytest.raises(ApproveGateError, match=match):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert events == []
+        assert load_dev_queue().model_dump() == before
+
+    @pytest.mark.parametrize("reason", ["", "   ", "\n\t"])
+    def test_rejects_blank_reason(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reason: str,
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        _, events = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        before = load_dev_queue().model_dump()
+
+        with pytest.raises(ApproveGateError, match="--reason"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", reason)
+
+        assert events == []
+        assert load_dev_queue().model_dump() == before
+
+    def test_rejects_missing_verdict_file(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        verdict_path, events = self._seed(
+            tmp_config_dir, tmp_path, monkeypatch, write_verdict=False
+        )
+        before = load_dev_queue().model_dump()
+
+        with pytest.raises(ApproveGateError, match="could not read") as excinfo:
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert str(verdict_path) in str(excinfo.value)
+        assert events == []
+        assert load_dev_queue().model_dump() == before
+
+    @pytest.mark.parametrize(
+        "body",
+        ["not json", '{"ticket_id": "GEN-500"}', '{"verdict": {}}'],
+        ids=["not_json", "no_verdict", "no_ticket_id"],
+    )
+    def test_rejects_unparseable_verdict(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        body: str,
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        verdict_path, events = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        verdict_path.write_text(body, encoding="utf-8")
+        before = load_dev_queue().model_dump()
+
+        with pytest.raises(ApproveGateError, match="not a valid review verdict"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert events == []
+        assert load_dev_queue().model_dump() == before
+
+    def test_rejects_foreign_verdict(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A verdict owned by another ticket is not this park's verdict."""
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        _, events = self._seed(
+            tmp_config_dir, tmp_path, monkeypatch, verdict_ticket_id="GEN-999"
+        )
+        before = load_dev_queue().model_dump()
+
+        with pytest.raises(ApproveGateError, match="belongs to ticket 'GEN-999'"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert events == []
+        assert load_dev_queue().model_dump() == before
+
+    def test_rejects_non_blocking_verdict(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        _, events = self._seed(tmp_config_dir, tmp_path, monkeypatch, must_fix=())
+        before = load_dev_queue().model_dump()
+
+        with pytest.raises(ApproveGateError, match="not blocking"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert events == []
+        assert load_dev_queue().model_dump() == before
+
+    def test_rejects_unfingerprintable_finding(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail closed: a no-diff-anchor MUST_FIX has no identity to bind, so
+        the override refuses rather than silently leaving it uncovered."""
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        _, events = self._seed(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            must_fix=(("src/a.py", "Bug here"), ("N/A", "Missing follow-up")),
+        )
+        before = load_dev_queue().model_dump()
+
+        with pytest.raises(ApproveGateError, match="Missing follow-up"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert events == []
+        assert load_dev_queue().model_dump() == before
+
+    def test_rejects_when_worktree_unresolvable(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        _, events = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        store = load_dev_queue()
+        store.tasks[0].worktree_path = None
+        save_dev_queue(store)
+        before = load_dev_queue().model_dump()
+
+        with pytest.raises(ApproveGateError, match="worktree"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert events == []
+        assert load_dev_queue().model_dump() == before
+
+    def test_event_failure_leaves_row_unstamped(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Event-first ordering: an audit write that fails means no override
+        was recorded, so FINALIZE keeps blocking."""
+        from cw.dev_queue import approve_must_fix_override_ticket
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        before = load_dev_queue().model_dump()
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "event inbox unavailable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.must_fix_override.record_event", _raise)
+
+        with pytest.raises(OSError, match="event inbox unavailable"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert load_dev_queue().model_dump() == before
+
+    def test_save_failure_after_event_is_logged_and_raised(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+
+        _, events = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        def _fail_save(_store: DevQueueStore) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.must_fix_override.save_dev_queue", _fail_save)
+
+        with caplog.at_level("ERROR"), pytest.raises(OSError, match="disk full"):
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        assert len(events) == 1
+        assert any("GEN-500" in r.message for r in caplog.records)
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.must_fix_override is None
 
 
 # ---------------------------------------------------------------------------
@@ -12338,6 +12744,41 @@ class TestStageRegress:
         assert task.plan_approved_at == stamped
         assert task.plan_approved_fingerprint == "f" * 64
 
+    def test_regress_into_review_clears_must_fix_override(self) -> None:
+        """#2205: a regress into REVIEW means a re-review, which supersedes the
+        verdict the operator's MUST_FIX override was bound to."""
+        from cw.dev_queue import _stage_regress
+
+        task = _make_stage_task(stage=Stage.FINALIZE)
+        task.must_fix_override = _must_fix_override()
+        _stage_regress(task, Stage.REVIEW)
+        assert task.must_fix_override is None
+
+    def test_regress_into_non_review_stage_keeps_must_fix_override(self) -> None:
+        """Only a regress INTO REVIEW clears it; a FINALIZE->IMPL self-heal
+        moves HEAD, which check_must_fix_override.py already refuses."""
+        from cw.dev_queue import _stage_regress
+
+        task = _make_stage_task(stage=Stage.FINALIZE)
+        override = _must_fix_override()
+        task.must_fix_override = override
+        _stage_regress(task, Stage.IMPL)
+        assert task.must_fix_override == override
+
+    def test_must_fix_override_survives_pending_reset(self) -> None:
+        """#2205: `requeue --stage finalize` resets the row to PENDING, which
+        clears blocked_reason -- the override must outlive that reset."""
+        from cw.dev_queue import transition_task_status
+
+        task = _make_blocked_task(
+            stage=Stage.REVIEW, blocked_reason="codex_must_fix_findings"
+        )
+        override = _must_fix_override()
+        task.must_fix_override = override
+        transition_task_status(task, QueueItemStatus.PENDING)
+        assert task.blocked_reason is None
+        assert task.must_fix_override == override
+
     def test_sets_pending_operator_comment(self) -> None:
         """#1730: the shared stamp point also raises the pending-send-back marker."""
         from cw.dev_queue import _stage_regress
@@ -12809,7 +13250,7 @@ class TestUnproductiveAttempts:
         assert task.unproductive_attempts == 0
 
     def test_schema_version_bumped_to_32(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 41
+        assert DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_migrate_fills_unproductive_attempts_default(self) -> None:
         """migrate_dev_queue fills unproductive_attempts=0 on legacy rows (v32)."""
@@ -13112,7 +13553,7 @@ class TestPlanApprovedAtStamp:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["plan_approved_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_migrate_preserves_plan_approved_at_idempotently(self) -> None:
         """A recorded approval survives a second migration pass."""
@@ -13222,7 +13663,7 @@ class TestAdvisoryNoteMigration:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["advisory_note"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_migrate_preserves_advisory_note_idempotently(self) -> None:
         """A recorded advisory_note survives a second migration pass."""
@@ -13264,7 +13705,7 @@ class TestAdvisoryNoteMigration:
 
         store = load_dev_queue()
 
-        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 42
         assert store.tasks[0].advisory_note is None
 
 
@@ -13295,7 +13736,7 @@ class TestUsageLimitActMigration:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["usage_limit_act"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_migrate_preserves_usage_limit_act_idempotently(self) -> None:
         """An intent already on the row survives a second migration pass."""
@@ -13337,7 +13778,7 @@ class TestUsageLimitActMigration:
 
         store = load_dev_queue()
 
-        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 42
         assert store.tasks[0].usage_limit_act is None
 
     def test_v39_row_with_codex_orphan_link_migrates_to_v41(
@@ -13366,7 +13807,7 @@ class TestUsageLimitActMigration:
 
         migrated = migrate_dev_queue(json.loads(json.dumps(v39_data)))
         task_raw = migrated["tasks"][0]
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
         assert task_raw["usage_limit_act"] is None
         assert task_raw["codex_orphan_session_id"] == "sess-orphan"
         assert task_raw["codex_orphan_rescan_next_eligible_at"] == (
@@ -13377,7 +13818,7 @@ class TestUsageLimitActMigration:
         dev_queue_file().write_text(json.dumps(v39_data))
         store = load_dev_queue()
         task = store.tasks[0]
-        assert store.schema_version == 41
+        assert store.schema_version == 42
         assert task.usage_limit_act is None
         assert task.codex_orphan_session_id == "sess-orphan"
         assert task.codex_orphan_rescan_next_eligible_at == datetime(
@@ -13427,7 +13868,7 @@ class TestCodexOrphanLinkMigration:
         task_raw = migrated["tasks"][0]
         assert task_raw["codex_orphan_session_id"] is None
         assert task_raw["codex_orphan_rescan_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_migrate_preserves_a_recorded_link_idempotently(self) -> None:
         raw: dict[str, object] = {
@@ -13472,7 +13913,7 @@ class TestCodexOrphanLinkMigration:
 
         store = load_dev_queue()
 
-        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 42
         assert store.tasks[0].codex_orphan_session_id is None
         assert store.tasks[0].codex_orphan_rescan_next_eligible_at is None
 
@@ -13625,7 +14066,7 @@ class TestPlanApprovedFingerprintStamp:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["plan_approved_fingerprint"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 41
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
 
     def test_migrate_preserves_plan_approved_fingerprint_idempotently(self) -> None:
         """A recorded fingerprint survives a second migration pass."""
