@@ -55,6 +55,7 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 from tests._codex_review_helpers import _mk_codex_proc
 from tests.conftest import (
     _seed_completed_session,
@@ -67,10 +68,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.codex_runner import CodexRunner
+    from cw.native_daemon import NativeDaemonClient
 
 
 def _sync_codex_executor(
-    config: StageExecutorConfig, runner: CodexRunner | None = None
+    config: StageExecutorConfig,
+    runner: CodexRunner | None = None,
+    *,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> CodexExecutor:
     """A CodexExecutor whose background seam runs inline (#1727).
 
@@ -81,7 +86,12 @@ def _sync_codex_executor(
     outcomes they asserted when spawn() was synchronous end-to-end. The
     threading seam itself is covered in tests/test_codex_background.py.
     """
-    return CodexExecutor(config=config, runner=runner, background=lambda fn: fn())
+    return CodexExecutor(
+        config=config,
+        runner=runner,
+        background=lambda fn: fn(),
+        native_daemon=native_daemon,
+    )
 
 
 def _persisted_result() -> AutoDevResult:
@@ -655,6 +665,53 @@ def test_resolve_executor_returns_codex_executor(
 
     assert isinstance(executor, CodexExecutor)
     assert isinstance(executor, StageExecutor)
+
+
+def test_codex_executor_threads_native_daemon_into_write_hook_context(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    """CodexExecutor.native_daemon (#2077) reaches _write_hook_context's
+    `daemon` kwarg exactly like ClaudeNativeExecutor's -- before this field
+    existed, every codex-backed REVIEW spawn called _write_hook_context with
+    no daemon, so its DAEMON-conflict branch could never tell a genuinely
+    live prior session apart from a stale one for a codex lane."""
+    worktree = make_git_repo("wt-codex-native-daemon")
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    daemon = FakeNativeDaemonClient()
+    executor = _sync_codex_executor(config, native_daemon=daemon)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-nd", client="test", stage=Stage.REVIEW)
+
+    calls: list[dict[str, object]] = []
+
+    def _capture(*_args: object, **kwargs: object) -> None:
+        calls.append(kwargs)
+
+    with patch("cw.executor.codex._write_hook_context", _capture):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    assert calls[0]["daemon"] is daemon
+
+
+def test_resolve_executor_threads_native_daemon_into_codex_executor(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """#2077: resolve_executor no longer drops *native_daemon* for the codex
+    backend (it already threaded it to ClaudeNativeExecutor)."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(
+            executors={Stage.REVIEW: StageExecutorConfig(backend=CODEX_BACKEND)}
+        ),
+    )
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+    daemon = FakeNativeDaemonClient()
+
+    executor = resolve_executor(task, client, native_daemon=daemon)
+
+    assert isinstance(executor, CodexExecutor)
+    assert executor._native_daemon is daemon
 
 
 def test_codex_executor_exception_handler_marks_session_completed(

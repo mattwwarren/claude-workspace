@@ -311,7 +311,7 @@ worker may recover and continue. Visible in `cw event tail` and
   "pending": 2,
   "running": 1,
   "cap": 3,
-  "skip_reason": "availability_gate | ssh_key_gate | disk_pressure_gate | freshness_gate | usage_limited | host_capacity_gated | cap_full | lane_cap_blocked | attempt_cap_blocked | stale_pr_blocked | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
+  "skip_reason": "availability_gate | ssh_key_gate | disk_pressure_gate | freshness_gate | usage_limited | host_capacity_gated | cap_full | lane_cap_blocked | attempt_cap_blocked | stale_pr_blocked | worktree_occupied | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
 }
 ```
 **Semantics:** Emitted once per client per tick. `claimed` is the number of
@@ -339,7 +339,7 @@ full" from "the whole host is out of budget") → `cap_full` (running ≥ cap)
 circuit breaker tripped after consecutive spawn errors, #875) →
 `spawn_error_backoff` (pending tasks exist but all in exponential backoff
 after spawn_error, next_eligible_at in the future) → `no_pending` (nothing
-to claim) → `none` (at least one session spawned). Two values sit outside
+to claim) → `none` (at least one session spawned). Three values sit outside
 this per-client precedence chain, emitted **per task** instead:
 `attempt_cap_blocked` (payload carries `ticket_id`) when the attempt
 ceiling parks a task, additionally carrying `attempt_ceiling` (int) — the
@@ -348,13 +348,21 @@ ceiling parks a task, additionally carrying `attempt_ceiling` (int) — the
 lane may have overridden the global value. `stale_pr_blocked` (#1862) when
 the pre-dispatch open-PR gate parks a PLAN/IMPL-stage task whose branch
 already carries an open, unmerged PR — payload carries `ticket_id`, no
-`attempt_ceiling`.
+`attempt_ceiling`. `worktree_occupied` (#2077) when a PENDING task's
+per-ticket worktree is currently held by a live session or daemon worker —
+caught either by the pre-claim occupancy screen (before the row is claimed)
+or by a genuinely-live `HookContextConflictError` during spawn (after a claim
+that must now be released) — payload carries `ticket_id`, no
+`attempt_ceiling`. The pre-existing post-claim `WorktreeOccupiedError`
+release (#2213) emits the same event. None of these is a failure: no attempt
+is charged and the lane circuit breaker is not incremented.
 
 Optional extra keys, grouped by which skip-reason path emits them: `lanes`
 (per-lane breakdown) is present on the main claim-loop tick and every
 per-client skip path (`availability_gate`, `ssh_key_gate`,
 `disk_pressure_gate`, `freshness_gate`, `usage_limited`), but absent on the
-two per-task ticks (`attempt_cap_blocked`, `stale_pr_blocked`).
+three per-task ticks (`attempt_cap_blocked`, `stale_pr_blocked`,
+`worktree_occupied`).
 `lane_occupants` (`dict[str, list[{"ticket_id": str, "status": str}]]`, a
 top-level key — deliberately *not* nested inside `lanes`, since
 `orchestrate.py`'s `_extract_lanes` hard-filters `lanes` values to

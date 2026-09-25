@@ -887,7 +887,8 @@ def _gate2_candidate_path(tmp_path: Path, location: str) -> str:
 def _gate2_session(tmp_path: Path) -> str:
     """A ``$CW_SESSION`` unique to *tmp_path* (#2141 round 4).
 
-    Gate 2's fence hard-codes ``/tmp/gate-wt-$CW_SESSION``, so the session id
+    Gate 2's fence hard-codes ``${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION``,
+    so the session id
     is what keeps two concurrently-running tests (or a stale run's leftovers)
     from sharing one detached worktree. Derived from the full ``tmp_path``
     rather than its basename, which repeats across parametrized cases.
@@ -1070,7 +1071,7 @@ def _run_gate2_fence(
         (global_scripts / _GATE2_SCRIPT).write_text(global_copy, encoding="utf-8")
 
     session = _gate2_session(tmp_path)
-    tmpwt = Path(f"/tmp/gate-wt-{session}")
+    tmpwt = Path(f"/var/tmp/cw-gate-wt-{session}")
     if gate_worktree:
         git_in(repo, "worktree", "add", "--detach", str(tmpwt), _GATE2_BRANCH)
 

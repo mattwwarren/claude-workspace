@@ -141,6 +141,39 @@ Bias: peek aggressively (free), stop conservatively (real cost on false
 positives). Only stop when the peek confirms the session can't produce
 useful work.
 
+## Row/session mismatch: wait vs. wedge
+
+A dev-queue row reading `pending`/`blocked` while its resolved session shows
+`active` looks identical for two opposite-severity conditions (#2077):
+
+- **A true wedge**: the session stopped making progress and the row is stuck
+  behind it.
+- **A healthy self-resolving race**: the dispatcher already released its own
+  claim on this ticket (the pre-claim occupancy screen, or a genuinely-live
+  `HookContextConflictError` deferral) because the SAME ticket's own live
+  session still holds the per-ticket worktree — not the mismatch's fault, and
+  it clears on its own once that session finishes. A `dispatch.tick` event
+  with `skip_reason=worktree_occupied` for the ticket is the dispatcher's own
+  record of this.
+
+Do not default to "wedge" on the mismatch alone. Corroborate with the SAME
+liveness signals `cw queue peek` and `cw doctor`'s wedge detector already
+compute:
+
+- `idle_m` at or below `IDLE_LIVE_MAX_MIN` (`src/cw/queue_peek.py`,
+  "demonstrably writing," #2044) — the session is actively producing.
+- The session's `surface_ref` present in the daemon roster, and/or
+  `Session.liveness_bucket` (`cw.reconcile.liveness._classify_liveness_bucket`,
+  consulted by `cw doctor`'s wedge checks) reading live/active rather than
+  stale-in-roster or roster-absent.
+
+A live, writing session that also passes roster corroboration is **WAIT**,
+never a wedge — closing it destroys real in-progress work to "fix" a state
+mismatch that was never broken. Only read the mismatch as a true wedge when
+`idle_m` crosses the ladder's existing stall thresholds (rules 5/6 above) OR
+the session is absent from the roster altogether — the same evidence the
+ladder's rule 10 liveness gate already requires before any STOP.
+
 ## Acting on recommendations
 
 The command never executes stops. After reading the report:

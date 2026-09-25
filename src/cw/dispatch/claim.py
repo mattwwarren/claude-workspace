@@ -222,6 +222,27 @@ def _emit_stale_dispatch_blocked_event(client_name: str, ticket_id: str) -> None
     )
 
 
+def _emit_worktree_occupied_skip_event(client_name: str, ticket_id: str) -> None:
+    """Emit a dispatch.tick event when a ticket's worktree/hook-context is
+    held by a live session or daemon worker (#2077).
+
+    Sibling of _emit_stale_dispatch_blocked_event: per-task, outside the
+    precedence chain, no SESSION_NEEDS_ATTENTION sibling -- nothing here
+    needs operator action, the condition resolves itself. Shared by the
+    pre-claim occupancy screen, the genuinely-live HookContextConflictError
+    release, and the pre-existing WorktreeOccupiedError release.
+    """
+    record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {
+            "client": client_name,
+            "claimed": 0,
+            "skip_reason": DispatchSkipReason.WORKTREE_OCCUPIED,
+            "ticket_id": ticket_id,
+        },
+    )
+
+
 def _emit_stale_dispatch_attention_event(
     task: TicketTask, client_name: str, lane: str
 ) -> None:
@@ -330,6 +351,50 @@ def _is_backstop_exempt(task: TicketTask) -> bool:
     return task.usage_limit_act is not None or _is_fix_dispatch_held(task)
 
 
+def resolve_occupied_ticket_ids(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    daemon: NativeDaemonClient,
+    warned_unresolvable: set[UnresolvablePathWarningKey] | None = None,
+) -> dict[str, str]:
+    """Ticket ids (with occupancy reason) whose per-ticket worktree a live
+    session/worker already holds (#2077).
+
+    Resolved once per client per tick, lock-free, BEFORE any row is
+    claimed -- mirrors the #1862 stale-PR-ticket-ids precompute
+    (cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids): _claim_next_pending
+    runs under dev_queue_lock() and must make no I/O of its own. Unlike
+    that sibling this makes no gh call -- only the same local reads (cw
+    session state, the daemon roster) create_worktree's reuse-refresh and
+    the stale-worktree claim handler already consult via
+    live_home_reason -- so it always runs, with no feature-flag escape
+    hatch.
+
+    Scans every PENDING task for *client* across all lanes and stages
+    (occupancy is per-ticket, not per-lane: a ticket's worktree is the
+    same path across its whole pipeline). A task with no worktree
+    created yet resolves to a nonexistent path that matches no live
+    home, so it is never falsely reported occupied.
+
+    Returns the occupancy REASON per ticket (not just membership) so the
+    pre-claim screen's warning log can name it, matching the shape the
+    post-claim occupancy handlers already log.
+    """
+    occupied: dict[str, str] = {}
+    for task in queue_snapshot.tasks:
+        if task.client != client.name or task.status != QueueItemStatus.PENDING:
+            continue
+        branch = f"{client.feature_branch_prefix}/{task.ticket_id}"
+        wt_path = worktree_path_for(client, branch)
+        reason = live_home_reason(
+            wt_path, daemon=daemon, warned_unresolvable=warned_unresolvable
+        )
+        if reason is not None:
+            occupied[task.ticket_id] = reason
+    return occupied
+
+
 # _screen_and_claim outcomes. "skipped" covers every held/parked case the two
 # claim loops treat identically (move to the next candidate, no flag raised).
 _CLAIM_CLAIMED = "claimed"
@@ -345,6 +410,7 @@ def _screen_and_claim(
     client: ClientConfig,
     config: OrchestratorConfig,
     stale_pr_ticket_ids: frozenset[str],
+    occupied_ticket_reasons: dict[str, str],
     store: DevQueueStore,
     now: datetime,
 ) -> str:
@@ -353,11 +419,31 @@ def _screen_and_claim(
     The identical screen-then-claim sequence both claim loops (priority and
     plain) run per candidate, extracted (#2075) so the fix-dispatch hold could
     be added without pushing ``_claim_next_pending`` past its PLR0912 branch
-    budget. Screens in precedence order — spawn-error backoff, fix-dispatch
-    hold, stale-PR gate, attempt ceiling — then claims. Parking paths save the
-    store themselves (``_park_stale_pr_task`` and the ceiling park below), as
-    does the successful claim; a screened-out candidate writes nothing.
+    budget. Screens in precedence order — worktree occupancy (#2077),
+    spawn-error backoff, fix-dispatch hold, stale-PR gate, attempt ceiling —
+    then claims. Parking paths save the store themselves
+    (``_park_stale_pr_task`` and the ceiling park below), as does the
+    successful claim; a screened-out candidate writes nothing.
+
+    The occupancy screen runs first: it is the most fundamental precondition
+    (a second worker must never be spawned into a live worktree) and needs no
+    store write -- the row simply stays PENDING, unclaimed and uncharged, for
+    the next tick's fresh precompute to reconsider.
     """
+    occupied_reason = occupied_ticket_reasons.get(task.ticket_id)
+    if occupied_reason is not None:
+        branch = f"{client.feature_branch_prefix}/{task.ticket_id}"
+        wt_path = worktree_path_for(client, branch)
+        _emit_worktree_occupied_skip_event(client_name, task.ticket_id)
+        _log.warning(
+            "dispatch_tick: worktree %s for %s/%s is occupied (%s); leaving"
+            " it PENDING for a later tick (not claimed)",
+            wt_path,
+            client_name,
+            task.ticket_id,
+            occupied_reason,
+        )
+        return _CLAIM_SKIPPED
     if task.next_eligible_at is not None and now < task.next_eligible_at:
         return _CLAIM_BACKOFF
     if _is_fix_dispatch_held(task):
@@ -391,6 +477,7 @@ def _claim_next_pending(
     priority_ticket_ids: list[str] | None = None,
     usage_limited_until: datetime | None = None,
     stale_pr_ticket_ids: frozenset[str] = frozenset(),
+    occupied_ticket_reasons: dict[str, str] | None = None,
 ) -> tuple[TicketTask | None, bool]:
     """Atomically claim the next PENDING task for a client in a specific lane.
 
@@ -443,6 +530,17 @@ def _claim_next_pending(
     call. Defaults to the empty set, so any caller that has not resolved the
     gate simply keeps today's behaviour.
 
+    *occupied_ticket_reasons* (GitHub #2077): ticket id -> occupancy reason for
+    every ticket whose per-ticket worktree a live session or daemon worker
+    already holds. A task named here is left PENDING -- never claimed, no
+    attempt charged, no backoff stamped -- instead of being claimed and then
+    released when ``create_worktree`` or the hook-context write discovers the
+    conflict. Resolved once per client per tick by
+    :func:`resolve_occupied_ticket_ids` and passed in precomputed for the same
+    no-I/O-under-the-lock reason as *stale_pr_ticket_ids*. ``None`` (the
+    default) screens nothing, so any caller that has not resolved it keeps
+    the post-claim occupancy handling as its only guard.
+
     Returns a tuple (task, spawn_backoff_skipped) where spawn_backoff_skipped
     is True when at least one PENDING task was skipped due to active
     spawn_error backoff (next_eligible_at in the future). See GitHub #868.
@@ -461,6 +559,7 @@ def _claim_next_pending(
     # no I/O -- reading the file here would break that invariant.
     if usage_limited_until is not None and now < usage_limited_until:
         return None, False
+    reasons = occupied_ticket_reasons if occupied_ticket_reasons is not None else {}
     with dev_queue_lock():
         store = load_dev_queue()
         spawn_backoff_skipped = False
@@ -480,6 +579,7 @@ def _claim_next_pending(
                             client=client,
                             config=config,
                             stale_pr_ticket_ids=stale_pr_ticket_ids,
+                            occupied_ticket_reasons=reasons,
                             store=store,
                             now=now,
                         )
@@ -506,6 +606,7 @@ def _claim_next_pending(
                 client=client,
                 config=config,
                 stale_pr_ticket_ids=stale_pr_ticket_ids,
+                occupied_ticket_reasons=reasons,
                 store=store,
                 now=now,
             )
@@ -609,7 +710,10 @@ class _SpawnOutcome:
     ``spawn_error`` — True if a broad spawn failure reverted the task.
     ``occupied`` — True if the reused worktree was occupied by a live cw session
     or daemon worker (``WorktreeOccupiedError``, #2213) and the claim was
-    released without a spawn. Deliberately decoupled from ``spawn_error``: an
+    released without a spawn -- or, since #2077, the hook-context write found
+    it held by a genuinely live session (a ``HookContextConflictError`` with
+    ``genuinely_live`` set, see :func:`_defer_genuinely_live_hook_conflict`),
+    which reuses this same field. Deliberately decoupled from ``spawn_error``: an
     occupied worktree is a transient, per-ticket condition, not the sporadic
     backend failure the circuit breaker exists to catch, so it neither
     increments the lane's spawn-error count nor aborts the rest of the tick's
@@ -1262,7 +1366,9 @@ def _defer_occupied_claim(
     and NOT ``spawn_error``, so the lane circuit breaker never counts it -- a
     long-lived occupant would otherwise pause the whole lane over a per-ticket
     condition. The reason is recorded in the log, in ``_SpawnOutcome.error`` and
-    on the operator's emit line.
+    on the operator's emit line, and a ``dispatch.tick`` event with
+    ``skip_reason=worktree_occupied`` is emitted through the emitter the #2077
+    pre-claim screen shares.
     """
     _log.warning(
         "dispatch_tick: worktree %s for %s/%s is occupied (%s); not spawning, "
@@ -1272,6 +1378,7 @@ def _defer_occupied_claim(
         task.ticket_id,
         exc.reason,
     )
+    _emit_worktree_occupied_skip_event(client.name, task.ticket_id)
     _revert_claimed_task_to_pending(
         client.name,
         task.ticket_id,
@@ -1284,6 +1391,96 @@ def _defer_occupied_claim(
             f" ({exc.reason}); deferred, not spawned"
         )
     return _SpawnOutcome(occupied=True, error=exc.reason)
+
+
+def _defer_genuinely_live_hook_conflict(
+    task: TicketTask,
+    client: ClientConfig,
+    exc: HookContextConflictError,
+    *,
+    emit: Callable[[str], None] | None,
+) -> _SpawnOutcome:
+    """Release a claim whose hook context is held by a genuinely live
+    session (#2077) -- sibling of _defer_occupied_claim for the
+    DAEMON-conflict branch of HookContextConflictError.
+
+    The residual race the pre-claim occupancy screen cannot close: the
+    screen's precompute found the worktree free, but by the time the
+    executor wrote its hook context a live session was homed there. Same
+    no-charge, no-breaker release as _defer_occupied_claim.
+
+    Deliberately does NOT stamp hook_context_conflict_session_id (unlike
+    the non-live branch in _spawn_claimed_task): that field's only consumer
+    (reconcile/concierge.py recipe 1) reads it as "only an operator
+    closing the session clears this" -- wrong semantics for a condition
+    that resolves itself. Recipe 1 only evaluates BLOCKED_ON_USER rows;
+    this revert leaves the row PENDING, so the stamp would only matter if a
+    LATER, unrelated park inherited it -- which omitting it here prevents.
+    """
+    _log.warning(
+        "dispatch_tick: hook context for %s/%s is held by genuinely live"
+        " session %s; not spawning, returning the task to PENDING for a"
+        " later tick",
+        client.name,
+        task.ticket_id,
+        exc.conflicting_session_id,
+    )
+    _revert_claimed_task_to_pending(
+        client.name,
+        task.ticket_id,
+        defer_for=timedelta(seconds=_OCCUPIED_DEFER_SECONDS),
+        created_at=task.created_at,
+    )
+    _emit_worktree_occupied_skip_event(client.name, task.ticket_id)
+    if emit is not None:
+        emit(
+            f"OCCUPIED {client.name}/{task.ticket_id} hook_context held"
+            f" by live session={exc.conflicting_session_id}; deferred,"
+            " not spawned"
+        )
+    return _SpawnOutcome(occupied=True, error=str(exc))
+
+
+def _handle_hook_context_conflict(
+    task: TicketTask,
+    client: ClientConfig,
+    exc: HookContextConflictError,
+    *,
+    emit: Callable[[str], None] | None,
+) -> _SpawnOutcome:
+    """Route a ``HookContextConflictError`` from the spawn path.
+
+    Must be called from inside the ``except`` clause (``_log.exception``
+    below relies on the active exception). Extracted from
+    :func:`_spawn_claimed_task` to keep it inside its PLR0911 return budget
+    once the #2077 genuinely-live branch was added.
+
+    A genuinely live occupant (#2077) is a self-resolving wait, not a spawn
+    failure: :func:`_defer_genuinely_live_hook_conflict` releases it without
+    a charge or a breaker increment. Otherwise behaviour is deliberately
+    identical to the broad spawn-failure path (revert to PENDING with the
+    #868 backoff); the ONLY addition is recording WHICH session's live
+    cw-context.json blocked the worktree, so concierge recipe 1 can stop
+    requeuing a row that cannot spawn until that session is closed (GitHub
+    #1674). The refusal itself lives there, not here.
+    """
+    if exc.genuinely_live:
+        return _defer_genuinely_live_hook_conflict(task, client, exc, emit=emit)
+    _log.exception(
+        "dispatch_tick: hook-context conflict for %s/%s"
+        " (blocking session=%s); reverting task to PENDING",
+        client.name,
+        task.ticket_id,
+        exc.conflicting_session_id,
+    )
+    _revert_claimed_task_to_pending(
+        client.name,
+        task.ticket_id,
+        stamp_backoff=True,
+        hook_context_conflict_session_id=exc.conflicting_session_id,
+        created_at=task.created_at,
+    )
+    return _SpawnOutcome(spawn_error=True, error=str(exc))
 
 
 def _raise_if_stale_tree_occupied(
@@ -1559,27 +1756,8 @@ def _spawn_claimed_task(
     except HookContextConflictError as exc:
         # Narrow catch ahead of the broad handler below (order matters —
         # HookContextConflictError is a plain CwError subclass and would
-        # otherwise fall through). Behaviour is deliberately identical to the
-        # broad path (revert to PENDING with the #868 backoff); the ONLY
-        # addition is recording WHICH session's live cw-context.json blocked
-        # the worktree, so concierge recipe 1 can stop requeuing a row that
-        # cannot spawn until that session is closed (GitHub #1674). The
-        # refusal itself lives there, not here.
-        _log.exception(
-            "dispatch_tick: hook-context conflict for %s/%s"
-            " (blocking session=%s); reverting task to PENDING",
-            client.name,
-            task.ticket_id,
-            exc.conflicting_session_id,
-        )
-        _revert_claimed_task_to_pending(
-            client.name,
-            task.ticket_id,
-            stamp_backoff=True,
-            hook_context_conflict_session_id=exc.conflicting_session_id,
-            created_at=task.created_at,
-        )
-        return _SpawnOutcome(spawn_error=True, error=str(exc))
+        # otherwise fall through). See _handle_hook_context_conflict.
+        return _handle_hook_context_conflict(task, client, exc, emit=emit)
     except WorktreeOccupiedError as exc:
         # Narrow catch ahead of the broad handler (order matters -- this is a
         # WorktreeError and would otherwise be reverted WITH a spawn-error

@@ -94,6 +94,7 @@ from cw.worktree._refresh import (
     _reuse_occupancy,
     _sync_reused_submodules,
     _warn_unresolvable_path_once,
+    is_genuinely_live_home_reason,
     live_home_reason,
     live_session_worktree_paths,
 )
@@ -193,6 +194,7 @@ __all__ = [
     "fetch_default_branch",
     "fetch_feature_branch",
     "get_head_branch",
+    "is_genuinely_live_home_reason",
     "is_main_behind_origin",
     "is_main_checkout_dirty",
     "live_home_reason",

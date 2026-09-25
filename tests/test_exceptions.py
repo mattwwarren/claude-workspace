@@ -123,6 +123,22 @@ class TestHookContextConflictError:
 
         assert err.conflicting_session_id is None
 
+    def test_carries_genuinely_live_when_provided(self) -> None:
+        from cw.exceptions import HookContextConflictError
+
+        err = HookContextConflictError(
+            "msg", conflicting_session_id="sess-1", genuinely_live=True
+        )
+
+        assert err.genuinely_live is True
+
+    def test_genuinely_live_defaults_to_false(self) -> None:
+        from cw.exceptions import HookContextConflictError
+
+        err = HookContextConflictError("msg")
+
+        assert err.genuinely_live is False
+
 
 class TestAmbiguousSessionIdentifierError:
     """#2237: an ambiguous session-name match lists every candidate."""

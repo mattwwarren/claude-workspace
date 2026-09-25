@@ -577,6 +577,11 @@ class DispatchSkipReason(StrEnum):
     STALE_PR_BLOCKED (#1862) is likewise per-task and outside the precedence
     chain: it is emitted when the pre-dispatch open-PR gate parks a PLAN/IMPL-
     stage task whose branch already carries an open, unmerged PR.
+    WORKTREE_OCCUPIED (#2077) is likewise per-task and outside the precedence
+    chain: emitted when a PENDING task's per-ticket worktree is currently held
+    by a live session or daemon worker -- caught either before the row is
+    claimed (the pre-claim occupancy screen) or by a genuinely-live
+    ``HookContextConflictError`` release during spawn.
     HOST_CAPACITY_GATED ranks just above CAP_FULL (#1444): a fleet-wide
     ``OrchestratorConfig.host_session_budget`` ceiling on concurrently-running
     DAEMON sessions across the whole host, folded into the per-client
@@ -595,6 +600,7 @@ class DispatchSkipReason(StrEnum):
     LANE_CAP_BLOCKED = "lane_cap_blocked"
     ATTEMPT_CAP_BLOCKED = "attempt_cap_blocked"
     STALE_PR_BLOCKED = "stale_pr_blocked"
+    WORKTREE_OCCUPIED = "worktree_occupied"
     SPAWN_ERROR = "spawn_error"
     LANE_CIRCUIT_PAUSED = "lane_circuit_paused"
     SPAWN_ERROR_BACKOFF = "spawn_error_backoff"

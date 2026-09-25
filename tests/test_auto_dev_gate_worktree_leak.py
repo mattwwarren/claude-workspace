@@ -18,14 +18,14 @@ from tests.conftest import _cmd
 def test_impl_gate_worktree_path_keyed_on_session_not_pid() -> None:
     """auto-dev-impl.md: TMPWT must be keyed on $CW_SESSION, never bare $$."""
     content = _cmd("auto-dev-impl.md")
-    assert '"/tmp/gate-wt-$CW_SESSION"' in content
+    assert '"${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"' in content
     assert '"/tmp/gate-wt-$$"' not in content
 
 
 def test_auto_dev_gate_worktree_path_keyed_on_session_not_pid() -> None:
     """auto-dev.md: TMPWT must be keyed on $CW_SESSION, never bare $$."""
     content = _cmd("auto-dev.md")
-    assert '"/tmp/gate-wt-$CW_SESSION"' in content
+    assert '"${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"' in content
     assert '"/tmp/gate-wt-$$"' not in content
 
 

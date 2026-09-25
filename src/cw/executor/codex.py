@@ -29,12 +29,15 @@ from cw.models import (
     StageExecutorConfig,
     TicketTask,
 )
+from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.spawn import _write_hook_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from cw.native_daemon import NativeDaemonClient
 
 # Session-level CodexExecutor pre-flight blocker reason code (RFC 0005 F1);
 # its sibling CODEX_NOT_FOUND lives in cw.executor.core, shared with the
@@ -72,8 +75,13 @@ class CodexExecutor:
         config: StageExecutorConfig,
         runner: CodexRunner | None = None,
         background: Callable[[Callable[[], None]], None] | None = None,
+        native_daemon: NativeDaemonClient | None = None,
     ) -> None:
         self._config = config
+        # Mirrors ClaudeNativeExecutor.native_daemon (#2077): threaded into
+        # _write_hook_context so its DAEMON-conflict branch can corroborate a
+        # prior session's liveness against the caller's own daemon client.
+        self._native_daemon = native_daemon
         self._runner: CodexRunner = runner if runner is not None else RealCodexRunner()
         # Testability seam for the threading handoff: tests inject
         # ``lambda fn: fn()`` to run the review inline and keep their
@@ -116,6 +124,7 @@ class CodexExecutor:
         # there is no Claude turn loop here to signal-stop. Called ahead of
         # the pre-flight branch below so even a CODEX_REVIEW_ONLY/
         # CODEX_NOT_FOUND park is covered.
+        daemon = self._native_daemon or get_native_daemon_client()
         try:
             _write_hook_context(
                 worktree,
@@ -131,6 +140,7 @@ class CodexExecutor:
                 workspace_path=client.workspace_path,
                 lane=task.lane,
                 write_stop_hook=False,
+                daemon=daemon,
             )
         except Exception:
             # #2280: sess is already persisted ACTIVE above -- a raise here
