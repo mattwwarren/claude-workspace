@@ -334,25 +334,24 @@ def _raise_stage_not_in_pipeline(
     raise ApproveGateError(msg)
 
 
-def _require_approval_session(ticket_id: str, task: TicketTask) -> Session:
-    """Return the session that parked *task*, or raise ``ApproveGateError``.
+def _raise_if_not_at_approval_gate(
+    ticket_id: str, session: Session, task: TicketTask
+) -> None:
+    """Raise ``ApproveGateError`` unless *task* is at an approval gate.
 
     Extracted to keep ``_approve_ticket_locked`` under ruff's PLR0915
     statement-count gate, like ``_raise_stage_not_in_pipeline`` above.
     """
-    from cw.config import load_state
-
-    session = None
-    if task.session_id is not None:
-        session = load_state().find_by_name_or_id(task.session_id)
-    if session is None:
-        msg = (
-            f"Cannot approve ticket '{ticket_id}': session not found"
-            f" (session_id={task.session_id!r}). The session may have been"
-            " cleaned up. Use 'requeue' to re-run the stage."
-        )
-        raise ApproveGateError(msg)
-    return session
+    if not _not_at_approval_gate(session, task):
+        return
+    actual = session.last_result.get("status") if session.last_result else None
+    msg = (
+        f"Cannot approve ticket '{ticket_id}': not at an approval gate"
+        f" (disposition={task.disposition!r}, last_result status={actual!r})."
+        " Expected disposition 'approval_gate', or last_result status one of:"
+        " plan_pending_approval, review_pending_approval."
+    )
+    raise ApproveGateError(msg)
 
 
 def _approve_ticket_locked(
@@ -423,6 +422,7 @@ def _approve_ticket_locked(
             failed on I/O.
         CwError: if no matching task is found.
     """
+    from cw.config import load_state
     from cw.dispatch import (
         _park_signoff_gate,
         _should_force_hold_finalize,
@@ -469,17 +469,20 @@ def _approve_ticket_locked(
             "plan_promoted": False,
         }
 
-    session = _require_approval_session(ticket_id, task)
+    state = load_state()
+    session = None
+    if task.session_id is not None:
+        session = state.find_by_name_or_id(task.session_id)
 
-    if _not_at_approval_gate(session, task):
-        actual = session.last_result.get("status") if session.last_result else None
+    if session is None:
         msg = (
-            f"Cannot approve ticket '{ticket_id}': not at an approval gate"
-            f" (disposition={task.disposition!r}, last_result status={actual!r})."
-            " Expected disposition 'approval_gate', or last_result status one of:"
-            " plan_pending_approval, review_pending_approval."
+            f"Cannot approve ticket '{ticket_id}': session not found"
+            f" (session_id={task.session_id!r}). The session may have been"
+            " cleaned up. Use 'requeue' to re-run the stage."
         )
         raise ApproveGateError(msg)
+
+    _raise_if_not_at_approval_gate(ticket_id, session, task)
 
     if task.stage == stages[-1]:
         msg = (
