@@ -41,6 +41,7 @@ _PLAN_APPROVED_MARKER = "<!-- auto-dev-plan-approved -->"
 # -->`), which is what makes exact-string containment a sufficient dedup.
 _PLAN_APPROVED_MARKER_BOUND = "<!-- auto-dev-plan-approved: {fingerprint} -->"
 
+
 def _plan_approved_marker(fingerprint: str | None) -> str:
     """The marker to post (and match) for an approval bound to *fingerprint*.
 
