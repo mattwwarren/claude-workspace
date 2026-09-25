@@ -181,6 +181,14 @@ result per the two cases below:
 
 **A `/prep-pr` invocation blocked by the harness's own permission classifier** is rare — the known limitation (#636, deferred) and why neither the `Bash(gh pr:*)` allowlist nor a per-spawn `bypassPermissions` suppresses it live in `.claude/commands/auto-dev-finalize-appendix.md`, section "Step 4c.2: the `auto` permission-mode limitation, and the no-`/ship-it` block". Read it now if `/prep-pr` blocked on a permission prompt; the block surfaces as a BLOCK for manual ship either way.
 
+**Compose the PR title in the parent finalize worktree before spawning (#2362):** with no `--title`, `ship-it.md`'s Step 3 Tier 3 titles the whole branch after its first substantive commit — usually a building block, not the change being shipped (#2358, #2361). Finalize decides the real title instead and passes it through `/prep-pr --title`, which `ship-it.md`'s Tier 1 already honors unconditionally ahead of every other tier. The parent must perform the reads and composition below before spawning; do not defer them to the child, because an interactive `isolation: "worktree"` child cannot see the parent's `.cw` artifacts.
+
+1. Read `.cw/plan.md`. If it contains a `## Summary` heading, take the text between that heading and the next `##` heading, trimmed.
+2. If `.cw/plan.md` is absent or has no `## Summary` section, fall back to `.cw/context.json`'s `ticket_title` field.
+3. Compose `PR_TITLE` as `<type>(<scope>): <summary>`, choosing `type`/`scope` with ordinary conventional-commit judgment — the same judgment `auto-dev-impl.md` already applies when composing a commit message — characterizing the whole branch's change, not one commit. Truncate the pre-suffix portion to 72 characters (`cut -c1-72`), mirroring `ship-it.md`'s own Tier 5 truncation.
+4. Append `(#<ticket_id>)` to `PR_TITLE` only when `ticket_id` is GitHub-numeric — the same guard `ship-it.md`'s `CLOSES_TRAILER`/Tier 5 already use: `grep -qE '^[0-9]+$'`. Leave it off for a Linear id or a ticket-less interactive run.
+5. Before spawning, render the resulting `PR_TITLE` to its concrete, shell-quoted literal value. Put that literal in the child prompt and every `/prep-pr` invocation below; the child must not read `.cw/plan.md`/`.cw/context.json`, assign its own title, or receive an unresolved title-variable placeholder.
+
 **Agent prompt must include:**
 - Branch name, fork point SHA (from Checkpoint 2), and ticket ID
 - Instruction to re-checkout the branch from origin AND refresh with main:
@@ -221,11 +229,11 @@ result per the two cases below:
   ```
   If the push fails, or the verify comparison mismatches → do NOT invoke `/prep-pr`. STOP and return a BLOCK whose text includes the verbatim push failure output (or the mismatch detail) — the Unavailability classifier below inspects that text and, on a signature match, emits the `push_auth_failed` sentinel via the existing template (`stage_reached: "stage4b_pr_create"`); otherwise it falls through to a generic `agent_block` per the "Any other agent BLOCK" gate-collapse row.
   This `git push` has no `timeout` wrapper — no push site in this file family does (#1414 R9: accepted residual risk, consistent with `ship-it.md`'s push and `prep-pr.md`'s own Step 1 push).
-- Instruction to invoke `/prep-pr --skip-review --base main` via the Skill tool. **If the user chose Force at Step 4a (stacking onto an open pipeline PR), append `--draft`** so `/prep-pr` passes it through to the project's `/ship-it` (its Step 8 supports `--draft` pass-through). The PR must stay a draft until the parent merges. `--skip-review` is required: Stage 3 already ran the full scope-aware review set, and `/prep-pr`'s thinner pass would double up.
+- The concrete, shell-quoted `PR_TITLE` literal composed above, and an instruction to invoke `/prep-pr --skip-review --base main --title "<the exact rendered PR_TITLE literal>"` via the Skill tool. Replace the angle-bracket notation with that literal before sending the prompt — never send an unresolved title variable. **If the user chose Force at Step 4a (stacking onto an open pipeline PR), append `--draft`** so `/prep-pr` passes it through to the project's `/ship-it` (its Step 8 supports `--draft` pass-through). The PR must stay a draft until the parent merges. `--skip-review` is required: Stage 3 already ran the full scope-aware review set, and `/prep-pr`'s thinner pass would double up.
 
   **Headless:** when finalize itself runs headless (`--headless` in "$ARGUMENTS"), the `/prep-pr` invocation MUST include `--headless` so the flag propagates down the `prep-pr` → `ship-it` chain and every interactive gate collapses per the gate-collapse table:
-  - Plain case: `/prep-pr --skip-review --base main --headless`
-  - Force + `--draft` case (stacking onto an open pipeline PR): `/prep-pr --skip-review --base main --headless --draft`
+  - Plain case: `/prep-pr --skip-review --base main --headless --title "<the exact rendered PR_TITLE literal>"`
+  - Force + `--draft` case (stacking onto an open pipeline PR): `/prep-pr --skip-review --base main --headless --draft --title "<the exact rendered PR_TITLE literal>"`
 
   Instruct the subagent explicitly: any interactive prompt in the delegated chain that cannot be auto-resolved (`/prep-pr`'s Step-7 "Ship anyway" gate, a project `ship-it.md`'s tag confirmation) MUST surface as `agent_block` per the gate-collapse table (`docs/headless-contract.md` §2, "Any other agent BLOCK") — NEVER silently skipped.
 - **Required deliverable:** the JSON output of `~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --json`, run from the worktree after `/prep-pr` returns. The friction report MUST paste this JSON verbatim — never summarized.
