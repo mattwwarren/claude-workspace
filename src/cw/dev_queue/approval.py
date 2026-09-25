@@ -44,6 +44,7 @@ from cw.gh import branch_head_sha_on_origin
 from cw.models import (
     PLAN_APPROVED_FINGERPRINT_KEY,
     PLAN_DRAFT_FINGERPRINT_KEY,
+    PLAN_PROMOTED_KEY,
     SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
     SCOPE_DRIFT_APPROVED_HEAD_KEY,
     OrchestratorEventType,
@@ -253,6 +254,7 @@ def _promote_plan_draft_on_direct_advance(
     client_cfg: ClientConfig,
     *,
     plan_reviewed: bool | None,
+    expected_fingerprint: str | None,
 ) -> bool:
     """Promote the approved plan draft on the direct plan->impl advance (#2342).
 
@@ -265,7 +267,11 @@ def _promote_plan_draft_on_direct_advance(
     """
     if task.stage != Stage.PLAN or plan_reviewed is not None:
         return False
-    return promote_plan_draft(task, client_cfg)
+    return promote_plan_draft(
+        task,
+        client_cfg,
+        expected_fingerprint=expected_fingerprint,
+    )
 
 
 def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
@@ -466,7 +472,7 @@ def _approve_ticket_locked(
             PLAN_APPROVED_FINGERPRINT_KEY: None,
             # Likewise: clearing a signoff gate never approves a plan draft,
             # so there is never a draft for this call to have promoted.
-            "plan_promoted": False,
+            PLAN_PROMOTED_KEY: False,
         }
 
     state = load_state()
@@ -530,7 +536,12 @@ def _approve_ticket_locked(
         plan_requeued = True
     else:
         plan_promoted = _promote_plan_draft_on_direct_advance(
-            task, client_cfg, plan_reviewed=plan_reviewed
+            task,
+            client_cfg,
+            plan_reviewed=plan_reviewed,
+            expected_fingerprint=(session.last_result or {}).get(
+                PLAN_DRAFT_FINGERPRINT_KEY
+            ),
         )
         _advance_task_pointer(task, stages)
     stamped_fingerprint = _stamp_plan_approval(task, from_stage, session)
@@ -564,7 +575,7 @@ def _approve_ticket_locked(
         "plan_requeued": plan_requeued,
         "finalize_held": finalize_held,
         PLAN_APPROVED_FINGERPRINT_KEY: stamped_fingerprint,
-        "plan_promoted": plan_promoted,
+        PLAN_PROMOTED_KEY: plan_promoted,
     }
 
 

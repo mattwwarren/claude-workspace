@@ -14,7 +14,11 @@ from cw.config import get_client, load_orchestrator_config
 from cw.dev_queue import approve_scope_drift_ticket, approve_ticket, resolve_client
 from cw.events import record_event
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments, post_issue_comment
-from cw.models import PLAN_APPROVED_FINGERPRINT_KEY, OrchestratorEventType
+from cw.models import (
+    PLAN_APPROVED_FINGERPRINT_KEY,
+    PLAN_PROMOTED_KEY,
+    OrchestratorEventType,
+)
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
@@ -293,7 +297,7 @@ def dev_queue_approve(
     else:
         promoted_note = (
             " (promoted the approved .cw/plan-draft.md to .cw/plan.md)"
-            if result["plan_promoted"]
+            if result[PLAN_PROMOTED_KEY]
             else ""
         )
         click.echo(
