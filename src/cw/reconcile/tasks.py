@@ -54,6 +54,34 @@ if TYPE_CHECKING:
 
     from cw.models import ClientConfig, Session
 
+# Grace window after Session.completed_at during which revert_timed_out_tasks/
+# revert_completed_silent_tasks leave a RUNNING task untouched, giving
+# consume_completed_sessions()/apply_staged_decision() (dispatch/loop.py,
+# dispatch/routing/__init__.py) a chance to route the row using the
+# session's own already-classified last_result before this generic,
+# last_result-blind worktree-dirty check can pre-empt it with the coarser
+# "dirty_worktree" disposition (#2355). ~2x the default tick_interval_seconds
+# (30s) — long enough to survive one normal dispatch-loop tick plus a slow
+# verdict-comment post, short enough that a genuinely orphaned dirty session
+# is still caught within a minute. Hardcoded, not an OrchestratorConfig
+# field, mirroring _LIVE_WRITER_RESCAN_BACKOFF_SECONDS immediately above.
+_COMPLETION_ROUTING_GRACE_SECONDS = 60
+
+
+def _sessions_past_completion_grace(sessions: list[Session]) -> list[Session]:
+    """Filter out sessions still inside their post-completion routing grace.
+
+    A None completed_at gets no grace (fail-safe: never suppress
+    indefinitely, mirrors _collect_timed_out_merged_candidates's guard).
+    """
+    now = datetime.now(UTC)
+    return [
+        s
+        for s in sessions
+        if s.completed_at is None
+        or (now - s.completed_at).total_seconds() >= _COMPLETION_ROUTING_GRACE_SECONDS
+    ]
+
 
 def _revert_running_tasks_for_sessions(
     session_ids: set[str],
@@ -526,6 +554,7 @@ def revert_timed_out_tasks() -> list[str]:
         for s in state.sessions
         if s.status == SessionStatus.TIMED_OUT and s.origin is SessionOrigin.DAEMON
     ]
+    target_sessions = _sessions_past_completion_grace(target_sessions)
     session_ids = {s.id for s in target_sessions}
     # Pre-read the dev queue (no lock) to identify which sessions have a
     # RUNNING task that will actually be reverted.  Only those sessions get
@@ -591,6 +620,7 @@ def revert_completed_silent_tasks() -> list[str]:
         for s in state.sessions
         if s.status == SessionStatus.COMPLETED and s.origin is SessionOrigin.DAEMON
     ]
+    target_sessions = _sessions_past_completion_grace(target_sessions)
     session_ids = {s.id for s in target_sessions}
     # Pre-read the dev queue (no lock) to identify which sessions have a
     # RUNNING task that will actually be reverted.  Only those sessions get

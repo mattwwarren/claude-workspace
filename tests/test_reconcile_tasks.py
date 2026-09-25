@@ -1812,7 +1812,7 @@ class TestCompleteTimedOutMergedTasks:
             "sess-legacy", ticket_id, completed_at=now - timedelta(hours=1)
         )
         # Override completed_at to None to simulate legacy state
-        session.completed_at = None  # type: ignore[assignment]
+        session.completed_at = None
         save_state(CwState(sessions=[session]))
         save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
 
