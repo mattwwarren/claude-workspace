@@ -11,8 +11,8 @@ reaches.
 
 Lives beside :mod:`cw.codex_fix_loop` rather than inside it for the same reason
 :mod:`cw.codex_fix_loop_convergence` does: that module is already over the
-repo's module-size ceiling. Uses the raw ``subprocess`` idiom the rest of the
-codex fix-loop family uses, not ``cw.worktree._run_git``.
+repo's module-size ceiling. Runs git through the shared :mod:`cw._git` seam
+the rest of the codex fix-loop family uses, not ``cw.worktree._run_git``.
 
 Every failure surfaces as ``subprocess.CalledProcessError`` — the real one from
 ``git push``, or a synthetic one for a failed tip verification — so the fix
@@ -24,7 +24,7 @@ from __future__ import annotations
 import subprocess
 from typing import TYPE_CHECKING
 
-from cw._git import git_clean_env
+from cw._git import git_output, run_git
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,23 +45,16 @@ def remote_branch_tip(worktree: Path, branch: str) -> str | None:
     fetch never falls back to a stale local tracking ref: a stale ref equal to
     HEAD would falsely report the branch as pushed.
     """
-    fetch = subprocess.run(
-        ["git", "fetch", "origin", branch],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-        check=False,
-        env=git_clean_env(),
+    fetch = run_git(
+        ["fetch", "origin", branch], cwd=worktree, capture_output=True, check=False
     )
     if fetch.returncode != 0:
         return None
-    resolved = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"origin/{branch}"],
+    resolved = run_git(
+        ["rev-parse", "--verify", "--quiet", f"origin/{branch}"],
         cwd=worktree,
         capture_output=True,
-        text=True,
         check=False,
-        env=git_clean_env(),
     )
     return resolved.stdout.strip() or None
 
@@ -73,12 +66,7 @@ def push_and_verify_head(worktree: Path, expected_sha: str) -> None:
     git's own stdout/stderr), when HEAD is detached, or when the fetched
     ``origin/<branch>`` does not equal *expected_sha* after a successful push.
     """
-    branch = subprocess.check_output(
-        ["git", "branch", "--show-current"],
-        cwd=worktree,
-        text=True,
-        env=git_clean_env(),
-    ).strip()
+    branch = git_output(["branch", "--show-current"], cwd=worktree).strip()
     if not branch:
         raise subprocess.CalledProcessError(
             1,
@@ -86,13 +74,11 @@ def push_and_verify_head(worktree: Path, expected_sha: str) -> None:
             output="",
             stderr=_SYNTHETIC_DETACHED,
         )
-    subprocess.run(
-        ["git", "push", "origin", f"HEAD:refs/heads/{branch}"],
+    run_git(
+        ["push", "origin", f"HEAD:refs/heads/{branch}"],
         cwd=worktree,
         capture_output=True,
-        text=True,
         check=True,
-        env=git_clean_env(),
     )
     origin_sha = remote_branch_tip(worktree, branch)
     if origin_sha != expected_sha:
