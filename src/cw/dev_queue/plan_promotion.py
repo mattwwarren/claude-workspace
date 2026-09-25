@@ -16,7 +16,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import logging
 import re
 from typing import TYPE_CHECKING
 
@@ -43,8 +42,6 @@ _SETTLED_LINE = re.compile(
     r"(?:A[0-9]+: (?:ADOPTED|ALT-[a-z])|"
     r"P[0-9]+: (?:CONFIRMED|REFUTED|DEFERRED)) -->\n?"
 )
-
-_log = logging.getLogger(__name__)
 
 
 def _draft_fingerprint(text: str) -> str:
@@ -123,21 +120,7 @@ def _write_recovery_record(
         "recovery_required": True,
     }
     serialized = json.dumps(payload, sort_keys=True) + "\n"
-    try:
-        atomic_write_text(recovery_path, serialized)
-    except Exception:  # noqa: BLE001
-        # Keep the original approval failure authoritative. The fallback is
-        # deliberately non-atomic: it is only used when the atomic writer
-        # itself is unavailable, and leaves an operator-visible record if the
-        # filesystem still permits one.
-        try:
-            recovery_path.write_text(serialized, encoding="utf-8")
-        except Exception:  # noqa: BLE001
-            _log.critical(
-                "plan promotion recovery record could not be persisted: %s",
-                recovery_path,
-                exc_info=True,
-            )
+    atomic_write_text(recovery_path, serialized)
 
 
 def promote_plan_draft(
@@ -159,7 +142,9 @@ def promote_plan_draft(
     ``atomic_write_text``, so ``.cw/plan.md`` is either the old or the new
     complete file, and a missing or malformed approval fingerprint is rejected
     before the write. If the promotion audit cannot be persisted, the prior
-    plan and draft are restored before approval fails. Clearing the draft
+    plan and draft are restored before approval fails; if that restoration
+    cannot be verified, a recovery record is required and its persistence
+    failure is surfaced as part of the approval error. Clearing the draft
     afterwards is best-effort, the same
     split ``auto-dev-plan.md`` Step 1g makes: once ``.cw/plan.md`` exists, a
     leftover draft is ignored by the plan stage's supersession guard.
@@ -237,20 +222,33 @@ def promote_plan_draft(
                 restore_error = RuntimeError(
                     "restoration verification failed for the plan/draft pair"
                 )
-        except Exception as restore_exc:  # noqa: BLE001
+        except OSError as restore_exc:
             restore_error = restore_exc
         if restore_error is not None:
-            _write_recovery_record(
-                wt_path / ".cw" / "plan-promotion-recovery.json",
-                task=task,
-                wt_path=wt_path,
-                plan_path=plan_path,
-                draft_path=draft_path,
-                old_plan_text=old_plan_text,
-                draft_text=draft_text,
-                audit_error=audit_error,
-                restore_error=restore_error,
-            )
+            recovery_path = wt_path / ".cw" / "plan-promotion-recovery.json"
+            try:
+                _write_recovery_record(
+                    recovery_path,
+                    task=task,
+                    wt_path=wt_path,
+                    plan_path=plan_path,
+                    draft_path=draft_path,
+                    old_plan_text=old_plan_text,
+                    draft_text=draft_text,
+                    audit_error=audit_error,
+                    restore_error=restore_error,
+                )
+            except OSError as recovery_error:
+                msg = (
+                    f"Cannot approve ticket {task.ticket_id!r}: plan draft"
+                    f" promotion audit failed for worktree {wt_path}, and"
+                    f" restoring the prior plan failed"
+                    f" ({restore_error.__class__.__name__}: {restore_error});"
+                    f" persisting the recovery record at {recovery_path} also"
+                    f" failed ({recovery_error.__class__.__name__}:"
+                    f" {recovery_error})."
+                )
+                raise ApproveGateError(msg) from recovery_error
             msg = (
                 f"Cannot approve ticket {task.ticket_id!r}: plan draft"
                 f" promotion audit failed for worktree {wt_path}, and restoring"
