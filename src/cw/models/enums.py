@@ -380,6 +380,14 @@ class OrchestratorEventType(StrEnum):
     # tick), so a fresh session is dispatched on retry -- there is no
     # same-session repeat-veto risk to bound.
     SESSION_SENTINEL_LIVENESS_VETOED = "session.sentinel_liveness_vetoed"
+    # GitHub #2401 -- emitted by the new shared _requeue_blocked_result_under_
+    # cap helper whenever a deterministic-parse or validation_failed
+    # BlockedResult re-queues a RUNNING task to PENDING under the shared
+    # attempt cap. Sibling to SESSION_SENTINEL_LIVENESS_VETOED above, but the
+    # gating evidence is a repeated-rejection COUNT, never a clock/transcript-
+    # age comparison (ADR-0014) -- the two vetoes are deliberately distinct
+    # mechanisms and this ticket does not extend or widen the liveness veto.
+    SENTINEL_BLOCKED_RESULT_REQUEUED = "sentinel.blocked_result_requeued"
     # GitHub #1437 — ssh_key_gate operator escape hatch. Emitted by
     # _emit_ssh_key_bypass when the SSH-agent-key preflight probe (#927)
     # reports unavailable but the operator has set

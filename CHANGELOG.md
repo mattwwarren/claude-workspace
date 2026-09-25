@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A deterministic-parse `BlockedResult` no longer lands a live worker's RUNNING task terminal FAILED on the first occurrence, with no diagnostic (#2401):** `schema_version_unsupported` and other deterministic-parse failures now re-queue to PENDING under the same evidence-based attempt cap as `validation_failed` (`_VALIDATION_FAILED_MAX_ATTEMPTS`), landing FAILED only once the cap is reached, and every such FAILED landing now records `TicketTask.last_blocked_result`. A new `sentinel.blocked_result_requeued` event traces each sub-cap re-queue. Closes the #2077 incident where this bypassed the #1406 liveness veto (which remains unchanged and unwidened — the fix is a repeat-count cap, not a clock, per ADR-0014).
+- **Approving a reconciled plan draft now promotes it to `.cw/plan.md`, instead of leaving the drift gate re-reading the stale pre-reconciliation plan forever (#2342):** `approve`'s direct plan→impl advance now calls a new `cw.dev_queue.plan_promotion.promote_plan_draft`, which fails loud (aborts `approve`, records nothing) on an I/O error and is a no-op when there is no draft to promote. Reported via a new `plan_promoted` key on `approve`'s return dict and CLI output; the `SCOPE_ROUTING_DECISION` audit event payload is unchanged.
+- **A durable PLAN approval can now be revoked before new resolutions apply, closing a window where a stale approval survived a resumed draft's edits (#2376):** a new `cw dev-queue revoke-plan-approval <ticket>` command and `cw.dev_queue.revoke_plan_approval` clear `plan_approved_at`/`plan_approved_fingerprint` under the dev-queue lock, recording the audit event before mutating the row (event-first ordering — no rollback machinery, since a failed save leaves the still-bound fingerprint unable to match the revised draft).
 ## [1.59.0] - 2026-09-25
 
 ### Added

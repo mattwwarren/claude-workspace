@@ -621,6 +621,7 @@ def _write_staged_clients_yaml(tmp_config_dir: Path, client_name: str) -> None:
         f"  {client_name}:\n"
         f"    workspace_path: /tmp/ws-staged\n"
         f"    default_branch: main\n"
+        f"    blocked_result_requeue_enabled: true\n"
         f"    pipeline:\n"
         f"      stages: [plan, impl, review, finalize]\n"
     )
