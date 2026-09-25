@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A `cw review verify-fixes` downgrade now leaves an event and a sentinel count, not only a log line (#2009):** each `"fixed"` disposition that `verify_fixed_dispositions` walks back to `"dropped"` now emits one `review.fixed_disposition_downgraded` event, recorded at the point of the downgrade and correlated to the ticket. The event payload carries the finding's file, lines, severity, summary, reviewers and `disposition_detail`. The count also reaches the terminal `AUTO_DEV_RESULT` sentinel as the new advisory `review.downgraded_disposition_count` field, which is `null` when the producer did not report it, with no `schema_version` bump (headless-contract Note A15). **Breaking for hand-written payloads:** `cw review verify-fixes` now requires `ticket_id`. `auto-dev-review.md` Step 3c sends it and records the count for the sentinel.
 
+### Fixed
+
+- **`resolve_project_config_auto_merge` no longer silently treats a missing shared config reader as "auto-merge allowed" (#2373, follow-up to #2046):** when the shared `cw.project_config` module can't load (no source tree, no installed `cw` package), it now reads `config_path` directly with PyYAML, which is already confirmed importable at that point, instead of returning `None` and letting callers fall back to allowed/required even when `.claude/project-config.yaml` explicitly sets `pr.auto_merge: false`. Also fixed: the repo root used to look up the config was derived from an unverified `config_path.parent.parent` guess, which only worked when `config_path` was exactly `<root>/.claude/project-config.yaml`; it now reads exactly the path it was given.
+
 ## [1.58.0] - 2026-09-25
 
 ### Changed
