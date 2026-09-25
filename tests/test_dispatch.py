@@ -3778,6 +3778,71 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
         assert tasks["GEN-2077-FREE"].status == QueueItemStatus.RUNNING
         assert tasks["GEN-2077-FREE"].session_id is not None
 
+    def test_requeued_deterministic_parse_row_with_live_roster_worker_is_deferred(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2401: a deterministic-parse BlockedResult re-queue must not let a
+        second worker double-claim the still-occupied worktree.
+
+        GitHub #2077 incident shape: a RUNNING task's schema_version_
+        unsupported BlockedResult re-queues it to PENDING (session_id
+        cleared) while the prior worker is, in fact, still alive in the
+        daemon roster -- independent of cw's own session-state bookkeeping,
+        which the incident showed can lag the OS-level process (Touch-point
+        Contract: ``live_session_worktree_paths``' non-terminal filter isn't
+        the reliable signal here). Proves the existing #2077 pre-claim
+        occupancy screen defers this re-queued row exactly as it defers a
+        freshly-created PENDING row -- no new production code needed.
+        """
+        from cw.auto_dev_result import BlockedResult, Blocker
+        from cw.reconcile import _apply_sentinel_to_task
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        daemon = FakeNativeDaemonClient()
+        worktree = _seed_occupied_ticket_worktree(
+            sample_client_config,
+            monkeypatch,
+            "roster",
+            daemon=daemon,
+            ticket_id=self._TICKET,
+        )
+        session_id = "sess-2401-requeue"
+        task = TicketTask(
+            ticket_id=self._TICKET,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_daemon_session(
+            id=session_id, client="test-client", worktree_path=worktree
+        )
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason="schema_version_unsupported",
+                details="test: unsupported schema_version",
+            )
+        )
+
+        outcome = _apply_sentinel_to_task(self._TICKET, session, sentinel)
+
+        assert outcome.routed is True
+        requeued = load_dev_queue().tasks[0]
+        assert requeued.status == QueueItemStatus.PENDING
+        assert requeued.session_id is None
+
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert daemon.spawn_calls == []
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.PENDING
+
 
 # ---------------------------------------------------------------------------
 # TestStaleWorktreeYieldsToLiveOccupant (#2213 round 7)

@@ -2780,9 +2780,62 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
     def test_running_task_blocked_result_deterministic_failure_returns_routed_false(
         self, tmp_config_dir: Path
     ) -> None:
-        """RUNNING + deterministic parse-failure BlockedResult → routed=False."""
+        """RUNNING + deterministic parse-failure BlockedResult at the attempt
+        cap → routed=False (#2401).
+
+        Pre-#2401 this landed FAILED unconditionally on the first occurrence
+        (attempts=1), bypassing any evidence-based cap. It now shares
+        ``_VALIDATION_FAILED_MAX_ATTEMPTS`` with the validation_failed branch
+        (see the below-cap sibling test), landing FAILED only at the cap.
+        """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-1189-schema", "sess-1189-schema"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason="schema_version_unsupported",
+                details="test: unsupported schema_version",
+            )
+        )
+
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+        assert outcome.routed is False
+        assert outcome.rescued is False
+        assert outcome.landed_terminal is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED
+        assert t.disposition == "abandoned"
+        # GitHub #2401: every FAILED/abandoned landing in
+        # _route_blocked_result_to_task now persists the rejected sentinel,
+        # closing the #1266 gap for this branch too.
+        assert t.last_blocked_result == sentinel.model_dump(mode="json")
+
+    def test_running_task_blocked_result_deterministic_failure_under_cap_requeues_pending(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING + deterministic parse-failure BlockedResult below the
+        attempt cap → PENDING, session cleared, requeue event emitted (#2401).
+
+        GitHub #2077 incident: a live worker's schema_version_unsupported
+        BlockedResult landed its task terminal FAILED on the first
+        occurrence while the worker was still working. This is evidence-based
+        (repeated identical rejection), not a clock -- no transcript-age
+        check, unlike the catch-all's #1406 liveness veto (ADR-0014 Plan
+        Soundness resolution R1/R3).
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-2401-schema-under-cap", "sess-2401-schema"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
             ticket_id=ticket_id,
@@ -2803,16 +2856,24 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
 
         outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
-        assert outcome.routed is False
-        assert outcome.rescued is False
-        assert outcome.landed_terminal is True
+        assert outcome.routed is True
+        assert outcome.landed_terminal is False
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
-        assert t.status == QueueItemStatus.FAILED
-        assert t.disposition == "abandoned"
-        # GitHub #1266: the last_blocked_result diagnostic write is scoped to
-        # the unrecognized-reason catch-all only -- this deterministic-parse-
-        # failure branch is untouched and must leave it unset.
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
         assert t.last_blocked_result is None
+        requeued = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SENTINEL_BLOCKED_RESULT_REQUEUED
+        ]
+        assert len(requeued) == 1
+        assert requeued[0].payload["ticket_id"] == ticket_id
+        assert requeued[0].payload["client"] == "staged-client"
+        assert requeued[0].payload["session_id"] == session_id
+        assert requeued[0].payload["blocker_reason"] == "schema_version_unsupported"
+        assert requeued[0].payload["attempts"] == 1
+        assert requeued[0].payload["attempt_cap"] == _VALIDATION_FAILED_MAX_ATTEMPTS
 
     def test_running_task_blocked_result_validation_failed_at_cap_returns_routed_false(
         self, tmp_config_dir: Path
@@ -2845,10 +2906,62 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
-        # GitHub #1266: the last_blocked_result diagnostic write is scoped to
-        # the unrecognized-reason catch-all only -- this validation_failed-
-        # at-cap branch is untouched and must leave it unset.
+        # GitHub #2401: every FAILED/abandoned landing in
+        # _route_blocked_result_to_task now persists the rejected sentinel --
+        # this validation_failed-at-cap branch is no longer untouched.
+        assert t.last_blocked_result == sentinel.model_dump(mode="json")
+
+    def test_running_task_blocked_result_validation_failed_under_cap_emits_requeue_event(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING + validation_failed below the attempt cap → PENDING,
+        session cleared, requeue event emitted (#2401).
+
+        Pre-#2401 this branch re-queued silently (no durable trace). The new
+        shared ``_requeue_blocked_result_under_cap`` helper now emits
+        ``SENTINEL_BLOCKED_RESULT_REQUEUED`` here too, previously only
+        exercised by the deterministic-parse branch's own sibling test.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-2401-vf-under-cap", "sess-2401-vf-under-cap"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason=BLOCKER_REASON_VALIDATION_FAILED,
+                details="test: validation failed under cap",
+            )
+        )
+
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+        assert outcome.routed is True
+        assert outcome.landed_terminal is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
         assert t.last_blocked_result is None
+        requeued = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SENTINEL_BLOCKED_RESULT_REQUEUED
+        ]
+        assert len(requeued) == 1
+        assert requeued[0].payload["ticket_id"] == ticket_id
+        assert requeued[0].payload["client"] == "staged-client"
+        assert requeued[0].payload["session_id"] == session_id
+        assert requeued[0].payload["blocker_reason"] == BLOCKER_REASON_VALIDATION_FAILED
+        assert requeued[0].payload["attempts"] == 1
+        assert requeued[0].payload["attempt_cap"] == _VALIDATION_FAILED_MAX_ATTEMPTS
 
     def test_running_task_blocked_result_unknown_reason_returns_routed_false(
         self, tmp_config_dir: Path
