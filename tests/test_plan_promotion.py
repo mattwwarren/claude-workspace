@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -213,3 +214,90 @@ def test_promote_plan_draft_audit_failure_restores_plan_and_draft(
 
     assert (cw_dir / "plan.md").read_text(encoding="utf-8") == _STALE_PLAN_BODY
     assert (cw_dir / "plan-draft.md").read_text(encoding="utf-8") == _DRAFT_BODY
+
+
+def test_promote_plan_draft_audit_failure_handles_non_oserror_rollback(
+    tmp_path: Path,
+    sample_client: ClientConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cw_dir = _cw_dir(tmp_path)
+    (cw_dir / "plan.md").write_text(_STALE_PLAN_BODY, encoding="utf-8")
+    (cw_dir / "plan-draft.md").write_text(_DRAFT_BODY, encoding="utf-8")
+
+    def _failing_event(*_args: object, **_kwargs: object) -> None:
+        msg = "event inbox unavailable"
+        raise OSError(msg)
+
+    def _failing_restore(*_args: object, **_kwargs: object) -> None:
+        msg = "rollback implementation failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("cw.dev_queue.plan_promotion.record_event", _failing_event)
+    monkeypatch.setattr(
+        "cw.dev_queue.plan_promotion._restore_after_audit_failure", _failing_restore
+    )
+
+    with pytest.raises(ApproveGateError, match="recovery was recorded") as excinfo:
+        promote_plan_draft(
+            _plan_task(cw_dir.parent),
+            sample_client,
+            expected_fingerprint=_DRAFT_FINGERPRINT,
+        )
+
+    assert isinstance(excinfo.value.__cause__, OSError)
+    recovery = json.loads(
+        (cw_dir / "plan-promotion-recovery.json").read_text(encoding="utf-8")
+    )
+    assert recovery["restore_error"] == "RuntimeError: rollback implementation failed"
+    assert recovery["plan_path"] == str(cw_dir / "plan.md")
+    assert recovery["draft_path"] == str(cw_dir / "plan-draft.md")
+
+
+def test_promote_plan_draft_recovery_write_uses_alternate_durable_channel(
+    tmp_path: Path,
+    tmp_state_dir: Path,
+    sample_client: ClientConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cw_dir = _cw_dir(tmp_path)
+    (cw_dir / "plan.md").write_text(_STALE_PLAN_BODY, encoding="utf-8")
+    (cw_dir / "plan-draft.md").write_text(_DRAFT_BODY, encoding="utf-8")
+
+    def _failing_event(*_args: object, **_kwargs: object) -> None:
+        msg = "event inbox unavailable"
+        raise RuntimeError(msg)
+
+    def _failing_restore(*_args: object, **_kwargs: object) -> None:
+        msg = "rollback unavailable"
+        raise RuntimeError(msg)
+
+    def _failing_recovery(*_args: object, **_kwargs: object) -> None:
+        msg = "worktree recovery unavailable"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr("cw.dev_queue.plan_promotion.record_event", _failing_event)
+    monkeypatch.setattr(
+        "cw.dev_queue.plan_promotion._restore_after_audit_failure", _failing_restore
+    )
+    monkeypatch.setattr(
+        "cw.dev_queue.plan_promotion._write_recovery_record", _failing_recovery
+    )
+
+    with pytest.raises(ApproveGateError, match="recovery was persisted") as excinfo:
+        promote_plan_draft(
+            _plan_task(cw_dir.parent),
+            sample_client,
+            expected_fingerprint=_DRAFT_FINGERPRINT,
+        )
+
+    fallback = tmp_state_dir / "plan-promotion-recovery.jsonl"
+    payload = json.loads(fallback.read_text(encoding="utf-8"))
+    assert payload["audit_error"] == "RuntimeError: event inbox unavailable"
+    assert payload["recovery_error"] == (
+        "PermissionError: worktree recovery unavailable"
+    )
+    assert payload["fallback_recovery_path"] == str(fallback)
+    assert payload["old_plan_text"] == _STALE_PLAN_BODY
+    assert payload["draft_text"] == _DRAFT_BODY
+    assert isinstance(excinfo.value.__cause__, RuntimeError)

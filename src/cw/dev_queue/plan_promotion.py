@@ -16,10 +16,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from cw.atomic import atomic_write_text
+from cw.config import dev_queue_file
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
 from cw.models import OrchestratorEventType
@@ -95,6 +97,50 @@ def _restoration_verified(
     return plan_restored and draft_restored
 
 
+def _recovery_payload(
+    *,
+    task: TicketTask,
+    wt_path: Path,
+    plan_path: Path,
+    draft_path: Path,
+    recovery_path: Path,
+    old_plan_text: str | None,
+    draft_text: str,
+    audit_error: Exception,
+    restore_error: Exception,
+    recovery_error: Exception | None = None,
+    fallback_path: Path | None = None,
+    fallback_error: Exception | None = None,
+) -> dict[str, object]:
+    """Build the complete state needed to recover an untracked promotion."""
+    return {
+        "ticket_id": task.ticket_id,
+        "worktree_path": str(wt_path),
+        "plan_path": str(plan_path),
+        "draft_path": str(draft_path),
+        "recovery_path": str(recovery_path),
+        "fallback_recovery_path": (
+            str(fallback_path) if fallback_path is not None else None
+        ),
+        "old_plan_text": old_plan_text,
+        "draft_text": draft_text,
+        "promoted_plan_text": draft_text,
+        "audit_error": f"{audit_error.__class__.__name__}: {audit_error}",
+        "restore_error": f"{restore_error.__class__.__name__}: {restore_error}",
+        "recovery_error": (
+            f"{recovery_error.__class__.__name__}: {recovery_error}"
+            if recovery_error is not None
+            else None
+        ),
+        "fallback_error": (
+            f"{fallback_error.__class__.__name__}: {fallback_error}"
+            if fallback_error is not None
+            else None
+        ),
+        "recovery_required": True,
+    }
+
+
 def _write_recovery_record(
     recovery_path: Path,
     *,
@@ -106,21 +152,214 @@ def _write_recovery_record(
     draft_text: str,
     audit_error: Exception,
     restore_error: Exception,
-) -> None:
+    recovery_error: Exception | None = None,
+    fallback_path: Path | None = None,
+    fallback_error: Exception | None = None,
+) -> dict[str, object]:
     """Persist the pair's contents when audit rollback cannot be verified."""
-    payload = {
-        "ticket_id": task.ticket_id,
-        "worktree_path": str(wt_path),
-        "plan_path": str(plan_path),
-        "draft_path": str(draft_path),
-        "old_plan_text": old_plan_text,
-        "draft_text": draft_text,
-        "audit_error": f"{audit_error.__class__.__name__}: {audit_error}",
-        "restore_error": f"{restore_error.__class__.__name__}: {restore_error}",
-        "recovery_required": True,
-    }
-    serialized = json.dumps(payload, sort_keys=True) + "\n"
-    atomic_write_text(recovery_path, serialized)
+    payload = _recovery_payload(
+        task=task,
+        wt_path=wt_path,
+        plan_path=plan_path,
+        draft_path=draft_path,
+        recovery_path=recovery_path,
+        old_plan_text=old_plan_text,
+        draft_text=draft_text,
+        audit_error=audit_error,
+        restore_error=restore_error,
+        recovery_error=recovery_error,
+        fallback_path=fallback_path,
+        fallback_error=fallback_error,
+    )
+    atomic_write_text(recovery_path, json.dumps(payload, sort_keys=True) + "\n")
+    return payload
+
+
+def _fallback_recovery_path() -> Path:
+    """Return the global recovery channel used when the worktree is unsafe."""
+    return dev_queue_file().with_name("plan-promotion-recovery.jsonl")
+
+
+def _write_fallback_recovery_record(
+    path: Path, payload: dict[str, object]
+) -> None:
+    """Append a fsynced recovery record outside the task worktree.
+
+    This deliberately does not reuse ``atomic_write_text``: its failure is
+    one of the conditions that sends us here, and the fallback must use an
+    independent durable channel.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as recovery_file:
+        recovery_file.write(json.dumps(payload, sort_keys=True) + "\n")
+        recovery_file.flush()
+        os.fsync(recovery_file.fileno())
+
+
+def _attempt_restore(
+    plan_path: Path,
+    old_plan_text: str | None,
+    draft_path: Path,
+    draft_text: str,
+    *,
+    attempts: int,
+) -> Exception | None:
+    """Try restoration repeatedly and return the last failure, if any."""
+    restore_error: Exception | None = None
+    for _ in range(attempts):
+        try:
+            _restore_after_audit_failure(
+                plan_path, old_plan_text, draft_path, draft_text
+            )
+            if _restoration_verified(
+                plan_path, old_plan_text, draft_path, draft_text
+            ):
+                return None
+            restore_error = RuntimeError(
+                "restoration verification failed for the plan/draft pair"
+            )
+        except Exception as restore_exc:  # noqa: BLE001
+            # A filesystem layer can fail with more than OSError. Keep the
+            # audit failure as the eventual cause, but carry this failure into
+            # the durable recovery state.
+            restore_error = restore_exc
+    return restore_error
+
+
+def _raise_after_audit_failure(
+    *,
+    task: TicketTask,
+    wt_path: Path,
+    plan_path: Path,
+    draft_path: Path,
+    old_plan_text: str | None,
+    draft_text: str,
+    audit_error: Exception,
+) -> NoReturn:
+    """Restore or durably record every artifact after an audit failure."""
+    restore_error = _attempt_restore(
+        plan_path, old_plan_text, draft_path, draft_text, attempts=2
+    )
+    if restore_error is None:
+        msg = (
+            f"Cannot approve ticket {task.ticket_id!r}: plan draft promotion"
+            f" audit failed for worktree {wt_path}"
+            f" ({audit_error.__class__.__name__}: {audit_error});"
+            " the prior plan and draft were restored."
+        )
+        raise ApproveGateError(msg) from audit_error
+
+    recovery_path = wt_path / ".cw" / "plan-promotion-recovery.json"
+    try:
+        _write_recovery_record(
+            recovery_path,
+            task=task,
+            wt_path=wt_path,
+            plan_path=plan_path,
+            draft_path=draft_path,
+            old_plan_text=old_plan_text,
+            draft_text=draft_text,
+            audit_error=audit_error,
+            restore_error=restore_error,
+        )
+    except Exception as recovery_exc:  # noqa: BLE001
+        # Retry restoration before using the alternate channel. A transient
+        # recovery-write error must not strand the promoted artifact pair.
+        restore_after_recovery_error = _attempt_restore(
+            plan_path, old_plan_text, draft_path, draft_text, attempts=1
+        )
+        if restore_after_recovery_error is None:
+            msg = (
+                f"Cannot approve ticket {task.ticket_id!r}: plan draft"
+                f" promotion audit failed for worktree {wt_path}; recovery"
+                f" persistence at {recovery_path} failed"
+                f" ({recovery_exc.__class__.__name__}: {recovery_exc}),"
+                " but the prior plan and draft were restored."
+            )
+            raise ApproveGateError(msg) from audit_error
+        _raise_with_fallback_recovery(
+            task=task,
+            wt_path=wt_path,
+            plan_path=plan_path,
+            draft_path=draft_path,
+            recovery_path=recovery_path,
+            old_plan_text=old_plan_text,
+            draft_text=draft_text,
+            audit_error=audit_error,
+            restore_error=restore_after_recovery_error,
+            recovery_error=recovery_exc,
+        )
+
+    msg = (
+        f"Cannot approve ticket {task.ticket_id!r}: plan draft"
+        f" promotion audit failed for worktree {wt_path}, and restoring"
+        f" the prior plan failed ({restore_error.__class__.__name__}:"
+        f" {restore_error}); recovery was recorded at {recovery_path}."
+    )
+    raise ApproveGateError(msg) from audit_error
+
+
+def _raise_with_fallback_recovery(
+    *,
+    task: TicketTask,
+    wt_path: Path,
+    plan_path: Path,
+    draft_path: Path,
+    recovery_path: Path,
+    old_plan_text: str | None,
+    draft_text: str,
+    audit_error: Exception,
+    restore_error: Exception,
+    recovery_error: Exception,
+) -> NoReturn:
+    """Persist recovery outside the worktree, or report the full state."""
+    fallback_path = _fallback_recovery_path()
+    recovery_payload = _recovery_payload(
+        task=task,
+        wt_path=wt_path,
+        plan_path=plan_path,
+        draft_path=draft_path,
+        recovery_path=recovery_path,
+        old_plan_text=old_plan_text,
+        draft_text=draft_text,
+        audit_error=audit_error,
+        restore_error=restore_error,
+        recovery_error=recovery_error,
+        fallback_path=fallback_path,
+    )
+    try:
+        _write_fallback_recovery_record(fallback_path, recovery_payload)
+    except Exception as fallback_error:  # noqa: BLE001
+        recovery_payload = _recovery_payload(
+            task=task,
+            wt_path=wt_path,
+            plan_path=plan_path,
+            draft_path=draft_path,
+            recovery_path=recovery_path,
+            old_plan_text=old_plan_text,
+            draft_text=draft_text,
+            audit_error=audit_error,
+            restore_error=restore_error,
+            recovery_error=recovery_error,
+            fallback_path=fallback_path,
+            fallback_error=fallback_error,
+        )
+        msg = (
+            f"Cannot approve ticket {task.ticket_id!r}: plan draft promotion"
+            f" audit failed for worktree {wt_path}; restoring the prior plan"
+            f" failed, and recovery persistence failed at {recovery_path} and"
+            f" {fallback_path}. Complete recovery state:"
+            f" {json.dumps(recovery_payload, sort_keys=True)}"
+        )
+        raise ApproveGateError(msg) from audit_error
+
+    msg = (
+        f"Cannot approve ticket {task.ticket_id!r}: plan draft promotion audit"
+        f" failed for worktree {wt_path}; primary recovery at {recovery_path}"
+        f" failed ({recovery_error.__class__.__name__}: {recovery_error}), so"
+        f" recovery was persisted at {fallback_path}."
+    )
+    raise ApproveGateError(msg) from audit_error
 
 
 def promote_plan_draft(
@@ -210,57 +449,14 @@ def promote_plan_draft(
             },
             correlation_id=task.ticket_id,
         )
-    except Exception as audit_error:
-        restore_error: Exception | None = None
-        try:
-            _restore_after_audit_failure(
-                plan_path, old_plan_text, draft_path, draft_text
-            )
-            if not _restoration_verified(
-                plan_path, old_plan_text, draft_path, draft_text
-            ):
-                restore_error = RuntimeError(
-                    "restoration verification failed for the plan/draft pair"
-                )
-        except OSError as restore_exc:
-            restore_error = restore_exc
-        if restore_error is not None:
-            recovery_path = wt_path / ".cw" / "plan-promotion-recovery.json"
-            try:
-                _write_recovery_record(
-                    recovery_path,
-                    task=task,
-                    wt_path=wt_path,
-                    plan_path=plan_path,
-                    draft_path=draft_path,
-                    old_plan_text=old_plan_text,
-                    draft_text=draft_text,
-                    audit_error=audit_error,
-                    restore_error=restore_error,
-                )
-            except OSError as recovery_error:
-                msg = (
-                    f"Cannot approve ticket {task.ticket_id!r}: plan draft"
-                    f" promotion audit failed for worktree {wt_path}, and"
-                    f" restoring the prior plan failed"
-                    f" ({restore_error.__class__.__name__}: {restore_error});"
-                    f" persisting the recovery record at {recovery_path} also"
-                    f" failed ({recovery_error.__class__.__name__}:"
-                    f" {recovery_error})."
-                )
-                raise ApproveGateError(msg) from recovery_error
-            msg = (
-                f"Cannot approve ticket {task.ticket_id!r}: plan draft"
-                f" promotion audit failed for worktree {wt_path}, and restoring"
-                f" the prior plan failed ({restore_error.__class__.__name__}:"
-                f" {restore_error})."
-            )
-            raise ApproveGateError(msg) from restore_error
-        msg = (
-            f"Cannot approve ticket {task.ticket_id!r}: plan draft promotion"
-            f" audit failed for worktree {wt_path}"
-            f" ({audit_error.__class__.__name__}: {audit_error});"
-            " the prior plan and draft were restored."
+    except Exception as audit_error:  # noqa: BLE001
+        _raise_after_audit_failure(
+            task=task,
+            wt_path=wt_path,
+            plan_path=plan_path,
+            draft_path=draft_path,
+            old_plan_text=old_plan_text,
+            draft_text=draft_text,
+            audit_error=audit_error,
         )
-        raise ApproveGateError(msg) from audit_error
     return True
