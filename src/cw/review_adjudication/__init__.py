@@ -71,7 +71,8 @@ concerns that cross-reference each other only through the shared
   matching, suppression (with its inline ``review.finding_voided`` event), and
   the ``VOIDED-REVIEW-FINDINGS`` JSON sentinel's render/parse. Imports
   ``_models``.
-- ``_verify`` — the #2000/#2007 fix-claim verification. A clean leaf: it
+- ``_verify`` — the #2000/#2007 fix-claim verification, with its inline
+  ``review.fixed_disposition_downgraded`` event (#2009). A clean leaf: it
   touches neither :class:`Adjudication` nor :class:`VoidedFinding`, so it
   imports no sibling.
 - ``_deferred_md`` — the ``.cw/deferred-findings.md`` artifact's

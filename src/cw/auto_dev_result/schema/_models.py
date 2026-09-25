@@ -127,6 +127,20 @@ class Review(BaseModel):
     # gate, and omitting it parks the ticket. "Optional to emit" and
     # "inconsequential when absent" are different claims; only the first holds.
     reviewed_sha: str | None = None
+    # #2009: the same quantity as `ReviewVerdict.downgraded_disposition_count`
+    # (`review_findings/_models.py`) — the number of "fixed" claims Step 3c's
+    # `cw review verify-fixes` walked back to "dropped" because the fix-cycle
+    # diff never touched the cited location — threaded here so an orchestrator
+    # reading only the terminal AUTO_DEV_RESULT sentinel sees it too. Unlike
+    # the frozen cycle-0 counts above, it is captured at Step 3c, after the
+    # fix loop settles.
+    #
+    # Defaults to `None` on the #2098 precedent: `None` means "the producer
+    # did not report this field", `0` means a producer-confirmed zero, and the
+    # two are never conflated. Additive and purely advisory — nothing gates on
+    # it and it does not feed `Health.recommendation` — so no `schema_version`
+    # bump (docs/headless-contract.md §8, Note A15).
+    downgraded_disposition_count: int | None = None
 
 
 class AgentHealthEntry(BaseModel):

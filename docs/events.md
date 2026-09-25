@@ -2418,6 +2418,47 @@ comment already carries the operator-facing version.
 `correlation_id` is the ticket id, always — this event is emitted from inside a
 review pass, which has one.
 
+### `review.fixed_disposition_downgraded`
+
+**Emitter:** `verify_fixed_dispositions` (`cw.review_adjudication`), reached
+only from `cw review verify-fixes` (`cw.cli.review`) — the Claude-native
+backend's `auto-dev-review.md` Step 3c. The codex backend never calls it.
+**Payload:**
+```json
+{
+  "file": "<str>",
+  "line_start": "<int | null>",
+  "line_end": "<int | null>",
+  "severity": "MUST_FIX | SHOULD_FIX | DEBT | NIT | PRINCIPLE",
+  "summary": "<str>",
+  "reviewers": ["<str>"],
+  "disposition_detail": "<str>"
+}
+```
+**Semantics:** GitHub #2009. One event per `"fixed"` disposition that
+`verify_fixed_dispositions` walked back to `"dropped"` because the fix-cycle
+diff never touched the finding's cited location. Before this event the
+downgrade's only records were a WARNING log line and the bare
+`ReviewVerdict.downgraded_disposition_count` on the verdict artifact; the
+event is its durable, per-finding audit record, emitted inline for the same
+"recording is not separable from the mutation" reason as
+`review.finding_voided` above. The run-level count also reaches the terminal
+sentinel as `review.downgraded_disposition_count`
+([headless-contract.md](headless-contract.md) Note A15).
+
+Distinct from `review.finding_voided` rather than a reuse of it: a downgrade
+corrects a false fix *claim*, a void suppresses a *finding*, and one type
+could not say which mechanism fired.
+
+Deliberately **not** in `_DEFAULT_OPERATOR_EVENT_TYPES`: record-only, like
+the downgrade itself — it never re-opens a gate, and Step 3c already surfaces
+each downgrade in `friction_highlights`.
+
+**Querying:** `cw event tail --type review.fixed_disposition_downgraded --json`.
+
+`correlation_id` is the `ticket_id` from the `cw review verify-fixes` payload
+(required).
+
 ### `watched_pr.collision`
 
 **Emitter:** `register_or_adopt_watched_pr` (`cw.dev_queue.crud`).
