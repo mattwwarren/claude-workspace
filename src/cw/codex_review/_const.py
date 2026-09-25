@@ -97,6 +97,14 @@ CODEX_FIX_SCOPE_VIOLATION = "codex_fix_scope_violation"
 # clean result anyway would hand a later stage work that exists only locally.
 CODEX_UNPUSHED_AT_EXIT = "codex_unpushed_at_exit"
 
+# Fix-loop divergence guard (#2394): the fix loop grew the diff for 2+
+# consecutive cycles while resolving none of the originally-found MUST_FIX
+# findings — distinct from CODEX_MUST_FIX_FINDINGS (the cap was reached but
+# findings may still be shrinking) and from REVIEW_TREADMILL_DETECTED (a
+# single refused self-inflicted finding, not a loop-wide progress signal).
+# Stops the loop BEFORE the cycle cap, unlike every other reason above.
+FIX_LOOP_DIVERGING = "fix_loop_diverging"
+
 # A review whose only MUST_FIX finding(s) were MECHANICALLY rejected — dropped
 # by review_findings' validation (bad file/line anchor, evidence absent from
 # the diff, ...) before any adjudication could weigh them on their merits

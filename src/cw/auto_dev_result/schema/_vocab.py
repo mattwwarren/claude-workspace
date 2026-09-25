@@ -215,6 +215,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "codex_must_fix_mechanically_rejected",
             "codex_review_partial",
             "codex_review_unparseable",
+            "fix_loop_diverging",
             "multiple_result_blocks",
             "no_result_emitted",
             "pr_already_open_pre_dispatch",
