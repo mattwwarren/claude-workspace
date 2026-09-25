@@ -59,6 +59,21 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 _SCOPE_DRIFT_RECOVERY_MARKER = "scope-drift-approval-recovery.jsonl"
+_PLAN_APPROVAL_RECOVERY_MARKER = "plan-approval-recovery.jsonl"
+
+
+def _write_plan_approval_recovery_marker(payload: dict[str, object]) -> None:
+    """Persist an operator-visible marker when approval rollback is uncertain."""
+    path = dev_queue_file().with_name(_PLAN_APPROVAL_RECOVERY_MARKER)
+    try:
+        previous = path.read_text() if path.exists() else ""
+        atomic_write_text(path, previous + json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:  # noqa: BLE001
+        _log.critical(
+            "plan approval recovery marker could not be persisted: %s",
+            payload,
+            exc_info=True,
+        )
 
 
 def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | None]:
@@ -119,6 +134,7 @@ def revoke_plan_approval(
     with _lock():
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
+        original_store = store.model_copy(deep=True)
         had_approval = (
             task.plan_approved_at is not None
             or task.plan_approved_fingerprint is not None
@@ -128,19 +144,47 @@ def revoke_plan_approval(
         task.plan_approved_fingerprint = None
         if had_approval:
             save_dev_queue(store)
-            record_event(
-                OrchestratorEventType.PLAN_APPROVAL_REVOKED,
-                {
-                    "ticket_id": ticket_id,
-                    "client": client_name,
-                    "previous_fingerprint": previous_fingerprint,
-                    "revoked_at": datetime.now(UTC).isoformat(),
-                    "initiating_service": "cw dev-queue revoke-plan-approval",
-                    "resolutions_source": resolutions_source,
-                    "reason": reason,
-                },
-                correlation_id=ticket_id,
-            )
+            audit_payload = {
+                "ticket_id": ticket_id,
+                "client": client_name,
+                "previous_fingerprint": previous_fingerprint,
+                "revoked_at": datetime.now(UTC).isoformat(),
+                "initiating_service": "cw dev-queue revoke-plan-approval",
+                "resolutions_source": resolutions_source,
+                "reason": reason,
+            }
+            try:
+                record_event(
+                    OrchestratorEventType.PLAN_APPROVAL_REVOKED,
+                    audit_payload,
+                    correlation_id=ticket_id,
+                )
+            except Exception as event_error:
+                try:
+                    save_dev_queue(original_store)
+                except Exception as rollback_error:
+                    _write_plan_approval_recovery_marker(
+                        {
+                            "ticket_id": ticket_id,
+                            "client": client_name,
+                            "approval_event": (
+                                OrchestratorEventType.PLAN_APPROVAL_REVOKED.value
+                            ),
+                            "approval_payload": audit_payload,
+                            "event_error": str(event_error),
+                            "rollback_error": str(rollback_error),
+                            "recovery_required": True,
+                        }
+                    )
+                    _log.critical(
+                        "plan approval rollback failed for %s/%s; operator recovery "
+                        "is required",
+                        client_name,
+                        ticket_id,
+                        exc_info=True,
+                    )
+                    raise rollback_error from event_error
+                raise
         return {
             "ticket_id": ticket_id,
             "client": client_name,
