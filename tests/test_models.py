@@ -2192,6 +2192,7 @@ class TestPackageExportCompleteness:
             "DEFAULT_DISK_PRESSURE_MIN_FREE_GB",
             "DEFAULT_GLOBAL_ATTEMPT_CEILING",
             "DEFAULT_LANE",
+            "DEFAULT_LOCAL_LIVENESS_BACKEND",
             "DEFAULT_STAGE",
             "DEV_QUEUE_SCHEMA_VERSION",
             "DevQueueStore",

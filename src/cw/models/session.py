@@ -29,6 +29,8 @@ from cw.models.enums import (
 # break this package's DAG-leaf property.
 LocalLivenessBackend = Literal["aider", "opencode"]
 
+DEFAULT_LOCAL_LIVENESS_BACKEND: LocalLivenessBackend = "aider"
+
 
 class LocalLivenessHandle(BaseModel):
     """Process-liveness handle for a fire-and-forget subprocess (RFC 0005 F3).
@@ -47,7 +49,7 @@ class LocalLivenessHandle(BaseModel):
 
     pid: int
     start_time_ns: int
-    backend: LocalLivenessBackend = "aider"
+    backend: LocalLivenessBackend = DEFAULT_LOCAL_LIVENESS_BACKEND
 
 
 class Session(BaseModel):

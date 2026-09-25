@@ -86,7 +86,12 @@ from cw.models.park_comment_marker import (
     ParkCommentMarker,
     read_park_comment_marker,
 )
-from cw.models.session import LocalLivenessBackend, LocalLivenessHandle, Session
+from cw.models.session import (
+    DEFAULT_LOCAL_LIVENESS_BACKEND,
+    LocalLivenessBackend,
+    LocalLivenessHandle,
+    Session,
+)
 from cw.models.session_inbox import SessionInboxMessage
 from cw.models.state import CW_STATE_SCHEMA_VERSION, CwState
 from cw.models.tasks import (
@@ -123,6 +128,7 @@ __all__ = [
     "DEFAULT_DISK_PRESSURE_MIN_FREE_GB",
     "DEFAULT_GLOBAL_ATTEMPT_CEILING",
     "DEFAULT_LANE",
+    "DEFAULT_LOCAL_LIVENESS_BACKEND",
     "DEFAULT_STAGE",
     "DEV_QUEUE_SCHEMA_VERSION",
     "HOOK_CONTEXT_RELATIVE_PATH",

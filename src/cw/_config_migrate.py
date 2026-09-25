@@ -12,7 +12,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from cw.models import CW_STATE_SCHEMA_VERSION, SessionOrigin
+from cw.models import (
+    CW_STATE_SCHEMA_VERSION,
+    DEFAULT_LOCAL_LIVENESS_BACKEND,
+    SessionOrigin,
+)
 from cw.native_daemon import SHORT_SESSION_ID_RE
 
 logger = logging.getLogger(__name__)
@@ -254,7 +258,7 @@ def _fill_session_local_liveness_backend_default(session_raw: dict[str, Any]) ->
             "migration; defaulting to 'aider' (GitHub #2369)",
             session_raw.get("id", "<unknown>"),
         )
-        handle["backend"] = "aider"
+        handle["backend"] = DEFAULT_LOCAL_LIVENESS_BACKEND
 
 
 def _clear_non_hex_surface_refs(session_raw: dict[str, Any]) -> None:
