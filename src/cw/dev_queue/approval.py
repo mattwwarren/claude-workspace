@@ -135,55 +135,32 @@ def revoke_plan_approval(
             task.plan_approved_at is not None
             or task.plan_approved_fingerprint is not None
         )
-        previous_approved_at = task.plan_approved_at
         previous_fingerprint = task.plan_approved_fingerprint
-        task_created_at = task.created_at
-    if not had_approval:
-        return {
-            "ticket_id": ticket_id,
-            "client": client_name,
-            "cleared": had_approval,
-            "previous_fingerprint": previous_fingerprint,
-        }
-
-    # record_event takes _inbox_lock. Keep it outside dev_queue_lock (#765),
-    # then compare-and-clear under a fresh queue-lock transaction so a
-    # concurrent approval or row replacement is never clobbered.
-    audit_payload = {
-        "ticket_id": ticket_id,
-        "client": client_name,
-        "previous_fingerprint": previous_fingerprint,
-        "revoked_at": datetime.now(UTC).isoformat(),
-        "initiating_service": "cw dev-queue revoke-plan-approval",
-        "resolutions_source": resolutions_source,
-        "reason": reason,
-    }
-    record_event(
-        OrchestratorEventType.PLAN_APPROVAL_REVOKED,
-        audit_payload,
-        correlation_id=ticket_id,
-    )
-
-    with _lock():
-        store = load_dev_queue()
-        task = _find_ticket(store, ticket_id, client_name)
-        if (
-            task.created_at != task_created_at
-            or task.plan_approved_at != previous_approved_at
-            or task.plan_approved_fingerprint != previous_fingerprint
-        ):
-            _log.info(
-                "plan approval revocation skipped for %s/%s: approval changed"
-                " while the audit event was being recorded",
-                client_name,
-                ticket_id,
-            )
+        if not had_approval:
             return {
                 "ticket_id": ticket_id,
                 "client": client_name,
                 "cleared": False,
                 "previous_fingerprint": previous_fingerprint,
             }
+
+        # Keep the event-first record-and-clear sequence serialized under the
+        # dev-queue lock: an approval change must not race the audit event.
+        audit_payload = {
+            "ticket_id": ticket_id,
+            "client": client_name,
+            "previous_fingerprint": previous_fingerprint,
+            "revoked_at": datetime.now(UTC).isoformat(),
+            "initiating_service": "cw dev-queue revoke-plan-approval",
+            "resolutions_source": resolutions_source,
+            "reason": reason,
+        }
+        record_event(
+            OrchestratorEventType.PLAN_APPROVAL_REVOKED,
+            audit_payload,
+            correlation_id=ticket_id,
+        )
+
         task.plan_approved_at = None
         task.plan_approved_fingerprint = None
         try:
