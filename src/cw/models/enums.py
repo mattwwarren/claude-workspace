@@ -361,32 +361,30 @@ class OrchestratorEventType(StrEnum):
     # carries a correction, not just a non-durable log line. Forwarded by
     # default alongside PR_ACTION_TAKEN for the same reason.
     PR_ACTION_FAILED = "pr.action_failed"
-    # GitHub #1281 -- stage-mismatch-refusal liveness veto. Emitted by the
-    # phantom sweep instead of proceeding with a CRASH_COMPLETE when a session
-    # already latched `already_refused` (a prior tick's #1149 stage-mismatch
-    # refusal) still has a transcript actively advancing within
-    # TRANSCRIPT_LIVENESS_WINDOW_SECONDS. Side-effect-only, mirrors
-    # SESSION_PARK_VETOED above: no queue or session mutation accompanies it.
+    # GitHub #1281 -- stage-mismatch-refusal veto. Emitted by the phantom sweep
+    # instead of proceeding with a CRASH_COMPLETE when a session already
+    # latched `already_refused` (a prior tick's #1149 stage-mismatch refusal).
+    # Since #2405 (ADR-0014 audit) it is gated solely by the evidence-based
+    # attempt cap (consecutive_sentinel_mismatch_vetoes <
+    # sentinel_mismatch_veto_cap, #1449); transcript staleness rides along as
+    # the diagnostic stale_minutes payload field and never decides the veto.
+    # The only mutation accompanying it is the persisted veto counter; the
+    # task stays RUNNING.
     SESSION_SENTINEL_STAGE_MISMATCH_VETOED = "session.sentinel_stage_mismatch_vetoed"
-    # GitHub #1406 -- catch-all-unparseable-sentinel liveness veto. Emitted by
-    # _route_blocked_result_to_task instead of landing a RUNNING task terminal
-    # FAILED/abandoned when a malformed/unrecognized BlockedResult (the
-    # unrecognized-reason catch-all) arrives but the owning session's
-    # transcript is still advancing within TRANSCRIPT_LIVENESS_WINDOW_SECONDS.
-    # Sibling closure to #1281's SESSION_SENTINEL_STAGE_MISMATCH_VETOED above,
-    # but no persisted veto counter: this decision clears the task's
-    # session_id and re-queues to PENDING (unlike the other two vetoes, which
-    # leave the task RUNNING against the same session for re-evaluation next
-    # tick), so a fresh session is dispatched on retry -- there is no
-    # same-session repeat-veto risk to bound.
+    # GitHub #1406 -- catch-all-unparseable-sentinel liveness veto. Historical:
+    # no longer emitted since #2405 (ADR-0014 audit), which folded the
+    # unrecognized-reason catch-all into _requeue_blocked_result_under_cap
+    # (see SENTINEL_BLOCKED_RESULT_REQUEUED below) so no transcript-age
+    # comparison decides FAILED vs. PENDING. Kept so older event logs still
+    # deserialize.
     SESSION_SENTINEL_LIVENESS_VETOED = "session.sentinel_liveness_vetoed"
-    # GitHub #2401 -- emitted by the new shared _requeue_blocked_result_under_
-    # cap helper whenever a deterministic-parse or validation_failed
-    # BlockedResult re-queues a RUNNING task to PENDING under the shared
-    # attempt cap. Sibling to SESSION_SENTINEL_LIVENESS_VETOED above, but the
-    # gating evidence is a repeated-rejection COUNT, never a clock/transcript-
-    # age comparison (ADR-0014) -- the two vetoes are deliberately distinct
-    # mechanisms and this ticket does not extend or widen the liveness veto.
+    # GitHub #2401 -- emitted by the shared _requeue_blocked_result_under_cap
+    # helper whenever a deterministic-parse, validation_failed, or (since
+    # #2405) unrecognized-reason catch-all BlockedResult re-queues a RUNNING
+    # task to PENDING under the shared attempt cap. The gating evidence is a
+    # repeated-rejection COUNT, never a clock/transcript-age comparison
+    # (ADR-0014); #2405 retired the catch-all's former transcript-liveness
+    # veto (SESSION_SENTINEL_LIVENESS_VETOED above) in favour of this event.
     SENTINEL_BLOCKED_RESULT_REQUEUED = "sentinel.blocked_result_requeued"
     # GitHub #1437 — ssh_key_gate operator escape hatch. Emitted by
     # _emit_ssh_key_bypass when the SSH-agent-key preflight probe (#927)
