@@ -334,10 +334,19 @@ two copies can't drift.
 # 3. If gates green, open the PR with auto-merge
 gh pr create --base main --head dev/<ticket>-<slug> \
   --title "<commit subject>" --body "<body>" ${EXTRA_LABEL_ARGS}
-gh pr merge <PR#> --squash --auto
-
-# 4. Clear the ticket from dev-queue (PR will close it on merge)
-cw dev-queue remove <ticket> -c <client>
+if ~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed; then
+  if gh pr merge <PR#> --squash --auto; then
+    if [ "$(gh pr view <PR#> --json state --jq .state)" = "MERGED" ]; then
+      cw dev-queue remove <ticket> -c <client>
+    else
+      echo "auto-merge armed; PR remains open pending merge"
+    fi
+  else
+    echo "auto-merge arm failed — leaving ticket queued"
+  fi
+else
+  echo "auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR open for manual merge"
+fi
 ```
 
 This pattern fires whenever the dispatch session is in Stage 3 (reviewers

@@ -207,10 +207,25 @@ If PR creation fails, BLOCK with the `gh` error verbatim.
 
 ```bash
 PR_NUMBER=$(gh pr view --json number -q .number)
-gh pr merge "$PR_NUMBER" --auto --squash
+REPO_ROOT=$(git rev-parse --show-toplevel)
+if [ -f "$REPO_ROOT/.claude/scripts/prep_pr_finalize.py" ]; then
+  AUTOMERGE_CHECK="$REPO_ROOT/.claude/scripts/prep_pr_finalize.py"
+else
+  AUTOMERGE_CHECK="$HOME/.claude/scripts/prep_pr_finalize.py"
+fi
+if "$AUTOMERGE_CHECK" check-automerge-allowed --repo-path "$REPO_ROOT"; then
+  gh pr merge "$PR_NUMBER" --auto --squash
+else
+  GATE_STATUS=$?
+  if [ "$GATE_STATUS" -ne 1 ]; then
+    echo "Auto-merge gate failed unexpectedly (exit $GATE_STATUS) — BLOCK." >&2
+    exit 1
+  fi
+  echo "Auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR #$PR_NUMBER open for manual merge."
+fi
 ```
 
-If auto-merge fails, BLOCK — the PR exists but auto-merge isn't on; don't silently leave it unset.
+If `check-automerge-allowed` permits arming and the `gh pr merge --auto` call itself fails, BLOCK — the PR exists but auto-merge isn't on; don't silently leave it unset. If `check-automerge-allowed` reports disallowed, this is expected, deliberate repo state, not a failure — do not BLOCK.
 
 ## Step 5: Register PR monitor
 

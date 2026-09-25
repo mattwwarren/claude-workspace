@@ -510,9 +510,9 @@ After `/prep-pr` returns with a PR number:
 
    One block per PR; list every deferred finding inside the single `DEFERRED-REVIEW-FINDINGS` comment (open/close sentinels exact — Step H3 greps them verbatim). Omit the section when `.cw/deferred-findings.md` is absent or empty. For pipeline exits that never create a PR (large-scope `review_pending_approval`, or a BLOCK) there is no body to write — rejections/deferrals stay in `friction_highlights` and surface in the structured output instead.
 
-3. **Enable auto-merge:** `gh pr merge <pr-number> --auto --squash`. Auto-merge may be enabled on a draft PR — it won't trigger until the PR is marked ready (`/review-monitor` does this when the stack parent merges) AND CI passes. Enable unconditionally, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless: then skip this step and set `pr.auto_merge` to `false`.
+3. **Enable auto-merge:** first check the shared seam — `~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed` — and record its exit status. Exit `0` permits the arm; exit `1` means `.claude/project-config.yaml` sets `pr.auto_merge: false`, so skip this step, set the sentinel's `pr.auto_merge` to `false`, leave the PR open for manual merge, and skip the verification below. Any other exit status is an unexpected gate failure: BLOCK. When the seam permits it, run `gh pr merge <pr-number> --auto --squash`. Auto-merge may be enabled on a draft PR — it won't trigger until the PR is marked ready (`/review-monitor` does this when the stack parent merges) AND CI passes. Enable whenever the seam permits it, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless: then skip this step and set `pr.auto_merge` to `false` regardless of what the seam said.
 
-   **Verify after arming (#1140 — do not skip):** Skip this sub-step if the arm itself was skipped (Hold / headless UI-evidence-missing branch). Otherwise, immediately after the `gh pr merge --auto` call, read back whether it took:
+   **Verify after arming (#1140 — do not skip):** Skip this sub-step if the arm itself was skipped (Hold / headless UI-evidence-missing branch / seam-disallowed `pr.auto_merge: false`). Otherwise, immediately after the `gh pr merge --auto` call, read back whether it took:
 
    ```bash
    ~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --json
@@ -526,11 +526,11 @@ After `/prep-pr` returns with a PR number:
    but autoMergeRequest read back null.
 
    Options:
-   1. Retry — run gh pr merge <pr-number> --auto --squash again and re-verify
+   1. Retry — re-check `check-automerge-allowed`, then run gh pr merge <pr-number> --auto --squash again and re-verify
    2. Leave open — do not enable auto-merge; human merges manually
    3. Abort — stop pipeline
    ```
-   - **Retry** → re-run the arm command once, then re-run this verify. If it still fails, fall through to **Leave open**.
+   - **Retry** → run `check-automerge-allowed` again first. Only when it exits `0`, re-run the arm command once and then re-run this verify. Exit `1` means leave the PR open without retrying; any other exit status is an unexpected gate failure and BLOCK. If the allowed retry still fails, fall through to **Leave open**.
    - **Leave open** → set `pr.auto_merge: false`; continue to step 4.
    - **Abort** → stop the pipeline.
 
