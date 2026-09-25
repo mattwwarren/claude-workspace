@@ -1715,7 +1715,7 @@ class TestWriteHookContextAtomicAndLiveSession:
         (claude_dir / "cw-context.json").write_text(json.dumps(prior_context))
         return worktree
 
-    def test_daemon_overwrite_raises_genuinely_live_message_when_daemon_confirms_liveness(
+    def test_daemon_overwrite_raises_genuinely_live_message_when_daemon_confirms(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """#2077: a prior session that ``live_home_reason`` independently
@@ -1753,9 +1753,8 @@ class TestWriteHookContextAtomicAndLiveSession:
 
         assert excinfo.value.genuinely_live is False
         assert excinfo.value.conflicting_session_id == "live2077"
-        assert (
-            "Complete or close that session before reusing this worktree."
-            in str(excinfo.value)
+        assert "Complete or close that session before reusing this worktree." in str(
+            excinfo.value
         )
 
     def test_daemon_overwrite_without_daemon_keeps_old_message(
