@@ -92,9 +92,7 @@ def test_promote_plan_draft_write_failure_raises_and_leaves_draft_intact(
         msg = "simulated disk full"
         raise OSError(msg)
 
-    monkeypatch.setattr(
-        "cw.dev_queue.plan_promotion.atomic_write_text", _failing_write
-    )
+    monkeypatch.setattr("cw.dev_queue.plan_promotion.atomic_write_text", _failing_write)
 
     with pytest.raises(ApproveGateError):
         promote_plan_draft(_plan_task(cw_dir.parent), sample_client)
@@ -114,9 +112,7 @@ def test_promote_plan_draft_error_names_worktree_path_and_exception(
         msg = "simulated disk full"
         raise PermissionError(msg)
 
-    monkeypatch.setattr(
-        "cw.dev_queue.plan_promotion.atomic_write_text", _failing_write
-    )
+    monkeypatch.setattr("cw.dev_queue.plan_promotion.atomic_write_text", _failing_write)
 
     with pytest.raises(ApproveGateError) as excinfo:
         promote_plan_draft(task, sample_client)

@@ -6710,9 +6710,7 @@ class TestApproveTicket:
         )
 
         with dev_queue_lock():
-            result = _approve_ticket_locked(
-                "GEN-500", "genhealth", plan_reviewed=True
-            )
+            result = _approve_ticket_locked("GEN-500", "genhealth", plan_reviewed=True)
 
         assert result["to_stage"] == "impl"
         assert result["plan_promoted"] is False
@@ -10524,9 +10522,7 @@ class TestCLIApprove:
 
         assert result.exit_code == 0, result.output
         assert "plan -> impl" in result.output
-        assert (
-            "promoted the approved .cw/plan-draft.md to .cw/plan.md" in result.output
-        )
+        assert "promoted the approved .cw/plan-draft.md to .cw/plan.md" in result.output
         assert (cw_dir / "plan.md").read_text(
             encoding="utf-8"
         ) == _RECONCILED_DRAFT_BODY

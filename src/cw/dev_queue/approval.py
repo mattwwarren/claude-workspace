@@ -36,6 +36,7 @@ from cw.dev_queue.lifecycle import (
     _plan_is_reviewed,
     _reset_for_same_stage_requeue,
 )
+from cw.dev_queue.plan_promotion import promote_plan_draft
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
@@ -52,7 +53,7 @@ from cw.models import (
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
-    from cw.models import DevQueueStore, Session, TicketTask
+    from cw.models import ClientConfig, DevQueueStore, Session, TicketTask
 
 
 _log = logging.getLogger(__name__)
@@ -80,14 +81,18 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | N
     advancing to IMPL, because the plan-of-record was not yet quality-
     reviewed -- see GitHub #968; always present, False on every other path),
     finalize_held (RFC 0011 A3, #1160; always False on this entry point,
-    which is the human release path -- see ``_approve_ticket_locked``), and
+    which is the human release path -- see ``_approve_ticket_locked``),
     plan_approved_fingerprint (#2102; the draft fingerprint this approval is
     bound to, read from the approving session's sentinel -- None on every
-    non-PLAN path and whenever the sentinel carried no fingerprint).
+    non-PLAN path and whenever the sentinel carried no fingerprint), and
+    plan_promoted (#2342; True iff *this* call's direct plan->impl advance
+    promoted ``.cw/plan-draft.md`` to ``.cw/plan.md`` -- always present, False
+    on every other path and when there was no draft to promote).
 
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
-            last_result is absent, or last_result status is not an approval gate.
+            last_result is absent, last_result status is not an approval gate,
+            or promoting the plan draft failed on I/O (nothing is recorded).
         CwError: if no matching task is found.
     """
     with _lock():
@@ -243,6 +248,26 @@ def _stamp_plan_approval(
     return task.plan_approved_fingerprint
 
 
+def _promote_plan_draft_on_direct_advance(
+    task: TicketTask,
+    client_cfg: ClientConfig,
+    *,
+    plan_reviewed: bool | None,
+) -> bool:
+    """Promote the approved plan draft on the direct plan->impl advance (#2342).
+
+    Only the public/CLI path (``plan_reviewed is None``) promotes: the trusted
+    gate-recipe caller passes ``plan_reviewed=True`` for an auto-adopted plan
+    and never approved a draft. Extracted from ``_approve_ticket_locked`` to
+    keep that function under the PLR0915 statement ceiling, like its sibling
+    helpers above. Runs before ``_advance_task_pointer`` and
+    ``save_dev_queue``, so a raised ``ApproveGateError`` records nothing.
+    """
+    if task.stage != Stage.PLAN or plan_reviewed is not None:
+        return False
+    return promote_plan_draft(task, client_cfg)
+
+
 def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
     """True iff neither release condition for the approval gate is met.
 
@@ -309,6 +334,27 @@ def _raise_stage_not_in_pipeline(
     raise ApproveGateError(msg)
 
 
+def _require_approval_session(ticket_id: str, task: TicketTask) -> Session:
+    """Return the session that parked *task*, or raise ``ApproveGateError``.
+
+    Extracted to keep ``_approve_ticket_locked`` under ruff's PLR0915
+    statement-count gate, like ``_raise_stage_not_in_pipeline`` above.
+    """
+    from cw.config import load_state
+
+    session = None
+    if task.session_id is not None:
+        session = load_state().find_by_name_or_id(task.session_id)
+    if session is None:
+        msg = (
+            f"Cannot approve ticket '{ticket_id}': session not found"
+            f" (session_id={task.session_id!r}). The session may have been"
+            " cleaned up. Use 'requeue' to re-run the stage."
+        )
+        raise ApproveGateError(msg)
+    return session
+
+
 def _approve_ticket_locked(
     ticket_id: str,
     client_name: str,
@@ -363,14 +409,20 @@ def _approve_ticket_locked(
     is already parked and stays exactly as it is -- and reports
     ``finalize_held=True`` so the caller can emit its own correction event.
 
+    On the direct plan->impl advance of the public/CLI path
+    (``plan_reviewed is None``), an approved ``.cw/plan-draft.md`` is promoted
+    to ``.cw/plan.md`` before the stage pointer moves (#2342), and reported
+    as ``plan_promoted``. A promotion I/O failure raises before any mutation
+    or ``save_dev_queue``, so the row stays parked and nothing is recorded.
+
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
             last_result is absent, last_result status is not an approval gate,
-            or (with ``resolved_task``) the validated row vanished or its status
-            diverged from the validated status.
+            (with ``resolved_task``) the validated row vanished or its status
+            diverged from the validated status, or promoting the plan draft
+            failed on I/O.
         CwError: if no matching task is found.
     """
-    from cw.config import load_state
     from cw.dispatch import (
         _park_signoff_gate,
         _should_force_hold_finalize,
@@ -412,20 +464,12 @@ def _approve_ticket_locked(
             # plan approval, so reporting one would credit this call with a
             # binding an earlier PLAN approval made.
             PLAN_APPROVED_FINGERPRINT_KEY: None,
+            # Likewise: clearing a signoff gate never approves a plan draft,
+            # so there is never a draft for this call to have promoted.
+            "plan_promoted": False,
         }
 
-    state = load_state()
-    session = None
-    if task.session_id is not None:
-        session = state.find_by_name_or_id(task.session_id)
-
-    if session is None:
-        msg = (
-            f"Cannot approve ticket '{ticket_id}': session not found"
-            f" (session_id={task.session_id!r}). The session may have been"
-            " cleaned up. Use 'requeue' to re-run the stage."
-        )
-        raise ApproveGateError(msg)
+    session = _require_approval_session(ticket_id, task)
 
     if _not_at_approval_gate(session, task):
         actual = session.last_result.get("status") if session.last_result else None
@@ -448,6 +492,7 @@ def _approve_ticket_locked(
     awaiting_signoff = False
     plan_requeued = False
     finalize_held = False
+    plan_promoted = False
     # Three independent gates share this branch (#968, #1160):
     #  - REVIEW-scoped A3 force hold: a proactive "do not ship this
     #    unattended", checked FIRST and only for an automatic caller. It makes
@@ -481,6 +526,9 @@ def _approve_ticket_locked(
         _reset_for_same_stage_requeue(task)
         plan_requeued = True
     else:
+        plan_promoted = _promote_plan_draft_on_direct_advance(
+            task, client_cfg, plan_reviewed=plan_reviewed
+        )
         _advance_task_pointer(task, stages)
     stamped_fingerprint = _stamp_plan_approval(task, from_stage, session)
     to_stage = task.stage.value
@@ -513,6 +561,7 @@ def _approve_ticket_locked(
         "plan_requeued": plan_requeued,
         "finalize_held": finalize_held,
         PLAN_APPROVED_FINGERPRINT_KEY: stamped_fingerprint,
+        "plan_promoted": plan_promoted,
     }
 
 

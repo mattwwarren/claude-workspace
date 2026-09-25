@@ -13,6 +13,8 @@ module is now a package of focused submodules:
 * ``crud`` — operator-facing queue mutations (add/remove/cancel/move/clear/
   prune) and the ticket-resolution helpers (resolve/list/find).
 * ``approval`` — the plan/review approval + operator-signoff-clearing gates.
+* ``plan_promotion`` — promote an approved ``.cw/plan-draft.md`` to
+  ``.cw/plan.md`` on the approve gate's plan->impl advance.
 * ``requeue`` — re-run a stage, regress, or clear a salvage park.
 * ``drain`` — batch-resume every Rule-5 availability park (RFC 0011 A4).
 
@@ -84,6 +86,7 @@ from cw.dev_queue.lifecycle import (
     wait_for_terminal,
 )
 from cw.dev_queue.migrate import migrate_dev_queue
+from cw.dev_queue.plan_promotion import promote_plan_draft
 from cw.dev_queue.requeue import (
     _apply_requeue_stage,
     _impl_bypass_plan_available,
@@ -155,6 +158,7 @@ __all__ = [
     "migrate_dev_queue",
     "move_ticket",
     "plan_path",
+    "promote_plan_draft",
     "prune_tickets",
     "register_watched_pr",
     "remove_ticket",
