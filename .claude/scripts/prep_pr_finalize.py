@@ -264,19 +264,31 @@ def resolve_project_config_auto_merge(
     Mirrors cw.tracker.load_project_config_dict's safe-degrade shape (absent
     file, unparseable YAML, non-dict root, absent/non-bool key -> None) via
     the shared project-config reader. If neither the checked-out source tree
-    nor an installed cw package is available, callers treat the result as
-    unknown and fall back to allowed/required, never as an implicit False
-    (#2046).
+    nor an installed cw package is available, `pr.auto_merge` is read
+    directly from `config_path` (PyYAML is already confirmed importable at
+    that point) rather than silently treated as unknown (#2373, follow-up to
+    #2046).
     """
     if yaml is None:
         return None
     project_config = _project_config or _load_project_config_module()
-    if project_config is None:
+    root = config_path.parent.parent
+    if project_config is not None and root / PROJECT_CONFIG_PATH == config_path:
+        raw = project_config.load_project_config_dict(root, yaml_module=yaml)
+    elif config_path.exists():
+        # Shared cw.project_config module unavailable (neither the source
+        # tree nor an installed cw package loaded), or config_path doesn't
+        # have the shape the shared reader's root-based lookup assumes
+        # (#2373, follow-up to #2046's fail-open). PyYAML is confirmed
+        # importable at this point (see the `yaml is None` guard above), so
+        # read config_path directly instead of silently reporting "unknown".
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            return None
+    else:
         return None
-    raw = project_config.load_project_config_dict(
-        config_path.parent.parent, yaml_module=yaml
-    )
-    if raw is None:
+    if not isinstance(raw, dict):
         return None
     pr_block = raw.get("pr")
     if not isinstance(pr_block, dict):
