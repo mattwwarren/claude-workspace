@@ -192,7 +192,7 @@ def test_codex_executor_codex_not_found(
     client = ClientConfig(name="test", workspace_path=worktree)
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
-    with patch("cw.executor.shutil.which", return_value=None):
+    with patch("cw.executor.codex.shutil.which", return_value=None):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
 
     assert len(runner.calls) == 0
@@ -223,7 +223,7 @@ def test_spawn_writes_cw_context_json_on_preflight_failure(
     client = ClientConfig(name="test", workspace_path=worktree)
     task = TicketTask(ticket_id="T-ctx-pre", client="test", stage=Stage.REVIEW)
 
-    with patch("cw.executor.shutil.which", return_value=None):
+    with patch("cw.executor.codex.shutil.which", return_value=None):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
 
     context_path = worktree / ".claude" / "cw-context.json"
@@ -246,7 +246,7 @@ def test_spawn_writes_cw_context_json_on_review_pass(
     task = TicketTask(ticket_id="T-ctx-run", client="test", stage=Stage.REVIEW)
 
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
         patch("cw.codex_background._post_review_comment"),
     ):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
@@ -294,7 +294,7 @@ def test_spawn_second_attempt_prior_attempts_summary_reflects_first_codex_park(
         ticket_id="T-retry", client="test", stage=Stage.REVIEW, attempts=1
     )
 
-    with patch("cw.executor.shutil.which", return_value=None):
+    with patch("cw.executor.codex.shutil.which", return_value=None):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
 
     context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
@@ -323,7 +323,7 @@ def test_codex_executor_clean_stage_complete(
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
         patch("cw.codex_background._post_review_comment") as post_mock,
     ):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
@@ -401,7 +401,7 @@ def test_codex_executor_must_fix_blocked(
     )
 
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
         patch("cw.codex_background._post_review_comment") as post_mock,
     ):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
@@ -456,7 +456,7 @@ def test_codex_executor_clean_stage_complete_fix_loop_enabled_states_available(
     )
 
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
         patch("cw.codex_background._post_review_comment") as post_mock,
     ):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
@@ -488,7 +488,7 @@ def test_codex_executor_all_roles_fail_blocked(
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
         patch("cw.codex_background._post_review_comment") as post_mock,
     ):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
@@ -548,7 +548,7 @@ def test_codex_executor_should_fix_only_stays_complete(
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
-    with patch("cw.executor.shutil.which", return_value="/usr/bin/codex"):
+    with patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
 
     result = _persisted_result()
@@ -580,7 +580,7 @@ def test_spawn_delegates_to_fix_loop_not_bare_run_review(
         stage_reached="stage3_review",
     )
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
         patch(
             "cw.codex_background.run_review_with_fix_loop", return_value=(blocked, None)
         ) as fix_loop_mock,
@@ -627,7 +627,7 @@ def test_spawn_threads_codex_fix_loop_enabled_true_from_lane(
         stage_reached="stage3_review",
     )
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
         patch(
             "cw.codex_background.run_review_with_fix_loop", return_value=(blocked, None)
         ) as fix_loop_mock,
@@ -687,7 +687,7 @@ def test_codex_executor_exception_handler_marks_session_completed(
     )
 
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
         patch(
             "cw.codex_background.run_review_with_fix_loop",
             side_effect=RuntimeError("git boom"),
@@ -741,7 +741,7 @@ def test_preflight_failure_persist_error_completes_session_and_reraises(
             raise OSError(msg)
 
     with (
-        patch("cw.executor._complete_session_via_door", _door),
+        patch("cw.executor.codex._complete_session_via_door", _door),
         pytest.raises(OSError, match="door boom"),
     ):
         # Stage.PLAN trips the CODEX_REVIEW_ONLY pre-flight guard, so this
@@ -777,7 +777,9 @@ def test_spawn_write_hook_context_failure_completes_session_and_reraises(
     task = TicketTask(ticket_id="T-hc", client="test", stage=Stage.REVIEW)
 
     with (
-        patch("cw.executor._write_hook_context", side_effect=OSError("hook boom")),
+        patch(
+            "cw.executor.codex._write_hook_context", side_effect=OSError("hook boom")
+        ),
         pytest.raises(OSError, match="hook boom"),
     ):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
@@ -833,7 +835,7 @@ def test_spawn_stamps_session_id_before_backgrounding(
     executor = CodexExecutor(
         config=config, runner=runner, background=_capture_background
     )
-    with patch("cw.executor.shutil.which", return_value="/usr/bin/codex"):
+    with patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"):
         sid = executor.spawn(
             stage=Stage.REVIEW, task=task, worktree=worktree, client=client
         )
@@ -875,7 +877,7 @@ def test_spawn_returns_before_background_work_completes(
 
     try:
         with (
-            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
             patch("cw.codex_background.run_review_with_fix_loop", _blocking_review),
         ):
             executor.spawn(
@@ -930,7 +932,7 @@ def test_spawn_threads_session_id_and_reasoning_effort_into_run_review(
         return blocked, None
 
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
         patch("cw.codex_background.run_review_with_fix_loop", _spy_run_review),
     ):
         sid = executor.spawn(
@@ -986,29 +988,31 @@ class TestCodexCapabilityDiagnosis:
     """Direct tests for the shared codex capability probe (#1238).
 
     ``shutil.which`` is patched via this file's established
-    ``patch("cw.executor.shutil.which", ...)`` idiom; the ``codex --version``
+    ``patch("cw.executor.core.shutil.which", ...)`` idiom; the ``codex --version``
     subprocess is patched at ``cw.executor.subprocess.run``.
     """
 
     def test_binary_absent_returns_not_found(self) -> None:
-        with patch("cw.executor.shutil.which", return_value=None):
+        with patch("cw.executor.core.shutil.which", return_value=None):
             probe = codex_capability_diagnosis()
         assert probe.diagnosis == CODEX_NOT_FOUND
         assert "not found" in probe.detail
 
     def test_version_filenotfound_returns_version_unknown(self) -> None:
         with (
-            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
-            patch("cw.executor.subprocess.run", side_effect=FileNotFoundError("gone")),
+            patch("cw.executor.core.shutil.which", return_value="/usr/bin/codex"),
+            patch(
+                "cw.executor.core.subprocess.run", side_effect=FileNotFoundError("gone")
+            ),
         ):
             probe = codex_capability_diagnosis()
         assert probe.diagnosis == CODEX_VERSION_UNKNOWN
 
     def test_version_timeout_returns_version_unknown(self) -> None:
         with (
-            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch("cw.executor.core.shutil.which", return_value="/usr/bin/codex"),
             patch(
-                "cw.executor.subprocess.run",
+                "cw.executor.core.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(cmd="codex", timeout=10),
             ),
         ):
@@ -1018,9 +1022,9 @@ class TestCodexCapabilityDiagnosis:
 
     def test_nonzero_returncode_returns_version_unknown(self) -> None:
         with (
-            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch("cw.executor.core.shutil.which", return_value="/usr/bin/codex"),
             patch(
-                "cw.executor.subprocess.run",
+                "cw.executor.core.subprocess.run",
                 return_value=_mk_codex_proc("boom\n", returncode=3),
             ),
         ):
@@ -1030,9 +1034,9 @@ class TestCodexCapabilityDiagnosis:
 
     def test_unparseable_version_returns_version_unknown(self) -> None:
         with (
-            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch("cw.executor.core.shutil.which", return_value="/usr/bin/codex"),
             patch(
-                "cw.executor.subprocess.run",
+                "cw.executor.core.subprocess.run",
                 return_value=_mk_codex_proc("not-a-version\n"),
             ),
         ):
@@ -1042,9 +1046,9 @@ class TestCodexCapabilityDiagnosis:
 
     def test_parseable_version_returns_capable(self) -> None:
         with (
-            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch("cw.executor.core.shutil.which", return_value="/usr/bin/codex"),
             patch(
-                "cw.executor.subprocess.run",
+                "cw.executor.core.subprocess.run",
                 return_value=_mk_codex_proc("0.144.5\n"),
             ),
         ):
@@ -1062,9 +1066,9 @@ class TestCodexCapabilityDiagnosis:
         CODEX_VERSION_UNKNOWN on every real install).
         """
         with (
-            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch("cw.executor.core.shutil.which", return_value="/usr/bin/codex"),
             patch(
-                "cw.executor.subprocess.run",
+                "cw.executor.core.subprocess.run",
                 return_value=_mk_codex_proc("codex-cli 0.136.0\n"),
             ),
         ):
@@ -1075,9 +1079,9 @@ class TestCodexCapabilityDiagnosis:
     def test_timeout_seconds_passed_to_subprocess_run(self) -> None:
         """The hot-path caller (dispatch's gate) needs to override the timeout."""
         with (
-            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch("cw.executor.core.shutil.which", return_value="/usr/bin/codex"),
             patch(
-                "cw.executor.subprocess.run",
+                "cw.executor.core.subprocess.run",
                 return_value=_mk_codex_proc("codex-cli 0.136.0\n"),
             ) as mock_run,
         ):
@@ -1087,9 +1091,9 @@ class TestCodexCapabilityDiagnosis:
     def test_default_timeout_passed_to_subprocess_run(self) -> None:
         """`cw doctor`'s one-shot call site relies on the 10s default."""
         with (
-            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch("cw.executor.core.shutil.which", return_value="/usr/bin/codex"),
             patch(
-                "cw.executor.subprocess.run",
+                "cw.executor.core.subprocess.run",
                 return_value=_mk_codex_proc("codex-cli 0.136.0\n"),
             ) as mock_run,
         ):
