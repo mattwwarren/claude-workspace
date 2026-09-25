@@ -773,11 +773,19 @@ class _VerifyFixesInput(BaseModel):
     verification. It is independent of ``verdict.reviewed_sha`` (the
     Checkpoint-3a sha the verdict was frozen at); the command never
     cross-checks the two.
+
+    ``ticket_id`` (#2009) is required because it is this path's
+    ``correlation_id`` source for the mandatory
+    ``review.fixed_disposition_downgraded`` event, for the same reason
+    ``_CheckVoidedInput.ticket_id`` is: there is no ``TicketTask`` on this
+    path, so it has to come in on the payload rather than leaving the event
+    uncorrelated.
     """
 
     verdict: ReviewVerdict
     diff: str
     reviewed_sha: str
+    ticket_id: str
 
 
 @review.command(name="verify-fixes")
@@ -824,12 +832,15 @@ def review_verify_fixes(
 
     PATH is a file path or '-' for stdin. Payload: {"verdict": <the adjudicated
     ReviewVerdict>, "diff": "<raw unified diff text of the fix cycles>",
-    "reviewed_sha": "<fix-cycle branch tip>"}.
+    "reviewed_sha": "<fix-cycle branch tip>", "ticket_id": "<ticket-id>"}.
 
     A "fixed" finding whose cited file/line the diff never touched becomes
     "dropped", with the reason in `disposition_detail`. Record-only: no gate
     is re-evaluated and no fix cycle is triggered — the caller surfaces the
     downgrade in friction_highlights.
+
+    Each downgrade emits one `review.fixed_disposition_downgraded` event
+    correlated to `ticket_id`.
 
     --base verifies the payload's diff text is byte-identical to the real
     `git diff <base>...<reviewed_sha>` output, resolved from --worktree (or
@@ -847,6 +858,8 @@ def review_verify_fixes(
     parsed = _parse_payload_or_exit(path, _VerifyFixesInput)
     _run_base_check_if_requested(parsed.diff, base, parsed.reviewed_sha, worktree)
     verdict = verify_fixed_dispositions(
-        parsed.verdict, _build_captured_diff(parsed.diff)
+        parsed.verdict,
+        _build_captured_diff(parsed.diff),
+        ticket_id=parsed.ticket_id,
     )
     click.echo(verdict.model_dump_json(indent=2))
