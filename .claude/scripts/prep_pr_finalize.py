@@ -49,7 +49,10 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -58,7 +61,7 @@ from utils.runtime_paths import review_monitor_script_path
 try:
     import yaml
 except ImportError:  # pragma: no cover - downstream repo without PyYAML
-    yaml = None  # type: ignore[assignment]
+    yaml: ModuleType | None = None
 
 
 def _load_project_config_module():
@@ -261,11 +264,22 @@ def resolve_project_config_auto_merge(
     (#2046). Callers treat None as "unknown - fall back to allowed/required,"
     never as an implicit False.
     """
-    if _project_config is None or yaml is None:
+    if yaml is None:
         return None
-    raw = _project_config.load_project_config_dict(
-        config_path.parent.parent, yaml_module=yaml
-    )
+    if _project_config is not None:
+        raw = _project_config.load_project_config_dict(
+            config_path.parent.parent, yaml_module=yaml
+        )
+    else:
+        # The script is installed independently in downstream repositories;
+        # keep the same safe-degrading reader available when this checkout's
+        # src/cw/project_config.py is not alongside it.
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            return None
+        if not isinstance(raw, dict):
+            return None
     if raw is None:
         return None
     pr_block = raw.get("pr")

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from types import ModuleType
+
+yaml: ModuleType | None
 try:
     import yaml
 except ImportError:  # pragma: no cover - downstream repo without PyYAML
-    yaml = None  # type: ignore[assignment]
+    yaml = None
 
 PROJECT_CONFIG_RELPATH = Path(".claude") / "project-config.yaml"
 

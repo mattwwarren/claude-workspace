@@ -140,6 +140,16 @@ def test_resolve_project_config_auto_merge_false(tmp_path: Path) -> None:
     assert _mod.resolve_project_config_auto_merge(config_path) is False
 
 
+def test_resolve_project_config_auto_merge_without_source_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An installed standalone script still honors a disabled project config."""
+    monkeypatch.setattr(_mod, "_project_config", None)
+    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: false\n")
+    config_path = tmp_path / ".claude" / "project-config.yaml"
+    assert _mod.resolve_project_config_auto_merge(config_path) is False
+
+
 def test_resolve_project_config_auto_merge_true(tmp_path: Path) -> None:
     _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: true\n")
     config_path = tmp_path / ".claude" / "project-config.yaml"
