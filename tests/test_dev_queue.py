@@ -5773,6 +5773,27 @@ def _make_session(
     )
 
 
+_RECONCILED_DRAFT_BODY = "# Plan — reconciled draft\n\nreconciled body\n"
+
+
+def _seed_plan_worktree(
+    task: TicketTask,
+    worktree: Path,
+    *,
+    plan: str | None = None,
+    draft: str | None = None,
+) -> Path:
+    """Stamp *task*'s worktree and seed its ``.cw/`` plan files (#2342)."""
+    task.worktree_path = worktree
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(parents=True)
+    if plan is not None:
+        (cw_dir / "plan.md").write_text(plan, encoding="utf-8")
+    if draft is not None:
+        (cw_dir / "plan-draft.md").write_text(draft, encoding="utf-8")
+    return cw_dir
+
+
 # ---------------------------------------------------------------------------
 # TestApproveTicket — approve_ticket() mutation function
 # ---------------------------------------------------------------------------
@@ -5809,6 +5830,7 @@ class TestApproveTicket:
         assert result["from_stage"] == "plan"
         assert result["to_stage"] == "impl"
         assert result["plan_requeued"] is False
+        assert result["plan_promoted"] is False
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
         assert t.stage == Stage.IMPL
@@ -6570,6 +6592,197 @@ class TestApproveTicket:
 
         assert result["plan_requeued"] is True
         assert result["to_stage"] == "plan"
+
+    # -- Plan-draft promotion on the direct plan->impl advance (#2342) -------
+
+    def test_approve_plan_pending_promotes_reconciled_draft_to_plan_md(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2342 regression: after a regress-to-plan, the plan stage writes a
+        reconciled ``.cw/plan-draft.md`` next to the stale-but-reviewed
+        ``.cw/plan.md``. Approving must promote the draft so IMPL's drift gate
+        reads the plan the operator actually approved."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-promote1")
+        cw_dir = _seed_plan_worktree(
+            task,
+            tmp_path / "wt-promote1",
+            plan=plan_body(),
+            draft=_RECONCILED_DRAFT_BODY,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-promote1",
+                        last_result={"status": "plan_pending_approval"},
+                    )
+                ]
+            )
+        )
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["to_stage"] == "impl"
+        assert result["plan_promoted"] is True
+        assert (cw_dir / "plan.md").read_text(
+            encoding="utf-8"
+        ) == _RECONCILED_DRAFT_BODY
+        assert not (cw_dir / "plan-draft.md").exists()
+
+    def test_approve_plan_requeued_path_never_promotes(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unreviewed plan re-parks at PLAN (#968); the draft is not the
+        plan-of-record yet, so it must stay a draft."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-promote2")
+        cw_dir = _seed_plan_worktree(
+            task, tmp_path / "wt-promote2", draft=_RECONCILED_DRAFT_BODY
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-promote2",
+                        last_result={"status": "plan_pending_approval"},
+                    )
+                ]
+            )
+        )
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_requeued"] is True
+        assert result["plan_promoted"] is False
+        assert (cw_dir / "plan-draft.md").read_text(
+            encoding="utf-8"
+        ) == _RECONCILED_DRAFT_BODY
+        assert not (cw_dir / "plan.md").exists()
+
+    def test_approve_gate_recipe_plan_reviewed_true_skips_promotion(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """The trusted gate-recipe caller passes ``plan_reviewed=True``; its
+        auto-adopt path never promotes a draft."""
+        from cw.config import save_state
+        from cw.dev_queue import _approve_ticket_locked, dev_queue_lock
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-promote3")
+        cw_dir = _seed_plan_worktree(
+            task,
+            tmp_path / "wt-promote3",
+            plan=plan_body(),
+            draft=_RECONCILED_DRAFT_BODY,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-promote3",
+                        last_result={"status": "plan_pending_approval"},
+                    )
+                ]
+            )
+        )
+
+        with dev_queue_lock():
+            result = _approve_ticket_locked(
+                "GEN-500", "genhealth", plan_reviewed=True
+            )
+
+        assert result["to_stage"] == "impl"
+        assert result["plan_promoted"] is False
+        assert (cw_dir / "plan-draft.md").read_text(
+            encoding="utf-8"
+        ) == _RECONCILED_DRAFT_BODY
+        assert (cw_dir / "plan.md").read_text(encoding="utf-8") == plan_body()
+
+    def test_approve_awaiting_operator_signoff_plan_promoted_false(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """The signoff-clearing early return reports plan_promoted=False."""
+        from cw.dev_queue import approve_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["to_stage"] == "finalize"
+        assert result["plan_promoted"] is False
+
+    def test_approve_promotion_io_failure_aborts_and_records_nothing(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A draft that cannot be read fails the approve loudly, naming the
+        worktree, and leaves the row exactly as it was parked."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-promote4")
+        worktree = tmp_path / "wt-promote4"
+        cw_dir = _seed_plan_worktree(task, worktree, plan=plan_body())
+        (cw_dir / "plan-draft.md").mkdir()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-promote4",
+                        last_result={"status": "plan_pending_approval"},
+                    )
+                ]
+            )
+        )
+
+        with pytest.raises(ApproveGateError) as excinfo:
+            approve_ticket("GEN-500", "genhealth")
+
+        assert str(worktree) in str(excinfo.value)
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.stage == Stage.PLAN
+        assert t.session_id == "sess-promote4"
+        assert t.plan_approved_at is None
+        assert (cw_dir / "plan.md").read_text(encoding="utf-8") == plan_body()
 
 
 # ---------------------------------------------------------------------------
@@ -10272,6 +10485,87 @@ class TestCLIApprove:
         assert len(events) == 2
         assert events[1][1]["plan_requeued"] is False
         assert "plan -> impl" in result2.output
+
+    def test_approve_cli_echoes_promotion_note(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A promoted draft is reported on the advance line (#2342)."""
+        from cw.config import save_state
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess7101")
+        cw_dir = _seed_plan_worktree(
+            task,
+            tmp_path / "wt-cli-promote",
+            plan=plan_body(),
+            draft=_RECONCILED_DRAFT_BODY,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess7101",
+                        last_result={"status": "plan_pending_approval"},
+                    )
+                ]
+            )
+        )
+
+        result = CliRunner().invoke(
+            main, ["dev-queue", "approve", "GEN-500", "--client", "genhealth"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "plan -> impl" in result.output
+        assert (
+            "promoted the approved .cw/plan-draft.md to .cw/plan.md" in result.output
+        )
+        assert (cw_dir / "plan.md").read_text(
+            encoding="utf-8"
+        ) == _RECONCILED_DRAFT_BODY
+
+    def test_approve_cli_promotion_failure_exits_nonzero(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unreadable draft fails the CLI approve and names the worktree."""
+        from cw.config import save_state
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess7102")
+        worktree = tmp_path / "wt-cli-fail"
+        cw_dir = _seed_plan_worktree(task, worktree, plan=plan_body())
+        (cw_dir / "plan-draft.md").mkdir()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess7102",
+                        last_result={"status": "plan_pending_approval"},
+                    )
+                ]
+            )
+        )
+
+        result = CliRunner().invoke(
+            main, ["dev-queue", "approve", "GEN-500", "--client", "genhealth"]
+        )
+
+        assert result.exit_code != 0
+        assert str(worktree) in result.output
 
 
 # ---------------------------------------------------------------------------
