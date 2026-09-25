@@ -3,24 +3,15 @@
 from __future__ import annotations
 
 import contextlib
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
-from cw.config import load_state, save_state, sessions_lock
-from cw.events import record_event as _record_orchestrator_event
-from cw.executor.core import _complete_session_via_door
-from cw.executor_diagnostics import (
-    append_diagnostics_pointer,
-    build_executor_failure,
-    persist_diagnostics_bundle,
-)
+from cw.executor.core import _PreflightOK, _spawn_fire_and_forget
 from cw.local_runner import (
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
-    LIVENESS_UNAVAILABLE,
     PLAN_MISSING,
     TASK_CONTEXT_RELATIVE_PATH,
-    UNEXPECTED_ERROR,
     AiderRunner,
     GithubIssuePlanFetcher,
     PlanFetcher,
@@ -31,41 +22,19 @@ from cw.local_runner import (
     build_env,
     build_task_message,
     make_blocked,
-    read_process_start_time_ns,
-)
-from cw.models import (
-    ClientConfig,
-    LocalLivenessHandle,
-    OrchestratorEventType,
-    Session,
-    SessionOrigin,
-    SessionPurpose,
-    Stage,
-    StageExecutorConfig,
-    TicketTask,
 )
 from cw.plan_files import parse_plan_files_modified
-from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-
-class _PreflightOK(NamedTuple):
-    """Resolved launch parameters returned by _local_preflight on success."""
-
-    endpoint: str
-    model: str
-    task_message: str
-    # The plan's ``## Files Modified`` manifest — aider's explicit edit set
-    # (#1905). Empty when the plan has no manifest section.
-    files: list[str]
-    # The materialised read-only task-context file passed to aider as --read.
-    read_only_path: Path
-    # The materialised --aiderignore file blocking every tracked file outside
-    # the manifest (#1915); None when the manifest is empty (no restriction).
-    aiderignore_path: Path | None
+    from cw.models import (
+        ClientConfig,
+        Stage,
+        StageExecutorConfig,
+        TicketTask,
+    )
 
 
 def _local_preflight(
@@ -77,7 +46,7 @@ def _local_preflight(
     """Run LocalExecutor pre-flight checks (endpoint/aider/plan availability).
 
     Returns a blocked ``AutoDevResult`` on the first failing check; returns
-    ``_PreflightOK`` with the resolved launch parameters when all checks pass.
+    ``_PreflightOK`` with the resolved aider argv + env when all checks pass.
     The discriminated return lets callers use ``isinstance(_PreflightOK)`` to
     narrow without ``or ""`` guards on the resolved values. Kept synchronous
     (Addendum 1 Alt A): pre-flight failures complete the session inline, before
@@ -119,14 +88,19 @@ def _local_preflight(
     plan_text = ""
     with contextlib.suppress(OSError):
         plan_text = (worktree / ".cw" / "plan.md").read_text(encoding="utf-8")
+    # The plan's ``## Files Modified`` manifest is aider's explicit edit set
+    # (#1905); a non-empty one also materialises an --aiderignore blocking
+    # every tracked file outside it (#1915).
     files = parse_plan_files_modified(plan_text)
     return _PreflightOK(
-        endpoint=config.endpoint,  # narrowed: is-None check above
-        model=config.model or "",
-        task_message=task_message,
-        files=files,
-        read_only_path=worktree / TASK_CONTEXT_RELATIVE_PATH,
-        aiderignore_path=build_aiderignore(worktree, files),
+        argv=build_argv(
+            config.model or "",
+            task_message,
+            files,
+            worktree / TASK_CONTEXT_RELATIVE_PATH,
+            build_aiderignore(worktree, files),
+        ),
+        env=build_env(config.endpoint),  # narrowed: is-None check above
     )
 
 
@@ -145,7 +119,8 @@ class LocalExecutor:
     persist a blocked result to Session.last_result via the door
     (``emit_result_locked``, source=EXECUTOR_DIRECT — RFC 0012 A2, #1458), mark
     the session COMPLETED, and emit SESSION_COMPLETED before returning — the
-    launch never happens.
+    launch never happens. The shared skeleton lives in
+    ``cw.executor.core._spawn_fire_and_forget`` (#2369).
 
     Result delivery bypasses stdout-sentinel parsing entirely. Every
     SESSION_COMPLETED event this class or the harvest path emits carries no
@@ -177,154 +152,25 @@ class LocalExecutor:
         # concept. wall_clock_budget_seconds is unused on the fire-and-forget
         # launch path — the harvest sweep, not a blocking timeout, bounds the run.
         del parent, wall_clock_budget_seconds
-        # Step 1: Create Session with all required fields.
-        sess = Session(
-            name=f"{client.name}/{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}",
-            client=client.name,
-            purpose=SessionPurpose.IMPL,
-            origin=SessionOrigin.DAEMON,
-            workspace_path=client.workspace_path,
-            worktree_path=worktree,
+
+        def _blocked(*, reason: str, details: str) -> AutoDevResult:
+            return make_blocked(
+                ticket_id=task.ticket_id,
+                worktree=worktree,
+                reason=reason,
+                details=details,
+            )
+
+        return _spawn_fire_and_forget(
+            task=task,
+            worktree=worktree,
+            client=client,
             stage=stage,
-            lane=task.lane,
+            executor_name="aider",
+            preflight_fn=lambda: _local_preflight(self._config, task, worktree, client),
+            blocked_ctor=_blocked,
+            runner=self._runner,
         )
-        sid = sess.id
-        with sessions_lock():
-            state = load_state()
-            state.sessions.append(sess)
-            save_state(state)
-
-        # Step 2: Pre-flight checks (synchronous, Addendum 1 Alt A).
-        # _PreflightOK → all checks passed; AutoDevResult → blocked.
-        preflight = _local_preflight(self._config, task, worktree, client)
-
-        # Captured for diagnostics: empty until the launch path builds it, so
-        # the generic-except branch (which may fire before build_argv) can still
-        # persist an argv-less bundle.
-        argv: list[str] = []
-        try:
-            if isinstance(preflight, _PreflightOK):
-                # Step 3: Launch aider fire-and-forget (pre-flight all passed).
-                # Capture the PID + start-time as a liveness handle, leave the
-                # session ACTIVE, and return — reconcile/local harvest completes
-                # it once the process exits. NEVER block on the run here.
-                argv = build_argv(
-                    preflight.model,
-                    preflight.task_message,
-                    preflight.files,
-                    preflight.read_only_path,
-                    preflight.aiderignore_path,
-                )
-                env = build_env(preflight.endpoint)
-                proc = self._runner.launch(worktree, argv, env)
-                start_time_ns = read_process_start_time_ns(proc.pid)
-                if start_time_ns is not None:
-                    with sessions_lock():
-                        state = load_state()
-                        target = next((s for s in state.sessions if s.id == sid), None)
-                        if target is not None:
-                            target.local_liveness = LocalLivenessHandle(
-                                pid=proc.pid,
-                                start_time_ns=start_time_ns,
-                            )
-                            save_state(state)
-                    return sid
-                # /proc/<pid>/stat unreadable immediately after launch — process
-                # may have exited before exec or /proc is unavailable. Storing 0
-                # would make every liveness check return False, triggering
-                # premature harvest while aider is still running. Kill any orphan
-                # and fall through to the blocked completion path so the dispatch
-                # retry path requeues the task (no stale liveness handle stored).
-                with contextlib.suppress(OSError):
-                    proc.kill()
-                    proc.wait()
-                liveness_detail = f"process {proc.pid} start-time unavailable"
-                # Post-spawn failure (process exited before exec / /proc gone),
-                # classified runtime_error per the inline comment above — not a
-                # spawn_error, the launch itself succeeded.
-                _persist_aider_runtime_error_diagnostics(
-                    session_id=sid, argv=argv, details=liveness_detail
-                )
-                completion_result: AutoDevResult = make_blocked(
-                    ticket_id=task.ticket_id,
-                    worktree=worktree,
-                    reason=LIVENESS_UNAVAILABLE,
-                    details=append_diagnostics_pointer(liveness_detail, session_id=sid),
-                )
-            else:
-                completion_result = preflight
-
-            # Pre-flight blocked OR proc stat unreadable: complete synchronously.
-            # Write the blocked result through the door (_complete_session_via_door,
-            # RFC 0012 A2), mark COMPLETED, and emit SESSION_COMPLETED — dispatch
-            # reads last_result from the session directly, no payload needed.
-            with sessions_lock():
-                _complete_session_via_door(
-                    sid=sid, payload=completion_result.model_dump(mode="json")
-                )
-            _record_orchestrator_event(
-                OrchestratorEventType.SESSION_COMPLETED,
-                {
-                    "session_id": sid,
-                    "ticket_id": task.ticket_id,
-                    "session_name": sess.name,
-                },
-            )
-        except Exception:
-            # Ensure the session is never left ACTIVE on unexpected errors during
-            # launch (FileNotFoundError/OSError from Popen despite the
-            # aider_available check, or a save_state failure). Mark it COMPLETED
-            # with a blocked result so reconcile can clean it up. SESSION_COMPLETED
-            # is NOT emitted; dispatch's exception handler reverts the task to
-            # PENDING, which is the correct recovery path.
-            unexpected_error_detail = "unexpected error during aider launch"
-            _persist_aider_runtime_error_diagnostics(
-                session_id=sid,
-                argv=argv,
-                details=unexpected_error_detail,
-            )
-            with sessions_lock():
-                _complete_session_via_door(
-                    sid=sid,
-                    payload=make_blocked(
-                        ticket_id=task.ticket_id,
-                        worktree=worktree,
-                        reason=UNEXPECTED_ERROR,
-                        details=append_diagnostics_pointer(
-                            unexpected_error_detail, session_id=sid
-                        ),
-                    ).model_dump(mode="json"),
-                    guard_already_completed=True,
-                )
-            raise
-
-        return sid
 
     def stage_sentinel_schema(self, _stage: Stage) -> dict[str, Any]:
         return AutoDevResult.model_json_schema()
-
-
-def _persist_aider_runtime_error_diagnostics(
-    *, session_id: str, argv: list[str], details: str
-) -> None:
-    """Write a ``runtime_error`` diagnostics bundle for a LocalExecutor failure.
-
-    Covers both post-spawn LocalExecutor.spawn failure branches
-    (LIVENESS_UNAVAILABLE and the generic ``except``). *argv* is passed
-    through raw — ``ExecutorFailure``'s own ``argv_sanitized`` field_validator
-    redacts aider's ``--message`` value (full ticket+plan text) wholesale
-    (#1330 item 4). Never raises (persist swallows OSError).
-    """
-    failure = build_executor_failure(
-        category="runtime_error",
-        executor_name="aider",
-        session_id=session_id,
-        argv=argv,
-        stdout_excerpt="",
-        stderr_excerpt=details,
-    )
-    persist_diagnostics_bundle(
-        session_id=session_id,
-        role_slug="aider",
-        failure=failure,
-    )

@@ -115,7 +115,7 @@ class RealCodexRunner:
 class FakeCodexRunner:
     """Test double: records invocation details; returns configurable results.
 
-    Mirrors FakeAiderRunner in local_runner.py.
+    Mirrors FakeFireAndForgetRunner in cw.executor.core.
     """
 
     def __init__(

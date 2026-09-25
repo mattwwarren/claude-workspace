@@ -63,8 +63,8 @@ UNEXPECTED_ERROR = "unexpected_error"
 LIVENESS_UNAVAILABLE = "liveness_unavailable"
 
 # The plan + ticket context handed to aider as a read-only reference (#1905).
-# Public (like CONTEXT_JSON_RELATIVE_PATH) because executor.py threads it onto
-# _PreflightOK and into build_argv's --read flag.
+# Public (like CONTEXT_JSON_RELATIVE_PATH) because cw.executor.local threads it
+# into build_argv's --read flag.
 TASK_CONTEXT_RELATIVE_PATH: Path = Path(".cw", "task_context.md")
 
 # The generated --aiderignore file (#1915). Blocks every git-tracked file
@@ -175,41 +175,6 @@ class RealAiderRunner:
         return _launch_logged_subprocess(worktree, argv, env, _AIDER_LOG_RELATIVE_PATH)
 
 
-class FakeAiderRunner:
-    """Test double: records the launch call; returns a real live subprocess.
-
-    Returns ``Popen(["sleep", "60"])`` rather than a fast-exiting process so the
-    caller's ``read_process_start_time_ns`` lookup does not race a just-exited
-    PID. Mirrors FakeNativeDaemonClient in native_daemon.py.
-    Spawned processes are tracked in ``self.procs`` so tests can kill them.
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-        self.procs: list[subprocess.Popen[bytes]] = []
-
-    def launch(
-        self,
-        worktree: Path,
-        argv: list[str],
-        env: dict[str, str],
-    ) -> subprocess.Popen[bytes]:
-        self.calls.append(
-            {
-                "argv": list(argv),
-                "cwd": worktree,
-                "env": dict(env),
-            }
-        )
-        proc = subprocess.Popen(
-            ["sleep", "60"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        self.procs.append(proc)
-        return proc
-
-
 def read_process_start_time_ns(pid: int) -> int | None:
     """Return the process start-time in ns, or None if unreadable.
 
@@ -246,7 +211,8 @@ class FakePlanFetcher:
     """Test double for PlanFetcher.
 
     Returns a configurable plan body and records all ticket_id arguments
-    passed to fetch(). Mirrors FakeAiderRunner in test-double style.
+    passed to fetch(). Mirrors cw.executor.core.FakeFireAndForgetRunner in
+    test-double style.
     """
 
     def __init__(self, plan: str | None = None) -> None:
