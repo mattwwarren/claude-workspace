@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.58.0] - 2026-09-25
+
+### Changed
+
+- **Approving a Large-scope plan by tracker comment now requires an explicit token (#2074):** the resumed-draft approval check previously accepted *any* operator comment posted after the park as approval, so an unrelated reply (a question, or an answer to a different item) could silently clear the Large-scope gate. The comment path now requires a standalone comment containing `<!-- auto-dev-comment-approval -->`, which stops counting once a later `## Pending Verification Scan` or `## Blocking Review Findings` comment posts. `cw dev-queue approve <ticket>` (fingerprint-bound) is unchanged.
+
 ### Fixed
 
 - **Every unconditional `gh pr merge --auto` call site now honors `pr.auto_merge: false` in `.claude/project-config.yaml` (#2046):** `ship-it.md`, `auto-dev-finalize.md`, `review-monitor.md`, and `cw-session-watch/SKILL.md` each armed auto-merge unconditionally, so a lane that disabled auto-merge could still have it armed by any of these four independent call sites. A new shared `prep_pr_finalize.py check-automerge-allowed` gate reads the config once (`automerge_allowed()`) and all four call sites, plus `/prep-pr` Step 9's own `--require-automerge` check, now consult it before arming or requiring auto-merge; any other config state (absent file/key, `auto_merge: true`, unparseable YAML, no PyYAML) still permits arming as before, only an explicit `pr.auto_merge: false` disables it.
