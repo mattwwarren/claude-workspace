@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from cw.events import record_event
+from cw.models.enums import OrchestratorEventType
 from cw.review_findings import (
     _evidence_removed_in_fix_diff,
     _line_reference_valid,
@@ -72,7 +74,7 @@ def _fix_is_substantiated(finding: Finding, fix_diff: CapturedDiff) -> bool:
 
 
 def verify_fixed_dispositions(
-    verdict: ReviewVerdict, fix_diff: CapturedDiff
+    verdict: ReviewVerdict, fix_diff: CapturedDiff, *, ticket_id: str
 ) -> ReviewVerdict:
     """Downgrade every ``"fixed"`` claim *fix_diff* does not substantiate.
 
@@ -96,6 +98,13 @@ def verify_fixed_dispositions(
     invokes this exactly once per pass (``auto-dev-review.md`` is the only call
     site), so the honest reading of the field is "this pass walked back N fixed
     claims", and accumulating would misreport a re-run as a worse pass.
+
+    **Emits one ``review.fixed_disposition_downgraded`` event per downgrade,
+    inline, correlated to** ``ticket_id`` (#2009) — the same "one event per
+    mutation, not separable from it" contract as
+    :func:`apply_voided_suppression`. Without it the downgrade's only records
+    were the WARNING below and a bare count on the verdict artifact, neither
+    of which survives into the event audit trail.
     """
     accepted: list[AcceptedFinding] = []
     downgraded = 0
@@ -117,16 +126,28 @@ def verify_fixed_dispositions(
             af.finding.severity,
             af.finding.summary,
         )
-        accepted.append(
-            af.model_copy(
-                update={
-                    "disposition": "dropped",
-                    "disposition_detail": (
-                        "fixed disposition claimed but fix-cycle diff does not "
-                        f"touch {af.finding.file}:{af.finding.line_start}"
-                    ),
-                }
-            )
+        downgraded_af = af.model_copy(
+            update={
+                "disposition": "dropped",
+                "disposition_detail": (
+                    "fixed disposition claimed but fix-cycle diff does not "
+                    f"touch {af.finding.file}:{af.finding.line_start}"
+                ),
+            }
+        )
+        accepted.append(downgraded_af)
+        record_event(
+            OrchestratorEventType.REVIEW_FIXED_DISPOSITION_DOWNGRADED,
+            payload={
+                "file": af.finding.file,
+                "line_start": af.finding.line_start,
+                "line_end": af.finding.line_end,
+                "severity": af.finding.severity,
+                "summary": af.finding.summary,
+                "reviewers": af.reviewers,
+                "disposition_detail": downgraded_af.disposition_detail,
+            },
+            correlation_id=ticket_id,
         )
     return verdict.model_copy(
         update={"accepted": accepted, "downgraded_disposition_count": downgraded}

@@ -49,6 +49,7 @@ from tests._cli_review_helpers import (
     _settle_payload,
 )
 from tests.conftest import (
+    _cmd,
     _finding_kwargs,
     _make_diff,
     _make_finding,
@@ -799,6 +800,9 @@ class TestReviewAdjudicateCommand:
         assert verdict["accepted"][0]["disposition"] == "dropped"
 
 
+_TICKET = "T-1814"
+
+
 class TestReviewVerifyFixesCommand:
     """#1805: ``cw review verify-fixes`` downgrades unverified 'fixed' claims."""
 
@@ -810,6 +814,7 @@ class TestReviewVerifyFixesCommand:
             "verdict": _verdict_payload(accepted),
             "diff": _CONSOLIDATE_DIFF,
             "reviewed_sha": "abc1234",
+            "ticket_id": _TICKET,
         }
         result = runner.invoke(
             main,
@@ -827,6 +832,7 @@ class TestReviewVerifyFixesCommand:
             "verdict": _verdict_payload(accepted),
             "diff": _CONSOLIDATE_DIFF,
             "reviewed_sha": "abc1234",
+            "ticket_id": _TICKET,
         }
         result = runner.invoke(
             main,
@@ -849,8 +855,86 @@ class TestReviewVerifyFixesCommand:
         assert result.exit_code == 1
         assert "verdict" in result.output
 
+    def test_emitted_event_correlates_to_the_payload_ticket_id(
+        self, runner: CliRunner
+    ) -> None:
+        # #2009: the real downgrade path end to end -- the same Click entry
+        # point auto-dev-review.md Step 3c shells out to -- not only the
+        # library function's unit test.
+        accepted = _accepted_payload(
+            file="src/cw/untouched.py", line_start=2, line_end=2
+        )
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "diff": _CONSOLIDATE_DIFF,
+            "reviewed_sha": "abc1234",
+            "ticket_id": _TICKET,
+        }
+        result = runner.invoke(
+            main,
+            ["review", "verify-fixes", "--no-base-check", "-"],
+            input=json.dumps(payload),
+        )
 
-_TICKET = "T-1814"
+        assert result.exit_code == 0, result.output
+        events = read_events(
+            event_types=[OrchestratorEventType.REVIEW_FIXED_DISPOSITION_DOWNGRADED]
+        )
+        assert len(events) == 1
+        assert events[0].correlation_id == _TICKET
+        assert events[0].payload["file"] == "src/cw/untouched.py"
+
+    def test_no_downgrade_emits_no_event(self, runner: CliRunner) -> None:
+        accepted = _accepted_payload(line_start=2, line_end=2)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "diff": _CONSOLIDATE_DIFF,
+            "reviewed_sha": "abc1234",
+            "ticket_id": _TICKET,
+        }
+        result = runner.invoke(
+            main,
+            ["review", "verify-fixes", "--no-base-check", "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.REVIEW_FIXED_DISPOSITION_DOWNGRADED]
+            )
+            == []
+        )
+
+    def test_missing_ticket_id_is_rejected(self, runner: CliRunner) -> None:
+        # #2009: required, not optional -- a payload without it would leave
+        # the mandatory downgrade event uncorrelated.
+        payload = {
+            "verdict": _verdict_payload(_accepted_payload(line_start=2, line_end=2)),
+            "diff": _CONSOLIDATE_DIFF,
+            "reviewed_sha": "abc1234",
+        }
+        result = runner.invoke(
+            main,
+            ["review", "verify-fixes", "--no-base-check", "-"],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 1
+        assert "ticket_id" in result.output
+
+    def test_verify_input_envelope_declares_ticket_id(self) -> None:
+        # #2009: the one production producer of this payload is the Step 3c
+        # envelope in auto-dev-review.md; if it omits ticket_id every real
+        # verify-fixes call fails validation.
+        content = _cmd("auto-dev-review.md")
+        envelope_lines = [
+            line
+            for line in content.splitlines()
+            if line.startswith("# envelope:") and '"diff": "$FIX_DIFF"' in line
+        ]
+        assert len(envelope_lines) == 1
+        assert '"ticket_id": "$TICKET"' in envelope_lines[0]
 
 
 def _voided_payload(**overrides: object) -> dict[str, Any]:
@@ -1595,6 +1679,7 @@ class TestReviewVerifyFixesBaseFlag:
             "verdict": _verdict_payload(accepted),
             "diff": _CONSOLIDATE_DIFF,
             "reviewed_sha": "abc1234",
+            "ticket_id": _TICKET,
         }
         result = runner.invoke(
             main, ["review", "verify-fixes", "-"], input=json.dumps(payload)
@@ -1611,6 +1696,7 @@ class TestReviewVerifyFixesBaseFlag:
             "verdict": _verdict_payload(accepted),
             "diff": _CONSOLIDATE_DIFF,
             "reviewed_sha": "abc1234",
+            "ticket_id": _TICKET,
         }
         result = runner.invoke(
             main,
@@ -1628,6 +1714,7 @@ class TestReviewVerifyFixesBaseFlag:
             "verdict": _verdict_payload(accepted),
             "diff": _CONSOLIDATE_DIFF,
             "reviewed_sha": "abc1234",
+            "ticket_id": _TICKET,
         }
         baseline = runner.invoke(
             main,
@@ -1663,6 +1750,7 @@ class TestReviewVerifyFixesBaseFlag:
             "verdict": _verdict_payload(accepted),
             "diff": real_diff,
             "reviewed_sha": sha,
+            "ticket_id": _TICKET,
         }
         result = runner.invoke(
             main,
@@ -1693,6 +1781,7 @@ class TestReviewVerifyFixesBaseFlag:
             "verdict": _verdict_payload(accepted),
             "diff": mutated,
             "reviewed_sha": sha,
+            "ticket_id": _TICKET,
         }
         result = runner.invoke(
             main,
@@ -1719,6 +1808,7 @@ class TestReviewVerifyFixesBaseFlag:
             "verdict": _verdict_payload(accepted),
             "diff": real_diff,
             "reviewed_sha": sha,
+            "ticket_id": _TICKET,
         }
         result = runner.invoke(
             main,
@@ -1751,6 +1841,7 @@ class TestReviewVerifyFixesBaseFlag:
             "verdict": _verdict_payload(accepted, reviewed_sha="different-sha"),
             "diff": real_diff,
             "reviewed_sha": sha,
+            "ticket_id": _TICKET,
         }
         result = runner.invoke(
             main,

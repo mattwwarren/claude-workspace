@@ -436,7 +436,7 @@ Run this once the round's final verdict is settled — after the fix loop conver
 git fetch origin <branch-name>
 FIX_TIP_SHA="$(git rev-parse origin/<branch-name>)"
 FIX_DIFF="$(git diff "$CHECKPOINT_3A_SHA"...origin/<branch-name>)"
-# envelope: {"verdict": <the adjudicated verdict from Checkpoint 3a / Step 3b>, "diff": "$FIX_DIFF", "reviewed_sha": "$FIX_TIP_SHA"}
+# envelope: {"verdict": <the adjudicated verdict from Checkpoint 3a / Step 3b>, "diff": "$FIX_DIFF", "reviewed_sha": "$FIX_TIP_SHA", "ticket_id": "$TICKET"}
 printf '%s' "$VERIFY_INPUT" | cw review verify-fixes --base "$CHECKPOINT_3A_SHA" -
 ```
 

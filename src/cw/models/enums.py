@@ -532,6 +532,21 @@ class OrchestratorEventType(StrEnum):
     # is an audit trail of a mechanical, strictly-forward move, not an
     # operator alert.
     WORKTREE_FAST_FORWARDED = "worktree.fast_forwarded"
+    # GitHub #2009 -- `cw review verify-fixes` walked one "fixed" disposition
+    # back to "dropped" because the fix-cycle diff never touched the finding's
+    # cited location. Namespaced by its owning module
+    # (review_adjudication/_verify.py), same convention as
+    # REVIEW_FINDING_VOIDED above. Mandatory, not optional:
+    # `verify_fixed_dispositions` emits it inline, one event per downgrade,
+    # because before this the downgrade's only record was a log line and a
+    # bare count on the verdict artifact. Distinct from REVIEW_FINDING_VOIDED
+    # rather than a reuse of it: a downgrade corrects a false fix claim, a
+    # void suppresses a finding, and one type would make an audit trail that
+    # cannot say which mechanism fired. Deliberately NOT added to
+    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config.py): it is an audit
+    # record, not an operator page -- Step 3c already surfaces each downgrade
+    # in friction_highlights.
+    REVIEW_FIXED_DISPOSITION_DOWNGRADED = "review.fixed_disposition_downgraded"
 
 
 class DispatchSkipReason(StrEnum):

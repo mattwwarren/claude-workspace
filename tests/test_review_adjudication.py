@@ -418,7 +418,7 @@ class TestVerifyFixedDispositions:
         fix_diff = _make_diff(files={"src/cw/foo.py": [10]})
 
         with caplog.at_level(logging.WARNING, logger=_LOGGER):
-            result = verify_fixed_dispositions(verdict, fix_diff)
+            result = verify_fixed_dispositions(verdict, fix_diff, ticket_id=_TICKET)
 
         assert result.accepted[0].disposition == "dropped"
         assert "src/cw/other.py" in result.accepted[0].disposition_detail
@@ -435,7 +435,7 @@ class TestVerifyFixedDispositions:
         fix_diff = _make_diff(files={"src/cw/foo.py": [10]})
 
         with caplog.at_level(logging.WARNING, logger=_LOGGER):
-            result = verify_fixed_dispositions(verdict, fix_diff)
+            result = verify_fixed_dispositions(verdict, fix_diff, ticket_id=_TICKET)
 
         assert result.accepted[0].disposition == "fixed"
         assert result.accepted[0].disposition_detail == ""
@@ -446,7 +446,7 @@ class TestVerifyFixedDispositions:
         verdict = _verdict(_accepted(finding, disposition="fixed"))
 
         result = verify_fixed_dispositions(
-            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
         )
 
         assert result.accepted[0].disposition == "fixed"
@@ -458,7 +458,7 @@ class TestVerifyFixedDispositions:
         verdict = _verdict(_accepted(finding, disposition="fixed"))
 
         result = verify_fixed_dispositions(
-            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
         )
 
         assert result.accepted[0].disposition == "dropped"
@@ -474,7 +474,7 @@ class TestVerifyFixedDispositions:
         fix_diff = _make_diff(files={"src/cw/foo.py": [10]})
 
         with caplog.at_level(logging.WARNING, logger=_LOGGER):
-            result = verify_fixed_dispositions(verdict, fix_diff)
+            result = verify_fixed_dispositions(verdict, fix_diff, ticket_id=_TICKET)
 
         assert result.accepted[0].disposition == disposition
         assert result.accepted[0].disposition_detail == "kept"
@@ -495,7 +495,7 @@ class TestVerifyFixedDispositions:
             ),
         )
         result = verify_fixed_dispositions(
-            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
         )
         assert result.downgraded_disposition_count == 2
         assert verdict.downgraded_disposition_count == 0
@@ -508,7 +508,7 @@ class TestVerifyFixedDispositions:
             )
         )
         result = verify_fixed_dispositions(
-            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
         )
         assert result.downgraded_disposition_count == 0
 
@@ -524,7 +524,7 @@ class TestVerifyFixedDispositions:
             downgraded_disposition_count=7,
         )
         result = verify_fixed_dispositions(
-            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
         )
         assert result.downgraded_disposition_count == 0
 
@@ -550,7 +550,7 @@ class TestVerifyFixedDispositions:
 
         with caplog.at_level(logging.WARNING, logger=_LOGGER):
             verify_fixed_dispositions(
-                verdict, _make_diff(files={"src/cw/foo.py": [10]})
+                verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
             )
 
         assert any(
@@ -575,7 +575,7 @@ class TestVerifyFixedDispositions:
             )
         )
         result = verify_fixed_dispositions(
-            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
         )
         assert result.downgraded_disposition_count == 0
 
@@ -600,12 +600,86 @@ class TestVerifyFixedDispositions:
         assert adjudicated.must_fix == []
 
         result = verify_fixed_dispositions(
-            adjudicated, _make_diff(files={"src/cw/unrelated.py": [1]})
+            adjudicated,
+            _make_diff(files={"src/cw/unrelated.py": [1]}),
+            ticket_id=_TICKET,
         )
 
         assert result.accepted[0].disposition == "dropped"
         assert result.blocking is False
         assert result.must_fix == []
+
+    def test_downgrade_emits_one_event_per_downgrade(self) -> None:
+        # #2009: the downgrade was visible only in a log line and a count on
+        # the verdict artifact; the event is its durable audit record.
+        finding = _make_finding(
+            severity="SHOULD_FIX",
+            file="src/cw/other.py",
+            line_start=10,
+            line_end=12,
+            summary="claimed fixed but untouched",
+        )
+        verdict = _verdict(
+            _accepted(finding, reviewers=["Code Quality Reviewer"], disposition="fixed")
+        )
+
+        result = verify_fixed_dispositions(
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
+        )
+
+        events = read_events(
+            event_types=[OrchestratorEventType.REVIEW_FIXED_DISPOSITION_DOWNGRADED]
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["file"] == "src/cw/other.py"
+        assert payload["line_start"] == 10
+        assert payload["line_end"] == 12
+        assert payload["severity"] == "SHOULD_FIX"
+        assert payload["summary"] == "claimed fixed but untouched"
+        assert payload["reviewers"] == ["Code Quality Reviewer"]
+        assert payload["disposition_detail"] == (result.accepted[0].disposition_detail)
+
+    def test_downgrade_event_correlates_to_ticket_id(self) -> None:
+        verdict = _verdict(
+            _accepted(
+                _make_finding(file="src/cw/other.py", line_start=10, line_end=10),
+                disposition="fixed",
+            ),
+            _accepted(
+                _make_finding(file="src/cw/also_other.py", line_start=10, line_end=10),
+                disposition="fixed",
+            ),
+        )
+
+        verify_fixed_dispositions(
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
+        )
+
+        events = read_events(
+            event_types=[OrchestratorEventType.REVIEW_FIXED_DISPOSITION_DOWNGRADED]
+        )
+        assert len(events) == 2
+        assert {e.correlation_id for e in events} == {_TICKET}
+
+    def test_no_downgrade_emits_no_event(self) -> None:
+        verdict = _verdict(
+            _accepted(
+                _make_finding(file="src/cw/foo.py", line_start=10, line_end=10),
+                disposition="fixed",
+            )
+        )
+
+        verify_fixed_dispositions(
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
+        )
+
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.REVIEW_FIXED_DISPOSITION_DOWNGRADED]
+            )
+            == []
+        )
 
 
 class TestVerifyFixedDispositionsContentRescue:
@@ -625,7 +699,7 @@ class TestVerifyFixedDispositionsContentRescue:
         verdict = _verdict(_accepted(finding, disposition="fixed"))
         fix_diff = _diff_with_removed_line("src/cw/foo.py", finding.evidence)
 
-        result = verify_fixed_dispositions(verdict, fix_diff)
+        result = verify_fixed_dispositions(verdict, fix_diff, ticket_id=_TICKET)
 
         assert result.accepted[0].disposition == "fixed"
         assert result.downgraded_disposition_count == 0
@@ -639,7 +713,7 @@ class TestVerifyFixedDispositionsContentRescue:
             context_text=finding.evidence,
         )
 
-        result = verify_fixed_dispositions(verdict, fix_diff)
+        result = verify_fixed_dispositions(verdict, fix_diff, ticket_id=_TICKET)
 
         assert result.accepted[0].disposition == "dropped"
         assert result.downgraded_disposition_count == 1
@@ -649,7 +723,7 @@ class TestVerifyFixedDispositionsContentRescue:
         verdict = _verdict(_accepted(finding, disposition="fixed"))
 
         result = verify_fixed_dispositions(
-            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
         )
 
         assert result.accepted[0].disposition == "dropped"
@@ -1067,7 +1141,7 @@ class TestCoexistsWithTerminalSnapshot:
         )
 
         result = verify_fixed_dispositions(
-            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+            verdict, _make_diff(files={"src/cw/foo.py": [10]}), ticket_id=_TICKET
         )
 
         assert result.is_terminal_snapshot is terminal
