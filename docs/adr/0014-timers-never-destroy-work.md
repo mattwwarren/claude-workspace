@@ -86,6 +86,17 @@ signal is preserved and made multi-dimensional instead of one-dimensional
   deserializing historical state/events but are no longer produced.
 - The `tasks.py` terminal backstops still heal legacy `TIMED_OUT` rows
   (including `complete_timed_out_merged_tasks`).
+- Two transcript-age vetoes predated this ADR's acceptance and survived it:
+  #1406 (`session.sentinel_liveness_vetoed`, the `BlockedResult` catch-all in
+  `_route_blocked_result_to_task`) and #1281
+  (`session.sentinel_stage_mismatch_vetoed`, the already_refused fall-through
+  in `_sentinel_mismatch_veto_candidate`). #2405 audited and remediated both:
+  no transcript-age comparison decides a `FAILED`/`PENDING`/`BLOCKED_ON_USER`
+  transition on either path. The catch-all now shares #2401's
+  `_requeue_blocked_result_under_cap` attempt cap (its liveness event is
+  retired, kept only for deserialization); the stage-mismatch veto is gated
+  solely by `sentinel_mismatch_veto_cap`, with transcript staleness kept as a
+  diagnostic payload field.
 
 ## Alternatives considered
 
