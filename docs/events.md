@@ -1872,8 +1872,9 @@ and reconcile's local/idle/phantom sweeps)
 terminal `FAILED` when an unparseable/unrecognized-reason `BlockedResult`
 (the catch-all: `status_unknown`, `multiple_result_blocks`, or any
 unrecognized `blocker.reason` — not the deterministic-parse-failure or
-`validation_failed` branches, which are unconditional) arrives but the
-session's transcript is still actively advancing
+`validation_failed` branches, which are instead bounded by the evidence-based
+attempt cap described in `sentinel.blocked_result_requeued` below, GitHub
+#2401) arrives but the session's transcript is still actively advancing
 (`0 <= transcript_age_seconds < TRANSCRIPT_LIVENESS_WINDOW_SECONDS`, 300s).
 Sibling closure to #1281's `session.sentinel_stage_mismatch_vetoed` (same
 incident shape, a different route to it): a malformed sentinel frame is
@@ -1885,6 +1886,41 @@ counter/cap bounding repeat vetoes against the same session.
 `transcript_age_seconds` is the measured staleness at veto time;
 `blocker_reason` is the sentinel's verbatim (unrecognized) `blocker.reason`.
 `correlation_id` is the `ticket_id`. Not in `_DEFAULT_OPERATOR_EVENT_TYPES`.
+
+### `sentinel.blocked_result_requeued`
+
+**Emitter:** `_requeue_blocked_result_under_cap` in `cw.reconcile._shared`
+(called from `_route_blocked_result_to_task` for both the deterministic-parse
+and `validation_failed` branches)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "session_id": "<str>",
+  "blocker_reason": "<str>",
+  "attempts": "<int>",
+  "attempt_cap": "<int>"
+}
+```
+**Semantics:** GitHub #2401. Closes the #2077 incident: a live worker's
+`schema_version_unsupported` `BlockedResult` landed its task terminal FAILED
+on the first occurrence, with no diagnostic, while the worker was still
+running — bypassing the #1406 liveness veto above, which only ever covered
+the unrecognized-reason catch-all. Emitted whenever a deterministic-parse or
+`validation_failed` `BlockedResult` re-queues a RUNNING task to PENDING
+(clearing `target.session_id`) because `target.attempts` is still under
+`_VALIDATION_FAILED_MAX_ATTEMPTS` (shared with `validation_failed`, not
+renamed). The cap is evidence-based — a repeated identical rejection count,
+never a transcript-age or clock comparison (ADR-0014) — deliberately
+distinct from `session.sentinel_liveness_vetoed`'s transcript-liveness
+mechanism, which this ticket does not extend. Once `attempts` reaches the
+cap, the branch instead lands terminal FAILED/abandoned and persists the
+rejected sentinel to `TicketTask.last_blocked_result` (closing the #1266 gap
+for both branches); a re-queue rejects nothing, so this event is the durable
+trace for the non-terminal outcome. `blocker_reason` is the sentinel's
+verbatim `blocker.reason`; `attempts` is `target.attempts` at decision time.
+`correlation_id` is the `ticket_id`.
 
 ### `gate.auto_approved`
 

@@ -52,9 +52,12 @@ from cw.review_finding_dispositions import FindingDisposition
 # v18: added TicketTask.address_review_fired_at (GitHub #1206) — one-shot
 #      latch for the address_review review recipe.
 # v19: added TicketTask.last_blocked_result (GitHub #1266) — diagnostic-only
-#      field populated by the _route_blocked_result_to_task
-#      unrecognized-reason catch-all; lets an operator distinguish "no
-#      sentinel yet" from "a rejected sentinel landed this FAILED."
+#      field originally populated by the _route_blocked_result_to_task
+#      unrecognized-reason catch-all only; GitHub #2401 widened this to every
+#      FAILED/abandoned landing in that function (the deterministic-parse and
+#      validation_failed branches at their shared attempt cap, too). Lets an
+#      operator distinguish "no sentinel yet" from "a rejected sentinel
+#      landed this FAILED."
 # v20: added TicketTask.cross_repo_override (GitHub #1198) — operator escape
 #      hatch that bypasses the cross-repo dispatch guard for one row.
 # v21: added TicketTask.stage_high_water (GitHub #1361) — furthest pipeline
@@ -759,10 +762,8 @@ class TicketTask(BaseModel):
     # a task without recording *why*. Deliberately NOT named last_result --
     # that name is Session.last_result's, a distinct, business-critical field
     # (gates cw dev-queue approve) with a different shape/update cadence.
-    # TicketTask has none today. Populated exclusively by that one catch-all;
-    # every other task keeps last_blocked_result=None. Lets an operator
-    # distinguish "sentinel never arrived" from "a rejected sentinel landed
-    # this FAILED."
+    # TicketTask has none today. Lets an operator distinguish "sentinel never
+    # arrived" from "a rejected sentinel landed this FAILED."
     # GitHub #1406 narrows that further: the catch-all now exits early, without
     # writing this field, when the owning session's transcript is still live
     # (the sentinel is re-queued PENDING, not rejected). So a set value means
@@ -773,6 +774,14 @@ class TicketTask(BaseModel):
     # this field, so a stale value from an earlier FAILED landing can persist
     # on a task later revived to PENDING/RUNNING -- read it relative to the
     # task's *current* status.
+    # GitHub #2401 widens this from "populated exclusively by that one
+    # catch-all" to every FAILED/abandoned landing in
+    # _route_blocked_result_to_task: the deterministic-parse and
+    # validation_failed branches now also write it once their shared
+    # _VALIDATION_FAILED_MAX_ATTEMPTS attempt cap is reached. It is still
+    # never written by a re-queue (PENDING outcome) -- a re-queue rejects
+    # nothing, so there is no sentinel to record here; that outcome's trace is
+    # the SENTINEL_BLOCKED_RESULT_REQUEUED event instead.
     last_blocked_result: dict[str, Any] | None = None
     # GitHub #1511 — the `blocker.reason` off a well-formed blocked/
     # merge_gate_blocked AutoDevResult, stamped by transition_task_status
