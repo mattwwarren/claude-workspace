@@ -276,6 +276,38 @@ def test_delta_revision_sub_step_ordered_before_fast_path_sub_step() -> None:
     )
 
 
+def test_later_settlement_is_inserted_before_resolutions_marker() -> None:
+    """A later settlement cannot append past the always-last resolutions line."""
+    appendix = _appendix("plan")
+    window = _after(appendix, "5. For each settled (non-unmappable) item:", span=900)
+    assert (
+        "insert the new `plan-stage-settled` marker line" in window
+        and "immediately before the existing `plan-stage-resolutions-applied` line"
+        in window
+    )
+    assert "later round settles another item" in window
+
+
+def test_delta_revision_failure_does_not_consume_source_marker() -> None:
+    """Failed one-shot revisions block and leave the delta eligible to retry."""
+    section = _step1a0b_appendix_section()
+    window = _after(section, "**On delta: revise.**", span=1800)
+    assert "valid revised draft" in window
+    assert "checkpoint fails" in window
+    assert "leave the resolutions marker unchanged" in window
+    assert "emit the existing blocking/error outcome" in window
+    assert "retry the same delta on the next dispatch" in window
+
+
+def test_delta_revokes_row_approval_even_when_fingerprint_is_unchanged() -> None:
+    """A resolutions delta always requires fresh row-path approval."""
+    section = _step1a0b_appendix_section()
+    window = _after(section, "**On delta: revise.**", span=2300)
+    assert "clearing (or otherwise revoking) both" in window
+    assert "even if the revised draft later has the same fingerprint" in window
+    assert "requires fresh row-path approval via `cw dev-queue approve`" in window
+
+
 # ---------------------------------------------------------------------------
 # docs/headless-contract.md closed-enum registration
 # ---------------------------------------------------------------------------
