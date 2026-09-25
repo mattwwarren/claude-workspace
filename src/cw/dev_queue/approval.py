@@ -268,9 +268,7 @@ def _promote_plan_draft_on_direct_advance(
     if task.stage != Stage.PLAN or plan_reviewed is not None:
         return False
     raw_fingerprint = (session.last_result or {}).get(PLAN_DRAFT_FINGERPRINT_KEY)
-    expected_fingerprint = (
-        raw_fingerprint if isinstance(raw_fingerprint, str) else ""
-    )
+    expected_fingerprint = raw_fingerprint if isinstance(raw_fingerprint, str) else ""
     return promote_plan_draft(
         task,
         client_cfg,
