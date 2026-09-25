@@ -37,6 +37,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import fix_dispatch, reconcile
+from tests._reconcile_helpers import _make_pending_fix_dispatch
 from tests.conftest import _make_daemon_session, _make_ticket_task, git_in
 from tests.test_reconcile_review_recipes import (
     _make_fix_client,
@@ -54,14 +55,11 @@ _CLIENT = "acme"
 
 def _pending(**overrides: Any) -> PendingFixDispatch:
     kwargs: dict[str, Any] = {
-        "prompt": "fix the MUST_FIX items\n",
         "label": f"fix-{_TICKET}",
-        "cycle": 1,
-        "requested_by_session_id": "review-sess",
         "requested_at": datetime(2026, 8, 26, tzinfo=UTC),
     }
     kwargs.update(overrides)
-    return PendingFixDispatch(**kwargs)
+    return _make_pending_fix_dispatch(**kwargs)
 
 
 def _seed_task(**overrides: Any) -> None:

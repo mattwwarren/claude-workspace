@@ -7110,8 +7110,9 @@ class TestClaimNextPendingFixDispatchHold:
 
     @staticmethod
     def _pending_fix() -> PendingFixDispatch:
-        return PendingFixDispatch(
-            prompt="fix the MUST_FIX items\n",
+        from tests._reconcile_helpers import _make_pending_fix_dispatch
+
+        return _make_pending_fix_dispatch(
             label="fix-2075",
             cycle=2,
             requested_by_session_id="review-sess",
