@@ -37,6 +37,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import fix_dispatch, reconcile
+from tests._reconcile_helpers import _make_pending_fix_dispatch
 from tests.conftest import _make_daemon_session, _make_ticket_task, git_in
 from tests.test_reconcile_review_recipes import (
     _make_fix_client,
@@ -54,14 +55,11 @@ _CLIENT = "acme"
 
 def _pending(**overrides: Any) -> PendingFixDispatch:
     kwargs: dict[str, Any] = {
-        "prompt": "fix the MUST_FIX items\n",
         "label": f"fix-{_TICKET}",
-        "cycle": 1,
-        "requested_by_session_id": "review-sess",
         "requested_at": datetime(2026, 8, 26, tzinfo=UTC),
     }
     kwargs.update(overrides)
-    return PendingFixDispatch(**kwargs)
+    return _make_pending_fix_dispatch(**kwargs)
 
 
 def _seed_task(**overrides: Any) -> None:
@@ -1021,6 +1019,71 @@ def test_run_fix_dispatch_spawns_real_fix_session_through_sessions_lock(
     assert updated.pending_fix_dispatch is None
     assert updated.fix_dispatch_session_id == fix_sessions[0].id
     assert read_events(event_types=[OrchestratorEventType.STAGE_ERRORED]) == []
+
+
+def test_reconcile_review_completion_preserves_fix_dispatch_hold_across_backstop(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2204: the REVIEW session's own row must survive its own completion.
+
+    Unlike ``test_run_fix_dispatch_spawns_real_fix_session_through_sessions_
+    lock`` (whose task's ``session_id`` is unrelated to the terminal session),
+    this reproduces the real shape a REVIEW session leaves behind per
+    ``dispatch/routing/__init__.py``'s ``fix_loop_pending_dispatch`` handler:
+    the RUNNING task's OWN ``session_id`` names a session that has since gone
+    DAEMON COMPLETED (the REVIEW session's Stop hook). Pre-fix,
+    ``revert_completed_silent_tasks()`` reverts that row to PENDING and
+    charges an attempt before ``run_fix_dispatch()`` ever sees it in the same
+    tick; ``_build_dispatch_jobs`` then classifies it a stale handoff, drops
+    ``pending_fix_dispatch``, and pages ``STAGE_ERRORED`` -- no fix session
+    ever spawns.
+    """
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2204"
+    _seed_origin(client, branch)
+    monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: mock_native_daemon)
+    monkeypatch.setattr(
+        fix_dispatch, "load_effective_clients", lambda: {_CLIENT: client}
+    )
+
+    save_state(
+        CwState(
+            sessions=[
+                _make_daemon_session(
+                    id="review-sess",
+                    name=f"{_CLIENT}/review/2204",
+                    client=_CLIENT,
+                    status=SessionStatus.COMPLETED,
+                )
+            ]
+        )
+    )
+    task = _make_ticket_task(
+        ticket_id="2204",
+        client=_CLIENT,
+        status=QueueItemStatus.RUNNING,
+        session_id="review-sess",
+    )
+    task.pending_fix_dispatch = _pending(label="fix-2204")
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    reconcile()
+
+    fix_sessions = [s for s in load_state().sessions if s.purpose == SessionPurpose.FIX]
+    assert len(fix_sessions) == 1
+    updated = _only_task()
+    assert updated.pending_fix_dispatch is None
+    assert updated.fix_dispatch_session_id == fix_sessions[0].id
+    assert updated.status == QueueItemStatus.RUNNING
+    assert updated.unproductive_attempts == 0
+    assert read_events(event_types=[OrchestratorEventType.STAGE_ERRORED]) == []
+    reloaded_review = load_state().find_by_name_or_id("review-sess")
+    assert reloaded_review is not None
+    assert reloaded_review.reap_reason is None
 
 
 def test_dispatch_fix_agent_falls_back_to_parent_none_when_unresolvable(
