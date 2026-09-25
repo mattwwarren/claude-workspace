@@ -81,6 +81,45 @@ def test_sentinel_template_carries_rejected_count_keys() -> None:
     assert '"must_fix_initial"' in window
 
 
+def test_freeze_rule_names_downgraded_disposition_count_as_unfrozen() -> None:
+    """``downgraded_disposition_count`` is stamped by Step 3c after the fix
+    loop settles, so the Freeze rule must carve it out of the first-consolidate
+    frozen set explicitly rather than leave it unmentioned (#2009).
+    """
+    section = _checkpoint_3a_section()
+    window = _after(section, FREEZE_ANCHOR, span=3000)
+    assert (
+        "**`.review.downgraded_disposition_count` is likewise explicitly NOT "
+        "part of this frozen set (#2009)**"
+    ) in window
+    assert "stamped by Step 3c after the fix loop settles" in window
+
+
+def test_sentinel_template_carries_downgraded_disposition_count_key() -> None:
+    """Stage 3 Completion's sentinel template carries the #2009 key, sourced
+    from Step 3c's captured value, alongside the pre-existing review fields.
+    """
+    section = _stage3_completion_section()
+    key = (
+        '"downgraded_disposition_count": "<DOWNGRADED_DISPOSITION_COUNT_FOR_'
+        'SENTINEL from Step 3c, or 0 if Step 3c downgraded nothing>"'
+    )
+    assert key in section
+    window = _nearby(section, '"downgraded_disposition_count"', span=400)
+    assert '"reviewed_sha"' in window
+    assert '"rejected_count": null' in window
+
+
+def test_step_3c_captures_downgraded_disposition_count_for_sentinel() -> None:
+    """Step 3c names the variable the sentinel template reads (#2009)."""
+    content = _cmd("auto-dev-review.md")
+    start = content.index("### Step 3c:")
+    end = content.index("## Stage 3 Completion (headless only)")
+    step_3c = content[start:end]
+    assert "DOWNGRADED_DISPOSITION_COUNT_FOR_SENTINEL" in step_3c
+    assert "downgraded_disposition_count" in step_3c
+
+
 def test_resolution_rule_scopes_to_step_1c0_settlement_only() -> None:
     """The #1896 emission rule now names the Step 1c.0-only scope and
     excludes a Step 1b pre-flight-resolutions merge from ever emitting
