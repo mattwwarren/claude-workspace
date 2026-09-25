@@ -13498,6 +13498,61 @@ class TestPlanApprovedFingerprintStamp:
 
         assert load_dev_queue().model_dump() == before
 
+    def test_revoke_plan_approval_releases_queue_lock_for_audit_event(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The inbox write must not block other dev-queue transactions (#765)."""
+        from cw.dev_queue import revoke_plan_approval
+
+        _seed_plan_pending(
+            tmp_config_dir, tmp_path, session_id="sess-revoke-contention"
+        )
+        task = load_dev_queue().tasks[0]
+        task.plan_approved_at = datetime(2026, 9, 25, tzinfo=UTC)
+        task.plan_approved_fingerprint = "a" * 64
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        event_started = threading.Event()
+        release_event = threading.Event()
+        queue_lock_acquired = threading.Event()
+        errors: list[BaseException] = []
+
+        def _blocked_event(*_args: object, **_kwargs: object) -> None:
+            event_started.set()
+            if not release_event.wait(5):
+                msg = "test event was not released"
+                raise AssertionError(msg)
+
+        def _revoke() -> None:
+            try:
+                revoke_plan_approval("GEN-500", "genhealth")
+            except Exception as exc:  # noqa: BLE001 - surface worker failures
+                errors.append(exc)
+
+        def _probe_queue_lock() -> None:
+            with _lock():
+                queue_lock_acquired.set()
+
+        monkeypatch.setattr("cw.dev_queue.approval.record_event", _blocked_event)
+        revoke_thread = threading.Thread(target=_revoke, daemon=True)
+        probe_thread = threading.Thread(target=_probe_queue_lock, daemon=True)
+        revoke_thread.start()
+        assert event_started.wait(5)
+        probe_thread.start()
+        try:
+            assert queue_lock_acquired.wait(1)
+        finally:
+            release_event.set()
+        revoke_thread.join(5)
+        probe_thread.join(5)
+
+        assert not errors
+        assert not revoke_thread.is_alive()
+        assert not probe_thread.is_alive()
+
     def test_revoke_plan_approval_save_failure_raises_with_event_recorded(
         self,
         tmp_config_dir: Path,

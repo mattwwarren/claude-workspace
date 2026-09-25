@@ -52,6 +52,7 @@ def revoke_plan_approval_command(ticket_id: str, client: str | None) -> None:
     else:
         click.echo(f"No durable plan approval to revoke for {ticket_id} ({resolved}).")
 
+
 # The plan-approved marker strings themselves live in `_plan_marker` (#2194),
 # alongside their shape validator -- and are distinct from lifecycle.py's
 # `_PLAN_SPEC_MARKER`/`_PLAN_SOUNDNESS_MARKER` pair (the coded
