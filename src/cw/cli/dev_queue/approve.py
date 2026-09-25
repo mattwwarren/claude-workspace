@@ -67,30 +67,15 @@ _HEAD_SHA_DISPLAY_LEN = 12
 def _bound_fingerprint(result: dict[str, str | bool | None]) -> str | None:
     """The approval's plan-draft fingerprint, or None when there is none.
 
-    Shape-validates at the marker boundary (#2194): ``_stamp_plan_approval``
-    records whatever string the sentinel emitted, unvalidated, and that value
-    is agent-produced and lands in a tracker comment, where a ``-->`` fragment
-    would break out of the HTML comment. A non-string (no approval bound a
-    draft) is silently None; a malformed string warns and falls back to the
-    unbound marker, which is the pre-#2194 behavior.
-
-    The warning reports the value's length, never the value: it is untrusted
-    text that could carry terminal control sequences, the length diagnoses the
-    common truncation/padding failures, and the raw value stays inspectable on
-    the session's ``last_result``.
+    ``_stamp_plan_approval`` records only a well-formed digest or None
+    (#2382: a malformed agent-produced value is stamped as None with a
+    warning that reports its length, never the value), so the shape check
+    here is a boundary guard on the value that lands in a tracker comment,
+    where a ``-->`` fragment would break out of the HTML comment. A
+    non-string (no approval bound a draft) is None.
     """
     raw = result[PLAN_APPROVED_FINGERPRINT_KEY]
-    if not isinstance(raw, str):
-        return None
-    if is_plan_draft_fingerprint(raw):
-        return raw
-    click.echo(
-        "--post-marker: the approval's plan-draft fingerprint is not a"
-        f" 64-character lowercase hex digest (got {len(raw)} characters)"
-        " — posting the unbound marker instead.",
-        err=True,
-    )
-    return None
+    return raw if isinstance(raw, str) and is_plan_draft_fingerprint(raw) else None
 
 
 def _post_plan_approved_marker(

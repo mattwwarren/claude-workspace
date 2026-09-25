@@ -647,7 +647,7 @@ After PR creation, auto-merge enablement, and CI monitoring complete, emit the `
 
 **Only in standalone `/auto-dev-finalize <ticket-id> --headless` invocation. In the interactive monolith chain, `auto-dev.md` owns the `done` event and the final sentinel.**
 
-**Validating is not emitting (#1890).** `cw result validate -` confirms the JSON is well-formed — it does not emit the sentinel. Never narrate emission as a separate act from performing it: the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the validated JSON, MUST be the final characters of this same message.
+**Emit through cw, then frame (#2382).** Record the payload with `cw result emit -` per the *Sentinel emit rule* in `.claude/commands/auto-dev.md` — run it from the cw session worktree root, fix every `field.path: message` error it reports and re-run until it exits 0, and only then frame the recorded JSON. Recording is not framing (#1890): the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the same JSON, MUST be the final characters of this same message. Never narrate emission as a separate act from performing it.
 
 **No interactive escalation, ever (#1890).** In headless mode there is no listener. Never escalate a `merge_gate_blocked` finding, a CI failure, or review feedback by asking a question and ending your turn — Stage 5 headless already auto-skips CI polling. Escalate exclusively via this sentinel's `blocker` field with `status: "blocked"`.
 
@@ -657,8 +657,8 @@ cw event record stage.entered \
   --correlation-id "$TICKET" \
   --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"done\",\"prev_stage\":\"s5_ci_waiting\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
 
-# Validate and emit sentinel
-printf '%s' "$SENTINEL_JSON" | cw result validate -
+# Record the sentinel through cw (fix-and-re-run until exit 0), then frame it
+printf '%s' "$SENTINEL_JSON" | cw result emit -
 ```
 
 ```

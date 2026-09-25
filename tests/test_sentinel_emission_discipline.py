@@ -1,8 +1,10 @@
 """Guard tests (#1890): every headless stage doc that terminates a session
-must carry both (a) frame-emission discipline ("validating is not
-emitting") and (b) the no-interactive-escalation warning ("no listener,
-never ask a question") in its own Stage-N-Completion section — not only in
-the chained-path Appendix of auto-dev.md.
+must carry both (a) frame-emission discipline ("recording is not framing" —
+formerly "validating is not emitting", reworded when #2382 made
+``cw result emit`` the pre-frame step; see ``test_sentinel_emit_rule.py``)
+and (b) the no-interactive-escalation warning ("no listener, never ask a
+question") in its own Stage-N-Completion section — not only in the
+chained-path Appendix of auto-dev.md.
 
 Forensics (2026-08-16 dead-flat sessions, #1886): #1833 validated a sentinel
 and narrated "Emitting the final result" without ever emitting the literal
@@ -16,7 +18,7 @@ import pytest
 
 from tests.conftest import _COMMANDS_ROOT, _appendix, _cmd
 
-FRAME_DISCIPLINE_ANCHOR = "Validating is not emitting"
+FRAME_DISCIPLINE_ANCHOR = "Recording is not framing"
 FRAME_DISCIPLINE_DETAIL = "final characters of this same message"
 NO_ESCALATION_ANCHOR = "no listener"
 NO_ESCALATION_DETAIL = 'status: "blocked"'
@@ -242,7 +244,7 @@ def _park_stamp_rule_section() -> str:
     return _section(
         _cmd("auto-dev.md"),
         "## Park-comment stamp rule (#2135)",
-        "## Guard Matrix",
+        "## Sentinel emit rule (#2382)",
     )
 
 

@@ -57,7 +57,7 @@ equivalent:
 
 Stage 0 exits standalone with a `blocked`/`stale_dispatch` sentinel in three places below (the Origin Sync Check's Step P3, the Step 3 fetch-failure handler, and the Step 3 open-PR self-check) — none of these chain into Stage 1. Whichever fires:
 
-**Validating is not emitting (#1890).** Before emitting any of the JSON payloads below, validate it with `cw result validate -` and wrap it in the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame — the bare JSON shown inline in each EXIT below is the payload, not the wire format. Validating is not emitting: never narrate emission as a separate act from performing it. The frame must be the final characters of this same message.
+**Emit through cw, then frame (#2382).** Before framing any of the JSON payloads below, record it with `printf '%s' "$SENTINEL_JSON" | cw result emit -` per the *Sentinel emit rule* in `.claude/commands/auto-dev.md` — from the cw session worktree root, fixing every `field.path: message` error it reports and re-running until it exits 0 — then wrap the recorded JSON in the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame; the bare JSON shown inline in each EXIT below is the payload, not the wire format. Recording is not framing (#1890): never narrate emission as a separate act from performing it. The frame must be the final characters of this same message.
 
 **No interactive escalation, ever.** In headless mode there is no listener. Never escalate a pre-flight condition (origin divergence, an unreachable tracker, an already-open PR) by asking a question and ending your turn. Escalate exclusively via the sentinel's `blocker` field with `status: "blocked"` (or `status: "stale_dispatch"` for the open-PR case), as specified at each EXIT below.
 

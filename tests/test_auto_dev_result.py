@@ -50,6 +50,7 @@ from cw.auto_dev_result import (
 )
 from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED, FIX_LOOP_DIVERGING
 from cw.models import QueueItemStatus
+from tests.conftest import _plan_pending_payload
 
 # ---------------------------------------------------------------------------
 # Package-split import guard (#1321)
@@ -110,40 +111,6 @@ def _shipped_payload() -> dict[str, Any]:
         "friction_highlights": [],
         "blocker": None,
         "next_actions": ["wait_for_ci"],
-    }
-
-
-def _plan_pending_payload() -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "ticket_id": "GEN-2",
-        "status": "plan_pending_approval",
-        "stage_reached": "stage1_plan",
-        "scope": {
-            "tier": "large",
-            "files": 25,
-            "lines_estimate": 1200,
-            "lines_actual": None,
-            "forbidden_touched": False,
-        },
-        "plan_source": "generated",
-        "branch": None,
-        "worktree_path": None,
-        "fork_point_sha": None,
-        "commits": [],
-        "pr": None,
-        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
-        "health": {
-            "lowest_agent_confidence": "HIGH",
-            "any_incomplete_risk": False,
-            "shortcuts": [],
-            "recommendation": "PROCEED",
-            "downgrade_applied": False,
-            "fix_loop_escalated": False,
-        },
-        "friction_highlights": [],
-        "blocker": None,
-        "next_actions": ["user_approve_plan"],
     }
 
 
@@ -3746,6 +3713,41 @@ class TestPlanDraftFingerprintField:
         result = parse_stdout(_wrap_sentinel(payload))
         assert isinstance(result, AutoDevResult)
         assert result.plan_draft_fingerprint is None
+
+    @pytest.mark.parametrize(
+        "malformed",
+        ["a" * 62, "A" * 64, "a" * 65, "", "not-a-digest"],
+        ids=["truncated-62", "uppercase", "padded-65", "empty", "prose"],
+    )
+    def test_malformed_fingerprint_is_rejected_at_the_model(
+        self, malformed: str
+    ) -> None:
+        """#2382: a 62-character copy of a 64-character digest reached
+        `cw dev-queue approve` and re-opened the gate every round. The shape
+        is a producer bug, never evidence — the model rejects it, naming the
+        length so the worker sees a truncation for what it is."""
+        payload = _plan_pending_payload()
+        payload["schema_version"] = 8
+        payload["plan_draft_fingerprint"] = malformed
+        with pytest.raises(ValidationError) as excinfo:
+            AutoDevResult.model_validate(payload)
+        message = str(excinfo.value)
+        assert "plan_draft_fingerprint" in message
+        assert "64-character lowercase hex" in message
+        assert f"got {len(malformed)} characters" in message
+
+    def test_malformed_fingerprint_on_transcript_path_is_validation_failed(
+        self,
+    ) -> None:
+        """The transcript fallback has no coercion for this field: the
+        synthetic blocker surfaces the bad value instead of routing on it."""
+        payload = _plan_pending_payload()
+        payload["schema_version"] = 8
+        payload["plan_draft_fingerprint"] = "a" * 62
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "validation_failed"
+        assert "plan_draft_fingerprint" in result.blocker.details
 
     def test_contract_doc_states_one_current_schema_version(self) -> None:
         """The v8 bump left §3.3's current-version statement behind at `5`,

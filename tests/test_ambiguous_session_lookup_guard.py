@@ -60,10 +60,17 @@ _CODEX_CLI = "cw/cli/codex.py"
 # Owners are listed only for user-name-reachable entries; id-only entries have
 # no user-facing entry point to check.
 _FIND_BY_NAME_OR_ID_ALLOWLIST: dict[tuple[str, str], _Classification] = {
-    # --- user-name-reachable (13) ---
+    # --- user-name-reachable (14) ---
     # `cw result emit --session-id <TEXT>`; the Stop-hook harvest path passes
     # session.id. Rendered by result_emit's explicit except arm (A9).
     ("cw/result.py", "emit_result_locked"): (
+        "user-name-reachable:explicit-except-arm",
+        (("cw/result.py", "result_emit"),),
+    ),
+    # `cw result emit --session-id <TEXT>` again: the #2382 read-only lookup
+    # that runs before the draft is bound, so the same text reaches this
+    # lookup first. Rendered by the same explicit except arm.
+    ("cw/result.py", "_load_session_for_emit"): (
         "user-name-reachable:explicit-except-arm",
         (("cw/result.py", "result_emit"),),
     ),

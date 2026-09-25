@@ -158,6 +158,34 @@ baked in at injection time:
   spawn. USER-origin worktrees are never modified and keep the unguarded
   command, which still works.
 
+## Amendment (#2382)
+
+The sentinel a headless worker frames in its final message is no longer the
+copy cw routes on. Each stage command now ends with `cw result emit -`, which
+validates the payload strictly and records it on the session through the
+RFC 0012 door (`LastResultSource.EMIT_CLI`); the Stop hook's #536 emit
+precedence then takes that recorded result and skips the transcript re-parse.
+
+- **Why.** Every prior sentinel defect the parser learned to coerce (§6 of the
+  headless contract) had the same root: the worker validated one JSON and then
+  re-typed another into its prose, and the prose was the harvested artifact.
+  The #2382 incident — a 62-character copy of a 64-character plan-draft
+  fingerprint that re-opened the approval gate on every round — was the same
+  bug on a field with no coercion. Recording the validated bytes removes the
+  transcription step; strict validation at emit turns the coerced shapes into
+  errors the worker fixes and re-runs.
+- **Invariant 4 stands, with the emitted result as its first source.** The
+  hook still refuses to COMPLETE a headless DAEMON session without a
+  sentinel; an emitted `last_result` satisfies that check before the
+  transcript walk does. The transcript frame is still emitted and still
+  parsed whenever nothing was recorded — a denied or unknown
+  `cw result emit`, a worker predating the command, an opencode worker — so
+  the three-layer priority order above is unchanged; this amendment only
+  names which artifact layer 1 reads first.
+- **`cw result emit` stays write-only.** It records `last_result` and nothing
+  else: no event, no status transition. The Stop hook remains the sole
+  completion-event source.
+
 ## Alternatives considered
 
 - **Continue parsing the wrapper buffer for daemon sessions.** Rejected.
@@ -182,4 +210,4 @@ baked in at injection time:
 
 ## Referenced by
 
-- #147, #151, #165, #176, #184, #225, #2226, ADR-0002
+- #147, #151, #165, #176, #184, #225, #2226, #2382, ADR-0002

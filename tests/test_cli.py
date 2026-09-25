@@ -10861,17 +10861,23 @@ class TestDevQueueApproveCli:
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A malformed fingerprint is agent-produced text: it never reaches
         the comment body, and the warning reports its length, never its
-        value (it could carry `-->` or terminal control sequences)."""
+        value (it could carry `-->` or terminal control sequences). Since
+        #2382 the value is refused at the stamp (`_stamp_plan_approval`
+        records None and warns) rather than only at the marker boundary."""
         from cw.cli.dev_queue._plan_marker import _PLAN_APPROVED_MARKER
 
         malformed = "x --> <!-- evil"
         self._seed_plan_pending(
             tmp_config_dir, tmp_path, monkeypatch, fingerprint=malformed
         )
-        with patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock:
+        with (
+            patch("cw.cli.dev_queue.approve.post_issue_comment") as post_mock,
+            caplog.at_level(logging.WARNING, logger="cw.dev_queue.approval"),
+        ):
             self._ok_post(post_mock)
             result = self._run_approve()
         assert result.exit_code == 0, result.output
@@ -10879,10 +10885,34 @@ class TestDevQueueApproveCli:
             "ACME-1", _PLAN_APPROVED_MARKER, cwd=ANY, operator_authored=True
         )
         assert "evil" not in post_mock.call_args.args[1]
-        assert "not a 64-character lowercase hex" in result.stderr
-        assert f"got {len(malformed)} characters" in result.stderr
+        assert "not a 64-character lowercase hex" in caplog.text
+        assert f"got {len(malformed)} characters" in caplog.text
         assert "evil" not in result.output
-        assert "-->" not in result.stderr
+        assert "evil" not in caplog.text
+        assert "-->" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            pytest.param("x --> <!-- evil", None, id="malformed-string"),
+            pytest.param("a" * 62, None, id="truncated"),
+            pytest.param(None, None, id="none"),
+            pytest.param(True, None, id="non-string"),
+            pytest.param("b" * 64, "b" * 64, id="well-formed"),
+        ],
+    )
+    def test_bound_fingerprint_guard_holds_independently_of_the_stamp(
+        self, raw: str | bool | None, expected: str | None
+    ) -> None:
+        """#2382 moved the malformed-value rejection upstream into
+        `_stamp_plan_approval`, so this boundary guard is no longer reached by
+        a malformed value end-to-end. It still has to hold on its own: a
+        `-->` fragment reaching the marker would break out of the HTML
+        comment, whatever the stamp does in future."""
+        from cw.cli.dev_queue.approve import _bound_fingerprint
+        from cw.models import PLAN_APPROVED_FINGERPRINT_KEY
+
+        assert _bound_fingerprint({PLAN_APPROVED_FINGERPRINT_KEY: raw}) == expected
 
     def test_approve_post_marker_help_states_audit_only(self) -> None:
         """The flag's own help has to say the marker is audit-only -- read off

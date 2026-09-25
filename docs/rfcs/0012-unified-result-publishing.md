@@ -113,7 +113,8 @@ explicitly blessed as display/forensic surfaces that never write state.
 ## Explicitly out of scope
 
 - Workers invoking `cw result emit` themselves (LLM CLI discipline is less
-  reliable than printing a sentinel; the hook harvests instead).
+  reliable than printing a sentinel; the hook harvests instead). **Superseded
+  by the Amendment (#2382) at the end of this document.**
 - Any change to the sentinel wire format, `AutoDevResult` schema fields, or
   schema_version.
 - New backends (opencode etc.) — this RFC defines the slot-in rule only.
@@ -249,3 +250,35 @@ explicitly blessed as display/forensic surfaces that never write state.
 - `#1390` / `#1391` / `#1392` — codex-review incident cluster (motivation).
 - `RFC 0005` — executor backends (E1), local backend (F3).
 - `docs/headless-contract.md` — the sentinel contract this RFC leaves unchanged.
+
+
+## Amendment (#2382)
+
+The first "Explicitly out of scope" bullet — workers invoking `cw result emit`
+themselves — is retired. Each headless stage command now ends with
+`printf '%s' "$SENTINEL_JSON" | cw result emit -` (the *Sentinel emit rule* in
+`.claude/commands/auto-dev.md`), and the Stop hook's #536 emit precedence
+takes that recorded result over the transcript frame.
+
+- **Why the reliability concern no longer holds.** The bullet assumed the
+  worker's CLI call was the fragile step and the printed sentinel the robust
+  one. The record since says the opposite: every parse-boundary coercion in
+  headless-contract §6 exists because the worker validated one JSON and then
+  re-typed another into its prose, and the #2382 incident (a 62-character
+  copy of a 64-character `plan_draft_fingerprint`) was that same
+  transcription step on a field with no coercion. `cw result emit` records
+  the validated bytes, so there is no second copy to drift; a malformed
+  payload is a non-zero exit with `field.path: message` lines the worker
+  fixes and re-runs, not a value cw has to repair after the fact.
+- **The harvest-authority model is unchanged.** The detached Claude daemon
+  still has one door and one arbitration. What changes is the order of its
+  two sources: the worker's push (`emit_cli`) is primary, and the Stop-hook
+  transcript harvest (`stop_hook_harvest`) is the fallback that runs only
+  when nothing was recorded — a denied or unknown `cw result emit`, a worker
+  predating the command, or an opencode worker. First-writer-wins still
+  arbitrates the two (S2), and `cw result emit` stays write-only (D-A1).
+- **What the fallback loses.** On the transcript path the fingerprint is the
+  worker's own value again (shape-checked, not recomputed), and the worker
+  records the fallback in `friction_highlights` so the rate is visible.
+
+See ADR-0003's Amendment (#2382) for the Stop-hook side.

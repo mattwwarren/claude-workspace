@@ -13,50 +13,22 @@ channel. Worktree resolution reuses :func:`cw.worktree.resolve_task_worktree`.
 from __future__ import annotations
 
 import contextlib
-import hashlib
-import re
 from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
 from cw.models import OrchestratorEventType
-from cw.plan_fingerprint import is_plan_draft_fingerprint
+from cw.plan_fingerprint import (
+    compute_plan_draft_fingerprint,
+    is_plan_draft_fingerprint,
+)
 from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig, TicketTask
-
-
-_ROUND_LINE = re.compile(r"<!-- plan-stage-scan-round: [0-9]+ -->\n?")
-_LAST_EVALUATED_LINE = re.compile(
-    r"<!-- plan-stage-last-evaluated: "
-    r"operator_comment=[^|\n]+\|body_sha=[0-9a-f]{64} -->\n?"
-)
-_SETTLED_LINE = re.compile(
-    r"<!-- plan-stage-settled: "
-    r"(?:A[0-9]+: (?:ADOPTED|ALT-[a-z])|"
-    r"P[0-9]+: (?:CONFIRMED|REFUTED|DEFERRED)) -->\n?"
-)
-
-
-def _draft_fingerprint(text: str) -> str:
-    """Apply the named Plan-draft fingerprint rule (#2102)."""
-    # The bookkeeping grammar is a leading block.  In particular, a matching
-    # HTML comment in the plan body is content and must remain hash material.
-    round_match = _ROUND_LINE.match(text)
-    if round_match is None:
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
-    offset = round_match.end()
-    last_evaluated_match = _LAST_EVALUATED_LINE.match(text, offset)
-    if last_evaluated_match is not None:
-        offset = last_evaluated_match.end()
-    while settled_match := _SETTLED_LINE.match(text, offset):
-        offset = settled_match.end()
-    stripped = text[offset:]
-    return hashlib.sha256(stripped.encode("utf-8")).hexdigest()
 
 
 def _restore_prior_plan(plan_path: Path, old_plan_text: str | None) -> Exception | None:
@@ -146,7 +118,7 @@ def promote_plan_draft(
             )
             raise ApproveGateError(msg)
         draft_text = draft_path.read_text(encoding="utf-8")
-        new_fingerprint = _draft_fingerprint(draft_text)
+        new_fingerprint = compute_plan_draft_fingerprint(draft_text)
         if new_fingerprint != expected_fingerprint:
             msg = (
                 f"Cannot approve ticket {task.ticket_id!r}: approved plan draft"
@@ -176,7 +148,9 @@ def promote_plan_draft(
         draft_path.unlink()
         draft_deleted = True
     old_fingerprint = (
-        _draft_fingerprint(old_plan_text) if old_plan_text is not None else None
+        compute_plan_draft_fingerprint(old_plan_text)
+        if old_plan_text is not None
+        else None
     )
     with contextlib.suppress(OSError):
         record_event(

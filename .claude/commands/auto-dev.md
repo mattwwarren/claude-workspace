@@ -443,6 +443,32 @@ In every case do not retry, do not work around it, do not report it as a blocker
 
 ---
 
+## Sentinel emit rule (#2382)
+
+The authoritative copy of a headless sentinel is the one `cw result emit` records on the session, never the one in your prose. The Stop hook takes an emitted result over the transcript frame (#536), so the bytes cw routes on are exactly the bytes cw validated — a re-typed frame that drifts from the validated payload (the #2382 62-character fingerprint) can no longer reach the queue. This rule replaces the former `cw result validate -` pre-emit gate everywhere; each stage's completion section cites it by name.
+
+**Where it runs.** Once, in the foreground (never `run_in_background`, see *Worker Execution Discipline*), from the cw session worktree root — the directory holding `.claude/cw-context.json` — never from a gate or nested worktree, immediately before the frame:
+
+```bash
+printf '%s' "$SENTINEL_JSON" | cw result emit -
+```
+
+**The fix-and-re-run loop.** Read the exit status, not the prose:
+- **Exit 0, `Recorded result for session …`** — the payload is recorded. Frame it, unchanged, per the rule below.
+- **Exit 1 with `field.path: message` lines** — the payload is malformed. Fix every named field in `$SENTINEL_JSON` and run the command again; loop until it exits 0. Validation here is strict: none of the transcript parser's leniency coercions apply, so a shape the parser used to repair silently (a stray `pr` on `blocked`, a non-null `lines_actual` at `stage1_plan`, a typo'd enum) is an error you fix. Never frame a payload that emit rejected, and never "simplify" the payload to make it pass — a field you drop is a fact the queue loses.
+- **Exit 0, `Result already recorded for session …`** — this session already emitted. Do not change the payload now; frame the payload you already recorded.
+- **`plan_draft_fingerprint`** — cw recomputes it from `.cw/plan-draft.md` (the *Plan-draft fingerprint rule* in `.claude/commands/auto-dev-plan.md`) and records its own digest; a non-null value in the payload is read only as your claim that a draft is in hand. A claim with no `.cw/plan-draft.md` on disk exits 1: emit `null` if no draft exists, or pass `--plan-draft <path>` if it lives elsewhere.
+
+**Failure of the command itself falls back to the frame, visibly (carve-out from the Tool-Use Denial Exit).** Like `cw signal-park`, this call is a side channel to cw state, so an auto-mode classifier denial of the `cw result emit` call is **not** a `tool_denied` exit, and an unknown-command error (`No such command 'emit'` from a `cw` that predates it, i.e. version skew) is not a blocker either. Any other non-zero exit that is not a `field.path: message` validation report — `Session '…' not found`, a `plan_draft_fingerprint: … none exists at …` binding error you cannot resolve by emitting `null` or passing `--plan-draft`, a lock or I/O error — is also not worth a retry loop against a side channel, but it is never silent. On every fallback, in this order:
+1. Append one entry to the payload's `friction_highlights`: `cw_result_emit_fallback: <first line of the error, or "tool denied">`. This is the only place the fallback is recorded — without it an operator cannot tell a fleet that is quietly running the pre-#2382 path from one that never needs to.
+2. If the payload carries a non-null `plan_draft_fingerprint`, compute it yourself per the *Plan-draft fingerprint rule* in `.claude/commands/auto-dev-plan.md` — on this path nothing recomputes it for you, so the value must be the full 64-character digest, never transcribed from an earlier message.
+3. Run `printf '%s' "$SENTINEL_JSON" | cw result validate -` if you can; it shape-checks every field (including that digest) but records nothing. Fix any `field.path: message` errors it reports.
+4. Frame the payload as the final characters of this message. The Stop hook parses the transcript when nothing was recorded, exactly as before #2382.
+
+**Recording is not framing (#1890).** `cw result emit` records the result; it does not end the run. The literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the same JSON, MUST still be the final characters of this same message — it is the operator's display copy, the forensic record in the transcript, and the fallback when nothing was recorded. Never narrate emission as a separate act from performing it (e.g. writing "Result recorded. Emitting the final sentinel." and stopping there).
+
+---
+
 ## Guard Matrix
 
 Two independent axes control approval automation.
@@ -1022,17 +1048,11 @@ cw event record stage.entered \
   --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"done\",\"prev_stage\":\"s5_ci_waiting\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
 ```
 
-**Pre-emit validation gate.** Before framing the sentinel block, validate the inner JSON payload with `cw result validate`. A validation failure means the payload is malformed — fix the field errors, do not emit invalid JSON.
+**Emit through cw, then frame (#2382).** Record the payload with `cw result emit -` per the *Sentinel emit rule* above — from the cw session worktree root, fixing every `field.path: message` error it reports and re-running until it exits 0 — and only then frame the recorded JSON. Recording is not framing (#1890): the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the same JSON, MUST be the final characters of this same message — not a description of what you are about to do next.
 
 ```bash
-# Write the payload to a temp file and validate before emission
-printf '%s' "$SENTINEL_JSON" | cw result validate -
-# On success: cw result validate exits 0 and prints normalized JSON to stdout
-# On failure: exits 1 and prints field.path: message lines to stderr
-# Fix all reported errors before proceeding to emit the framed block
+printf '%s' "$SENTINEL_JSON" | cw result emit -
 ```
-
-**Validating is not emitting (#1890).** `cw result validate -` confirms the JSON is well-formed — it does not emit the sentinel. Never narrate emission as a separate act from performing it (e.g. writing "Sentinel validated. Emitting the final result." and stopping there): the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the validated JSON, MUST be the final characters of this same message — not a description of what you are about to do next.
 
 ```
 <<<AUTO_DEV_RESULT
