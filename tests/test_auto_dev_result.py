@@ -4786,6 +4786,54 @@ class TestReviewRejectedCount:
         assert review.rejected_count_by_severity == {}
 
 
+class TestReviewDowngradedDispositionCount:
+    """#2009 — Review.downgraded_disposition_count.
+
+    The same quantity as ``ReviewVerdict.downgraded_disposition_count`` (the
+    number of ``"fixed"`` claims Step 3c's ``cw review verify-fixes`` walked
+    back to ``"dropped"``), threaded into the terminal sentinel so an
+    orchestrator reading only ``AUTO_DEV_RESULT`` sees it. Follows the #2098
+    convention: ``None`` means "producer did not report", ``0`` is a
+    producer-confirmed zero, and the two never collapse.
+    """
+
+    def test_defaults_to_none_when_omitted(self) -> None:
+        review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
+        assert review.downgraded_disposition_count is None
+
+    def test_parses_explicit_value(self) -> None:
+        review = Review.model_validate(
+            {
+                "must_fix_initial": 1,
+                "should_fix": 0,
+                "fix_cycles_used": 1,
+                "downgraded_disposition_count": 2,
+            }
+        )
+        assert review.downgraded_disposition_count == 2
+
+    def test_parses_explicit_zero(self) -> None:
+        review = Review.model_validate(
+            {
+                "must_fix_initial": 0,
+                "should_fix": 0,
+                "fix_cycles_used": 0,
+                "downgraded_disposition_count": 0,
+            }
+        )
+        assert review.downgraded_disposition_count == 0
+
+    def test_round_trips_through_json(self) -> None:
+        review = Review(
+            must_fix_initial=1,
+            should_fix=0,
+            fix_cycles_used=1,
+            downgraded_disposition_count=3,
+        )
+        restored = Review.model_validate_json(review.model_dump_json())
+        assert restored.downgraded_disposition_count == 3
+
+
 class TestReviewReviewedSha:
     """#2123 — Review.reviewed_sha, the sha the review actually ran against.
 
