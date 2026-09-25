@@ -605,6 +605,16 @@ class EmitValidationError(CwError):
         self.errors = errors
 
 
+class PlanDraftBindingError(CwError):
+    """``cw result emit`` could not bind a claimed ``plan_draft_fingerprint``
+    to a plan draft on disk (#2382): the payload claimed a draft but none
+    exists at the resolved path, or the file could not be read. Carries the
+    operator-facing message; nothing has been written when it is raised.
+    """
+
+    __slots__ = ()
+
+
 class EmitSessionNotFoundError(CwError):
     """Raised by emit_result_locked() when the resolved session_id has no
     matching session in state. Carries the session id so callers (the CLI

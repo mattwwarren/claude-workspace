@@ -10891,6 +10891,29 @@ class TestDevQueueApproveCli:
         assert "evil" not in caplog.text
         assert "-->" not in caplog.text
 
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            pytest.param("x --> <!-- evil", None, id="malformed-string"),
+            pytest.param("a" * 62, None, id="truncated"),
+            pytest.param(None, None, id="none"),
+            pytest.param(True, None, id="non-string"),
+            pytest.param("b" * 64, "b" * 64, id="well-formed"),
+        ],
+    )
+    def test_bound_fingerprint_guard_holds_independently_of_the_stamp(
+        self, raw: str | bool | None, expected: str | None
+    ) -> None:
+        """#2382 moved the malformed-value rejection upstream into
+        `_stamp_plan_approval`, so this boundary guard is no longer reached by
+        a malformed value end-to-end. It still has to hold on its own: a
+        `-->` fragment reaching the marker would break out of the HTML
+        comment, whatever the stamp does in future."""
+        from cw.cli.dev_queue.approve import _bound_fingerprint
+        from cw.models import PLAN_APPROVED_FINGERPRINT_KEY
+
+        assert _bound_fingerprint({PLAN_APPROVED_FINGERPRINT_KEY: raw}) == expected
+
     def test_approve_post_marker_help_states_audit_only(self) -> None:
         """The flag's own help has to say the marker is audit-only -- read off
         the option object, since `--help` rewraps the hyphenated word."""

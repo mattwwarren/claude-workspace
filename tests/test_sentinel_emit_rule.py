@@ -57,6 +57,12 @@ class TestRuleDefinition:
         section = _rule_section()
         assert "not** a `tool_denied` exit" in section
         assert _VALIDATE_LINE in section
+        # SysAdmin review: the fallback is never silent -- it lands in the
+        # sentinel so the fallback rate is visible fleet-wide.
+        assert "cw_result_emit_fallback:" in section
+        assert "friction_highlights" in section
+        # ...and on that path the worker computes the digest itself.
+        assert "Plan-draft fingerprint rule" in section
 
     def test_rule_explains_fingerprint_recomputation(self) -> None:
         section = _rule_section()
@@ -91,6 +97,23 @@ class TestContractAndAdrRecordTheChange:
         )
         assert "**Producer push (#2382).**" in text
         assert "Sentinel emit rule" in text
+
+    def test_rfc_0012_retires_its_out_of_scope_bullet(self) -> None:
+        """RFC 0012 scoped worker-invoked emit OUT; the two accepted docs must
+        not contradict each other, so the RFC carries its own amendment."""
+        rfc = _REPO_ROOT / "docs" / "rfcs" / "0012-unified-result-publishing.md"
+        text = rfc.read_text(encoding="utf-8")
+        assert "## Amendment (#2382)" in text
+        assert "Superseded" in text
+        assert "primary" in text
+        assert "fallback" in text
+
+    def test_harvest_table_orders_the_claude_rows(self) -> None:
+        text = (_REPO_ROOT / "docs" / "headless-contract.md").read_text(
+            encoding="utf-8"
+        )
+        assert "detached Claude daemon — **primary**" in text
+        assert "detached Claude daemon — **fallback**" in text
 
     def test_adr_0003_carries_the_amendment(self) -> None:
         adr_dir = _REPO_ROOT / "docs" / "adr"

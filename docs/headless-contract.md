@@ -847,11 +847,13 @@ Every backend has a designated harvest authority that pushes `Session.last_resul
 
 | Authority mechanism | `LastResultSource` value | Backend(s) | Call site |
 |---|---|---|---|
-| Worker push at end of stage (#2382), or manual CLI push | `emit_cli` | detached Claude daemon (primary, per the *Sentinel emit rule*); operator / scripted | `cw.result.result_emit` |
-| Stop-hook harvest | `stop_hook_harvest` | detached Claude daemon | `cw.cli.stop_hook` |
+| Worker push at end of stage (#2382); also the manual / scripted push | `emit_cli` | detached Claude daemon — **primary** (the *Sentinel emit rule*) | `cw.result.result_emit` |
+| Stop-hook harvest | `stop_hook_harvest` | detached Claude daemon — **fallback**, only when nothing was recorded | `cw.cli.stop_hook` |
 | Executor-direct | `executor_direct` | codex, aider/local (supervised-child, synchronous) | `cw.executor` |
 | Git-facts synthesis | `git_synthesis` | aider/local (no sentinel emitted) | `cw.reconcile.local` |
 | Salvage-transcript | `salvage_transcript` | idle/phantom/stalled sweeps (supervising worker died mid-run) | `cw.reconcile._shared` |
+
+The detached Claude daemon is the one backend with two rows, and they are ordered, not independent (#2382, superseding RFC 0012's original out-of-scope bullet — see its Amendment): the worker's own `cw result emit` at the end of the stage is the authority, and the Stop hook's #536 emit precedence takes that recorded result without re-parsing the transcript. The transcript harvest runs only when no result was recorded — a denied or unknown `cw result emit`, a worker predating the command — and the door's first-writer-wins arbitration (§11.2) covers the case where both arrive.
 
 ### 11.2 `LastResultSource` Provenance Enum
 

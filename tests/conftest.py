@@ -523,6 +523,50 @@ def _stub_cw(
     return _write_bin_stub(tmp_path, "cw", "\n".join(lines) + "\n")
 
 
+def _plan_pending_payload(**overrides: object) -> dict[str, Any]:
+    """Minimal valid ``plan_pending_approval`` AutoDevResult payload.
+
+    Shared by ``test_auto_dev_result.py`` (schema/parser cases) and
+    ``test_result.py`` (the #2382 emit fingerprint binding), which used to
+    carry two drifting private copies. ``overrides`` are merged last, so a
+    caller sets a key -- ``plan_draft_fingerprint=None`` included -- and the
+    key is present with that value.
+    """
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "ticket_id": "GEN-2",
+        "status": "plan_pending_approval",
+        "stage_reached": "stage1_plan",
+        "scope": {
+            "tier": "large",
+            "files": 25,
+            "lines_estimate": 1200,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "next_actions": ["user_approve_plan"],
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _seed_daemon_session(
     tmp_path: Path,
     tmp_config_dir: Path,

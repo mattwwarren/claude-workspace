@@ -50,6 +50,7 @@ from cw.auto_dev_result import (
 )
 from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED, FIX_LOOP_DIVERGING
 from cw.models import QueueItemStatus
+from tests.conftest import _plan_pending_payload
 
 # ---------------------------------------------------------------------------
 # Package-split import guard (#1321)
@@ -110,40 +111,6 @@ def _shipped_payload() -> dict[str, Any]:
         "friction_highlights": [],
         "blocker": None,
         "next_actions": ["wait_for_ci"],
-    }
-
-
-def _plan_pending_payload() -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "ticket_id": "GEN-2",
-        "status": "plan_pending_approval",
-        "stage_reached": "stage1_plan",
-        "scope": {
-            "tier": "large",
-            "files": 25,
-            "lines_estimate": 1200,
-            "lines_actual": None,
-            "forbidden_touched": False,
-        },
-        "plan_source": "generated",
-        "branch": None,
-        "worktree_path": None,
-        "fork_point_sha": None,
-        "commits": [],
-        "pr": None,
-        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
-        "health": {
-            "lowest_agent_confidence": "HIGH",
-            "any_incomplete_risk": False,
-            "shortcuts": [],
-            "recommendation": "PROCEED",
-            "downgrade_applied": False,
-            "fix_loop_escalated": False,
-        },
-        "friction_highlights": [],
-        "blocker": None,
-        "next_actions": ["user_approve_plan"],
     }
 
 

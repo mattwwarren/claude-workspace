@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ from cw.result import (
     has_terminal_result,
     validate_payload,
 )
-from tests.conftest import _seed_daemon_session
+from tests.conftest import _plan_pending_payload, _seed_daemon_session
 
 
 def _in_memory_session(**overrides: Any) -> Session:
@@ -771,6 +772,62 @@ class TestResultEmit:
         assert sess.last_result == {"status": "blocked"}
         assert sess.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
 
+    def test_result_emit_cli_locked_refusal_after_pre_check_passed(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2382: the read-only pre-check saw no terminal result, but the
+        locked door refused (a concurrent writer landed first). The CLI
+        reports the door's refusal, exit 0, and prints no binding note."""
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+
+        def _refuse(
+            payload: dict[str, Any], session_id: str, *, source: LastResultSource
+        ) -> EmitOutcome:
+            return EmitOutcome(
+                session_id=session_id,
+                result=None,
+                prior_status="shipped",
+                refused=True,
+                existing_result={"status": "shipped"},
+                existing_source=LastResultSource.STOP_HOOK_HARVEST,
+            )
+
+        monkeypatch.setattr("cw.result.emit_result", _refuse)
+        result = CliRunner().invoke(
+            main,
+            ["result", "emit", "-", "--session-id", "test1234"],
+            input=json.dumps(_valid_payload()),
+        )
+        assert result.exit_code == 0, result.output
+        assert result.output == (
+            "Result already recorded for session test1234 "
+            "(source=stop_hook_harvest); not overwritten.\n"
+        )
+
+    def test_result_emit_cli_renders_door_validation_error(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The door's own validation arm (reached only if it ever disagrees
+        with the CLI's strict pre-validation) renders field lines plus the
+        no-mutation notice."""
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+
+        def _reject(
+            payload: dict[str, Any], session_id: str, *, source: LastResultSource
+        ) -> EmitOutcome:
+            msg = "door rejected the payload"
+            raise EmitValidationError(msg, errors=["pr: door said no"])
+
+        monkeypatch.setattr("cw.result.emit_result", _reject)
+        result = CliRunner().invoke(
+            main,
+            ["result", "emit", "-", "--session-id", "test1234"],
+            input=json.dumps(_valid_payload()),
+        )
+        assert result.exit_code == 1
+        assert "pr: door said no" in result.output
+        assert "No session state was modified." in result.output
+
     def test_result_emit_cli_rejects_bare_blocked_shape_payload(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
@@ -796,42 +853,17 @@ class TestResultEmit:
         assert sess.last_result is None
 
 
-def _plan_pending_payload(fingerprint: object) -> dict[str, Any]:
-    """Minimal valid plan_pending_approval payload carrying *fingerprint*."""
-    return {
-        "schema_version": 8,
-        "ticket_id": "GEN-2382",
-        "status": "plan_pending_approval",
-        "stage_reached": "stage1_plan",
-        "scope": {
-            "tier": "large",
-            "files": 25,
-            "lines_estimate": 1200,
-            "lines_actual": None,
-            "forbidden_touched": False,
-        },
-        "plan_source": "generated",
-        "branch": None,
-        "commits": [],
-        "pr": None,
-        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
-        "health": {
-            "lowest_agent_confidence": "HIGH",
-            "any_incomplete_risk": False,
-            "shortcuts": [],
-            "recommendation": "PROCEED",
-            "downgrade_applied": False,
-            "fix_loop_escalated": False,
-        },
-        "friction_highlights": [],
-        "blocker": None,
-        "next_actions": ["user_approve_plan"],
-        "plan_draft_fingerprint": fingerprint,
-    }
+def _claim(fingerprint: object) -> dict[str, Any]:
+    """A v8 plan_pending payload carrying *fingerprint* as its claim."""
+    return _plan_pending_payload(
+        schema_version=8, ticket_id="GEN-2382", plan_draft_fingerprint=fingerprint
+    )
 
 
 _DRAFT_TEXT = "<!-- plan-stage-scan-round: 1 -->\n# Plan\n\nthe draft\n"
 _DRAFT_DIGEST = compute_plan_draft_fingerprint(_DRAFT_TEXT)
+_OTHER_DRAFT_TEXT = "# Plan\n\nsomebody else's draft\n"
+_OTHER_DRAFT_DIGEST = compute_plan_draft_fingerprint(_OTHER_DRAFT_TEXT)
 
 
 def _worktree_with_context(tmp_path: Path, session_id: str = "test1234") -> Path:
@@ -856,25 +888,38 @@ def _recorded_fingerprint(session_id: str = "test1234") -> object:
     return sess.last_result["plan_draft_fingerprint"]
 
 
+def _seed_worker_session(
+    tmp_path: Path, tmp_config_dir: Path, worktree: Path, **overrides: object
+) -> None:
+    """A DAEMON session whose recorded worktree is *worktree* -- the shape
+    dispatch spawns, and the directory emit binds the draft against."""
+    _seed_daemon_session(
+        tmp_path,
+        tmp_config_dir,
+        session_id="test1234",
+        worktree_path=worktree,
+        **overrides,
+    )
+
+
 class TestResultEmitPlanDraftFingerprintBinding:
     """#2382: `cw result emit` never records the payload's fingerprint — a
     non-null value is only the producer's claim that a draft is in hand, and
-    the digest is recomputed from the draft on disk."""
+    the digest is recomputed from the draft in the *target session's*
+    worktree."""
 
     def test_truncated_claim_is_replaced_by_the_digest_cw_computes(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The incident shape: 62 of 64 characters. The recorded value is the
         on-disk digest, and stderr says the payload's value was replaced."""
-        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
         worktree = _worktree_with_context(tmp_path)
+        _seed_worker_session(tmp_path, tmp_config_dir, worktree)
         _write_draft(worktree)
         monkeypatch.chdir(worktree)
 
         result = CliRunner().invoke(
-            main,
-            ["result", "emit", "-"],
-            input=json.dumps(_plan_pending_payload(_DRAFT_DIGEST[:62])),
+            main, ["result", "emit", "-"], input=json.dumps(_claim(_DRAFT_DIGEST[:62]))
         )
 
         assert result.exit_code == 0, result.output
@@ -884,15 +929,13 @@ class TestResultEmitPlanDraftFingerprintBinding:
     def test_matching_claim_is_recorded_silently(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
         worktree = _worktree_with_context(tmp_path)
+        _seed_worker_session(tmp_path, tmp_config_dir, worktree)
         _write_draft(worktree)
         monkeypatch.chdir(worktree)
 
         result = CliRunner().invoke(
-            main,
-            ["result", "emit", "-"],
-            input=json.dumps(_plan_pending_payload(_DRAFT_DIGEST)),
+            main, ["result", "emit", "-"], input=json.dumps(_claim(_DRAFT_DIGEST))
         )
 
         assert result.exit_code == 0, result.output
@@ -904,36 +947,71 @@ class TestResultEmitPlanDraftFingerprintBinding:
     ) -> None:
         """null is the contract's "no draft" value on every non-plan-stage
         sentinel; a stale draft on disk must not turn it into a binding."""
+        worktree = _worktree_with_context(tmp_path)
+        _seed_worker_session(tmp_path, tmp_config_dir, worktree)
+        _write_draft(worktree)
+        monkeypatch.chdir(worktree)
+
+        result = CliRunner().invoke(
+            main, ["result", "emit", "-"], input=json.dumps(_claim(None))
+        )
+
+        assert result.exit_code == 0, result.output
+        assert _recorded_fingerprint() is None
+
+    def test_draft_is_resolved_against_the_target_sessions_worktree(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--session-id` from another directory must never bind the draft
+        that happens to sit in the invoker's cwd to the target session."""
+        session_wt = tmp_path / "session-wt"
+        session_wt.mkdir()
+        _seed_worker_session(tmp_path, tmp_config_dir, session_wt)
+        _write_draft(session_wt, _DRAFT_TEXT)
+        elsewhere = tmp_path / "operator-cwd"
+        elsewhere.mkdir()
+        _write_draft(elsewhere, _OTHER_DRAFT_TEXT)
+        monkeypatch.chdir(elsewhere)
+
+        result = CliRunner().invoke(
+            main,
+            ["result", "emit", "-", "--session-id", "test1234"],
+            input=json.dumps(_claim("a" * 62)),
+        )
+
+        assert result.exit_code == 0, result.output
+        assert _recorded_fingerprint() == _DRAFT_DIGEST
+        assert _recorded_fingerprint() != _OTHER_DRAFT_DIGEST
+
+    def test_session_without_worktree_falls_back_to_cwd(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
         worktree = _worktree_with_context(tmp_path)
         _write_draft(worktree)
         monkeypatch.chdir(worktree)
 
         result = CliRunner().invoke(
-            main,
-            ["result", "emit", "-"],
-            input=json.dumps(_plan_pending_payload(None)),
+            main, ["result", "emit", "-"], input=json.dumps(_claim("a" * 62))
         )
 
         assert result.exit_code == 0, result.output
-        assert _recorded_fingerprint() is None
+        assert _recorded_fingerprint() == _DRAFT_DIGEST
 
     def test_claim_without_a_draft_exits_one_and_mutates_nothing(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
         worktree = _worktree_with_context(tmp_path)
+        _seed_worker_session(tmp_path, tmp_config_dir, worktree)
         monkeypatch.chdir(worktree)
 
         result = CliRunner().invoke(
-            main,
-            ["result", "emit", "-"],
-            input=json.dumps(_plan_pending_payload("a" * 64)),
+            main, ["result", "emit", "-"], input=json.dumps(_claim("a" * 64))
         )
 
         assert result.exit_code == 1
         assert "claims a plan draft but none exists" in result.output
-        assert str(Path(".cw") / "plan-draft.md") in result.output
+        assert str(worktree / ".cw" / "plan-draft.md") in result.output
         assert "No session state was modified." in result.output
         sess = next(s for s in load_state().sessions if s.id == "test1234")
         assert sess.last_result is None
@@ -941,16 +1019,14 @@ class TestResultEmitPlanDraftFingerprintBinding:
     def test_unreadable_draft_exits_one_and_mutates_nothing(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
         worktree = _worktree_with_context(tmp_path)
+        _seed_worker_session(tmp_path, tmp_config_dir, worktree)
         draft = _write_draft(worktree)
         draft.write_bytes(b"\xff\xfe not utf-8")
         monkeypatch.chdir(worktree)
 
         result = CliRunner().invoke(
-            main,
-            ["result", "emit", "-"],
-            input=json.dumps(_plan_pending_payload("a" * 64)),
+            main, ["result", "emit", "-"], input=json.dumps(_claim("a" * 64))
         )
 
         assert result.exit_code == 1
@@ -959,15 +1035,18 @@ class TestResultEmitPlanDraftFingerprintBinding:
         sess = next(s for s in load_state().sessions if s.id == "test1234")
         assert sess.last_result is None
 
-    def test_plan_draft_option_overrides_the_cwd_default(
+    def test_plan_draft_option_overrides_the_worktree_default(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        session_wt = tmp_path / "session-wt"
+        session_wt.mkdir()
+        _seed_worker_session(tmp_path, tmp_config_dir, session_wt)
+        _write_draft(session_wt, _OTHER_DRAFT_TEXT)
         elsewhere = tmp_path / "elsewhere" / "draft.md"
         elsewhere.parent.mkdir(parents=True)
         elsewhere.write_text(_DRAFT_TEXT, encoding="utf-8")
         payload_file = tmp_path / "payload.json"
-        payload_file.write_text(json.dumps(_plan_pending_payload("a" * 62)))
+        payload_file.write_text(json.dumps(_claim("a" * 62)))
 
         result = CliRunner().invoke(
             main,
@@ -990,19 +1069,76 @@ class TestResultEmitPlanDraftFingerprintBinding:
     ) -> None:
         """A non-string claim is still a claim: it is replaced by the on-disk
         digest rather than rejected by the schema's shape validator."""
-        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
         worktree = _worktree_with_context(tmp_path)
+        _seed_worker_session(tmp_path, tmp_config_dir, worktree)
         _write_draft(worktree)
         monkeypatch.chdir(worktree)
 
         result = CliRunner().invoke(
-            main,
-            ["result", "emit", "-"],
-            input=json.dumps(_plan_pending_payload(12345)),
+            main, ["result", "emit", "-"], input=json.dumps(_claim(12345))
         )
 
         assert result.exit_code == 0, result.output
         assert _recorded_fingerprint() == _DRAFT_DIGEST
+
+    def test_already_recorded_short_circuits_before_binding(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repeat emit against a session that already carries a terminal
+        result has nothing to fix: it lands on 'already recorded' even when
+        the claimed draft is gone (promoted away) and the claim is malformed,
+        and it prints no 'replaced' note for a write that did not happen."""
+        worktree = _worktree_with_context(tmp_path)
+        _seed_worker_session(
+            tmp_path,
+            tmp_config_dir,
+            worktree,
+            last_result={"status": "plan_pending_approval"},
+            last_result_source=LastResultSource.EMIT_CLI,
+        )
+        monkeypatch.chdir(worktree)
+
+        result = CliRunner().invoke(
+            main, ["result", "emit", "-"], input=json.dumps(_claim("a" * 62))
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Result already recorded for session test1234" in result.output
+        assert "source=emit_cli" in result.output
+        assert "replaced" not in result.output
+        assert "claims a plan draft" not in result.output
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result == {"status": "plan_pending_approval"}
+
+
+class TestReconstructStagedSentinelLegacyFingerprint:
+    """#2382: the new shape validator must not make an already-persisted
+    result unreconstructable on the Stop-hook / phantom-sweep path."""
+
+    def test_malformed_persisted_fingerprint_reconstructs_with_null(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from cw.result import reconstruct_staged_sentinel
+
+        persisted = _claim("c" * 62)
+        with caplog.at_level(logging.WARNING, logger="cw.result"):
+            reconstructed = reconstruct_staged_sentinel(persisted)
+
+        assert isinstance(reconstructed, AutoDevResult)
+        assert reconstructed.status == "plan_pending_approval"
+        assert reconstructed.plan_draft_fingerprint is None
+        assert "got 62 characters" in caplog.text
+        assert "c" * 62 not in caplog.text
+        # The stored dict is untouched -- sanitization works on a copy.
+        assert persisted["plan_draft_fingerprint"] == "c" * 62
+
+    def test_well_formed_persisted_fingerprint_is_kept(self) -> None:
+        from cw.result import reconstruct_staged_sentinel
+
+        reconstructed = reconstruct_staged_sentinel(_claim("d" * 64))
+
+        assert isinstance(reconstructed, AutoDevResult)
+        assert reconstructed.plan_draft_fingerprint == "d" * 64
 
 
 class TestHasTerminalResult:
