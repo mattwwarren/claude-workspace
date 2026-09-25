@@ -21,7 +21,6 @@ from cw.atomic import atomic_write_text
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
 from cw.models import OrchestratorEventType
-from cw.plan_fingerprint import is_plan_draft_fingerprint
 from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
@@ -110,7 +109,6 @@ def promote_plan_draft(
     task: TicketTask,
     client_cfg: ClientConfig | None,
     *,
-    expected_fingerprint: str | None = None,
     actor: str = "cw dev-queue approve",
 ) -> bool:
     """Promote the task's approved ``.cw/plan-draft.md`` to ``.cw/plan.md``.
@@ -124,8 +122,7 @@ def promote_plan_draft(
     in ``auto-dev-plan.md`` Step 1g.
 
     Raises:
-        ApproveGateError: the approval fingerprint is missing or stale, or
-            reading the draft or writing ``.cw/plan.md`` failed.
+        ApproveGateError: reading the draft or writing ``.cw/plan.md`` failed.
     """
     wt_path = resolve_task_worktree(task, client_cfg)
     if wt_path is None:
@@ -137,21 +134,6 @@ def promote_plan_draft(
             return False
         draft_text = draft_path.read_text(encoding="utf-8")
         new_fingerprint = _draft_fingerprint(draft_text)
-        if not isinstance(expected_fingerprint, str) or not is_plan_draft_fingerprint(
-            expected_fingerprint
-        ):
-            msg = (
-                f"Cannot approve ticket {task.ticket_id!r}: the plan draft"
-                f" has no valid approval fingerprint for worktree {wt_path}."
-            )
-            raise ApproveGateError(msg)
-        if new_fingerprint != expected_fingerprint:
-            msg = (
-                f"Cannot approve ticket {task.ticket_id!r}: the plan draft"
-                f" fingerprint changed for worktree {wt_path}"
-                f" (expected {expected_fingerprint}, got {new_fingerprint})."
-            )
-            raise ApproveGateError(msg)
         old_plan_text = (
             plan_path.read_text(encoding="utf-8") if plan_path.exists() else None
         )

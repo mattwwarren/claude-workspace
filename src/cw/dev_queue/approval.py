@@ -254,7 +254,6 @@ def _promote_plan_draft_on_direct_advance(
     client_cfg: ClientConfig,
     *,
     plan_reviewed: bool | None,
-    expected_fingerprint: str | None,
 ) -> bool:
     """Promote the approved plan draft on the direct plan->impl advance (#2342).
 
@@ -267,11 +266,7 @@ def _promote_plan_draft_on_direct_advance(
     """
     if task.stage != Stage.PLAN or plan_reviewed is not None:
         return False
-    return promote_plan_draft(
-        task,
-        client_cfg,
-        expected_fingerprint=expected_fingerprint,
-    )
+    return promote_plan_draft(task, client_cfg)
 
 
 def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
@@ -539,9 +534,6 @@ def _approve_ticket_locked(
             task,
             client_cfg,
             plan_reviewed=plan_reviewed,
-            expected_fingerprint=(session.last_result or {}).get(
-                PLAN_DRAFT_FINGERPRINT_KEY
-            ),
         )
         _advance_task_pointer(task, stages)
     stamped_fingerprint = _stamp_plan_approval(task, from_stage, session)

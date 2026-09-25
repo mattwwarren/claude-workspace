@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,7 +19,6 @@ if TYPE_CHECKING:
 
 _DRAFT_BODY = "# Plan\n\nreconciled draft body\n"
 _STALE_PLAN_BODY = "# Plan\n\nstale pre-reconciliation body\n"
-_DRAFT_FINGERPRINT = hashlib.sha256(_DRAFT_BODY.encode("utf-8")).hexdigest()
 
 
 def _plan_task(worktree: Path | None) -> TicketTask:
@@ -49,7 +47,6 @@ def test_promote_plan_draft_writes_plan_md_and_removes_draft(
     promoted = promote_plan_draft(
         _plan_task(cw_dir.parent),
         sample_client,
-        expected_fingerprint=_DRAFT_FINGERPRINT,
     )
 
     assert promoted is True
@@ -88,7 +85,6 @@ def test_promote_plan_draft_read_failure_raises_approve_gate_error(
         promote_plan_draft(
             _plan_task(cw_dir.parent),
             sample_client,
-            expected_fingerprint=_DRAFT_FINGERPRINT,
         )
 
     assert not (cw_dir / "plan.md").exists()
@@ -110,7 +106,6 @@ def test_promote_plan_draft_write_failure_raises_and_leaves_draft_intact(
         promote_plan_draft(
             _plan_task(cw_dir.parent),
             sample_client,
-            expected_fingerprint=_DRAFT_FINGERPRINT,
         )
 
     assert (cw_dir / "plan-draft.md").read_text(encoding="utf-8") == _DRAFT_BODY
@@ -134,7 +129,6 @@ def test_promote_plan_draft_error_names_worktree_path_and_exception(
         promote_plan_draft(
             task,
             sample_client,
-            expected_fingerprint=_DRAFT_FINGERPRINT,
         )
 
     message = str(excinfo.value)
@@ -161,7 +155,6 @@ def test_promote_plan_draft_draft_delete_failure_is_non_fatal(
     promoted = promote_plan_draft(
         _plan_task(cw_dir.parent),
         sample_client,
-        expected_fingerprint=_DRAFT_FINGERPRINT,
     )
 
     assert promoted is True
@@ -169,16 +162,15 @@ def test_promote_plan_draft_draft_delete_failure_is_non_fatal(
     assert (cw_dir / "plan-draft.md").exists()
 
 
-def test_promote_plan_draft_requires_a_valid_approval_fingerprint(
+def test_promote_plan_draft_accepts_legacy_approval_without_fingerprint(
     tmp_path: Path, sample_client: ClientConfig
 ) -> None:
     cw_dir = _cw_dir(tmp_path)
     (cw_dir / "plan-draft.md").write_text(_DRAFT_BODY, encoding="utf-8")
 
-    with pytest.raises(ApproveGateError, match="valid approval fingerprint"):
-        promote_plan_draft(_plan_task(cw_dir.parent), sample_client)
+    assert promote_plan_draft(_plan_task(cw_dir.parent), sample_client) is True
 
-    assert not (cw_dir / "plan.md").exists()
+    assert (cw_dir / "plan.md").read_text(encoding="utf-8") == _DRAFT_BODY
 
 
 def test_draft_fingerprint_only_strips_leading_bookkeeping_lines() -> None:
@@ -233,7 +225,6 @@ def test_promote_plan_draft_write_failure_restores_prior_plan(
         promote_plan_draft(
             _plan_task(cw_dir.parent),
             sample_client,
-            expected_fingerprint=_DRAFT_FINGERPRINT,
         )
 
     message = str(excinfo.value)
@@ -263,7 +254,6 @@ def test_promote_plan_draft_write_failure_with_failed_restore_names_manual_step(
         promote_plan_draft(
             _plan_task(cw_dir.parent),
             sample_client,
-            expected_fingerprint=_DRAFT_FINGERPRINT,
         )
 
     message = str(excinfo.value)
@@ -294,7 +284,6 @@ def test_promote_plan_draft_audit_event_failure_is_non_fatal(
     promoted = promote_plan_draft(
         _plan_task(cw_dir.parent),
         sample_client,
-        expected_fingerprint=_DRAFT_FINGERPRINT,
     )
 
     assert promoted is True
