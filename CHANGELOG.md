@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Approving a reconciled plan draft now promotes it to `.cw/plan.md`, instead of leaving the drift gate re-reading the stale pre-reconciliation plan forever (#2342):** `approve`'s direct plan→impl advance now calls a new `cw.dev_queue.plan_promotion.promote_plan_draft`, which fails loud (aborts `approve`, records nothing) on an I/O error and is a no-op when there is no draft to promote. Reported via a new `plan_promoted` key on `approve`'s return dict and CLI output; the `SCOPE_ROUTING_DECISION` audit event payload is unchanged.
+
 ## [1.58.0] - 2026-09-25
 
 ### Changed

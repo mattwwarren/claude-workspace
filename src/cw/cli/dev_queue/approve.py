@@ -291,7 +291,12 @@ def dev_queue_approve(
                 " marker comment on this ticket."
             )
     else:
+        promoted_note = (
+            " (promoted the approved .cw/plan-draft.md to .cw/plan.md)"
+            if result["plan_promoted"]
+            else ""
+        )
         click.echo(
             f"Approved {ticket_id} ({resolved}):"
-            f" {result['from_stage']} -> {result['to_stage']}"
+            f" {result['from_stage']} -> {result['to_stage']}{promoted_note}"
         )
