@@ -38,6 +38,7 @@ from cw.executor_diagnostics import (
     build_executor_failure,
     persist_diagnostics_bundle,
 )
+from cw.executor_launch import _launch_logged_subprocess
 
 if TYPE_CHECKING:
     from cw.models import TicketTask
@@ -138,17 +139,9 @@ class RealOpencodeRunner:
         argv: list[str],
         env: dict[str, str],
     ) -> subprocess.Popen[bytes]:
-        log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w") as log_file:
-            return subprocess.Popen(
-                argv,
-                env=env,
-                cwd=worktree,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+        return _launch_logged_subprocess(
+            worktree, argv, env, OPENCODE_LOG_RELATIVE_PATH
+        )
 
 
 class FakeOpencodeRunner:

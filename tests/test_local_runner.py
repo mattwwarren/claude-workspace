@@ -26,7 +26,6 @@ from cw.local_runner import (
     AIDER_NOT_FOUND,
     PLAN_MISSING,
     TASK_CONTEXT_RELATIVE_PATH,
-    FakeAiderRunner,
     FakePlanFetcher,
     RealAiderRunner,
     _blocked_scope,
@@ -59,32 +58,6 @@ def _make_task(ticket_id: str = "T-1", scope_hint: str | None = None) -> MagicMo
 
 
 # ---------------------------------------------------------------------------
-# FakeAiderRunner — records the launch call; returns a live sleep process
-# ---------------------------------------------------------------------------
-
-
-def test_fake_runner_launch_records_call_and_returns_live_proc(tmp_path: Path) -> None:
-    """FakeAiderRunner.launch() records argv/cwd/env and returns a live process."""
-    runner = FakeAiderRunner()
-    argv = ["aider", "--model", "openai/test", "--message", "do stuff"]
-    env = {"OPENAI_API_BASE": "http://localhost:1234/v1", "OPENAI_API_KEY": "local"}
-
-    proc = runner.launch(tmp_path, argv, env)
-    try:
-        assert len(runner.calls) == 1
-        call = runner.calls[0]
-        assert call["argv"] == argv
-        assert call["cwd"] == tmp_path
-        assert call["env"] == env
-        # The returned process is alive (a real 'sleep 60').
-        assert proc.poll() is None
-        assert read_process_start_time_ns(proc.pid) is not None
-    finally:
-        proc.kill()
-        proc.wait()
-
-
-# ---------------------------------------------------------------------------
 # RealAiderRunner — fire-and-forget subprocess launch
 # ---------------------------------------------------------------------------
 
@@ -111,7 +84,7 @@ def test_real_runner_launch_raises_on_missing_binary(tmp_path: Path) -> None:
 def test_real_runner_launch_passes_start_new_session(tmp_path: Path) -> None:
     """RealAiderRunner.launch() passes start_new_session=True to Popen."""
     runner = RealAiderRunner()
-    with patch("cw.local_runner.subprocess.Popen") as mock_popen:
+    with patch("cw.executor_launch.subprocess.Popen") as mock_popen:
         runner.launch(tmp_path, ["sh", "-c", "true"], {})
     assert mock_popen.call_args.kwargs["start_new_session"] is True
 

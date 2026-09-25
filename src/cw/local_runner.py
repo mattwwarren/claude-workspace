@@ -35,6 +35,7 @@ from cw.executor_diagnostics import (
     build_executor_failure,
     persist_diagnostics_bundle,
 )
+from cw.executor_launch import _launch_logged_subprocess
 from cw.gh import fetch_approved_plan_comment
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
 from cw.worktree import _parse_numstat_totals
@@ -171,22 +172,7 @@ class RealAiderRunner:
         argv: list[str],
         env: dict[str, str],
     ) -> subprocess.Popen[bytes]:
-        # Redirect to a per-run log file (never PIPE — nothing reads the pipe on
-        # this fire-and-forget path, and an unread full pipe buffer deadlocks the
-        # child; a file has no such backpressure). Truncated ("w") on every call
-        # so a retry into the same worktree does not bleed a prior attempt's
-        # output into the next harvest read.
-        log_path = worktree / _AIDER_LOG_RELATIVE_PATH
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w") as log_file:
-            return subprocess.Popen(
-                argv,
-                env=env,
-                cwd=worktree,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+        return _launch_logged_subprocess(worktree, argv, env, _AIDER_LOG_RELATIVE_PATH)
 
 
 class FakeAiderRunner:
