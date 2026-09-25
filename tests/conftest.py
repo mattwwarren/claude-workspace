@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import sys
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,6 +47,7 @@ from cw.review_findings import (
 )
 
 if TYPE_CHECKING:
+    import types
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from cw.models import ReapPolicy
@@ -384,10 +387,10 @@ def run_guard_fence(
     alone apart from *placeholders* (see ``substitute_fence_placeholders``): the
     invocation is neutralised by putting sentinel ``uv``/``python`` stubs first
     on ``PATH`` instead. The per-site capture variables are echoed afterwards
-    because three of the four fences assign the invocation into a command
+    because four of the five fences assign the invocation into a command
     substitution rather than letting it print.
 
-    This runner serves the three ``$GUARD_ROOT`` resolver sites. Step 2.5 gate 2
+    This runner serves the four ``$GUARD_ROOT`` resolver sites. Step 2.5 gate 2
     derives its anchor from ``git worktree list`` instead and has its own
     real-worktree runner in ``tests/test_scope_conformance_gate_docs.py``.
     """
@@ -428,7 +431,8 @@ def run_guard_fence(
     bin_dir = write_guard_stub_bin(tmp_path)
     body = (
         substitute_fence_placeholders(fence, placeholders or {})
-        + '\necho "${VERDICT-}${RESOLVE_OUTPUT-}${SCOPE_CONFORMANCE_OUTPUT-}"\n'
+        + '\necho "${VERDICT-}${RESOLVE_OUTPUT-}${SCOPE_CONFORMANCE_OUTPUT-}'
+        '${MUST_FIX_OVERRIDE_OUTPUT-}"\n'
     )
     # Scoped to this tmp_path so the gate-2 fence's hard-coded
     # `/tmp/touched_files-$CW_SESSION` scratch write cannot collide with a
@@ -452,6 +456,34 @@ def run_guard_fence(
         )
     finally:
         Path(f"/tmp/touched_files-{session}").unlink(missing_ok=True)
+
+
+def load_guard_script_module(script_path: Path, module_name: str) -> types.ModuleType:
+    """Import a stdlib-only ``.claude/scripts/`` guard script as a module.
+
+    The scripts live outside ``src/`` and must not import ``cw``, so their unit
+    tests load them by path. Shared by every per-script test file rather than
+    each carrying a private copy.
+    """
+    spec = importlib.util.spec_from_file_location(module_name, script_path)
+    assert spec is not None
+    assert spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(module_name, mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def run_guard_script_cli(
+    script_path: Path, args: list[str]
+) -> subprocess.CompletedProcess[str]:
+    """Run a guard script as a subprocess, capturing its exit code and output."""
+    return subprocess.run(
+        [sys.executable, str(script_path), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _write_bin_stub(tmp_path: Path, name: str, body: str) -> Path:
