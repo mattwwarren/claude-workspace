@@ -294,21 +294,37 @@ BREADCRUMB_ELIGIBLE_PAUSED_STATUSES: frozenset[str] = (
 # invented reason from a documented routing code without cross-checking the
 # contract by hand, which is the failure the #2097 incident turned on.
 _UNRECOGNIZED_REASON_SUFFIX = " (unrecognized)"
+# Max blocker.details chars appended to an unrecognized-reason breadcrumb
+# (#2415). Hard cutoff, no word-boundary awareness -- the breadcrumb is a
+# triage hint, not a full transcript.
+_UNRECOGNIZED_REASON_DETAILS_MAX_CHARS = 200
 
 
-def _breadcrumb_for_reason(blocker_reason: str | None) -> str:
-    """Render Rule 5's SESSION_NEEDS_ATTENTION breadcrumb (#1511, #2097).
+def _breadcrumb_for_reason(blocker_reason: str | None, blocker: object | None) -> str:
+    """Render Rule 5's SESSION_NEEDS_ATTENTION breadcrumb (#1511, #2097, #2415).
 
     Verbatim reason for a registered or `x_`-declared one; the same string
     plus :data:`_UNRECOGNIZED_REASON_SUFFIX` otherwise. Empty when the
     sentinel carried no blocker at all, exactly as before #2097.
+
+    #2415: an unrecognized reason additionally appends a bounded slice of
+    `blocker.details` (200 chars, hard cutoff, trailing `…` only when actually
+    truncated) -- an operator reading the breadcrumb alone can then triage an
+    invented reason without opening the transcript.
     """
     if blocker_reason is None:
         return ""
     reason = str(blocker_reason)
     if is_known_blocker_reason(reason):
         return reason
-    return f"{reason}{_UNRECOGNIZED_REASON_SUFFIX}"
+    unrecognized = f"{reason}{_UNRECOGNIZED_REASON_SUFFIX}"
+    details = blocker.get("details") if isinstance(blocker, dict) else None
+    if isinstance(details, str) and details:
+        max_chars = _UNRECOGNIZED_REASON_DETAILS_MAX_CHARS
+        if len(details) <= max_chars:
+            return f"{unrecognized}: {details[:max_chars]}"
+        return f"{unrecognized}: {details[:max_chars]}…"
+    return unrecognized
 
 
 def _park_must_fix_mechanically_rejected(task: TicketTask) -> None:
@@ -870,7 +886,7 @@ def _route_stage_failure(
             },
         )
         return
-    breadcrumbs = _breadcrumb_for_reason(blocker_reason)
+    breadcrumbs = _breadcrumb_for_reason(blocker_reason, blocker)
     record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
         {
