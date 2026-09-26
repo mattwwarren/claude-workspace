@@ -408,7 +408,9 @@ class ProposedAction(StrEnum):
     RECOVER_COUNTER = "recover_counter"
     # Emitted sentinel that signal_stop never routed (turn never completed).
     # Fires at sentinel_unrouted_check_seconds; exempt from signal_only.
-    # See GitHub #578.
+    # See GitHub #578. Since #2426, stalled.py is a second producer: a live
+    # session's foreign INTERMEDIATE_ADVANCE_STATUSES result reclassifies
+    # from COMPLETE_FOREIGN_RESULT into this action too.
     ROUTE_EMITTED_SENTINEL = "route_emitted_sentinel"
     # Session at Stage.FINALIZE timed out with commits pushed but no PR.
     # Worktree is preserved; rescue_finalize_blocked_sessions opens the PR.
@@ -468,7 +470,9 @@ class ReapCandidate:
     salvage_csid: str | None = None
     # ROUTE_EMITTED_SENTINEL carries the full parsed result (any status).
     # COMPLETE_FOREIGN_RESULT also carries its validated foreign result here
-    # (a second producer of this same field). See #1470.
+    # (a second producer of this same field). See #1470. stalled.py's
+    # reclassified INTERMEDIATE_ADVANCE_STATUSES case is a third producer,
+    # onto ROUTE_EMITTED_SENTINEL rather than a new field. See #2426.
     routed_sentinel: AutoDevResult | BlockedResult | None = None
     usage_limit_detected: bool = False
     elapsed_seconds: float = 0.0
