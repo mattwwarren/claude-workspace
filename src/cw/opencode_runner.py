@@ -253,15 +253,51 @@ def _stage_preamble(stage_value: str, ticket_id: str) -> str:
     )
 
 
-_SENTINEL_RULES = (
+_SENTINEL_FRAME = (
     "\nSentinel contract: your FINAL message must contain exactly one block "
     "of the form\n"
     "<<<AUTO_DEV_RESULT\n{...one JSON object...}\nAUTO_DEV_RESULT>>>\n"
     "Report only facts that are true — never claim a push, passing test, or "
-    "review that did not happen. If the `cw` CLI is on PATH, validate the "
-    "JSON before emitting: printf '%s' \"$SENTINEL_JSON\" | cw result "
-    "validate -\n"
+    "review that did not happen. "
 )
+
+
+def _sentinel_rules(session_id: str | None) -> str:
+    """Return the sentinel-contract fragment, keyed on whether a session id is known.
+
+    ``session_id is None`` (today's 3-arg ``build_stage_prompt`` call, and the
+    FINALIZE stage which never threads one): byte-identical to the pre-#2430
+    validate-only ``_SENTINEL_RULES`` string.
+
+    ``session_id`` set: opencode pushes the result directly via
+    ``cw result emit --session-id <session_id>`` (mirrors the detached Claude
+    daemon's emit_cli primary path, #2382). A `field.path: message` validation
+    failure is fixed and re-run; "Result already recorded" is treated as
+    success. Any other non-zero exit records a
+    ``cw_result_emit_fallback: <reason>`` friction entry and falls back to the
+    validate-only path so a `cw` CLI outage never blocks the sentinel itself.
+    """
+    if session_id is None:
+        return (
+            _SENTINEL_FRAME
+            + "If the `cw` CLI is on PATH, validate the JSON before emitting: "
+            "printf '%s' \"$SENTINEL_JSON\" | cw result validate -\n"
+        )
+    return (
+        _SENTINEL_FRAME
+        + "Push the result directly: printf '%s' \"$SENTINEL_JSON\" | cw "
+        f"result emit - --session-id {session_id}\n"
+        'If it exits 0, or the output says "Result already recorded", you '
+        "are done — frame the same JSON payload above unchanged regardless. "
+        "If it exits non-zero with one or more `field.path: message` lines, "
+        "fix each named field in $SENTINEL_JSON and re-run the same command "
+        "until it exits 0 or reports already recorded. On any other "
+        "non-zero exit (the `cw` CLI errors, times out, or is unreachable), "
+        "append an entry `cw_result_emit_fallback: <first line of the "
+        "error>` to $SENTINEL_JSON's friction_highlights, then fall back to "
+        "printf '%s' \"$SENTINEL_JSON\" | cw result validate -\n"
+    )
+
 
 _PLAN_SENTINEL_TEMPLATE = """
 Sentinel template (stage1_plan — branch/fork_point_sha are null, commits [],
@@ -366,7 +402,7 @@ AUTO_DEV_RESULT>>>
 """
 
 
-def _plan_prompt(ticket_id: str) -> str:
+def _plan_prompt(ticket_id: str, session_id: str | None = None) -> str:
     return (
         _stage_preamble("plan", ticket_id)
         + "Produce the implementation plan for this ticket:\n"
@@ -408,12 +444,12 @@ def _plan_prompt(ticket_id: str) -> str:
         "plan_pending_approval (a human approves before implementation); "
         "already satisfied → no_op as above; anything unresolvable → blocked "
         "with a specific blocker.reason and details.\n"
-        + _SENTINEL_RULES
+        + _sentinel_rules(session_id)
         + _PLAN_SENTINEL_TEMPLATE
     )
 
 
-def _impl_prompt(ticket_id: str) -> str:
+def _impl_prompt(ticket_id: str, session_id: str | None = None) -> str:
     return (
         _stage_preamble("impl", ticket_id)
         + "Implement the approved plan for this ticket:\n"
@@ -452,12 +488,12 @@ def _impl_prompt(ticket_id: str) -> str:
         "create a PR; pr stays null) with branch, fork_point_sha, the pushed "
         "commit SHAs, and scope.lines_actual = added+removed from "
         "`git diff --stat $FORK_POINT`; otherwise blocked as above.\n"
-        + _SENTINEL_RULES
+        + _sentinel_rules(session_id)
         + _IMPL_SENTINEL_TEMPLATE
     )
 
 
-def _review_prompt(ticket_id: str) -> str:
+def _review_prompt(ticket_id: str, session_id: str | None = None) -> str:
     return (
         _stage_preamble("review", ticket_id)
         + "Review the implementation branch for this ticket:\n"
@@ -493,7 +529,7 @@ def _review_prompt(ticket_id: str) -> str:
         "a review pass that did not happen. Set review.reviewed_sha to "
         "REVIEWED_SHA (step 4) — the post-fix-loop branch tip, or the "
         "unchanged HEAD when no fix cycle ran.\n"
-        + _SENTINEL_RULES
+        + _sentinel_rules(session_id)
         + _REVIEW_SENTINEL_TEMPLATE
     )
 
@@ -519,7 +555,12 @@ _STAGE_PROMPT_BUILDERS = {
 }
 
 
-def build_stage_prompt(stage_value: str, ticket_id: str, worktree: Path) -> str:
+def build_stage_prompt(
+    stage_value: str,
+    ticket_id: str,
+    worktree: Path,
+    session_id: str | None = None,
+) -> str:
     """Build the opencode prompt for a supported auto-dev stage.
 
     FINALIZE points at the ``auto-dev-finalize.md`` command file (the one
@@ -529,10 +570,16 @@ def build_stage_prompt(stage_value: str, ticket_id: str, worktree: Path) -> str:
     files require Claude Code-only machinery an opencode subprocess cannot
     execute (see the shared-fragment note above). Raises ``KeyError`` for an
     unsupported stage value.
+
+    ``session_id``, when known at spawn time, threads into PLAN/IMPL/REVIEW's
+    sentinel rules so the worker pushes its result via ``cw result emit
+    --session-id`` instead of only validating it (#2430). FINALIZE never
+    receives it — that stage's prompt points at a command file, not a
+    self-contained sentinel-rules fragment.
     """
     if stage_value == "finalize":
         return _finalize_prompt(ticket_id, worktree)
-    return _STAGE_PROMPT_BUILDERS[stage_value](ticket_id)
+    return _STAGE_PROMPT_BUILDERS[stage_value](ticket_id, session_id)
 
 
 def make_blocked(
