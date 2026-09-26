@@ -72,6 +72,28 @@ def _diff_with_removed_line(
     return CapturedDiff(**kwargs)
 
 
+def _diff_with_deleted_file(file: str, *removed_lines: str) -> CapturedDiff:
+    """CapturedDiff for a fix that deletes *file* outright (#2420).
+
+    Mirrors what ``_parse_unified_diff`` (``cw.codex_review._diff``)
+    actually produces for a ``+++ /dev/null`` block: the deleted path
+    never enters ``files``, ``file_diffs``, ``file_line_text``, or
+    ``file_window_text`` — only ``text``, the untouched raw diff, still
+    carries the ``deleted file mode``/``+++ /dev/null`` markers.
+    """
+    body = "\n".join(f"-{line}" for line in (removed_lines or ("old content",)))
+    text = (
+        f"diff --git a/{file} b/{file}\n"
+        "deleted file mode 100644\n"
+        "index 1111111..0000000\n"
+        f"--- a/{file}\n"
+        "+++ /dev/null\n"
+        f"@@ -1,{len(removed_lines) or 1} +0,0 @@\n"
+        f"{body}\n"
+    )
+    return CapturedDiff(text=text)
+
+
 def _accepted(finding: Finding, **overrides: object) -> AcceptedFinding:
     """An AcceptedFinding at its post-consolidate default disposition."""
     kwargs: dict[str, object] = {"finding": finding, "reviewers": ["Test Reviewer"]}
@@ -769,6 +791,87 @@ class TestVerifyFixedDispositionsContentRescue:
         assert _FIX_RESCUE_LOG in caplog.text
         assert "file=src/cw/foo.py" in caplog.text
         assert "line=42" in caplog.text
+
+
+class TestVerifyFixedDispositionsWholeFileDeletion:
+    """#2420: a fix that deletes the cited file outright is substantiated for
+    every line in it — ``_parse_unified_diff`` drops a deleted file's hunk body
+    from every structured substrate (``files``/``file_diffs``/``file_line_text``/
+    ``file_window_text``), so only the raw ``text`` still carries the
+    ``deleted file mode``/``+++ /dev/null`` markers.
+    """
+
+    def test_retains_fixed_disposition_for_line_anchored_finding_when_fix_deletes_file(
+        self,
+    ) -> None:
+        finding = _make_finding(file="src/cw/foo.py", line_start=10, line_end=10)
+        verdict = _verdict(_accepted(finding, disposition="fixed"))
+        fix_diff = _diff_with_deleted_file("src/cw/foo.py", "old code here")
+
+        result = verify_fixed_dispositions(verdict, fix_diff, ticket_id=_TICKET)
+
+        assert result.accepted[0].disposition == "fixed"
+        assert result.downgraded_disposition_count == 0
+
+    def test_retains_fixed_disposition_for_file_level_finding_when_fix_deletes_file(
+        self,
+    ) -> None:
+        finding = _make_finding(file="src/cw/foo.py", line_start=None, line_end=None)
+        verdict = _verdict(_accepted(finding, disposition="fixed"))
+        fix_diff = _diff_with_deleted_file("src/cw/foo.py", "old code here")
+
+        result = verify_fixed_dispositions(verdict, fix_diff, ticket_id=_TICKET)
+
+        assert result.accepted[0].disposition == "fixed"
+
+    def test_no_downgrade_event_emitted_when_fix_deletes_cited_file(self) -> None:
+        finding = _make_finding(file="src/cw/foo.py", line_start=10, line_end=10)
+        verdict = _verdict(_accepted(finding, disposition="fixed"))
+        fix_diff = _diff_with_deleted_file("src/cw/foo.py", "old code here")
+
+        verify_fixed_dispositions(verdict, fix_diff, ticket_id=_TICKET)
+
+        assert (
+            read_events(
+                event_types=[OrchestratorEventType.REVIEW_FIXED_DISPOSITION_DOWNGRADED]
+            )
+            == []
+        )
+
+    def test_fix_is_substantiated_true_when_fix_diff_deletes_cited_file(self) -> None:
+        finding = _make_finding(file="src/cw/foo.py", line_start=10, line_end=10)
+        fix_diff = _diff_with_deleted_file("src/cw/foo.py", "old code here")
+
+        assert _fix_is_substantiated(finding, fix_diff) is True
+
+    def test_still_downgrades_when_deletion_is_of_an_unrelated_file(self) -> None:
+        finding = _make_finding(file="src/cw/foo.py", line_start=10, line_end=10)
+        verdict = _verdict(_accepted(finding, disposition="fixed"))
+        fix_diff = _diff_with_deleted_file("src/cw/bar.py", "gone")
+
+        result = verify_fixed_dispositions(verdict, fix_diff, ticket_id=_TICKET)
+
+        assert result.accepted[0].disposition == "dropped"
+
+    def test_does_not_treat_diff_as_deletion_from_another_files_marker(self) -> None:
+        finding = _make_finding(file="src/cw/foo.py", line_start=10, line_end=10)
+        verdict = _verdict(_accepted(finding, disposition="fixed"))
+        unrelated_deletion = _diff_with_deleted_file("src/cw/bar.py", "gone")
+        other_file_hunk = (
+            "diff --git a/src/cw/foo.py b/src/cw/foo.py\n"
+            "index 2222222..3333333 100644\n"
+            "--- a/src/cw/foo.py\n"
+            "+++ b/src/cw/foo.py\n"
+            "@@ -97,3 +97,3 @@\n"
+            " unrelated context\n"
+            "-old line 99\n"
+            "+new line 99\n"
+        )
+        fix_diff = CapturedDiff(text=unrelated_deletion.text + other_file_hunk)
+
+        result = verify_fixed_dispositions(verdict, fix_diff, ticket_id=_TICKET)
+
+        assert result.accepted[0].disposition == "dropped"
 
 
 # Split across two source lines only to stay under the 88-column ruff limit;

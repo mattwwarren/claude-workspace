@@ -1,4 +1,4 @@
-"""Fix-claim verification against the fix-cycle diff (#2000/#2007).
+"""Fix-claim verification against the fix-cycle diff (#2000/#2007/#2420).
 
 :func:`verify_fixed_dispositions` downgrades every ``"fixed"`` disposition the
 fix-cycle diff does not substantiate. Record-only by design: it never triggers
@@ -33,6 +33,30 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
+def _file_deleted_in_fix_diff(diff_text: str, file: str) -> bool:
+    """True iff *diff_text* deletes *file* outright (#2420).
+
+    ``_parse_unified_diff`` (``cw.codex_review._diff``) deliberately drops a
+    deleted file's hunk body from every structured substrate on
+    :class:`CapturedDiff` — ``files``, ``file_diffs``, ``file_line_text``, and
+    ``file_window_text`` all lack an entry for it, because a deletion
+    contributes no new-file line to anchor against. ``text``, the untouched
+    raw diff, is the only substrate where a whole-file deletion still shows
+    up: its own ``diff --git`` header block carries a ``deleted file mode``
+    line and a ``+++ /dev/null`` line. Scoped to that one file's block
+    (bounded by the next ``diff --git`` header or EOF) so a deletion recorded
+    for an unrelated path elsewhere in the same diff can never leak a false
+    positive here.
+    """
+    header = f"diff --git a/{file} b/{file}\n"
+    start = diff_text.find(header)
+    if start == -1:
+        return False
+    end = diff_text.find("\ndiff --git ", start + 1)
+    block = diff_text[start:] if end == -1 else diff_text[start:end]
+    return "\ndeleted file mode " in block and "\n+++ /dev/null" in block
+
+
 def _fix_is_substantiated(finding: Finding, fix_diff: CapturedDiff) -> bool:
     """True iff *fix_diff* actually touches *finding*'s cited location.
 
@@ -55,7 +79,19 @@ def _fix_is_substantiated(finding: Finding, fix_diff: CapturedDiff) -> bool:
     refuses, which is why this arm is permitted and that one still is not.
     The arm is purely additive: when it finds nothing, the pre-#2007
     ``"dropped"`` downgrade stands untouched.
+
+    #2420 adds a third, first-checked arm: when the fix diff deletes the
+    cited file outright, every line in it — line-anchored or file-level — is
+    credited as touched. A whole-file deletion is the strongest possible
+    fix-substantiation claim there is; without this arm ``files``/
+    ``file_diffs`` are both empty for a deleted path (see
+    :func:`_file_deleted_in_fix_diff`), so the finding fell through to a
+    ``"dropped"`` downgrade and a spurious
+    ``review.fixed_disposition_downgraded`` event despite the fix being
+    correct.
     """
+    if _file_deleted_in_fix_diff(fix_diff.text, finding.file):
+        return True
     if finding.line_start is None and finding.line_end is None:
         return finding.file in fix_diff.files
     if _line_reference_valid(fix_diff, finding, worktree=None):
