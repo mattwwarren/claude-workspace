@@ -143,3 +143,17 @@ def test_guard_rematerializes_context_json() -> None:
     window = _after(content, "**Comments are live, not cached", span=1400)
     assert "overwrite `.cw/context.json`" in window
     assert "materialized_by_session" in window
+
+
+def test_orientation_regressed_comments_fetch_failure_hard_blocks() -> None:
+    """#2415: a comments-fetch failure on an IMPL entry reached via
+    `_stage_regress` hard-blocks instead of the generic WARN-and-continue --
+    a regress exists specifically to act on newer comments, so continuing on
+    a stale cached array would defeat it. The non-regress WARN branch must
+    survive unchanged alongside the new hard-block branch."""
+    content = _cmd("auto-dev-impl.md")
+    window = _after(content, "**Comments are live, not cached", span=2800)
+    assert 'blocker.reason: "impl_comments_unreadable_after_regress"' in window
+    assert "queue_metadata.regressed_into_stage" in window
+    assert "impl_comments_fetch_failed" in window
+    assert "a stale-but-real array is better evidence than none" in window
