@@ -11319,7 +11319,7 @@ class TestApplyStagedDecision:
         assert task.disposition == "awaiting_operator"
         assert task.blocked_reason == "dependency_unmerged"
 
-    def test_stage_failure_impl_comments_unreadable_after_regress_stamps_awaiting_operator_disposition(
+    def test_stage_failure_impl_comments_unreadable_regress_stamps_awaiting_operator(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
         """#2415: blocked + impl_comments_unreadable_after_regress blocker reason →

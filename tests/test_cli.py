@@ -9812,7 +9812,7 @@ class TestDevQueueTasksPrState:
         assert "dependency_unmerged" in result.output
         assert "?dependency_unmerged" not in result.output
 
-    def test_tasks_human_does_not_flag_impl_comments_unreadable_after_regress_blocked_reason(
+    def test_tasks_human_does_not_flag_impl_comments_unreadable_regress_blocked_reason(
         self, tmp_config_dir: Path
     ) -> None:
         """`impl_comments_unreadable_after_regress` is a known reason -- no `?`
