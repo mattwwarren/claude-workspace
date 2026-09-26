@@ -415,6 +415,49 @@ def test_missing_task_row_leaves_session_untouched(
     assert _TICKET in caplog.text
 
 
+def test_another_clients_row_is_never_gated(
+    tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    """Ticket ids are per-client: a same-id row of another client is no match."""
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    store = load_dev_queue()
+    store.tasks[0].client = "client-b"
+    save_dev_queue(store)
+
+    assert _harvest(_AUTO) == []
+
+    _assert_untouched("codex-harvest-other-client")
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
+
+
+def test_requeue_skipped_when_the_row_was_reclaimed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The identity-checked revert leaves a row re-claimed by a fresh session.
+
+    The dead session still closes behind its audit event; no requeue is
+    reported for a revert that did not happen.
+    """
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    store = load_dev_queue()
+    store.tasks[0].session_id = "fresh-session"
+    save_dev_queue(store)
+
+    with caplog.at_level(logging.WARNING, logger=reconcile_local.__name__):
+        assert _harvest(_AUTO) == []
+
+    _assert_session_closed()
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.session_id == "fresh-session"
+    assert _requeued_events("codex-harvest-reclaimed-requeued") == []
+    assert len(_completed_events("codex-harvest-reclaimed-completed")) == 1
+    assert "requeue skipped" in caplog.text
+
+
 def test_unknown_client_leaves_session_untouched(
     tmp_config_dir: Path,
     tmp_path: Path,
