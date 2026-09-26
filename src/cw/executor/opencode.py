@@ -42,6 +42,7 @@ def _opencode_preflight(
     worktree: Path,
     client: ClientConfig,
     stage: Stage,
+    session_id: str,
 ) -> AutoDevResult | _PreflightOK:
     """Run OpencodeExecutor pre-flight checks for any supported stage.
 
@@ -50,9 +51,11 @@ def _opencode_preflight(
     (stage prompt) when the binary is available and the stage is supported.
     FINALIZE's prompt points at the ``auto-dev-finalize.md`` command file
     (worktree copy first, home fallback — #1670 R6); PLAN/IMPL/REVIEW get
-    self-contained prompts (see ``build_stage_prompt``). Every blocked result
-    carries the dispatched stage's own entry marker so dispatch never walks
-    ``task.stage`` forward on a failure sentinel.
+    self-contained prompts carrying *session_id* so the worker can push its
+    result via ``cw result emit --session-id`` (#2430; see
+    ``build_stage_prompt``). Every blocked result carries the dispatched
+    stage's own entry marker so dispatch never walks ``task.stage`` forward
+    on a failure sentinel.
     """
     del client  # unused: opencode builds its prompt from ticket_id + stage
     if stage.value not in SUPPORTED_STAGES:
@@ -71,7 +74,9 @@ def _opencode_preflight(
             retry_delay_seconds=0,
             stage_reached=stage_entry_marker(stage.value),
         )
-    prompt = build_stage_prompt(stage.value, task.ticket_id, worktree)
+    prompt = build_stage_prompt(
+        stage.value, task.ticket_id, worktree, session_id=session_id
+    )
     return _PreflightOK(
         argv=build_opencode_argv(config.model, worktree, prompt),
         env=build_opencode_env(),
@@ -147,8 +152,8 @@ class OpencodeExecutor:
             client=client,
             stage=stage,
             executor_name="opencode",
-            preflight_fn=lambda: _opencode_preflight(
-                self._config, task, worktree, client, stage
+            preflight_fn=lambda sid: _opencode_preflight(
+                self._config, task, worktree, client, stage, sid
             ),
             blocked_ctor=_blocked,
             runner=self._runner,

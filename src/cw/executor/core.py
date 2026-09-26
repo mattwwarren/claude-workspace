@@ -470,25 +470,28 @@ def _spawn_fire_and_forget(
     client: ClientConfig,
     stage: Stage,
     executor_name: LocalLivenessBackend,
-    preflight_fn: Callable[[], AutoDevResult | _PreflightOK],
+    preflight_fn: Callable[[str], AutoDevResult | _PreflightOK],
     blocked_ctor: BlockedCtor,
     runner: FireAndForgetRunner,
 ) -> str:
     """Shared non-blocking spawn for fire-and-forget executors (#2369).
 
-    Creates the session, runs the synchronous pre-flight, then either launches
-    the process (recording a ``LocalLivenessHandle`` tagged with
-    *executor_name*, leaving the session ACTIVE for reconcile/local harvest)
-    or completes the session inline through the door (source=EXECUTOR_DIRECT)
-    and emits SESSION_COMPLETED. Returns the sid without ever waiting on the
-    run. Any unexpected error during launch completes the session
-    COMPLETED/CRASHED so it is never left ACTIVE, then re-raises.
+    Creates the session, runs the synchronous pre-flight (passed the sid, so
+    a backend whose prompt embeds the session id -- e.g. opencode's
+    ``--session-id``, #2430 -- can thread the SAME id the session was created
+    under), then either launches the process (recording a
+    ``LocalLivenessHandle`` tagged with *executor_name*, leaving the session
+    ACTIVE for reconcile/local harvest) or completes the session inline
+    through the door (source=EXECUTOR_DIRECT) and emits SESSION_COMPLETED.
+    Returns the sid without ever waiting on the run. Any unexpected error
+    during launch completes the session COMPLETED/CRASHED so it is never left
+    ACTIVE, then re-raises.
     """
     sess = _create_executor_session(
         task=task, worktree=worktree, client=client, stage=stage
     )
     sid = sess.id
-    preflight = preflight_fn()
+    preflight = preflight_fn(sid)
     # Empty until the launch path sets it, so the except branch (which may
     # fire before launch) can still persist an argv-less bundle.
     argv: list[str] = []

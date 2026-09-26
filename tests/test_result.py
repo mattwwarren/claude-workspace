@@ -1110,6 +1110,28 @@ class TestResultEmitPlanDraftFingerprintBinding:
         sess = next(s for s in load_state().sessions if s.id == "test1234")
         assert sess.last_result == {"status": "plan_pending_approval"}
 
+    def test_omitted_fingerprint_key_is_treated_like_null(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """opencode's _PLAN_SENTINEL_TEMPLATE has no plan_draft_fingerprint key
+        at all -- a missing key must resolve identically to an explicit null,
+        never bind a stale on-disk draft that happens to exist (#2430)."""
+        worktree = _worktree_with_context(tmp_path)
+        _seed_worker_session(tmp_path, tmp_config_dir, worktree)
+        _write_draft(worktree)
+        monkeypatch.chdir(worktree)
+        payload = _plan_pending_payload(
+            schema_version=8, ticket_id="GEN-2382", plan_draft_fingerprint="a" * 64
+        )
+        del payload["plan_draft_fingerprint"]
+
+        result = CliRunner().invoke(
+            main, ["result", "emit", "-"], input=json.dumps(payload)
+        )
+
+        assert result.exit_code == 0, result.output
+        assert _recorded_fingerprint() is None
+
 
 class TestReconstructStagedSentinelLegacyFingerprint:
     """#2382: the new shape validator must not make an already-persisted
@@ -1259,3 +1281,85 @@ class TestOpencodeDoorCollision:
             sort_keys=True,
         )
         assert before == after
+
+    def test_emit_cli_wins_over_executor_direct(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """EMIT_CLI (opencode's --session-id push) writes first →
+        EXECUTOR_DIRECT refused."""
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="oc-coll-4",
+            last_result={"status": "shipped"},
+            last_result_source=LastResultSource.EMIT_CLI,
+        )
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "oc-coll-4", source=LastResultSource.EXECUTOR_DIRECT
+            )
+        assert outcome.refused is True
+        assert outcome.existing_source == LastResultSource.EMIT_CLI
+
+    def test_executor_direct_wins_over_emit_cli(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """EXECUTOR_DIRECT (opencode pre-flight failure) writes first →
+        EMIT_CLI refused."""
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="oc-coll-5",
+            last_result={
+                "status": "blocked",
+                "blocker": {"reason": "opencode_not_found"},
+            },
+            last_result_source=LastResultSource.EXECUTOR_DIRECT,
+        )
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "oc-coll-5", source=LastResultSource.EMIT_CLI
+            )
+        assert outcome.refused is True
+        assert outcome.existing_source == LastResultSource.EXECUTOR_DIRECT
+
+    def test_emit_cli_wins_over_git_synthesis(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """EMIT_CLI writes first → GIT_SYNTHESIS (opencode harvest fallback) refused.
+
+        The pairing that matters most for the adopted table shape: once a
+        worker's session id is known, its emit_cli push is primary and the
+        git-facts harvest is the fallback, mirroring the Claude daemon.
+        """
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="oc-coll-6",
+            last_result={"status": "shipped"},
+            last_result_source=LastResultSource.EMIT_CLI,
+        )
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "oc-coll-6", source=LastResultSource.GIT_SYNTHESIS
+            )
+        assert outcome.refused is True
+        assert outcome.existing_source == LastResultSource.EMIT_CLI
+
+    def test_git_synthesis_wins_over_emit_cli(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """GIT_SYNTHESIS writes first (emit never ran) → EMIT_CLI refused."""
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="oc-coll-7",
+            last_result={"status": "shipped"},
+            last_result_source=LastResultSource.GIT_SYNTHESIS,
+        )
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "oc-coll-7", source=LastResultSource.EMIT_CLI
+            )
+        assert outcome.refused is True
+        assert outcome.existing_source == LastResultSource.GIT_SYNTHESIS
