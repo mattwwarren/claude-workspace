@@ -26,8 +26,9 @@ from cw.models.enums import (
 # The fire-and-forget backends that record a LocalLivenessHandle. A narrow
 # subset of cw.executor_diagnostics.ExecutorName, defined here because that
 # module imports cw.config (which imports cw.models) — importing it would
-# break this package's DAG-leaf property.
-LocalLivenessBackend = Literal["aider", "opencode"]
+# break this package's DAG-leaf property. "codex" (RFC 0014 A1, #2387) is
+# harvested by an audited clean-requeue gate, not a result synthesizer.
+LocalLivenessBackend = Literal["aider", "opencode", "codex"]
 
 DEFAULT_LOCAL_LIVENESS_BACKEND: LocalLivenessBackend = "aider"
 
@@ -41,8 +42,9 @@ class LocalLivenessHandle(BaseModel):
     PID reassigned to an unrelated process re-reads a different start-time, so
     the session is treated as dead (harvested) rather than falsely observed
     alive. ``backend`` names the executor that launched the process and selects
-    the harvest-time result synthesizer (#2369). Frozen — an immutable
-    snapshot. See GitHub #888.
+    the harvest-time result synthesizer (#2369) — or, for ``"codex"``, the
+    crash-orphan requeue-or-park branch that synthesizes no result (#2387).
+    Frozen — an immutable snapshot. See GitHub #888.
     """
 
     model_config = ConfigDict(frozen=True)
