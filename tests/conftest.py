@@ -1620,8 +1620,8 @@ def _hide_optional_binaries(
     bug for any runner that opts in without one.
 
     ``@pytest.mark.integration``-marked tests are exempt entirely: those
-    tests intentionally shell out to real external tools (tmux, cmux,
-    ``claude --bg``), so this fixture no-ops for them.
+    tests intentionally shell out to real external tools (``claude --bg``,
+    ``codex``, ``opencode``), so this fixture no-ops for them.
     """
     if request.node.get_closest_marker("integration") is not None:
         return
