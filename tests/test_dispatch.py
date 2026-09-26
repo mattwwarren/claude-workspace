@@ -11341,8 +11341,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "awaiting_operator"
         assert (
-            task.blocked_reason
-            == IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
+            task.blocked_reason == IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
         )
 
     def test_merge_gate_blocked_push_auth_failed_stamps_awaiting_operator_disposition(
