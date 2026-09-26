@@ -1631,9 +1631,7 @@ def test_phantom_sentinel_mismatch_veto_disabled_keeps_age_fallback(
     save_dev_queue(DevQueueStore(tasks=[]))
 
     with caplog.at_level(logging.WARNING, logger="cw.reconcile.phantom._detect"):
-        candidates = _detect_phantom_candidates(
-            state, phantom_set={sess.id}, now=now
-        )
+        candidates = _detect_phantom_candidates(state, phantom_set={sess.id}, now=now)
 
     assert candidates[0].proposed_action == ProposedAction.CRASH_COMPLETE
     assert any(
