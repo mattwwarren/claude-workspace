@@ -20,7 +20,6 @@ import contextlib
 import json
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
@@ -38,8 +37,11 @@ from cw.executor_diagnostics import (
     build_executor_failure,
     persist_diagnostics_bundle,
 )
+from cw.executor_launch import _launch_logged_subprocess
 
 if TYPE_CHECKING:
+    import subprocess
+
     from cw.models import TicketTask
 
 _SCHEMA_VERSION: Literal[4] = 4
@@ -138,52 +140,9 @@ class RealOpencodeRunner:
         argv: list[str],
         env: dict[str, str],
     ) -> subprocess.Popen[bytes]:
-        log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w") as log_file:
-            return subprocess.Popen(
-                argv,
-                env=env,
-                cwd=worktree,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-
-
-class FakeOpencodeRunner:
-    """Test double: records the launch call; returns a real live subprocess.
-
-    Mirrors FakeAiderRunner in local_runner.py. Returns
-    ``Popen(["sleep", "60"])`` rather than a fast-exiting process so the
-    caller's ``read_process_start_time_ns`` lookup does not race a just-exited
-    PID. Spawned processes are tracked in ``self.procs`` so tests can kill them.
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-        self.procs: list[subprocess.Popen[bytes]] = []
-
-    def launch(
-        self,
-        worktree: Path,
-        argv: list[str],
-        env: dict[str, str],
-    ) -> subprocess.Popen[bytes]:
-        self.calls.append(
-            {
-                "argv": list(argv),
-                "cwd": worktree,
-                "env": dict(env),
-            }
+        return _launch_logged_subprocess(
+            worktree, argv, env, OPENCODE_LOG_RELATIVE_PATH
         )
-        proc = subprocess.Popen(
-            ["sleep", "60"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        self.procs.append(proc)
-        return proc
 
 
 def build_argv(model: str | None, worktree: Path, prompt: str) -> list[str]:

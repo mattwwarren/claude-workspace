@@ -4,7 +4,8 @@ Split by concern into submodules; this package re-exports the flat surface the
 former ``cw/executor.py`` module exposed so import sites stay stable:
 
 - ``core``     — StageExecutor Protocol, ClaudeNativeExecutor, codex capability
-                 probe, and the shared executor-direct completion door.
+                 probe, the shared executor-direct completion door, and the
+                 shared fire-and-forget spawn skeleton.
 - ``local``    — LocalExecutor (aider).
 - ``opencode`` — OpencodeExecutor.
 - ``codex``    — CodexExecutor.
@@ -29,20 +30,12 @@ from cw.executor.core import (
     CodexCapabilityDiagnosis,
     StageExecutor,
     _complete_session_via_door,
+    _persist_runtime_error_diagnostics,
+    _PreflightOK,
     codex_capability_diagnosis,
 )
-from cw.executor.local import (
-    LocalExecutor,
-    _local_preflight,
-    _persist_aider_runtime_error_diagnostics,
-    _PreflightOK,
-)
-from cw.executor.opencode import (
-    OpencodeExecutor,
-    _opencode_preflight,
-    _OpencodePreflightOK,
-    _persist_opencode_runtime_error_diagnostics,
-)
+from cw.executor.local import LocalExecutor, _local_preflight
+from cw.executor.opencode import OpencodeExecutor, _opencode_preflight
 from cw.local_runner import GithubIssuePlanFetcher
 
 __all__ = [
@@ -57,14 +50,12 @@ __all__ = [
     "LocalExecutor",
     "OpencodeExecutor",
     "StageExecutor",
-    "_OpencodePreflightOK",
     "_PreflightOK",
     "_complete_session_via_door",
     "_lane_pipeline",
     "_local_preflight",
     "_opencode_preflight",
-    "_persist_aider_runtime_error_diagnostics",
-    "_persist_opencode_runtime_error_diagnostics",
+    "_persist_runtime_error_diagnostics",
     "codex_capability_diagnosis",
     "resolve_executor",
     "resolve_executor_config",

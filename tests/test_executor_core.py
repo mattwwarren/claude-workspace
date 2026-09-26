@@ -5,12 +5,15 @@ RFC 0005 A2 / E1 / E2.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
+from cw.config import load_state
 from cw.executor import (
     ClaudeNativeExecutor,
     StageExecutor,
@@ -19,19 +22,46 @@ from cw.executor import (
     resolve_executor_config,
     resolve_pipeline_stages,
 )
+from cw.executor.core import (
+    FakeFireAndForgetRunner,
+    _persist_runtime_error_diagnostics,
+    _PreflightOK,
+    _spawn_fire_and_forget,
+)
+from cw.executor_diagnostics import (
+    ExecutorFailure,
+    diagnostics_bundle_dir,
+    render_bundle_path,
+)
+from cw.local_runner import (
+    LIVENESS_UNAVAILABLE,
+    UNEXPECTED_ERROR,
+    make_blocked,
+    read_process_start_time_ns,
+)
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
     ClientConfig,
+    CompletionReason,
     LaneConfig,
+    LastResultSource,
+    OrchestratorEventType,
+    SessionOrigin,
+    SessionStatus,
     Stage,
     StageExecutorConfig,
     StagePipelineConfig,
     TicketTask,
 )
+from cw.reconcile import AUTO_DEV_LABEL_PREFIX
+from tests.conftest import find_completed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.executor.core import BlockedCtor, FireAndForgetRunner
+    from cw.executor_diagnostics import ExecutorName
+    from cw.models import LocalLivenessBackend
     from cw.native_daemon import FakeNativeDaemonClient
 
 
@@ -628,3 +658,235 @@ def test_e2_heterogeneous_models_per_stage(
     assert args is not None
     assert args.count("--model") == 1
     assert args[args.index("--model") + 1] == expected_model
+
+
+# ---------------------------------------------------------------------------
+# #2369 — shared fire-and-forget spawn skeleton (_spawn_fire_and_forget)
+# ---------------------------------------------------------------------------
+
+_FAF_TICKET = "T-faf"
+_FAF_ARGV = ["tool", "--message", "do the thing"]
+_FAF_ENV = {"PATH": "/usr/bin"}
+
+
+def _faf_blocked_ctor(worktree: Path) -> BlockedCtor:
+    def _blocked(*, reason: str, details: str) -> AutoDevResult:
+        return make_blocked(
+            ticket_id=_FAF_TICKET, worktree=worktree, reason=reason, details=details
+        )
+
+    return _blocked
+
+
+def _faf_spawn(
+    worktree: Path,
+    *,
+    runner: FireAndForgetRunner,
+    preflight: AutoDevResult | _PreflightOK,
+    executor_name: LocalLivenessBackend = "aider",
+) -> str:
+    return _spawn_fire_and_forget(
+        task=TicketTask(ticket_id=_FAF_TICKET, client="test", stage=Stage.IMPL),
+        worktree=worktree,
+        client=ClientConfig(name="test", workspace_path=worktree),
+        stage=Stage.IMPL,
+        executor_name=executor_name,
+        preflight_fn=lambda: preflight,
+        blocked_ctor=_faf_blocked_ctor(worktree),
+        runner=runner,
+    )
+
+
+def _kill_procs(runner: FakeFireAndForgetRunner) -> None:
+    for proc in runner.procs:
+        with contextlib.suppress(OSError):
+            proc.kill()
+            proc.wait()
+
+
+def test_fake_fire_and_forget_runner_records_call_and_returns_live_proc(
+    tmp_path: Path,
+) -> None:
+    """FakeFireAndForgetRunner.launch() records argv/cwd/env; returns a live proc."""
+    runner = FakeFireAndForgetRunner()
+
+    proc = runner.launch(tmp_path, _FAF_ARGV, _FAF_ENV)
+    try:
+        assert len(runner.calls) == 1
+        call = runner.calls[0]
+        assert call["argv"] == _FAF_ARGV
+        assert call["cwd"] == tmp_path
+        assert call["env"] == _FAF_ENV
+        # The returned process is alive (a real 'sleep 60').
+        assert proc.poll() is None
+        assert read_process_start_time_ns(proc.pid) is not None
+        assert runner.procs == [proc]
+    finally:
+        _kill_procs(runner)
+
+
+@pytest.mark.parametrize("executor_name", ["aider", "opencode"])
+def test_spawn_fire_and_forget_happy_path_stores_backend(
+    executor_name: LocalLivenessBackend,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Launch succeeds → session ACTIVE with a handle tagged by executor_name."""
+    worktree = make_git_repo(f"wt-faf-happy-{executor_name}")
+    runner = FakeFireAndForgetRunner()
+
+    try:
+        sid = _faf_spawn(
+            worktree,
+            runner=runner,
+            preflight=_PreflightOK(argv=_FAF_ARGV, env=_FAF_ENV),
+            executor_name=executor_name,
+        )
+
+        assert runner.calls == [{"argv": _FAF_ARGV, "cwd": worktree, "env": _FAF_ENV}]
+        session = next(s for s in load_state().sessions if s.id == sid)
+        assert session.status == SessionStatus.ACTIVE
+        assert session.origin == SessionOrigin.DAEMON
+        assert session.name == f"test/{AUTO_DEV_LABEL_PREFIX}{_FAF_TICKET}"
+        assert session.last_result is None
+        assert session.local_liveness is not None
+        assert session.local_liveness.pid == runner.procs[0].pid
+        assert session.local_liveness.backend == executor_name
+    finally:
+        _kill_procs(runner)
+
+
+def test_spawn_fire_and_forget_preflight_blocked_completes_session(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Pre-flight blocked → no launch; COMPLETED via EXECUTOR_DIRECT; event emitted."""
+    worktree = make_git_repo("wt-faf-preflight-blocked")
+    runner = FakeFireAndForgetRunner()
+    blocked = make_blocked(
+        ticket_id=_FAF_TICKET, worktree=worktree, reason="preflight_nope"
+    )
+
+    with patch("cw.executor.core._record_orchestrator_event") as record_mock:
+        sid = _faf_spawn(worktree, runner=runner, preflight=blocked)
+
+    assert runner.calls == []
+    session = find_completed_session(load_state())
+    assert session.id == sid
+    assert session.status == SessionStatus.COMPLETED
+    assert session.completed_reason == CompletionReason.NORMAL
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.blocker is not None
+    assert result.blocker.reason == "preflight_nope"
+    record_mock.assert_called_once_with(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {
+            "session_id": sid,
+            "ticket_id": _FAF_TICKET,
+            "session_name": session.name,
+        },
+    )
+
+
+@pytest.mark.parametrize("executor_name", ["aider", "opencode"])
+def test_spawn_fire_and_forget_liveness_unavailable(
+    executor_name: LocalLivenessBackend,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """start-time unreadable → orphan killed, no handle, runtime_error bundle."""
+    worktree = make_git_repo(f"wt-faf-liveness-{executor_name}")
+    runner = FakeFireAndForgetRunner()
+
+    try:
+        with patch("cw.executor.core.read_process_start_time_ns", return_value=None):
+            sid = _faf_spawn(
+                worktree,
+                runner=runner,
+                preflight=_PreflightOK(argv=_FAF_ARGV, env=_FAF_ENV),
+                executor_name=executor_name,
+            )
+
+        # The orphan was killed and reaped by the helper.
+        assert runner.procs[0].poll() is not None
+        session = find_completed_session(load_state())
+        assert session.id == sid
+        assert session.status == SessionStatus.COMPLETED
+        assert session.local_liveness is None
+        result = AutoDevResult.model_validate(session.last_result)
+        assert result.blocker is not None
+        assert result.blocker.reason == LIVENESS_UNAVAILABLE
+        assert result.blocker.details == (
+            f"process {runner.procs[0].pid} start-time unavailable "
+            f"[diagnostics: {render_bundle_path(sid)}]"
+        )
+        [path] = list(
+            diagnostics_bundle_dir(sid).glob(f"{executor_name}-runtime_error-*.json")
+        )
+        failure = ExecutorFailure.model_validate_json(path.read_text())
+        assert failure.category == "runtime_error"
+        assert failure.executor_name == executor_name
+    finally:
+        _kill_procs(runner)
+
+
+def test_spawn_fire_and_forget_unexpected_error_reraises_and_completes(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """launch() raises → re-raised; session COMPLETED/CRASHED; bundle persisted."""
+    worktree = make_git_repo("wt-faf-unexpected")
+    runner = FakeFireAndForgetRunner()
+
+    with (
+        patch.object(runner, "launch", side_effect=OSError("exec boom")),
+        patch("cw.executor.core._record_orchestrator_event") as record_mock,
+        pytest.raises(OSError, match="exec boom"),
+    ):
+        _faf_spawn(
+            worktree,
+            runner=runner,
+            preflight=_PreflightOK(argv=_FAF_ARGV, env=_FAF_ENV),
+            executor_name="opencode",
+        )
+
+    record_mock.assert_not_called()
+    session = find_completed_session(load_state())
+    assert session.status == SessionStatus.COMPLETED
+    assert session.completed_reason == CompletionReason.CRASHED
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.blocker is not None
+    assert result.blocker.reason == UNEXPECTED_ERROR
+    assert result.blocker.details == (
+        "unexpected error during opencode launch "
+        f"[diagnostics: {render_bundle_path(session.id)}]"
+    )
+    [path] = list(
+        diagnostics_bundle_dir(session.id).glob("opencode-runtime_error-*.json")
+    )
+    failure = ExecutorFailure.model_validate_json(path.read_text())
+    assert failure.executor_name == "opencode"
+
+
+@pytest.mark.parametrize("executor_name", ["aider", "opencode"])
+def test_persist_runtime_error_diagnostics_writes_bundle(
+    executor_name: ExecutorName,
+    tmp_config_dir: Path,
+) -> None:
+    """Both executor names write a <name>-runtime_error-*.json bundle."""
+    _persist_runtime_error_diagnostics(
+        executor_name=executor_name,
+        session_id="sid-diag",
+        argv=[],
+        details="boom detail",
+    )
+
+    [path] = list(
+        diagnostics_bundle_dir("sid-diag").glob(f"{executor_name}-runtime_error-*.json")
+    )
+    failure = ExecutorFailure.model_validate_json(path.read_text())
+    assert failure.category == "runtime_error"
+    assert failure.executor_name == executor_name
+    assert "boom detail" in failure.stderr_excerpt

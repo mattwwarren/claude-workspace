@@ -1,6 +1,6 @@
 [project]
 name = "claude-workspace"
-version = "1.59.0"
+version = "1.60.0"
 description = "Multi-session workspace orchestrator for Claude Code"
 readme = "README.md"
 authors = [
@@ -306,13 +306,13 @@ ignore = [
 # the gating ↔ claim circular dependency (#1310): gating imports claim at module
 # top, so claim's own reach back into gating must be function-level. Inline
 # import is the sanctioned mechanism, not a workaround.
-"src/cw/dispatch/claim.py" = ["PLC0415"]
+"src/cw/dispatch/claim/spawn.py" = ["PLC0415"]
 # review_gates defers cw.dispatch.routing's _resolve_scope_tier (inside
 # _should_gate_for_scope_hint) and _APPROVAL_GATE_REASON (inside
 # _park_scope_hint_gate) to break the routing ↔ review_gates circular
 # dependency (#1823): routing imports review_gates at module top, so
 # review_gates' own reach back into routing must be function-level. Identical
-# shape and rationale to the claim.py entry above. Inline import is the
+# shape and rationale to the claim/spawn.py entry above. Inline import is the
 # sanctioned mechanism, not a workaround.
 "src/cw/dispatch/review_gates.py" = ["PLC0415"]
 # routing/stage_walk defers cw.dispatch.routing's _record_scope_routing_decision
