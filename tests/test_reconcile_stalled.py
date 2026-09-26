@@ -213,7 +213,7 @@ def test_foreign_result_with_no_evidence_is_charged(
 def test_stage_complete_foreign_result_classified_as_route_emitted_sentinel(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:
-    """#2426: a live worker's stage_complete foreign result is NOT COMPLETE_FOREIGN_RESULT.
+    """#2426: a live worker's stage_complete foreign result is NOT completed outright.
 
     ``stage_complete`` is an INTERMEDIATE_ADVANCE_STATUSES member -- it must
     be reclassified to ROUTE_EMITTED_SENTINEL so the owning task's stage
@@ -233,9 +233,8 @@ def test_stage_complete_foreign_result_classified_as_route_emitted_sentinel(
 def test_stage_complete_foreign_result_advances_task_stage_not_completed(
     tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
 ) -> None:
-    """#2426: the incident case -- a live IMPL worker's mid-pipeline result
-
-    must advance IMPL -> REVIEW (leaving the task PENDING for a fresh REVIEW
+    """#2426: the incident case -- a live IMPL worker's mid-pipeline result must
+    advance IMPL -> REVIEW (leaving the task PENDING for a fresh REVIEW
     dispatch), not land it terminal-COMPLETED at IMPL.
     """
     state = _foreign_result_session(tmp_path, _stage_complete_payload())

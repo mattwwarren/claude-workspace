@@ -1,10 +1,10 @@
 """Act-phase state and dev-queue mutations for the stalled-headless sweep.
 
 Evidence-only since the process-kill-timeout removal: only the
-COMPLETE_FOREIGN_RESULT disposition remains. These helpers write session
-state in place (the caller owns the ``save_state`` flush) and apply dev-queue
-status transitions under ``dev_queue_lock``. See GitHub #185, #552, #1470,
-ADR-0006.
+COMPLETE_FOREIGN_RESULT disposition and, since #2426, ROUTE_EMITTED_SENTINEL
+remain. These helpers write session state in place (the caller owns the
+``save_state`` flush) and apply dev-queue status transitions under
+``dev_queue_lock``. See GitHub #185, #552, #1470, #2426, ADR-0006.
 """
 
 from __future__ import annotations
@@ -22,10 +22,19 @@ from cw.dev_queue import (
 )
 from cw.models import (
     CompletionReason,
+    LastResultSource,
     QueueItemStatus,
     SessionStatus,
 )
-from cw.reconcile._shared import _foreign_result_target_queue_status
+from cw.reconcile._shared import (
+    _PAUSED_STATUS_KEY,
+    _SENTINEL_ADVANCE_REFUSED_KEY,
+    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
+    _apply_sentinel_to_task,
+    _foreign_result_target_queue_status,
+    _resolve_routed_sentinel,
+)
+from cw.result import emit_result_on
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -55,6 +64,103 @@ def _apply_stalled_state_mutations(
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
+
+
+def _apply_stalled_routed_mutations(
+    session_by_id: dict[str, Session],
+    routed_candidates: list[ReapCandidate],
+    *,
+    now: datetime,
+) -> list[ReapCandidate]:
+    """Apply ROUTE_EMITTED_SENTINEL mutations for a live worker's foreign sentinel.
+
+    #2426.
+
+    A third sibling of ``phantom._apply_phantom_routed_mutations`` and
+    ``idle._apply_idle_routed_mutations`` -- neither is reused directly here.
+    ``idle``'s version unconditionally overwrites ``session.last_result`` on a
+    refusal (safe only because idle's precondition is ``last_result is None``
+    going in); stalled's precondition is the opposite -- ``last_result`` is
+    always already the emitted terminal dict -- so an unconditional overwrite
+    would destroy it. ``phantom``'s version merges safely (matching stalled's
+    precondition) but also stamps ``session.reap_reason =
+    ReapReason.PHANTOM_SURFACE``, mislabeling a still-registered-live session
+    as a phantom-surface teardown. This function reuses phantom's merge-safe
+    refusal-stamp shape while omitting ``reap_reason`` (matching stalled's own
+    ``COMPLETE_FOREIGN_RESULT`` convention, which never stamps ``reap_reason``
+    either).
+
+    Routes the emitted advance sentinel through the shared staged-advance
+    authority (``_apply_sentinel_to_task`` -> ``apply_staged_decision``) so the
+    task advances to its next stage, then marks the session COMPLETED/NORMAL
+    -- but only when the route was accepted. A stage-mismatch refusal leaves
+    the task untouched and the session live (not completed/torn down): the
+    session is a still-registered-live headless worker, not a phantom, so
+    refusing here must not orphan it.
+
+    Returns only the candidates actually routed, so the caller's event
+    emission fires solely for those.
+    """
+    accepted: list[ReapCandidate] = []
+    for candidate in routed_candidates:
+        routed_sentinel = _resolve_routed_sentinel(candidate)
+        if routed_sentinel is None:
+            continue
+        session = session_by_id[candidate.session_id]
+        routed = True
+        task_already_terminal = False
+        if candidate.ticket_id:
+            outcome = _apply_sentinel_to_task(
+                candidate.ticket_id, session, routed_sentinel, now=now
+            )
+            routed = outcome.routed
+            task_already_terminal = outcome.task_already_terminal
+        if not routed and task_already_terminal:
+            # #2140-shape race: another authority already landed this
+            # ticket's task genuinely terminal before this lookup ran. Route
+            # the completion through the door instead of the raw assignment
+            # below (reached only when routed is True) so a foreign
+            # authority's already-door-written result is never clobbered.
+            emit_outcome = emit_result_on(
+                session,
+                routed_sentinel.model_dump(mode="json"),
+                source=LastResultSource.SALVAGE_TRANSCRIPT,
+            )
+            if emit_outcome.refused:
+                continue
+            session.status = SessionStatus.COMPLETED
+            session.completed_at = now
+            session.completed_reason = CompletionReason.NORMAL
+            if candidate.salvage_csid is not None:
+                session.claude_session_id = candidate.salvage_csid
+            accepted.append(candidate)
+            continue
+        if not routed:
+            # #1149-shape stage-mismatch refusal: leave the task untouched and
+            # merge (never clobber) the refusal flag into the pre-existing
+            # last_result dict, matching phantom's merge-safe convention --
+            # stalled's precondition guarantees last_result is always already
+            # a dict here (it is the terminal sentinel that made this a
+            # candidate in the first place).
+            existing = session.last_result
+            if isinstance(existing, dict):
+                session.last_result = {
+                    **existing,
+                    _SENTINEL_ADVANCE_REFUSED_KEY: True,
+                }
+            else:
+                session.last_result = {
+                    _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+                }
+            continue
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.last_result = routed_sentinel.model_dump(mode="json")
+        if candidate.salvage_csid is not None:
+            session.claude_session_id = candidate.salvage_csid
+        accepted.append(candidate)
+    return accepted
 
 
 def _apply_foreign_result_queue_mutation(

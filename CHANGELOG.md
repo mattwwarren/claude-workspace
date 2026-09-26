@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The stalled sweep no longer lands a live worker's mid-pipeline `stage_complete` terminal COMPLETED after `cw result emit` (#2426):** since `cw result emit` (#2382) is write-only and never flips `session.status`, a still-live headless worker's out-of-band emit could be discovered by `stalled.py` as a terminal-shaped foreign result and completed straight to `COMPLETED` at whatever stage it happened to be, even though `stage_complete` is an intermediate stage-advance status. `_append_foreign_result_candidate` now reclassifies an `INTERMEDIATE_ADVANCE_STATUSES` foreign result (today exactly `stage_complete`) as `ROUTE_EMITTED_SENTINEL` and routes it through the same stage-aware authority the phantom sweep already uses, so the task advances to its next stage instead. A stage-mismatch refusal latches (mirroring the phantom/idle sweeps' existing convention) so a stale claim is not re-offered forever.
+
 ## [1.60.0] - 2026-09-26
 
 ### Added
