@@ -171,6 +171,10 @@ def test_opencode_executor_spawn_runner_path(
         prompt = call["argv"][-1]
         assert "auto-dev-finalize.md" in prompt
         assert "T-1" in prompt
+        # FINALIZE's prompt points at the command file -- it never gets a
+        # session_id threaded in (build_stage_prompt's finalize branch takes
+        # no session_id param).
+        assert "--session-id" not in prompt
 
         state = load_state()
         session = next(s for s in state.sessions if s.id == sid)
@@ -300,6 +304,40 @@ def test_opencode_executor_exception_handler(
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == UNEXPECTED_ERROR
+
+
+def test_opencode_executor_spawn_threads_session_id_into_prompt(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The sid the spawn skeleton creates threads into the pre-flight prompt.
+
+    _spawn_fire_and_forget creates the session and obtains sid BEFORE calling
+    preflight_fn() -- this proves the sid embedded in the prompt's
+    --session-id is the SAME one the session was created under, not a
+    placeholder or a mismatched value.
+    """
+    worktree = make_git_repo("wt-opencode-session-id")
+
+    fake_runner = FakeFireAndForgetRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    try:
+        with patch("cw.executor.opencode.opencode_available", return_value=True):
+            sid = executor.spawn(
+                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+            )
+
+        assert len(fake_runner.calls) == 1
+        prompt = fake_runner.calls[0]["argv"][-1]
+        assert f"--session-id {sid}" in prompt
+    finally:
+        for proc in fake_runner.procs:
+            proc.kill()
+            proc.wait()
 
 
 def test_opencode_executor_stage_sentinel_schema(tmp_path: Path) -> None:

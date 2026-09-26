@@ -479,3 +479,65 @@ def test_build_stage_prompt_unsupported_stage_raises(tmp_path: Path) -> None:
     """build_stage_prompt raises KeyError for unsupported stage."""
     with pytest.raises(KeyError):
         build_stage_prompt("harden", "T-1", tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# build_stage_prompt session_id threading (#2430) -- the sentinel rules switch
+# from validate-only to an emit_cli push once a session id is known at spawn
+# time.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("stage", ["plan", "impl", "review"])
+def test_build_stage_prompt_threads_session_id_into_emit_command(
+    stage: str, tmp_path: Path
+) -> None:
+    """A known session_id threads into an emit_cli push, not the validate path."""
+    prompt = build_stage_prompt(stage, "T-1", tmp_path, session_id="abc123")
+    assert "cw result emit - --session-id abc123" in prompt
+    assert "validate the JSON before emitting" not in prompt
+
+
+@pytest.mark.parametrize("stage", ["plan", "impl", "review"])
+def test_build_stage_prompt_session_id_none_falls_back_to_validate_only(
+    stage: str, tmp_path: Path
+) -> None:
+    """No session_id (today's 3-arg call) keeps the validate-only contract.
+
+    Regression guard for every existing 3-arg build_stage_prompt call in
+    this file: the default must stay byte-identical to the pre-#2430 prompt.
+    """
+    prompt = build_stage_prompt(stage, "T-1", tmp_path)
+    assert "cw result validate -" in prompt
+    assert "--session-id" not in prompt
+
+
+@pytest.mark.parametrize("stage", ["plan", "impl", "review"])
+def test_build_stage_prompt_emit_form_still_carries_the_frame(
+    stage: str, tmp_path: Path
+) -> None:
+    """The emit-form sentinel rules still carry the <<<AUTO_DEV_RESULT>>> frame."""
+    prompt = build_stage_prompt(stage, "T-1", tmp_path, session_id="abc123")
+    assert "<<<AUTO_DEV_RESULT" in prompt
+    assert "AUTO_DEV_RESULT>>>" in prompt
+
+
+@pytest.mark.parametrize("stage", ["plan", "impl", "review"])
+def test_build_stage_prompt_emit_form_carries_fix_and_rerun_loop(
+    stage: str, tmp_path: Path
+) -> None:
+    """A field.path: message validation failure instructs a fix-and-rerun loop."""
+    prompt = build_stage_prompt(stage, "T-1", tmp_path, session_id="abc123")
+    assert "field.path: message" in prompt
+    assert "re-run" in prompt
+
+
+@pytest.mark.parametrize("stage", ["plan", "impl", "review"])
+def test_build_stage_prompt_emit_form_carries_fallback_friction_entry(
+    stage: str, tmp_path: Path
+) -> None:
+    """A non-field.path emit failure records friction, then falls back to validate."""
+    prompt = build_stage_prompt(stage, "T-1", tmp_path, session_id="abc123")
+    assert "cw_result_emit_fallback:" in prompt
+    assert "friction_highlights" in prompt
+    assert "cw result validate -" in prompt

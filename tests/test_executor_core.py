@@ -691,7 +691,7 @@ def _faf_spawn(
         client=ClientConfig(name="test", workspace_path=worktree),
         stage=Stage.IMPL,
         executor_name=executor_name,
-        preflight_fn=lambda: preflight,
+        preflight_fn=lambda _sid: preflight,
         blocked_ctor=_faf_blocked_ctor(worktree),
         runner=runner,
     )

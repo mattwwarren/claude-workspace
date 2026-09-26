@@ -280,5 +280,18 @@ takes that recorded result over the transcript frame.
 - **What the fallback loses.** On the transcript path the fingerprint is the
   worker's own value again (shape-checked, not recomputed), and the worker
   records the fallback in `friction_highlights` so the rate is visible.
+- **Opencode adopts the same primary/fallback ordering, with `git_synthesis`
+  as its fallback, not `executor_direct`** (#2430). Once a worker's session
+  id is known at spawn time — `_spawn_fire_and_forget` creates the session
+  and obtains it before pre-flight builds the prompt — opencode's `cw result
+  emit --session-id` push (`emit_cli`) becomes primary, mirroring the Claude
+  daemon. Its fallback is the git-facts harvest (`git_synthesis`) that
+  already runs when `_harvest_via_opencode_log`/`synthesize_opencode_result`
+  finds no recorded push in the JSONL log. `executor_direct` is not part of
+  this pair: it covers synchronous pre-flight failures (binary missing,
+  unsupported stage) before a process launches or a prompt is even built — a
+  different failure class than the emit_cli/git_synthesis ordering, which
+  both presuppose the opencode subprocess ran. First-writer-wins still
+  arbitrates all sources uniformly.
 
 See ADR-0003's Amendment (#2382) for the Stop-hook side.

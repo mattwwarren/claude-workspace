@@ -168,7 +168,9 @@ class LocalExecutor:
             client=client,
             stage=stage,
             executor_name="aider",
-            preflight_fn=lambda: _local_preflight(self._config, task, worktree, client),
+            preflight_fn=lambda _sid: _local_preflight(
+                self._config, task, worktree, client
+            ),
             blocked_ctor=_blocked,
             runner=self._runner,
         )
