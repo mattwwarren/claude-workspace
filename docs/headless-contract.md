@@ -847,13 +847,15 @@ Every backend has a designated harvest authority that pushes `Session.last_resul
 
 | Authority mechanism | `LastResultSource` value | Backend(s) | Call site |
 |---|---|---|---|
-| Worker push at end of stage (#2382); also the manual / scripted push | `emit_cli` | detached Claude daemon — **primary** (the *Sentinel emit rule*) | `cw.result.result_emit` |
+| Worker push at end of stage (#2382); also the manual / scripted push | `emit_cli` | detached Claude daemon — **primary** (the *Sentinel emit rule*); opencode — **primary** once a session id is known (#2430) | `cw.result.result_emit` |
 | Stop-hook harvest | `stop_hook_harvest` | detached Claude daemon — **fallback**, only when nothing was recorded | `cw.cli.stop_hook` |
-| Executor-direct | `executor_direct` | codex, aider/local (supervised-child, synchronous) | `cw.executor` |
-| Git-facts synthesis | `git_synthesis` | aider/local (no sentinel emitted) | `cw.reconcile.local` |
+| Executor-direct | `executor_direct` | codex, aider/local (supervised-child, synchronous); opencode (pre-flight failure only, before the process launches — not part of the emit_cli/git_synthesis pair) | `cw.executor` |
+| Git-facts synthesis | `git_synthesis` | aider/local (no sentinel emitted); opencode — **fallback**, only when nothing was recorded (harvest via synthesize_opencode_result) | `cw.reconcile.local` |
 | Salvage-transcript | `salvage_transcript` | idle/phantom/stalled sweeps (supervising worker died mid-run) | `cw.reconcile._shared` |
 
 The detached Claude daemon is the one backend with two rows, and they are ordered, not independent (#2382, superseding RFC 0012's original out-of-scope bullet — see its Amendment): the worker's own `cw result emit` at the end of the stage is the authority, and the Stop hook's #536 emit precedence takes that recorded result without re-parsing the transcript. The transcript harvest runs only when no result was recorded — a denied or unknown `cw result emit`, a worker predating the command — and the door's first-writer-wins arbitration (§11.2) covers the case where both arrive.
+
+opencode (#2430) is the second backend with an ordered two-row pair: once a worker's session id is known at spawn time, its `cw result emit --session-id` push (`emit_cli`) is primary, and the git-facts harvest (`git_synthesis`, via `synthesize_opencode_result`) is the fallback that runs only when nothing was recorded. `executor_direct` is a separate, earlier failure class — a synchronous pre-flight failure before any process launches or prompt is built — not part of that ordered pair.
 
 ### 11.2 `LastResultSource` Provenance Enum
 
