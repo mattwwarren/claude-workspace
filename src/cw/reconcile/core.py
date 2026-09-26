@@ -374,6 +374,7 @@ def _reconcile_locked(
         local_harvest_candidates,
         now=now,
         task_by_ticket=shared_task_by_ticket,
+        config=orchestrator_config,
     )
 
     # Main-checkout drift sweep (#925/#940): flag live worktree workers whose
