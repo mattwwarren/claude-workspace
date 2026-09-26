@@ -26,8 +26,9 @@ from cw.models.enums import (
 # The fire-and-forget backends that record a LocalLivenessHandle. A narrow
 # subset of cw.executor_diagnostics.ExecutorName, defined here because that
 # module imports cw.config (which imports cw.models) — importing it would
-# break this package's DAG-leaf property.
-LocalLivenessBackend = Literal["aider", "opencode"]
+# break this package's DAG-leaf property. "codex" (RFC 0014 A1, #2387) is
+# harvested by an audited clean-requeue gate, not a result synthesizer.
+LocalLivenessBackend = Literal["aider", "opencode", "codex"]
 
 DEFAULT_LOCAL_LIVENESS_BACKEND: LocalLivenessBackend = "aider"
 
@@ -41,8 +42,9 @@ class LocalLivenessHandle(BaseModel):
     PID reassigned to an unrelated process re-reads a different start-time, so
     the session is treated as dead (harvested) rather than falsely observed
     alive. ``backend`` names the executor that launched the process and selects
-    the harvest-time result synthesizer (#2369). Frozen — an immutable
-    snapshot. See GitHub #888.
+    the harvest-time result synthesizer (#2369) — or, for ``"codex"``, the
+    crash-orphan requeue-or-park branch that synthesizes no result (#2387).
+    Frozen — an immutable snapshot. See GitHub #888.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -103,6 +105,12 @@ class Session(BaseModel):
     resumed_at: datetime | None = None
     completed_reason: CompletionReason | None = None
     completed_at: datetime | None = None
+    # Durable task disposition for a recovery path that may crash after this
+    # session is closed but before its owning task is transitioned.  Currently
+    # used by the codex harvest park; the completed-session backstop consumes
+    # it instead of silently reverting the task to PENDING.
+    recovery_disposition: str | None = None
+    recovery_reason: str | None = None
     # Reason written at each reap site so the queue-events bus server can
     # include it in queue.session_reaped notifications. Finer-grained than
     # CompletionReason — see ReapReason and GitHub #380. None for sessions

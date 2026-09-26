@@ -85,7 +85,7 @@ def _apply_idle_routed_mutations(
         task_already_terminal = False
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, session, routed_sentinel, now=now
+                candidate.ticket_id, session, routed_sentinel
             )
             routed = outcome.routed
             task_already_terminal = outcome.task_already_terminal

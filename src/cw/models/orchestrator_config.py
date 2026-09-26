@@ -644,12 +644,12 @@ class OrchestratorConfig(BaseModel):
     # Maximum consecutive sentinel-stage-mismatch vetoes the phantom sweep will
     # grant a single already_refused session before it lets the pending
     # CRASH_COMPLETE fall-through proceed anyway (closes #1449). Deliberately
-    # small: this counts ONLY vetoes that fire while the
-    # transcript is still LIVE (staleness below TRANSCRIPT_LIVENESS_WINDOW_SECONDS)
-    # on a session whose most recent tick refused a stage-mismatched sentinel, so
-    # 2 consecutive live vetoes already reproduce the #1281 "would have crashed
-    # two sweeps after the refusal" window that motivated this bound. Reset for
-    # free per episode via a fresh Session.
+    # small: this counts vetoes on a session whose most recent tick refused a
+    # stage-mismatched sentinel, so 2 consecutive vetoes already reproduce the
+    # #1281 "would have crashed two sweeps after the refusal" window that
+    # motivated this bound. Since #2405 (ADR-0014 audit), this cap is the veto's
+    # only gate -- transcript staleness is a diagnostic, never a condition.
+    # Reset for free per episode via a fresh Session.
     sentinel_mismatch_veto_cap: int = 2
     # RFC 0010 anomaly layer (#1201) — review-recipe repeat-fire burst detector.
     # A review recipe that keeps firing on the same PR across successive

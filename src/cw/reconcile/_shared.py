@@ -1662,8 +1662,6 @@ def _apply_sentinel_to_task(
     ticket_id: str,
     session: Session,
     sentinel: AutoDevResult | BlockedResult,
-    *,
-    now: datetime | None = None,
 ) -> SentinelRouteOutcome:
     """Update the matching dev-queue task based on the sentinel result.
 
@@ -1680,11 +1678,8 @@ def _apply_sentinel_to_task(
     ``SentinelRouteOutcome`` -- see its docstring for ``rescued``/``routed``.
 
     Takes the owning ``session`` (not just its id) because the BlockedResult
-    arm's catch-all needs a transcript path to resolve liveness against
-    (#1406); the task lookup itself still keys off ``session.id`` alone.
-    ``now`` is the caller's sweep timestamp, threaded through to that liveness
-    comparison so a reconcile tick judges every session against one clock;
-    it defaults to wall-clock ``now`` for callers that have none.
+    arm records ``session.id`` on its ``SENTINEL_BLOCKED_RESULT_REQUEUED``
+    audit event; the task lookup itself keys off ``session.id`` alone.
 
     GitHub #1692/#2140: the returned outcome's ``task_already_terminal`` flag
     is now consumed at all four call sites -- the Stop-hook (``cw.cli.
@@ -1730,7 +1725,7 @@ def _apply_sentinel_to_task(
             if already_terminal:
                 # #1692: durable trace alongside the log line -- record_event
                 # nests _inbox_lock inside dev_queue_lock here, the same safe
-                # nesting order this module's SESSION_SENTINEL_LIVENESS_VETOED
+                # nesting order this module's SENTINEL_BLOCKED_RESULT_REQUEUED
                 # call (below) already relies on. No queue/session mutation
                 # precedes this in this branch, so there is nothing for a
                 # failed write to leave half-applied.
@@ -1794,7 +1789,7 @@ def _apply_sentinel_to_task(
             # writes a real transition (FAILED or PENDING) that must be
             # persisted below even when routed=False -- routed=False means
             # "don't also complete the session," not "don't write the task."
-            routed = _route_blocked_result_to_task(target, session, sentinel, now=now)
+            routed = _route_blocked_result_to_task(target, session, sentinel)
             landed_terminal = not routed
         else:
             # True no-op: a late BlockedResult against an already-parked task
@@ -1813,9 +1808,10 @@ def _requeue_blocked_result_under_cap(
 ) -> bool:
     """Land FAILED at the attempt cap, else re-queue to PENDING (GitHub #2401).
 
-    Shared by the deterministic-parse and validation_failed branches of
-    :func:`_route_blocked_result_to_task`, which became identical once both
-    were put under ``_VALIDATION_FAILED_MAX_ATTEMPTS``: a worker that keeps
+    Shared by the deterministic-parse, validation_failed, and unrecognized-
+    reason catch-all branches of :func:`_route_blocked_result_to_task`, which
+    became identical once all were put under
+    ``_VALIDATION_FAILED_MAX_ATTEMPTS`` (#2401, #2405): a worker that keeps
     emitting the same rejected sentinel may well have committed real work
     each time, so the cap is evidence-based (repeated identical rejection),
     never a transcript-age/clock comparison (ADR-0014).
@@ -1848,10 +1844,17 @@ def _requeue_blocked_result_under_cap(
     return True
 
 
-def _deterministic_parse_requeue_enabled(
+def _land_blocked_result_failed(target: TicketTask, sentinel: BlockedResult) -> bool:
+    """Persist a rejected sentinel and land the task terminal FAILED."""
+    target.last_blocked_result = sentinel.model_dump(mode="json")
+    transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
+    return False
+
+
+def _blocked_result_requeue_enabled(
     target: TicketTask, sentinel: BlockedResult
 ) -> bool:
-    """Return the client's #2401 rollout setting, logging disabled shadowing."""
+    """Return the client's #2401 deterministic-parse rollout setting."""
     try:
         enabled = get_client(target.client).blocked_result_requeue_enabled
     except CwError:
@@ -1861,13 +1864,14 @@ def _deterministic_parse_requeue_enabled(
     if not enabled:
         _log.warning(
             "sentinel.blocked_result_requeue_shadowed: client=%s ticket=%s; "
-            "reason=%s attempts=%s attempt_cap=%s; deterministic-parse requeue "
-            "would apply, but blocked_result_requeue_enabled is false",
+            "reason=%s attempts=%s attempt_cap=%s cap_only_would_requeue=%s; "
+            "blocked_result_requeue_enabled is false",
             target.client,
             target.ticket_id,
             sentinel.blocker.reason,
             target.attempts,
             _VALIDATION_FAILED_MAX_ATTEMPTS,
+            target.attempts < _VALIDATION_FAILED_MAX_ATTEMPTS,
         )
     return enabled
 
@@ -1876,47 +1880,38 @@ def _route_blocked_result_to_task(
     target: TicketTask,
     session: Session,
     sentinel: BlockedResult,
-    *,
-    now: datetime | None = None,
 ) -> bool:
     """Route a malformed/unparseable BlockedResult to a RUNNING task's status.
 
     A BlockedResult means the sentinel failed to parse or was malformed.
-    Deterministic parse failures and validation_failed both re-queue to
-    PENDING (clearing session_id) under a shared evidence-based attempt cap,
-    landing FAILED only once the cap is reached (GitHub #2401); transient
-    failures re-queue unconditionally. Extracted from _apply_sentinel_to_task
-    to keep that function under the branch cap (#918).
+    Deterministic parse failures re-queue to PENDING (clearing session_id)
+    under a rollout gate; the unrecognized-reason catch-all re-queues under
+    the shared evidence-based attempt cap unconditionally, landing FAILED only
+    once the cap is reached (GitHub #2401, #2405). Transient failures re-queue
+    unconditionally.
+    Extracted from _apply_sentinel_to_task to keep that function under the
+    branch cap (#918).
 
     Returns False when this call just landed the task terminal-FAILED (the
     caller must not also complete the owning session on that outcome), True
     when it re-queued to PENDING instead (#1189).
 
-    GitHub #1406: the unrecognized-reason catch-all is additionally vetoed by
-    ``session``'s transcript liveness. #1281 gave the phantom sweep's
-    stage-mismatch fall-through the same guard; this closes the alternative
-    route to the same incident -- a still-advancing worker whose sentinel
-    merely failed to *parse* was landed terminal-FAILED (and, via #1273's
-    ``landed_terminal``, had its daemon stopped) while it was still working.
-    Only the catch-all is guarded by transcript liveness: a deterministic
-    parse failure and validation_failed are instead bounded by the
-    evidence-based attempt cap above (ADR-0014 forbids widening the
-    transcript-age veto to a second branch; #2401 Plan Soundness Review).
-    ``now`` is the caller's sweep timestamp; it defaults to wall-clock
-    ``now``.
+    GitHub #2405 (ADR-0014 audit): the catch-all's former #1406 transcript-
+    liveness veto is gone -- no transcript-age comparison decides FAILED vs.
+    PENDING. A still-advancing
+    worker whose sentinel merely failed to *parse* is protected by the attempt
+    cap instead: it is re-queued until it has been rejected
+    ``_VALIDATION_FAILED_MAX_ATTEMPTS`` times, and only then landed terminal
+    (and, via #1273's ``landed_terminal``, has its daemon stopped).
     """
-    # GitHub #2401: both branches below share _requeue_blocked_result_under_
-    # cap's attempt-cap gate, closing the #1266 last_blocked_result gap for
-    # both -- a FAILED/abandoned landing from either now records why, and a
-    # sub-cap re-queue leaves a SENTINEL_BLOCKED_RESULT_REQUEUED audit event
-    # since there is no rejected sentinel to store on a non-terminal landing.
+    # GitHub #2401: the branches below share _requeue_blocked_result_under_
+    # cap's attempt-cap gate, closing the #1266 last_blocked_result gap -- a
+    # FAILED/abandoned landing from any of them records why, and a sub-cap
+    # re-queue leaves a SENTINEL_BLOCKED_RESULT_REQUEUED audit event since
+    # there is no rejected sentinel to store on a non-terminal landing.
     if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
-        if not _deterministic_parse_requeue_enabled(target, sentinel):
-            target.last_blocked_result = sentinel.model_dump(mode="json")
-            transition_task_status(
-                target, QueueItemStatus.FAILED, disposition="abandoned"
-            )
-            return False
+        if not _blocked_result_requeue_enabled(target, sentinel):
+            return _land_blocked_result_failed(target, sentinel)
         return _requeue_blocked_result_under_cap(target, session, sentinel)
     if sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
         return _requeue_blocked_result_under_cap(target, session, sentinel)
@@ -1927,56 +1922,10 @@ def _route_blocked_result_to_task(
     # An unparseable/unknown-status sentinel (status_unknown,
     # multiple_result_blocks, any unrecognized reason) carries NO success
     # signal. Never mark it COMPLETED — that silently retires unshipped work
-    # as "shipped" (#750, the #728 loss). Surface as FAILED so the operator
-    # sees it instead of a phantom completion.
-    # #1406: ...unless the worker behind it is demonstrably still advancing.
-    # An unparseable sentinel is evidence the *frame* was malformed, not that
-    # the run is over -- a fresh transcript means killing it here would drop
-    # work that is still in flight (the #1281 incident shape). Re-queue to
-    # PENDING, same shape as the _TRANSIENT_PARSE_FAILURES branch above (no
-    # last_blocked_result write: a re-queue rejects nothing), plus an audit
-    # event -- unlike that branch, this one overrides what would otherwise be
-    # a terminal FAILED landing, so it needs a durable trace an operator can
-    # find later. record_event nests _inbox_lock inside dev_queue_lock here,
-    # the same safe nesting order crud.py's _emit_task_deleted and
-    # dev_queue/lifecycle.py already rely on (RFC 0008 W1, #978: the reverse
-    # nesting -- _inbox_lock then dev_queue_lock -- never occurs). Not #765:
-    # that ticket is the opposite lesson, a deadlock caused by record_event
-    # inside dev_queue_lock in a since-fixed call site (_shared.py's own
-    # SESSION_NEEDS_ATTENTION emission a few hundred lines below still emits
-    # after the lock releases for that reason) -- citing it here as evidence
-    # of safety would point a future reader at the wrong precedent.
-    #
-    # The `0 <= age` floor is load-bearing, not defensive: a negative age
-    # means the transcript's mtime is *after* `now` (clock skew, or a caller
-    # passing a fictional/frozen timestamp), which is not evidence of
-    # liveness. Without the floor every such case is trivially `< WINDOW` and
-    # would misclassify as LIVE. A None age (no locatable transcript) is
-    # likewise not evidence -- both fall through to the FAILED landing below,
-    # preserving pre-#1406 behavior wherever liveness is unknowable.
-    _now = now if now is not None else datetime.now(UTC)
-    age = _transcript_age_seconds(session, _now)
-    if age is not None and 0 <= age < TRANSCRIPT_LIVENESS_WINDOW_SECONDS:
-        transition_task_status(target, QueueItemStatus.PENDING)
-        target.session_id = None
-        record_event(
-            OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED,
-            {
-                "ticket_id": target.ticket_id,
-                "client": target.client,
-                "session_id": session.id,
-                "transcript_age_seconds": age,
-                "blocker_reason": sentinel.blocker.reason,
-            },
-            correlation_id=target.ticket_id,
-        )
-        return True
-    # #1266: persist the rejected sentinel so an operator can tell an absent
-    # sentinel (last_blocked_result stays None) from a rejected one, instead
-    # of a bare `abandoned` disposition with no diagnostic.
-    target.last_blocked_result = sentinel.model_dump(mode="json")
-    transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
-    return False
+    # as "shipped" (#750, the #728 loss). GitHub #2405 (ADR-0014 audit): it
+    # shares the same evidence-based attempt cap as the branches above, so a
+    # FAILED landing is decided by repeated rejection, never transcript age.
+    return _requeue_blocked_result_under_cap(target, session, sentinel)
 
 
 def _session_project_dir(session: Session) -> Path | None:

@@ -22,8 +22,8 @@ if TYPE_CHECKING:
     from cw.reconcile._shared import ReapCandidate
 
 # paused_status written to SESSION_NEEDS_ATTENTION when the phantom sweep's
-# sentinel-stage-mismatch veto cap is exhausted on a still-LIVE already_refused
-# session and the pending CRASH_COMPLETE proceeds (#1449). Defined locally (not
+# sentinel-stage-mismatch veto cap is exhausted on an already_refused session
+# and the pending CRASH_COMPLETE proceeds (#1449, #2405). Defined locally (not
 # in _shared.py, which is outside this ticket's file set) — mirrors the
 # retry-cap park's own escalation reason. See docs/events.md.
 _SENTINEL_MISMATCH_VETO_CAP_EXHAUSTED_REASON = "sentinel_mismatch_veto_cap_exhausted"
@@ -170,7 +170,7 @@ def _emit_sentinel_mismatch_veto_escalation_events(
     notification is added here (parity with the retry-cap park's needs_attention
     emission; no daemon-stop / worktree removal). Edge-triggered: the act phase
     already persisted each candidate's post-cap counter bump before this runs, so
-    a still-LIVE session that already escalated will not produce a new escalate
+    a session that already escalated will not produce a new escalate
     candidate on a later tick — see ``_sentinel_mismatch_veto_candidate``.
     """
     for candidate in escalate_candidates:
