@@ -2,16 +2,12 @@
 operator dissent (#2433).
 
 `plan_approved_fingerprint` binds an approval to the exact draft text the
-operator read (#2102), which is correct when the draft actually changed. But a
-resumed round's own advisory re-scan can rewrite non-substantive sections of
-the draft with no operator ever weighing in, producing a non-null,
-non-matching `plan_approved_fingerprint` that re-parks a plan nobody actually
-disputed. This adds a stage-agnostic "operator-authority delta" rule
-(`.claude/commands/auto-dev.md`) — no live-fetched operator-authority comment
-newer than the row's last durable park/approval timestamp — and wires it into
-Checkpoint 1's row-path evidence, Step 1a.0b's fingerprint fast path, and the
-fingerprint-mismatch sub-case as an alternate, fingerprint-equality-independent
-sufficient condition.
+operator read (#2102). A resumed round may have no newer operator comment while
+still carrying a changed draft, but the current contract has no durable
+approved-draft snapshot or section-level digest that can machine-verify such a
+change as advisory-only. The stage-agnostic "operator-authority delta" rule
+(`.claude/commands/auto-dev.md`) therefore remains context only; a mismatched
+fingerprint stays parked for fresh approval until such a verifier exists.
 
 Pure-markdown assertions over the auto-dev pipeline instruction files,
 following the ``read_text()`` + literal-substring/window convention of
@@ -34,7 +30,6 @@ from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 NEW_SUBSECTION_ANCHOR = "### Operator-authority delta (#2433)"
 DESTRUCTIVE_GATE_ANCHOR = "### Destructive-directive gate"
 PROVENANCE_ANCHOR = "### Provenance — what carries operator authority"
-FAST_PATH_BRANCH_ANCHOR = "**Operator-authority delta match → fast path (#2433).**"
 
 
 def _norm(text: str) -> str:
@@ -107,45 +102,24 @@ def test_operator_authority_delta_cites_impl_stage_followup_2438() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint 1's row-path evidence gains the alternate sufficient condition
+# Checkpoint 1's row-path evidence keeps the mismatch safety gate
 # ---------------------------------------------------------------------------
 
 
-def test_checkpoint1_row_path_gains_operator_authority_alternate() -> None:
-    """The alternate condition is named and does not require fingerprint equality."""
+def test_checkpoint1_mismatch_requires_machine_checkable_baseline() -> None:
+    """Comment silence is not an alternate approval source for a mismatch."""
     section = _norm(_checkpoint1_section())
-    assert (
-        "Row-path alternate sufficient condition (operator-authority delta, "
-        "#2433)" in section
-    )
-    assert (
-        "independently sufficient without requiring `plan_approved_fingerprint` "
-        "to equal `draft_fp`" in section
-    )
+    assert "Fingerprint-mismatch safety gate (#2433)" in section
+    assert "not independently sufficient to transfer approval" in section
+    assert "only machine-checkable baseline currently available" in section
+    assert "any mismatch remains absent row-path evidence" in section
 
 
-def test_checkpoint1_alternate_precedes_absent_both_exit() -> None:
-    """The alternate is part of source sufficiency, before the park decision."""
+def test_checkpoint1_mismatch_fails_closed_even_without_operator_comment() -> None:
+    """A mismatch falls through even when the operator has been silent."""
     section = _norm(_checkpoint1_section())
-    assert section.index("both durable row fields") < section.index(
-        "Absent both, EXIT `plan_pending_approval` again"
-    )
-
-
-def test_checkpoint1_alternate_requires_both_row_fields() -> None:
-    """A timestamp without the stored fingerprint cannot enter the alternate."""
-    window = _norm(
-        _after(
-            _checkpoint1_section(),
-            "Row-path alternate sufficient condition (operator-authority "
-            "delta, #2433).",
-            span=1300,
-        )
-    )
-    assert "both durable row fields" in window
-    assert "`plan_approved_fingerprint`" in window
-    assert "must be non-null" in window
-    assert "`plan_approved_fingerprint` must not be `None`" in window
+    assert "including when no operator-authority comment postdates" in section
+    assert "A substantive, destructive, or body change must never transfer" in section
 
 
 def test_checkpoint1_existing_equality_language_still_present() -> None:
@@ -158,30 +132,12 @@ def test_checkpoint1_existing_equality_language_still_present() -> None:
     )
 
 
-def test_checkpoint1_revocation_marker_gates_both_row_path_subconditions() -> None:
-    """The revocation marker voids BOTH row-path sub-conditions, not just equality."""
+def test_checkpoint1_revocation_marker_gates_row_path_evidence() -> None:
+    """The revocation marker voids the exact-equality row-path evidence."""
     section = _checkpoint1_section()
     window = _norm(_after(section, "Before accepting this pair", span=700))
-    assert "the alternate sufficient condition below" in window
-    assert (
-        "revoked and absent for both sub-conditions, not just the equality one"
-        in window
-    )
-    assert "supersedes that marker for both" in window
-    # The new alternate-condition paragraph itself restates the same guarantee.
-    alt_window = _norm(
-        _after(
-            section,
-            "Row-path alternate sufficient condition (operator-authority "
-            "delta, #2433).",
-            span=900,
-        )
-    )
-    assert "already gates this alternate condition too" in alt_window
-    assert (
-        "cannot fire on a just-revoked, stale-cached `plan_approved_at` either"
-        in alt_window
-    )
+    assert "treat the row evidence as revoked and absent" in window
+    assert "a later `plan_approved_at` is a fresh approval" in window
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +145,8 @@ def test_checkpoint1_revocation_marker_gates_both_row_path_subconditions() -> No
 # ---------------------------------------------------------------------------
 
 
-def test_fingerprint_mismatch_subcase_checks_operator_authority_delta_first() -> None:
-    """The no-delta condition is checked before the unconditional fallback fires,
-    and the quote-both-fingerprints language survives for that fallback case."""
+def test_fingerprint_mismatch_subcase_always_requires_fresh_approval() -> None:
+    """The mismatch fallback remains unconditional and quotes both fingerprints."""
     window = _norm(
         _after(
             _checkpoint1_section(),
@@ -199,50 +154,39 @@ def test_fingerprint_mismatch_subcase_checks_operator_authority_delta_first() ->
             span=1200,
         )
     )
-    assert "Check the operator-authority-delta branch first (#2433)" in window
-    assert "the approval transfers via that branch instead" in window
-    assert "Only when that condition also fails" in window
-    assert "quote both fingerprints" in window
-    assert "does not transfer by fingerprint equality alone" in window
-
-
-# ---------------------------------------------------------------------------
-# Step 1a.0b's fingerprint fast-path check gains the new OR-branch
-# ---------------------------------------------------------------------------
-
-
-def test_step1a0b_fast_path_gains_operator_authority_branch() -> None:
-    """The new branch cites the Operator-authority delta rule by name, not restated."""
-    window = _norm(_after(_appendix("plan"), FAST_PATH_BRANCH_ANCHOR, span=700))
+    assert "no machine-checkable advisory-only verification" in window
     assert (
-        "per the *Operator-authority delta* rule (`.claude/commands/auto-dev.md`)"
+        "even the absence of a newer operator-authority comment cannot transfer"
         in window
     )
-    assert "skip Step 1c's ambiguity/premise re-scan AND Step 1c.0's" in window
-    # Not re-derived: the two-branch silence/no-delta prose is absent here.
-    assert "never satisfied by silence alone" not in window
+    assert "**always** EXIT `plan_pending_approval`" in window
+    assert "quote both fingerprints" in window
 
 
-def test_step1a0b_new_reason_value_distinct_from_existing() -> None:
-    """Two distinct `reason` literals: the new branch's and the equality branch's."""
+# ---------------------------------------------------------------------------
+# Step 1a.0b's fingerprint fast-path keeps mismatches parked
+# ---------------------------------------------------------------------------
+
+
+def test_step1a0b_mismatch_requires_advisory_only_verification() -> None:
+    """The appendix defines the executable baseline and fail-closed behavior."""
+    window = _norm(
+        _after(
+            _appendix("plan"),
+            "**Fingerprint-mismatch safety gate (#2433).**",
+            span=900,
+        )
+    )
+    assert "comment silence is not an advisory-only verification" in window
+    assert "only machine-checkable baseline currently available" in window
+    assert "must fall through to Step 1c.0 / Step 1c for fresh approval" in window
+
+
+def test_step1a0b_has_no_mismatch_fast_path_reason() -> None:
+    """Only exact fingerprint matches may emit the skip event."""
     appendix = _appendix("plan")
     assert '\\"reason\\":\\"approved_fingerprint_match\\"' in appendix
-    assert '\\"reason\\":\\"operator_approval_no_delta\\"' in appendix
-
-
-def test_new_branch_never_emits_resolution_consumed_keys() -> None:
-    """Regression guard tied to the productivity-ceiling touch-point (#1750):
-    the new branch's own emitted payload never carries either key, and the
-    prose says so explicitly."""
-    window = _after(_appendix("plan"), FAST_PATH_BRANCH_ANCHOR, span=1300)
-    payload_start = window.index('--payload "{')
-    payload_end = window.index('}"', payload_start)
-    payload = window[payload_start:payload_end]
-    assert "resolution_consumed" not in payload
-    assert "resolution_evidence" not in payload
-    assert "never emits `resolution_consumed`/`resolution_evidence` either" in _norm(
-        window
-    )
+    assert "operator_approval_no_delta" not in appendix
 
 
 def test_scope_note_on_evidence_source_unchanged() -> None:
@@ -256,28 +200,17 @@ def test_scope_note_on_evidence_source_unchanged() -> None:
     )
 
 
-def test_step1a0b_branch_disqualified_by_newer_operator_comment() -> None:
-    """The new branch falls through when an operator-authority comment postdates
-    the park, mirroring the rule's own delta-present branch."""
-    window = _norm(_after(_appendix("plan"), FAST_PATH_BRANCH_ANCHOR, span=1300))
-    assert (
-        "Any operator-authority comment newer than `plan_approved_at` "
-        "disqualifies this branch and falls through to the next bullet" in window
-    )
-
-
 # ---------------------------------------------------------------------------
-# docs/headless-contract.md §10.3 documents the new reason value
+# docs/headless-contract.md §10.3 documents the surviving reason value
 # ---------------------------------------------------------------------------
 
 
-def test_headless_contract_reason_enum_documents_new_value() -> None:
-    """The new value is named alongside the existing one, and the open-enum
-    sentence is preserved verbatim."""
+def test_headless_contract_reason_enum_documents_exact_match_only() -> None:
+    """The mismatch path has no separate skip reason."""
     window = _reason_field_row()
     assert "`reason` (str) — `s1_ambiguity_scan_skipped` only (#2376)." in window
     assert "`approved_fingerprint_match`" in window
-    assert "`operator_approval_no_delta`" in window
+    assert "operator_approval_no_delta" not in window
     assert (
         "Open enum — consumers MUST tolerate unknown future values, mirroring "
         "`error_kind` below." in window
@@ -285,7 +218,7 @@ def test_headless_contract_reason_enum_documents_new_value() -> None:
 
 
 def test_reason_row_still_singular_field_row() -> None:
-    """The two values share the one `reason` bullet — no duplicate row added."""
+    """The reason remains one open-enum field row."""
     content = _headless_contract()
     assert content.count("- `reason` (str) — `s1_ambiguity_scan_skipped` only") == 1
 
@@ -296,4 +229,4 @@ def test_shared_helpers_resolve() -> None:
     assert _cmd("auto-dev.md")
     assert _appendix("plan")
     assert _checkpoint1_section()
-    assert _nearby(_cmd("auto-dev-plan.md"), "Row-path alternate sufficient condition")
+    assert _nearby(_cmd("auto-dev-plan.md"), "Fingerprint-mismatch safety gate")
