@@ -124,6 +124,31 @@ def test_checkpoint1_row_path_gains_operator_authority_alternate() -> None:
     )
 
 
+def test_checkpoint1_alternate_precedes_absent_both_exit() -> None:
+    """The alternate is part of source sufficiency, before the park decision."""
+    section = _norm(_checkpoint1_section())
+    assert section.index("both durable row fields") < section.index(
+        "Absent both, EXIT `plan_pending_approval` again"
+    )
+
+
+def test_checkpoint1_alternate_requires_both_row_fields() -> None:
+    """A timestamp without the stored fingerprint cannot enter the alternate."""
+    window = _norm(
+        _after(
+            _checkpoint1_section(),
+            "Row-path alternate sufficient condition (operator-authority "
+            "delta, #2433).",
+            span=1300,
+        )
+    )
+    assert "both durable row fields" in window
+    assert "`plan_approved_fingerprint`" in window
+    assert "must be non-null" in window
+    assert "`plan_approved_fingerprint` must not be `None`" in window
+    assert "machine-verified as advisory-only" in window
+
+
 def test_checkpoint1_existing_equality_language_still_present() -> None:
     """Regression pin: the #2102 equality sentence is untouched, not replaced."""
     section = _checkpoint1_section()
@@ -178,6 +203,9 @@ def test_fingerprint_mismatch_subcase_checks_operator_authority_delta_first() ->
     assert "Check the operator-authority-delta branch first (#2433)" in window
     assert "the approval transfers via that branch instead" in window
     assert "Only when that condition also fails" in window
+    assert "machine-verified as advisory-only" in window
+    assert "Comment silence alone is not that verification" in window
+    assert "substantive or destructive changes still require re-approval" in window
     assert "quote both fingerprints" in window
     assert "does not transfer by fingerprint equality alone" in window
 
