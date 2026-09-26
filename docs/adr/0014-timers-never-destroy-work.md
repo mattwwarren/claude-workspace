@@ -90,7 +90,8 @@ signal is preserved and made multi-dimensional instead of one-dimensional
   #1406 (`session.sentinel_liveness_vetoed`, the `BlockedResult` catch-all in
   `_route_blocked_result_to_task`) and #1281
   (`session.sentinel_stage_mismatch_vetoed`, the already_refused fall-through
-  in `_sentinel_mismatch_veto_candidate`). #2405 audited and remediated both:
+  in `_sentinel_mismatch_veto_candidate`). #2405 audited and remediated both
+  for clients opted into the per-client rollout flags:
   no transcript-age comparison decides a `FAILED`/`PENDING`/`BLOCKED_ON_USER`
   transition on either path. The catch-all now shares #2401's
   `_requeue_blocked_result_under_cap` attempt cap (its liveness event is

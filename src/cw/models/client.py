@@ -89,10 +89,14 @@ class ClientConfig(BaseModel):
     # the pre-claim probe for this client only. The global switch remains the
     # fleet-wide emergency control.
     occupancy_gate_enabled: bool | None = None
-    # Per-client opt-in for the #2401 deterministic-parse requeue policy.
-    # False preserves terminal handling for this client. Enable explicitly
-    # after reconciling any already-requeued rows/events for the client.
+    # Per-client opt-in for the #2401 deterministic-parse and #2405
+    # unrecognized-reason catch-all requeue policies. False preserves terminal
+    # handling for this client. Enable explicitly after reconciling any
+    # already-requeued rows/events for the client.
     blocked_result_requeue_enabled: bool = False
+    # Per-client opt-in for the #2405 cap-only phantom stage-mismatch veto.
+    # False retains the pre-#2405 transcript-liveness fallback.
+    sentinel_mismatch_veto_enabled: bool = False
     auto_background_threshold: int | None = None
     notifications: bool = False
     lanes: list[LaneConfig] = Field(default_factory=list)

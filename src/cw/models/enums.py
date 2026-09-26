@@ -364,8 +364,9 @@ class OrchestratorEventType(StrEnum):
     # GitHub #1281 -- stage-mismatch-refusal veto. Emitted by the phantom sweep
     # instead of proceeding with a CRASH_COMPLETE when a session already
     # latched `already_refused` (a prior tick's #1149 stage-mismatch refusal).
-    # Since #2405 (ADR-0014 audit) it is gated solely by the evidence-based
-    # attempt cap (consecutive_sentinel_mismatch_vetoes <
+    # Since #2405 (ADR-0014 audit), clients opted into
+    # ClientConfig.sentinel_mismatch_veto_enabled are gated solely by the
+    # evidence-based attempt cap (consecutive_sentinel_mismatch_vetoes <
     # sentinel_mismatch_veto_cap, #1449); transcript staleness rides along as
     # the diagnostic stale_minutes payload field and never decides the veto.
     # The only mutation accompanying it is the persisted veto counter; the

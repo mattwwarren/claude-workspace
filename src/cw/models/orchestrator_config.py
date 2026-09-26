@@ -647,8 +647,9 @@ class OrchestratorConfig(BaseModel):
     # small: this counts vetoes on a session whose most recent tick refused a
     # stage-mismatched sentinel, so 2 consecutive vetoes already reproduce the
     # #1281 "would have crashed two sweeps after the refusal" window that
-    # motivated this bound. Since #2405 (ADR-0014 audit) this cap is the veto's
-    # ONLY gate -- transcript staleness is a diagnostic, never a condition.
+    # motivated this bound. Since #2405 (ADR-0014 audit), this cap is the veto's
+    # only gate for clients opted into ClientConfig.sentinel_mismatch_veto_enabled
+    # -- transcript staleness is a diagnostic, never a condition there.
     # Reset for free per episode via a fresh Session.
     sentinel_mismatch_veto_cap: int = 2
     # RFC 0010 anomaly layer (#1201) — review-recipe repeat-fire burst detector.
