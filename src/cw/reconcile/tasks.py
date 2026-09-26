@@ -148,11 +148,15 @@ def _revert_running_tasks_for_sessions(
                 # way, reverting it here would charge an attempt it should
                 # never cost.
                 continue
-            if task.session_id in dirty:
+            session = sessions_by_id.get(task.session_id) if sessions_by_id else None
+            recovery_disposition = (
+                session.recovery_disposition if session is not None else None
+            )
+            if task.session_id in dirty or recovery_disposition is not None:
                 transition_task_status(
                     task,
                     QueueItemStatus.BLOCKED_ON_USER,
-                    disposition="dirty_worktree",
+                    disposition=recovery_disposition or "dirty_worktree",
                 )
                 if sessions_by_id and task.session_id in sessions_by_id:
                     notify_sessions.append(sessions_by_id[task.session_id])
@@ -165,7 +169,7 @@ def _revert_running_tasks_for_sessions(
             save_dev_queue(store)
     # Fire notifications after dev_queue_lock releases (lock-order invariant #765).
     for session in notify_sessions:
-        reason = dirty[session.id]
+        reason = session.recovery_reason or dirty.get(session.id, "dirty_worktree")
         breadcrumbs = (
             f"{session.worktree_path}: {reason}" if session.worktree_path else reason
         )
@@ -177,7 +181,9 @@ def _revert_running_tasks_for_sessions(
                 "client": session.client,
                 "ticket_id": ticket_id_for_session(session.name),
                 "claude_session_id": session.claude_session_id,
-                "paused_status": _DIRTY_WORKTREE_REASON,
+                "paused_status": (
+                    session.recovery_disposition or _DIRTY_WORKTREE_REASON
+                ),
                 "breadcrumbs": breadcrumbs,
                 "crashed": False,
                 "lane": session.lane,

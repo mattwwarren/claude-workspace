@@ -406,6 +406,13 @@ def _act_on_codex_harvest_candidate(
             task.ticket_id,
         )
         return
+    if not gate.should_requeue:
+        # Persist the task disposition with the session closure.  If this
+        # process dies before the park helper runs, the completed-session
+        # backstop must preserve this failed-gate outcome instead of applying
+        # its generic RUNNING -> PENDING fallback.
+        session.recovery_disposition = CODEX_HARVEST_ORPHANED_DISPOSITION
+        session.recovery_reason = gate.reason
     session.status = SessionStatus.COMPLETED
     session.completed_reason = CompletionReason.CRASHED
     session.completed_at = now

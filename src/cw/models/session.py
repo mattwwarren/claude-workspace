@@ -105,6 +105,12 @@ class Session(BaseModel):
     resumed_at: datetime | None = None
     completed_reason: CompletionReason | None = None
     completed_at: datetime | None = None
+    # Durable task disposition for a recovery path that may crash after this
+    # session is closed but before its owning task is transitioned.  Currently
+    # used by the codex harvest park; the completed-session backstop consumes
+    # it instead of silently reverting the task to PENDING.
+    recovery_disposition: str | None = None
+    recovery_reason: str | None = None
     # Reason written at each reap site so the queue-events bus server can
     # include it in queue.session_reaped notifications. Finer-grained than
     # CompletionReason — see ReapReason and GitHub #380. None for sessions

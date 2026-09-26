@@ -12,10 +12,9 @@ way the session closes ``COMPLETED``/``CRASHED`` behind a ``SESSION_COMPLETED``
 audit event recorded before any transition.
 
 Fixtures are shared with ``test_reconcile_codex_boot.py`` rather than
-re-implemented. The orchestrator config is injected through the sweep's
-``config`` parameter (what ``reconcile()`` passes), so the boot-pass
-``_use_config`` helpers — which pin ``codex_boot.load_effective_config`` — are
-not needed here.
+re-implemented, including the configuration constructors used by the boot
+tests. The orchestrator config is injected through the sweep's ``config``
+parameter (what ``reconcile()`` passes).
 """
 
 from __future__ import annotations
@@ -57,6 +56,7 @@ from cw.reconcile.local import (
     CODEX_HARVEST_CLEAN_REQUEUE_REASON,
     CODEX_HARVEST_ORPHANED_DISPOSITION,
 )
+from cw.reconcile.tasks import revert_completed_silent_tasks
 from tests.conftest import commit_tracked_file
 from tests.test_reconcile_codex_boot import (
     _assert_session_closed,
@@ -67,6 +67,8 @@ from tests.test_reconcile_codex_boot import (
     _requeued_events,
     _seed_clean_codex_orphan,
     _task_without_base_ref,
+    _use_auto_reap_policy,
+    _use_config,
 )
 
 if TYPE_CHECKING:
@@ -81,11 +83,9 @@ _TICKET = "T-orphan"
 _DEAD_PID = 2_000_000_000
 _DEAD_START_TIME_NS = 123
 
-_AUTO = OrchestratorConfig(reap_policy=ReapPolicy.AUTO)
-_SIGNAL_ONLY = OrchestratorConfig(reap_policy=ReapPolicy.SIGNAL_ONLY)
-_AUTO_FIX_LOOP_ON = OrchestratorConfig(
-    reap_policy=ReapPolicy.AUTO, default_codex_fix_loop_enabled=True
-)
+_AUTO = _use_auto_reap_policy()
+_SIGNAL_ONLY = _use_config(reap_policy=ReapPolicy.SIGNAL_ONLY)
+_AUTO_FIX_LOOP_ON = _use_auto_reap_policy(default_codex_fix_loop_enabled=True)
 
 _GATE_KEYS = ("reap_policy_auto", "fix_loop_disabled", "worktree_clean", "head_unmoved")
 
@@ -344,6 +344,42 @@ def test_failed_audit_write_blocks_the_transition(
     _assert_session_closed()
     assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
     assert len(_completed_events("codex-harvest-failed-audit-completed")) == 1
+
+
+def test_failed_task_disposition_after_session_close_preserves_park(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The completed-session backstop honors a persisted codex park intent."""
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+
+    from cw.dispatch import claim
+
+    def _fail_park(**_kwargs: object) -> None:
+        message = "simulated crash after session close"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(claim, "_park_running_task_blocked_on_user", _fail_park)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _harvest(_SIGNAL_ONLY)
+
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    assert session.recovery_disposition == CODEX_HARVEST_ORPHANED_DISPOSITION
+    assert session.recovery_reason == _PARK_REASON_REAP_POLICY_NOT_AUTO
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
+
+    assert revert_completed_silent_tasks() == []
+
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == CODEX_HARVEST_ORPHANED_DISPOSITION
+    assert task.session_id is None
+    attention = _attention_events("codex-harvest-recovery-backstop")
+    assert len(attention) == 1
+    assert _PARK_REASON_REAP_POLICY_NOT_AUTO in str(attention[0]["breadcrumbs"])
 
 
 def test_codex_candidate_never_reaches_git_synthesis_or_opencode_parse(
