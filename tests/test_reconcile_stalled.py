@@ -338,3 +338,45 @@ def test_stage_mismatch_refusal_is_not_reoffered(
 
     candidates_again = _detect_stalled_candidates(state, task_by_ticket={})
     assert candidates_again == []
+
+
+def test_task_already_terminal_race_completes_session_not_leaked(
+    tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
+) -> None:
+    """#2426 fix-cycle-1: a #2140-shape race must not leak the session.
+
+    A concurrent authority already landed the ticket's dev-queue task
+    genuinely terminal (COMPLETED) before this tick's ``_apply_sentinel_to_
+    task`` lookup ran, so it reports ``routed=False, task_already_terminal=
+    True``. The dead ``emit_result_on`` call previously on this arm always
+    refused here -- stalled's own precondition guarantees ``session.
+    last_result`` already carries a terminal sentinel (that is exactly what
+    made this a candidate), so ``has_terminal_result`` always short-circuited
+    it to ``refused=True`` -- leaving the session ACTIVE and the daemon
+    surface running forever. The session must instead be completed directly,
+    same as the ordinary ``routed=True`` success arm.
+    """
+    state = _foreign_result_session(tmp_path, _stage_complete_payload())
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    store = load_dev_queue()
+    store.tasks.append(
+        TicketTask(
+            ticket_id="salv-1",
+            client="client-a",
+            status=QueueItemStatus.COMPLETED,
+            session_id="salv-1",
+            stage=Stage.IMPL,
+        )
+    )
+    save_dev_queue(store)
+    candidates = _detect_stalled_candidates(state, task_by_ticket={})
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action is ProposedAction.ROUTE_EMITTED_SENTINEL
+
+    _act_on_stalled_candidates(state, candidates, now=_NOW)
+
+    session = state.sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    assert session.completed_at == _NOW
+    assert session.completed_reason == CompletionReason.NORMAL
+    assert stop_recorder.stopped == ["fake-short-id"]
