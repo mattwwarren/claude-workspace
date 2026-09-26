@@ -237,9 +237,7 @@ def _act_on_local_harvest_candidates(
         routed = True
         task_already_terminal = False
         if candidate.ticket_id:
-            outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, session, sentinel, now=now
-            )
+            outcome = _apply_sentinel_to_task(candidate.ticket_id, session, sentinel)
             routed = outcome.routed
             task_already_terminal = outcome.task_already_terminal
         if not routed and not task_already_terminal:

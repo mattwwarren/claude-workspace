@@ -154,6 +154,26 @@ class TestLoadClients:
         result = load_clients()
         assert result["acme"].worker_model == "claude-sonnet-4-6-20251015"
 
+    def test_load_clients_accepts_legacy_sentinel_mismatch_veto_flag(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Clients written during the #2405 rollout remain loadable."""
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    sentinel_mismatch_veto_enabled: true\n"
+        )
+
+        result = load_clients()
+
+        assert result["acme"].sentinel_mismatch_veto_enabled is True
+
     def test_default_worker_model_is_none_when_unset(
         self,
         tmp_config_dir: Path,

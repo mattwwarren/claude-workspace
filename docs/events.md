@@ -1631,7 +1631,7 @@ idle/phantom sweep salvaging the same emitted sentinel via
 own lookup was blocked on `dev_queue_lock()`. `excluded_status` is the raced
 task's status at the moment of the miss (e.g. `failed`, `completed`). `client`
 is the raced task's `client` field, matching the sibling
-`session.sentinel_liveness_vetoed` payload below.
+`sentinel.blocked_result_requeued` payload below.
 
 Round-2 (#1692): this event fires **only** when `excluded_status` is
 genuinely terminal (`COMPLETED`, `FAILED`, or `CANCELLED` — the same
@@ -1816,27 +1816,37 @@ per pipeline episode, since each episode constructs a brand-new `Session`.
   "ticket_id": "<str | null>",
   "client": "<str | null>",
   "session_id": "<str>",
-  "stale_minutes": "<float>",
+  "stale_minutes": "<float | null>",
   "new_veto_count": "<int>"
 }
 ```
-**Semantics:** GitHub #1281, #1449. Emitted instead of the phantom sweep's
-already_refused → `CRASH_COMPLETE` fall-through (GitHub #1149's
+**Semantics:** GitHub #1281, #1449, #2405. For clients with
+`sentinel_mismatch_veto_enabled: true`, emitted instead of the phantom
+sweep's already_refused → `CRASH_COMPLETE` fall-through (GitHub #1149's
 `already_refused` latch: a session whose most recent tick refused a
-stage-mismatched sentinel) when the session's transcript is still actively
-advancing — `_transcript_age_seconds` reports a staleness below
-`TRANSCRIPT_LIVENESS_WINDOW_SECONDS`. The #1281 incident: a session was
+stage-mismatched sentinel) while
+`consecutive_sentinel_mismatch_vetoes < OrchestratorConfig.sentinel_mismatch_veto_cap`
+— regardless of transcript state. The #1281 incident: a session was
 crash-completed 56 seconds before its valid `AUTO_DEV_RESULT` sentinel
 landed, burning the task's final retry attempt on a session that was in fact
 still making progress. The task stays `RUNNING` and the session stays
 `ACTIVE`/`IDLE` — but the session's `consecutive_sentinel_mismatch_vetoes`
 latch **is** incremented; that is the only state this event mutates.
 
+GitHub #2405 (ADR-0014 audit) makes the attempt cap the veto's **only** gate
+for opted-in clients. Clients with the rollout disabled retain the previous
+transcript-liveness fallback and emit shadow telemetry.
+Before #2405 the veto also required a fresh transcript
+(`_transcript_age_seconds` below `TRANSCRIPT_LIVENESS_WINDOW_SECONDS`), and a
+stale or unlocatable transcript fell straight through to `CRASH_COMPLETE` —
+a transcript-age comparison deciding a transition, which ADR-0014 forbids.
+`stale_minutes` is now purely diagnostic: the transcript staleness read on
+this tick when the transcript is locatable, `null` otherwise; it never gates
+the veto.
+
 Unlike `session.park_vetoed`, this veto has exactly one trigger path (the
 already_refused latch), so its payload carries no `reason` field — there is
-only one reason it can fire. A session whose transcript cannot be located
-falls through to `CRASH_COMPLETE` unchanged (fail-toward-crash), as does a
-transcript that has since gone stale beyond the liveness window.
+only one reason it can fire.
 
 The veto is **bounded** (#1449): it is granted only while
 `consecutive_sentinel_mismatch_vetoes < OrchestratorConfig.sentinel_mismatch_veto_cap`
@@ -1847,17 +1857,18 @@ routes silently to `BLOCKED_ON_USER` **and** — at parity with the retry-cap pa
 (`paused_status=sentinel_mismatch_veto_cap_exhausted`, carrying `new_veto_count`,
 non-destructive: no daemon-stop / worktree removal). That escalation is
 edge-triggered: the counter is bumped past the cap (`cap + 1`) when it fires, so
-a session that stays LIVE past its cap does not re-escalate every tick. The
+a session that stays a phantom past its cap does not re-escalate every tick. The
 counter resets for free per pipeline episode, since each episode constructs a
 brand-new `Session`.
 
 `correlation_id` is the `ticket_id`.
 
-### `session.sentinel_liveness_vetoed`
+### `session.sentinel_liveness_vetoed` — historical (ADR-0014)
 
-**Emitter:** `_route_blocked_result_to_task` in `cw.reconcile._shared`
-(called from `_apply_sentinel_to_task`, itself invoked from the Stop hook
-and reconcile's local/idle/phantom sweeps)
+**Emitter:** none since GitHub #2405 (the catch-all now shares
+`_requeue_blocked_result_under_cap` with the other `BlockedResult` branches —
+see `sentinel.blocked_result_requeued`); documented for reading old logs.
+Was `_route_blocked_result_to_task` in `cw.reconcile._shared`.
 **Payload:**
 ```json
 {
@@ -1887,11 +1898,17 @@ counter/cap bounding repeat vetoes against the same session.
 `blocker_reason` is the sentinel's verbatim (unrecognized) `blocker.reason`.
 `correlation_id` is the `ticket_id`. Not in `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
+Retired by GitHub #2405 (ADR-0014 audit): the veto let a transcript-age
+comparison decide `FAILED` vs. `PENDING`. The catch-all is now bounded by the
+same evidence-based attempt cap as the other branches and emits
+`sentinel.blocked_result_requeued` on a sub-cap re-queue instead.
+
 ### `sentinel.blocked_result_requeued`
 
 **Emitter:** `_requeue_blocked_result_under_cap` in `cw.reconcile._shared`
-(called from `_route_blocked_result_to_task` for both the deterministic-parse
-and `validation_failed` branches)
+(called from `_route_blocked_result_to_task` for the deterministic-parse,
+`validation_failed`, and — since #2405 — unrecognized-reason catch-all
+branches)
 **Payload:**
 ```json
 {
@@ -1903,21 +1920,25 @@ and `validation_failed` branches)
   "attempt_cap": "<int>"
 }
 ```
-**Semantics:** GitHub #2401. Closes the #2077 incident: a live worker's
+**Semantics:** GitHub #2401, #2405. This closes the #2077 incident: a live worker's
 `schema_version_unsupported` `BlockedResult` landed its task terminal FAILED
 on the first occurrence, with no diagnostic, while the worker was still
 running — bypassing the #1406 liveness veto above, which only ever covered
-the unrecognized-reason catch-all. Emitted whenever a deterministic-parse or
-`validation_failed` `BlockedResult` re-queues a RUNNING task to PENDING
+the unrecognized-reason catch-all. Emitted whenever a deterministic-parse,
+`validation_failed`, or catch-all `BlockedResult` re-queues a RUNNING task to PENDING
 (clearing `target.session_id`) because `target.attempts` is still under
 `_VALIDATION_FAILED_MAX_ATTEMPTS` (shared with `validation_failed`, not
-renamed). The cap is evidence-based — a repeated identical rejection count,
-never a transcript-age or clock comparison (ADR-0014) — deliberately
-distinct from `session.sentinel_liveness_vetoed`'s transcript-liveness
-mechanism, which this ticket does not extend. Once `attempts` reaches the
-cap, the branch instead lands terminal FAILED/abandoned and persists the
-rejected sentinel to `TicketTask.last_blocked_result` (closing the #1266 gap
-for both branches); a re-queue rejects nothing, so this event is the durable
+renamed) for clients with `blocked_result_requeue_enabled: true`. The cap is
+evidence-based — a repeated identical rejection count,
+never a transcript-age or clock comparison (ADR-0014). GitHub #2405 folded
+the unrecognized-reason catch-all (`status_unknown`,
+`multiple_result_blocks`, any unrecognized `blocker.reason`) into this same
+mechanism, retiring its former transcript-liveness veto
+(`session.sentinel_liveness_vetoed`, now historical); `blocker_reason`
+distinguishes which branch re-queued. Once `attempts` reaches the cap, the
+branch instead lands terminal FAILED/abandoned and persists the rejected
+sentinel to `TicketTask.last_blocked_result` (closing the #1266 gap for
+every branch); a re-queue rejects nothing, so this event is the durable
 trace for the non-terminal outcome. `blocker_reason` is the sentinel's
 verbatim `blocker.reason`; `attempts` is `target.attempts` at decision time.
 `correlation_id` is the `ticket_id`.
