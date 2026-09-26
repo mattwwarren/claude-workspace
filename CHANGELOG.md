@@ -19,6 +19,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **No transcript-age comparison decides a task or session transition on the #1406 or #1281 veto paths for opted-in clients (#2405, ADR-0014 audit):** the unrecognized-reason `BlockedResult` catch-all (`status_unknown`, `multiple_result_blocks`, any unrecognized reason) now shares #2401's `_requeue_blocked_result_under_cap`, re-queuing to PENDING under `_VALIDATION_FAILED_MAX_ATTEMPTS` and landing FAILED (with `last_blocked_result`) only at the cap, whatever the transcript's age; `session.sentinel_liveness_vetoed` is retired (historical only) and sub-cap re-queues emit `sentinel.blocked_result_requeued`. The phantom sweep's already_refused veto (`session.sentinel_stage_mismatch_vetoed`) now fires purely off `sentinel_mismatch_veto_cap` for clients with `sentinel_mismatch_veto_enabled: true`, so a stale or unlocatable transcript is vetoed for up to the cap's ticks instead of falling straight through to `CRASH_COMPLETE`/`BLOCKED_ON_USER`; transcript staleness stays on the event as a diagnostic `stale_minutes` (`null` when unlocatable). Both changes retain per-client rollout gates and shadow/rollback paths. The now-unused `now` parameter is removed from `_apply_sentinel_to_task` and `_route_blocked_result_to_task`. ADR-0014's Consequences section records the remediation.
 
+### Fixed
+
+- **Sprint decision scope boundaries (#2392):** Resolved-decision text now stops at blank lines and Markdown headings, so trailing prose and subsections no longer leak into generated ticket scopes.
+
 ## [1.60.0] - 2026-09-26
 
 ### Added
