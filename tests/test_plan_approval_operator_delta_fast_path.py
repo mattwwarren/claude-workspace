@@ -125,8 +125,7 @@ def test_step1a0b_distinguishes_resolutions_changes_from_ordinary_body_edits() -
     )
     assert "body edit that changes the resolutions source" in window
     assert (
-        "ordinary ticket body edit that does not change the resolutions source does "
-        "not"
+        "ordinary ticket body edit that does not change the resolutions source does not"
     ) in window
     assert "that rule is comment-scoped only" in window
 
@@ -136,8 +135,7 @@ def test_operator_authority_delta_requires_no_delta_not_mere_silence() -> None:
     assert "never satisfied by silence alone" in window
     assert (
         "A durable approval/park timestamp T exists on the row AND no "
-        "operator-authority comment postdates it"
-        in window
+        "operator-authority comment postdates it" in window
     )
     assert "Any operator-authority comment newer than T" in window
     assert "unconditionally, regardless of how much time has passed" in window
@@ -157,6 +155,59 @@ def test_checkpoint1_revocation_marker_gates_both_row_path_subconditions() -> No
         in window
     )
     assert "a later `plan_approved_at` is a fresh approval" in window
+
+
+def test_step1a0b_fast_path_requires_body_sha_match_third_condition() -> None:
+    """#2433 fix cycle 6: an ordinary body edit must NOT ride the fast path.
+
+    The operator-authority-delta alternate previously fired off two
+    conditions (durable approval + no newer operator-authority comment)
+    without checking the persisted `body_sha`, letting a body edit that left
+    the resolutions source untouched skip Step 1c.0's body-edit invalidation
+    entirely. Approval present, no newer operator comment, `body_sha` changed
+    -> full Step 1c.0 / Step 1c path, fast path not taken.
+    """
+    window = _norm(
+        _after(_appendix("plan"), "Operator-authority-delta alternate", span=2600)
+    )
+    assert "ALL three conditions hold" in window
+    assert "plan_approved_fingerprint` both exist on the row" in window
+    assert "no operator-authority comment newer than `plan_approved_at`" in window
+    assert "equals a freshly computed SHA-256 of the live-fetched issue body" in window
+    assert (
+        "A `body_sha` mismatch disqualifies this branch exactly as a newer "
+        "operator-authority comment does" in window
+    )
+    assert "invents no new branch for it" in window
+
+
+def test_step1a0b_body_sha_condition_never_exempted_by_comment_scoped_rule() -> None:
+    window = _norm(
+        _after(_appendix("plan"), "Operator-authority-delta alternate", span=2600)
+    )
+    assert "stays comment-scoped only" in window
+    assert "never, by itself, disqualified by a body edit" in window
+    assert "never exempts the fast path from the body-edit check" in window
+
+
+def test_auto_dev_operator_authority_delta_rule_documents_fast_path_composition() -> (
+    None
+):
+    window = _norm(_after(_rule_section(), NEW_SUBSECTION_ANCHOR, span=3000))
+    assert "requires a third condition" in window
+    assert "all three" in window.lower()
+    assert "never, by itself, disqualified by a" in window or "never exempts" in window
+    assert (
+        "Step 1a.0b item 4's" in window
+        or "Operator-authority-delta alternate" in window
+    )
+
+
+def test_headless_contract_reason_value_mentions_body_sha_condition() -> None:
+    window = _reason_field_row()
+    assert "`operator_approval_no_delta`" in window
+    assert "matching persisted `body_sha`" in window
+    assert "all three required" in window
 
 
 def test_fingerprint_mismatch_subcase_checks_operator_authority_delta_first() -> None:
