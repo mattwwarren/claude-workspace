@@ -622,7 +622,7 @@ def _spawn_claimed_task(
         # spawn failures and the task is reverted to PENDING).
         #
         # Catch broad like the reconcile guard above: a backend
-        # outage (tmux pane exhaustion, transient daemon failure,
+        # outage (transient daemon failure,
         # OSError from the adapter) must NOT kill the loop. The
         # task was just claimed RUNNING by _claim_next_pending; it
         # would otherwise be left in a half-state (status=RUNNING,

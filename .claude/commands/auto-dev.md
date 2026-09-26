@@ -1031,7 +1031,7 @@ The Friction/Health checks remain useful for diagnostics and post-mortems, but t
 
 ## Appendix: Structured Output
 
-In headless mode, after all pipeline logic completes, emit `stage.entered` (`done`) then emit the sentinel-delimited JSON block as the final lines of stdout. The narrative friction reports remain above (still useful for tmux scrollback / post-mortem); this block is the parsing contract for `cw`.
+In headless mode, after all pipeline logic completes, emit `stage.entered` (`done`) then emit the sentinel-delimited JSON block as the final lines of stdout. The narrative friction reports remain above (still useful for transcript review / post-mortem); this block is the parsing contract for `cw`.
 
 **The sentinel is the LAST thing you do — end the turn immediately after it.**
 The closing `AUTO_DEV_RESULT>>>` frame must be the final characters of your

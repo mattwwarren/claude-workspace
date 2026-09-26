@@ -80,7 +80,7 @@ Everything else runs to completion or exits with a structured error.
 
 ## 3. Structured Output
 
-After all pipeline logic completes, the skill emits a sentinel-delimited JSON block as the **final lines of stdout**. Narrative friction reports remain above (still useful for tmux scrollback / post-mortem); this block is the parsing contract.
+After all pipeline logic completes, the skill emits a sentinel-delimited JSON block as the **final lines of stdout**. Narrative friction reports remain above (still useful for transcript review / post-mortem); this block is the parsing contract.
 
 ### 3.1 Sentinels
 

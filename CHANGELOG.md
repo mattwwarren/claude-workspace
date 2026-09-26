@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **Leftover tmux/cmux scaffolding from the pre-1.0 multiplexer backend:** CI (`ci.yml`, `nightly-native.yml`, `release-tag.yml`) no longer installs tmux, since no test uses it; the unused `cmux` pytest marker and the `src/cw/cmux.py` ruff per-file ignore (that module no longer exists) are gone from `pyproject.toml`; and `scripts/install.sh` and `/install-cw` no longer tell macOS users to install and run cmux. The schema-v5 `surface_ref` migration that clears legacy pane IDs is unchanged.
+
 ### Fixed
 
 - **The stalled sweep no longer lands a live worker's mid-pipeline `stage_complete` terminal COMPLETED after `cw result emit` (#2426):** since `cw result emit` (#2382) is write-only and never flips `session.status`, a still-live headless worker's out-of-band emit could be discovered by `stalled.py` as a terminal-shaped foreign result and completed straight to `COMPLETED` at whatever stage it happened to be, even though `stage_complete` is an intermediate stage-advance status. `_append_foreign_result_candidate` now reclassifies an `INTERMEDIATE_ADVANCE_STATUSES` foreign result (today exactly `stage_complete`) as `ROUTE_EMITTED_SENTINEL` and routes it through the same stage-aware authority the phantom sweep already uses, so the task advances to its next stage instead. A stage-mismatch refusal latches (mirroring the phantom/idle sweeps' existing convention) so a stale claim is not re-offered forever.

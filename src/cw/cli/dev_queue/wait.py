@@ -515,7 +515,7 @@ def dev_queue_wait(
         # --- Step 5: HEARTBEAT / ATTENTION ---
         # ATTENTION: stale AND worker not native OR not in daemon roster.
         # Must guard with _is_native_surface_ref to avoid false-attention on
-        # non-daemon surface refs (e.g. tmux window names).
+        # non-daemon surface refs (anything not an 8-char hex daemon short id).
         # BlockedResult → keep polling (partial write guard), so exclude from ATTENTION.
         _check_stale_attention(
             task, session, sentinel, ticket_id, resolved, output_json
