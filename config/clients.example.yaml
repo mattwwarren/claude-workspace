@@ -26,8 +26,7 @@ clients:
   #     impl: "Custom implementation instructions..."
   #     idea: "Custom ideation instructions..."
   #   worktree_base: /path/to/worktrees     # base dir for git worktree isolation
-  #   blocked_result_requeue_enabled: false # opt in per client to #2401/#2405 cap requeues
-  #   sentinel_mismatch_veto_enabled: false # opt in per client to #2405 cap-only vetoes
+  #   blocked_result_requeue_enabled: false # opt in per client to #2401 deterministic-parse cap requeues
 
   # Worktree mode — for multi-branch workflows from a shared repo
   # my-worktree-project:

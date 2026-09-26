@@ -1840,10 +1840,17 @@ def _requeue_blocked_result_under_cap(
     return True
 
 
+def _land_blocked_result_failed(target: TicketTask, sentinel: BlockedResult) -> bool:
+    """Persist a rejected sentinel and land the task terminal FAILED."""
+    target.last_blocked_result = sentinel.model_dump(mode="json")
+    transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
+    return False
+
+
 def _blocked_result_requeue_enabled(
     target: TicketTask, sentinel: BlockedResult
 ) -> bool:
-    """Return the client's #2401/#2405 rollout setting, logging shadowing."""
+    """Return the client's #2401 deterministic-parse rollout setting."""
     try:
         enabled = get_client(target.client).blocked_result_requeue_enabled
     except CwError:
@@ -1876,8 +1883,8 @@ def _route_blocked_result_to_task(
     Deterministic parse failures and the unrecognized-reason catch-all re-queue
     to PENDING (clearing session_id) under a shared evidence-based attempt cap
     when the client's rollout is enabled, landing FAILED only once the cap is
-    reached (GitHub #2401, #2405). The disabled catch-all rollout fails closed
-    to terminal handling; transient failures re-queue unconditionally.
+    reached (GitHub #2401, #2405). The catch-all always uses that cap;
+    transient failures re-queue unconditionally.
     Extracted from _apply_sentinel_to_task to keep that function under the
     branch cap (#918).
 
@@ -1886,13 +1893,12 @@ def _route_blocked_result_to_task(
     when it re-queued to PENDING instead (#1189).
 
     GitHub #2405 (ADR-0014 audit): the catch-all's former #1406 transcript-
-    liveness veto is gone for opted-in clients -- no transcript-age comparison
-    decides FAILED vs. PENDING in the cap-only rollout. A still-advancing
+    liveness veto is gone -- no transcript-age comparison decides FAILED vs.
+    PENDING. A still-advancing
     worker whose sentinel merely failed to *parse* is protected by the attempt
     cap instead: it is re-queued until it has been rejected
     ``_VALIDATION_FAILED_MAX_ATTEMPTS`` times, and only then landed terminal
-    (and, via #1273's ``landed_terminal``, has its daemon stopped). A client
-    with the rollout disabled fails closed to FAILED and records the sentinel.
+    (and, via #1273's ``landed_terminal``, has its daemon stopped).
     """
     # GitHub #2401: the branches below share _requeue_blocked_result_under_
     # cap's attempt-cap gate, closing the #1266 last_blocked_result gap -- a
@@ -1901,11 +1907,7 @@ def _route_blocked_result_to_task(
     # there is no rejected sentinel to store on a non-terminal landing.
     if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
         if not _blocked_result_requeue_enabled(target, sentinel):
-            target.last_blocked_result = sentinel.model_dump(mode="json")
-            transition_task_status(
-                target, QueueItemStatus.FAILED, disposition="abandoned"
-            )
-            return False
+            return _land_blocked_result_failed(target, sentinel)
         return _requeue_blocked_result_under_cap(target, session, sentinel)
     if sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
         return _requeue_blocked_result_under_cap(target, session, sentinel)
@@ -1919,10 +1921,6 @@ def _route_blocked_result_to_task(
     # as "shipped" (#750, the #728 loss). GitHub #2405 (ADR-0014 audit): it
     # shares the same evidence-based attempt cap as the branches above, so a
     # FAILED landing is decided by repeated rejection, never transcript age.
-    if not _blocked_result_requeue_enabled(target, sentinel):
-        target.last_blocked_result = sentinel.model_dump(mode="json")
-        transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
-        return False
     return _requeue_blocked_result_under_cap(target, session, sentinel)
 
 

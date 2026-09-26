@@ -8,7 +8,6 @@ events.
 from __future__ import annotations
 
 import json
-import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1590,49 +1589,6 @@ def test_phantom_sentinel_mismatch_veto_fires_when_no_transcript(
     assert c.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
     assert c.new_veto_count == 1
     assert c.stale_minutes is None
-
-
-def test_phantom_sentinel_mismatch_veto_rollout_disabled_shadows_cap_only_decision(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A disabled client keeps the old age fallback and records shadow telemetry."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
-
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    worktree = tmp_path / "wt-sentinel-veto-disabled"
-    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = started_at + timedelta(hours=2)
-    sess = _mk_phantom_daemon_session(
-        "phantom-veto-disabled-1",
-        started_at,
-        surface_ref="fake-short-id",
-        worktree_path=worktree,
-    )
-    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
-    transcript = _write_salvage_transcript(
-        home, worktree, "csid-phantom-veto-disabled", _stage_complete_payload()
-    )
-    stale_ts = (started_at + timedelta(minutes=1)).timestamp()
-    os.utime(str(transcript), (stale_ts, stale_ts))
-    state = CwState(sessions=[sess])
-    save_state(state)
-    save_dev_queue(DevQueueStore(tasks=[]))
-
-    with caplog.at_level(logging.WARNING, logger="cw.reconcile.phantom._detect"):
-        candidates = _detect_phantom_candidates(
-            state, phantom_set={sess.id}, now=now
-        )
-
-    assert candidates[0].proposed_action == ProposedAction.CRASH_COMPLETE
-    assert any(
-        "sentinel.stage_mismatch_veto_shadowed" in record.message
-        for record in caplog.records
-    )
 
 
 @pytest.mark.parametrize(

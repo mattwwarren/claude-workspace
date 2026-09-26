@@ -1832,17 +1832,14 @@ still making progress. The task stays `RUNNING` and the session stays
 `ACTIVE`/`IDLE` — but the session's `consecutive_sentinel_mismatch_vetoes`
 latch **is** incremented; that is the only state this event mutates.
 
-For clients with `sentinel_mismatch_veto_enabled: true`, GitHub #2405
-(ADR-0014 audit) makes the attempt cap the veto's **only** gate. Before #2405
-the veto also required a fresh transcript
+GitHub #2405 (ADR-0014 audit) makes the attempt cap the veto's **only** gate.
+Before #2405 the veto also required a fresh transcript
 (`_transcript_age_seconds` below `TRANSCRIPT_LIVENESS_WINDOW_SECONDS`), and a
 stale or unlocatable transcript fell straight through to `CRASH_COMPLETE` —
 a transcript-age comparison deciding a transition, which ADR-0014 forbids.
 `stale_minutes` is now purely diagnostic: the transcript staleness read on
 this tick when the transcript is locatable, `null` otherwise; it never gates
-the veto. Clients with the rollout disabled retain the pre-#2405 age-gated
-fallback and emit a `sentinel.stage_mismatch_veto_shadowed` warning for
-rollout monitoring.
+the veto.
 
 Unlike `session.park_vetoed`, this veto has exactly one trigger path (the
 already_refused latch), so its payload carries no `reason` field — there is
@@ -1920,9 +1917,7 @@ branches)
   "attempt_cap": "<int>"
 }
 ```
-**Semantics:** GitHub #2401, #2405. For clients with
-`blocked_result_requeue_enabled: true`, this closes the #2077 incident: a live
-worker's
+**Semantics:** GitHub #2401, #2405. This closes the #2077 incident: a live worker's
 `schema_version_unsupported` `BlockedResult` landed its task terminal FAILED
 on the first occurrence, with no diagnostic, while the worker was still
 running — bypassing the #1406 liveness veto above, which only ever covered
@@ -1943,10 +1938,6 @@ every branch); a re-queue rejects nothing, so this event is the durable
 trace for the non-terminal outcome. `blocker_reason` is the sentinel's
 verbatim `blocker.reason`; `attempts` is `target.attempts` at decision time.
 `correlation_id` is the `ticket_id`.
-
-When `blocked_result_requeue_enabled` is false, the catch-all fails closed to
-terminal `FAILED` handling instead; no requeue event is emitted, and the
-rejected sentinel is persisted in `last_blocked_result` for operator review.
 
 ### `gate.auto_approved`
 
