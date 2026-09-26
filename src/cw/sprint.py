@@ -34,6 +34,7 @@ _TICKET_RE = re.compile(
     r"^###\s+(?P<code>[A-Z]+\d+)\s+—\s+(?P<name>.+?)\s*$", re.MULTILINE
 )
 _DECISION_RE = re.compile(r"^-\s+\*\*(?P<id>D-[A-Za-z0-9]+)\s+—", re.MULTILINE)
+_DECISION_BODY_TERMINATOR_RE = re.compile(r"^(?:[ \t]*$|#{2,}[ \t])", re.MULTILINE)
 _REFERENCE_RE = re.compile(r"^-\s+`(?P<ref>[^`]+)`", re.MULTILINE)
 _FIELD_RE = re.compile(
     r"^-\s+\*\*(?P<key>[A-Za-z ]+):\*\*\s*(?P<value>.*)$", re.MULTILINE
@@ -273,10 +274,16 @@ def _parse_epics(text: str) -> list[EpicSpec]:
 
 
 def _parse_decisions(section: str) -> dict[str, str]:
-    return {
-        match.group("id"): section[match.start() : end].strip().lstrip("- ")
-        for match, end in _iter_matches_with_end(_DECISION_RE, section)
-    }
+    decisions: dict[str, str] = {}
+    for match, end in _iter_matches_with_end(_DECISION_RE, section):
+        terminator = _DECISION_BODY_TERMINATOR_RE.search(section, match.end(), end)
+        decision_end = end
+        if terminator is not None:
+            decision_end = terminator.start()
+        decisions[match.group("id")] = (
+            section[match.start() : decision_end].strip().lstrip("- ")
+        )
+    return decisions
 
 
 def parse_rfc(text: str) -> RfcDoc:

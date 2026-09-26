@@ -123,6 +123,49 @@ def test_parse_rfc_expands_scope_citations_from_resolved_decisions() -> None:
     assert doc.decisions["D-S1"].startswith("**D-S1 — Counterparty derivation.**")
 
 
+def test_parse_rfc_truncates_final_decision_at_blank_line() -> None:
+    rfc = MINIMAL_RFC.replace(
+        "- **D-A1 — Park-class shape.** New blocker.reason value.\n\n## Tickets",
+        "- **D-A1 — Park-class shape.** New blocker.reason value.\n\n"
+        "Trailing prose is not part of the decision.\n\n## Tickets",
+    )
+
+    doc = parse_rfc(rfc)
+
+    assert doc.decisions["D-A1"] == (
+        "**D-A1 — Park-class shape.** New blocker.reason value."
+    )
+
+
+def test_parse_rfc_truncates_final_decision_at_heading_without_blank_line() -> None:
+    rfc = MINIMAL_RFC.replace(
+        "- **D-A1 — Park-class shape.** New blocker.reason value.\n\n## Tickets",
+        "- **D-A1 — Park-class shape.** New blocker.reason value.\n"
+        "### Settled on review\n\n1. Some reading. Settled.\n\n## Tickets",
+    )
+
+    doc = parse_rfc(rfc)
+
+    assert doc.decisions["D-A1"] == (
+        "**D-A1 — Park-class shape.** New blocker.reason value."
+    )
+
+
+def test_parse_rfc_preserves_wrapped_decision_body() -> None:
+    rfc = MINIMAL_RFC.replace(
+        "- **D-A1 — Park-class shape.** New blocker.reason value.\n\n## Tickets",
+        "- **D-A1 — Park-class shape.** New blocker.reason value.\n"
+        "  Wrapped decision detail remains part of the body.\n\n## Tickets",
+    )
+
+    doc = parse_rfc(rfc)
+
+    assert doc.decisions["D-A1"] == (
+        "**D-A1 — Park-class shape.** New blocker.reason value.\n"
+        "  Wrapped decision detail remains part of the body."
+    )
+
+
 def test_parse_rfc_extracts_references() -> None:
     doc = parse_rfc(MINIMAL_RFC)
     assert doc.references == ["src/cw/pr_hydrate.py:257"]
@@ -312,6 +355,24 @@ def _config() -> BuildoutConfig:
             },
         }
     )
+
+
+def test_build_plan_scope_does_not_include_trailing_subsection() -> None:
+    rfc = MINIMAL_RFC.replace(
+        "- **D-A1 — Park-class shape.** New blocker.reason value.\n\n## Tickets",
+        "- **D-A1 — Park-class shape.** New blocker.reason value.\n\n"
+        "### Settled on review\n\n1. Some reading. Settled.\n\n## Tickets",
+    )
+
+    plan = build_plan(parse_rfc(rfc), _config(), version="1.20.0")
+    a1 = next(ticket for ticket in plan.tickets if ticket.code == "A1")
+
+    assert (
+        "## Scope\n\n- **D-A1 — Park-class shape.** New blocker.reason value.\n\n"
+        in a1.body
+    )
+    assert "Settled on review" not in a1.body
+    assert "Some reading. Settled." not in a1.body
 
 
 def test_build_plan_renders_the_milestone_title() -> None:
