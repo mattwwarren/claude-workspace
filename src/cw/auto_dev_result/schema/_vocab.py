@@ -127,9 +127,17 @@ FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset({"agent_block"})
 # the first instance. dependency_unmerged (#2260) is the second: a ticket
 # split into a dependency chain (the #2233/#2213 precedent) whose downstream
 # leg can't proceed until the upstream PR merges -- an unreachable dependency,
-# not a broken leg.
+# not a broken leg. impl_comments_unreadable_after_regress (#2415) is the
+# third: Orientation's live tracker-comment fetch failed on an IMPL entry
+# reached via `_stage_regress`, so the operator/tracker is unreachable right
+# now, not that the implementation itself is broken.
 OPERATOR_UNAVAILABLE_BLOCKER_REASONS: frozenset[str] = frozenset(
-    {"push_auth_failed", "operator_unavailable", "dependency_unmerged"}
+    {
+        "push_auth_failed",
+        "operator_unavailable",
+        "dependency_unmerged",
+        "impl_comments_unreadable_after_regress",
+    }
 )
 # blocker.reason emitted when a stage finds a destructive directive (delete a
 # remote branch, force-push/rewrite shared history, discard work, close or
