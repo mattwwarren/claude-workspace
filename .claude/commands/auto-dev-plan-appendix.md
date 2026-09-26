@@ -37,6 +37,13 @@ The durable revocation is the approval source of truth: Checkpoint 1 MUST honor 
        --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"approved_fingerprint_match\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
      ```
      — in place of, not in addition to, `s1_ambiguity_scan_complete`.
+   - **Operator-authority delta match → fast path (#2433).** Independent of the equality check above: even when `draft_fp` does not equal `plan_approved_fingerprint`, if Checkpoint 1's row-path alternate sufficient condition holds — a non-null `plan_approved_at` AND no operator-authority delta since it, per the *Operator-authority delta* rule (`.claude/commands/auto-dev.md`) — the fast path fires the same as the equality match: skip Step 1c's ambiguity/premise re-scan AND Step 1c.0's round-cap/settlement-folding machinery entirely. Emit:
+     ```bash
+     cw event record stage.entered \
+       --correlation-id "$TICKET" \
+       --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"operator_approval_no_delta\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+     ```
+     — in place of, not in addition to, `s1_ambiguity_scan_complete`, same as the equality branch. Like the equality branch, this branch never emits `resolution_consumed`/`resolution_evidence` either. Any operator-authority comment newer than `plan_approved_at` disqualifies this branch and falls through to the next bullet.
    - **No match (or absent evidence) → proceed to Step 1c.0 / Step 1c as today**, now evaluated against the (possibly just-revised) draft.
 
 **Scope note on evidence source.** Step 4's evidence check is scoped to the row-path only (`cw dev-queue approve`) — matching the ticket's literal wording ("the row's `plan_approved_fingerprint` matches"). A comment-path-token-approved draft is unaffected by this section; it continues through today's slower path (Step 1c re-scan runs, Checkpoint 1 re-evaluates the comment-path token as it does today).
