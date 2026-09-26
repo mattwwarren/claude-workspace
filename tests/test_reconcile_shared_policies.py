@@ -2929,6 +2929,43 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             for r in caplog.records
         )
 
+    def test_running_task_blocked_result_catch_all_requeues_when_rollout_disabled(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#2405: the catch-all uses the attempt cap even for disabled clients."""
+        ticket_id, session_id = "GH-2405-catchall-disabled", "sess-2405-disabled"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="unconfigured-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason="unknown_reason_xyz",
+                details="test: catch-all with rollout disabled",
+            )
+        )
+
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+        assert outcome.routed is True
+        assert outcome.landed_terminal is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+        assert t.last_blocked_result is None
+        assert [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SENTINEL_BLOCKED_RESULT_REQUEUED
+        ]
+
     def test_running_task_blocked_result_validation_failed_at_cap_returns_routed_false(
         self, tmp_config_dir: Path
     ) -> None:
