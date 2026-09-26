@@ -109,29 +109,11 @@ def _apply_stalled_routed_mutations(
         task_already_terminal = False
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, session, routed_sentinel, now=now
+                candidate.ticket_id, session, routed_sentinel
             )
             routed = outcome.routed
             task_already_terminal = outcome.task_already_terminal
-        if not routed and task_already_terminal:
-            # #2140-shape race: another authority already landed this
-            # ticket's task genuinely terminal before this lookup ran. Unlike
-            # phantom's/idle's identical-looking arm, stalled's own
-            # precondition (this session was only a candidate because
-            # ``_has_terminal_sentinel`` already found a terminal sentinel in
-            # ``session.last_result``) guarantees ``emit_result_on`` would
-            # always see ``has_terminal_result(...) == True`` and always
-            # return ``refused=True`` -- that door is never open here, so
-            # complete the session directly instead (#2426 fix-cycle-1).
-            session.status = SessionStatus.COMPLETED
-            session.completed_at = now
-            session.completed_reason = CompletionReason.NORMAL
-            session.last_result = routed_sentinel.model_dump(mode="json")
-            if candidate.salvage_csid is not None:
-                session.claude_session_id = candidate.salvage_csid
-            accepted.append(candidate)
-            continue
-        if not routed:
+        if not routed and not task_already_terminal:
             # #1149-shape stage-mismatch refusal: leave the task untouched and
             # merge (never clobber) the refusal flag into the pre-existing
             # last_result dict, matching phantom's merge-safe convention --
@@ -149,6 +131,17 @@ def _apply_stalled_routed_mutations(
                     _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
                 }
             continue
+        # Shared completion path for the ordinary routed=True success arm and
+        # the #2140-shape task_already_terminal race (another authority
+        # already landed this ticket's task genuinely terminal before this
+        # lookup ran). Unlike phantom's/idle's identical-looking arm,
+        # stalled's own precondition (this session was only a candidate
+        # because ``_has_terminal_sentinel`` already found a terminal
+        # sentinel in ``session.last_result``) guarantees ``emit_result_on``
+        # would always see ``has_terminal_result(...) == True`` and always
+        # return ``refused=True`` -- that door is never open here, so both
+        # arms complete the session directly and share this one block
+        # (#2426 fix-cycle-2, folding fix-cycle-1's duplicate).
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
