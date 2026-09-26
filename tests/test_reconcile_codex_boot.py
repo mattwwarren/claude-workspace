@@ -120,15 +120,21 @@ def _requeued_events(consumer: str) -> list[dict[str, object]]:
     ]
 
 
-def _use_config(monkeypatch: pytest.MonkeyPatch, **fields: object) -> None:
+def _use_config(
+    monkeypatch: pytest.MonkeyPatch | None = None, **fields: object
+) -> OrchestratorConfig:
     """Pin the orchestrator config the boot pass resolves its gates against."""
     config = OrchestratorConfig.model_validate(fields)
-    monkeypatch.setattr(codex_boot, "load_effective_config", lambda: config)
+    if monkeypatch is not None:
+        monkeypatch.setattr(codex_boot, "load_effective_config", lambda: config)
+    return config
 
 
-def _use_auto_reap_policy(monkeypatch: pytest.MonkeyPatch, **fields: object) -> None:
+def _use_auto_reap_policy(
+    monkeypatch: pytest.MonkeyPatch | None = None, **fields: object
+) -> OrchestratorConfig:
     """Authorize the requeue branch (gate 0) so a later gate is what decides."""
-    _use_config(monkeypatch, reap_policy=ReapPolicy.AUTO, **fields)
+    return _use_config(monkeypatch, reap_policy=ReapPolicy.AUTO, **fields)
 
 
 def _reap_proposed_events(consumer: str) -> list[dict[str, object]]:

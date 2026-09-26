@@ -63,6 +63,16 @@ This is a blast-radius bound, not a liveness handle: it does not make codex
 sessions crash-recoverable in the RFC 0005 F3 sense (no PID/surface_ref is
 persisted for external harvest). See the ``StageExecutor`` Protocol invariant
 comment in ``cw.executor`` for the accepted gap this bounds.
+
+Two sibling modules import this module's private helpers: ``cw.reconcile
+.codex_reparks`` re-runs ``_resolve_orphan_action`` on reconcile ticks (#2307),
+and ``cw.reconcile.local``'s codex harvest branch (RFC 0014 A1, #2387) reuses
+the clean-requeue primitives (``_worktree_porcelain_clean_except_verdict``,
+``_head_matches_pre_review_ref``) and the ``_PARK_REASON_*`` constants for a
+codex session whose recorded PID has died. That branch skips the live-writer
+scan (the recycled-PID guard already proved the process dead) and evaluates
+every gate check rather than short-circuiting, so its audit event can report
+each one. Changing these helpers' contracts changes both consumers.
 """
 
 from __future__ import annotations
