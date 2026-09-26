@@ -24,6 +24,7 @@ from cw.auto_dev_result import (
     EXTERNAL_STATE_BLOCKER_REASON,
     FINALIZE_REGRESS_BLOCKER_REASONS,
     FREEFORM_BLOCKER_REASON_PREFIX,
+    IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
     KNOWN_BLOCKER_REASONS,
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
@@ -4583,7 +4584,7 @@ class TestOperatorUnavailableBlockerReasons:
                     "push_auth_failed",
                     "operator_unavailable",
                     "dependency_unmerged",
-                    "impl_comments_unreadable_after_regress",
+                    IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
                 }
             )
             == OPERATOR_UNAVAILABLE_BLOCKER_REASONS
@@ -4604,7 +4605,9 @@ class TestOperatorUnavailableBlockerReasons:
     def test_impl_comments_unreadable_after_regress_is_known_blocker_reason(
         self,
     ) -> None:
-        assert is_known_blocker_reason("impl_comments_unreadable_after_regress")
+        assert is_known_blocker_reason(
+            IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
+        )
 
     def test_finalize_regress_blocker_reasons_unchanged(self) -> None:
         assert frozenset({"agent_block"}) == FINALIZE_REGRESS_BLOCKER_REASONS
@@ -4635,11 +4638,14 @@ class TestOperatorUnavailableBlockerReasons:
         """A blocked+impl_comments_unreadable_after_regress blocker round-trips
         without a schema bump (#2415)."""
         p = _blocked_payload()
-        p["blocker"]["reason"] = "impl_comments_unreadable_after_regress"
+        p["blocker"]["reason"] = IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
         result = parse_stdout(_wrap_sentinel(p))
         assert isinstance(result, AutoDevResult)
         assert result.blocker is not None
-        assert result.blocker.reason == "impl_comments_unreadable_after_regress"
+        assert (
+            result.blocker.reason
+            == IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
+        )
         assert result.schema_version == p["schema_version"]
 
 

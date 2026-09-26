@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
+from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
 from cw.codex_background import join_outstanding_codex_threads
 from cw.config import (
     _load_concurrency_overrides,
@@ -11332,14 +11333,17 @@ class TestApplyStagedDecision:
             "status": "blocked",
             "blocker": {
                 "stage": "stage2_impl",
-                "reason": "impl_comments_unreadable_after_regress",
+                "reason": IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
             },
         }
         apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "awaiting_operator"
-        assert task.blocked_reason == "impl_comments_unreadable_after_regress"
+        assert (
+            task.blocked_reason
+            == IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
+        )
 
     def test_merge_gate_blocked_push_auth_failed_stamps_awaiting_operator_disposition(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
@@ -14185,7 +14189,7 @@ class TestApplyStagedDecision:
             "push_auth_failed",
             "operator_unavailable",
             "dependency_unmerged",
-            "impl_comments_unreadable_after_regress",
+            IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
         ],
     )
     def test_operator_unavailable_blocker_sets_awaiting_operator_paused_status(
@@ -14233,7 +14237,7 @@ class TestApplyStagedDecision:
             "push_auth_failed",
             "operator_unavailable",
             "dependency_unmerged",
-            "impl_comments_unreadable_after_regress",
+            IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
         ],
     )
     def test_blocked_at_finalize_operator_unavailable_reason_parks_without_regress(

@@ -131,12 +131,15 @@ FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset({"agent_block"})
 # third: Orientation's live tracker-comment fetch failed on an IMPL entry
 # reached via `_stage_regress`, so the operator/tracker is unreachable right
 # now, not that the implementation itself is broken.
+IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON: Literal[
+    "impl_comments_unreadable_after_regress"
+] = "impl_comments_unreadable_after_regress"
 OPERATOR_UNAVAILABLE_BLOCKER_REASONS: frozenset[str] = frozenset(
     {
         "push_auth_failed",
         "operator_unavailable",
         "dependency_unmerged",
-        "impl_comments_unreadable_after_regress",
+        IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
     }
 )
 # blocker.reason emitted when a stage finds a destructive directive (delete a

@@ -3,6 +3,7 @@ override (#1794) — mirrors tests/test_scope_conformance_gate_docs.py's pairing
 of a script-behavior test file with a prose-wiring test file.
 """
 
+from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
 from tests.conftest import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
@@ -153,7 +154,10 @@ def test_orientation_regressed_comments_fetch_failure_hard_blocks() -> None:
     survive unchanged alongside the new hard-block branch."""
     content = _cmd("auto-dev-impl.md")
     window = _after(content, "**Comments are live, not cached", span=2800)
-    assert 'blocker.reason: "impl_comments_unreadable_after_regress"' in window
+    assert (
+        f'blocker.reason: "{IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON}"'
+        in window
+    )
     assert "queue_metadata.regressed_into_stage" in window
     assert "impl_comments_fetch_failed" in window
     assert "a stale-but-real array is better evidence than none" in window

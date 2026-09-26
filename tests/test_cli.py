@@ -26,6 +26,7 @@ from cw.auto_dev_result import (
     _CLOSE_SENTINEL,
     _OPEN_SENTINEL,
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
+    IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
 )
 from cw.cli import (
     _complete_client,
@@ -9831,15 +9832,16 @@ class TestDevQueueTasksPrState:
                         client="attn-client",
                         status=QueueItemStatus.BLOCKED_ON_USER,
                         disposition="awaiting_operator",
-                        blocked_reason="impl_comments_unreadable_after_regress",
+                        blocked_reason=IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
                     )
                 ]
             )
         )
         result = CliRunner().invoke(main, ["dev-queue", "tasks"])
         assert result.exit_code == 0, result.output
-        assert "impl_comments_unread" in result.output
-        assert "?impl_comments_unread" not in result.output
+        reason_prefix = IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON[:20]
+        assert reason_prefix in result.output
+        assert f"?{reason_prefix}" not in result.output
 
     def test_tasks_human_renders_em_dash_for_absent_blocked_reason(
         self, tmp_config_dir: Path
