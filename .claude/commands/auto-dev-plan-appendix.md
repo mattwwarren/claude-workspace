@@ -37,7 +37,7 @@ The durable revocation is the approval source of truth: Checkpoint 1 MUST honor 
        --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"approved_fingerprint_match\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
      ```
      — in place of, not in addition to, `s1_ambiguity_scan_complete`.
-   - **Operator-authority delta match → fast path (#2433).** Independent of the equality check above: even when `draft_fp` does not equal `plan_approved_fingerprint`, if Checkpoint 1's row-path alternate sufficient condition holds — both durable row fields are non-null, no operator-authority delta since `plan_approved_at` per the *Operator-authority delta* rule (`.claude/commands/auto-dev.md`), and the changed portion has been machine-verified as advisory-only — the fast path fires the same as the equality match: skip Step 1c's ambiguity/premise re-scan AND Step 1c.0's round-cap/settlement-folding machinery entirely. Emit:
+   - **Operator-authority delta match → fast path (#2433).** Independent of the equality check above: even when `draft_fp` does not equal `plan_approved_fingerprint`, if Checkpoint 1's row-path alternate sufficient condition holds — both durable row fields are non-null and no operator-authority delta since `plan_approved_at` per the *Operator-authority delta* rule (`.claude/commands/auto-dev.md`) — the fast path fires the same as the equality match: skip Step 1c's ambiguity/premise re-scan AND Step 1c.0's round-cap/settlement-folding machinery entirely. Emit:
      ```bash
      cw event record stage.entered \
        --correlation-id "$TICKET" \

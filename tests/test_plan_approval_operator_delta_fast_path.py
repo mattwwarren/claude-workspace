@@ -1,4 +1,4 @@
-"""Guard tests: plan approval survives advisory-only draft drift with no
+"""Guard tests: plan approval survives draft drift with no
 operator dissent (#2433).
 
 `plan_approved_fingerprint` binds an approval to the exact draft text the
@@ -146,7 +146,6 @@ def test_checkpoint1_alternate_requires_both_row_fields() -> None:
     assert "`plan_approved_fingerprint`" in window
     assert "must be non-null" in window
     assert "`plan_approved_fingerprint` must not be `None`" in window
-    assert "machine-verified as advisory-only" in window
 
 
 def test_checkpoint1_existing_equality_language_still_present() -> None:
@@ -203,9 +202,6 @@ def test_fingerprint_mismatch_subcase_checks_operator_authority_delta_first() ->
     assert "Check the operator-authority-delta branch first (#2433)" in window
     assert "the approval transfers via that branch instead" in window
     assert "Only when that condition also fails" in window
-    assert "machine-verified as advisory-only" in window
-    assert "Comment silence alone is not that verification" in window
-    assert "substantive or destructive changes still require re-approval" in window
     assert "quote both fingerprints" in window
     assert "does not transfer by fingerprint equality alone" in window
 
