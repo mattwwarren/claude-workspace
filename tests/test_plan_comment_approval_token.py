@@ -93,7 +93,7 @@ def test_checkpoint1_row_side_evidence_window_still_intact() -> None:
     the comment-path detail block is inserted lower in the same section."""
     section = _checkpoint1_section()
     window = _after(
-        section, "the AUTO-SKIP additionally requires approval evidence", span=3600
+        section, "the AUTO-SKIP additionally requires approval evidence", span=3700
     )
     assert "`queue_metadata.plan_approved_at`" in window
     assert "`.claude/cw-context.json`" in window
