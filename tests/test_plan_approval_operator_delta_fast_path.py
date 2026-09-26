@@ -61,6 +61,20 @@ def test_checkpoint1_existing_equality_language_still_present() -> None:
     assert "equal to `draft_fp`" in _checkpoint1_section()
 
 
+def test_checkpoint1_no_delta_alternate_still_requires_fingerprint() -> None:
+    """A timestamp without the paired durable fingerprint is not approval."""
+    section = _norm(_checkpoint1_section())
+    row_path = _after(section, "**Row path:**", span=1500)
+    assert (
+        "non-null `queue_metadata.plan_approved_at` **AND** non-null "
+        "`queue_metadata.plan_approved_fingerprint`"
+    ) in row_path
+    assert (
+        "tolerates a non-equal fingerprint but still requires both durable approval "
+        "fields"
+    ) in row_path
+
+
 def test_step1a0b_fast_path_gains_operator_authority_branch() -> None:
     window = _norm(_after(_appendix("plan"), "Fingerprint fast-path check", span=2600))
     assert "Operator-authority-delta alternate" in window
@@ -99,6 +113,22 @@ def test_scope_note_on_evidence_source_unchanged() -> None:
         in window
     )
     assert "comment-path-token-approved draft is unaffected" in window
+
+
+def test_step1a0b_distinguishes_resolutions_changes_from_ordinary_body_edits() -> None:
+    window = _norm(
+        _after(
+            _appendix("plan"),
+            "Because step 3 (delta/revision) runs strictly before step 4",
+            span=1100,
+        )
+    )
+    assert "body edit that changes the resolutions source" in window
+    assert (
+        "ordinary ticket body edit that does not change the resolutions source does "
+        "not"
+    ) in window
+    assert "that rule is comment-scoped only" in window
 
 
 def test_operator_authority_delta_requires_no_delta_not_mere_silence() -> None:
