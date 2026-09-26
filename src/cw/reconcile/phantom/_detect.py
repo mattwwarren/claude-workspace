@@ -8,9 +8,12 @@ ADR-0006.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
+from cw.config import get_client
+from cw.exceptions import CwError
 from cw.models import DEFAULT_LANE, OrchestratorConfig, SessionOrigin
 from cw.reconcile import _shared
 from cw.reconcile._shared import (
@@ -25,6 +28,8 @@ from cw.reconcile._shared import (
     ticket_id_for_session,
 )
 from cw.result import reconstruct_staged_sentinel
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -77,9 +82,11 @@ def _sentinel_mismatch_veto_candidate(
     *,
     now: datetime,
     config: OrchestratorConfig,
+    enabled: bool = True,
 ) -> tuple[ReapCandidate | None, bool, float | None]:
     """Return ``(veto_candidate_or_None, cap_exhausted, stale_seconds)`` for an
-    already_refused phantom (#1281, bounded by #1449, cap-only since #2405).
+    already_refused phantom (#1281, bounded by #1449, cap-only since #2405
+    for clients with the rollout enabled).
 
     Guards the already_refused latch's fall-through to CRASH_COMPLETE in
     _detect_phantom_candidates: a session whose most recent tick refused a
@@ -87,12 +94,15 @@ def _sentinel_mismatch_veto_candidate(
     first tick after the refusal -- the #1281 incident killed a session 56
     seconds before its valid sentinel landed.
 
-    GitHub #2405 (ADR-0014 audit): the veto is gated solely by the
-    evidence-based attempt cap ``config.sentinel_mismatch_veto_cap`` against
+    GitHub #2405 (ADR-0014 audit): for an opted-in client, the veto is gated
+    solely by the evidence-based attempt cap
+    ``config.sentinel_mismatch_veto_cap`` against
     ``session.consecutive_sentinel_mismatch_vetoes``. Transcript age is still
     read, but only as a diagnostic (``stale_seconds`` / ``stale_minutes``); it
     never decides veto vs. fall-through, and an unlocatable transcript no
-    longer short-circuits to CRASH_COMPLETE.
+    longer short-circuits to CRASH_COMPLETE. The disabled rollout preserves
+    the pre-#2405 age-gated fallback and logs the cap-only shadow decision.
+    The three return shapes below describe the opted-in path:
 
     - ``(candidate, False, stale_seconds)`` — under the cap: veto, with the
       candidate's ``new_veto_count`` set to
@@ -118,6 +128,24 @@ def _sentinel_mismatch_veto_candidate(
     See GitHub #1281, #1449, #2405 and ADR-0014.
     """
     stale_seconds = _transcript_age_seconds(session, now)
+    if not enabled:
+        _log.warning(
+            "sentinel.stage_mismatch_veto_shadowed: client=%s session=%s "
+            "count=%s cap=%s stale_seconds=%s cap_only_would_veto=%s; "
+            "sentinel_mismatch_veto_enabled is false",
+            session.client,
+            session.id,
+            session.consecutive_sentinel_mismatch_vetoes,
+            config.sentinel_mismatch_veto_cap,
+            stale_seconds,
+            session.consecutive_sentinel_mismatch_vetoes
+            < config.sentinel_mismatch_veto_cap,
+        )
+        if (
+            stale_seconds is None
+            or stale_seconds >= _shared.TRANSCRIPT_LIVENESS_WINDOW_SECONDS
+        ):
+            return None, False, None
     cap = config.sentinel_mismatch_veto_cap
     if session.consecutive_sentinel_mismatch_vetoes >= cap:
         cap_exhausted = session.consecutive_sentinel_mismatch_vetoes == cap
@@ -273,10 +301,19 @@ def _detect_phantom_candidates(
             # very next tick (the #1281 incident: a valid AUTO_DEV_RESULT landed
             # 56s after the refusal that burned the task's final attempt). Veto
             # the crash until the attempt cap is spent (#1449, cap-only since
-            # #2405 -- see _sentinel_mismatch_veto_candidate).
+            # #2405 for opted-in clients -- see _sentinel_mismatch_veto_candidate).
+            try:
+                veto_enabled = get_client(session.client).sentinel_mismatch_veto_enabled
+            except CwError:
+                veto_enabled = False
             veto, veto_cap_exhausted, veto_stale_seconds = (
                 _sentinel_mismatch_veto_candidate(
-                    session, ticket_id, lane, now=now, config=effective_config
+                    session,
+                    ticket_id,
+                    lane,
+                    now=now,
+                    config=effective_config,
+                    enabled=veto_enabled,
                 )
             )
             if veto is not None:

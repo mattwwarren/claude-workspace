@@ -1850,7 +1850,7 @@ def _land_blocked_result_failed(target: TicketTask, sentinel: BlockedResult) -> 
 def _blocked_result_requeue_enabled(
     target: TicketTask, sentinel: BlockedResult
 ) -> bool:
-    """Return the client's #2401 deterministic-parse rollout setting."""
+    """Return the client's #2401/#2405 BlockedResult rollout setting."""
     try:
         enabled = get_client(target.client).blocked_result_requeue_enabled
     except CwError:
@@ -1921,6 +1921,8 @@ def _route_blocked_result_to_task(
     # as "shipped" (#750, the #728 loss). GitHub #2405 (ADR-0014 audit): it
     # shares the same evidence-based attempt cap as the branches above, so a
     # FAILED landing is decided by repeated rejection, never transcript age.
+    if not _blocked_result_requeue_enabled(target, sentinel):
+        return _land_blocked_result_failed(target, sentinel)
     return _requeue_blocked_result_under_cap(target, session, sentinel)
 
 

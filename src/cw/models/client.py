@@ -94,6 +94,11 @@ class ClientConfig(BaseModel):
     # handling for this client. Enable explicitly after reconciling any
     # already-requeued rows/events for the client.
     blocked_result_requeue_enabled: bool = False
+    # Per-client opt-in for the #2405 cap-only phantom stage-mismatch veto.
+    # False retains the pre-#2405 transcript-liveness fallback. Keep this
+    # setting readable so clients.yaml written during the staged rollout
+    # remains loadable after the policy becomes the default implementation.
+    sentinel_mismatch_veto_enabled: bool = False
     auto_background_threshold: int | None = None
     notifications: bool = False
     lanes: list[LaneConfig] = Field(default_factory=list)

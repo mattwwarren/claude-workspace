@@ -1820,7 +1820,8 @@ per pipeline episode, since each episode constructs a brand-new `Session`.
   "new_veto_count": "<int>"
 }
 ```
-**Semantics:** GitHub #1281, #1449, #2405. Emitted instead of the phantom
+**Semantics:** GitHub #1281, #1449, #2405. For clients with
+`sentinel_mismatch_veto_enabled: true`, emitted instead of the phantom
 sweep's already_refused → `CRASH_COMPLETE` fall-through (GitHub #1149's
 `already_refused` latch: a session whose most recent tick refused a
 stage-mismatched sentinel) while
@@ -1832,7 +1833,9 @@ still making progress. The task stays `RUNNING` and the session stays
 `ACTIVE`/`IDLE` — but the session's `consecutive_sentinel_mismatch_vetoes`
 latch **is** incremented; that is the only state this event mutates.
 
-GitHub #2405 (ADR-0014 audit) makes the attempt cap the veto's **only** gate.
+GitHub #2405 (ADR-0014 audit) makes the attempt cap the veto's **only** gate
+for opted-in clients. Clients with the rollout disabled retain the previous
+transcript-liveness fallback and emit shadow telemetry.
 Before #2405 the veto also required a fresh transcript
 (`_transcript_age_seconds` below `TRANSCRIPT_LIVENESS_WINDOW_SECONDS`), and a
 stale or unlocatable transcript fell straight through to `CRASH_COMPLETE` —
@@ -1925,7 +1928,8 @@ the unrecognized-reason catch-all. Emitted whenever a deterministic-parse,
 `validation_failed`, or catch-all `BlockedResult` re-queues a RUNNING task to PENDING
 (clearing `target.session_id`) because `target.attempts` is still under
 `_VALIDATION_FAILED_MAX_ATTEMPTS` (shared with `validation_failed`, not
-renamed). The cap is evidence-based — a repeated identical rejection count,
+renamed) for clients with `blocked_result_requeue_enabled: true`. The cap is
+evidence-based — a repeated identical rejection count,
 never a transcript-age or clock comparison (ADR-0014). GitHub #2405 folded
 the unrecognized-reason catch-all (`status_unknown`,
 `multiple_result_blocks`, any unrecognized `blocker.reason`) into this same
