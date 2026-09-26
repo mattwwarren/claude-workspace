@@ -18,7 +18,6 @@ from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
     STAGE4A_MERGE_GATE,
     SUPPORTED_STAGES,
-    FakeOpencodeRunner,
     RealOpencodeRunner,
     build_argv,
     build_env,
@@ -173,30 +172,6 @@ def test_extract_text_from_jsonl_empty_string() -> None:
 
 
 # ---------------------------------------------------------------------------
-# FakeOpencodeRunner
-# ---------------------------------------------------------------------------
-
-
-def test_fake_runner_records_call_and_returns_live_proc(tmp_path: Path) -> None:
-    """FakeOpencodeRunner.launch() records argv/cwd/env and returns a live process."""
-    runner = FakeOpencodeRunner()
-    argv = ["opencode", "run", "--format", "json", "do stuff"]
-    env = {"HOME": "/tmp", "PATH": "/usr/bin"}
-
-    proc = runner.launch(tmp_path, argv, env)
-    try:
-        assert len(runner.calls) == 1
-        call = runner.calls[0]
-        assert call["argv"] == argv
-        assert call["cwd"] == tmp_path
-        assert call["env"] == env
-        assert proc.poll() is None
-    finally:
-        proc.kill()
-        proc.wait()
-
-
-# ---------------------------------------------------------------------------
 # RealOpencodeRunner
 # ---------------------------------------------------------------------------
 
@@ -218,7 +193,7 @@ def test_real_runner_creates_log_file(tmp_path: Path) -> None:
 def test_real_runner_launch_passes_start_new_session(tmp_path: Path) -> None:
     """RealOpencodeRunner.launch() passes start_new_session=True to Popen."""
     runner = RealOpencodeRunner()
-    with patch("cw.opencode_runner.subprocess.Popen") as mock_popen:
+    with patch("cw.executor_launch.subprocess.Popen") as mock_popen:
         runner.launch(tmp_path, ["echo", "test-output"], {})
     assert mock_popen.call_args.kwargs["start_new_session"] is True
 

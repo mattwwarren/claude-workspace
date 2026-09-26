@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,22 +23,33 @@ from cw.models.enums import (
     Stage,
 )
 
+# The fire-and-forget backends that record a LocalLivenessHandle. A narrow
+# subset of cw.executor_diagnostics.ExecutorName, defined here because that
+# module imports cw.config (which imports cw.models) — importing it would
+# break this package's DAG-leaf property.
+LocalLivenessBackend = Literal["aider", "opencode"]
+
+DEFAULT_LOCAL_LIVENESS_BACKEND: LocalLivenessBackend = "aider"
+
 
 class LocalLivenessHandle(BaseModel):
-    """Process-liveness handle for a LocalExecutor aider subprocess (RFC 0005 F3).
+    """Process-liveness handle for a fire-and-forget subprocess (RFC 0005 F3).
 
     Binds a PID to its process creation-time (nanoseconds, epoch-relative —
     ``psutil.Process(pid).create_time()``, see GitHub #921) captured at spawn.
     The start-time pin lets harvest detection reject a recycled PID: a dead
-    aider PID reassigned to an unrelated process re-reads a different
-    start-time, so the session is treated as dead (harvested) rather than
-    falsely observed alive. Frozen — an immutable snapshot. See GitHub #888.
+    PID reassigned to an unrelated process re-reads a different start-time, so
+    the session is treated as dead (harvested) rather than falsely observed
+    alive. ``backend`` names the executor that launched the process and selects
+    the harvest-time result synthesizer (#2369). Frozen — an immutable
+    snapshot. See GitHub #888.
     """
 
     model_config = ConfigDict(frozen=True)
 
     pid: int
     start_time_ns: int
+    backend: LocalLivenessBackend = DEFAULT_LOCAL_LIVENESS_BACKEND
 
 
 class Session(BaseModel):

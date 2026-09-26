@@ -21,6 +21,7 @@ from cw.executor import (
     _PreflightOK,
     resolve_executor,
 )
+from cw.executor.core import FakeFireAndForgetRunner
 from cw.executor_diagnostics import (
     ExecutorFailure,
     diagnostics_bundle_dir,
@@ -34,7 +35,6 @@ from cw.local_runner import (
     PLAN_MISSING,
     TASK_CONTEXT_RELATIVE_PATH,
     UNEXPECTED_ERROR,
-    FakeAiderRunner,
 )
 from cw.models import (
     LOCAL_BACKEND,
@@ -94,7 +94,7 @@ def test_local_executor_blocked_endpoint_none(
 ) -> None:
     """endpoint=None → blocked/endpoint_not_configured before runner is called."""
     worktree = make_git_repo("wt-local-ep-none")
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(backend=LOCAL_BACKEND, model="m", endpoint=None)
     executor = LocalExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
@@ -118,7 +118,7 @@ def test_local_executor_blocked_aider_not_found(
 ) -> None:
     """aider_available() is False → blocked/aider_not_found."""
     worktree = make_git_repo("wt-local-aider-missing")
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -147,7 +147,7 @@ def test_local_executor_blocked_plan_missing(
 ) -> None:
     """Absent .cw/plan.md → blocked/plan_missing."""
     worktree = make_git_repo("wt-local-plan-missing")
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -184,7 +184,7 @@ def test_local_executor_spawn_runner_path(
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
 
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
     )
@@ -210,6 +210,7 @@ def test_local_executor_spawn_runner_path(
         assert session.status == SessionStatus.ACTIVE
         assert isinstance(session.local_liveness, LocalLivenessHandle)
         assert session.local_liveness.pid == fake_runner.procs[0].pid
+        assert session.local_liveness.backend == "aider"
         assert session.last_result is None
     finally:
         for proc in fake_runner.procs:
@@ -237,7 +238,7 @@ def test_local_executor_launch_records_liveness_and_returns_active(
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
 
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
     )
@@ -276,7 +277,7 @@ def test_local_executor_exception_handler_marks_session_completed(
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text("plan", encoding="utf-8")
 
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
     )
@@ -325,7 +326,7 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text("plan", encoding="utf-8")
 
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
     )
@@ -335,13 +336,13 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
 
     with (
         patch("cw.executor.local.aider_available", return_value=True),
-        patch("cw.executor.local.read_process_start_time_ns", return_value=None),
+        patch("cw.executor.core.read_process_start_time_ns", return_value=None),
     ):
         sid = executor.spawn(
             stage=Stage.IMPL, task=task, worktree=worktree, client=client
         )
 
-    # FakeAiderRunner spawned a sleep process; the None path kills it but
+    # FakeFireAndForgetRunner spawned a sleep process; the None path kills it but
     # suppress in case it already exited.
     for proc in fake_runner.procs:
         with contextlib.suppress(OSError):
@@ -376,7 +377,7 @@ def test_local_executor_emit_session_not_found_logs_and_skips(
     main completion path (Site 1, pre-flight-blocked branch).
     """
     worktree = make_git_repo("wt-local-emit-not-found")
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(backend=LOCAL_BACKEND, model="m", endpoint=None)
     executor = LocalExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
@@ -407,7 +408,7 @@ def test_local_executor_door_refusal_still_completes_session(
     refusal affects only the last_result write, not status/event bookkeeping.
     """
     worktree = make_git_repo("wt-local-door-refusal")
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(backend=LOCAL_BACKEND, model="m", endpoint=None)
     executor = LocalExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
@@ -428,7 +429,7 @@ def test_local_executor_door_refusal_still_completes_session(
 
     with (
         patch("cw.executor.core.emit_result_locked", side_effect=_refuse),
-        patch("cw.executor.local._record_orchestrator_event") as record_mock,
+        patch("cw.executor.core._record_orchestrator_event") as record_mock,
     ):
         sid = executor.spawn(
             stage=Stage.IMPL, task=task, worktree=worktree, client=client
@@ -453,7 +454,7 @@ def test_local_executor_liveness_unavailable_persists_runtime_error_diagnostics(
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text("plan", encoding="utf-8")
 
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
     )
@@ -463,7 +464,7 @@ def test_local_executor_liveness_unavailable_persists_runtime_error_diagnostics(
 
     with (
         patch("cw.executor.local.aider_available", return_value=True),
-        patch("cw.executor.local.read_process_start_time_ns", return_value=None),
+        patch("cw.executor.core.read_process_start_time_ns", return_value=None),
     ):
         sid = executor.spawn(
             stage=Stage.IMPL, task=task, worktree=worktree, client=client
@@ -496,7 +497,7 @@ def test_local_executor_unexpected_error_persists_diagnostics(
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text("plan", encoding="utf-8")
 
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
     )
@@ -547,7 +548,7 @@ def test_local_executor_fetches_plan_from_tracker_when_absent(
 
     plan_body = "## Plan\n\nDo the thing.\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
 
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -584,7 +585,7 @@ def test_local_executor_plan_missing_when_tracker_returns_none(
     worktree = make_git_repo("wt-tracker-none")
     _write_tracker_config(workspace, "github-issues")
 
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -618,7 +619,7 @@ def test_local_executor_no_tracker_no_plan_is_plan_missing(
     worktree = make_git_repo("wt-no-tracker")
     # No .claude/project-config.yaml in workspace → resolve_tracker returns None
 
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -655,7 +656,7 @@ def test_local_executor_launch_reached_after_tracker_fetch(
 
     plan_body = "## Plan\n\nDo the thing.\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
 
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -687,7 +688,7 @@ def test_local_preflight_success_returns_preflight_ok(
     tmp_path: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """_local_preflight returns _PreflightOK on all-checks-pass.
+    """_local_preflight returns _PreflightOK(argv, env) on all-checks-pass.
 
     Locks in the discriminated-union contract: callers narrow with
     isinstance(_PreflightOK) instead of testing the first element for None.
@@ -707,15 +708,26 @@ def test_local_preflight_success_returns_preflight_ok(
         result = _local_preflight(config, task, worktree, client)
 
     assert isinstance(result, _PreflightOK)
-    assert result.endpoint == "http://localhost:1234/v1"
-    assert result.model == "qwen"
+    assert result.env["OPENAI_API_BASE"] == "http://localhost:1234/v1"
+    assert _flag_value(result.argv, "--model") == "openai/qwen"
     # Post-#1905: the plan body reaches the model through the read-only
     # task-context file, never through the mention-scanned --message string.
-    assert result.task_message == _PATH_FREE_TASK_INSTRUCTION
-    assert "do the thing" not in result.task_message
+    message = _flag_value(result.argv, "--message")
+    assert message == _PATH_FREE_TASK_INSTRUCTION
+    assert "do the thing" not in message
     assert "do the thing" in (worktree / TASK_CONTEXT_RELATIVE_PATH).read_text(
         encoding="utf-8"
     )
+
+
+def _flag_value(argv: list[str], flag: str) -> str:
+    """Return the value following the first *flag* in *argv*."""
+    return argv[argv.index(flag) + 1]
+
+
+def _flag_values(argv: list[str], flag: str) -> list[str]:
+    """Return every value following an occurrence of *flag* in *argv*."""
+    return [argv[i + 1] for i, token in enumerate(argv) if token == flag]
 
 
 # The ticket's own reproduction shape (#1905): plan prose that names paths the
@@ -738,12 +750,12 @@ def _local_spawn_argv(
     worktree: Path,
     plan_text: str,
 ) -> list[str]:
-    """Run a full LocalExecutor.spawn through FakeAiderRunner; return the argv."""
+    """Run a full LocalExecutor.spawn through FakeFireAndForgetRunner; return argv."""
     cw_dir = worktree / ".cw"
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text(plan_text, encoding="utf-8")
 
-    fake_runner = FakeAiderRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
     )
@@ -767,7 +779,7 @@ def test_local_preflight_threads_files_modified_into_preflight_ok(
     tmp_path: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """The plan's file manifest is parsed and threaded onto _PreflightOK (#1905)."""
+    """The plan's file manifest is parsed and threaded into argv --file (#1905)."""
     worktree = make_git_repo("wt-preflight-files")
     cw_dir = worktree / ".cw"
     cw_dir.mkdir(exist_ok=True)
@@ -785,7 +797,7 @@ def test_local_preflight_threads_files_modified_into_preflight_ok(
         result = _local_preflight(config, task, worktree, client)
 
     assert isinstance(result, _PreflightOK)
-    assert result.files == ["src/cw/a.py", "tests/test_a.py"]
+    assert _flag_values(result.argv, "--file") == ["src/cw/a.py", "tests/test_a.py"]
 
 
 def test_local_preflight_files_empty_without_files_modified_heading(
@@ -808,15 +820,15 @@ def test_local_preflight_files_empty_without_files_modified_heading(
         result = _local_preflight(config, task, worktree, client)
 
     assert isinstance(result, _PreflightOK)
-    assert result.files == []
+    assert "--file" not in result.argv
 
 
 def test_local_preflight_threads_aiderignore_path_into_preflight_ok(
     tmp_path: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """A non-empty manifest threads a materialised aiderignore path onto
-    _PreflightOK (#1915)."""
+    """A non-empty manifest threads a materialised aiderignore path into
+    argv --aiderignore (#1915)."""
     worktree = make_git_repo("wt-preflight-aiderignore")
     commit_tracked_file(worktree, "core/database.py")
     cw_dir = worktree / ".cw"
@@ -835,8 +847,8 @@ def test_local_preflight_threads_aiderignore_path_into_preflight_ok(
         result = _local_preflight(config, task, worktree, client)
 
     assert isinstance(result, _PreflightOK)
-    assert isinstance(result.aiderignore_path, Path)
-    assert "/core/database.py" in result.aiderignore_path.read_text(encoding="utf-8")
+    aiderignore_path = Path(_flag_value(result.argv, "--aiderignore"))
+    assert "/core/database.py" in aiderignore_path.read_text(encoding="utf-8")
 
 
 def test_local_preflight_aiderignore_path_none_without_manifest(
@@ -860,14 +872,14 @@ def test_local_preflight_aiderignore_path_none_without_manifest(
         result = _local_preflight(config, task, worktree, client)
 
     assert isinstance(result, _PreflightOK)
-    assert result.aiderignore_path is None
+    assert "--aiderignore" not in result.argv
 
 
 def test_local_preflight_threads_read_only_path_into_preflight_ok(
     tmp_path: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """_PreflightOK carries the materialised read-only task-context path."""
+    """_PreflightOK.argv carries the materialised read-only task-context path."""
     worktree = make_git_repo("wt-preflight-readonly")
     cw_dir = worktree / ".cw"
     cw_dir.mkdir(exist_ok=True)
@@ -886,8 +898,9 @@ def test_local_preflight_threads_read_only_path_into_preflight_ok(
         result = _local_preflight(config, task, worktree, client)
 
     assert isinstance(result, _PreflightOK)
-    assert result.read_only_path == worktree / TASK_CONTEXT_RELATIVE_PATH
-    context = result.read_only_path.read_text(encoding="utf-8")
+    read_only_path = Path(_flag_value(result.argv, "--read"))
+    assert read_only_path == worktree / TASK_CONTEXT_RELATIVE_PATH
+    context = read_only_path.read_text(encoding="utf-8")
     assert "plan body here" in context
     assert "T" in context
 
@@ -958,7 +971,7 @@ def test_local_preflight_ok_model_none_defaults_to_empty_string(
     tmp_path: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """_PreflightOK.model is '' when config.model is None."""
+    """config.model None → argv --model is the bare 'openai/' prefix."""
     worktree = make_git_repo("wt-preflight-model-none")
     cw_dir = worktree / ".cw"
     cw_dir.mkdir(exist_ok=True)
@@ -974,4 +987,4 @@ def test_local_preflight_ok_model_none_defaults_to_empty_string(
         result = _local_preflight(config, task, worktree, client)
 
     assert isinstance(result, _PreflightOK)
-    assert result.model == ""
+    assert _flag_value(result.argv, "--model") == "openai/"

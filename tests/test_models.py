@@ -2167,8 +2167,8 @@ class TestPackageExportCompleteness:
     wire keys = 57, plus #2135's ``PARK_ON_ABANDONED_EXIT_KEY``,
     ``PARK_COMMENT_MARKER_KEY``, ``ParkCommentMarker`` and
     ``read_park_comment_marker`` = 61, plus #2337's two scope-drift wire keys
-    = 63, plus #2205's ``MUST_FIX_OVERRIDE_KEY`` and ``MustFixOverride`` = 65)
-    — hardcoded here, NOT
+    = 63, plus #2205's ``MUST_FIX_OVERRIDE_KEY`` and ``MustFixOverride`` = 65,
+    plus #2369's ``LocalLivenessBackend`` = 66) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2195,6 +2195,7 @@ class TestPackageExportCompleteness:
             "DEFAULT_DISK_PRESSURE_MIN_FREE_GB",
             "DEFAULT_GLOBAL_ATTEMPT_CEILING",
             "DEFAULT_LANE",
+            "DEFAULT_LOCAL_LIVENESS_BACKEND",
             "DEFAULT_STAGE",
             "DEV_QUEUE_SCHEMA_VERSION",
             "DevQueueStore",
@@ -2212,6 +2213,7 @@ class TestPackageExportCompleteness:
             "LaneConfig",
             "LastResultSource",
             "LivenessBucket",
+            "LocalLivenessBackend",
             "LocalLivenessHandle",
             "OCCUPIED_LANE_STATUSES",
             "OPENCODE_BACKEND",

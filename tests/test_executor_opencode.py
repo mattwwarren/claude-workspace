@@ -11,6 +11,7 @@ import pytest
 from cw.auto_dev_result import AutoDevResult
 from cw.config import load_state
 from cw.executor import OpencodeExecutor, resolve_executor
+from cw.executor.core import FakeFireAndForgetRunner
 from cw.local_runner import LIVENESS_UNAVAILABLE, UNEXPECTED_ERROR
 from cw.models import (
     OPENCODE_BACKEND,
@@ -25,7 +26,6 @@ from cw.models import (
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
     STAGE4A_MERGE_GATE,
-    FakeOpencodeRunner,
     OpencodeRunner,
 )
 from tests.conftest import find_completed_session
@@ -59,7 +59,7 @@ def test_opencode_executor_unsupported_stage_blocked(
 ) -> None:
     """HARDEN stage → blocked/opencode_harden_not_implemented."""
     worktree = make_git_repo("wt-opencode-wrong-stage")
-    fake_runner = FakeOpencodeRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
@@ -84,7 +84,7 @@ def test_opencode_executor_blocked_binary_missing(
 ) -> None:
     """opencode_available() is False → blocked/opencode_not_found."""
     worktree = make_git_repo("wt-opencode-binary-missing")
-    fake_runner = FakeOpencodeRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
@@ -118,7 +118,7 @@ def test_opencode_executor_blocked_binary_missing_plan_stage_marker(
     PLAN→IMPL (_resolve_stage_walk), silently skipping planning.
     """
     worktree = make_git_repo("wt-opencode-binary-missing-plan")
-    fake_runner = FakeOpencodeRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
@@ -149,7 +149,7 @@ def test_opencode_executor_spawn_runner_path(
     """
     worktree = make_git_repo("wt-opencode-runner-path")
 
-    fake_runner = FakeOpencodeRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="genhealth/glm-5.2")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
@@ -177,6 +177,7 @@ def test_opencode_executor_spawn_runner_path(
         assert session.status == SessionStatus.ACTIVE
         assert session.local_liveness is not None
         assert session.local_liveness.pid > 0
+        assert session.local_liveness.backend == "opencode"
         assert session.last_result is None
     finally:
         for proc in fake_runner.procs:
@@ -197,7 +198,7 @@ def test_opencode_executor_spawn_impl_stage(
     """
     worktree = make_git_repo("wt-opencode-impl-stage")
 
-    fake_runner = FakeOpencodeRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="genhealth/glm-5.2")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
@@ -237,7 +238,7 @@ def test_opencode_executor_spawn_liveness_unavailable(
     """start_time None → blocked/liveness_unavailable, session COMPLETED."""
     worktree = make_git_repo("wt-opencode-liveness-unavailable")
 
-    fake_runner = FakeOpencodeRunner()
+    fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
@@ -246,7 +247,7 @@ def test_opencode_executor_spawn_liveness_unavailable(
     try:
         with (
             patch("cw.executor.opencode.opencode_available", return_value=True),
-            patch("cw.executor.opencode.read_process_start_time_ns", return_value=None),
+            patch("cw.executor.core.read_process_start_time_ns", return_value=None),
         ):
             executor.spawn(
                 stage=Stage.FINALIZE, task=task, worktree=worktree, client=client

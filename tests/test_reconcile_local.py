@@ -949,7 +949,7 @@ def test_local_harvest_opencode_sentinel_found(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(text_event, encoding="utf-8")
 
-    dead_handle = LocalLivenessHandle(pid=999999, start_time_ns=1)
+    dead_handle = LocalLivenessHandle(pid=999999, start_time_ns=1, backend="opencode")
     sess = _mk_local_session("ses-oc-sentinel", worktree, dead_handle)
     save_state(CwState(sessions=[sess]))
     save_dev_queue(
@@ -997,7 +997,7 @@ def test_local_harvest_opencode_no_output(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(log_content, encoding="utf-8")
 
-    dead_handle = LocalLivenessHandle(pid=999999, start_time_ns=1)
+    dead_handle = LocalLivenessHandle(pid=999999, start_time_ns=1, backend="opencode")
     sess = _mk_local_session("ses-oc-no-output", worktree, dead_handle)
     save_state(CwState(sessions=[sess]))
     save_dev_queue(
@@ -1029,3 +1029,79 @@ def test_local_harvest_opencode_no_output(
     result = AutoDevResult.model_validate(session.last_result)
     assert result.blocker is not None
     assert result.blocker.reason == OPENCODE_NO_OUTPUT
+
+
+# ---------------------------------------------------------------------------
+# #2369 — harvest dispatch keys on LocalLivenessHandle.backend, not log files
+# ---------------------------------------------------------------------------
+
+
+def _harvest_single(sid: str, ticket_id: str, worktree: Path, backend: str) -> Session:
+    """Save one dead-handle session + RUNNING task, harvest it, return it."""
+    dead_handle = LocalLivenessHandle.model_validate(
+        {"pid": 2_000_000_000, "start_time_ns": 1, "backend": backend}
+    )
+    sess = _mk_local_session(sid, worktree, dead_handle)
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    stage=Stage.IMPL,
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sid,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    state = load_state()
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    assert len(candidates) == 1
+    _act_on_local_harvest_candidates(
+        state,
+        candidates,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        task_by_ticket=task_by_ticket,
+    )
+    return next(s for s in load_state().sessions if s.id == sid)
+
+
+def test_local_harvest_opencode_backend_without_log_routes_to_opencode(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """backend=opencode with NO .cw/opencode.log still routes through opencode
+    synthesis (OPENCODE_NO_OUTPUT), never silently misroutes to git/aider."""
+    worktree = _local_git_worktree(make_git_repo, "wt-oc-no-log", with_commit=False)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    assert not (worktree / OPENCODE_LOG_RELATIVE_PATH).exists()
+
+    session = _harvest_single("ses-oc-no-log", "T-oc-no-log", worktree, "opencode")
+
+    assert session.status == SessionStatus.COMPLETED
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.blocker is not None
+    assert result.blocker.reason == OPENCODE_NO_OUTPUT
+
+
+def test_local_harvest_aider_backend_ignores_stray_opencode_log(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """backend=aider with a stray .cw/opencode.log still routes through git
+    synthesis — the file's presence no longer drives dispatch."""
+    worktree = _local_git_worktree(make_git_repo, "wt-aider-stray", with_commit=False)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("stale opencode output\n", encoding="utf-8")
+
+    session = _harvest_single("ses-aider-stray", "T-aider-stray", worktree, "aider")
+
+    assert session.status == SessionStatus.COMPLETED
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.blocker is not None
+    assert result.blocker.reason == "aider_no_output"
