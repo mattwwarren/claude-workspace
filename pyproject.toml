@@ -295,6 +295,10 @@ ignore = [
 # codex_boot above: claim.py imports cw.executor at module top and cw.executor
 # imports cw.reconcile, so this module must not reach back at import time.
 "src/cw/reconcile/fix_dispatch.py" = ["PLC0415"]
+# local defers cw.dispatch.claim._park_running_task_blocked_on_user and
+# _revert_claimed_task_to_pending inside its codex harvest branch (#2387), for
+# the identical cw.dispatch ↔ cw.reconcile cycle as codex_boot above.
+"src/cw/reconcile/local.py" = ["PLC0415"]
 # usage_limit_mid_turn defers cw.dispatch.claim._find_running_row inside
 # _decide (#2324) for the same cw.dispatch ↔ cw.reconcile cycle as the
 # tasks.py and phantom/_mutations entries above: cw.dispatch's package
