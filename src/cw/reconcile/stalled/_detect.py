@@ -11,7 +11,11 @@ whatever stage it happened to be at (#2382 made this possible: the emit CLI is
 write-only and never flips ``session.status``, so a genuinely still-running
 worker can hold a terminal-shaped result while ``session.status`` stays
 ACTIVE/IDLE). Every function here is read-only: zero writes to state, queue,
-or event bus. See GitHub #185, #552, #1470, #2382, #2426, ADR-0006.
+or event bus. Since #2435, a live session whose result was written by ``cw
+result emit`` (``last_result_source == LastResultSource.EMIT_CLI``) is never
+claimed by this sweep at all -- that worker's own Stop hook is still running
+and is the routing authority for it. See GitHub #185, #552, #1470, #2382,
+#2426, #2435, ADR-0006.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
-from cw.models import DEFAULT_LANE, SessionOrigin
+from cw.models import DEFAULT_LANE, LastResultSource, SessionOrigin
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
     _PAUSED_STATUS_KEY,
@@ -81,7 +85,18 @@ def _append_foreign_result_candidate(
     ticket terminal-COMPLETED at its current stage. A session already latched
     ``already_refused`` by a prior tick's stage-mismatch refusal is never
     re-offered.
+
+    #2435: a session whose ``last_result`` was itself written by ``cw result
+    emit`` (``LastResultSource.EMIT_CLI``) is never offered here, even though
+    the caller's loop already restricts candidates to ``_LIVE_STATUSES``. Such
+    a session's own Stop hook (#536 emit precedence) is running right now and
+    is the routing authority for that result -- it already handles stage
+    advance, attention events, and fix-dispatch handoffs. Racing it from this
+    sweep risks a second, conflicting ``_apply_sentinel_to_task`` call against
+    the same task row.
     """
+    if session.last_result_source == LastResultSource.EMIT_CLI:
+        return False
     if not _has_terminal_sentinel(session):
         return False
     if _is_already_refused(session):
@@ -129,7 +144,10 @@ def _detect_stalled_candidates(
     result). Makes zero writes to state, queue, or event bus. Elapsed
     wall-clock time is deliberately never consulted -- a session is only
     dispositioned here on the positive evidence of an already-recorded
-    terminal result. See GitHub #552, #1470, #2426, ADR-0006.
+    terminal result. Since #2435, an EMIT_CLI-sourced result on a still-live
+    session is withheld entirely (see ``_append_foreign_result_candidate``) --
+    that worker's own Stop hook owns routing it. See GitHub #552, #1470,
+    #2426, #2435, ADR-0006.
     """
     candidates: list[ReapCandidate] = []
     for session in state.sessions:
