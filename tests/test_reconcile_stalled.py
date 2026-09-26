@@ -15,21 +15,32 @@ from typing import Any
 import pytest
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.events import read_events
 from cw.models import (
     CompletionReason,
     CwState,
+    LastResultSource,
+    OrchestratorEventType,
     QueueItemStatus,
     SessionStatus,
     Stage,
     TicketTask,
 )
 from cw.reconcile import _deps
-from cw.reconcile._shared import ProposedAction
+from cw.reconcile._shared import (
+    ProposedAction,
+    _apply_sentinel_to_task,
+    _validate_existing_result_for_routing,
+)
+from cw.reconcile.fix_dispatch import FIX_LOOP_PENDING_DISPATCH
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
 )
 from tests._reconcile_helpers import (
+    _blocked_result_payload,
+    _make_pending_fix_dispatch,
+    _make_terminal_payload,
     _mk_headless_daemon_session,
     _shipped_salvage_payload,
     _stage_complete_payload,
@@ -230,14 +241,98 @@ def test_stage_complete_foreign_result_classified_as_route_emitted_sentinel(
     assert candidate.routed_sentinel.status == "stage_complete"
 
 
-def test_stage_complete_foreign_result_advances_task_stage_not_completed(
+def test_live_session_premises_pending_verification_defers_to_stop_hook(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """#2435: a still-live worker's EMIT_CLI-sourced result is never claimed here.
+
+    ``cw result emit`` never flips ``session.status`` (#2382), so a genuinely
+    running worker can hold a ``premises_pending_verification`` sentinel while
+    ``session.status`` stays ACTIVE. That worker's own Stop hook (#536 emit
+    precedence) is the routing authority for it -- the stalled sweep must not
+    also offer it as a candidate, racing the Stop hook's own
+    ``_apply_sentinel_to_task`` call.
+    """
+    payload = _make_terminal_payload("premises_pending_verification", "salv-1")
+    state = _foreign_result_session(tmp_path, payload)
+    state.sessions[0].last_result_source = LastResultSource.EMIT_CLI
+
+    assert _detect_stalled_candidates(state, task_by_ticket={}) == []
+
+    session = state.sessions[0]
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    store = load_dev_queue()
+    store.tasks.append(
+        TicketTask(
+            ticket_id="salv-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="salv-1",
+        )
+    )
+    save_dev_queue(store)
+
+    validated = _validate_existing_result_for_routing(session.last_result)
+    assert validated is not None
+    _apply_sentinel_to_task("salv-1", session, validated)
+
+    updated_task = load_dev_queue().tasks[0]
+    assert updated_task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert session.status is SessionStatus.ACTIVE
+
+    attention = read_events(
+        consumer="test-2435-premises-attention",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(attention) == 1
+    assert attention[0].payload["paused_status"] == "plan_parked"
+
+
+def test_live_session_blocked_fix_loop_pending_dispatch_stays_running(
+    tmp_path: Path,
+) -> None:
+    """#2435: a live worker's fix-loop-pending BlockedResult is never claimed here.
+
+    The fix-dispatch machinery (``FIX_LOOP_PENDING_DISPATCH``) owns this
+    task's row while its fix cycle is outstanding; the stalled sweep must not
+    also offer the still-live session as a foreign-result candidate.
+    """
+    sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
+    sess.last_result = _blocked_result_payload(reason=FIX_LOOP_PENDING_DISPATCH)
+    sess.last_result_source = LastResultSource.EMIT_CLI
+    task = TicketTask(
+        ticket_id="T-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="T-1",
+        stage=Stage.REVIEW,
+        pending_fix_dispatch=_make_pending_fix_dispatch(),
+    )
+
+    candidates = _detect_stalled_candidates(
+        CwState(sessions=[sess]), task_by_ticket={"T-1": task}
+    )
+
+    assert candidates == []
+    assert task.status == QueueItemStatus.RUNNING
+    assert task.pending_fix_dispatch is not None
+
+
+def test_dead_session_stage_complete_still_advances_via_sweep(
     tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
 ) -> None:
-    """#2426: the incident case -- a live IMPL worker's mid-pipeline result must
+    """#2426: the incident case -- a dead IMPL worker's mid-pipeline result must
     advance IMPL -> REVIEW (leaving the task PENDING for a fresh REVIEW
     dispatch), not land it terminal-COMPLETED at IMPL.
+
+    #2435: stamps ``last_result_source=SALVAGE_TRANSCRIPT`` to make the "dead"
+    precondition explicit -- this sweep's disposition now depends on the
+    result not having come from a still-live worker's own ``cw result emit``
+    (``EMIT_CLI``), which defers to the Stop hook instead (see the two tests
+    above).
     """
     state = _foreign_result_session(tmp_path, _stage_complete_payload())
+    state.sessions[0].last_result_source = LastResultSource.SALVAGE_TRANSCRIPT
     _write_staged_clients_yaml(tmp_config_dir, "client-a")
     store = load_dev_queue()
     store.tasks.append(
