@@ -61,13 +61,16 @@ For every event recorded with type `STAGE_ENTERED` or `STAGE_ERRORED`:
   canonical `<<<AUTO_DEV_RESULT` sentinel with `status: blocked` per §3 —
   stage events do not replace the sentinel.
 - Since #2429, an unknown `stage` or `prev_stage` on `stage.entered` /
-  `stage.errored` is rejected at `cw event record` time (non-zero exit,
-  nothing recorded) rather than silently accepted and only degrading at
-  consumer render time. `/auto-dev` stage docs therefore no longer append
-  `|| true` to these calls. A producer that calls `record_event` directly
-  bypasses that check; invariant 1's `last_stage = None` degradation, which
-  `_derive_last_stage_by_session` now enforces by filtering against the same
-  closed set, still covers it.
+  `stage.errored` is rejected at record time (non-zero exit via `cw event
+  record`, or a raised `CwError` from a direct `record_event` call) rather
+  than silently accepted and only degrading at consumer render time.
+  `/auto-dev` stage docs therefore no longer append `|| true` to these calls.
+  As of #2443, this record-time rejection lives inside `record_event` itself
+  (`cw.events`), so it covers every caller — CLI and internal producer alike
+  — not just `cw event record`. Invariant 1's `last_stage = None` degradation
+  in `_derive_last_stage_by_session` remains as defense-in-depth for
+  historical or hand-edited inbox data written before this record-time gate
+  existed, not as the primary safety net for internal producers anymore.
 
 ## Consequences
 

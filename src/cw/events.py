@@ -17,6 +17,7 @@ from cw.atomic import atomic_write_text
 from cw.config import events_dir, load_orchestrator_config
 from cw.exceptions import CwError
 from cw.models import OrchestratorConfig, OrchestratorEvent, OrchestratorEventType
+from cw.models.enums import STAGE_IDENTIFIERS
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
@@ -55,6 +56,33 @@ def _inbox_lock() -> Iterator[None]:
         fd.close()
 
 
+# Event types whose payload carries the closed headless-contract §10.2 stage
+# vocabulary in ``stage`` (required) and ``prev_stage`` (optional) (#2429,
+# moved here from ``cw.cli.queues`` by #2443 so every caller of
+# ``record_event`` -- not just ``cw event record`` -- is validated).
+_STAGE_EVENT_TYPES = frozenset(
+    {OrchestratorEventType.STAGE_ENTERED, OrchestratorEventType.STAGE_ERRORED}
+)
+
+
+def _validate_stage_payload(payload_dict: dict[str, Any]) -> None:
+    """Reject a stage-event payload whose stage fields leave the §10.2 enum.
+
+    ``stage`` is required, so a missing one fails the membership test the
+    same way a typo does. ``prev_stage`` is optional and checked only when
+    present. ``error_kind`` is an open enum (§10.3) and is not checked.
+    """
+    valid = ", ".join(sorted(STAGE_IDENTIFIERS))
+    stage = payload_dict.get("stage")
+    if stage not in STAGE_IDENTIFIERS:
+        msg = f"Unknown stage '{stage}'. Valid stages: {valid}"
+        raise CwError(msg)
+    prev_stage = payload_dict.get("prev_stage")
+    if prev_stage is not None and prev_stage not in STAGE_IDENTIFIERS:
+        msg = f"Unknown prev_stage '{prev_stage}'. Valid stages: {valid}"
+        raise CwError(msg)
+
+
 def record_event(
     event_type: OrchestratorEventType,
     payload: dict[str, Any] | None = None,
@@ -62,6 +90,12 @@ def record_event(
     correlation_id: str | None = None,
 ) -> OrchestratorEvent:
     """Append a new event to the inbox and return it.
+
+    For ``STAGE_ENTERED``/``STAGE_ERRORED``, the payload's ``stage`` and
+    ``prev_stage`` are validated against the closed §10.2 enum before
+    anything is written (#2443) -- this is the one chokepoint every internal
+    producer and ``cw event record`` both go through, closing the gap where
+    a direct ``record_event`` call could bypass the CLI-only check.
 
     May trigger an in-band auto-prune (#1980): once the inbox exceeds
     ``event_inbox_retention_bytes``, this call also rewrites the inbox down
@@ -79,9 +113,12 @@ def record_event(
     Returns:
         The newly created and persisted event.
     """
+    payload_dict = payload or {}
+    if event_type in _STAGE_EVENT_TYPES:
+        _validate_stage_payload(payload_dict)
     event = OrchestratorEvent(
         type=event_type,
-        payload=payload or {},
+        payload=payload_dict,
         correlation_id=correlation_id,
     )
     with _inbox_lock():
