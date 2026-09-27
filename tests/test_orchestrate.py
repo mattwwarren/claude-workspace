@@ -1450,6 +1450,38 @@ class TestRunningSessionLastStage:
         by_id = {s.id: s for s in snapshot.running_sessions}
         assert by_id["s1"].last_stage == "s2_impl_started"
 
+    def test_running_session_last_stage_ignores_stage_outside_enum(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """A STAGE_ENTERED stage outside the §10.2 enum renders as None (#2429).
+
+        Written with ``record_event`` directly, bypassing ``cw event record``'s
+        validation exactly as an internal producer would, so the consumer's
+        own membership filter is what keeps the raw string out of the output.
+        """
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session("s1", workspace, status=SessionStatus.ACTIVE),
+                ]
+            )
+        )
+        record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "s1",
+                "ticket_id": "2429",
+                "stage": "s2_impl_startd",
+                "started_at": "2026-09-26T13:00:00Z",
+            },
+        )
+
+        snapshot = orchestrator_status()
+        by_id = {s.id: s for s in snapshot.running_sessions}
+        assert by_id["s1"].last_stage is None
+
 
 # ---------------------------------------------------------------------------
 # Tests: _aggregate_feed (relocated from cw.board -- issue #854)
