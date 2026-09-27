@@ -236,6 +236,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "pr_already_open_pre_dispatch",
             "schema_version_unsupported",
             "status_unknown",
+            "tracker_mcp_unavailable_pre_dispatch",
             "validation_failed",
         }
     )

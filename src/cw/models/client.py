@@ -21,6 +21,28 @@ DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [
 ]
 
 
+class TrackerMcpGateConfig(BaseModel):
+    """Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate.
+
+    Before a PLAN/IMPL-stage PENDING ticket is claimed, dispatch reads
+    ``settings_path`` from the ticket's own branch (``git show``, no checkout)
+    and parks the ticket when that file's ``enabledPlugins`` verifiably lacks
+    ``plugin_id`` -- a worker spawned there could not reach the tracker MCP.
+
+    ``plugin_id`` is the exact ``enabledPlugins`` key the tracker's MCP plugin
+    registers under (e.g. ``"linear@acme-marketplace"``); matching is exact,
+    with no ``@``-suffix stripping and no case folding. Anything ambiguous --
+    no branch yet, no settings file, malformed JSON, an unrecognized
+    ``enabledPlugins`` shape -- fails open (the spawn proceeds).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    plugin_id: str
+    settings_path: str = ".claude/settings.json"
+
+
 class ClientConfig(BaseModel):
     """Configuration for a client workspace.
 
@@ -109,6 +131,12 @@ class ClientConfig(BaseModel):
     # setting readable so clients.yaml written during the staged rollout
     # remains loadable after the policy becomes the default implementation.
     sentinel_mismatch_veto_enabled: bool = False
+    # Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate. None (the
+    # default) means the gate never runs for this client -- it never even
+    # reads the branch's settings file. There is deliberately no fleet-wide
+    # OrchestratorConfig companion toggle: per-client opt-in IS the rollout
+    # control. See TrackerMcpGateConfig above.
+    tracker_mcp_gate: TrackerMcpGateConfig | None = None
     auto_background_threshold: int | None = None
     notifications: bool = False
     lanes: list[LaneConfig] = Field(default_factory=list)

@@ -613,6 +613,10 @@ class DispatchSkipReason(StrEnum):
     by a live session or daemon worker -- caught either before the row is
     claimed (the pre-claim occupancy screen) or by a genuinely-live
     ``HookContextConflictError`` release during spawn.
+    TRACKER_MCP_GATE_BLOCKED (#2442) is likewise per-task and outside the
+    precedence chain: emitted when the pre-dispatch tracker-MCP gate parks a
+    PLAN/IMPL-stage task whose branch's settings file verifiably lacks the
+    client's configured tracker MCP plugin.
     HOST_CAPACITY_GATED ranks just above CAP_FULL (#1444): a fleet-wide
     ``OrchestratorConfig.host_session_budget`` ceiling on concurrently-running
     DAEMON sessions across the whole host, folded into the per-client
@@ -632,6 +636,7 @@ class DispatchSkipReason(StrEnum):
     ATTEMPT_CAP_BLOCKED = "attempt_cap_blocked"
     STALE_PR_BLOCKED = "stale_pr_blocked"
     WORKTREE_OCCUPIED = "worktree_occupied"
+    TRACKER_MCP_GATE_BLOCKED = "tracker_mcp_gate_blocked"
     SPAWN_ERROR = "spawn_error"
     LANE_CIRCUIT_PAUSED = "lane_circuit_paused"
     SPAWN_ERROR_BACKOFF = "spawn_error_backoff"
