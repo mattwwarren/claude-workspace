@@ -223,6 +223,15 @@ def _fill_finalize_regress_branch_head_default(task_raw: dict[str, Any]) -> None
         task_raw["finalize_regress_branch_head"] = None
 
 
+def _fill_finalize_regress_merge_conflict_detected_default(
+    task_raw: dict[str, Any],
+) -> None:
+    """Fill finalize_regress_merge_conflict_detected introduced in dev-queue
+    schema v43 (GitHub #2421). Idempotent."""
+    if "finalize_regress_merge_conflict_detected" not in task_raw:
+        task_raw["finalize_regress_merge_conflict_detected"] = False
+
+
 def _fill_pending_operator_comment_default(task_raw: dict[str, Any]) -> None:
     """Fill pending_operator_comment introduced in dev-queue schema v29
     (GitHub #1730). Idempotent."""
@@ -382,6 +391,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_salvage_no_sentinel_at_default(task_raw)
                 _fill_regressed_into_stage_default(task_raw)
                 _fill_finalize_regress_branch_head_default(task_raw)
+                _fill_finalize_regress_merge_conflict_detected_default(task_raw)
                 _fill_pending_operator_comment_default(task_raw)
                 _fill_stale_gate_default(task_raw)
                 _fill_finding_dispositions_default(task_raw)

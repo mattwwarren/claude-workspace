@@ -2090,6 +2090,30 @@ def make_git_repo_with_origin(
     return _make
 
 
+@pytest.fixture
+def make_worktree_with_change(
+    make_git_repo: Callable[..., Path],
+) -> Callable[..., Path]:
+    """Factory: a repo on ``feature`` with *content* committed to *filename*.
+
+    The branch is pushed to a bare origin: the codex fix loop's per-cycle push
+    and the review-exit guard compare HEAD with ``origin/<branch>`` (#2354).
+    Hoisted (#2388) from two private ``_worktree_with_change`` copies in
+    ``test_codex_executor.py`` and ``test_codex_driver.py``.
+    """
+
+    def _make(name: str, *, filename: str, content: str) -> Path:
+        repo = make_git_repo(name)
+        git_in(repo, "checkout", "-b", "feature")
+        (repo / filename).write_text(content, encoding="utf-8")
+        git_in(repo, "add", filename)
+        git_in(repo, "commit", "-m", f"add {filename}")
+        add_bare_origin(repo)
+        return repo
+
+    return _make
+
+
 def tree_fingerprint(worktree: Path) -> tuple[str, str, str]:
     """``(HEAD sha, porcelain status, digest of every working-tree file)``.
 

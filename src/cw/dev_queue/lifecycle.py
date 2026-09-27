@@ -199,6 +199,17 @@ EMPTY_DIFF_GATE_DISPOSITION = "empty_diff_gate"
 # staleness gates diverge there.
 REVIEW_STALENESS_GATE_DISPOSITION = "review_artifacts_stale"
 
+# Disposition stamped when dispatch's IMPL-stage routing refuses to advance a
+# FINALIZE-regress round trip whose merge was left unconcluded (#2421): the
+# worktree is still mid-merge, or the merge-caused regress landed no commit.
+# Shares its literal with dispatch.impl_gates._UNCONCLUDED_MERGE_REASON (two
+# namespaces, do not collapse). Same set-membership treatment as the gate
+# dispositions above, for the same reason: NOT a HOLD_DISPOSITIONS member -- a
+# half-finished merge clears by committing it, not by "proceed anyway".
+UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION = (
+    "unconcluded_finalize_regress_merge"
+)
+
 # Disposition stamped when a session reported the ``stale_dispatch`` sentinel
 # itself -- an agent ran, discovered this ticket already has an open, unmerged
 # PR from an earlier dispatch, and refused rather than re-implementing on top
@@ -781,7 +792,9 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     _emit_stage_change(task, old_stage, task.stage, "advance")
 
 
-def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
+def _stage_regress(
+    task: TicketTask, target_stage: Stage, *, merge_conflict_detected: bool = False
+) -> None:
     """Regress task to a prior pipeline stage for self-heal.
 
     Mutates task in-place: sets stage to target_stage, increments
@@ -812,6 +825,12 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     *consumption* site (``dispatch/claim.py`` clears it only at a REVIEW-stage
     spawn), not at this shared stamp point, because Rule 5a's self-heal
     regresses to IMPL and must not consume a marker meant for REVIEW.
+
+    ``merge_conflict_detected`` (GitHub #2421) is the caller's live
+    ``merge_in_progress()`` measurement, stamped onto
+    ``finalize_regress_merge_conflict_detected`` under the same FINALIZE-origin
+    gate as ``finalize_regress_branch_head``. Measured by the caller so this
+    function stays pure mutation, with no git I/O.
     """
     old_stage = task.stage
     task.stage = target_stage
@@ -837,6 +856,7 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     task.pending_operator_comment = True
     if old_stage == Stage.FINALIZE:
         task.finalize_regress_branch_head = task.stage_base_ref
+        task.finalize_regress_merge_conflict_detected = merge_conflict_detected
     # A deliberate regress INTO the plan stage is a "re-plan": the operator's
     # earlier plan approval (schema v35, dev_queue/approval.py) was given for
     # text that is about to be superseded, so it must not auto-clear the next

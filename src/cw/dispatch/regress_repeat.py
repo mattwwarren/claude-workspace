@@ -75,11 +75,16 @@ def _consume_finalize_regress_repeat(
     zero commits landed anywhere in the finalize->impl->review round trip,
     the exact condition that produced the #1644/#1702/#1710 silent-repeat
     incidents.
+
+    Also clears the v43 sibling ``finalize_regress_merge_conflict_detected``
+    (#2421) alongside the marker, so the pair is consumed as one unit and a
+    stale merge-caused flag cannot leak into a later regress cycle.
     """
     if task.stage != Stage.REVIEW:
         return False
     marker = task.finalize_regress_branch_head
     task.finalize_regress_branch_head = None
+    task.finalize_regress_merge_conflict_detected = False
     if marker is None:
         return False
     return marker == current_branch_head

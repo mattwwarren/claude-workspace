@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
-from cw.codex_background import join_outstanding_codex_threads
+from cw.codex_background import _default_background, join_outstanding_codex_threads
 from cw.config import (
     _load_concurrency_overrides,
     _save_concurrency_overrides,
@@ -73,7 +73,7 @@ from cw.exceptions import (
     VersionDriftError,
     WorktreeError,
 )
-from cw.local_runner import make_blocked
+from cw.executor.core import FakeFireAndForgetRunner
 from cw.models import (
     CODEX_BACKEND,
     DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
@@ -113,7 +113,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
     from cw.native_daemon import NativeDaemonClient
     from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
@@ -158,6 +158,30 @@ def _stub_review_head_sha(monkeypatch: pytest.MonkeyPatch, sha: str) -> None:
     monkeypatch.setattr(rg_mod, "current_head_sha", lambda _p: sha)
 
 
+_STUB_WORKTREE = Path("/stub-worktree")
+
+
+def _stub_impl_merge_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    merge_in_progress: bool | None = None,
+    head_sha: str | None = None,
+    worktree: Path | None = _STUB_WORKTREE,
+) -> None:
+    """Stub the #2421 IMPL gate's three probes at their consumption point.
+
+    Same shape as ``_stub_review_head_sha`` above, but targets
+    ``cw.dispatch.impl_gates`` and adds ``merge_in_progress``, which has no
+    analog in ``review_gates``. The git-level measurements themselves are
+    covered against real repos in ``tests/test_branch_ahead.py``.
+    """
+    from cw.dispatch import impl_gates as ig_mod
+
+    monkeypatch.setattr(ig_mod, "resolve_task_worktree", lambda _t, _c: worktree)
+    monkeypatch.setattr(ig_mod, "merge_in_progress", lambda _p: merge_in_progress)
+    monkeypatch.setattr(ig_mod, "current_head_sha", lambda _p: head_sha)
+
+
 # ---------------------------------------------------------------------------
 # Package-split import guard (#1310)
 # ---------------------------------------------------------------------------
@@ -177,14 +201,19 @@ def test_dispatch_package_submodules_import_without_cycle() -> None:
     ``routing`` for ``_resolve_scope_tier``/``_APPROVAL_GATE_REASON`` via
     function-level deferred imports. Both modules are named explicitly below so
     the guard genuinely covers that pair rather than passing incidentally.
+
+    #2421 added ``impl_gates``, imported by ``routing`` at module top the same
+    way ``review_gates`` is.
     """
-    from cw.dispatch import claim, gating, lanes, review_gates, routing
+    from cw.dispatch import claim, gating, impl_gates, lanes, review_gates, routing
 
     assert gating is not None
     assert claim is not None
     assert lanes is not None
     assert routing is not None
     assert review_gates is not None
+    assert impl_gates is not None
+    assert routing._should_gate_for_unconcluded_finalize_regress_merge is not None
     # The two-way pair resolves in both directions at runtime.
     assert routing._should_gate_for_branch_staleness is not None
     assert review_gates._park_scope_hint_gate is not None
@@ -9766,29 +9795,39 @@ class TestClientFilter:
 # ---------------------------------------------------------------------------
 
 
-class _BlockedCodexReview:
-    """A ``run_review_with_fix_loop`` stand-in that parks until released.
+class _BlockedThreadWork:
+    """A unit of work that parks on a registered codex thread until released.
 
-    Stands in for the real blocking unit of work (``codex exec`` subprocesses,
-    up to the full REVIEW budget). Blocking here — rather than inside a
-    ``CodexRunner`` fake — puts the block at exactly the seam #1727 moved off
-    the ``dispatch_tick`` call stack, without needing a real git diff.
+    Registers directly through ``cw.codex_background._default_background`` —
+    since RFC 0014 A2 (#2388) CodexExecutor no longer starts threads, but the
+    shutdown drain still reports any it finds until B2 retires it.
     """
 
-    def __init__(self, worktree: Path, ticket_id: str) -> None:
+    def __init__(self) -> None:
         self.entered = threading.Event()
         self.release = threading.Event()
-        self._result = make_blocked(
-            ticket_id=ticket_id,
-            worktree=worktree,
-            reason="codex_review_unparseable",
-            stage_reached="stage3_review",
-        )
 
-    def __call__(self, **_kwargs: object) -> tuple[object, None]:
+    def __call__(self) -> None:
         self.entered.set()
         self.release.wait(timeout=30.0)
-        return self._result, None
+
+
+@pytest.fixture
+def fake_codex_job_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[FakeFireAndForgetRunner]:
+    """Swap CodexExecutor's detached ``cw codex run`` launcher for a fake.
+
+    Keeps a dispatch-driven codex spawn from launching a real ``cw`` child
+    (which would resolve the real, not the test's, state dirs).
+    """
+    runner = FakeFireAndForgetRunner()
+    monkeypatch.setattr("cw.executor.codex.RealCodexJobRunner", lambda: runner)
+    yield runner
+    for proc in runner.procs:
+        with contextlib.suppress(OSError):
+            proc.kill()
+            proc.wait()
 
 
 @pytest.mark.binary_on_path("codex")
@@ -9812,17 +9851,16 @@ class TestCodexSpawnDoesNotBlockDispatch:
         # makes that pre-flight see codex as present without shelling out —
         # CI runners have no real codex binary on PATH, and without this,
         # spawn() takes the synchronous CODEX_NOT_FOUND branch and never
-        # reaches _background(): blocked_review.entered is never set and
-        # these tests only passed on a dev machine that happens to have
-        # codex installed.
+        # launches the review job, and these tests only passed on a dev
+        # machine that happens to have codex installed.
 
     def test_other_client_spawns_while_codex_review_still_running(
         self,
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
-        monkeypatch: pytest.MonkeyPatch,
         mock_native_daemon: FakeNativeDaemonClient,
+        fake_codex_job_runner: FakeFireAndForgetRunner,
     ) -> None:
         """Acceptance item 1: both clients spawn in one tick, codex still ACTIVE."""
         ws_a = make_git_repo("workspace/codex-block-a")
@@ -9845,60 +9883,49 @@ class TestCodexSpawnDoesNotBlockDispatch:
         add_ticket(TicketTask(ticket_id="A-1", client="client-a", stage=Stage.REVIEW))
         add_ticket(TicketTask(ticket_id="B-1", client="client-b"))
 
-        blocked_review = _BlockedCodexReview(ws_a, "A-1")
-        monkeypatch.setattr(
-            "cw.codex_background.run_review_with_fix_loop", blocked_review
-        )
         config = OrchestratorConfig(
             tick_interval_seconds=30,
             per_client_max_parallel={"client-a": 1, "client-b": 1},
         )
-        try:
-            result = dispatch_tick(config, native_daemon=mock_native_daemon)
+        result = dispatch_tick(config, native_daemon=mock_native_daemon)
 
-            # The codex review is genuinely in flight, not already finished.
-            assert blocked_review.entered.wait(timeout=10.0)
+        # The codex review job was launched and is still running (a live
+        # `sleep 60` stands in for `cw codex run`).
+        [codex_job] = fake_codex_job_runner.procs
+        assert codex_job.poll() is None
+        # Both clients got a spawn out of the same tick.
+        assert result.spawned == 2
+        # client-b's task went to the daemon, i.e. the tick was never
+        # parked behind client-a's codex review.
+        assert len(mock_native_daemon.spawn_calls) == 1
 
-            # Both clients got a spawn out of the same tick.
-            assert result.spawned == 2
-            # client-b's task went to the daemon, i.e. the tick was never
-            # parked behind client-a's codex subprocess.
-            assert len(mock_native_daemon.spawn_calls) == 1
-
-            state = load_state()
-            codex_session = next(s for s in state.sessions if s.client == "client-a")
-            assert codex_session.status is SessionStatus.ACTIVE
-            # R1: session_id is on the RUNNING row before the review finishes.
-            tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
-            assert tasks["A-1"].status is QueueItemStatus.RUNNING
-            assert tasks["A-1"].session_id == codex_session.id
-        finally:
-            blocked_review.release.set()
-            join_outstanding_codex_threads(timeout_seconds=10.0)
+        state = load_state()
+        codex_session = next(s for s in state.sessions if s.client == "client-a")
+        assert codex_session.status is SessionStatus.ACTIVE
+        # RFC 0014 A2: a detached job with a liveness handle, not a thread.
+        assert codex_session.local_liveness is not None
+        assert codex_session.local_liveness.pid == codex_job.pid
+        assert codex_session.local_liveness.backend == "codex"
+        assert join_outstanding_codex_threads(timeout_seconds=0) == 0
+        # R1: session_id is on the RUNNING row before the review finishes.
+        tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
+        assert tasks["A-1"].status is QueueItemStatus.RUNNING
+        assert tasks["A-1"].session_id == codex_session.id
 
     def test_shutdown_join_reports_still_running_codex_threads(
         self,
         tmp_dispatch_dirs: Path,
-        tmp_path: Path,
-        make_git_repo: Callable[[str], Path],
         monkeypatch: pytest.MonkeyPatch,
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
-        """R7(b): the loop's shutdown path bounds the join and reports the count."""
-        ws_a = make_git_repo("workspace/codex-join-a")
-        client_a = ClientConfig(
-            name="client-a",
-            workspace_path=ws_a,
-            default_branch="main",
-            worktree_base=tmp_path / "worktrees-join",
-        )
-        _make_clients_yaml(tmp_dispatch_dirs, client_a, codex_review_client="client-a")
-        add_ticket(TicketTask(ticket_id="A-2", client="client-a", stage=Stage.REVIEW))
+        """R7(b): the loop's shutdown path bounds the join and reports the count.
 
-        blocked_review = _BlockedCodexReview(ws_a, "A-2")
-        monkeypatch.setattr(
-            "cw.codex_background.run_review_with_fix_loop", blocked_review
-        )
+        Until B2 retires the drain, any still-registered codex thread is
+        reported; the thread is registered directly because CodexExecutor no
+        longer starts one (#2388).
+        """
+        blocked_review = _BlockedThreadWork()
+        _default_background(blocked_review)
         # Keep the bounded join bounded *and fast* — the point is that it does
         # not wait the review out, not how many seconds it waits.
         monkeypatch.setattr(
@@ -14099,9 +14126,13 @@ class TestApplyStagedDecision:
         captured_session_id: list[str | None] = []
         real_stage_regress = cw.dispatch.routing._stage_regress
 
-        def _spy_stage_regress(task: TicketTask, target_stage: Stage) -> None:
+        def _spy_stage_regress(
+            task: TicketTask, target_stage: Stage, *, merge_conflict_detected: bool
+        ) -> None:
             captured_session_id.append(task.session_id)
-            real_stage_regress(task, target_stage)
+            real_stage_regress(
+                task, target_stage, merge_conflict_detected=merge_conflict_detected
+            )
 
         monkeypatch.setattr("cw.dispatch.routing._stage_regress", _spy_stage_regress)
 
@@ -16145,6 +16176,438 @@ class TestEmptyDiffGate:
 
         assert task.disposition != "empty_diff_gate"
         assert task.stage == Stage.FINALIZE
+
+
+# ---------------------------------------------------------------------------
+# TestUnconcludedFinalizeRegressMergeGate (#2421)
+# ---------------------------------------------------------------------------
+
+
+class TestUnconcludedFinalizeRegressMergeGate:
+    """GitHub #2421: the IMPL-scoped gate on a FINALIZE-regress round trip.
+
+    A FINALIZE pre-push refresh that hit a merge conflict regresses to IMPL
+    for resolution. If the IMPL session stages the resolution but never
+    commits it, ``MERGE_HEAD`` stays set and the branch head never moves --
+    and Rule 3 used to advance IMPL->REVIEW unconditionally anyway. This gate
+    parks that row instead.
+
+    Two branches, deliberately scoped differently: a still-present
+    ``MERGE_HEAD`` gates regardless of why the regress happened, while an
+    unchanged branch head gates only when the regress was measured as
+    merge-caused (``finalize_regress_merge_conflict_detected``) -- a
+    non-merge regress (e.g. a diff-cover ``agent_block``) with no new commit
+    is left to existing routing.
+    """
+
+    _MARKER = "sha-original"
+
+    def _make_task(
+        self,
+        ticket_id: str,
+        *,
+        stage: Stage = Stage.IMPL,
+        marker: str | None = _MARKER,
+        merge_caused: bool = True,
+    ) -> TicketTask:
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=stage,
+        )
+        task.finalize_regress_branch_head = marker
+        task.finalize_regress_merge_conflict_detected = merge_caused
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _clients(self, tmp_path: Path) -> dict[str, ClientConfig]:
+        return {
+            "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
+        }
+
+    # -- predicate --------------------------------------------------------
+
+    def test_no_marker_does_not_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No FINALIZE-origin regress in play: an ordinary IMPL completion."""
+        from cw.dispatch.impl_gates import (
+            _should_gate_for_unconcluded_finalize_regress_merge,
+        )
+
+        _stub_impl_merge_gate(monkeypatch, merge_in_progress=True)
+        task = self._make_task("UFM-P1", marker=None)
+
+        assert (
+            _should_gate_for_unconcluded_finalize_regress_merge(
+                task, self._clients(tmp_path)
+            )
+            is False
+        )
+
+    def test_marker_set_merge_in_progress_gates(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """MERGE_HEAD present gates regardless of the merge-caused flag."""
+        from cw.dispatch.impl_gates import (
+            _should_gate_for_unconcluded_finalize_regress_merge,
+        )
+
+        _stub_impl_merge_gate(monkeypatch, merge_in_progress=True, head_sha="sha-new")
+        task = self._make_task("UFM-P2", merge_caused=False)
+
+        assert (
+            _should_gate_for_unconcluded_finalize_regress_merge(
+                task, self._clients(tmp_path)
+            )
+            is True
+        )
+
+    def test_marker_set_head_unchanged_in_class_gates(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The #2421 incident shape: merge-caused regress, no commit landed."""
+        from cw.dispatch.impl_gates import (
+            _should_gate_for_unconcluded_finalize_regress_merge,
+        )
+
+        _stub_impl_merge_gate(
+            monkeypatch, merge_in_progress=False, head_sha=self._MARKER
+        )
+        task = self._make_task("UFM-P3", merge_caused=True)
+
+        assert (
+            _should_gate_for_unconcluded_finalize_regress_merge(
+                task, self._clients(tmp_path)
+            )
+            is True
+        )
+
+    def test_marker_set_head_unchanged_out_of_class_does_not_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A non-merge-caused FINALIZE regress with an unchanged head is left
+        to existing routing (#1717's REVIEW-side repeat signal), never parked
+        by the head-unchanged branch."""
+        from cw.dispatch.impl_gates import (
+            _should_gate_for_unconcluded_finalize_regress_merge,
+        )
+
+        _stub_impl_merge_gate(
+            monkeypatch, merge_in_progress=False, head_sha=self._MARKER
+        )
+        task = self._make_task("UFM-P4", merge_caused=False)
+
+        assert (
+            _should_gate_for_unconcluded_finalize_regress_merge(
+                task, self._clients(tmp_path)
+            )
+            is False
+        )
+
+    def test_marker_set_head_changed_no_merge_does_not_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A real commit concluded the merge: the head moved, MERGE_HEAD gone."""
+        from cw.dispatch.impl_gates import (
+            _should_gate_for_unconcluded_finalize_regress_merge,
+        )
+
+        _stub_impl_merge_gate(monkeypatch, merge_in_progress=False, head_sha="sha-new")
+        task = self._make_task("UFM-P5", merge_caused=True)
+
+        assert (
+            _should_gate_for_unconcluded_finalize_regress_merge(
+                task, self._clients(tmp_path)
+            )
+            is False
+        )
+
+    def test_unresolvable_worktree_gates(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fail closed: no worktree means no evidence the merge concluded."""
+        from cw.dispatch.impl_gates import (
+            _should_gate_for_unconcluded_finalize_regress_merge,
+        )
+
+        _stub_impl_merge_gate(
+            monkeypatch, merge_in_progress=False, head_sha="sha-new", worktree=None
+        )
+        task = self._make_task("UFM-P6")
+
+        assert (
+            _should_gate_for_unconcluded_finalize_regress_merge(
+                task, self._clients(tmp_path)
+            )
+            is True
+        )
+
+    def test_unmeasurable_merge_state_gates(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.impl_gates import (
+            _should_gate_for_unconcluded_finalize_regress_merge,
+        )
+
+        _stub_impl_merge_gate(monkeypatch, merge_in_progress=None, head_sha="sha-new")
+        task = self._make_task("UFM-P7", merge_caused=False)
+
+        assert (
+            _should_gate_for_unconcluded_finalize_regress_merge(
+                task, self._clients(tmp_path)
+            )
+            is True
+        )
+
+    def test_unmeasurable_head_gates(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.impl_gates import (
+            _should_gate_for_unconcluded_finalize_regress_merge,
+        )
+
+        _stub_impl_merge_gate(monkeypatch, merge_in_progress=False, head_sha=None)
+        task = self._make_task("UFM-P8", merge_caused=True)
+
+        assert (
+            _should_gate_for_unconcluded_finalize_regress_merge(
+                task, self._clients(tmp_path)
+            )
+            is True
+        )
+
+    # -- park helper ------------------------------------------------------
+
+    def test_park_stamps_status_disposition_and_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        from cw.dev_queue import UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION
+        from cw.dispatch.impl_gates import (
+            _park_unconcluded_finalize_regress_merge_gate,
+        )
+
+        attention = capture_events(
+            "cw.dispatch.impl_gates", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        task = self._make_task("UFM-K1")
+        task.session_id = "sess-ufm-k1"
+
+        _park_unconcluded_finalize_regress_merge_gate(task)
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION
+        assert task.disposition == "unconcluded_finalize_regress_merge"
+
+        assert len(attention) == 1
+        _event_type, payload, correlation_id = attention[0]
+        assert payload["paused_status"] == "unconcluded_finalize_regress_merge"
+        assert payload["breadcrumbs"] == ""
+        assert payload["session_id"] == "sess-ufm-k1"
+        assert payload["ticket_id"] == "UFM-K1"
+        assert correlation_id == "UFM-K1"
+
+    def test_gate_disposition_excluded_from_hold_dispositions(self) -> None:
+        """A half-finished merge clears by committing it, not by an operator
+        saying "proceed anyway"."""
+        from cw.dev_queue import (
+            HOLD_DISPOSITIONS,
+            UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION,
+        )
+
+        assert UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION not in (
+            HOLD_DISPOSITIONS
+        )
+
+    def test_gate_reason_is_distinct_from_status_literals(self) -> None:
+        """Gate-class park hardcodes breadcrumbs="", so its paused_status must
+        stay out of BREADCRUMB_ELIGIBLE_PAUSED_STATUSES (#1729)."""
+        from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        from cw.dispatch.impl_gates import _UNCONCLUDED_MERGE_REASON
+
+        assert _UNCONCLUDED_MERGE_REASON == "unconcluded_finalize_regress_merge"
+        assert _UNCONCLUDED_MERGE_REASON not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+    # -- routing (Rule 3) -------------------------------------------------
+
+    def test_stage_success_site_blocks_impl_advance_on_unconcluded_merge(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dev_queue import UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        _stub_impl_merge_gate(
+            monkeypatch, merge_in_progress=False, head_sha=self._MARKER
+        )
+        task = self._make_task("UFM-R1", merge_caused=True)
+
+        apply_staged_decision(
+            task,
+            "stage_complete",
+            {"status": "stage_complete"},
+            self._clients(tmp_path),
+        )
+
+        assert task.stage == Stage.IMPL
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION
+        # Not consumed at IMPL: #1717's REVIEW-side detector still owns both.
+        assert task.finalize_regress_branch_head == self._MARKER
+        assert task.finalize_regress_merge_conflict_detected is True
+
+    def test_stage_success_site_advances_impl_when_merge_concluded(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch import apply_staged_decision
+
+        _stub_impl_merge_gate(monkeypatch, merge_in_progress=False, head_sha="sha-new")
+        task = self._make_task("UFM-R2", merge_caused=True)
+
+        apply_staged_decision(
+            task,
+            "stage_complete",
+            {"status": "stage_complete"},
+            self._clients(tmp_path),
+        )
+
+        assert task.stage == Stage.REVIEW
+        assert task.status == QueueItemStatus.PENDING
+        assert task.finalize_regress_branch_head == self._MARKER
+        assert task.finalize_regress_merge_conflict_detected is True
+
+    def test_stage_success_site_advances_impl_when_regress_was_not_merge_caused(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The false positive a reason-agnostic head check would produce."""
+        from cw.dispatch import apply_staged_decision
+
+        _stub_impl_merge_gate(
+            monkeypatch, merge_in_progress=False, head_sha=self._MARKER
+        )
+        task = self._make_task("UFM-R3", merge_caused=False)
+
+        apply_staged_decision(
+            task,
+            "stage_complete",
+            {"status": "stage_complete"},
+            self._clients(tmp_path),
+        )
+
+        assert task.stage == Stage.REVIEW
+        assert task.status == QueueItemStatus.PENDING
+
+    def test_review_stage_stage_complete_not_gated_by_impl_check(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """IMPL-scoped: a REVIEW completion with the marker set and MERGE_HEAD
+        present is never parked by this gate."""
+        from cw.dispatch import apply_staged_decision
+
+        _stub_impl_merge_gate(monkeypatch, merge_in_progress=True, head_sha="x")
+        task = self._make_task("UFM-R4", stage=Stage.REVIEW)
+
+        apply_staged_decision(
+            task,
+            "stage_complete",
+            {"status": "stage_complete"},
+            self._clients(tmp_path),
+        )
+
+        assert task.disposition != "unconcluded_finalize_regress_merge"
+        assert task.stage == Stage.FINALIZE
+
+    # -- Sub-rule 5a stamping --------------------------------------------
+
+    @pytest.mark.parametrize("measured", [True, False, None])
+    def test_finalize_regress_stamps_merge_conflict_detected_from_measurement(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        measured: bool | None,
+    ) -> None:
+        """Rule 5a measures MERGE_HEAD at regress time; only a positive
+        measurement stamps True (unmeasurable is not evidence of a merge)."""
+        from cw.dispatch import apply_staged_decision
+        from cw.dispatch import routing as routing_mod
+
+        seen: list[Path | None] = []
+
+        def _probe(path: Path | None) -> bool | None:
+            seen.append(path)
+            return measured
+
+        monkeypatch.setattr(
+            routing_mod, "resolve_task_worktree", lambda _t, _c: _STUB_WORKTREE
+        )
+        monkeypatch.setattr(routing_mod, "merge_in_progress", _probe)
+        task = self._make_task("UFM-S1", stage=Stage.FINALIZE, marker=None)
+        task.stage_base_ref = self._MARKER
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.stage == Stage.IMPL
+        assert seen == [_STUB_WORKTREE]
+        assert task.finalize_regress_branch_head == self._MARKER
+        assert task.finalize_regress_merge_conflict_detected is (measured is True)
+
+    # -- REVIEW-side consumption -----------------------------------------
+
+    def test_finalize_regress_repeat_consumption_clears_both_fields(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """#1717's consumer clears the sibling flag with the oracle, so a
+        stale merge-caused flag cannot leak into a later regress cycle."""
+        from cw.dispatch import _consume_finalize_regress_repeat
+
+        task = self._make_task("UFM-C1", stage=Stage.REVIEW, merge_caused=True)
+
+        assert _consume_finalize_regress_repeat(task, self._MARKER) is True
+        assert task.finalize_regress_branch_head is None
+        assert task.finalize_regress_merge_conflict_detected is False
 
 
 # ---------------------------------------------------------------------------

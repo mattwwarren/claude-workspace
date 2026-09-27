@@ -1,7 +1,7 @@
 """StageExecutor seam, ClaudeNativeExecutor, codex capability probe, the
 shared executor-direct completion door (RFC 0005 A2, RFC 0012 A2), and the
-shared fire-and-forget spawn skeleton used by LocalExecutor and
-OpencodeExecutor (#2369)."""
+shared fire-and-forget spawn skeleton used by LocalExecutor,
+OpencodeExecutor (#2369), and CodexExecutor (#2388)."""
 
 from __future__ import annotations
 
@@ -140,23 +140,19 @@ class StageExecutor(Protocol):
     # Invariant: a ``StageExecutor.spawn()`` that blocks the calling thread must
     # not be on the shared ``dispatch_tick`` path unless its session carries a
     # ``surface_ref``-equivalent liveness handle (bound to process start-time)
-    # that phantom/harvest detection can use for crash recovery. LocalExecutor
-    # satisfies this via ``Session.local_liveness`` (RFC 0005 F3, #888): it
-    # launches aider fire-and-forget, records the handle, and returns without
-    # blocking, so reconcile/local can recover the session if cw dies mid-run.
+    # that phantom/harvest detection can use for crash recovery. LocalExecutor,
+    # OpencodeExecutor, and CodexExecutor all satisfy this the same way, via
+    # ``Session.local_liveness`` (RFC 0005 F3, #888; #2369): each launches its
+    # process fire-and-forget through ``_spawn_fire_and_forget``, records the
+    # handle, and returns without blocking, so reconcile/local can recover the
+    # session if cw dies mid-run.
     #
-    # CodexExecutor is an accepted, documented exception (#1727): it no longer
-    # blocks the caller (it hands the review to a ``cw.codex_background`` daemon
-    # thread and returns) but still carries no liveness handle, so its session
-    # is not crash-recoverable via harvest. Unchanged from when the call was
-    # synchronous — a thread dies with its process exactly as a blocking call
-    # did — so this is not a regression; closing it is Option A/B territory (a
-    # real subprocess surface), out of scope. The blast radius is bounded, not
-    # closed, from two sides: ``run_dispatch_loop``'s shutdown path
-    # bounded-joins outstanding codex threads before DISPATCH_LOOP_EXITED
-    # (deploy/restart/``--once``), and ``cw.reconcile.codex_boot`` flags any
-    # codex session still ACTIVE at the next boot (the crash/SIGKILL path a
-    # join cannot reach).
+    # For CodexExecutor (RFC 0014 A2, #2388) that process is a detached
+    # ``cw codex run`` job: it completes the session itself through the door,
+    # which is the sole normal completion path, and outlives a serve restart.
+    # reconcile/local's codex branch (A1, #2387) — an audited clean-requeue-
+    # or-park gate on a dead PID — is the crash-only fallback, never a result
+    # synthesizer.
     """
 
     def spawn(
@@ -238,7 +234,8 @@ def _complete_session_via_door(
     source=EXECUTOR_DIRECT), then transition status to COMPLETED.
 
     Caller MUST already hold sessions_lock(). Shared by every executor-direct
-    write site (``_spawn_fire_and_forget`` and CodexExecutor, #1458) so the
+    write site (``_spawn_fire_and_forget`` and ``cw.codex_background``'s
+    review completion, #1458) so the
     door-call + not-found-catch + status-transition shape isn't duplicated
     per site.
 
@@ -290,9 +287,10 @@ def _complete_session_via_door(
 class FireAndForgetRunner(Protocol):
     """Testability seam for a fire-and-forget subprocess launch (#2369).
 
-    ``AiderRunner`` and ``OpencodeRunner`` implementations satisfy it
-    structurally. The caller does NOT wait on the returned process — it
-    captures PID + start-time as a liveness handle and returns immediately.
+    ``AiderRunner``, ``OpencodeRunner``, and ``RealCodexJobRunner``
+    implementations satisfy it structurally. The caller does NOT wait on the
+    returned process — it captures PID + start-time as a liveness handle and
+    returns immediately.
     """
 
     def launch(
@@ -470,32 +468,32 @@ def _spawn_fire_and_forget(
     client: ClientConfig,
     stage: Stage,
     executor_name: LocalLivenessBackend,
-    preflight_fn: Callable[[str], AutoDevResult | _PreflightOK],
+    preflight_fn: Callable[[Session], AutoDevResult | _PreflightOK],
     blocked_ctor: BlockedCtor,
     runner: FireAndForgetRunner,
 ) -> str:
     """Shared non-blocking spawn for fire-and-forget executors (#2369).
 
-    Creates the session, runs the synchronous pre-flight (passed the sid, so
-    a backend whose prompt embeds the session id -- e.g. opencode's
-    ``--session-id``, #2430 -- can thread the SAME id the session was created
-    under), then either launches the process (recording a
-    ``LocalLivenessHandle`` tagged with *executor_name*, leaving the session
-    ACTIVE for reconcile/local harvest) or completes the session inline
-    through the door (source=EXECUTOR_DIRECT) and emits SESSION_COMPLETED.
-    Returns the sid without ever waiting on the run. Any unexpected error
-    during launch completes the session COMPLETED/CRASHED so it is never left
-    ACTIVE, then re-raises.
+    Creates the session, runs the synchronous pre-flight (passed the persisted
+    ``Session``, so a backend can thread the SAME id the session was created
+    under -- e.g. opencode's ``--session-id``, #2430 -- or its name, as
+    codex's ``_write_hook_context`` call needs, #2388), then either launches
+    the process (recording a ``LocalLivenessHandle`` tagged with
+    *executor_name*, leaving the session ACTIVE for reconcile/local harvest)
+    or completes the session inline through the door (source=EXECUTOR_DIRECT)
+    and emits SESSION_COMPLETED. Returns the sid without ever waiting on the
+    run. Any unexpected error -- in the pre-flight or the launch -- completes
+    the session COMPLETED/CRASHED so it is never left ACTIVE, then re-raises.
     """
     sess = _create_executor_session(
         task=task, worktree=worktree, client=client, stage=stage
     )
     sid = sess.id
-    preflight = preflight_fn(sid)
     # Empty until the launch path sets it, so the except branch (which may
     # fire before launch) can still persist an argv-less bundle.
     argv: list[str] = []
     try:
+        preflight = preflight_fn(sess)
         if isinstance(preflight, _PreflightOK):
             argv = preflight.argv
             proc = runner.launch(worktree, argv, preflight.env)

@@ -3,7 +3,9 @@
 Answers one question: **how many commits does this worktree's HEAD carry that
 ``origin/<default_branch>`` does not?** Zero means the branch exists but holds
 nothing — there is no diff to review, nothing to ship, and no scope decision an
-operator could meaningfully approve.
+operator could meaningfully approve. Two sibling measurements share the module
+and its contracts: ``current_head_sha`` (#2123) and ``merge_in_progress``
+(#2421, whether ``MERGE_HEAD`` is still set in the worktree).
 
 Two hard contracts, both inherited from ``dispatch/branch_freshness``:
 
@@ -111,3 +113,27 @@ def current_head_sha(worktree_path: Path | None) -> str | None:
     # as a *mismatch* downstream rather than as "unmeasurable". Both park, but
     # conflating them would hide which one actually happened.
     return result.stdout.strip() or None
+
+
+def merge_in_progress(worktree_path: Path | None) -> bool | None:
+    """Return whether *worktree_path* is mid-merge, or ``None`` if unmeasurable (#2421).
+
+    ``True`` means ``MERGE_HEAD`` resolves: a merge was started and never
+    concluded by a commit. Staging a resolution with ``git add`` is not enough
+    -- only the merge commit clears it. Same fail-open-never-raise contract as
+    the two siblings above; ``dispatch.impl_gates`` supplies the fail-closed
+    policy for ``None``.
+    """
+    if worktree_path is None or not worktree_path.exists():
+        return None
+    try:
+        result = _run_git(
+            "rev-parse", "--verify", "-q", "MERGE_HEAD", cwd=worktree_path, check=False
+        )
+    except OSError:
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
