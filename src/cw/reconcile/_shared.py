@@ -1482,6 +1482,7 @@ class _TaskLookupResult(NamedTuple):
     make the live/redispatch-eligible interpretation win whenever both are
     present, regardless of order.
     """
+
     target: TicketTask | None
     target_status: QueueItemStatus | None
     matched_excluded: bool

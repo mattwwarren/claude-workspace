@@ -277,9 +277,7 @@ def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
         event_types=[OrchestratorEventType.SESSION_COMPLETED],
     )
     assert not any(e.payload.get("session_id") == "harv-refused" for e in events)
-    assert not read_events(
-        event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
-    )
+    assert not read_events(event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED])
 
 
 def test_local_harvest_queue_save_failure_keeps_audit_event(
@@ -328,9 +326,7 @@ def test_local_harvest_queue_save_failure_keeps_audit_event(
             task_by_ticket=task_by_ticket,
         )
 
-    events = read_events(
-        event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
-    )
+    events = read_events(event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED])
     assert len(events) == 1
     assert events[0].payload["session_id"] == session_id
     assert load_state().sessions[0].last_result is None
