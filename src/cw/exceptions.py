@@ -414,7 +414,7 @@ class DisclaimerNotAcceptedError(CwError):
 
 
 class LaneMoveError(CwError):
-    """Raised when a ticket cannot be moved due to its current status."""
+    """Raised when a ticket cannot be moved or reprioritized due to its status."""
 
     __slots__ = ()
 

@@ -647,6 +647,7 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 | `lane.resumed` | `cw lane resume` (also resets the circuit-breaker counter) | `{client, lane, source: "operator"}` |
 | `ticket.enqueued` | `cw dev-queue add` | `{ticket_id, client, priority}` (see top of file) |
 | `ticket.moved` | `cw dev-queue move` | `{ticket_id, client, from_lane, to_lane}` |
+| `ticket.reprioritized` | `cw dev-queue move --priority` | `{ticket_id, client, from_priority, to_priority}` |
 | `ticket.approved` | `cw dev-queue approve` | `{ticket_id, client, from_stage, to_stage}`; scope-drift approvals also carry `{old_status, new_status, scope_drift_approved_extra_files, scope_drift_approved_head, approved_at, actor}` |
 | `plan.approval_revoked` | `cw dev-queue revoke-plan-approval` | `{ticket_id, client, previous_fingerprint, revoked_at, initiating_service, resolutions_source, reason}` |
 | `ticket.approval_failed` | scope-drift approval compensation | `{ticket_id, client, approval_event, approval_payload, error, rolled_back, recovery_required}` |
@@ -1270,8 +1271,9 @@ only ones emitted today). `correlation_id` is the `ticket_id`.
 ```
 
 **Known legacy gap — the `ticket.*` CLI family:** The operator-command events
-`ticket.enqueued`, `ticket.moved`, `ticket.approved`, `ticket.requeued`, and
-`ticket.unblocked` are emitted from the CLI layer with `correlation_id=None`
+`ticket.enqueued`, `ticket.moved`, `ticket.reprioritized`, `ticket.approved`,
+`ticket.requeued`, and `ticket.unblocked` are emitted from the CLI layer with
+`correlation_id=None`
 (the `ticket_id` lives only in their payloads). The three `task.*` producers
 above deliberately set `correlation_id=ticket_id`; the older `ticket.*` family
 was **not** retrofitted in this change to avoid touching unrelated emit sites.

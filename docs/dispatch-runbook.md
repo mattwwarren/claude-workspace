@@ -59,7 +59,10 @@ cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
     approval gate, and a `small` hint is used only when the sentinel omits
     its own tier — a hint can ADD the gate, never remove it (`large` from
     the sentinel always wins).
-- `-p/--priority` — higher dispatches sooner.
+- `-p/--priority` — higher dispatches sooner. An already-queued row's
+  priority can be edited in place with `cw dev-queue move <T> -c <client>
+  --priority <n>` — no cancel+requeue needed; it takes effect on the next
+  claim evaluation with no other action required.
 - (The former `-t/--timeout` wall-clock budget override was removed with the
   process-kill timeouts — see ADR-0014. Sessions are never dispositioned on
   elapsed time; a quiet worker surfaces via the liveness distress signal
