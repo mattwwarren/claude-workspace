@@ -7458,7 +7458,7 @@ class TestApproveTicket:
         assert actor_default.default is DEV_QUEUE_APPROVE_ACTOR
 
     @pytest.mark.parametrize("event_error", [OSError, RuntimeError])
-    def test_approve_body_drift_event_failure_is_logged_not_raised(
+    def test_approve_body_drift_event_failure_aborts_with_nothing_persisted(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
@@ -7466,14 +7466,19 @@ class TestApproveTicket:
         caplog: pytest.LogCaptureFixture,
         event_error: type[Exception],
     ) -> None:
-        """The event is advisory: a recording failure of any class is logged
-        with its traceback and the warning is still returned -- the approval,
-        already saved, never fails over it."""
-        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+        """Event-first ordering: a failed append aborts before persistence,
+        leaving the row parked and the draft unpromoted."""
         from cw.dev_queue import approval as approval_module
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
 
-        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift13")
+        task = self._arm_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, "sess-drift13", plan=plan_body()
+        )
         _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+        assert task.worktree_path is not None
+        cw_dir = task.worktree_path / ".cw"
+        before = load_dev_queue().model_dump()
         real_record_event = approval_module.record_event
 
         def _record(
@@ -7489,20 +7494,53 @@ class TestApproveTicket:
 
         monkeypatch.setattr("cw.dev_queue.approval.record_event", _record)
 
-        with caplog.at_level(logging.WARNING, logger="cw.dev_queue.approval"):
-            result = approve_ticket("GEN-500", "genhealth")
+        with (
+            caplog.at_level(logging.ERROR, logger="cw.dev_queue.approval"),
+            pytest.raises(ApproveGateError, match="Nothing was recorded") as excinfo,
+        ):
+            approve_ticket("GEN-500", "genhealth")
 
-        assert isinstance(result[BODY_DRIFT_WARNING_KEY], str)
+        assert isinstance(excinfo.value.__cause__, event_error)
         assert "plan.approval_body_drift_warned" in caplog.text
-        drift_records = [r for r in caplog.records if r.exc_info is not None]
-        assert drift_records
-        exc_info = drift_records[0].exc_info
-        assert exc_info is not None
-        assert isinstance(exc_info[1], event_error)
-        store = load_dev_queue()
-        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
-        assert t.status == QueueItemStatus.PENDING
-        assert t.plan_approved_fingerprint == _RECONCILED_DRAFT_FINGERPRINT
+        assert any(record.exc_info for record in caplog.records)
+        assert load_dev_queue().model_dump() == before
+        assert (cw_dir / "plan.md").read_text(encoding="utf-8") == plan_body()
+        assert (cw_dir / "plan-draft.md").read_text(
+            encoding="utf-8"
+        ) == _BODY_EVALUATED_DRAFT
+
+    def test_approve_body_drift_save_failure_after_event_leaves_phantom_record(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A save failure after the event leaves the accepted phantom audit
+        record while the approval remains unpersisted."""
+        from cw.dev_queue import approve_ticket
+        from cw.events import read_events
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift14")
+        _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        def _raise_save(*_args: object, **_kwargs: object) -> None:
+            msg = "queue file unwritable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.approval.save_dev_queue", _raise_save)
+
+        with pytest.raises(OSError, match="queue file unwritable"):
+            approve_ticket("GEN-500", "genhealth")
+
+        audit = read_events(
+            event_types=[OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED]
+        )
+        assert len(audit) == 1
+        assert audit[0].correlation_id == "GEN-500"
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.plan_approved_at is None
+        assert t.plan_approved_fingerprint is None
 
 
 # ---------------------------------------------------------------------------
