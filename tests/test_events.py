@@ -30,10 +30,13 @@ from cw.events import (
 from cw.events import record_event as events_record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorConfig, OrchestratorEvent, OrchestratorEventType
+from cw.models.enums import STAGE_IDENTIFIERS, StageIdentifier
 from tests._reconcile_helpers import _auto_config
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+
+    from click.testing import Result
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +595,116 @@ def test_cli_event_record_stage_entered_works(tmp_events_dir: Path) -> None:
     assert len(events) == 1
     assert events[0].type is OrchestratorEventType.STAGE_ENTERED
     assert events[0].payload["stage"] == "s2_impl_started"
+
+
+# ---------------------------------------------------------------------------
+# Closed §10.2 stage enum enforced at record time (issue #2429)
+# ---------------------------------------------------------------------------
+
+
+def _stage_payload(**fields: object) -> str:
+    """JSON payload for a stage.* event; ``fields`` override the defaults."""
+    payload: dict[str, object] = {
+        "session_id": "x",
+        "ticket_id": "2429",
+        "stage": "s2_impl_started",
+        "started_at": "2026-09-26T13:01:42Z",
+    }
+    payload.update(fields)
+    return json.dumps(payload)
+
+
+def _invoke_record(event_type: str, payload_json: str) -> Result:
+    return CliRunner().invoke(
+        main,
+        ["event", "record", event_type, "--payload", payload_json],
+    )
+
+
+def test_cli_event_record_stage_entered_rejects_unknown_stage(
+    tmp_events_dir: Path,
+) -> None:
+    """stage.entered with a stage outside §10.2 is rejected, nothing recorded."""
+    result = _invoke_record("stage.entered", _stage_payload(stage="s9_bogus"))
+    assert result.exit_code != 0
+    assert "Unknown stage 's9_bogus'" in result.output
+    assert "Valid stages:" in result.output
+    assert "s0_intake" in result.output
+    assert read_events() == []
+
+
+def test_cli_event_record_stage_errored_rejects_unknown_stage(
+    tmp_events_dir: Path,
+) -> None:
+    """stage.errored is held to the same closed enum as stage.entered."""
+    result = _invoke_record(
+        "stage.errored",
+        _stage_payload(stage="s9_bogus", error_kind="agent_block"),
+    )
+    assert result.exit_code != 0
+    assert "Unknown stage 's9_bogus'" in result.output
+    assert read_events() == []
+
+
+def test_cli_event_record_stage_entered_rejects_unknown_prev_stage(
+    tmp_events_dir: Path,
+) -> None:
+    """A valid stage with an out-of-enum prev_stage is still rejected."""
+    result = _invoke_record(
+        "stage.entered",
+        _stage_payload(prev_stage="s1_plan_approved"),
+    )
+    assert result.exit_code != 0
+    assert "Unknown prev_stage 's1_plan_approved'" in result.output
+    assert "Valid stages:" in result.output
+    assert read_events() == []
+
+
+def test_cli_event_record_stage_entered_missing_stage_rejected(
+    tmp_events_dir: Path,
+) -> None:
+    """``stage`` is required (§10.3): omitting it is rejected, not recorded."""
+    payload = {
+        "session_id": "x",
+        "ticket_id": "2429",
+        "started_at": "2026-09-26T13:01:42Z",
+    }
+    result = _invoke_record("stage.entered", json.dumps(payload))
+    assert result.exit_code != 0
+    assert "Unknown stage 'None'" in result.output
+    assert read_events() == []
+
+
+def test_cli_event_record_stage_entered_accepts_every_enum_value(
+    tmp_events_dir: Path,
+) -> None:
+    """Every StageIdentifier member is accepted as both stage and prev_stage.
+
+    Walks the whole enum (mirrors test_all_orchestrator_event_types_round_trip)
+    so a §10.2 edit landing in the enum but not the validator -- or vice
+    versa -- fails here.
+    """
+    for member in StageIdentifier:
+        result = _invoke_record(
+            "stage.entered",
+            _stage_payload(stage=member.value, prev_stage=member.value),
+        )
+        assert result.exit_code == 0, (member, result.output)
+
+    recorded = [ev.payload["stage"] for ev in read_events()]
+    assert recorded == [member.value for member in StageIdentifier]
+    assert frozenset(recorded) == STAGE_IDENTIFIERS
+
+
+def test_cli_event_record_non_stage_event_type_ignores_stage_key(
+    tmp_events_dir: Path,
+) -> None:
+    """The stage check is gated on event type, not on payload shape."""
+    result = _invoke_record("pr.registered", json.dumps({"stage": "whatever"}))
+    assert result.exit_code == 0, result.output
+    events = read_events()
+    assert len(events) == 1
+    assert events[0].payload["stage"] == "whatever"
 
 
 def test_cli_event_tail_type_filter_stage_entered(tmp_events_dir: Path) -> None:
