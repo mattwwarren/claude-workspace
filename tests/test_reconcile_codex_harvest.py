@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw import result as cw_result
 from cw.config import load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
@@ -398,9 +399,9 @@ def test_codex_candidate_never_reaches_git_synthesis_or_opencode_parse(
         "_synthesize_harvest_sentinel",
         "synthesize_git_result",
         "synthesize_opencode_result",
-        "emit_result_on",
     ):
         monkeypatch.setattr(reconcile_local, name, _forbidden)
+    monkeypatch.setattr(cw_result, "emit_result_on", _forbidden)
     for backend in ("aider", "opencode"):
         monkeypatch.setitem(reconcile_local._HARVEST_SYNTHESIZERS, backend, _forbidden)
 

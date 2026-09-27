@@ -336,18 +336,25 @@ def _harvest_last_result_through_door(
     terminal result recorded from another writer can't be silently
     clobbered by a late transcript re-parse.
 
-    Best-effort: a validation failure or missing session is logged and
-    swallowed, never raised -- the Stop hook must never block claude from
-    exiting. There is no fallback write; a failure here just means
-    ``last_result`` stays whatever it already was. A refusal (terminal
-    result already present) is not logged again here -- ``emit_result_locked``
-    already emits its own warning on refusal.
+    Best-effort: a validation failure, missing session, or audit-inbox failure
+    is logged and swallowed, never raised -- the Stop hook must never block
+    claude from exiting. There is no fallback write; a failure here just means
+    ``last_result`` stays whatever it already was. A refusal (terminal result
+    already present) is not logged again here -- ``emit_result_locked`` already
+    emits its own warning on refusal.
     """
     try:
         emit_result_locked(
             sentinel.model_dump(mode="json"),
             session_id,
             source=LastResultSource.STOP_HOOK_HARVEST,
+        )
+    except OSError as exc:
+        logger.warning(
+            "stop-hook harvest audit append failed for session %s; "
+            "allowing the Stop hook to exit: %s",
+            session_id,
+            exc,
         )
     except (EmitValidationError, EmitSessionNotFoundError) as exc:
         logger.warning(
