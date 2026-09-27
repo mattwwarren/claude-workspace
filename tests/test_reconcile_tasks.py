@@ -51,7 +51,10 @@ from cw.reconcile import (
     revert_timed_out_tasks,
 )
 from cw.reconcile.stale_dispatch_watch import register_stale_dispatch_watched_prs
-from cw.reconcile.tasks import _closed_pr_numbers_by_client, _merged_pr_numbers_by_client
+from cw.reconcile.tasks import (
+    _closed_pr_numbers_by_client,
+    _merged_pr_numbers_by_client,
+)
 from tests._reconcile_helpers import (
     _client_with_lane,
     _make_pending_fix_dispatch,
@@ -2923,7 +2926,9 @@ class TestClosedPrNumbersByClient:
     def test_null_client_watch_excluded(self) -> None:
         """An operator-registered (webhook/cli) watch carries no client
         context, so its bare PR number cannot be scoped to one repo."""
-        store = DevQueueStore(watched_prs=[_make_watched_pr(client=None, state="CLOSED")])
+        store = DevQueueStore(
+            watched_prs=[_make_watched_pr(client=None, state="CLOSED")]
+        )
         assert _closed_pr_numbers_by_client(store) == {}
 
     def test_other_client_watch_does_not_leak(self) -> None:
