@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import getpass
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +15,9 @@ from click.testing import CliRunner
 from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.cli import main
 from cw.config import load_state, save_state, sessions_lock
+from cw.events import read_events
 from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
-from cw.models import CwState, LastResultSource, Session, SessionPurpose
+from cw.models import CwState, LastResultSource, OrchestratorEventType, Session, SessionPurpose
 from cw.plan_fingerprint import compute_plan_draft_fingerprint
 from cw.result import (
     EmitOutcome,
@@ -24,7 +27,9 @@ from cw.result import (
     has_terminal_result,
     validate_payload,
 )
-from tests.conftest import _plan_pending_payload, _seed_daemon_session
+from tests.conftest import _REPO_ROOT, _plan_pending_payload, _seed_daemon_session
+
+_PAYLOAD_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _in_memory_session(**overrides: Any) -> Session:
@@ -470,6 +475,188 @@ class TestEmitResultLocked:
 
         assert outcome.refused is False
         assert isinstance(outcome.result, AutoDevResult)
+
+    def test_emit_result_locked_records_result_emitted_audit_event(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """An accepted emit records exactly one audit-only SESSION_RESULT_EMITTED
+        event, before save_state, with the ticket derived from the session
+        name (#2439)."""
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        with sessions_lock():
+            emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
+
+        events = read_events(
+            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
+        )
+        assert len(events) == 1
+        event = events[0]
+        assert event.correlation_id == "GEN-42"
+        payload = event.payload
+        assert set(payload) == {
+            "session_id",
+            "ticket_id",
+            "client",
+            "lane",
+            "stage",
+            "last_result_source",
+            "status",
+            "payload_digest",
+            "actor",
+            "recorded_at",
+        }
+        assert payload["session_id"] == "test1234"
+        assert payload["ticket_id"] == "GEN-42"
+        assert payload["client"] == "test-client"
+        assert payload["lane"] is None
+        assert payload["stage"] is None
+        assert payload["last_result_source"] == "emit_cli"
+        assert payload["status"] == "shipped"
+        assert _PAYLOAD_DIGEST_RE.match(payload["payload_digest"])
+        assert payload["actor"] == getpass.getuser()
+        assert isinstance(payload["recorded_at"], str)
+        from datetime import datetime
+
+        assert datetime.fromisoformat(payload["recorded_at"])
+
+    def test_emit_result_locked_refusal_records_no_audit_event(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A refused (already-terminal) write records no audit event."""
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="test1234",
+            last_result={"status": "shipped"},
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
+        )
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
+
+        assert outcome.refused is True
+        events = read_events(
+            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
+        )
+        assert events == []
+
+    def test_emit_result_locked_audit_append_failure_leaves_last_result_unchanged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed audit append propagates and leaves state untouched
+        (event-first ordering, mirrors test_revoke_plan_approval_event_failure_
+        raises_without_mutation)."""
+        import cw.result as result_mod
+
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        before = load_state().model_dump(mode="json")
+
+        def _raise_event(*_args: object, **_kwargs: object) -> None:
+            msg = "event inbox unavailable"
+            raise OSError(msg)
+
+        monkeypatch.setattr(result_mod, "record_event", _raise_event)
+
+        with sessions_lock(), pytest.raises(OSError, match="event inbox unavailable"):
+            emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
+
+        assert load_state().model_dump(mode="json") == before
+
+    def test_emit_result_locked_save_state_failure_raises_with_audit_event_recorded(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A save_state failure after the audit event has already landed still
+        propagates, and the audit event stands as a truthful record (mirrors
+        test_revoke_plan_approval_save_failure_raises_with_event_recorded)."""
+        import cw.result as result_mod
+
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+
+        def _raise_save(*_args: object, **_kwargs: object) -> None:
+            msg = "state file unwritable"
+            raise OSError(msg)
+
+        monkeypatch.setattr(result_mod, "save_state", _raise_save)
+
+        with sessions_lock(), pytest.raises(OSError, match="state file unwritable"):
+            emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
+
+        events = read_events(
+            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
+        )
+        assert len(events) == 1
+
+    def test_emit_result_locked_audit_event_ticket_id_uses_session_name_for_blocked_shape(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A BlockedResult-shaped payload (no schema_version) still records a
+        populated ticket_id, derived from the session name rather than the
+        result object (#2439)."""
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        payload = {
+            "status": "blocked",
+            "blocker": {"stage": "s2", "reason": "impl_failed", "details": "x"},
+        }
+        with sessions_lock():
+            outcome = emit_result_locked(
+                payload, "test1234", source=LastResultSource.STOP_HOOK_HARVEST
+            )
+
+        assert outcome.refused is False
+        assert isinstance(outcome.result, BlockedResult)
+        events = read_events(
+            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
+        )
+        assert len(events) == 1
+        assert events[0].payload["ticket_id"] == "GEN-42"
+
+
+def test_session_result_emitted_absent_from_reconcile_and_dispatch_consumer_sets() -> (
+    None
+):
+    """SESSION_RESULT_EMITTED is audit-only by construction (#2439, R2): it
+    must never appear in a reconcile/dispatch consumer's event_types filter,
+    nor be referenced at all under those trees. Mirrors
+    tests/test_result_door_guard.py's regex + Path.rglob("*.py") shape."""
+    consumer_source = (
+        _REPO_ROOT / "src" / "cw" / "dispatch" / "loop.py"
+    ).read_text()
+    match = re.search(
+        r"consume_completed_sessions.*?event_types=\[(.*?)\]",
+        consumer_source,
+        re.DOTALL,
+    )
+    assert match is not None, "consume_completed_sessions event_types filter not found"
+    assert "SESSION_RESULT_EMITTED" not in match.group(1)
+
+    for tree in ("reconcile", "dispatch"):
+        root = _REPO_ROOT / "src" / "cw" / tree
+        for path in root.rglob("*.py"):
+            text = path.read_text()
+            assert "SESSION_RESULT_EMITTED" not in text, (
+                f"{path} references SESSION_RESULT_EMITTED; this event is "
+                "audit-only and must never be consumed by reconcile/dispatch"
+            )
+
+
+def test_session_result_emitted_is_documented() -> None:
+    """docs/events.md documents session.result_emitted (mirrors
+    tests/test_dispatch_usage_limit.py's test_event_type_is_documented)."""
+    events_doc = (_REPO_ROOT / "docs" / "events.md").read_text()
+    assert "### `session.result_emitted`" in events_doc
 
 
 class TestEmitResult:

@@ -1898,6 +1898,19 @@ class TestConciergeAndEscalationModelSurface:
             not in _DEFAULT_OPERATOR_EVENT_TYPES
         )
 
+    def test_orchestrator_event_type_includes_session_result_emitted(self) -> None:
+        assert OrchestratorEventType.SESSION_RESULT_EMITTED == "session.result_emitted"
+
+    def test_session_result_emitted_not_in_default_forward_set(self) -> None:
+        """SESSION_RESULT_EMITTED is audit-trail only — deliberately NOT
+        forwarded to the operator channel by default (#2439)."""
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert (
+            OrchestratorEventType.SESSION_RESULT_EMITTED
+            not in _DEFAULT_OPERATOR_EVENT_TYPES
+        )
+
     def test_orchestrator_config_concierge_enabled_defaults_false(self) -> None:
         assert OrchestratorConfig().concierge_enabled is False
 
