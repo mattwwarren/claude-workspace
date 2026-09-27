@@ -20,7 +20,7 @@ import pytest
 import yaml
 
 from cw.config import load_state, save_state
-from cw.disk import DiskUsage
+from cw.disk import DiskUsage, InodeUsage
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
     DEFAULT_LANE,
@@ -1561,10 +1561,20 @@ def _mock_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     ``_force_disk_pressure_gated`` and pytest's patch stacking lets the
     test-level patch win. ``test_disk.py`` exercises the real helper via
     ``cw.disk`` directly and is unaffected.
+
+    #2470 extends the same default to the inode probe (``check_inode_usage``,
+    which reads the host's real ``os.statvfs``) at both of its consumer
+    bindings -- the dispatch gate and the ``cw doctor`` worker-tmp check --
+    plus the doctor check's own ``check_disk_usage`` binding. The inode
+    default sits comfortably above both the absolute floor and the fraction
+    floor. ``TestHostTmpInodePressureGate`` and the doctor below-threshold
+    test re-patch their own seams per test.
     """
+    roomy_disk = DiskUsage(total_gb=500.0, free_gb=250.0)
+    roomy_inodes = InodeUsage(total_inodes=1_000_000, free_inodes=900_000)
+    monkeypatch.setattr("cw.dispatch.gating.check_disk_usage", lambda _path: roomy_disk)
     monkeypatch.setattr(
-        "cw.dispatch.gating.check_disk_usage",
-        lambda _path: DiskUsage(total_gb=500.0, free_gb=250.0),
+        "cw.dispatch.gating.check_inode_usage", lambda _path: roomy_inodes
     )
 
 
