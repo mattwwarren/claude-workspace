@@ -10366,6 +10366,39 @@ class TestDevQueueApproveCli:
         assert result.exit_code == 0, result.output
         assert "awaiting operator signoff" in result.output
 
+    def test_approve_cli_prints_body_drift_warning_to_stderr(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2311: an advisory body-drift warning goes to stderr; the approval
+        message itself stays on stdout and the command still exits 0."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY
+
+        self._seed_review_pending(tmp_config_dir, tmp_path, signoff=False)
+        warning = "Warning: the body of ticket ACME-1 changed (test)."
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.approve.approve_ticket",
+            lambda *_a, **_kw: {
+                "from_stage": "plan",
+                "to_stage": "plan",
+                "ticket_id": "ACME-1",
+                "client": "acme",
+                "awaiting_signoff": False,
+                "plan_requeued": True,
+                "finalize_held": False,
+                "plan_approved_fingerprint": None,
+                "plan_promoted": False,
+                BODY_DRIFT_WARNING_KEY: warning,
+            },
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert warning in result.stderr
+        assert warning not in result.stdout
+        assert "re-queued at plan stage" in result.stdout
+
     def _seed_plan_pending(
         self,
         tmp_config_dir: Path,
