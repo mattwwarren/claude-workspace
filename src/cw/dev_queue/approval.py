@@ -39,7 +39,7 @@ from cw.dev_queue.lifecycle import (
     _reset_for_same_stage_requeue,
     _tracker_allows_github_fetch,
 )
-from cw.dev_queue.plan_promotion import DEV_QUEUE_APPROVE_ACTOR, promote_plan_draft
+from cw.dev_queue.plan_promotion import promote_plan_draft
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
@@ -62,14 +62,11 @@ from cw.plan_fingerprint import (
 from cw.worktree import _git_dir, resolve_task_worktree
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from cw.models import ClientConfig, DevQueueStore, Session, TicketTask
 
 
 _log = logging.getLogger(__name__)
 _SCOPE_DRIFT_RECOVERY_MARKER = "scope-drift-approval-recovery.jsonl"
-_BODY_DRIFT_PENDING_AUDIT_MARKER = "body-drift-approval-audit-pending.jsonl"
 
 BODY_DRIFT_WARNING_KEY = "body_drift_warning"
 """Advisory :func:`approve_ticket` result key (#2311).
@@ -80,6 +77,8 @@ last evaluated it (the ``body_sha`` persisted in ``.cw/plan-draft.md``'s
 None. Not a persisted ``TicketTask`` field, so it lives here rather than in
 ``cw.models.tasks`` beside ``PLAN_APPROVED_FINGERPRINT_KEY``.
 """
+# Mirrors ``promote_plan_draft``'s literal invoking-command ``actor``.
+_BODY_DRIFT_ACTOR = "cw dev-queue approve"
 _BODY_SHA_DISPLAY_LEN = 12
 
 
@@ -121,16 +120,13 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | N
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
             last_result is absent, last_result status is not an approval gate,
-            promoting the plan draft failed on I/O, or the body-drift audit
-            cannot be durably queued, or a non-empty pending body-drift audit
-            store cannot be read (nothing is recorded).
+            or promoting the plan draft failed on I/O (nothing is recorded).
         CwError: if no matching task is found.
     """
     with _lock():
         # operator_initiated=True: this entry point IS the human `cw dev-queue
         # approve` path, the one caller authorised to release an RFC 0011 A3
         # force hold (#1160).
-        _reconcile_body_drift_audits()
         return _approve_ticket_locked(ticket_id, client_name, operator_initiated=True)
 
 
@@ -449,182 +445,6 @@ def _body_drift_message(
     )
 
 
-def _queue_body_drift_audit_retry(
-    payload: dict[str, object], task: TicketTask, error: Exception | None = None
-) -> None:
-    """Durably queue a body-drift audit before the queue save."""
-    path = dev_queue_file().with_name(_BODY_DRIFT_PENDING_AUDIT_MARKER)
-    entry = {
-        "event_type": OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED.value,
-        "payload": payload,
-        "correlation_id": payload["ticket_id"],
-        "approval_at": task.plan_approved_at.isoformat()
-        if task.plan_approved_at is not None
-        else None,
-        "error": f"{error.__class__.__name__}: {error}"
-        if error is not None
-        else "queued before approval save",
-    }
-    try:
-        previous = path.read_text(encoding="utf-8") if path.exists() else ""
-        atomic_write_text(path, previous + json.dumps(entry, sort_keys=True) + "\n")
-    except (OSError, UnicodeDecodeError) as write_error:
-        _log.critical(
-            "approve: could not persist pending body-drift audit for %s/%s",
-            payload["client"],
-            payload["ticket_id"],
-            exc_info=True,
-        )
-        msg = (
-            "Cannot approve: the body-drift audit could not be durably queued"
-            f" for ticket {payload['ticket_id']}."
-        )
-        raise ApproveGateError(msg) from write_error
-
-
-def _reconcile_body_drift_audits() -> None:
-    """Replay pending body-drift audit records, retaining failed attempts."""
-    path = dev_queue_file().with_name(_BODY_DRIFT_PENDING_AUDIT_MARKER)
-    try:
-        pending = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        return
-    except (OSError, UnicodeDecodeError) as exc:
-        _raise_if_pending_audit_unreadable(path, exc)
-        return
-
-    try:
-        store = load_dev_queue()
-    except (OSError, TypeError, ValueError):
-        _log.warning(
-            "approve: could not load queue for pending audit replay", exc_info=True
-        )
-        return
-
-    remaining: list[str] = []
-    for line in pending:
-        try:
-            entry = json.loads(line)
-            task = next(
-                (
-                    task
-                    for task in store.tasks
-                    if task.ticket_id == entry["payload"]["ticket_id"]
-                    and task.client == entry["payload"]["client"]
-                ),
-                None,
-            )
-            if task is None:
-                remaining.append(line)
-                continue
-            if (
-                task.plan_approved_at is None
-                or task.plan_approved_at.isoformat() != entry["approval_at"]
-            ):
-                remaining.append(line)
-                continue
-            record_event(
-                OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED,
-                entry["payload"],
-                correlation_id=entry["correlation_id"],
-            )
-        except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
-            remaining.append(line)
-            _log.warning(
-                "approve: pending %s audit retry failed",
-                OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED.value,
-                exc_info=True,
-            )
-    try:
-        if remaining:
-            atomic_write_text(path, "\n".join(remaining) + "\n")
-        else:
-            path.unlink(missing_ok=True)
-    except OSError:
-        _log.warning(
-            "approve: could not update pending body-drift audits", exc_info=True
-        )
-
-
-def _raise_if_pending_audit_unreadable(path: Path, error: Exception) -> None:
-    """Refuse approval when a non-empty body-drift outbox cannot be read."""
-    try:
-        if path.stat().st_size == 0:
-            return
-    except FileNotFoundError:
-        return
-    except OSError:
-        pass
-    msg = (
-        "Cannot approve: the pending body-drift audit store cannot be read at"
-        f" {path}. Repair or remove it before approving."
-    )
-    raise ApproveGateError(msg) from error
-
-
-def _save_approve_and_reconcile(
-    store: DevQueueStore,
-    task: TicketTask,
-    client_cfg: ClientConfig,
-    persisted_body_sha: str | None,
-) -> str | None:
-    """Prepare and save approval, then flush its body-drift outbox."""
-    body_drift_warning = _detect_body_drift_warning(
-        task, client_cfg, persisted_body_sha
-    )
-    save_dev_queue(store)
-    _reconcile_body_drift_audits()
-    return body_drift_warning
-
-
-def _capture_plan_promotion_state(
-    task: TicketTask, client_cfg: ClientConfig
-) -> tuple[Path, str, Path, str | None] | None:
-    """Capture the draft and plan before a direct approval promotion (#2311)."""
-    wt_path = resolve_task_worktree(task, client_cfg)
-    if wt_path is None:
-        return None
-    draft_path = wt_path / PLAN_DRAFT_RELATIVE_PATH
-    plan_path = wt_path / ".cw" / "plan.md"
-    try:
-        if not draft_path.exists():
-            return None
-        draft_text = draft_path.read_text(encoding="utf-8")
-        old_plan_text = (
-            plan_path.read_text(encoding="utf-8") if plan_path.exists() else None
-        )
-    except (OSError, UnicodeDecodeError):
-        # Promotion performs the same reads and will fail closed if these
-        # artifacts cannot be captured, so do not change that error path here.
-        return None
-    return draft_path, draft_text, plan_path, old_plan_text
-
-
-def _restore_plan_promotion_state(
-    state: tuple[Path, str, Path, str | None], error: Exception
-) -> None:
-    """Restore worktree artifacts when approval aborts after promotion."""
-    draft_path, draft_text, plan_path, old_plan_text = state
-    try:
-        atomic_write_text(draft_path, draft_text)
-        if old_plan_text is None:
-            plan_path.unlink(missing_ok=True)
-        else:
-            atomic_write_text(plan_path, old_plan_text)
-    except Exception as restore_error:
-        _log.critical(
-            "approve: could not roll back promoted plan artifacts after %s",
-            error,
-            exc_info=True,
-        )
-        msg = (
-            f"Approval aborted after promotion, but restoring {draft_path}"
-            f" and {plan_path} failed ({restore_error}). Manual recovery is"
-            " required before approving again."
-        )
-        raise ApproveGateError(msg) from restore_error
-
-
 def _detect_body_drift_warning(
     task: TicketTask,
     client_cfg: ClientConfig,
@@ -632,15 +452,15 @@ def _detect_body_drift_warning(
 ) -> str | None:
     """Warn when the live ticket body no longer matches the evaluated one (#2311).
 
-    The warning itself is advisory: it never blocks or mutates the row. Skipped
+    Advisory only: never raises, never blocks, never mutates the row. Skipped
     (None) when nothing was persisted to compare, when the client's tracker is
     positively non-GitHub (``_tracker_allows_github_fetch``'s fail-open
     polarity -- ``fetch_issue_body`` is ``gh``-only), and when the fetch
-    fails. On a mismatch, writes a pending ``PLAN_APPROVAL_BODY_DRIFT_WARNED``
-    record before the approval save. If that outbox write fails, this raises
-    before the approval can be saved. Otherwise the caller flushes the outbox
-    after the save, so a crash cannot lose the required audit and a failed save
-    cannot produce a false one.
+    fails. On a mismatch, records ``PLAN_APPROVAL_BODY_DRIFT_WARNED`` where the
+    mismatch is discovered, under the caller's dev-queue lock and after its
+    ``save_dev_queue`` -- so ``task.plan_approved_fingerprint`` is the value
+    this approval stamped. A recording failure (``OSError``) is logged, not
+    propagated.
     """
     if persisted_body_sha is None or not _tracker_allows_github_fetch(client_cfg):
         return None
@@ -652,15 +472,31 @@ def _detect_body_drift_warning(
     live_body_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
     if live_body_sha == persisted_body_sha:
         return None
-    payload = {
-        "ticket_id": task.ticket_id,
-        "client": task.client,
-        "persisted_body_sha": persisted_body_sha,
-        "live_body_sha": live_body_sha,
-        "plan_approved_fingerprint": task.plan_approved_fingerprint,
-        "actor": DEV_QUEUE_APPROVE_ACTOR,
-    }
-    _queue_body_drift_audit_retry(payload, task)
+    try:
+        record_event(
+            OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED,
+            {
+                "ticket_id": task.ticket_id,
+                "client": task.client,
+                "persisted_body_sha": persisted_body_sha,
+                "live_body_sha": live_body_sha,
+                "plan_approved_fingerprint": task.plan_approved_fingerprint,
+                "actor": _BODY_DRIFT_ACTOR,
+            },
+            correlation_id=task.ticket_id,
+        )
+    except OSError:
+        # Mirrors promote_plan_draft's best-effort PLAN_DRAFT_PROMOTED emit:
+        # the event is advisory, so an unwritable events inbox never fails
+        # an approval that has already been saved.
+        _log.warning(
+            "approve: could not record %s for %s/%s; the body-drift warning"
+            " is still returned",
+            OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED.value,
+            task.client,
+            task.ticket_id,
+            exc_info=True,
+        )
     return _body_drift_message(task, persisted_body_sha, live_body_sha)
 
 
@@ -758,77 +594,6 @@ def _raise_if_not_at_approval_gate(
     raise ApproveGateError(msg)
 
 
-def _apply_approval_transition(
-    store: DevQueueStore,
-    task: TicketTask,
-    stages: list[Stage],
-    client_cfg: ClientConfig,
-    session: Session,
-    from_stage: str,
-    plan_reviewed: bool | None,
-    operator_initiated: bool,
-    persisted_body_sha: str | None,
-) -> tuple[str, bool, bool, bool, str | None, bool, str | None]:
-    """Apply and persist the approval transition transactionally (#2311)."""
-    from cw.dispatch import (
-        _park_signoff_gate,
-        _should_force_hold_finalize,
-        _should_gate_for_signoff,
-    )
-
-    awaiting_signoff = False
-    plan_requeued = False
-    finalize_held = False
-    plan_promoted = False
-    promotion_state = None
-    try:
-        if (
-            task.stage == Stage.REVIEW
-            and not operator_initiated
-            and _should_force_hold_finalize(task, {task.client: client_cfg})
-        ):
-            finalize_held = True
-        elif task.stage == Stage.REVIEW and _should_gate_for_signoff(
-            task, {task.client: client_cfg}
-        ):
-            _park_signoff_gate(task)
-            awaiting_signoff = True
-        elif task.stage == Stage.PLAN and not (
-            plan_reviewed
-            if plan_reviewed is not None
-            else _plan_is_reviewed(task, client_cfg)
-        ):
-            _reset_for_same_stage_requeue(task)
-            plan_requeued = True
-        else:
-            promotion_state = _capture_plan_promotion_state(task, client_cfg)
-            plan_promoted = _promote_plan_draft_on_direct_advance(
-                task,
-                client_cfg,
-                plan_reviewed=plan_reviewed,
-                session=session,
-            )
-            _advance_task_pointer(task, stages)
-        stamped_fingerprint = _stamp_plan_approval(task, from_stage, session)
-        to_stage = task.stage.value
-        body_drift_warning = _save_approve_and_reconcile(
-            store, task, client_cfg, persisted_body_sha
-        )
-    except Exception as approval_error:
-        if plan_promoted and promotion_state is not None:
-            _restore_plan_promotion_state(promotion_state, approval_error)
-        raise
-    return (
-        to_stage,
-        awaiting_signoff,
-        plan_requeued,
-        finalize_held,
-        stamped_fingerprint,
-        plan_promoted,
-        body_drift_warning,
-    )
-
-
 def _approve_ticket_locked(
     ticket_id: str,
     client_name: str,
@@ -891,12 +656,10 @@ def _approve_ticket_locked(
 
     ``body_drift_warning`` (#2311) is computed only for an operator-initiated
     PLAN-stage approval: the persisted ``body_sha`` is read before the branch
-    chain (promotion deletes the draft), compared with the live GitHub body,
-    and a mismatch is written to an outbox before ``save_dev_queue``. The
-    outbox is flushed after the save as ``PLAN_APPROVAL_BODY_DRIFT_WARNED``;
-    failure to queue that audit fails closed before the approval is persisted.
-    The warning itself is advisory -- it never blocks or mutates the row -- and
-    automatic callers always get None.
+    chain (promotion deletes the draft), compared with the live GitHub body
+    after ``save_dev_queue``, and a mismatch records
+    ``PLAN_APPROVAL_BODY_DRIFT_WARNED``. Advisory only -- never raises, never
+    blocks, never mutates the row; automatic callers always get None.
 
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
@@ -907,6 +670,11 @@ def _approve_ticket_locked(
         CwError: if no matching task is found.
     """
     from cw.config import load_state
+    from cw.dispatch import (
+        _park_signoff_gate,
+        _should_force_hold_finalize,
+        _should_gate_for_signoff,
+    )
     from cw.executor import resolve_pipeline_stages
 
     store = load_dev_queue()
@@ -981,25 +749,61 @@ def _approve_ticket_locked(
         if operator_initiated and task.stage == Stage.PLAN
         else None
     )
-    (
-        to_stage,
-        awaiting_signoff,
-        plan_requeued,
-        finalize_held,
-        stamped_fingerprint,
-        plan_promoted,
-        body_drift_warning,
-    ) = _apply_approval_transition(
-        store,
-        task,
-        stages,
-        client_cfg,
-        session,
-        from_stage,
-        plan_reviewed,
-        operator_initiated,
-        persisted_body_sha,
-    )
+    awaiting_signoff = False
+    plan_requeued = False
+    finalize_held = False
+    plan_promoted = False
+    # Three independent gates share this branch (#968, #1160):
+    #  - REVIEW-scoped A3 force hold: a proactive "do not ship this
+    #    unattended", checked FIRST and only for an automatic caller. It makes
+    #    no mutation -- the row stays parked exactly as it is -- so an
+    #    automatic approve degrades to a no-op instead of shipping the ticket.
+    #  - REVIEW-scoped signoff gate: reroutes the review->FINALIZE advance to
+    #    AWAITING_OPERATOR_SIGNOFF (RFC 0007's "gate a ticket before it
+    #    ships"). Never touches the plan_pending_approval->IMPL advance.
+    #  - PLAN-scoped review-completeness gate: reroutes the
+    #    plan_pending_approval->IMPL advance to a same-stage requeue when the
+    #    plan-of-record was never quality-reviewed (Large-scope plans park
+    #    for scope approval before the ambiguity scan / quality review /
+    #    persistence steps run) -- prevents Stage 2 from spawning against an
+    #    empty .cw/plan.md with no signoff markers.
+    if (
+        task.stage == Stage.REVIEW
+        and not operator_initiated
+        and _should_force_hold_finalize(task, {client_name: client_cfg})
+    ):
+        finalize_held = True
+    elif task.stage == Stage.REVIEW and _should_gate_for_signoff(
+        task, {client_name: client_cfg}
+    ):
+        _park_signoff_gate(task)
+        awaiting_signoff = True
+    elif task.stage == Stage.PLAN and not (
+        plan_reviewed
+        if plan_reviewed is not None
+        else _plan_is_reviewed(task, client_cfg)
+    ):
+        _reset_for_same_stage_requeue(task)
+        plan_requeued = True
+    else:
+        plan_promoted = _promote_plan_draft_on_direct_advance(
+            task,
+            client_cfg,
+            plan_reviewed=plan_reviewed,
+            session=session,
+        )
+        _advance_task_pointer(task, stages)
+    stamped_fingerprint = _stamp_plan_approval(task, from_stage, session)
+    to_stage = task.stage.value
+
+    # #1617 (D4): _approve_ticket_locked is a gate-release site, excluded from
+    # the scope_hint park-decision gate (Scope item 1) but still covered by
+    # the scope-routing audit trail (Scope item 2). save_dev_queue runs first
+    # so the audit event never durably claims a disposition that did not
+    # actually land in the dev-queue store (Checkpoint 3a review, #1617): if
+    # save_dev_queue raises or the process dies between the two calls, no
+    # audit event is emitted for a mutation that never persisted.
+    save_dev_queue(store)
 
     _record_approve_scope_routing_decision(
         ticket_id,
@@ -1021,7 +825,12 @@ def _approve_ticket_locked(
         "finalize_held": finalize_held,
         PLAN_APPROVED_FINGERPRINT_KEY: stamped_fingerprint,
         PLAN_PROMOTED_KEY: plan_promoted,
-        BODY_DRIFT_WARNING_KEY: body_drift_warning,
+        # #2311: evaluated here, after save_dev_queue, so the advisory event
+        # never describes an approval that did not persist (same ordering
+        # rationale as the scope-routing event above).
+        BODY_DRIFT_WARNING_KEY: _detect_body_drift_warning(
+            task, client_cfg, persisted_body_sha
+        ),
     }
 
 

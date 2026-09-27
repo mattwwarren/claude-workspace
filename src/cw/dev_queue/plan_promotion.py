@@ -31,10 +31,6 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig, TicketTask
 
 
-# Shared by every audit event emitted by the operator approve path.
-DEV_QUEUE_APPROVE_ACTOR = "cw dev-queue approve"
-
-
 def _restore_prior_plan(plan_path: Path, old_plan_text: str | None) -> Exception | None:
     """Make one attempt to put ``.cw/plan.md`` back; return the failure, if any."""
     try:
@@ -86,7 +82,7 @@ def promote_plan_draft(
     task: TicketTask,
     client_cfg: ClientConfig | None,
     *,
-    actor: str = DEV_QUEUE_APPROVE_ACTOR,
+    actor: str = "cw dev-queue approve",
     expected_fingerprint: str | None = None,
 ) -> bool:
     """Promote the task's approved ``.cw/plan-draft.md`` to ``.cw/plan.md``.

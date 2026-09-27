@@ -7444,17 +7444,15 @@ class TestApproveTicket:
         approve_ticket("GEN-500", "genhealth")
         assert events == []
 
-    @pytest.mark.parametrize("event_error", [OSError, RuntimeError])
     def test_approve_body_drift_event_failure_is_logged_not_raised(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
-        event_error: type[Exception],
     ) -> None:
-        """Audit failures are logged, queued durably, and do not block approval."""
-        from cw.config import dev_queue_file
+        """The event is advisory: a recording failure is logged and the
+        warning is still returned -- the approval never fails over it."""
         from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
         from cw.dev_queue import approval as approval_module
 
@@ -7470,7 +7468,7 @@ class TestApproveTicket:
         ) -> None:
             if etype == OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED:
                 msg = "events log unwritable"
-                raise event_error(msg)
+                raise OSError(msg)
             real_record_event(etype, payload, correlation_id=correlation_id)
 
         monkeypatch.setattr("cw.dev_queue.approval.record_event", _record)
@@ -7483,11 +7481,6 @@ class TestApproveTicket:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
         assert t.plan_approved_fingerprint == _RECONCILED_DRAFT_FINGERPRINT
-        assert (
-            dev_queue_file()
-            .with_name("body-drift-approval-audit-pending.jsonl")
-            .exists()
-        )
 
 
 # ---------------------------------------------------------------------------
