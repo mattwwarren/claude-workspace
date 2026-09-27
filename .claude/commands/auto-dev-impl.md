@@ -229,7 +229,7 @@ number and this table's minimum in the same commit.
 |---|---|---|
 | `check_not_main_checkout.py` | 1 | `auto-dev-impl.md` Pre-mutation guard |
 | `check_plan_scope_conformance.py` | 2 | `auto-dev-impl.md` Step 2.5 gate 2 |
-| `check_impl_guard_staleness.py` | 1 | `auto-dev-impl-appendix.md` Pre-Stage Detector Guard |
+| `check_impl_guard_staleness.py` | 2 | `auto-dev-impl-appendix.md` Pre-Stage Detector Guard |
 | `classify_merge_conflict.py` | 1 | `auto-dev-finalize.md` Step 4c.5 |
 | `check_must_fix_override.py` | 1 | `auto-dev-finalize.md` MUST_FIX Override Verification |
 

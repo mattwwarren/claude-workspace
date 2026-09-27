@@ -11,14 +11,10 @@ applies the *Operator-authority delta* rule (`auto-dev.md`, #2433) to the impl
 stage, anchored to `HEAD_COMMIT_AT` rather than `plan_approved_at`.
 """
 
-from tests.conftest import _cmd
+from tests.conftest import _cmd, _norm
 from tests.test_agent_comment_provenance import _rule_section
 from tests.test_auto_dev_preflight_resolutions import _after
 from tests.test_impl_guard_staleness_docs import _guard_section
-
-
-def _norm(text: str) -> str:
-    return " ".join(text.split())
 
 
 def _s2_implementing_bullet() -> str:
@@ -28,9 +24,23 @@ def _s2_implementing_bullet() -> str:
     return section[start:end]
 
 
-def _past_s2_stale_true_bullet() -> str:
+def _past_s2_stale_false_bullet() -> str:
     section = _guard_section()
     start = section.index("- If `stage` is past S2")
+    end = section.index("**AND the verdict's `stale` is `true`**", start)
+    return section[start:end]
+
+
+def _past_s2_stale_true_bullet() -> str:
+    """Isolate the stale=true bullet only (#2438 SHOULD_FIX).
+
+    Anchored on the substring unique to the true-bullet — "- If `stage` is
+    past S2" alone matches the stale=false bullet first (it is a prefix of
+    both bullets), which previously let this helper silently return both
+    bullets concatenated and made every assertion against it trivially true.
+    """
+    section = _guard_section()
+    start = section.index("**AND the verdict's `stale` is `true`**")
     end = section.index("\n\n---", start)
     return section[start:end]
 
@@ -71,6 +81,15 @@ def test_s2_implementing_stale_true_forces_fresh_attempt() -> None:
     assert "silently re-park" in bullet
 
 
+def test_s2_implementing_stale_true_applies_operator_authority_filter() -> None:
+    """MUST_FIX A (#2438 fix cycle 1): stale=true must act on the filtered
+    verdict, not the script's raw unfiltered `stale_comment_after_head`."""
+    bullet = _s2_implementing_bullet()
+    assert "operator-authority comment" in bullet
+    assert "coarse, unfiltered superset" in bullet
+    assert "## Comment provenance rule (#2097)" in bullet
+
+
 def test_past_s2_stale_true_also_forbids_deterministic_repark() -> None:
     bullet = _past_s2_stale_true_bullet()
     assert "as new, binding instructions to read and act on" in bullet
@@ -78,6 +97,25 @@ def test_past_s2_stale_true_also_forbids_deterministic_repark() -> None:
     assert "HEAD_COMMIT_AT" in bullet
     assert 'do NOT treat this as "repo state unchanged' in bullet
     assert "silently re-park" in bullet
+
+
+def test_past_s2_stale_true_applies_operator_authority_filter() -> None:
+    """Defense-in-depth mirror of the s2_implementing MUST_FIX A fix."""
+    bullet = _past_s2_stale_true_bullet()
+    assert "operator-authority comment" in bullet
+    assert "coarse, unfiltered superset" in bullet
+    assert "## Comment provenance rule (#2097)" in bullet
+
+
+def test_past_s2_stale_false_path_unchanged() -> None:
+    """SHOULD_FIX (#2438 fix cycle 1): the stale=false bullet must isolate
+    cleanly from its stale=true sibling now that the isolator anchors on the
+    true-bullet's unique substring instead of a shared prefix."""
+    bullet = _past_s2_stale_false_bullet()
+    marker = "advance to that stage's entry point; do not re-implement"
+    assert marker in bullet
+    assert "binding instructions" not in bullet
+    assert "Operator-authority delta" not in bullet
 
 
 def test_core_doc_bullet_drops_past_s2_only_restriction() -> None:
