@@ -119,7 +119,8 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | N
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
             last_result is absent, last_result status is not an approval gate,
-            or promoting the plan draft failed on I/O (nothing is recorded).
+            promoting the plan draft failed on I/O, or the body-drift audit
+            cannot be durably queued (nothing is recorded).
         CwError: if no matching task is found.
     """
     with _lock():
@@ -464,13 +465,18 @@ def _queue_body_drift_audit_retry(
     try:
         previous = path.read_text(encoding="utf-8") if path.exists() else ""
         atomic_write_text(path, previous + json.dumps(entry, sort_keys=True) + "\n")
-    except Exception:  # noqa: BLE001
+    except (OSError, UnicodeDecodeError) as write_error:
         _log.critical(
             "approve: could not persist pending body-drift audit for %s/%s",
             payload["client"],
             payload["ticket_id"],
             exc_info=True,
         )
+        msg = (
+            "Cannot approve: the body-drift audit could not be durably queued"
+            f" for ticket {payload['ticket_id']}."
+        )
+        raise ApproveGateError(msg) from write_error
 
 
 def _reconcile_body_drift_audits() -> None:
@@ -486,7 +492,7 @@ def _reconcile_body_drift_audits() -> None:
 
     try:
         store = load_dev_queue()
-    except Exception:  # noqa: BLE001
+    except (OSError, TypeError, ValueError):
         _log.warning(
             "approve: could not load queue for pending audit replay", exc_info=True
         )
@@ -506,18 +512,20 @@ def _reconcile_body_drift_audits() -> None:
                 None,
             )
             if task is None:
+                remaining.append(line)
                 continue
             if (
                 task.plan_approved_at is None
                 or task.plan_approved_at.isoformat() != entry["approval_at"]
             ):
+                remaining.append(line)
                 continue
             record_event(
                 OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED,
                 entry["payload"],
                 correlation_id=entry["correlation_id"],
             )
-        except Exception:  # noqa: BLE001
+        except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
             remaining.append(line)
             _log.warning(
                 "approve: pending %s audit retry failed",
@@ -557,14 +565,15 @@ def _detect_body_drift_warning(
 ) -> str | None:
     """Warn when the live ticket body no longer matches the evaluated one (#2311).
 
-    Advisory only: never raises, never blocks, never mutates the row. Skipped
+    The warning itself is advisory: it never blocks or mutates the row. Skipped
     (None) when nothing was persisted to compare, when the client's tracker is
     positively non-GitHub (``_tracker_allows_github_fetch``'s fail-open
     polarity -- ``fetch_issue_body`` is ``gh``-only), and when the fetch
     fails. On a mismatch, writes a pending ``PLAN_APPROVAL_BODY_DRIFT_WARNED``
-    record before the approval save. The caller flushes that outbox only
-    after the save succeeds, so a crash cannot lose the required audit and a
-    failed save cannot produce a false one.
+    record before the approval save. If that outbox write fails, this raises
+    before the approval can be saved. Otherwise the caller flushes the outbox
+    after the save, so a crash cannot lose the required audit and a failed save
+    cannot produce a false one.
     """
     if persisted_body_sha is None or not _tracker_allows_github_fetch(client_cfg):
         return None
@@ -746,8 +755,9 @@ def _approve_ticket_locked(
     PLAN-stage approval: the persisted ``body_sha`` is read before the branch
     chain (promotion deletes the draft), compared with the live GitHub body,
     and a mismatch is written to an outbox before ``save_dev_queue``. The
-    outbox is flushed after the save as ``PLAN_APPROVAL_BODY_DRIFT_WARNED``.
-    Advisory only -- never raises, never blocks, never mutates the row;
+    outbox is flushed after the save as ``PLAN_APPROVAL_BODY_DRIFT_WARNED``;
+    failure to queue that audit fails closed before the approval is persisted.
+    The warning itself is advisory -- it never blocks or mutates the row -- and
     automatic callers always get None.
 
     Raises:
