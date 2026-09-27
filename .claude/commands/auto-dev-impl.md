@@ -248,7 +248,8 @@ Before starting S2 work, run `detect_current_stage()` (see [Resume Detection](#r
 - **Any other verdict** (`s2_implementing`, or a stage past S2: `s3_*`, `s4_*`,
   `s5_*`, `merged`) means this ticket already carries branch work, which is rare
   — the resume dispositions, and the staleness/regress check (#1794) that MUST
-  run before them whenever the detector reports a stage past S2, live in
+  run before them on every arrival here, whether the detector reports
+  `s2_implementing` or a stage past S2 (#2438), live in
   `.claude/commands/auto-dev-impl-appendix.md`, section
   "Pre-Stage Detector Guard: resume dispositions and the staleness check (#1794)".
   Read it now; do not decide from this summary whether to advance, resume, or
