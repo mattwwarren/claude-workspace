@@ -26,6 +26,7 @@ from cw.auto_dev_result import (
     _CLOSE_SENTINEL,
     _OPEN_SENTINEL,
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
+    IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
 )
 from cw.cli import (
     _complete_client,
@@ -9811,6 +9812,36 @@ class TestDevQueueTasksPrState:
         assert result.exit_code == 0, result.output
         assert "dependency_unmerged" in result.output
         assert "?dependency_unmerged" not in result.output
+
+    def test_tasks_human_does_not_flag_impl_comments_unreadable_regress_blocked_reason(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """`impl_comments_unreadable_after_regress` is a known reason -- no `?`
+        flag (#2415). The REASON column truncates to 20 chars regardless of
+        recognition, so this reason (39 chars, unlike the 20-char
+        `dependency_unmerged`) never appears in full -- assert on the
+        truncated cell instead."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-2415",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="awaiting_operator",
+                        blocked_reason=IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
+                    )
+                ]
+            )
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        reason_prefix = IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON[:20]
+        assert reason_prefix in result.output
+        assert f"?{reason_prefix}" not in result.output
 
     def test_tasks_human_renders_em_dash_for_absent_blocked_reason(
         self, tmp_config_dir: Path

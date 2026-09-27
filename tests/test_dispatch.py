@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
+from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
 from cw.codex_background import join_outstanding_codex_threads
 from cw.config import (
     _load_concurrency_overrides,
@@ -11319,6 +11320,30 @@ class TestApplyStagedDecision:
         assert task.disposition == "awaiting_operator"
         assert task.blocked_reason == "dependency_unmerged"
 
+    def test_stage_failure_impl_comments_unreadable_regress_stamps_awaiting_operator(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#2415: blocked + impl_comments_unreadable_after_regress blocker reason →
+        BLOCKED_ON_USER with the hold-class disposition, not the verbatim status.
+        blocked_reason still carries the verbatim per-park diagnostic."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("HOLD-3", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {
+                "stage": "stage2_impl",
+                "reason": IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
+            },
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "awaiting_operator"
+        assert (
+            task.blocked_reason == IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
+        )
+
     def test_merge_gate_blocked_push_auth_failed_stamps_awaiting_operator_disposition(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
@@ -11911,6 +11936,30 @@ class TestApplyStagedDecision:
                 {"stage": "s3_review", "reason": "x_producer_local"},
                 "x_producer_local",
                 id="blocked_freeform_reason_not_flagged",
+            ),
+            pytest.param(
+                # #2415: an unrecognized reason with short details appends a
+                # bounded, colon-separated slice of blocker.details.
+                "blocked",
+                {
+                    "stage": "s3_review",
+                    "reason": "stale_branch_restart_directed",
+                    "details": "short detail text",
+                },
+                "stale_branch_restart_directed (unrecognized): short detail text",
+                id="blocked_unregistered_reason_with_short_details",
+            ),
+            pytest.param(
+                # #2415: details longer than 200 chars are hard-cut at 200 with
+                # a trailing ellipsis marker.
+                "blocked",
+                {
+                    "stage": "s3_review",
+                    "reason": "stale_branch_restart_directed",
+                    "details": "x" * 250,
+                },
+                f"stale_branch_restart_directed (unrecognized): {'x' * 200}…",
+                id="blocked_unregistered_reason_with_long_details_truncated",
             ),
             pytest.param(
                 "scope_exceeded",
@@ -14135,7 +14184,12 @@ class TestApplyStagedDecision:
 
     @pytest.mark.parametrize(
         "reason",
-        ["push_auth_failed", "operator_unavailable", "dependency_unmerged"],
+        [
+            "push_auth_failed",
+            "operator_unavailable",
+            "dependency_unmerged",
+            IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
+        ],
     )
     def test_operator_unavailable_blocker_sets_awaiting_operator_paused_status(
         self,
@@ -14178,7 +14232,12 @@ class TestApplyStagedDecision:
 
     @pytest.mark.parametrize(
         "reason",
-        ["push_auth_failed", "operator_unavailable", "dependency_unmerged"],
+        [
+            "push_auth_failed",
+            "operator_unavailable",
+            "dependency_unmerged",
+            IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
+        ],
     )
     def test_blocked_at_finalize_operator_unavailable_reason_parks_without_regress(
         self,
