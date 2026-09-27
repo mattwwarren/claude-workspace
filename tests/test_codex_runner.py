@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-import cw.codex_driver as codex_driver
+from cw import codex_driver
 from cw.codex_runner import (
     FakeCodexRunner,
     RealCodexJobRunner,
