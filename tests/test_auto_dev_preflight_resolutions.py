@@ -649,7 +649,14 @@ def test_defer_excludes_operator_intent_questions() -> None:
 def test_defer_output_format_names_all_three_tokens() -> None:
     """The premises output format offers YES | NO | DEFER."""
     content = _agent("product-manager-reviewer.md")
-    assert "| DEFER — <why the fact is runtime-only" in content
+    assert "Verified: YES | NO | DEFER" in content
+
+
+def test_defer_citation_and_reason_are_separate_sub_bullets() -> None:
+    """Citation/Reason live on their own sub-bullets, not the token line (#2432)."""
+    content = _agent("product-manager-reviewer.md")
+    assert "Citation: <YES only" in content
+    assert "Reason: <NO only" in content
 
 
 def test_step1c_premise_partition_is_three_way() -> None:
