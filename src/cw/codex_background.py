@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 from cw._git import capture_head_sha
 from cw.atomic import atomic_write_text
 from cw.codex_fix_loop import run_review_with_fix_loop
-from cw.codex_fix_loop_push import push_and_verify_head, remote_branch_tip
+from cw.codex_fix_loop.push import push_and_verify_head, remote_branch_tip
 from cw.codex_review import (
     CODEX_UNPUSHED_AT_EXIT,
     make_codex_blocked,

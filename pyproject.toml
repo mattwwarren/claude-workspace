@@ -412,6 +412,11 @@ ignore = [
 # cw.codex_review, so a module-level import here would close that cycle. Same
 # shape and rationale as the codex_background.py entry above.
 "src/cw/codex_review/_context/core.py" = ["PLC0415"]
+# codex_fix_loop/park defers cw.codex_fix_loop.commit._build_fix_codex_argv
+# inside _park_fix_failure (#2370): commit.py imports park.py at module top
+# (_run_fix_and_commit parks through its builders), so a module-level import of
+# commit here would close that cycle. Inline import is the sanctioned mechanism.
+"src/cw/codex_fix_loop/park.py" = ["PLC0415"]
 # Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
 # so module-level imports legitimately follow executable code (E402).
 "tests/test_cw_pr_events_channel.py" = ["E402"]

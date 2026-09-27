@@ -359,7 +359,9 @@ class TestFixCycleFloor:
             "cw.codex_fix_loop._driver.run_review", lambda **_k: (result0, verdict)
         )
         # deadline = 0 + 1000; remaining at loop = 1000 - 950 = 50 < 60.
-        monkeypatch.setattr("cw.codex_fix_loop._driver.time.monotonic", _Clock([0.0, 950.0]))
+        monkeypatch.setattr(
+            "cw.codex_fix_loop._driver.time.monotonic", _Clock([0.0, 950.0])
+        )
         runner = _SequencedRunner([])
         out, out_verdict = _run_loop(
             runner, worktree, budget=1000, session_id="s-floor"
@@ -444,7 +446,9 @@ class TestFixCycleFloor:
             lambda **_k: (clean_result, clean_verdict, _stub_prepared()),
         )
         # deadline 1000; remaining = 1000 - 940 = 60 == floor → not floored.
-        monkeypatch.setattr("cw.codex_fix_loop._driver.time.monotonic", _Clock([0.0, 940.0]))
+        monkeypatch.setattr(
+            "cw.codex_fix_loop._driver.time.monotonic", _Clock([0.0, 940.0])
+        )
         runner = _SequencedRunner([CodexRunResult(returncode=0, stdout="", stderr="")])
         out, _ = _run_loop(runner, worktree, budget=1000, session_id="s-floor-eq")
 
@@ -2261,9 +2265,7 @@ class TestRereviewForwardsFindingDispositions:
             return real_synth(**kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(_driver, "_prepare_review_pass", _spy_prepare)
-        monkeypatch.setattr(
-            _driver, "synthesize_codex_review_result", _spy_synth
-        )
+        monkeypatch.setattr(_driver, "synthesize_codex_review_result", _spy_synth)
         monkeypatch.setattr(
             "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
         )
@@ -2383,9 +2385,7 @@ class TestClaimTierGateReachesBothSynthesisHops:
         real_core_synth: Callable[..., object] = (
             codex_review_core.synthesize_codex_review_result
         )
-        real_loop_synth: Callable[..., object] = (
-            _driver.synthesize_codex_review_result
-        )
+        real_loop_synth: Callable[..., object] = _driver.synthesize_codex_review_result
 
         def _spy_core(**kwargs: object) -> object:
             seen.append(kwargs.get("claim_tier_enabled"))
@@ -2436,9 +2436,7 @@ class TestDispositionDriftCheckGateReachesAllSynthesisHops:
         real_core_synth: Callable[..., object] = (
             codex_review_core.synthesize_codex_review_result
         )
-        real_loop_synth: Callable[..., object] = (
-            _driver.synthesize_codex_review_result
-        )
+        real_loop_synth: Callable[..., object] = _driver.synthesize_codex_review_result
         real_rereview: Callable[..., object] = _driver._rereview
 
         def _spy_core(**kwargs: object) -> object:
