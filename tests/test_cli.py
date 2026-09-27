@@ -180,6 +180,19 @@ def _park_marker_extra(
     return {PARK_COMMENT_MARKER_KEY: payload}
 
 
+def _sentinel_payload(text: str, **overrides: object) -> dict[str, object]:
+    """The JSON body of a framed ``AUTO_DEV_RESULT`` fixture, as a dict (#2458).
+
+    Lets the emit_cli Stop-hook cases stage the exact payloads the transcript
+    cases below already parse, as a ``session.last_result`` a prior ``cw
+    result emit`` wrote -- *overrides* then adjusts individual fields.
+    """
+    body = text.removeprefix(_OPEN_SENTINEL).removesuffix(_CLOSE_SENTINEL)
+    payload: dict[str, object] = json.loads(body)
+    payload.update(overrides)
+    return payload
+
+
 def _user_prose_record(text: str, timestamp: str | None = None) -> dict[str, object]:
     """A ``user`` prose record the sentinel scan deliberately skips (#2135).
 
@@ -4842,6 +4855,472 @@ class TestSignalStop:
             "        park_on_abandoned_exit:\n"
             f"          {PARK_ON_ABANDONED_EXIT_KEY}: {str(enabled).lower()}\n"
         )
+
+    # ------------------------------------------------------------------
+    # #2458: a staged ``cw result emit`` result is routed by the Stop hook
+    # even mid-background-task, and an unroutable one pages.
+    # ------------------------------------------------------------------
+
+    _EMIT_HOOK_TIME = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+
+    def _stage_emit_cli_result(
+        self, session_id: str, payload: dict[str, object]
+    ) -> None:
+        """Persist *payload* as a prior ``cw result emit`` would have."""
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session_id)
+        target.last_result = payload
+        target.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+
+    def _seed_running_row(
+        self, session_id: str, *, stage: Stage, attempts: int = 1
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=self.SEED_TICKET_ID,
+                        client="test-client",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=session_id,
+                        attempts=attempts,
+                        stage=stage,
+                    )
+                ]
+            )
+        )
+
+    def _fire_emit_stop(
+        self, worktree: Path, claude_session_id: str, **extra: object
+    ) -> None:
+        body: dict[str, object] = {
+            "session_id": claude_session_id,
+            "cwd": str(worktree),
+            "hook_event_name": "Stop",
+        }
+        body.update(extra)
+        with freeze_time(self._EMIT_HOOK_TIME):
+            result = CliRunner().invoke(main, ["signal-stop"], input=json.dumps(body))
+        assert result.exit_code == 0, result.output
+
+    @staticmethod
+    def _attention_statuses(consumer: str) -> list[object]:
+        events = read_events(
+            consumer=consumer,
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        return [e.payload.get("paused_status") for e in events]
+
+    def _emit_case(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        *,
+        payload: dict[str, object],
+        stage: Stage,
+        attempts: int = 1,
+    ) -> tuple[Path, Session, FakeNativeDaemonClient]:
+        """Seed a headless session holding a staged emit_cli *payload*.
+
+        The session carries a ``surface_ref`` (so a daemon stop is observable)
+        and the client a staged pipeline (so ``apply_staged_decision`` can
+        advance). ``Path.home`` points at an empty fake home: no transcript
+        exists unless the case writes one, so any routing observed below can
+        only have come from the staged ``last_result``.
+        """
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path,
+            f"sess-2458-{name}",
+            f"worktree-2458-{name}",
+            surface_ref=f"sfref-2458-{name}",
+        )
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        self._stage_emit_cli_result(session.id, payload)
+        self._seed_running_row(session.id, stage=stage, attempts=attempts)
+        self._write_headless_context(worktree, session_id=session.id)
+        fake_home = tmp_path / f"fake-home-2458-{name}"
+        fake_home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        return worktree, session, daemon
+
+    @staticmethod
+    def _plan_stage_complete_payload() -> dict[str, object]:
+        """A valid stage_complete emitted at the plan stage (#2458 test 1/6)."""
+        payload = _sentinel_payload(
+            _SENTINEL_918_STAGE_COMPLETE,
+            stage_reached="stage1_plan",
+            branch=None,
+            commits=[],
+            fork_point_sha=None,
+        )
+        scope = payload["scope"]
+        assert isinstance(scope, dict)
+        scope["lines_actual"] = None
+        return payload
+
+    def test_signal_stop_emit_cli_stage_complete_advances_plan_to_impl(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2458 test 1: a staged non-terminal ``stage_complete`` routes.
+
+        Coverage, not a regression fix: documents that the emit-precedence
+        gate does NOT skip a non-terminal status (``_has_terminal_sentinel``
+        is key presence only). No transcript exists, so the advance can only
+        have come from ``last_result``.
+        """
+        worktree, session, daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "plan-advance",
+            payload=self._plan_stage_complete_payload(),
+            stage=Stage.PLAN,
+        )
+
+        self._fire_emit_stop(worktree, "sfref-2458-plan-advance-uuid")
+
+        assert self._reload_task().stage == Stage.IMPL
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        events = read_events(
+            consumer="t2458-plan-advance",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert [e.payload["session_id"] for e in events] == [session.id]
+        assert daemon.stop_calls == ["sfref-2458-plan-advance"]
+
+    def test_signal_stop_emit_cli_premises_pending_verification_parks_plan_parked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2458 test 2: a staged pause status parks the row BLOCKED_ON_USER.
+
+        The emit_cli twin of
+        ``test_signal_stop_premises_pending_v2_marks_task_blocked_on_user``.
+        """
+        from cw.models import QueueItemStatus
+
+        worktree, session, _daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "premises",
+            payload=_sentinel_payload(
+                _SENTINEL_316_PREMISES_PENDING_V2, schema_version=4
+            ),
+            stage=Stage.PLAN,
+        )
+
+        self._fire_emit_stop(worktree, "sfref-2458-premises-uuid")
+
+        assert self._reload_task().status == QueueItemStatus.BLOCKED_ON_USER
+        assert self._attention_statuses("t2458-premises") == ["plan_parked"]
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+    def test_signal_stop_emit_cli_wins_over_failed_then_retried_transcript_frames(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2458 test 4: the staged emit wins over a failed-then-retried pair.
+
+        The transcript carries a validation-failed frame followed by a valid
+        ``no_op`` retry; either would route the row somewhere other than the
+        staged ``premises_pending_verification`` (PENDING re-queue or
+        COMPLETED). BLOCKED_ON_USER is only reachable from ``last_result``.
+        """
+        from cw.models import QueueItemStatus
+
+        worktree, session, _daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "retried",
+            payload=_sentinel_payload(
+                _SENTINEL_316_PREMISES_PENDING_V2, schema_version=4
+            ),
+            stage=Stage.PLAN,
+        )
+        claude_session_id = "sfref-2458-retried-uuid"
+        _write_transcript_records(
+            tmp_path / "fake-home-2458-retried",
+            worktree,
+            [
+                _ul_record(_SENTINEL_251_VALIDATION_FAILED),
+                _ul_record(_SENTINEL_251_NO_OP),
+            ],
+            filename=f"{claude_session_id}.jsonl",
+        )
+
+        self._fire_emit_stop(worktree, claude_session_id)
+
+        assert self._reload_task().status == QueueItemStatus.BLOCKED_ON_USER
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.last_result is not None
+        assert updated.last_result["status"] == "premises_pending_verification"
+        assert updated.last_result_source == LastResultSource.EMIT_CLI
+
+    def test_signal_stop_defers_forever_when_nothing_staged_and_bg_tasks_never_drain(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2458 test 5: nothing staged + pending background work -> silent defer.
+
+        The genuine mid-subagent-wait case the ``background_tasks`` guard was
+        always for: no ``cw result emit`` has run, so the lock-free peek finds
+        nothing and the hook mutates nothing but the spawn-stamp snapshot.
+        """
+        from cw.models import QueueItemStatus
+
+        worktree, session, daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "nothing-staged",
+            payload={},
+            stage=Stage.PLAN,
+        )
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.last_result = None
+        target.last_result_source = None
+        save_state(state)
+        pre_snapshot = target.model_dump()
+
+        self._fire_emit_stop(
+            worktree,
+            "sfref-2458-nothing-staged-uuid",
+            background_tasks=[{"id": "task-1", "description": "Plan subagent running"}],
+        )
+
+        post = next(s for s in load_state().sessions if s.id == session.id)
+        assert post.model_dump() == pre_snapshot
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert read_events(consumer="t2458-nothing-staged") == []
+        assert daemon.stop_calls == []
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["agent_spawn_stamp"]["unresolved_count"] == 1
+
+    def test_signal_stop_routes_staged_emit_cli_result_before_bg_tasks_defer(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2458 test 6: a staged result is routed even mid-background-task.
+
+        The TASK advances on this very Stop; only the SESSION's own
+        completion (``SESSION_COMPLETED`` + daemon stop) waits for the
+        background work to drain, so the in-flight subagent is not orphaned
+        (#151).
+        """
+        worktree, session, daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "bg-routed",
+            payload=self._plan_stage_complete_payload(),
+            stage=Stage.PLAN,
+        )
+
+        self._fire_emit_stop(
+            worktree,
+            "sfref-2458-bg-routed-uuid",
+            background_tasks=[
+                {"id": "bg-1", "description": "trailing finalize subagent"}
+            ],
+        )
+
+        assert self._reload_task().stage == Stage.IMPL
+        events = read_events(
+            consumer="t2458-bg-routed",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert events == []
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.ACTIVE
+        assert daemon.stop_calls == []
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["agent_spawn_stamp"]["unresolved_count"] == 1
+
+    def test_signal_stop_landed_terminal_blocked_stops_daemon_with_bg_tasks_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2458 test 7: a staged BlockedResult landing FAILED stops the daemon.
+
+        The emit_cli twin of
+        ``test_signal_stop_unrecognized_reason_marks_failed_and_stops_daemon``
+        with ``background_tasks`` still pending: the catch-all lands the row
+        terminal at the attempt cap, which makes the worker provably leaked
+        whatever it thinks it is still waiting on.
+        """
+        from cw.models import QueueItemStatus
+        from cw.reconcile import _VALIDATION_FAILED_MAX_ATTEMPTS
+
+        worktree, session, daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "catchall",
+            payload={
+                "status": "blocked",
+                "blocker": {
+                    "stage": "unknown",
+                    "reason": "unknown_reason_xyz",
+                    "details": "parser-synthesized blocker",
+                },
+            },
+            stage=Stage.PLAN,
+            attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
+        )
+
+        self._fire_emit_stop(
+            worktree,
+            "sfref-2458-catchall-uuid",
+            background_tasks=[{"id": "bg-1", "description": "still running"}],
+        )
+
+        task = self._reload_task()
+        assert task.status == QueueItemStatus.FAILED
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status != SessionStatus.COMPLETED
+        assert daemon.stop_calls == ["sfref-2458-catchall"]
+
+    def test_signal_stop_sentinel_unroutable_logs_and_pages(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """#2458 test 8: an unreconstructable staged result with no transcript
+        fallback logs a WARNING and pages ``sentinel_unroutable``.
+
+        Signal-only: the session stays ACTIVE and the row RUNNING, so the
+        idle-sweep backstop (or a later Stop) is still free to route it.
+        """
+        from cw.models import QueueItemStatus
+
+        worktree, session, daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "unroutable",
+            payload={"status": "blocked"},
+            stage=Stage.PLAN,
+        )
+        claude_session_id = "sfref-2458-unroutable-uuid"
+        _write_transcript_records(
+            tmp_path / "fake-home-2458-unroutable",
+            worktree,
+            [_ul_record("No sentinel here, just prose.")],
+            filename=f"{claude_session_id}.jsonl",
+        )
+
+        with caplog.at_level("WARNING", logger="cw.cli.stop_hook"):
+            self._fire_emit_stop(worktree, claude_session_id)
+
+        messages = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == "cw.cli.stop_hook" and "sentinel_unroutable" in r.getMessage()
+        ]
+        assert len(messages) == 1
+        assert session.id in messages[0]
+        assert f"ticket={self.SEED_TICKET_ID}" in messages[0]
+        assert "last_result_source=emit_cli" in messages[0]
+        attention = read_events(
+            consumer="t2458-unroutable",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert [e.payload["paused_status"] for e in attention] == [
+            "sentinel_unroutable"
+        ]
+        assert attention[0].payload["session_id"] == session.id
+        assert attention[0].payload["ticket_id"] == self.SEED_TICKET_ID
+        assert attention[0].correlation_id == self.SEED_TICKET_ID
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.ACTIVE
+        task = self._reload_task()
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.disposition is None
+        assert daemon.stop_calls == []
+
+    def test_signal_stop_stage_mismatch_refusal_does_not_fire_sentinel_unroutable(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2458 test 9: a #1031 stage-mismatch refusal already has its own
+        event, so it must not also page ``sentinel_unroutable``."""
+        worktree, _session, _daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "mismatch",
+            payload=_sentinel_payload(_SENTINEL_918_STAGE_COMPLETE),
+            # The row already advanced past IMPL (#986 shape).
+            stage=Stage.REVIEW,
+        )
+
+        self._fire_emit_stop(worktree, "sfref-2458-mismatch-uuid")
+
+        mismatches = read_events(
+            consumer="t2458-mismatch",
+            event_types=[OrchestratorEventType.SENTINEL_STAGE_MISMATCH],
+        )
+        assert len(mismatches) == 1
+        assert "sentinel_unroutable" not in self._attention_statuses(
+            "t2458-mismatch-att"
+        )
+        assert self._reload_task().stage == Stage.REVIEW
+
+    def test_signal_stop_abandoned_exit_park_suppresses_sentinel_unroutable_attention(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2458 test 10: the #2135 park pages once, not twice.
+
+        A malformed staged emit_cli result falls through to the transcript,
+        which has no sentinel; the armed park then fires on the worker's
+        marker. Its own ``stopped_without_sentinel`` page is the only one.
+        """
+        from cw.models import QueueItemStatus
+
+        session, worktree, _daemon = self._seed_park_case(
+            tmp_path, monkeypatch, "unroutable-park", _PARK_BENIGN_RECORDS
+        )
+        self._stage_emit_cli_result(session.id, {"status": "blocked"})
+
+        self._invoke_stop(worktree)
+
+        assert self._reload_task().status == QueueItemStatus.BLOCKED_ON_USER
+        assert self._attention_statuses("t2458-park") == ["stopped_without_sentinel"]
 
 
 class TestHarvestLastResultThroughDoor:

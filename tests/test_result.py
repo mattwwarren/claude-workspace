@@ -1345,6 +1345,23 @@ class TestReconstructStagedSentinelLegacyFingerprint:
         assert isinstance(reconstructed, AutoDevResult)
         assert reconstructed.plan_draft_fingerprint == "d" * 64
 
+    def test_validation_failure_logs_warning_with_errors(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#2458: a staged result that fails validation says why, then
+        returns None so every caller still falls back rather than raising."""
+        from cw.result import reconstruct_staged_sentinel
+
+        with caplog.at_level(logging.WARNING, logger="cw.result"):
+            reconstructed = reconstruct_staged_sentinel({"status": "shipped"})
+
+        assert reconstructed is None
+        messages = [r.getMessage() for r in caplog.records if r.name == "cw.result"]
+        assert len(messages) == 1
+        assert "reconstruct_staged_sentinel: validation failed" in messages[0]
+        # The pydantic field-error text, not just a generic failure line.
+        assert "schema_version: Field required" in messages[0]
+
 
 class TestHasTerminalResult:
     """cw.result.has_terminal_result -- the door's terminal-ness predicate
