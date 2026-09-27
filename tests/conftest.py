@@ -1576,6 +1576,12 @@ def _mock_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "cw.dispatch.gating.check_inode_usage", lambda _path: roomy_inodes
     )
+    monkeypatch.setattr(
+        "cw.doctor.config_checks.check_disk_usage", lambda _path: roomy_disk
+    )
+    monkeypatch.setattr(
+        "cw.doctor.config_checks.check_inode_usage", lambda _path: roomy_inodes
+    )
 
 
 @pytest.fixture(autouse=True)
