@@ -89,6 +89,10 @@ def _apply_idle_routed_mutations(
             source=LastResultSource.SALVAGE_TRANSCRIPT,
         )
         if audited.emit is not None and audited.emit.refused:
+            # #2140: the door refused a genuine overwrite attempt -- a foreign
+            # authority's already-recorded terminal result must survive
+            # byte-identical (first-writer-wins), so this candidate is
+            # abandoned rather than completed.
             continue
         outcome = audited.route
         if outcome is not None:

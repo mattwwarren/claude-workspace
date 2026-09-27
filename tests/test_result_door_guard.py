@@ -46,12 +46,6 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "stage-mismatch-refused; no 'status' key so has_terminal_result() "
             "stays False"
         ),
-        "session.last_result = routed_payload": (
-            "idle/_mutations.py (_apply_idle_routed_mutations) — routed-"
-            "sentinel advance; audit is appended immediately before this "
-            "legacy assignment, and the real terminal sentinel routed via "
-            "_apply_sentinel_to_task carries 'status'"
-        ),
     },
     "reconcile/phantom/_mutations.py": {
         (

@@ -39,6 +39,7 @@ from cw.reconcile._shared import (
     _queue_status_for_salvaged,
     _resolve_routed_sentinel,
 )
+from cw.result import reconstruct_staged_sentinel
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -267,13 +268,34 @@ def _apply_phantom_routed_mutations(
         session = session_by_id[candidate.session_id]
         routed = True
         task_already_terminal = False
+        routed_payload = routed_sentinel.model_dump(mode="json")
+        # #1762's staged-sentinel producer reconstructs routed_sentinel FROM
+        # session.last_result itself, so when the two are still the same
+        # sentinel a fresh door emit would spuriously refuse it as an
+        # overwrite of itself -- audit the already-staged result instead of
+        # re-emitting it (mirrors stalled.py's audit_existing_result=True
+        # call). Comparing reconstructed *sentinels* rather than raw dicts
+        # matters: a raw last_result dict predating a schema addition differs
+        # byte-for-byte from its own round-tripped dump (new fields default-
+        # filled in), which would false-negative a real dict-equality check.
+        # #2140's race (a foreign authority lands a *different* terminal
+        # result between this tick's detect and apply phases) reconstructs to
+        # a different sentinel and correctly falls through to the real door,
+        # so first-writer-wins is enforced rather than bypassed.
         audited = _apply_sentinel_to_task_audited(
             candidate.ticket_id,
             session,
             routed_sentinel,
             source=LastResultSource.SALVAGE_TRANSCRIPT,
+            audit_existing_result=(
+                reconstruct_staged_sentinel(session.last_result) == routed_sentinel
+            ),
         )
         if audited.emit is not None and audited.emit.refused:
+            # #2140: the door refused a genuine overwrite attempt -- a foreign
+            # authority's already-recorded terminal result must survive
+            # byte-identical (first-writer-wins), so this candidate is
+            # abandoned rather than completed.
             continue
         outcome = audited.route
         if outcome is not None:
@@ -291,6 +313,8 @@ def _apply_phantom_routed_mutations(
             session.completed_at = now
             session.completed_reason = CompletionReason.NORMAL
             session.reap_reason = ReapReason.PHANTOM_SURFACE
+            session.last_result = routed_payload
+            session.last_result_source = LastResultSource.SALVAGE_TRANSCRIPT
             session.claude_session_id = candidate.salvage_csid
             phantom_names.append(session.name)
             accepted.append(candidate)
@@ -334,6 +358,8 @@ def _apply_phantom_routed_mutations(
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
         session.reap_reason = ReapReason.PHANTOM_SURFACE
+        session.last_result = routed_payload
+        session.last_result_source = LastResultSource.SALVAGE_TRANSCRIPT
         # #1762: only overwrite when the candidate actually carries a csid. The
         # staged-last_result producer passes session.claude_session_id straight
         # back (a no-op), but a future None-csid producer must not blank the id
