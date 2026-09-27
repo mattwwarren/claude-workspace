@@ -409,7 +409,11 @@ of:
 The comment-scoped rule composes with condition 3; it never exempts the
 caller from it. The plan stage's instantiation of all three conditions lives
 in `.claude/commands/auto-dev-plan-appendix.md`, Step 1a.0b item 4's
-Operator-authority-delta alternate — cited here, not restated.
+Operator-authority-delta alternate, and in `.claude/commands/auto-dev-plan.md`
+Checkpoint 1's **Row path** bullet (condition (b)) and its **Fingerprint
+mismatch sub-case** — every caller of the no-delta alternate composes with
+condition 3, not only the fast path (#2311). Each is cited here, not
+restated.
 
 **Impl-stage consumption (#2438).** The impl stage now consumes this rule
 too, via `.claude/commands/auto-dev-impl-appendix.md`, section

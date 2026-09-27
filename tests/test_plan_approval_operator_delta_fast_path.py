@@ -5,13 +5,17 @@ headless contract. Shared readers are imported from the established test
 helpers rather than duplicated here.
 """
 
-from tests.conftest import _REPO_ROOT, _appendix, _checkpoint1_section, _norm
+from tests.conftest import _REPO_ROOT, _appendix, _checkpoint1_section, _cmd, _norm
 from tests.test_agent_comment_provenance import RULE_ANCHOR, _rule_section
 from tests.test_auto_dev_preflight_resolutions import _after
 
 NEW_SUBSECTION_ANCHOR = "### Operator-authority delta (#2433)"
 DESTRUCTIVE_GATE_ANCHOR = "### Destructive-directive gate"
 PROVENANCE_ANCHOR = "### Provenance — what carries operator authority"
+# The auto-dev.md rule every caller of the no-delta alternate must compose
+# with (#2433 fix cycle 6, generalized to every caller by #2311).
+COMPOSITION_RULE_NAME = "Fast-path composition requires a third condition"
+AUTO_DEV_DOC_PATH = "`.claude/commands/auto-dev.md`"
 
 
 def _headless_contract() -> str:
@@ -222,3 +226,63 @@ def test_fingerprint_mismatch_subcase_checks_operator_authority_delta_first() ->
         in window
     )
     assert "**always** EXIT `plan_pending_approval`" not in window
+
+
+def test_checkpoint1_row_path_alternate_requires_body_sha_match_too() -> None:
+    """#2311: Checkpoint 1's row-path condition (b) is the same no-delta
+    alternate Step 1a.0b composes with the `body_sha` gate, so it must cite
+    that composition rule too -- otherwise an ordinary body edit rides the
+    row path past Step 1c.0's body-edit invalidation (fix cycle 6's
+    asymmetry)."""
+    window = _norm(
+        _after(
+            _norm(_checkpoint1_section()),
+            "latter branch does not require fingerprint equality",
+            span=900,
+        )
+    )
+    assert COMPOSITION_RULE_NAME in window
+    assert AUTO_DEV_DOC_PATH in window
+    assert "`body_sha`" in window
+    assert "no marker fails closed" in window
+
+
+def test_checkpoint1_mismatch_subcase_alternate_requires_body_sha_match_too() -> None:
+    """#2311: the mismatch sub-case evaluates the same alternate first, so a
+    `body_sha` mismatch (or no persisted marker) must disqualify it there as
+    well -- without regressing the fingerprint-quoting fallback."""
+    window = _norm(
+        _after(
+            _checkpoint1_section(),
+            "**Fingerprint mismatch sub-case (#2102).**",
+            span=1800,
+        )
+    )
+    assert COMPOSITION_RULE_NAME in window
+    assert AUTO_DEV_DOC_PATH in window
+    assert "`body_sha`" in window
+    assert (
+        "disqualifies the alternate exactly as a newer operator-authority "
+        "comment does" in window
+    )
+    assert "quote both fingerprints" in window
+
+
+def test_auto_dev_rule_generalizes_composition_to_every_caller_not_only_fast_path() -> (
+    None
+):
+    """#2311: the composition rule's pointer sentence names every plan-stage
+    instantiation -- Checkpoint 1's row-path bullet and mismatch sub-case as
+    well as Step 1a.0b -- so no caller is left citing only two conditions."""
+    window = _norm(
+        _after(
+            _norm(_cmd("auto-dev.md")),
+            "The plan stage's instantiation of all three conditions lives in",
+            span=700,
+        )
+    )
+    assert "Step 1a.0b item 4's Operator-authority-delta alternate" in window
+    assert "`.claude/commands/auto-dev-plan.md`" in window
+    assert "Checkpoint 1" in window
+    assert "**Row path** bullet" in window
+    assert "**Fingerprint mismatch sub-case**" in window
