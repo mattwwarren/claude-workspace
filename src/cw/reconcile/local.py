@@ -31,7 +31,6 @@ from __future__ import annotations
 import logging
 import subprocess
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING
 
 from cw.codex_background import _resolve_codex_fix_loop_enabled
@@ -60,7 +59,7 @@ from cw.reconcile import _deps
 from cw.reconcile._shared import (
     ProposedAction,
     ReapCandidate,
-    _apply_sentinel_to_task,
+    _apply_sentinel_to_task_audited,
     ticket_id_for_session,
 )
 from cw.reconcile.codex_boot import (
@@ -75,11 +74,6 @@ from cw.reconcile.codex_boot import (
     _worktree_porcelain_clean_except_verdict,
 )
 from cw.reconcile.tasks import _resolve_task_policy
-from cw.result import (
-    _record_result_emitted_audit,
-    emit_result_on,
-    emit_result_on_audited,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -517,9 +511,8 @@ def _act_on_local_harvest_candidates(
     would re-detect the same dead-PID candidate and re-synthesize the harvest
     sentinel (a real git/opencode subprocess call) forever, re-hitting the
     identical race deterministically. That case is now admitted past this
-    bail so it flows into the unconditional ``emit_result_on(source=
-    GIT_SYNTHESIS)`` call below -- the same door call the ordinary path
-    already uses, with the same refusal handling.
+    bail so it flows through the shared audited result door -- the same
+    first-writer and audit ordering the ordinary path uses.
     """
     if not candidates:
         return []
@@ -576,24 +569,18 @@ def _act_on_local_harvest_candidates(
         # terminal/advanced state when revert_completed_silent_tasks runs.
         routed = True
         task_already_terminal = False
-        sentinel_payload = sentinel.model_dump(mode="json")
-
-        if candidate.ticket_id:
-            outcome = _apply_sentinel_to_task(
-                candidate.ticket_id,
-                session,
-                sentinel,
-                before_persist=partial(
-                    _record_result_emitted_audit,
-                    session,
-                    sentinel_payload,
-                    source=LastResultSource.GIT_SYNTHESIS,
-                    status=sentinel.status,
-                ),
-            )
+        audited = _apply_sentinel_to_task_audited(
+            candidate.ticket_id,
+            session,
+            sentinel,
+            source=LastResultSource.GIT_SYNTHESIS,
+        )
+        if audited.emit is not None and audited.emit.refused:
+            continue
+        outcome = audited.route
+        if outcome is not None:
             routed = outcome.routed
             task_already_terminal = outcome.task_already_terminal
-        audit_recorded = bool(candidate.ticket_id and routed)
         if not routed and not task_already_terminal:
             continue
         # RFC 0012 A3 (#1459): route the git-synthesized completion through the
@@ -601,23 +588,9 @@ def _act_on_local_harvest_candidates(
         # directly. A first-writer-wins refusal (another authority already
         # recorded a terminal result) short-circuits the WHOLE completion for
         # this candidate -- skip the harvested-id count, the session-completion
-        # stamp, and the SESSION_COMPLETED event. The task was already routed
-        # by _apply_sentinel_to_task above (pre-existing ordering, unchanged);
-        # a refusal does not roll that back (Adopted Assumption 2). The door's
-        # own warning logs existing_source/attempted_source, so no log here.
-        emit_outcome = (
-            emit_result_on(
-                session, sentinel_payload, source=LastResultSource.GIT_SYNTHESIS
-            )
-            if audit_recorded
-            else emit_result_on_audited(
-                session,
-                sentinel_payload,
-                source=LastResultSource.GIT_SYNTHESIS,
-            )
-        )
-        if emit_outcome.refused:
-            continue
+        # stamp, and the SESSION_COMPLETED event. The shared audited seam has
+        # already arbitrated first-writer-wins and recorded the event before
+        # persisting a routed queue mutation.
         if candidate.ticket_id:
             harvested_ticket_ids.append(candidate.ticket_id)
         session.status = SessionStatus.COMPLETED

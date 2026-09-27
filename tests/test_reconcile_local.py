@@ -224,8 +224,7 @@ def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
 ) -> None:
     """RFC 0012 A3 (#1459): when the door refuses (a foreign terminal result is
     already recorded), the session-completion write is suppressed and no
-    SESSION_COMPLETED event fires for the candidate. The task was already routed
-    by _apply_sentinel_to_task before the door check (Adopted Assumption 2)."""
+    SESSION_COMPLETED or result-emitted audit event fires for the candidate."""
     worktree = _local_git_worktree(
         make_git_repo, "wt-harvest-refused", with_commit=True
     )
@@ -267,12 +266,75 @@ def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
     assert reloaded.status == SessionStatus.ACTIVE
     assert reloaded.last_result == foreign
     assert reloaded.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+    task_after = next(
+        t for t in load_dev_queue().tasks if t.ticket_id == "harv-refused"
+    )
+    assert task_after.status == QueueItemStatus.RUNNING
+    assert task_after.stage == Stage.IMPL
     # No SESSION_COMPLETED event fired for the refused candidate.
     events = read_events(
         consumer="test-harvest-refused",
         event_types=[OrchestratorEventType.SESSION_COMPLETED],
     )
     assert not any(e.payload.get("session_id") == "harv-refused" for e in events)
+    assert not read_events(
+        event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
+    )
+
+
+def test_local_harvest_queue_save_failure_keeps_audit_event(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The accepted emit audit is write-ahead of a failing queue save."""
+    worktree = _local_git_worktree(
+        make_git_repo, "wt-harvest-save-failure", with_commit=True
+    )
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    session_id = "harv-save-failure"
+    sess = _mk_local_session(
+        session_id,
+        worktree,
+        LocalLivenessHandle(pid=2_000_000_000, start_time_ns=10),
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=session_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session_id,
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    candidates = _detect_local_harvest_candidates(load_state(), task_by_ticket)
+
+    def _raise_save(_store: DevQueueStore) -> None:
+        msg = "queue file unwritable"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.reconcile._shared.save_dev_queue", _raise_save)
+    with pytest.raises(OSError, match="queue file unwritable"):
+        _act_on_local_harvest_candidates(
+            load_state(),
+            candidates,
+            now=datetime(2026, 1, 2, tzinfo=UTC),
+            task_by_ticket=task_by_ticket,
+        )
+
+    events = read_events(
+        event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
+    )
+    assert len(events) == 1
+    assert events[0].payload["session_id"] == session_id
+    assert load_state().sessions[0].last_result is None
+    assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
 
 
 def test_act_on_local_harvest_candidates_completes_on_task_already_terminal(
