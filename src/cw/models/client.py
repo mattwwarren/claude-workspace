@@ -75,6 +75,16 @@ class ClientConfig(BaseModel):
     #   3. CLAUDE.md "## Quality Gates" section — #1744, feeds codex-review
     #      lint grounding.
     quality_gate_commands: str | None = None
+    # Per-client ignore list for Step 4a's merge-gate overlap check (#2431).
+    # Repo-relative, root-anchored, exact-match paths (no globs) excluded from
+    # the branch/PR file intersection before it escalates to a `git
+    # merge-tree` probe -- e.g. a checked-in mypy-baseline.txt or lock file
+    # that nearly every PR touches. It does not excuse a genuine textual
+    # conflict in a listed path; the gate simply never looks at that path.
+    # Delivered to headless workers via `.claude/cw-context.json` (schema v11,
+    # see cw.spawn.CW_CONTEXT_SCHEMA_VERSION), never read from clients.yaml
+    # inside an agent's own bash.
+    merge_gate_ignore_paths: list[str] = Field(default_factory=list)
     # RFC 0011 S1 D-S2b — override for the GitHub login used in counterparty
     # (self|external) and self-identity resolution (see
     # cw.operator_identity.resolve_operator_login). Opaque string — no

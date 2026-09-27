@@ -320,6 +320,28 @@ class TestClientConfig:
         )
         assert c.quality_gate_commands == ""
 
+    def test_merge_gate_ignore_paths_defaults_to_empty_list(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.merge_gate_ignore_paths == []
+
+    def test_merge_gate_ignore_paths_accepts_list(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            merge_gate_ignore_paths=["mypy-baseline.txt", "uv.lock"],
+        )
+        assert c.merge_gate_ignore_paths == ["mypy-baseline.txt", "uv.lock"]
+
+    def test_merge_gate_ignore_paths_round_trip(self) -> None:
+        original = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            merge_gate_ignore_paths=["mypy-baseline.txt"],
+        )
+        data = original.model_dump(mode="json")
+        restored = ClientConfig.model_validate(data)
+        assert restored.merge_gate_ignore_paths == ["mypy-baseline.txt"]
+
     def test_occupancy_gate_enabled_defaults_to_inherit(self) -> None:
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.occupancy_gate_enabled is None
