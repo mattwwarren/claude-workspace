@@ -707,6 +707,53 @@ def test_cli_event_record_non_stage_event_type_ignores_stage_key(
     assert events[0].payload["stage"] == "whatever"
 
 
+def test_record_event_rejects_stage_outside_enum_from_direct_call(
+    tmp_events_dir: Path,
+) -> None:
+    """A direct ``record_event`` call is validated too, not just ``cw event
+    record`` (#2443) -- closes the internal-producer bypass.
+    """
+    with pytest.raises(CwError, match="Unknown stage 'bogus'"):
+        events_record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "x",
+                "ticket_id": "1",
+                "stage": "bogus",
+                "started_at": "2026-09-26T13:01:42Z",
+            },
+        )
+    assert read_events() == []
+
+
+def test_record_event_rejects_prev_stage_outside_enum_from_direct_call(
+    tmp_events_dir: Path,
+) -> None:
+    """``prev_stage`` is checked the same way as ``stage`` on a direct call."""
+    with pytest.raises(CwError, match="Unknown prev_stage 'bogus'"):
+        events_record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "x",
+                "ticket_id": "1",
+                "stage": "s2_impl_started",
+                "prev_stage": "bogus",
+                "started_at": "2026-09-26T13:01:42Z",
+            },
+        )
+    assert read_events() == []
+
+
+def test_record_event_non_stage_event_type_skips_validation(
+    tmp_events_dir: Path,
+) -> None:
+    """The record-time gate is on event_type, not payload shape."""
+    events_record_event(OrchestratorEventType.PR_MERGED, {"stage": "bogus"})
+    events = read_events()
+    assert len(events) == 1
+    assert events[0].payload["stage"] == "bogus"
+
+
 def test_cli_event_tail_type_filter_stage_entered(tmp_events_dir: Path) -> None:
     """cw event tail --type stage.entered filters out non-stage events."""
     events_record_event(
