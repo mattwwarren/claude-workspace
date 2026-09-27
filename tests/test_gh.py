@@ -6,8 +6,10 @@ import json
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
 
 from cw import gh
 from cw.gh import (
@@ -28,9 +30,6 @@ from cw.gh import (
 )
 from cw.models import PrState
 from tests.conftest import _make_ticket_task
-
-if TYPE_CHECKING:
-    import pytest
 
 
 class TestGithubPrUrl:
@@ -861,6 +860,71 @@ class TestFetchIssueComments:
             "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, "not json{{")
         )
         assert gh.fetch_issue_comments("1730", timeout=5) is None
+
+
+class TestFetchIssueBody:
+    """Tests for fetch_issue_body (#2311), shaped after fetch_issue_comments.
+
+    Feeds ``cw dev-queue approve``'s advisory ticket-body drift check, which
+    fails open on every ``None`` this returns.
+    """
+
+    def test_fetch_issue_body_returns_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def _fake_run(args: list[str], **kwargs: object) -> Any:
+            calls.append(list(args))
+            assert kwargs["cwd"] == Path("/repo")
+            return _make_run_result(0, json.dumps({"body": "edited body\n"}))
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        assert (
+            gh.fetch_issue_body("2311", timeout=5, cwd=Path("/repo")) == "edited body\n"
+        )
+        assert calls == [["gh", "issue", "view", "2311", "--json", "body"]]
+
+    def test_fetch_issue_body_returns_none_on_gh_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(1, ""))
+        assert gh.fetch_issue_body("2311", timeout=5) is None
+
+    def test_fetch_issue_body_returns_none_on_malformed_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, "not json{{")
+        )
+        assert gh.fetch_issue_body("2311", timeout=5) is None
+
+    @pytest.mark.parametrize("payload", [{"body": None}, {}, [], {"body": 7}])
+    def test_fetch_issue_body_returns_none_when_body_key_not_a_string(
+        self, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, json.dumps(payload)),
+        )
+        assert gh.fetch_issue_body("2311", timeout=5) is None
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            FileNotFoundError("gh"),
+            OSError("boom"),
+            subprocess.TimeoutExpired(cmd="gh", timeout=5),
+        ],
+    )
+    def test_fetch_issue_body_returns_none_when_gh_cannot_run(
+        self, monkeypatch: pytest.MonkeyPatch, exc: BaseException
+    ) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise exc
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert gh.fetch_issue_body("2311", timeout=5) is None
 
 
 class TestFetchApprovedPlanComment:
