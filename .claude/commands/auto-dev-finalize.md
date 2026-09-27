@@ -131,30 +131,124 @@ not improvise the prompt from memory.
 
 **Headless:** (Small only — large already exited at S3.)
 
-1. Collect the changed-file list for the current candidate branch:
-   ```bash
-   git diff --name-only <fork_point_sha>...HEAD
-   ```
-2. List all other open pipeline PRs:
-   ```bash
-   gh pr list --author @me --state open --json number,headRefName
-   ```
-   Filter for branches matching `<branch-prefix>/*`, excluding the current branch.
-3. For each such PR, collect its changed-file list via `gh pr diff <number> --name-only` (fallback: `git diff --name-only origin/main...origin/<headRefName>`).
-4. Compute the intersection of the candidate file list with each open PR's file list.
-   - **Non-empty intersection** for any open PR → EXIT `merge_gate_blocked` with populated `blocker`:
-     ```json
-     "blocker": {
-       "stage": "stage4a_merge_gate",
-       "reason": "prior_pipeline_pr_open",
-       "details": "PR #<number> (<headRefName>) is open and shares files with this branch: <comma-separated overlap list>",
-       "recovery_hint": "Wait for PR #<number> to merge, then re-dispatch this ticket.",
-       "retry_eligible": true,
-       "retry_delay_seconds": null
-     }
-     ```
-     When multiple open PRs overlap, list all overlapping PRs in `details`.
-   - **Empty intersection** for ALL open PRs (or no other open pipeline PRs) → proceed to Step 4b. Log: `"All open pipeline PRs are file-disjoint — proceeding to PR creation."`
+The gate is content-aware (#2431): a file this branch shares with another open pipeline PR blocks only when the two heads genuinely conflict. Two layers, both run by the single fence below:
+
+1. **Ignore-list narrowing.** `check_merge_gate_overlap.py filter` intersects this branch's changed files with each open pipeline PR's and drops the client's `merge_gate_ignore_paths` — read from `.claude/cw-context.json` (schema v11), passed as one `--ignore-path` argument per entry. Exact repo-relative match, no globs. The worker never reads `clients.yaml` or calls a config CLI for this.
+2. **Content-aware probe.** Overlap that survives the ignore list is escalated: fetch the PR head (`pull/<number>/head`) and run `git merge-tree --write-tree FETCH_HEAD HEAD`. Exit 0 = textually mergeable → non-blocking. Exit 1 = genuine conflict → the PR is recorded as conflicting. Anything else (fetch failure, git older than 2.38, the filter's own exit 2) → fail closed: the PR is recorded as conflicting with a tooling-error clause.
+
+Every other open pipeline PR is evaluated — one PR's conflict or tooling failure never skips the rest — and the gate decides once, after the loop, from the accumulated conflict list. Run the whole fence in **one** Bash call: the accumulator does not survive between calls.
+
+```bash
+MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+RESOLVED=""
+for candidate in "$GUARD_ROOT/.claude/scripts/check_merge_gate_overlap.py" "$HOME/.claude/scripts/check_merge_gate_overlap.py"; do
+  if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
+done
+if [ -n "$RESOLVED" ]; then
+  FOUND_VERSION=$(head -n 5 "$RESOLVED" \
+    | sed -nE 's/^#[[:space:]]*cw-script-version:[[:space:]]*([^[:space:]]*)[[:space:]]*$/\1/p' \
+    | head -n 1)
+  # Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+  # (which errors, evaluates false, and would fall through to the invocation).
+  if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+    echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+    # HARD STOP: EXIT blocked with agent_block (see bullet below); never
+    # evaluate a single PR, and never fall back to the raw intersection.
+    exit 3
+  fi
+else
+  echo "check_merge_gate_overlap: script absent, skipped"
+fi
+
+# merge_gate_ignore_paths comes from cw-context.json (schema v11) only, as
+# one --ignore-path argument per entry, never a joined string.
+IGNORE_ARGS=()
+while IFS= read -r IGNORE_PATH; do
+  [ -n "$IGNORE_PATH" ] && IGNORE_ARGS+=(--ignore-path "$IGNORE_PATH")
+done < <(jq -r '.merge_gate_ignore_paths // [] | .[]' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+
+MG_DIR=$(mktemp -d)
+git diff --name-only <fork_point_sha>...HEAD > "$MG_DIR/branch-files"
+CURRENT_BRANCH=$(git branch --show-current)
+gh pr list --author @me --state open --json number,headRefName \
+  --jq '.[] | "\(.number) \(.headRefName)"' > "$MG_DIR/open-prs"
+
+MERGE_GATE_CONFLICTS=()
+while read -r PR_NUMBER HEAD_REF <&3; do
+  case "$HEAD_REF" in "<branch-prefix>"/*) ;; *) continue ;; esac
+  [ "$HEAD_REF" = "$CURRENT_BRANCH" ] && continue
+  PR_FILES="$MG_DIR/pr-$PR_NUMBER-files"
+  gh pr diff "$PR_NUMBER" --name-only > "$PR_FILES" 2>/dev/null \
+    || git diff --name-only "origin/main...origin/$HEAD_REF" > "$PR_FILES" 2>/dev/null
+  if [ -z "$RESOLVED" ]; then
+    # Script absent: the pre-#2431 raw intersection — no ignore list, no probe.
+    OVERLAP=$(comm -12 <(sort -u "$MG_DIR/branch-files") <(sort -u "$PR_FILES") \
+      | paste -sd, - | sed 's/,/, /g')
+    [ -n "$OVERLAP" ] && MERGE_GATE_CONFLICTS+=("PR #$PR_NUMBER ($HEAD_REF) is open and shares files with this branch: $OVERLAP")
+  else
+    MERGE_GATE_OUTPUT=$(uv run python "$RESOLVED" filter \
+      --branch-files "$MG_DIR/branch-files" --pr-files "$PR_FILES" \
+      "${IGNORE_ARGS[@]}" --json 2>"$MG_DIR/pr-$PR_NUMBER-stderr")
+    MERGE_GATE_EXIT=$?
+    case "$MERGE_GATE_EXIT" in
+      0)
+        echo "PR #$PR_NUMBER: no file overlap after merge_gate_ignore_paths — non-blocking"
+        ;;
+      1)
+        OVERLAP=$(printf '%s' "$MERGE_GATE_OUTPUT" | jq -r '.overlap_after_ignore | join(", ")')
+        if git fetch --quiet origin "pull/$PR_NUMBER/head" 2>/dev/null; then
+          git merge-tree --write-tree FETCH_HEAD HEAD > /dev/null 2>&1
+          MERGE_TREE_EXIT=$?
+        else
+          MERGE_TREE_EXIT="fetch failed"
+        fi
+        case "$MERGE_TREE_EXIT" in
+          0) echo "merge-tree clean despite file overlap with PR #$PR_NUMBER — proceeding" ;;
+          1) MERGE_GATE_CONFLICTS+=("PR #$PR_NUMBER ($HEAD_REF) is open and conflicts textually with this branch (git merge-tree) in: $OVERLAP") ;;
+          *) MERGE_GATE_CONFLICTS+=("PR #$PR_NUMBER ($HEAD_REF) is open and shares files with this branch: $OVERLAP — merge-tree probe failed ($MERGE_TREE_EXIT), tooling error, failing closed") ;;
+        esac
+        ;;
+      *)
+        MG_ERR=$(head -c 300 "$MG_DIR/pr-$PR_NUMBER-stderr")
+        MERGE_GATE_CONFLICTS+=("PR #$PR_NUMBER ($HEAD_REF) could not be checked — check_merge_gate_overlap.py exited $MERGE_GATE_EXIT, tooling error, failing closed: $MG_ERR")
+        ;;
+    esac
+  fi
+done 3< "$MG_DIR/open-prs"
+rm -rf "$MG_DIR"
+
+if [ "${#MERGE_GATE_CONFLICTS[@]}" -gt 0 ]; then
+  MERGE_GATE_DETAILS=$(printf '%s; ' "${MERGE_GATE_CONFLICTS[@]}")
+  echo "MERGE_GATE_BLOCKED: ${MERGE_GATE_DETAILS%; }"
+else
+  echo "MERGE_GATE_CLEAR"
+fi
+```
+
+(Resolved repo-local-then-global and marker-verified by the same pattern as this pipeline's other guard scripts — see `auto-dev-impl.md`'s "Guard-script path resolution and staleness marker" subsection for the shared snippet and the version table. The marker check runs once, before any PR is evaluated.)
+
+- **Candidate found but its marker is missing or below minimum** (fence exits 3 after `STALE:`) → EXIT `blocked` with `blocker.reason: "agent_block"` (this doc's fixed catch-all convention), `blocker.details: "Step 4a: HEADLESS BLOCK — check_merge_gate_overlap.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP. A stale filter cannot be trusted to have narrowed anything, and silently reverting to the content-blind intersection would hide that.
+- **Absent from both locations** (fence printed `check_merge_gate_overlap: script absent, skipped`) → log `"check_merge_gate_overlap: script absent, skipped"` in `friction_highlights`. The fence has already fallen back to the pre-#2431 raw file intersection for every PR (no ignore list, no merge-tree probe), so the gate still ran, content-blind — act on its verdict line below like any other. Same non-blocking absence convention as the pipeline's other guard sites.
+- **`MERGE_GATE_BLOCKED: <details>`** → EXIT `merge_gate_blocked` with populated `blocker`, `details` set verbatim to the text after the prefix:
+  ```json
+  "blocker": {
+    "stage": "stage4a_merge_gate",
+    "reason": "prior_pipeline_pr_open",
+    "details": "PR #<number> (<headRefName>) is open and conflicts textually with this branch (git merge-tree) in: <comma-separated overlap list>",
+    "recovery_hint": "Wait for PR #<number> to merge, then re-dispatch this ticket.",
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  }
+  ```
+  `details` names every conflicting PR — one `PR #<number> (<headRefName>) ...` clause each, `; `-separated, tooling-error clauses included — and never a PR the gate found clean. When several PRs conflict, name each of them in `recovery_hint` too.
+- **`MERGE_GATE_CLEAR`** → proceed to Step 4b. Log: `"All open pipeline PRs are file-disjoint or textually mergeable — proceeding to PR creation."`
+
+**Ignored paths are unverified — regenerate, don't hand-resolve.** When a path was excluded from the overlap computation by `merge_gate_ignore_paths`, the merge gate has **not** verified that path. If this branch and a sibling PR both changed it, whichever merges second will diverge on it: after merging base (Step 4c.5's rebase, or `/prep-pr`'s sync with main), regenerate that file with its own tool (`uv lock`, the baseline generator, the codegen step) and commit the regenerated output, rather than resolving the divergence by hand.
 
 ### Step 4b: Pipeline-Level PR Approval
 
