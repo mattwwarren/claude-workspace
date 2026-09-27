@@ -51,7 +51,7 @@ from cw.reconcile import (
     revert_timed_out_tasks,
 )
 from cw.reconcile.stale_dispatch_watch import register_stale_dispatch_watched_prs
-from cw.reconcile.tasks import _merged_pr_numbers_by_client
+from cw.reconcile.tasks import _closed_pr_numbers_by_client, _merged_pr_numbers_by_client
 from tests._reconcile_helpers import (
     _client_with_lane,
     _make_pending_fix_dispatch,
@@ -2486,6 +2486,56 @@ def test_release_stale_gated_tasks_auto_policy_requeues_variant_b(
     assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_b"
 
 
+def test_release_stale_gated_tasks_auto_policy_requeues_variant_b_closed_unmerged(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reap_policy=auto: Variant B (blocked behind another ticket's PR that
+    has since been CLOSED unmerged, GitHub #1920) requeues to PENDING,
+    clears session_id, still emits SESSION_REAP_PROPOSED -- mirrors the
+    MERGED case above."""
+    blocking = _make_ticket_task(
+        ticket_id="SG-B-BLOCKERC",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="https://github.com/foo/bar/pull/150",
+        pr_state=PrState(state="CLOSED"),
+    )
+    blocked = _make_ticket_task(
+        ticket_id="SG-B1C",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_gate_blocked",
+        blocked_reason="prior_pipeline_pr_open",
+        blocked_on_pr=150,
+        session_id="sess-b1c",
+    )
+    save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
+    save_state(CwState(sessions=[]))
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-B1C"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-B1C")
+    assert reloaded.status == QueueItemStatus.PENDING
+    assert reloaded.session_id is None
+    assert reloaded.blocked_on_pr is None  # unconditional-clear on transition
+
+    events = read_events()
+    reap_events = [
+        e
+        for e in events
+        if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        and e.payload.get("ticket_id") == "SG-B1C"
+    ]
+    assert len(reap_events) == 1
+    assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_b"
+
+
 # GitHub #1862/#1902 — the verbatim agent sentinel shape a stale_dispatch park
 # is routed from; mirrors TestStaleDispatchSentinelRouting._last_result() in
 # tests/test_dispatch.py so the two stay recognizably the same payload.
@@ -2618,6 +2668,42 @@ def test_release_stale_gated_tasks_auto_policy_requeues_stale_dispatch_variant_b
     assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_b"
 
 
+def test_release_stale_gated_tasks_auto_policy_requeues_stale_dispatch_variant_b_closed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reap_policy=auto: a stale_dispatch/pr_already_open park requeues to
+    PENDING once its own blocking PR is observed CLOSED unmerged (GitHub
+    #1920) -- mirrors the MERGED case above, same end-to-end production
+    path (#1927)."""
+    _park_stale_dispatch_via_routing("SG-SD1C", "client-a", tmp_path)
+    save_state(CwState(sessions=[]))
+    _register_and_hydrate_merged_watch(monkeypatch, state="CLOSED")
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-SD1C"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD1C")
+    assert reloaded.status == QueueItemStatus.PENDING
+    assert reloaded.session_id is None
+    assert reloaded.blocked_on_pr is None  # unconditional-clear on transition
+
+    events = read_events()
+    reap_events = [
+        e
+        for e in events
+        if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        and e.payload.get("ticket_id") == "SG-SD1C"
+    ]
+    assert len(reap_events) == 1
+    assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_b"
+
+
 def test_release_stale_gated_tasks_stale_dispatch_open_pr_not_released_end_to_end(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -2701,6 +2787,28 @@ def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps(
     assert reloaded.blocked_on_pr == _STALE_DISPATCH_PR_NUMBER
 
 
+def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps_closed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default signal_only (ADR-0006): the same end-to-end production path as
+    the AUTO CLOSED test above stamps ``stale_gate_detected_at`` and leaves
+    ``status`` untouched -- no destructive mutation without an opt-in
+    (GitHub #1920)."""
+    _park_stale_dispatch_via_routing("SG-SD3C", "client-a", tmp_path)
+    save_state(CwState(sessions=[]))
+    _register_and_hydrate_merged_watch(monkeypatch, state="CLOSED")
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-SD3C"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD3C")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.stale_gate_detected_at is not None
+    assert reloaded.blocked_on_pr == _STALE_DISPATCH_PR_NUMBER
+
+
 def test_is_variant_b_gate_task_stale_dispatch_requires_matching_blocked_reason(
     tmp_config_dir: Path,
 ) -> None:
@@ -2736,48 +2844,48 @@ def test_is_variant_b_gate_task_stale_dispatch_requires_matching_blocked_reason(
     assert reloaded.blocked_on_pr == 73
 
 
+def _make_watched_pr(
+    *,
+    pr_number: int = 90,
+    client: str | None = "client-a",
+    state: str = "MERGED",
+) -> WatchedPr:
+    return WatchedPr(
+        pr_url=f"https://github.com/foo/bar/pull/{pr_number}",
+        repo="foo/bar",
+        pr_number=pr_number,
+        client=client,
+        source="stale_dispatch_park",
+        pr_state=PrState(state=state),
+    )
+
+
 class TestMergedPrNumbersByClient:
     """The Variant B cross-reference index, now fed by two sources (#1927):
     task rows' hydrated ``pr_state`` and client-tagged ``WatchedPr`` entries.
     """
 
-    def _watched(
-        self,
-        *,
-        pr_number: int = 90,
-        client: str | None = "client-a",
-        state: str = "MERGED",
-    ) -> WatchedPr:
-        return WatchedPr(
-            pr_url=f"https://github.com/foo/bar/pull/{pr_number}",
-            repo="foo/bar",
-            pr_number=pr_number,
-            client=client,
-            source="stale_dispatch_park",
-            pr_state=PrState(state=state),
-        )
-
     def test_merged_client_tagged_watch_contributes(self) -> None:
-        store = DevQueueStore(watched_prs=[self._watched()])
+        store = DevQueueStore(watched_prs=[_make_watched_pr()])
         assert _merged_pr_numbers_by_client(store) == {"client-a": {90}}
 
     def test_unmerged_watch_excluded(self) -> None:
-        store = DevQueueStore(watched_prs=[self._watched(state="OPEN")])
+        store = DevQueueStore(watched_prs=[_make_watched_pr(state="OPEN")])
         assert _merged_pr_numbers_by_client(store) == {}
 
     def test_watch_without_pr_state_excluded(self) -> None:
-        watched = self._watched()
+        watched = _make_watched_pr()
         watched.pr_state = None
         assert _merged_pr_numbers_by_client(DevQueueStore(watched_prs=[watched])) == {}
 
     def test_null_client_watch_excluded(self) -> None:
         """An operator-registered (webhook/cli) watch carries no client
         context, so its bare PR number cannot be scoped to one repo."""
-        store = DevQueueStore(watched_prs=[self._watched(client=None)])
+        store = DevQueueStore(watched_prs=[_make_watched_pr(client=None)])
         assert _merged_pr_numbers_by_client(store) == {}
 
     def test_other_client_watch_does_not_leak(self) -> None:
-        store = DevQueueStore(watched_prs=[self._watched(client="client-b")])
+        store = DevQueueStore(watched_prs=[_make_watched_pr(client="client-b")])
         merged = _merged_pr_numbers_by_client(store)
         assert merged.get("client-a", set()) == set()
         assert merged == {"client-b": {90}}
@@ -2789,8 +2897,64 @@ class TestMergedPrNumbersByClient:
             pr_url="https://github.com/foo/bar/pull/91",
             pr_state=PrState(state="MERGED"),
         )
-        store = DevQueueStore(tasks=[task], watched_prs=[self._watched()])
+        store = DevQueueStore(tasks=[task], watched_prs=[_make_watched_pr()])
         assert _merged_pr_numbers_by_client(store) == {"client-a": {90, 91}}
+
+
+class TestClosedPrNumbersByClient:
+    """The Variant B cross-reference index's CLOSED-unmerged sibling
+    (GitHub #1920) -- mirrors TestMergedPrNumbersByClient's six sub-tests,
+    targeting ``_closed_pr_numbers_by_client``, plus a cross-contamination
+    check that MERGED and CLOSED sets never leak into each other."""
+
+    def test_closed_client_tagged_watch_contributes(self) -> None:
+        store = DevQueueStore(watched_prs=[_make_watched_pr(state="CLOSED")])
+        assert _closed_pr_numbers_by_client(store) == {"client-a": {90}}
+
+    def test_open_watch_excluded(self) -> None:
+        store = DevQueueStore(watched_prs=[_make_watched_pr(state="OPEN")])
+        assert _closed_pr_numbers_by_client(store) == {}
+
+    def test_watch_without_pr_state_excluded(self) -> None:
+        watched = _make_watched_pr(state="CLOSED")
+        watched.pr_state = None
+        assert _closed_pr_numbers_by_client(DevQueueStore(watched_prs=[watched])) == {}
+
+    def test_null_client_watch_excluded(self) -> None:
+        """An operator-registered (webhook/cli) watch carries no client
+        context, so its bare PR number cannot be scoped to one repo."""
+        store = DevQueueStore(watched_prs=[_make_watched_pr(client=None, state="CLOSED")])
+        assert _closed_pr_numbers_by_client(store) == {}
+
+    def test_other_client_watch_does_not_leak(self) -> None:
+        store = DevQueueStore(
+            watched_prs=[_make_watched_pr(client="client-b", state="CLOSED")]
+        )
+        closed = _closed_pr_numbers_by_client(store)
+        assert closed.get("client-a", set()) == set()
+        assert closed == {"client-b": {90}}
+
+    def test_task_and_watch_sources_union_within_a_client(self) -> None:
+        task = _make_ticket_task(
+            ticket_id="SG-U2",
+            client="client-a",
+            pr_url="https://github.com/foo/bar/pull/91",
+            pr_state=PrState(state="CLOSED"),
+        )
+        store = DevQueueStore(
+            tasks=[task], watched_prs=[_make_watched_pr(state="CLOSED")]
+        )
+        assert _closed_pr_numbers_by_client(store) == {"client-a": {90, 91}}
+
+    def test_merged_watch_does_not_leak_into_closed_index(self) -> None:
+        """A MERGED-state watch must not appear in the CLOSED index, and a
+        CLOSED-state watch must not appear in the MERGED index -- the two
+        cross-reference sets are disjoint by construction."""
+        merged_watch = _make_watched_pr(pr_number=90, state="MERGED")
+        closed_watch = _make_watched_pr(pr_number=91, state="CLOSED")
+        store = DevQueueStore(watched_prs=[merged_watch, closed_watch])
+        assert _merged_pr_numbers_by_client(store) == {"client-a": {90}}
+        assert _closed_pr_numbers_by_client(store) == {"client-a": {91}}
 
 
 def test_release_stale_gated_tasks_variant_b_signal_only_stamps(
@@ -2823,6 +2987,39 @@ def test_release_stale_gated_tasks_variant_b_signal_only_stamps(
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
     assert reloaded.stale_gate_detected_at is not None
     assert reloaded.blocked_on_pr == 60
+
+
+def test_release_stale_gated_tasks_variant_b_signal_only_stamps_closed_unmerged(
+    tmp_config_dir: Path,
+) -> None:
+    """Default signal_only: Variant B stamps stale_gate_detected_at without
+    mutating status, for a blocking PR that was CLOSED unmerged (GitHub
+    #1920) -- mirrors the MERGED signal_only test above."""
+    blocking = _make_ticket_task(
+        ticket_id="SG-B-BLOCKER2C",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="https://github.com/foo/bar/pull/151",
+        pr_state=PrState(state="CLOSED"),
+    )
+    blocked = _make_ticket_task(
+        ticket_id="SG-B3C",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_gate_blocked",
+        blocked_reason="prior_pipeline_pr_open",
+        blocked_on_pr=151,
+    )
+    save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
+    save_state(CwState(sessions=[]))
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-B3C"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-B3C")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.stale_gate_detected_at is not None
+    assert reloaded.blocked_on_pr == 151
 
 
 def test_release_stale_gated_tasks_variant_b_ignores_merged_task_without_pr_url(
