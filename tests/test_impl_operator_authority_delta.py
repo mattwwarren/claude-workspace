@@ -82,9 +82,8 @@ def test_past_s2_stale_true_also_forbids_deterministic_repark() -> None:
 
 def test_core_doc_bullet_drops_past_s2_only_restriction() -> None:
     bullet = _core_guard_bullet()
-    assert (
-        "run before them whenever the detector reports a stage past S2"
-        not in _norm(bullet)
+    assert "run before them whenever the detector reports a stage past S2" not in _norm(
+        bullet
     )
     assert "s2_implementing" in bullet
     content = _cmd("auto-dev-impl.md")
@@ -98,7 +97,7 @@ def test_auto_dev_md_documents_impl_stage_consumption() -> None:
     idx_fastpath = section.index("Fast-path composition requires a third condition")
     idx_new = section.index("Impl-stage consumption (#2438)")
     assert idx_fastpath < idx_new
-    window = _after(section, "Impl-stage consumption (#2438)", span=700)
+    window = _norm(_after(section, "Impl-stage consumption (#2438)", span=700))
     assert "HEAD_COMMIT_AT" in window
     assert (
         'section "Pre-Stage Detector Guard: resume dispositions and the '
