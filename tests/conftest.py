@@ -170,6 +170,18 @@ def _appendix(stage: str) -> str:
     )
 
 
+def _norm(text: str) -> str:
+    """Collapse *text* to single-spaced words (#2438).
+
+    Doc-guard tests slice a markdown section and then need to assert a
+    phrase regardless of the exact whitespace/line-wrapping around it.
+    Hoisted out of ``test_plan_approval_operator_delta_fast_path.py`` and
+    ``test_impl_operator_authority_delta.py``, which carried byte-identical
+    private copies (#2438 MUST_FIX B) — import this instead of adding a third.
+    """
+    return " ".join(text.split())
+
+
 def _step4c2_section() -> str:
     """Return ``auto-dev-finalize.md``'s Step 4c.2 agent-prompt region.
 

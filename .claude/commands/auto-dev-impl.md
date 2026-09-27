@@ -229,7 +229,7 @@ number and this table's minimum in the same commit.
 |---|---|---|
 | `check_not_main_checkout.py` | 1 | `auto-dev-impl.md` Pre-mutation guard |
 | `check_plan_scope_conformance.py` | 2 | `auto-dev-impl.md` Step 2.5 gate 2 |
-| `check_impl_guard_staleness.py` | 1 | `auto-dev-impl-appendix.md` Pre-Stage Detector Guard |
+| `check_impl_guard_staleness.py` | 2 | `auto-dev-impl-appendix.md` Pre-Stage Detector Guard |
 | `classify_merge_conflict.py` | 1 | `auto-dev-finalize.md` Step 4c.5 |
 | `check_must_fix_override.py` | 1 | `auto-dev-finalize.md` MUST_FIX Override Verification |
 
@@ -248,7 +248,8 @@ Before starting S2 work, run `detect_current_stage()` (see [Resume Detection](#r
 - **Any other verdict** (`s2_implementing`, or a stage past S2: `s3_*`, `s4_*`,
   `s5_*`, `merged`) means this ticket already carries branch work, which is rare
   — the resume dispositions, and the staleness/regress check (#1794) that MUST
-  run before them whenever the detector reports a stage past S2, live in
+  run before them on every arrival here, whether the detector reports
+  `s2_implementing` or a stage past S2 (#2438), live in
   `.claude/commands/auto-dev-impl-appendix.md`, section
   "Pre-Stage Detector Guard: resume dispositions and the staleness check (#1794)".
   Read it now; do not decide from this summary whether to advance, resume, or

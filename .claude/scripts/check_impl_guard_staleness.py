@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# cw-script-version: 1
+# cw-script-version: 2
 """Gate script: is the impl stage's `impl-complete` trailer still valid? (#1794)
 
 Usage (from `/auto-dev-impl`'s Pre-Stage Detector Guard):
@@ -55,6 +55,13 @@ The JSON verdict is written to stdout on exit 0:
 
 `reasons` is the operator-facing audit surface: the guard copies it into
 `friction_highlights` so a run that declined to short-circuit says why.
+
+`stale_comment_after_head` is computed over operator-authority comments only
+(#2438 MUST_FIX A): an entry whose body carries the pipeline's own
+`<!-- cw-agent-authored -->` marker (`auto-dev.md`'s `## Comment provenance
+rule (#2097)`) is ignored by `newest_comment_timestamp()`, so a routine
+pipeline-authored comment postdating HEAD can never trip a false-positive
+forced fresh attempt.
 """
 
 from __future__ import annotations
@@ -72,6 +79,11 @@ from pathlib import Path
 # fatal — a stale cached file full of old-shape bare-string entries must
 # degrade to "no timestamp evidence", never crash the gate.
 _CREATED_AT_KEYS = ("createdAt", "created_at")
+
+# The pipeline's own agent-authorship marker (`auto-dev.md`'s `## Comment
+# provenance rule (#2097)`) -- a comment carrying it is agent analysis, never
+# an operator decision, and must not feed the staleness comparison (#2438).
+_AGENT_AUTHORED_MARKER = "<!-- cw-agent-authored -->"
 
 _REASON_REGRESSED = "regressed_to_impl"
 _REASON_STALE_COMMENT = "stale_comment_after_head"
@@ -128,15 +140,25 @@ def _load_comments(path: Path) -> list[object] | None:
 
 
 def newest_comment_timestamp(comments: list[object]) -> tuple[str, datetime] | None:
-    """Return the (raw, parsed) newest comment timestamp, or None if there is none.
+    """Return the (raw, parsed) newest OPERATOR-AUTHORITY comment timestamp.
 
     Entries that are not objects, that carry neither timestamp key, or whose
     timestamp does not parse are skipped rather than treated as fatal — the
     absence of usable timestamp evidence is "not stale", not "cannot compute".
+
+    An entry whose `body` carries `_AGENT_AUTHORED_MARKER` is skipped too
+    (#2438 MUST_FIX A): it is agent analysis, never an operator decision, per
+    `auto-dev.md`'s `## Comment provenance rule (#2097)`, and must not make
+    `stale_comment_after_head` fire on the pipeline's own routine commentary.
+    A missing/non-string `body` is not evidence of agent authorship — it is
+    simply unfiltered, same fail-open direction as a missing timestamp key.
     """
     newest: tuple[str, datetime] | None = None
     for entry in comments:
         if not isinstance(entry, dict):
+            continue
+        body = entry.get("body")
+        if isinstance(body, str) and _AGENT_AUTHORED_MARKER in body:
             continue
         for key in _CREATED_AT_KEYS:
             value = entry.get(key)
