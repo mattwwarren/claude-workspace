@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from cw.auto_dev_result.schema._vocab import IMPACT_REASON_KEY
+
 
 def _reject_empty_string_items(v: list[str], field_name: str) -> list[str]:
     """Raise if any item in *v* is empty/whitespace-only (issue #1130).
@@ -87,7 +89,7 @@ def _is_no_impact_premise(item: dict[str, Any]) -> bool:
     impact = item.get("impact")
     if not (isinstance(impact, str) and impact.strip().lower() == "none"):
         return False
-    reason = item.get("impact_reason")
+    reason = item.get(IMPACT_REASON_KEY)
     return isinstance(reason, str) and bool(reason.strip())
 
 

@@ -166,7 +166,7 @@ def test_plan_malformed_impact_token_falls_through_as_malformed() -> None:
         "any other unparseable/malformed `Impact:` value — is treated as "
         "`CODE-AFFECTING`" in window
     )
-    assert "a malformed `Impact:` token, is additionally tallied" in window
+    assert "a malformed `Impact:` token is additionally tallied" in window
 
 
 def test_plan_malformed_verified_tally_is_additive_only() -> None:
@@ -174,6 +174,7 @@ def test_plan_malformed_verified_tally_is_additive_only() -> None:
     assert "does not introduce a fourth partition bucket" in window
     assert "not guaranteed to be a subset count of `unverified`" in window
     assert "regardless of which bucket each ultimately lands in" in window
+    assert "whose `Impact:` sub-bullet was missing" in window
 
 
 def test_plan_stage_entered_payload_has_malformed_verified_count() -> None:
@@ -186,6 +187,7 @@ def test_plan_stage_entered_payload_has_malformed_verified_count() -> None:
         content
     )
     assert "NOT guaranteed always-`0` on the AUTO-CONTINUE path (#2432)" in content
+    assert "malformed/missing-`Impact:` component" in content
 
 
 def test_plan_malformed_verified_note_is_count_only() -> None:

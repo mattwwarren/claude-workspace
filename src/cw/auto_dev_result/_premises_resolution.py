@@ -35,6 +35,7 @@ from typing import Any
 
 from cw.auto_dev_result._warn import _warn_once
 from cw.auto_dev_result.schema import _is_no_impact_premise, _is_resolved_premise
+from cw.auto_dev_result.schema._vocab import IMPACT_REASON_KEY
 
 
 def _downgrade_exempt_premises(
@@ -104,7 +105,7 @@ def _downgrade_exempt_premises(
     for item in impact_exempt:
         fh.append(
             f"premise no-impact (issue #2432): {_claim_text(item)} — "
-            f"impact_reason: {item.get('impact_reason')}"
+            f"impact_reason: {item.get(IMPACT_REASON_KEY)}"
         )
 
     _warn_once(
