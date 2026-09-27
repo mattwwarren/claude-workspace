@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 from click.testing import CliRunner
@@ -7040,7 +7040,7 @@ class TestApproveScopeDrift:
         """A failed restore is durable and operator-visible, not silently masked."""
         from cw.config import dev_queue_file
         from cw.dev_queue import approve_scope_drift_ticket
-        from cw.dev_queue.approval import save_dev_queue as real_save_dev_queue
+        from cw.dev_queue.storage import save_dev_queue as real_save_dev_queue
         from cw.models import OrchestratorEventType
 
         self._seed(tmp_config_dir, tmp_path, monkeypatch)
@@ -8148,6 +8148,140 @@ class TestApproveTicketLockedForceHold:
         assert payload["rule"] == "gate_release"
         assert payload["disposition"] == "advanced"
         assert correlation_id == "GEN-500"
+
+    def test_approve_locked_operator_bypasses_force_hold_after_stage_complete(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Per-ticket hold_finalize='manual' parked by a plain stage_complete
+        completion (last_result.status='stage_complete', disposition=
+        finalize_gate_held) -- not review_pending_approval -- still releases
+        via operator-initiated approve (#2410's primary repro). hold_finalize
+        is left untouched: it is a standing per-ticket policy, not a one-shot
+        latch (see docs/headless-contract.md's "Releasing the hold")."""
+        from cw.config import save_state
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION, approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-fh-sc-1",
+            disposition=FINALIZE_GATE_HELD_DISPOSITION,
+        )
+        task.hold_finalize = "manual"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-fh-sc-1",
+                        last_result={"status": "stage_complete"},
+                    )
+                ]
+            )
+        )
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["finalize_held"] is False
+        assert result["awaiting_signoff"] is False
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.FINALIZE
+        assert t.status == QueueItemStatus.PENDING
+        assert t.hold_finalize == "manual"
+
+    def test_approve_locked_releases_lane_finalize_gate_after_stage_complete(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Lane-level finalize_gate='manual' (no per-ticket hold_finalize),
+        parked by the real routing path (apply_staged_decision) via a plain
+        stage_complete, also releases via operator-initiated approve (#2410,
+        mattGenhealth's comment). There is no per-row flag to clear here, so
+        hold_finalize stays None."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.dispatch import apply_staged_decision
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-fh-lane-1",
+        )
+        assert task.hold_finalize is None
+        clients = {
+            "genhealth": ClientConfig(
+                name="genhealth",
+                workspace_path=tmp_path,
+                lanes=[LaneConfig(name=DEFAULT_LANE, finalize_gate="manual")],
+            )
+        }
+        apply_staged_decision(task, "stage_complete", None, clients)
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "finalize_gate_held"
+        assert task.hold_finalize is None
+
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-fh-lane-1",
+                        last_result={"status": "stage_complete"},
+                    )
+                ]
+            )
+        )
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["finalize_held"] is False
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.FINALIZE
+        assert t.status == QueueItemStatus.PENDING
+        assert t.hold_finalize is None
+
+    def test_approve_locked_automatic_caller_stays_held_after_stage_complete(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Regression guard (#2410): the widened disposition check only
+        widens what an operator-initiated call may do. An automatic caller
+        (resolved_task pinned, no operator_initiated) still holds after a
+        plain stage_complete park with disposition=finalize_gate_held -- the
+        actual protection is the pre-existing `not operator_initiated and
+        _should_force_hold_finalize(...)` guard inside
+        _approve_ticket_locked's branch chain, unaffected by the
+        disposition-tuple widening in _not_at_approval_gate."""
+        from cw.config import load_state, save_state
+        from cw.dev_queue import (
+            FINALIZE_GATE_HELD_DISPOSITION,
+            _approve_ticket_locked,
+            dev_queue_lock,
+        )
+
+        task = self._arm_force_held_review_row(tmp_config_dir, tmp_path, "sess-fh-7")
+        task.disposition = FINALIZE_GATE_HELD_DISPOSITION
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        state = load_state()
+        session = state.find_by_name_or_id("sess-fh-7")
+        assert session is not None
+        session.last_result = {"status": "stage_complete"}
+        save_state(state)
+
+        with dev_queue_lock():
+            result = _approve_ticket_locked("GEN-500", "genhealth", resolved_task=task)
+
+        assert result["finalize_held"] is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.REVIEW
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
 
 
 # ---------------------------------------------------------------------------
@@ -13689,7 +13823,7 @@ class TestAdvisoryNoteMigration:
         """A v36 store on disk without the key loads as v37 with None."""
         from cw.config import dev_queue_file
 
-        v36_data = {
+        v36_data: dict[str, Any] = {
             "schema_version": 36,
             "tasks": [
                 {
@@ -13790,7 +13924,7 @@ class TestUsageLimitActMigration:
         link exactly as written."""
         from cw.config import dev_queue_file
 
-        v39_data = {
+        v39_data: dict[str, Any] = {
             "schema_version": 39,
             "tasks": [
                 {
@@ -14258,7 +14392,7 @@ class TestPlanApprovedFingerprintStamp:
         from cw.dev_queue import approve_ticket
         from cw.models import CwState, LastResultSource
         from cw.result import emit_result_on
-        from tests.test_auto_dev_result import _plan_pending_payload
+        from tests.conftest import _plan_pending_payload
 
         fingerprint = "f" * 64
         stub_fetch_plan(
