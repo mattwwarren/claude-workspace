@@ -93,6 +93,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
 )
+from cw.models.enums import StageIdentifier
 from cw.reconcile._shared import (
     _FIX_DISPATCH_REF_UNRESOLVED_REASON,
     ticket_id_for_session,
@@ -118,7 +119,14 @@ _log = logging.getLogger(__name__)
 # operator-actionable park.
 FIX_LOOP_PENDING_DISPATCH = "fix_loop_pending_dispatch"
 
-_STAGE_FIX_LOOP = "s3_fix_loop"
+# §10.2's closed stage enum has no dedicated fix-loop member -- this handoff
+# is an orchestrator-internal continuation of REVIEW, not a skill-emitted
+# stage, so it is routed through the nearest validated stage
+# (StageIdentifier.S3_REVIEW_STARTED) with fix-loop identity carried in the
+# open `phase`/`cycle` payload fields instead (#2443; ADR-0004 §Consequences
+# treats payload additions as non-breaking).
+_STAGE_FIX_LOOP = StageIdentifier.S3_REVIEW_STARTED
+_PHASE_FIX_LOOP = "fix_loop"
 _ERROR_KIND_DISPATCH_FAILED = "fix_dispatch_failed"
 
 # error_kind/paused_status for a handoff found on a row that is no longer
@@ -273,6 +281,7 @@ def _emit_fix_dispatch_operator_signal(
     lane: str,
     error_kind: str,
     breadcrumbs: str,
+    cycle: int,
 ) -> None:
     """Emit the STAGE_ERRORED + SESSION_NEEDS_ATTENTION event pair for a
     fix-dispatch problem — shared by the stale-handoff drop in
@@ -285,7 +294,9 @@ def _emit_fix_dispatch_operator_signal(
         {
             "session_id": session_id,
             "ticket_id": ticket_id,
-            "stage": _STAGE_FIX_LOOP,
+            "stage": _STAGE_FIX_LOOP.value,
+            "phase": _PHASE_FIX_LOOP,
+            "cycle": cycle,
             "started_at": datetime.now(UTC).isoformat(),
             "error_kind": error_kind,
         },
@@ -390,6 +401,7 @@ def _drop_stale_handoffs(snapshots: list[_StaleHandoffSnapshot]) -> None:
                 lane=snap.lane,
                 error_kind=_ERROR_KIND_STALE_HANDOFF,
                 breadcrumbs=snap.breadcrumbs,
+                cycle=snap.cycle,
             )
         except OSError:
             _log.warning(
@@ -652,6 +664,7 @@ def _stamp_dispatch_failure(job: _DispatchJob, exc: CwError) -> None:
             lane=job.lane,
             error_kind=_ERROR_KIND_DISPATCH_FAILED,
             breadcrumbs=str(exc),
+            cycle=job.pending.cycle,
         )
 
 
