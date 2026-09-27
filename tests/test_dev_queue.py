@@ -5747,9 +5747,7 @@ class TestCLIDevQueueMove:
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
-    def _capture_events(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> list[CapturedEvent]:
+    def _capture_events(self, monkeypatch: pytest.MonkeyPatch) -> list[CapturedEvent]:
         events: list[CapturedEvent] = []
         monkeypatch.setattr(
             "cw.cli.dev_queue.crud.record_event",
