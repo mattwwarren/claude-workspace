@@ -29,7 +29,7 @@ Reached from Step 1a's item "0b." in the core doc, and only when Step 1a.0's res
 
 The durable revocation is the approval source of truth: Checkpoint 1 MUST honor it before evaluating row-path evidence, while consuming the cleared queue-row fields; it must not restore approval from the draft-local marker. A later `plan_approved_at` supersedes it as a fresh approval.
 
-4. **Fingerprint fast-path check (runs regardless of whether step 3 fired).** Compute `draft_fp` per the *Plan-draft fingerprint rule* (`.claude/commands/auto-dev-plan.md`) of the draft as it now stands. Reuse Checkpoint 1's existing row-path evidence check by name (`.claude/commands/auto-dev-plan.md`, Checkpoint 1 — a non-null `queue_metadata.plan_approved_at` AND a `queue_metadata.plan_approved_fingerprint` equal to `draft_fp`) — do not re-derive it here.
+4. **Fingerprint fast-path check (runs regardless of whether step 3 fired).** Compute `draft_fp` per the *Plan-draft fingerprint rule* (`.claude/commands/auto-dev-plan.md`) of the draft as it now stands. Reuse Checkpoint 1's existing row-path evidence check by name — do not re-derive it here (`.claude/commands/auto-dev-plan.md`, Checkpoint 1 — non-null `queue_metadata.plan_approved_at` **and** non-null `queue_metadata.plan_approved_fingerprint`, **and** either a fingerprint equal to `draft_fp` or the *Operator-authority delta* alternate, whose two-branch test finds no newer operator-authority comment).
    - **Match → fast path.** Skip Step 1c's ambiguity/premise re-scan AND Step 1c.0's round-cap/settlement-folding machinery entirely — no Product Manager Reviewer spawn, nothing rewrites the draft — and proceed straight to Step 1d. Emit:
      ```bash
      cw event record stage.entered \
@@ -37,11 +37,27 @@ The durable revocation is the approval source of truth: Checkpoint 1 MUST honor 
        --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"approved_fingerprint_match\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
      ```
      — in place of, not in addition to, `s1_ambiguity_scan_complete`.
+   - **Operator-authority-delta alternate eligibility guard — this branch fires ONLY when ALL three conditions hold (#2433 fix cycle 6):**
+     1. a durable `plan_approved_at` **and** its paired `plan_approved_fingerprint` both exist on the row (Checkpoint 1's alternate row-path condition);
+     2. the *Operator-authority delta* rule (`.claude/commands/auto-dev.md`) finds no operator-authority comment newer than `plan_approved_at`;
+     3. the persisted `body_sha` — read from `.cw/plan-draft.md`'s `plan-stage-last-evaluated` marker (absent ⇒ treat as no persisted value, condition fails) — equals a freshly computed SHA-256 of the live-fetched issue body, using the same *body_sha* definition Step 1c.0 uses.
+     This alternate never emits `resolution_consumed` or `resolution_evidence`.
+
+   - **Operator-authority-delta alternate → fast path.** When the three-condition eligibility guard above holds, take the same fast path independently of fingerprint equality. Skip Step 1c's ambiguity/premise re-scan AND Step 1c.0's round-cap/settlement-folding machinery entirely and proceed straight to Step 1d. Emit:
+     ```bash
+     cw event record stage.entered \
+       --correlation-id "$TICKET" \
+       --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"operator_approval_no_delta\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+      ```
+     — in place of, not in addition to, `s1_ambiguity_scan_complete`. Any operator-authority comment newer than `plan_approved_at` disqualifies this branch and falls through to Step 1c.0 / Step 1c as today.
+
+     A `body_sha` mismatch disqualifies this branch exactly as a newer operator-authority comment does (condition 3), falling through to Step 1c.0 / Step 1c as today; that fallthrough takes Step 1c.0's own existing tracker-state-delta reset on the mismatch, so this composition invents no new branch for it. The `body_sha` check is an independent tracker-state gate, not part of the *Operator-authority delta* rule: that rule stays comment-scoped only (see its definition in `.claude/commands/auto-dev.md`) and is never, by itself, disqualified by a body edit; this fast path composes the two separate gates, so the comment-scoped rule never exempts the fast path from the body-edit check.
+
    - **No match (or absent evidence) → proceed to Step 1c.0 / Step 1c as today**, now evaluated against the (possibly just-revised) draft.
 
-**Scope note on evidence source.** Step 4's evidence check is scoped to the row-path only (`cw dev-queue approve`) — matching the ticket's literal wording ("the row's `plan_approved_fingerprint` matches"). A comment-path-token-approved draft is unaffected by this section; it continues through today's slower path (Step 1c re-scan runs, Checkpoint 1 re-evaluates the comment-path token as it does today).
+**Scope note on evidence source.** Step 4's existing fingerprint-equality evidence check is scoped to the row-path only (`cw dev-queue approve`) — matching the ticket's literal wording ("the row's `plan_approved_fingerprint` matches"). The new no-delta alternate is also anchored to the row's durable `plan_approved_at`; a comment-path-token-approved draft is unaffected by this section and continues through today's slower path (Step 1c re-scan runs, Checkpoint 1 re-evaluates the comment-path token as it does today).
 
-Because step 3 (delta/revision) runs strictly before step 4 (fingerprint fast-path check), a new resolutions comment or body edit posted after approval automatically takes precedence over the fast path with no extra special-casing: the revision changes the draft text, so the freshly-computed `draft_fp` no longer equals the (now-stale) `plan_approved_fingerprint`, and the fast path simply doesn't match — falling through to the normal ambiguity re-scan → Checkpoint 1 re-park, with a freshly computed fingerprint.
+Because step 3 (delta/revision) runs strictly before step 4 (fingerprint fast-path check), a new resolutions-marker comment or a body edit that changes the resolutions source after approval automatically takes precedence over the fast path: step 3 revises the draft and durably revokes the approval, so the freshly-computed `draft_fp` no longer equals the (now-stale) `plan_approved_fingerprint`, and the fast path falls through to the normal ambiguity re-scan → Checkpoint 1 re-park, with a freshly computed fingerprint. An ordinary ticket body edit that does not change the resolutions source does not, by itself, disqualify the Operator-authority delta alternate when the persisted `body_sha` remains unchanged; a `body_sha` mismatch disqualifies the alternate and falls through to Step 1c.0 / Step 1c as today. This means that rule is comment-scoped only, so a body edit is not itself an operator-authority delta.
 
 ---
 
