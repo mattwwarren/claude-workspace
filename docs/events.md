@@ -370,8 +370,10 @@ numerics and would silently strip a nested ticket-id string, #1243) and
 `occupied` (int, total occupant count across lanes) are present on that
 same set of ticks. `host_running` (int) and `host_budget` (int | null) are
 present only on the main claim-loop tick — the one tick that can carry
-`host_capacity_gated`. `disk_free_gb` / `disk_min_free_gb` (float) are
-present only on `disk_pressure_gate` ticks. `freshness_detail`
+`host_capacity_gated`. `disk_free_gb` / `disk_min_free_gb` (float) and
+`disk_free_inodes` / `disk_min_free_inodes` (int | null — null when the
+inode probe failed or the filesystem reports no fixed inode count, #2470)
+are present only on `disk_pressure_gate` ticks. `freshness_detail`
 (`non_main_head | main_behind_origin | main_dirty_checkout |
 main_diverged_from_origin | main_detached_head`) plus `blocked_branch` are
 present only on `freshness_gate` ticks.
@@ -417,16 +419,21 @@ forwarded to the operator-attention channel by default (same as
 {
   "client": "<str>",
   "disk_free_gb": 1.2,
-  "disk_min_free_gb": 5.0
+  "disk_min_free_gb": 5.0,
+  "disk_free_inodes": 10000,
+  "disk_min_free_inodes": 50000
 }
 ```
 **Semantics:** GitHub #1887 (split from #1858). Emitted when
 `disk_pressure_gate_enabled` is `false` and the claim-time disk-pressure
 probe (`cw.disk.check_disk_usage` on
 `cw.worktree.resolve_worktree_base(client)`) reports free space below
-`disk_pressure_min_free_gb` — the operator has explicitly disabled the
-gate, so the client proceeds to claim this tick instead of being held
-PENDING, and this event records that the skip was suppressed. Mirrors
+`disk_pressure_min_free_gb`, or (since #2470, via `cw.disk.check_inode_usage`)
+free inodes below `max(disk_pressure_min_free_inodes,
+disk_pressure_min_free_inode_fraction × total)` — the operator has explicitly
+disabled the gate, so the client proceeds to claim this tick instead of being
+held PENDING, and this event records that the skip was suppressed. The
+inode fields are `null` when that dimension does not apply. Mirrors
 `gate.ssh_key_bypassed` (#1437)'s bypass shape; forwarded to the
 operator-attention channel by default (same as `gate.auto_approved`),
 since a disk-pressure bypass is attention-worthy.
@@ -981,6 +988,14 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `"blocked"` paused_status for this park only; `breadcrumbs` still carries
   the specific `blocker.reason` verbatim. The task is BLOCKED_ON_USER.
   See #1155.
+- `"host_tmp_exhausted"` — the claim-time disk-pressure gate found a
+  client's worktree-base mount (home of every worker's `.cw/tmp` TMPDIR)
+  below its free-inode floor (#2470). Sessionless and ticketless
+  (`session_id=""`, `ticket_id=None`) but per-client: `client` is the real
+  client name. Edge-triggered per client — fires on the first exhausted
+  probe and re-arms only after a healthy one — and fires even when
+  `disk_pressure_gate_enabled` is `false`. `breadcrumbs` carries
+  `free_inodes=<n> min_free_inodes=<n>`.
 - `"merge_gate_blocked"` — Rule 5: the merge/CI gate rejected the PR
   (optionally `blocker.reason` in `breadcrumbs`, e.g.
   `"prior_pipeline_pr_open"` per issue #777; empty otherwise). See #1117.

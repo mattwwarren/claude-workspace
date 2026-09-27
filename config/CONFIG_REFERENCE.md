@@ -1090,6 +1090,31 @@ disk_pressure_gate_enabled: true
 # tuning per host/mount, not derived from a measured incident threshold.
 disk_pressure_min_free_gb: 5.0
 
+# Inode dimension of the same disk-pressure gate (GitHub #2470). A tmpfs can
+# run out of inodes while bytes remain plentiful -- the 2026-09-27 ENOSPC
+# incident -- and every dispatched worker's TMPDIR is <worktree>/.cw/tmp on
+# this same worktree-base mount. The gate also holds a client PENDING when
+# free inodes fall below the effective floor
+#   max(disk_pressure_min_free_inodes,
+#       disk_pressure_min_free_inode_fraction * total_inodes)
+# The absolute floor protects small mounts; the fraction scales to large
+# ones. Worked examples at the defaults: a 1M-inode tmpfs refuses below 50K
+# free (both terms equal 50K); a 200K-inode mount still refuses below 50K
+# (the floor dominates, 5% would be only 10K); a 50M-inode ext4 mount
+# refuses below 2.5M free (the fraction dominates). A filesystem with
+# dynamic inode allocation (btrfs reports 0 total inodes) never gates on
+# this dimension. The first exhausted probe per episode also fires a
+# per-client session.needs_attention with paused_status host_tmp_exhausted
+# (edge-triggered; a healthy probe re-arms it) -- even when
+# disk_pressure_gate_enabled is false, since that signal is informational.
+# `cw doctor` reports the same thresholds as one worker-tmp/<client> check
+# per client. Defined as DEFAULT_DISK_PRESSURE_MIN_FREE_INODES /
+# DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION in
+# src/cw/models/orchestrator_config.py -- judgment defaults open to tuning
+# per host/mount, not derived from a measured incident threshold.
+disk_pressure_min_free_inodes: 50000
+disk_pressure_min_free_inode_fraction: 0.05
+
 # Pre-claim worktree-occupancy screen operator escape hatch (GitHub #2396,
 # follow-up to #2077). Default true (gate stays enforced) -- use the
 # per-client clients.yaml override for staged rollout; this global field is
