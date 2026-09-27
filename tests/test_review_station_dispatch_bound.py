@@ -86,9 +86,9 @@ def test_review_stations_allowed_tools_excludes_sendmessage() -> None:
 def test_findings_round_initialization_is_recoverable() -> None:
     """A new round must archive prior findings, while a resume retains them."""
     content = _cmd("auto-dev-review.md")
-    startup = content[content.index("### Step 3a"):content.index("**Small scope:")]
+    startup = content[content.index("### Step 3a") : content.index("**Small scope:")]
     assert "review-findings-round.json" in startup
-    assert "status: \"in_progress\"" in startup
+    assert 'status: "in_progress"' in startup
     assert "resume" in startup.lower()
     assert "retain the active directory" in startup
     assert "review-findings-archive" in startup
@@ -99,14 +99,12 @@ def test_findings_round_initialization_is_recoverable() -> None:
 def test_new_round_promotes_verified_staging_after_archiving_old_round() -> None:
     """Round archival and marker promotion must be explicitly ordered."""
     content = _cmd("auto-dev-review.md")
-    startup = content[content.index("### Step 3a"):content.index("**Small scope:")]
+    startup = content[content.index("### Step 3a") : content.index("**Small scope:")]
     archive_dir = ".cw/review-findings-archive/<ticket>-<round-id>/review-findings/"
     archive_marker = (
         ".cw/review-findings-archive/<ticket>-<round-id>/review-findings-round.json"
     )
-    staging_dir = (
-        ".cw/review-findings-staging/<ticket>-<round-id>/review-findings/"
-    )
+    staging_dir = ".cw/review-findings-staging/<ticket>-<round-id>/review-findings/"
     staging_marker = (
         ".cw/review-findings-staging/<ticket>-<round-id>/review-findings-round.json"
     )
@@ -126,7 +124,9 @@ def test_new_round_promotes_verified_staging_after_archiving_old_round() -> None
 def test_roster_is_persisted_before_spawn_and_after_return() -> None:
     """The complete pending roster and each return state use atomic writes."""
     content = _cmd("auto-dev-review.md")
-    section = content[content.index("### Step 3a"):content.index("**Sandbox warning**")]
+    section = content[
+        content.index("### Step 3a") : content.index("**Sandbox warning**")
+    ]
     assert 'every role marked `status: "pending"`' in section
     assert "before the first Agent spawn" in section
     assert ".cw/review-findings-round.json.tmp" in section
@@ -200,3 +200,28 @@ def test_worker_execution_discipline_cross_references_review_station_rule() -> N
     section = _worker_execution_discipline_section()
     assert "auto-dev-review.md" in section
     assert "sibling" in section
+
+
+def test_recovery_matrix_post_commit_bullet_names_all_three_manifest_arms() -> None:
+    """The recovery matrix's 'active+active present, archive+archive present'
+    bullet must name all three reachable manifest phases (`committed`,
+    `staging_marker_promoted`, `staging_directory_promoted`), in that order,
+    with the third arm advancing the manifest and falling through to the
+    second rather than requiring an unreachable `committed` state (#2156 —
+    codex cycle-5 MUST_FIX: recovery could not finish a crash immediately
+    after the staging-marker rename succeeded but before the manifest
+    recorded it)."""
+    content = _cmd("auto-dev-review.md")
+    start = content.index(
+        "active directory **and** active marker present, "
+        "archive directory **and** archive marker present"
+    )
+    end = content.index("active directory present, active marker absent:", start)
+    bullet = content[start:end]
+    assert bullet.index("`committed`") < bullet.index("`staging_marker_promoted`")
+    assert bullet.index("`staging_marker_promoted`") < bullet.index(
+        "`staging_directory_promoted`"
+    )
+    assert "continue with arm 2" in bullet
+    assert "recovery_inconsistent" in bullet
+    assert "never require `committed`" in bullet
