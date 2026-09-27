@@ -1,4 +1,4 @@
-"""Tests for cw.codex_fix_loop_convergence — the delta-aware admission gate (#1837).
+"""Tests for cw.codex_fix_loop.convergence —the delta-aware admission gate (#1837).
 
 The fix loop used to re-review the WHOLE PR diff every cycle, so each pass could
 surface fresh MUST_FIX findings on code no fix cycle had touched — a treadmill
@@ -18,17 +18,17 @@ import pytest
 from cw.auto_dev_result import Review
 from cw.codex_fix_loop import (
     _MAX_FIX_CYCLES,
-    _park_survivors,
-    _PersistedSnapshot,
     run_review_with_fix_loop,
 )
-from cw.codex_fix_loop_convergence import (
+from cw.codex_fix_loop.convergence import (
     _admit_new_must_fix,
     _finding_in_delta,
     _open_finding_key,
     _survivors_only_verdict,
     _track_open_findings,
 )
+from cw.codex_fix_loop.park import _park_survivors
+from cw.codex_fix_loop.snapshot import _PersistedSnapshot
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.codex_runner import CodexRunResult
 from cw.events import read_events
@@ -499,7 +499,7 @@ def _drive_loop(
     cycle0: list[AcceptedFinding],
     cycles: list[list[AcceptedFinding]],
 ) -> tuple[Any, ReviewVerdict | None, _FakeRereview]:
-    from cw import codex_fix_loop
+    from cw.codex_fix_loop import _driver
 
     cycle0_verdict = _verdict(*cycle0, reviewed_sha="sha0")
     cycle0_result = make_blocked(
@@ -509,12 +509,12 @@ def _drive_loop(
         stage_reached="stage3_review",
     )
     monkeypatch.setattr(
-        codex_fix_loop,
+        _driver,
         "run_review",
         lambda **_kwargs: (cycle0_result, cycle0_verdict),
     )
     fake = _FakeRereview(cycles, repo)
-    monkeypatch.setattr(codex_fix_loop, "_rereview", fake)
+    monkeypatch.setattr(_driver, "_rereview", fake)
 
     result, verdict = run_review_with_fix_loop(
         runner=_FakeRunner(),  # type: ignore[arg-type]

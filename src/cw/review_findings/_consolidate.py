@@ -214,7 +214,7 @@ def consolidate_verdict(
     ``must_fix_initial`` / ``deferred`` combination across a multi-pass loop
     (``must_fix_initial`` needs cycle 0's pre-defer snapshot, ``deferred`` needs
     the loop's cross-cycle survivor set) — a fix-loop adapter reconstructs the
-    terminal ``Review`` itself (see ``cw.codex_fix_loop._finalize_review``);
+    terminal ``Review`` itself (see ``cw.codex_fix_loop.park._finalize_review``);
     this parameter only carries the per-cycle count for that adapter's own
     intermediate verdicts (#1392).
 

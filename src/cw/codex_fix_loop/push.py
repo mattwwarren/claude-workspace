@@ -9,10 +9,8 @@ explicit refspec and verify the tip (``auto-dev-review.md``); this module is
 the same contract for the pure-Python codex path, which no agent prompt
 reaches.
 
-Lives beside :mod:`cw.codex_fix_loop` rather than inside it for the same reason
-:mod:`cw.codex_fix_loop_convergence` does: that module is already over the
-repo's module-size ceiling. Runs git through the shared :mod:`cw._git` seam
-the rest of the codex fix-loop family uses, not ``cw.worktree._run_git``.
+Runs git through the shared :mod:`cw._git` seam the rest of the codex
+fix-loop package uses, not ``cw.worktree._run_git``.
 
 Every failure surfaces as ``subprocess.CalledProcessError`` — the real one from
 ``git push``, or a synthetic one for a failed tip verification — so the fix

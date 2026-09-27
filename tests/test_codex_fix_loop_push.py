@@ -1,4 +1,4 @@
-"""Tests for ``cw.codex_fix_loop_push`` (#2354).
+"""Tests for ``cw.codex_fix_loop.push`` (#2354).
 
 Sibling of ``test_codex_fix_loop.py`` for the push-and-verify helper split
 out of ``cw.codex_fix_loop``, mirroring ``test_codex_fix_loop_convergence.py``.
@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw import codex_fix_loop_push
-from cw.codex_fix_loop_push import (
+from cw.codex_fix_loop import push as codex_fix_loop_push
+from cw.codex_fix_loop.push import (
     SYNTHETIC_MISMATCH_PREFIX,
     push_and_verify_head,
     remote_branch_tip,

@@ -16,7 +16,7 @@ import cw.review_findings as rf
 # The complete re-export surface: 9 type aliases, FINGERPRINT_VERSION and
 # REVIEW_VERDICT_JSON_RELATIVE_PATH (#2205), the 14
 # model classes, the 7 public functions, and the 23 private names that existing
-# cross-module call sites (``cw.codex_fix_loop_convergence``,
+# cross-module call sites (``cw.codex_fix_loop.convergence``,
 # ``cw.review_adjudication``, ``cw.codex_review._roles``,
 # ``tests/test_review_findings.py``) import directly.
 EXPECTED_EXPORTS = {

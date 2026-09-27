@@ -1,6 +1,6 @@
 """Loop-wide divergence guard for the codex fix loop (#2394).
 
-The #1837 admission gate (:mod:`cw.codex_fix_loop_convergence`) decides which
+The #1837 admission gate (:mod:`cw.codex_fix_loop.convergence`) decides which
 newly-appearing MUST_FIX findings a fix cycle caused, and a finding anchored in
 the latest delta is always admitted — correctly, since the cycle really did
 write that code. The failure mode it cannot see is a loop that answers each
@@ -16,11 +16,8 @@ original findings for :data:`_DIVERGENCE_STALL_CYCLES` consecutive cycles AND
 its cumulative churn has passed a size threshold — both conditions, so neither
 a growing-but-converging loop nor a stalled-but-small one trips it.
 
-Lives beside :mod:`cw.codex_fix_loop` rather than inside it for the same reason
-:mod:`cw.codex_fix_loop_convergence` does: that module is already at the repo's
-module-size ceiling. State is an immutable :class:`DivergenceState` threaded
-through pure "take state, return new state" functions, matching
-``_track_open_findings``'s shape.
+State is an immutable :class:`DivergenceState` threaded through pure "take
+state, return new state" functions, matching ``_track_open_findings``'s shape.
 """
 
 from __future__ import annotations
@@ -36,7 +33,7 @@ from cw.worktree import _parse_numstat_totals
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.codex_fix_loop_convergence import _OpenFindingKey
+    from cw.codex_fix_loop.convergence import _OpenFindingKey
 
 _log = logging.getLogger(__name__)
 

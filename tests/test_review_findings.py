@@ -3482,7 +3482,7 @@ def _find_function_node(
 class TestEnclosingDefAnchorRealFileRegression:
     """Reproduces the ticket's exact evidence: a structural finding anchored
     on ``_run_fix_and_commit``'s real ``def`` line in
-    ``src/cw/codex_fix_loop.py``, which is not itself a changed line. The
+    ``src/cw/codex_fix_loop/commit.py``, which is not itself a changed line. The
     function's real span is discovered dynamically via ``ast.parse`` in this
     test's own setup (not the helper under test) so the assertion stays
     correct if the function is refactored — #1743 explicitly rejects
@@ -3490,7 +3490,7 @@ class TestEnclosingDefAnchorRealFileRegression:
     """
 
     def _discover_span(self, repo_root: Path) -> tuple[int, int]:
-        source_path = repo_root / "src" / "cw" / "codex_fix_loop.py"
+        source_path = repo_root / "src" / "cw" / "codex_fix_loop" / "commit.py"
         tree = ast.parse(source_path.read_text())
         node = _find_function_node(tree, "_run_fix_and_commit")
         assert node.end_lineno is not None
@@ -3513,10 +3513,10 @@ class TestEnclosingDefAnchorRealFileRegression:
         changed_line = self._changed_line_beyond_tolerance(def_line, end_line)
         diff = _make_diff(
             "some changed line inside the function",
-            files={"src/cw/codex_fix_loop.py": [changed_line]},
+            files={"src/cw/codex_fix_loop/commit.py": [changed_line]},
         )
         finding = _make_finding(
-            file="src/cw/codex_fix_loop.py",
+            file="src/cw/codex_fix_loop/commit.py",
             line_start=def_line,
             line_end=def_line,
             evidence="_run_fix_and_commit does too many things",
@@ -3536,10 +3536,10 @@ class TestEnclosingDefAnchorRealFileRegression:
         changed_line = self._changed_line_beyond_tolerance(def_line, end_line)
         diff = _make_diff(
             "some changed line inside the function",
-            files={"src/cw/codex_fix_loop.py": [changed_line]},
+            files={"src/cw/codex_fix_loop/commit.py": [changed_line]},
         )
         finding = _make_finding(
-            file="src/cw/codex_fix_loop.py",
+            file="src/cw/codex_fix_loop/commit.py",
             line_start=def_line,
             line_end=def_line,
             evidence="_run_fix_and_commit does too many things",
