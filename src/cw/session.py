@@ -231,6 +231,7 @@ def start_session(
         ticket_id=None,
         origin=SessionOrigin.USER,
         workspace_path=_git_dir(client) if is_worktree_homed else None,
+        merge_gate_ignore_paths=client.merge_gate_ignore_paths,
     )
 
     # Build per-purpose system prompt for the session.

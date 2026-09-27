@@ -187,6 +187,33 @@ class TestStartSession:
         assert hook_calls[0]["client"] == "test-client"
         assert hook_calls[0]["purpose"] == "impl"
         assert hook_calls[0]["origin"] == SessionOrigin.USER
+        assert hook_calls[0]["merge_gate_ignore_paths"] == []
+
+    def test_new_session_forwards_merge_gate_ignore_paths(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2431: the client's ignore list reaches cw-context.json."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            clients_file.read_text() + "    merge_gate_ignore_paths: [uv.lock]\n"
+        )
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        hook_calls: list[dict[str, object]] = []
+
+        def capture_hook(path: object, **kwargs: object) -> None:
+            hook_calls.append({"path": path, **kwargs})
+
+        monkeypatch.setattr("cw.session._write_hook_context", capture_hook)
+
+        start_session("test-client", "impl", native_daemon=mock_native_daemon)
+
+        assert hook_calls[0]["merge_gate_ignore_paths"] == ["uv.lock"]
 
     def test_start_debt_purpose_hook_context_omits_workspace_path(
         self,
