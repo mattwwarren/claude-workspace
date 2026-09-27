@@ -65,7 +65,9 @@ def _reviewer_doc(findings: list[dict[str, object]] | None = None) -> str:
     )
 
 
-def _finding(*, severity: str, file: str, line: int, evidence: str) -> dict[str, object]:
+def _finding(
+    *, severity: str, file: str, line: int, evidence: str
+) -> dict[str, object]:
     return {
         "severity": severity,
         "file": file,
@@ -83,9 +85,7 @@ def _worktree_with_change(
     make_worktree_with_change: Callable[..., Path], name: str
 ) -> Path:
     """A repo on ``feature`` pushed to a bare origin, with ``new.py`` committed."""
-    return make_worktree_with_change(
-        name, filename="new.py", content="def broken():\n"
-    )
+    return make_worktree_with_change(name, filename="new.py", content="def broken():\n")
 
 
 def _persisted_result() -> AutoDevResult:
@@ -224,11 +224,7 @@ def test_run_codex_review_stage_must_fix_runs_fix_loop_to_cap_and_parks(
     client = _fix_loop_client(worktree)
     _seed_client(tmp_config_dir=tmp_config_dir, worktree=worktree, client=client)
     doc = _reviewer_doc(
-        [
-            _finding(
-                severity="MUST_FIX", file="new.py", line=1, evidence="def broken():"
-            )
-        ]
+        [_finding(severity="MUST_FIX", file="new.py", line=1, evidence="def broken():")]
     )
     runner = FakeCodexRunner(returncode=0, output_file_content=doc)
 

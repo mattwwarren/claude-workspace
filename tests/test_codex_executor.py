@@ -499,7 +499,7 @@ def test_codex_executor_launch_exception_marks_session_completed(
     make_git_repo: Callable[[str], Path],
     fake_runner: FakeFireAndForgetRunner,
 ) -> None:
-    """launch() raises OSError → session COMPLETED/CRASHED + UNEXPECTED_ERROR, re-raised."""
+    """launch() raises OSError → COMPLETED/CRASHED + UNEXPECTED_ERROR, re-raised."""
     worktree = make_git_repo("wt-codex-launch-exc")
     executor = _codex_executor(runner=fake_runner)
 

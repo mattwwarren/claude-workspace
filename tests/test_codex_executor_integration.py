@@ -22,9 +22,11 @@ from unittest.mock import patch
 
 import pytest
 
+from cw.auto_dev_result import AutoDevResult
 from cw.config import load_state
 from cw.dev_queue import add_ticket
 from cw.executor import CodexExecutor
+from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import (
     CODEX_BACKEND,
     ClientConfig,
@@ -58,9 +60,7 @@ def _path_without_codex() -> str:
     )
 
 
-def _isolate_child_environment(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def _isolate_child_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Point the child ``cw`` at this test's tmp config/state dirs.
 
     ``tmp_config_dir`` only patches the parent's already-imported
@@ -136,7 +136,13 @@ def test_detached_codex_run_completes_session_without_parent(
     session = next(s for s in load_state().sessions if s.id == sid)
     assert session.status is SessionStatus.COMPLETED
     assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
-    assert session.last_result is not None
+    # The child wrote a real terminal review result (a park, since its codex
+    # is absent) — not the parent's UNEXPECTED_ERROR crash completion.
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.stage_reached == "stage3_review"
+    assert result.blocker is not None
+    assert result.blocker.reason != UNEXPECTED_ERROR
     assert session.local_liveness is not None
     assert session.local_liveness.backend == "codex"
     log_text = (worktree / ".cw" / "codex_driver.log").read_text(encoding="utf-8")
