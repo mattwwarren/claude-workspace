@@ -21821,9 +21821,7 @@ class TestClaimNextPendingTrackerMcpGate:
             msg = "tracker-MCP resolver must not run for an opted-out client"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(
-            "cw.dispatch.lanes.resolve_tracker_mcp_gate_hits", _explode
-        )
+        monkeypatch.setattr("cw.dispatch.lanes.resolve_tracker_mcp_gate_hits", _explode)
         self._seed("GEN-default")
 
         dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())

@@ -13052,7 +13052,9 @@ class TestTrackerMcpGateDisposition:
     def test_pre_dispatch_reason_value(self) -> None:
         from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
 
-        assert _PRE_DISPATCH_TRACKER_MCP_REASON == "tracker_mcp_unavailable_pre_dispatch"
+        assert (
+            _PRE_DISPATCH_TRACKER_MCP_REASON == "tracker_mcp_unavailable_pre_dispatch"
+        )
 
     def test_gate_disposition_is_not_a_hold_disposition(self) -> None:
         """Clears by fixing the branch's settings file or re-dispatching, not

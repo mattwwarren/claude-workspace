@@ -100,8 +100,7 @@ def _warn_fail_open_once(client_name: str, branch: str, reason: str) -> None:
         return
     _WARNED_FAIL_OPEN[key] = reason
     _log.warning(
-        "dispatch: tracker-MCP gate failing open for %s branch %s: %s;"
-        " spawn proceeds",
+        "dispatch: tracker-MCP gate failing open for %s branch %s: %s; spawn proceeds",
         client_name,
         branch,
         reason,
@@ -122,8 +121,7 @@ def _read_branch_json(
     try:
         if not _ref_exists(branch, git_cwd):
             _log.debug(
-                "dispatch: tracker-MCP gate skipped for %s — branch %s not"
-                " created yet",
+                "dispatch: tracker-MCP gate skipped for %s — branch %s not created yet",
                 client.name,
                 branch,
             )

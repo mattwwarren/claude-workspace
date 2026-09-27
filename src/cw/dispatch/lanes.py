@@ -62,6 +62,10 @@ from cw.dispatch.claim import (
     resolve_occupied_ticket_ids,
 )
 from cw.dispatch.pr_gate import resolve_stale_pr_ticket_ids
+from cw.dispatch.tracker_mcp_gate import (
+    TrackerMcpGateHit,
+    resolve_tracker_mcp_gate_hits,
+)
 
 _log = logging.getLogger("cw.dispatch")
 
@@ -615,6 +619,27 @@ def _resolve_stale_pr_ticket_ids_if_gated(
     return resolve_stale_pr_ticket_ids(client, queue_snapshot)
 
 
+def _resolve_tracker_mcp_gate_hits_if_gated(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    available_client_slots: int,
+) -> dict[str, TrackerMcpGateHit]:
+    """The #2442 pre-dispatch tracker-MCP gate's resolve call, guarded.
+
+    The toggle is checked first and is per-client only: a client whose
+    ``ClientConfig.tracker_mcp_gate`` is unset or disabled (the default) never
+    reaches the resolver, so its branches' settings files are never read.
+    There is deliberately no ``OrchestratorConfig`` switch. Also skipped when
+    this client has no capacity to claim anything this tick, exactly like
+    :func:`_resolve_stale_pr_ticket_ids_if_gated`.
+    """
+    gate = client.tracker_mcp_gate
+    if gate is None or not gate.enabled or available_client_slots <= 0:
+        return {}
+    return resolve_tracker_mcp_gate_hits(client, queue_snapshot)
+
+
 def _resolve_occupied_ticket_ids(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
@@ -648,6 +673,69 @@ def _resolve_occupied_ticket_ids(
         queue_snapshot,
         daemon=resolved_native_daemon,
         warned_unresolvable=warned_unresolvable,
+    )
+
+
+class _PreClaimScreens(NamedTuple):
+    """The per-client, per-tick precomputes :func:`_claim_next_pending` consumes."""
+
+    stale_pr_ticket_ids: frozenset[str]
+    occupied_ticket_reasons: dict[str, str]
+    tracker_mcp_gate_hits: dict[str, TrackerMcpGateHit]
+
+
+def _resolve_pre_claim_screens(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    config: OrchestratorConfig,
+    available_client_slots: int,
+    resolved_native_daemon: NativeDaemonClient,
+    warned_unresolvable: set[UnresolvablePathWarningKey] | None,
+) -> _PreClaimScreens:
+    """Resolve every pre-claim screen once for *client*, outside every lock.
+
+    Extracted from :func:`_dispatch_client_lanes` to keep that function inside
+    its PLR statement budget. Each screen does I/O that
+    ``_claim_next_pending`` must never do while holding ``dev_queue_lock()``:
+
+    * Pre-dispatch open-PR gate (#1862) -- makes ``gh`` calls. The
+      ``queue_snapshot`` it scans was already loaded lock-free by
+      dispatch_tick (ADR-0005: a stale read is acceptable for read-only
+      callers); a row that changed since then is re-checked by stage under
+      the lock inside ``_claim_next_pending``, so a stale snapshot cannot park
+      a healthy task. See :func:`_resolve_stale_pr_ticket_ids_if_gated` for
+      the capacity/toggle guard.
+    * Pre-claim worktree-occupancy screen (#2077) -- ``live_home_reason``
+      reads cw state and the daemon roster. A row named here is left PENDING
+      instead of being claimed and then released when ``create_worktree`` or
+      the hook-context write finds the occupant. Operator escape hatches: the
+      global ``OrchestratorConfig`` setting and the per-client
+      ``ClientConfig`` override (#2396) -- see
+      :func:`_resolve_occupied_ticket_ids`.
+    * Pre-dispatch tracker-MCP gate (#2442) -- runs ``git show`` against the
+      client's git dir. Per-client opt-in; see
+      :func:`_resolve_tracker_mcp_gate_hits_if_gated`. Same stage re-check
+      under the lock as the open-PR gate.
+    """
+    return _PreClaimScreens(
+        stale_pr_ticket_ids=_resolve_stale_pr_ticket_ids_if_gated(
+            client,
+            queue_snapshot,
+            config=config,
+            available_client_slots=available_client_slots,
+        ),
+        occupied_ticket_reasons=_resolve_occupied_ticket_ids(
+            client,
+            queue_snapshot,
+            config=config,
+            available_client_slots=available_client_slots,
+            resolved_native_daemon=resolved_native_daemon,
+            warned_unresolvable=warned_unresolvable,
+        ),
+        tracker_mcp_gate_hits=_resolve_tracker_mcp_gate_hits_if_gated(
+            client, queue_snapshot, available_client_slots=available_client_slots
+        ),
     )
 
 
@@ -725,30 +813,11 @@ def _dispatch_client_lanes(
     # join _lane_stats_for_client uses -- so blocked_in_lane/signoff_in_lane
     # below derive from it rather than re-scanning the queue.
     occupants_by_lane = _lane_occupants_for_client(client, queue_snapshot)
-    # Pre-dispatch open-PR gate (#1862). Resolved once here -- outside every
-    # lock and outside the per-lane loop -- because it makes `gh` calls, which
-    # _claim_next_pending must never do while holding dev_queue_lock(). The
-    # `queue_snapshot` it scans was already loaded lock-free by dispatch_tick
-    # (ADR-0005: a stale read is acceptable for read-only callers); a row that
-    # changed since then is re-checked by stage under the lock inside
-    # _claim_next_pending, so a stale snapshot cannot park a healthy task. See
-    # _resolve_stale_pr_ticket_ids_if_gated for the capacity/toggle guard.
-    stale_pr_ticket_ids = _resolve_stale_pr_ticket_ids_if_gated(
-        client,
-        queue_snapshot,
-        config=config,
-        available_client_slots=available_client_slots,
-    )
-    # Pre-claim worktree-occupancy screen (#2077). Same once-per-client,
-    # lock-free placement as the stale-PR gate above, for the same reason:
-    # live_home_reason reads cw state and the daemon roster, and
-    # _claim_next_pending holds dev_queue_lock() and must do no I/O. A row
-    # named here is left PENDING instead of being claimed and then released
-    # when create_worktree or the hook-context write finds the occupant.
-    # Operator escape hatches: the global OrchestratorConfig setting and the
-    # per-client ClientConfig override (#2396) -- see
-    # _resolve_occupied_ticket_ids's docstring for their semantics.
-    occupied_ticket_reasons = _resolve_occupied_ticket_ids(
+    # Pre-claim screens (#1862 open-PR gate, #2077 worktree occupancy, #2442
+    # tracker-MCP gate): resolved once here -- outside every lock and outside
+    # the per-lane loop -- because each does I/O _claim_next_pending must
+    # never do under dev_queue_lock(). See _resolve_pre_claim_screens.
+    screens = _resolve_pre_claim_screens(
         client,
         queue_snapshot,
         config=config,
@@ -807,8 +876,9 @@ def _dispatch_client_lanes(
                 config=config,
                 priority_ticket_ids=priority_ids,
                 usage_limited_until=usage_limited_until,
-                stale_pr_ticket_ids=stale_pr_ticket_ids,
-                occupied_ticket_reasons=occupied_ticket_reasons,
+                stale_pr_ticket_ids=screens.stale_pr_ticket_ids,
+                occupied_ticket_reasons=screens.occupied_ticket_reasons,
+                tracker_mcp_gate_hits=screens.tracker_mcp_gate_hits,
             )
             spawn_backoff_skipped |= backoff_skipped
             if task is None:

@@ -1,4 +1,4 @@
-"""Tests for ``cw.dispatch.tracker_mcp_gate`` — the pre-dispatch tracker-MCP gate (#2442).
+"""Tests for ``cw.dispatch.tracker_mcp_gate`` — pre-dispatch tracker-MCP gate (#2442).
 
 Mirrors ``tests/test_dispatch_branch_freshness.py``'s fixture style: real ``git``
 repos built in ``tmp_path`` via the shared ``make_git_repo`` fixture, with the
@@ -65,7 +65,7 @@ def _snapshot(*, stage: Stage = Stage.PLAN, ticket_id: str = _TICKET) -> DevQueu
 def _branch_with_file(
     make_git_repo: Callable[..., Path], relpath: str, content: str
 ) -> Path:
-    """Repo whose ``dev/T-2442`` branch commits *relpath*; ``main`` stays checked out."""
+    """Repo whose ``dev/T-2442`` branch commits *relpath*; ``main`` checked out."""
     repo = make_git_repo("tmg-repo")
     git_in(repo, "checkout", "-b", _BRANCH)
     commit_tracked_file(repo, relpath, content)
@@ -73,9 +73,7 @@ def _branch_with_file(
     return repo
 
 
-def _branch_with_settings(
-    make_git_repo: Callable[..., Path], settings: object
-) -> Path:
+def _branch_with_settings(make_git_repo: Callable[..., Path], settings: object) -> Path:
     return _branch_with_file(make_git_repo, _SETTINGS, json.dumps(settings))
 
 
@@ -113,9 +111,7 @@ class TestGateToggle:
             calls.append(branch)
 
         monkeypatch.setattr("cw.dispatch.tracker_mcp_gate._read_branch_json", _spy)
-        client = _client(
-            repo, TrackerMcpGateConfig(enabled=False, plugin_id=_PLUGIN)
-        )
+        client = _client(repo, TrackerMcpGateConfig(enabled=False, plugin_id=_PLUGIN))
 
         assert _resolve(client, _snapshot()) == {}
         assert calls == []
@@ -261,7 +257,9 @@ class TestGateHit:
     def test_enabled_plugin_explicitly_false_in_dict_is_gated(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        repo = _branch_with_settings(make_git_repo, {"enabledPlugins": {_PLUGIN: False}})
+        repo = _branch_with_settings(
+            make_git_repo, {"enabledPlugins": {_PLUGIN: False}}
+        )
 
         self._assert_hit(_resolve(_client(repo, _enabled_gate()), _snapshot()))
 
@@ -275,7 +273,9 @@ class TestGateHit:
     def test_plugin_id_match_is_exact_no_at_suffix_stripping(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        repo = _branch_with_settings(make_git_repo, {"enabledPlugins": {"linear": True}})
+        repo = _branch_with_settings(
+            make_git_repo, {"enabledPlugins": {"linear": True}}
+        )
 
         self._assert_hit(_resolve(_client(repo, _enabled_gate()), _snapshot()))
 
@@ -307,7 +307,9 @@ class TestGateHit:
         repo = _branch_with_file(
             make_git_repo, custom, json.dumps({"enabledPlugins": {}})
         )
-        gate = TrackerMcpGateConfig(enabled=True, plugin_id=_PLUGIN, settings_path=custom)
+        gate = TrackerMcpGateConfig(
+            enabled=True, plugin_id=_PLUGIN, settings_path=custom
+        )
 
         assert _resolve(_client(repo, gate), _snapshot()) == {
             _TICKET: TrackerMcpGateHit(
