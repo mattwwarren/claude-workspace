@@ -22,6 +22,10 @@ from cw.models import QueueItemStatus
 # seeing it after the package split (#2193).
 _LOGGER_NAME = "cw.auto_dev_result"
 
+# Best-effort wire key used by both the sentinel validator and parse-boundary
+# premise coercion for issue #2432. Keep the spelling in one place.
+IMPACT_REASON_KEY = "impact_reason"
+
 # Accepted sentinel schema versions. Single source of truth: parse.py derives
 # SUPPORTED_SCHEMA_VERSIONS (its pre-Pydantic gate) from this Literal via
 # get_args, so a version bump edits exactly one place (#1535 drift class).

@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, get_args
 
 from pydantic import ValidationError
 
-from cw.auto_dev_result._premises_resolution import _downgrade_resolved_premises
+from cw.auto_dev_result._premises_resolution import _downgrade_exempt_premises
 from cw.auto_dev_result._warn import _warn_once
 from cw.auto_dev_result.schema import (
     _STAGE_REACHED_ALIASES,
@@ -859,8 +859,8 @@ def _normalize_payload(
         _filter_empty_claim_premises(
             payload, warned_blocks=warned_blocks, block_key=block_key
         )
-        _downgrade_resolved_premises(
-            payload, raw_status, warned_blocks=warned_blocks, block_key=block_key
+        _downgrade_exempt_premises(
+            payload, warned_blocks=warned_blocks, block_key=block_key
         )
         if payload.get("status") == "premises_pending_verification":
             _coerce_empty_pending_array(

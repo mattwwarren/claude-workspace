@@ -70,6 +70,7 @@ EXPECTED_EXPORTS = {
     "_has_usable_premise_text",
     "_has_usable_question",
     "_is_blank",
+    "_is_no_impact_premise",
     "_is_resolved_premise",
     "_reject_empty_string_items",
     # Nested sub-models (schema/_models.py)

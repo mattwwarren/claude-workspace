@@ -3,8 +3,9 @@
 Predicate and guard functions used by field validators across
 :mod:`cw.auto_dev_result.schema._models` and
 :mod:`cw.auto_dev_result.schema._result` — extracted here so neither submodule
-has to import the other. ``_is_resolved_premise`` is additionally imported
-directly by :mod:`cw.auto_dev_result._premises_resolution`.
+has to import the other. ``_is_resolved_premise`` and
+``_is_no_impact_premise`` are additionally imported directly by
+:mod:`cw.auto_dev_result._premises_resolution`.
 
 Package split: issue #2193.
 """
@@ -12,6 +13,8 @@ Package split: issue #2193.
 from __future__ import annotations
 
 from typing import Any
+
+from cw.auto_dev_result.schema._vocab import IMPACT_REASON_KEY
 
 
 def _reject_empty_string_items(v: list[str], field_name: str) -> list[str]:
@@ -66,6 +69,28 @@ def _is_resolved_premise(item: dict[str, Any]) -> bool:
         return False
     resolution = item.get("resolution")
     return isinstance(resolution, str) and bool(resolution.strip())
+
+
+def _is_no_impact_premise(item: dict[str, Any]) -> bool:
+    """Return True iff *item* is impact-exempt (issue #2432).
+
+    Exempt means BOTH: `impact` normalizes (strip+lower) to exactly
+    "none" -- independent of `verified`/`resolution` (contrast
+    `_is_resolved_premise` above -- an impact-exempt item is dropped
+    regardless of its `verified` value) -- AND `impact_reason` is
+    present as a non-empty, non-whitespace string, mirroring
+    `_is_resolved_premise`'s `resolution` requirement (#2432, R5). Both
+    conditions independently gate: an `impact: none` item with no (or a
+    blank) `impact_reason` is NOT exempt at this predicate -- it can
+    still settle into `self_verified`/`deferred` upstream via a
+    well-formed `Verified:` value; this predicate governs only this
+    coercion's drop decision.
+    """
+    impact = item.get("impact")
+    if not (isinstance(impact, str) and impact.strip().lower() == "none"):
+        return False
+    reason = item.get(IMPACT_REASON_KEY)
+    return isinstance(reason, str) and bool(reason.strip())
 
 
 def _is_blank(s: str) -> bool:

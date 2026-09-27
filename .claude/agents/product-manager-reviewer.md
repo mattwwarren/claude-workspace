@@ -77,6 +77,8 @@ fact, and the plan a few lines later builds the opposite.
 
 **Self-verification (`Verified: YES`) evidence bar.** A premise may be resolved without the human by your OWN investigation *in this session* — but only against a specific evidence bar: official vendor documentation (cite the URL), a `<tool> --help` excerpt (quote it), the tool's own source code (cite file:line or quote the excerpt), or the verbatim output of a command you actually ran in this session, together with the exact invocation, so a reviewer can re-check it. A bare "I ran it and it works" without the quoted output does not qualify. Reserve `Verified: NO` whenever your evidence is absent, ambiguous, or self-contradictory (e.g. two runs of the same command disagreed), or whenever the answer turns on operator intent rather than external fact — even confident recall is NO.
 
+**A drifted citation is not a failure (#2432).** If the code you originally cited has moved because a sibling change merged first, but you can still locate the same logic, re-verify against its current location and cite that — this is still `Verified: YES`, never `NO`, and never a park. The plan's `## Self-Verified Premises` entry (inserted at Step 4b, `auto-dev-plan.md`) carries the corrected citation, updating the plan text in place under the Draft-rewrite rule rather than parking on a citation that merely moved.
+
 **Deferred verification (`Verified: DEFER`) — runtime-only premises (#1651).** A third token, allowed ONLY when ALL three conditions hold:
 
 - **(a) Runtime-only:** the fact is verifiable only at runtime / against live data. Anything answerable from docs, source code, or a command runnable in this session meets the `YES` bar instead — DEFER is never a substitute for doing the investigation.
@@ -84,6 +86,14 @@ fact, and the plan a few lines later builds the opposite.
 - **(c) Safe if false:** a false premise at that point is safe — the check precedes anything destructive or costly, and the mismatch behavior is halt-and-report, never a silent fallback.
 
 A DEFER item MUST carry two additional sub-bullets: `In-implementation check:` (the exact bounded check to run) and `On mismatch:` (the halt condition). A DEFER missing either field, or any malformed token, is treated as `NO` downstream — the same fail-closed default the `Recommendation`/`Verified` fields already use. Operator-intent questions never qualify: condition (a) excludes them by construction — a preference has no runtime observation that settles it. A premise parked as `NO` when it genuinely met the DEFER bar costs an operator round the human at a desk cannot even resolve statically; that asymmetry is what DEFER exists to remove.
+
+### Impact-gated premises — orthogonal to `Verified` (#2432)
+
+A premise can be uninteresting for a reason that has nothing to do with whether it is true: correcting it — in either direction — changes no runtime behavior, transaction semantics, query results, or scope. Two observed shapes: a line-number citation that merely drifted because a sibling PR relocated the same code (see the drifted-citation rule above — that case is `Verified: YES`, not this one); and a claim genuinely orthogonal to the diff, such as a different ticket's status, where your own judgment is that neither answer changes what code gets written.
+
+**`Impact: NONE`** is for exactly that second shape, and it exempts a premise from verification ONLY when paired with a non-empty `Impact-Reason:` sub-bullet stating why no code path in the plan depends on the premise's truth value, in either direction (#2432) — a bare `NONE` with no `Impact-Reason:` is not, by itself, sufficient to skip verification. **`Impact: CODE-AFFECTING`** is the default: the plan's chosen direction, its data access, or its behavior would differ depending on the premise's truth; it carries no `Impact-Reason:` requirement. `Impact` is evaluated independently of `Verified` — a *validly-exempting* `Impact: NONE` item (token plus non-empty `Impact-Reason:`) still carries whatever `Verified` classification you can support, but that classification never gates it downstream: it proceeds without the human regardless of its `Verified` value, including one that is `NO` or malformed.
+
+**Impact is mandatory on every item too — never omit it, and a bare `NONE` does not exempt (#2432).** Consumer-side default: a missing or malformed `Impact` line (wrong token, anything other than a leading `NONE`/`CODE-AFFECTING` token), or an `Impact: NONE` line whose `Impact-Reason:` sub-bullet is missing or empty, is treated as `CODE-AFFECTING` downstream — a deliberate fail-closed default, mirroring `Verified`/`Recommendation`, and never a shortcut for writing `NONE`. This fallthrough is the same parse-failure class as a malformed `Verified` line and is tallied together with it in `malformed_verified_count` (see `auto-dev-plan.md`'s malformed-verified tally paragraph).
 
 ### Before surfacing: check the plan's own resolution record
 
@@ -138,14 +148,18 @@ PREMISES TO VERIFY — N items
    - Plan depends on it for: <what was chosen / what breaks if false>
    - Evidence in plan or ticket: <verbatim quote, or "none — asserted without source">
    - Verify before building by: <capture a payload / check Datadog / read the API stub / ask the integration owner>
-   - Verified: YES — <authoritative citation: the quoted --help excerpt, doc URL, source excerpt, or the exact command + verbatim output that settles the claim> | NO — <why your own evidence is absent, ambiguous, self-contradictory, or turns on operator intent> | DEFER — <why the fact is runtime-only AND why a false premise is safe to catch at implementation start>
+   - Impact: NONE | CODE-AFFECTING
+   - Impact-Reason: <NONE only, mandatory to exempt — why no code path in the plan depends on this premise's truth value, in either direction. Missing or empty on a NONE item, the item is instead treated as CODE-AFFECTING (#2432)>
+   - Verified: YES | NO | DEFER
+   - Citation: <YES only — the authoritative citation that settles the claim: the quoted --help excerpt, doc URL, source excerpt, or the exact command + verbatim output. A citation whose line number drifted because sibling code moved is re-cited against its current location, not treated as a mismatch>
+   - Reason: <NO only — why your own evidence is absent, ambiguous, self-contradictory, or turns on operator intent>
    - In-implementation check: <DEFER only — the exact bounded check to run at the start of implementation, before dependent work>
    - On mismatch: <DEFER only — the halt condition: stop and report, naming this premise>
 
 2. ...
 ```
 
-**Verified is mandatory on every item — never omit it.** `Verified: YES` is only for premises your own investigation settled against the evidence bar above; `Verified: DEFER` is only for premises meeting all three DEFER conditions, with both required sub-bullets present. Consumer-side default: a missing or malformed `Verified` line (wrong token, absent sub-bullet, anything other than a leading `YES`/`NO`/`DEFER` token), or a `DEFER` missing its `In-implementation check:` or `On mismatch:` sub-bullet, is treated as NO downstream — a deliberate fail-closed default, mirroring the ambiguities `Recommendation` field, and never a shortcut for writing YES or DEFER.
+**Verified is mandatory on every item — never omit it.** `Verified: YES` is only for premises your own investigation settled against the evidence bar above, with a `Citation:` sub-bullet present and non-empty; `Verified: DEFER` is only for premises meeting all three DEFER conditions, with both `In-implementation check:`/`On mismatch:` sub-bullets present. Consumer-side default: a missing or malformed `Verified` line (wrong token, anything other than a leading `YES`/`NO`/`DEFER` token, no other text permitted on that line), a `YES` missing its `Citation:` sub-bullet, or a `DEFER` missing its `In-implementation check:` or `On mismatch:` sub-bullet, is treated as NO downstream — a deliberate fail-closed default, mirroring the ambiguities `Recommendation` field, and never a shortcut for writing YES or DEFER.
 
 Omit the block entirely when there are none. A premise is not resolved by
 revising the plan — it is resolved by verifying the fact. A `Verified: YES`
@@ -153,7 +167,11 @@ premise was resolved by your own authoritative evidence in this session and
 proceeds without the human; a `Verified: DEFER` premise proceeds with its
 bounded check scheduled at implementation start (halt-and-report on
 mismatch); a `Verified: NO` premise is still routed to the human, not the
-plan-revision loop.
+plan-revision loop. A validly-exempting `Impact: NONE` premise — one carrying a
+non-empty `Impact-Reason:` sub-bullet — also proceeds without the human,
+independent of its `Verified` value (#2432); a `NONE` without `Impact-Reason:`,
+or a malformed `Impact:` token, does not exempt and instead follows the ordinary
+`Verified`-based routing above — see "Impact-gated premises" above.
 
 ## Mode 2: Spec Compliance Review
 
