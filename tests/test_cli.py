@@ -11582,6 +11582,8 @@ class TestDevQueueWaitSentinelAware:
         surface_ref: str = "abcd1234",
         started_at: datetime | None = None,
         reap_proposed_at: datetime | None = None,
+        last_result: dict[str, object] | None = None,
+        last_result_source: LastResultSource | None = None,
     ) -> Session:
         """Build an ACTIVE Session pointing at *worktree*."""
         return _make_daemon_session(
@@ -11594,6 +11596,8 @@ class TestDevQueueWaitSentinelAware:
             claude_session_id=claude_session_id,
             started_at=started_at or datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
             reap_proposed_at=reap_proposed_at,
+            last_result=last_result,
+            last_result_source=last_result_source,
         )
 
     def test_terminal_shipped_csid_set(
