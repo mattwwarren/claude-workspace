@@ -414,6 +414,24 @@ def run_guard_fence(
         check=True,
         env=_clean_git_env(),
     )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Codex Fixture",
+            "-c",
+            "user.email=codex-fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture base",
+        ],
+        capture_output=True,
+        check=True,
+        env=_clean_git_env(),
+    )
     if repo_local is not None:
         scripts = repo / ".claude" / "scripts"
         scripts.mkdir(parents=True, exist_ok=True)

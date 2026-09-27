@@ -173,10 +173,24 @@ done < <(jq -r '.merge_gate_ignore_paths // [] | .[]' \
   "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
 
 MG_DIR=$(mktemp -d)
-git diff --name-only <fork_point_sha>...HEAD > "$MG_DIR/branch-files"
+git diff --name-only <fork_point_sha>...HEAD > "$MG_DIR/branch-files" 2>"$MG_DIR/branch-files-stderr"
+BRANCH_FILES_EXIT=$?
+if [ "$BRANCH_FILES_EXIT" -ne 0 ]; then
+  MG_ERR=$(head -c 300 "$MG_DIR/branch-files-stderr")
+  rm -rf "$MG_DIR"
+  echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a branch file inventory failed (git diff exited $BRANCH_FILES_EXIT), tooling error, failing closed: $MG_ERR"
+  exit 4
+fi
 CURRENT_BRANCH=$(git branch --show-current)
 gh pr list --author @me --state open --json number,headRefName \
-  --jq '.[] | "\(.number) \(.headRefName)"' > "$MG_DIR/open-prs"
+  --jq '.[] | "\(.number) \(.headRefName)"' > "$MG_DIR/open-prs" 2>"$MG_DIR/open-prs-stderr"
+PR_LIST_EXIT=$?
+if [ "$PR_LIST_EXIT" -ne 0 ]; then
+  MG_ERR=$(head -c 300 "$MG_DIR/open-prs-stderr")
+  rm -rf "$MG_DIR"
+  echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a open-PR inventory failed (gh pr list exited $PR_LIST_EXIT), tooling error, failing closed: $MG_ERR"
+  exit 4
+fi
 
 MERGE_GATE_CONFLICTS=()
 while read -r PR_NUMBER HEAD_REF <&3; do
@@ -195,6 +209,28 @@ while read -r PR_NUMBER HEAD_REF <&3; do
       --branch-files "$MG_DIR/branch-files" --pr-files "$PR_FILES" \
       "${IGNORE_ARGS[@]}" --json 2>"$MG_DIR/pr-$PR_NUMBER-stderr")
     MERGE_GATE_EXIT=$?
+    if [ "$MERGE_GATE_EXIT" -eq 0 ] || [ "$MERGE_GATE_EXIT" -eq 1 ]; then
+      EXPECTED_BLOCKING=false
+      [ "$MERGE_GATE_EXIT" -eq 1 ] && EXPECTED_BLOCKING=true
+      FILTER_VALIDATION=$(printf '%s' "$MERGE_GATE_OUTPUT" | jq -e \
+        --argjson expected "$EXPECTED_BLOCKING" '
+          if (.blocking | type) != "boolean" then error("blocking is not a boolean")
+          elif .blocking != $expected then error("blocking does not match filter status")
+          elif (.overlap_after_ignore | type) != "array" then error("overlap_after_ignore is not an array")
+          elif any(.overlap_after_ignore[]; type != "string") then error("overlap_after_ignore contains a non-string")
+          elif $expected then
+            if ((.overlap_after_ignore | length) == 0) then error("blocking overlap is empty") else . end
+          elif ((.overlap_after_ignore | length) != 0) then error("non-blocking overlap is not empty")
+          else .
+          end
+        ' 2>"$MG_DIR/pr-$PR_NUMBER-validation-stderr")
+      FILTER_VALIDATION_EXIT=$?
+      if [ "$FILTER_VALIDATION_EXIT" -ne 0 ]; then
+        MG_ERR=$(head -c 300 "$MG_DIR/pr-$PR_NUMBER-validation-stderr")
+        MERGE_GATE_CONFLICTS+=("PR #$PR_NUMBER ($HEAD_REF) could not be checked — malformed check_merge_gate_overlap.py output (jq exited $FILTER_VALIDATION_EXIT), tooling error, failing closed: $MG_ERR")
+        continue
+      fi
+    fi
     case "$MERGE_GATE_EXIT" in
       0)
         echo "PR #$PR_NUMBER: no file overlap after merge_gate_ignore_paths — non-blocking"
@@ -232,6 +268,9 @@ fi
 
 (Resolved repo-local-then-global and marker-verified by the same pattern as this pipeline's other guard scripts — see `auto-dev-impl.md`'s "Guard-script path resolution and staleness marker" subsection for the shared snippet and the version table. The marker check runs once, before any PR is evaluated.)
 
+- **Branch file inventory fails** (the initial `git diff --name-only` exits nonzero) → the fence exits 4 after `STEP4A_BLOCKED:` with `blocker.reason: "agent_block"` and tooling-failure details naming the exit status and captured stderr. Do not treat an empty branch-file list as evidence of no overlap.
+- **Open-PR inventory fails** (`gh pr list` exits nonzero) → the fence exits 4 after `STEP4A_BLOCKED:` with `blocker.reason: "agent_block"` and tooling-failure details naming the exit status and captured stderr. Do not proceed with an empty PR list.
+- **Filter output validation fails** (the filter exits 0/1 but its JSON is malformed, its `blocking` value disagrees with the exit status, or `overlap_after_ignore` is not a non-empty/empty string array matching that status) → record that PR as a tooling failure and continue evaluating the remaining PRs. The `jq -e` status is checked before any merge-tree result is trusted.
 - **Candidate found but its marker is missing or below minimum** (fence exits 3 after `STALE:`) → EXIT `blocked` with `blocker.reason: "agent_block"` (this doc's fixed catch-all convention), `blocker.details: "Step 4a: HEADLESS BLOCK — check_merge_gate_overlap.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP. A stale filter cannot be trusted to have narrowed anything, and silently reverting to the content-blind intersection would hide that.
 - **Absent from both locations** (fence printed `check_merge_gate_overlap: script absent, skipped`) → log `"check_merge_gate_overlap: script absent, skipped"` in `friction_highlights`. The fence has already fallen back to the pre-#2431 raw file intersection for every PR (no ignore list, no merge-tree probe), so the gate still ran, content-blind — act on its verdict line below like any other. Same non-blocking absence convention as the pipeline's other guard sites.
 - **`MERGE_GATE_BLOCKED: <details>`** → EXIT `merge_gate_blocked` with populated `blocker`, `details` set verbatim to the text after the prefix:
