@@ -249,6 +249,9 @@ class OrchestratorEventType(StrEnum):
     FOCUS_SET = "focus.set"
     FOCUS_CLEARED = "focus.cleared"
     TICKET_MOVED = "ticket.moved"
+    # #2312 -- distinct from TICKET_MOVED: fires when `cw dev-queue move
+    # --priority` edits a queued row's priority in place.
+    TICKET_REPRIORITIZED = "ticket.reprioritized"
     TICKET_APPROVED = "ticket.approved"
     PLAN_APPROVAL_REVOKED = "plan.approval_revoked"
     PLAN_DRAFT_PROMOTED = "plan.draft_promoted"
