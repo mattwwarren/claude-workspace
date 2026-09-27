@@ -252,6 +252,27 @@ STALE_DISPATCH_GATE_DISPOSITION: Final = "stale_dispatch_gate"
 # namespaces -- do not collapse them.
 _PRE_DISPATCH_STALE_PR_REASON: Final = "pr_already_open_pre_dispatch"
 
+# Disposition stamped when dispatch's pre-dispatch tracker-MCP gate refuses to
+# claim a PLAN/IMPL-stage PENDING task whose branch's settings file verifiably
+# lacks the client's configured tracker MCP plugin (#2442). No agent ever ran
+# for this park -- like STALE_DISPATCH_GATE_DISPOSITION it fires in
+# ``_claim_next_pending`` before any session is spawned, carries
+# ``breadcrumbs=""``, and is never added to ``Status`` or any
+# ``Status``-derived set.
+#
+# Deliberately NOT a HOLD_DISPOSITIONS member, on the stale-PR gate's
+# precedent: it clears by fixing the branch's settings file (or disabling the
+# client's gate) and re-dispatching, not by an operator saying "proceed
+# anyway" -- and membership would make it eligible for concierge's false-park
+# auto-requeue recipe, re-dispatching into the same missing plugin.
+TRACKER_MCP_GATE_DISPOSITION: Final = "tracker_mcp_gate"
+
+# ``TicketTask.blocked_reason`` stamped alongside TRACKER_MCP_GATE_DISPOSITION
+# (#2442). The ``_pre_dispatch`` suffix follows _PRE_DISPATCH_STALE_PR_REASON's
+# convention: it tells "the loop refused to spawn this" apart from anything an
+# agent might report on its own sentinel.
+_PRE_DISPATCH_TRACKER_MCP_REASON: Final = "tracker_mcp_unavailable_pre_dispatch"
+
 # Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
 # ("needs_salvage") but a SEPARATE constant, not an import of it: _shared
 # imports FROM cw.dev_queue (dev_queue -> reconcile is the only cycle-safe

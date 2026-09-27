@@ -3,7 +3,8 @@
 Everything that decides, under ``dev_queue_lock()``, whether a PENDING row is
 claimed: the precomputed worktree-occupancy screen (#2077), spawn-error
 backoff, the fix-dispatch hold, the pre-dispatch open-PR gate (#1862), the
-lane-resolved attempt ceiling, and :func:`_claim_next_pending` itself.
+pre-dispatch tracker-MCP gate (#2442), the lane-resolved attempt ceiling, and
+:func:`_claim_next_pending` itself.
 Extracted verbatim from the historical flat ``cw.dispatch.claim`` module by
 the package split (#2378).
 """
@@ -16,17 +17,23 @@ from typing import TYPE_CHECKING
 
 from cw.dev_queue import (
     STALE_DISPATCH_GATE_DISPOSITION,
+    TRACKER_MCP_GATE_DISPOSITION,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
     transition_task_status,
 )
-from cw.dev_queue.lifecycle import _PRE_DISPATCH_STALE_PR_REASON
+from cw.dev_queue.lifecycle import (
+    _PRE_DISPATCH_STALE_PR_REASON,
+    _PRE_DISPATCH_TRACKER_MCP_REASON,
+)
 from cw.dispatch.claim.events import (
     _emit_attempt_cap_attention_event,
     _emit_attempt_cap_blocked_event,
     _emit_stale_dispatch_attention_event,
     _emit_stale_dispatch_blocked_event,
+    _emit_tracker_mcp_gate_attention_event,
+    _emit_tracker_mcp_gate_blocked_event,
     _emit_worktree_occupied_skip_event,
 )
 from cw.models import QueueItemStatus, Stage
@@ -34,6 +41,9 @@ from cw.reconcile import resolve_attempt_ceiling
 from cw.worktree import live_home_reason, worktree_path_for
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from cw.dispatch.tracker_mcp_gate import TrackerMcpGateHit
     from cw.models import (
         ClientConfig,
         DevQueueStore,
@@ -83,6 +93,79 @@ def _is_stale_pr_gated(task: TicketTask, stale_pr_ticket_ids: frozenset[str]) ->
     return (
         task.stage in (Stage.PLAN, Stage.IMPL) and task.ticket_id in stale_pr_ticket_ids
     )
+
+
+def _park_tracker_mcp_gated_task(
+    task: TicketTask,
+    client_name: str,
+    lane: str,
+    store: DevQueueStore,
+    hit: TrackerMcpGateHit,
+) -> None:
+    """Park one tracker-MCP gate hit BLOCKED_ON_USER and emit both signals (#2442).
+
+    ``unproductive=False`` for the same reason as :func:`_park_stale_pr_task`:
+    no session was ever spawned for this claim. *hit* names the branch, the
+    settings file inspected, and the expected plugin id, carried on the
+    SESSION_NEEDS_ATTENTION event only (transient, event-only detail).
+    """
+    transition_task_status(
+        task,
+        QueueItemStatus.BLOCKED_ON_USER,
+        disposition=TRACKER_MCP_GATE_DISPOSITION,
+        blocked_reason=_PRE_DISPATCH_TRACKER_MCP_REASON,
+        unproductive=False,
+    )
+    save_dev_queue(store)
+    _emit_tracker_mcp_gate_blocked_event(client_name, task.ticket_id)
+    _emit_tracker_mcp_gate_attention_event(
+        task,
+        client_name,
+        lane,
+        branch=hit.branch,
+        file_inspected=hit.file_inspected,
+        expected_plugin=hit.expected_plugin,
+    )
+
+
+def _is_tracker_mcp_gated(
+    task: TicketTask, tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit]
+) -> bool:
+    """True iff *task* is a PLAN/IMPL-stage row the tracker-MCP gate holds (#2442).
+
+    Stage-scoped at the point of use, like :func:`_is_stale_pr_gated`: a row
+    that advanced past IMPL since the lock-free snapshot is never held on a
+    stale hit.
+    """
+    return (
+        task.stage in (Stage.PLAN, Stage.IMPL)
+        and task.ticket_id in tracker_mcp_gate_hits
+    )
+
+
+def _park_if_pre_dispatch_gated(
+    task: TicketTask,
+    *,
+    client_name: str,
+    lane: str,
+    stale_pr_ticket_ids: frozenset[str],
+    tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
+    store: DevQueueStore,
+) -> bool:
+    """Park *task* under the first pre-dispatch gate that holds it; report it.
+
+    Stale-PR gate (#1862) first, then the tracker-MCP gate (#2442). Grouped so
+    :func:`_screen_and_claim` stays inside its PLR0911 return budget.
+    """
+    if _is_stale_pr_gated(task, stale_pr_ticket_ids):
+        _park_stale_pr_task(task, client_name, lane, store)
+        return True
+    if _is_tracker_mcp_gated(task, tracker_mcp_gate_hits):
+        _park_tracker_mcp_gated_task(
+            task, client_name, lane, store, tracker_mcp_gate_hits[task.ticket_id]
+        )
+        return True
+    return False
 
 
 def _is_fix_dispatch_held(task: TicketTask) -> bool:
@@ -189,6 +272,7 @@ def _screen_and_claim(
     config: OrchestratorConfig,
     stale_pr_ticket_ids: frozenset[str],
     occupied_ticket_reasons: dict[str, str],
+    tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
     store: DevQueueStore,
     now: datetime,
 ) -> str:
@@ -198,10 +282,10 @@ def _screen_and_claim(
     plain) run per candidate, extracted (#2075) so the fix-dispatch hold could
     be added without pushing ``_claim_next_pending`` past its PLR0912 branch
     budget. Screens in precedence order — worktree occupancy (#2077),
-    spawn-error backoff, fix-dispatch hold, stale-PR gate, attempt ceiling —
-    then claims. Parking paths save the store themselves
-    (``_park_stale_pr_task`` and the ceiling park below), as does the
-    successful claim; a screened-out candidate writes nothing.
+    spawn-error backoff, fix-dispatch hold, stale-PR gate, tracker-MCP gate
+    (#2442), attempt ceiling — then claims. Parking paths save the store
+    themselves (``_park_if_pre_dispatch_gated`` and the ceiling park below),
+    as does the successful claim; a screened-out candidate writes nothing.
 
     The occupancy screen runs first: it is the most fundamental precondition
     (a second worker must never be spawned into a live worktree) and needs no
@@ -226,8 +310,14 @@ def _screen_and_claim(
         return _CLAIM_BACKOFF
     if _is_fix_dispatch_held(task):
         return _CLAIM_SKIPPED
-    if _is_stale_pr_gated(task, stale_pr_ticket_ids):
-        _park_stale_pr_task(task, client_name, lane, store)
+    if _park_if_pre_dispatch_gated(
+        task,
+        client_name=client_name,
+        lane=lane,
+        stale_pr_ticket_ids=stale_pr_ticket_ids,
+        tracker_mcp_gate_hits=tracker_mcp_gate_hits,
+        store=store,
+    ):
         return _CLAIM_SKIPPED
     ceiling = resolve_attempt_ceiling(client, task, config)
     if ceiling is not None and task.unproductive_attempts >= ceiling:
@@ -256,6 +346,7 @@ def _claim_next_pending(
     usage_limited_until: datetime | None = None,
     stale_pr_ticket_ids: frozenset[str] = frozenset(),
     occupied_ticket_reasons: dict[str, str] | None = None,
+    tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit] | None = None,
 ) -> tuple[TicketTask | None, bool]:
     """Atomically claim the next PENDING task for a client in a specific lane.
 
@@ -319,6 +410,15 @@ def _claim_next_pending(
     default) screens nothing, so any caller that has not resolved it keeps
     the post-claim occupancy handling as its only guard.
 
+    *tracker_mcp_gate_hits* (GitHub #2442): ticket id -> gate hit for every
+    PLAN/IMPL-stage ticket whose branch's settings file verifiably lacks the
+    client's configured tracker MCP plugin. A task named here is parked
+    BLOCKED_ON_USER with ``disposition=tracker_mcp_gate`` instead of claimed.
+    Resolved once per client per tick by
+    ``cw.dispatch.tracker_mcp_gate.resolve_tracker_mcp_gate_hits`` and passed
+    in precomputed for the same no-I/O-under-the-lock reason. ``None`` (the
+    default) screens nothing.
+
     Returns a tuple (task, spawn_backoff_skipped) where spawn_backoff_skipped
     is True when at least one PENDING task was skipped due to active
     spawn_error backoff (next_eligible_at in the future). See GitHub #868.
@@ -338,6 +438,7 @@ def _claim_next_pending(
     if usage_limited_until is not None and now < usage_limited_until:
         return None, False
     reasons = occupied_ticket_reasons if occupied_ticket_reasons is not None else {}
+    mcp_hits = tracker_mcp_gate_hits if tracker_mcp_gate_hits is not None else {}
     with dev_queue_lock():
         store = load_dev_queue()
         spawn_backoff_skipped = False
@@ -358,6 +459,7 @@ def _claim_next_pending(
                             config=config,
                             stale_pr_ticket_ids=stale_pr_ticket_ids,
                             occupied_ticket_reasons=reasons,
+                            tracker_mcp_gate_hits=mcp_hits,
                             store=store,
                             now=now,
                         )
@@ -385,6 +487,7 @@ def _claim_next_pending(
                 config=config,
                 stale_pr_ticket_ids=stale_pr_ticket_ids,
                 occupied_ticket_reasons=reasons,
+                tracker_mcp_gate_hits=mcp_hits,
                 store=store,
                 now=now,
             )

@@ -13041,6 +13041,49 @@ class TestStaleDispatchDispositions:
         assert task.unproductive_attempts == 0
 
 
+class TestTrackerMcpGateDisposition:
+    """The #2442 pre-dispatch tracker-MCP gate's literals and set membership."""
+
+    def test_gate_disposition_value(self) -> None:
+        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+
+        assert TRACKER_MCP_GATE_DISPOSITION == "tracker_mcp_gate"
+
+    def test_pre_dispatch_reason_value(self) -> None:
+        from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
+
+        assert (
+            _PRE_DISPATCH_TRACKER_MCP_REASON == "tracker_mcp_unavailable_pre_dispatch"
+        )
+
+    def test_gate_disposition_is_not_a_hold_disposition(self) -> None:
+        """Clears by fixing the branch's settings file or re-dispatching, not
+        by a blanket "proceed anyway" -- same rule as stale_dispatch_gate."""
+        from cw.dev_queue import HOLD_DISPOSITIONS, TRACKER_MCP_GATE_DISPOSITION
+
+        assert TRACKER_MCP_GATE_DISPOSITION not in HOLD_DISPOSITIONS
+
+    def test_gate_disposition_is_never_a_status_member(self) -> None:
+        from typing import get_args
+
+        from cw.auto_dev_result import Status
+        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+
+        assert TRACKER_MCP_GATE_DISPOSITION not in get_args(Status)
+
+    def test_gate_disposition_is_not_breadcrumb_eligible(self) -> None:
+        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+        from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+        assert TRACKER_MCP_GATE_DISPOSITION not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+    def test_pre_dispatch_reason_is_a_known_blocker_reason(self) -> None:
+        from cw.auto_dev_result import KNOWN_BLOCKER_REASONS
+        from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
+
+        assert _PRE_DISPATCH_TRACKER_MCP_REASON in KNOWN_BLOCKER_REASONS
+
+
 # ---------------------------------------------------------------------------
 # TestHoldAwareDisposition
 # ---------------------------------------------------------------------------

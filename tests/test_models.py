@@ -358,6 +358,47 @@ class TestClientConfig:
         )
         assert c.occupancy_gate_enabled is False
 
+    def test_tracker_mcp_gate_defaults_to_none(self) -> None:
+        """#2442: omitted from clients.yaml -> the gate never runs."""
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.tracker_mcp_gate is None
+
+    def test_tracker_mcp_gate_config_defaults(self) -> None:
+        from cw.models.client import TrackerMcpGateConfig
+
+        gate = TrackerMcpGateConfig(plugin_id="linear@acme")
+        assert gate.enabled is False
+        assert gate.settings_path == ".claude/settings.json"
+
+    def test_tracker_mcp_gate_config_requires_plugin_id(self) -> None:
+        from cw.models.client import TrackerMcpGateConfig
+
+        with pytest.raises(ValidationError):
+            TrackerMcpGateConfig.model_validate({"enabled": True})
+
+    def test_tracker_mcp_gate_config_rejects_unknown_key(self) -> None:
+        from cw.models.client import TrackerMcpGateConfig
+
+        with pytest.raises(ValidationError):
+            TrackerMcpGateConfig.model_validate(
+                {"plugin_id": "linear@acme", "bogus": 1}
+            )
+
+    def test_tracker_mcp_gate_round_trip(self) -> None:
+        original = ClientConfig.model_validate(
+            {
+                "name": "test",
+                "workspace_path": "/dev/null",
+                "tracker_mcp_gate": {"enabled": True, "plugin_id": "linear@acme"},
+            }
+        )
+        data = original.model_dump(mode="json")
+        restored = ClientConfig.model_validate(data)
+        assert restored.tracker_mcp_gate is not None
+        assert restored.tracker_mcp_gate.enabled is True
+        assert restored.tracker_mcp_gate.plugin_id == "linear@acme"
+        assert restored.tracker_mcp_gate.settings_path == ".claude/settings.json"
+
     def test_unknown_key_raises(self) -> None:
         """extra='forbid' rejects an unrecognized top-level key (#1200)."""
         with pytest.raises(ValidationError):
