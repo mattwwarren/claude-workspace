@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
+from cw.branch_ahead import merge_in_progress
 from cw.config import get_client, load_state
 from cw.dev_queue.crud import (
     _APPROVABLE_STATUSES,
@@ -47,7 +48,11 @@ from cw.gh import fetch_approved_plan_comment
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.worktree import _checked_out_branch, worktree_path_for
+from cw.worktree import (
+    _checked_out_branch,
+    resolve_task_worktree,
+    worktree_path_for,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -254,7 +259,16 @@ def _apply_requeue_stage(
                 " AWAITING_OPERATOR_SIGNOFF."
             )
             raise RequeueStageError(msg)
-        _stage_regress(task, target_stage)
+        # #2421: this path carries no blocker at all, so the merge-caused flag
+        # can only come from a live measurement. Probed only where
+        # _stage_regress would stamp it (FINALIZE origin).
+        merge_conflict_detected = (
+            task.stage == Stage.FINALIZE
+            and merge_in_progress(resolve_task_worktree(task, client_cfg)) is True
+        )
+        _stage_regress(
+            task, target_stage, merge_conflict_detected=merge_conflict_detected
+        )
         return True
 
     # Guarded because impl hard-exits plan_missing; review and finalize

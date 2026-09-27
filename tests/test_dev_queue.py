@@ -9116,6 +9116,76 @@ class TestRequeueTicket:
         assert t.stage == Stage.IMPL
         assert t.regress_attempts == 1
 
+    @pytest.mark.parametrize("measured", [True, False, None])
+    def test_requeue_manual_regress_from_finalize_stamps_merge_conflict_detected(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        measured: bool | None,
+    ) -> None:
+        """#2421: the manual ``--regress`` path carries no blocker at all, so it
+        measures MERGE_HEAD itself and stamps the same flag Rule 5a does."""
+        from cw.dev_queue import requeue as requeue_mod
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_worktree = tmp_path / "wt"
+        seen: list[Path | None] = []
+
+        def _probe(path: Path | None) -> bool | None:
+            seen.append(path)
+            return measured
+
+        monkeypatch.setattr(
+            requeue_mod, "resolve_task_worktree", lambda _t, _c: stub_worktree
+        )
+        monkeypatch.setattr(requeue_mod, "merge_in_progress", _probe)
+        task = _make_blocked_task(stage=Stage.FINALIZE, session_id="sess-mcd-1")
+        task.stage_base_ref = "sha-original"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", stage_override="impl", allow_regress=True
+        )
+
+        assert result["regressed"] is True
+        assert seen == [stub_worktree]
+        t = load_dev_queue().tasks[0]
+        assert t.stage == Stage.IMPL
+        assert t.finalize_regress_branch_head == "sha-original"
+        assert t.finalize_regress_merge_conflict_detected is (measured is True)
+
+    def test_requeue_manual_regress_from_review_skips_merge_measurement(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only a FINALIZE-origin regress stamps the flag, so no other origin
+        pays for the git probe."""
+        from cw.dev_queue import requeue as requeue_mod
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+
+        def _must_not_probe(_path: Path | None) -> bool | None:
+            msg = "merge_in_progress probed on a non-FINALIZE regress"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(requeue_mod, "merge_in_progress", _must_not_probe)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-mcd-2")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", stage_override="impl", allow_regress=True
+        )
+
+        assert result["regressed"] is True
+        assert load_dev_queue().tasks[0].finalize_regress_merge_conflict_detected is (
+            False
+        )
+
     def test_requeue_from_awaiting_signoff_without_regress_flag_stage_target_forward_ok(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
