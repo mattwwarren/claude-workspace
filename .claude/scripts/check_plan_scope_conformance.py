@@ -4,8 +4,8 @@
 
 Usage (from `/auto-dev` Stage 2.5, gate check 2):
     python .claude/scripts/check_plan_scope_conformance.py \\
-        --plan .cw/plan.md --touched-files /tmp/touched_files-$CW_SESSION \\
-        [--approved-extra-files /tmp/approved-extra-$CW_SESSION]
+        --plan .cw/plan.md --touched-files "$SESSION_WT/.cw/touched-files.txt" \\
+        [--approved-extra-files "$SESSION_WT/.cw/approved-extra.txt"]
 
 ``--approved-extra-files`` (v2, #2337) names a newline-delimited list of paths
 the operator approved beyond the plan via ``cw dev-queue approve

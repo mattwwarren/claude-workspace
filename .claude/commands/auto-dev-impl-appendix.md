@@ -105,12 +105,12 @@ if [ -n "$RESOLVED" ]; then
   else
     VERDICT=$(uv run python "$RESOLVED" \
       --head-commit-at "$HEAD_COMMIT_AT" \
-      --comments-file /tmp/impl-comments-$CW_SESSION.json \
+      --comments-file "$GUARD_ROOT/.cw/impl-comments.json" \
       --regressed-into-stage "$REGRESSED_INTO_STAGE")
   fi
 fi
 ```
-(`/tmp/impl-comments-$CW_SESSION.json` is the freshly live-fetched comments array from the Orientation step in the core doc, written to a temp file before this call.)
+(`$GUARD_ROOT/.cw/impl-comments.json` is the freshly live-fetched comments array from the Orientation step in the core doc, written there before this call.)
 
 Resolution follows "Guard-script path resolution and staleness marker (#2141)" in the core doc. Two dispositions attach to it, and neither is the script's own verdict:
 

@@ -935,6 +935,42 @@ def test_every_site_fence_skips_when_absent_from_both_locations(
     assert "STALE:" not in result.stdout
 
 
+def test_impl_guard_comments_cache_differs_across_worktrees_sharing_cw_session(
+    tmp_path: Path,
+) -> None:
+    """#2315 AC4/AC5 for the impl-comments cache: two workers whose parent
+    shell exports an identical (simulated machine-wide/inherited) `$CW_SESSION`
+    must still resolve different `--comments-file` cache paths, because the
+    cache is keyed on `$GUARD_ROOT` (this worker's own worktree), never on
+    `$CW_SESSION`. Two `tmp_path` roots sharing a basename simulate the
+    identical-`$CW_SESSION` condition (`run_guard_fence` derives `CW_SESSION`
+    from `tmp_path.name`) while resolving to genuinely different, independently
+    `git init`'d worktree roots.
+    """
+    shared_name = "shared-session-2315"
+    tmp_path_a = tmp_path / "worker-a" / shared_name
+    tmp_path_b = tmp_path / "worker-b" / shared_name
+    result_a = _run_site_fence(
+        tmp_path_a, _IMPL_GUARD_SCRIPT, repo_local=_IMPL_GUARD_MARKER_CURRENT
+    )
+    result_b = _run_site_fence(
+        tmp_path_b, _IMPL_GUARD_SCRIPT, repo_local=_IMPL_GUARD_MARKER_CURRENT
+    )
+    assert result_a.returncode == 0, result_a.stderr
+    assert result_b.returncode == 0, result_b.stderr
+    assert tmp_path_a.name == tmp_path_b.name  # identical simulated $CW_SESSION
+
+    repo_a = tmp_path_a / "repo"
+    repo_b = tmp_path_b / "repo"
+    assert repo_a != repo_b
+
+    comments_a = f"{repo_a}/.cw/impl-comments.json"
+    comments_b = f"{repo_b}/.cw/impl-comments.json"
+    assert f"--comments-file {comments_a}" in result_a.stdout
+    assert f"--comments-file {comments_b}" in result_b.stdout
+    assert comments_a != comments_b
+
+
 _GATE2_BRANCH = "dev/gate2-fixture"
 _GATE2_LOCATIONS = ["session_worktree", "global_only"]
 
@@ -950,7 +986,8 @@ _GATE2_LOCAL_BRANCH = "agent-9f1c2e"
 
 # Committed on the branch one commit past ``main``, so the fence's own
 # ``FORK_POINT`` derivation shows up as real content in
-# ``/tmp/touched_files-$CW_SESSION`` (#2141 round 5).
+# ``$SESSION_WT/.cw/touched-files.txt`` (#2141 round 5; re-keyed off
+# ``$CW_SESSION`` per #2315).
 _PROBE_FILE = "scope_probe.txt"
 
 
@@ -1093,6 +1130,7 @@ def _run_gate2_fence(
     session_branch: str = _GATE2_BRANCH,
     context_ticket: str | None = None,
     scope_drift_approval: tuple[list[str], str] | None = None,
+    cw_session_override: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute gate 2's own fence against real worktrees (#2141 round 4/5).
 
@@ -1130,6 +1168,12 @@ def _run_gate2_fence(
     carries one commit past ``main`` touching ``_PROBE_FILE`` — which is what
     makes an in-fence ``FORK_POINT`` observable in the touched-files scratch
     output echoed after the fence.
+
+    *cw_session_override*, when given, replaces the ``tmp_path``-derived
+    ``$CW_SESSION`` value with a literal string — used only to prove AC4/AC5
+    (#2315): two calls sharing an identical ``$CW_SESSION`` but different
+    ``tmp_path`` roots must still resolve different touched-files/approved-extra
+    paths, since both are keyed on ``$SESSION_WT``, never on ``$CW_SESSION``.
     """
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
@@ -1164,7 +1208,11 @@ def _run_gate2_fence(
         global_scripts.mkdir(parents=True, exist_ok=True)
         (global_scripts / _GATE2_SCRIPT).write_text(global_copy, encoding="utf-8")
 
-    session = _gate2_session(tmp_path)
+    session = (
+        cw_session_override
+        if cw_session_override is not None
+        else _gate2_session(tmp_path)
+    )
     tmpwt = Path(f"/var/tmp/cw-gate-wt-{session}")
     if gate_worktree:
         git_in(repo, "worktree", "add", "--detach", str(tmpwt), _GATE2_BRANCH)
@@ -1172,14 +1220,19 @@ def _run_gate2_fence(
     bin_dir = write_guard_stub_bin(tmp_path)
     if break_git_diff:
         _write_failing_git_diff_stub(bin_dir)
+    # Computed the same way the fence itself resolves `$SESSION_WT` (the
+    # session worktree, not `$TMPWT`) — these `.cw/` scratch files are
+    # worktree-scoped, not `$CW_SESSION`-keyed (#2315), so the post-fence echo
+    # reads them back from the session worktree, not from `/tmp`.
+    session_wt_path = (tmp_path / "session-wt").resolve()
     body = (
         substitute_fence_placeholders(
             _gate2_fence(),
             {"branch-name": _GATE2_BRANCH, "ticket-id": _GATE2_TICKET},
         )
         + '\necho "${SCOPE_CONFORMANCE_OUTPUT-}"'
-        + f'\ncat "/tmp/touched_files-{session}" 2>/dev/null'
-        + f'\ncat "/tmp/approved-extra-{session}" 2>/dev/null || true\n'
+        + f'\ncat "{session_wt_path}/.cw/touched-files.txt" 2>/dev/null'
+        + f'\ncat "{session_wt_path}/.cw/approved-extra.txt" 2>/dev/null || true\n'
     )
     try:
         return subprocess.run(
@@ -1206,8 +1259,6 @@ def _run_gate2_fence(
             env=_clean_git_env(),
         )
         shutil.rmtree(tmpwt, ignore_errors=True)
-        Path(f"/tmp/touched_files-{session}").unlink(missing_ok=True)
-        Path(f"/tmp/approved-extra-{session}").unlink(missing_ok=True)
 
 
 def test_gate2_fence_resolves_the_session_worktree_from_the_gate_worktree(
@@ -1477,8 +1528,10 @@ def test_gate2_fence_applies_an_approval_whose_head_is_an_ancestor(
     )
     assert result.returncode == 0, result.stderr
     assert _INVOKED in result.stdout
-    session = _gate2_session(tmp_path)
-    assert f"--approved-extra-files /tmp/approved-extra-{session}" in result.stdout
+    session_wt = (tmp_path / "session-wt").resolve()
+    assert (
+        f"--approved-extra-files {session_wt}/.cw/approved-extra.txt" in result.stdout
+    )
     assert "src/a.py\nsrc/b.py" in result.stdout
     assert "scope_drift_approval_stale" not in result.stdout
 
@@ -1518,6 +1571,59 @@ def test_gate2_fence_runs_without_the_flag_when_no_approval(
     assert _INVOKED in result.stdout
     assert "--approved-extra-files" not in result.stdout
     assert "scope_drift_approval_stale" not in result.stdout
+
+
+def test_gate2_scratch_files_differ_across_worktrees_sharing_cw_session(
+    tmp_path: Path,
+) -> None:
+    """#2315 AC4/AC5 for gate 2: two workers whose parent shell exports an
+    identical (simulated machine-wide/inherited) ``$CW_SESSION`` must still
+    resolve different touched-files/approved-extra paths, because both are
+    keyed on ``$SESSION_WT`` (this worker's own session worktree) and never on
+    ``$CW_SESSION``. Forces the collision via ``cw_session_override`` rather
+    than relying on a ``_gate2_session`` hash collision, which two distinct
+    ``tmp_path`` roots do not produce."""
+    shared_session = "shared-session-2315"
+    result_a = _run_gate2_fence(
+        tmp_path / "worker-a",
+        session_copy=_GATE2_MARKER_CURRENT,
+        context_ticket=_GATE2_TICKET,
+        scope_drift_approval=(["src/a.py"], _BRANCH_HEAD),
+        cw_session_override=shared_session,
+    )
+    result_b = _run_gate2_fence(
+        tmp_path / "worker-b",
+        session_copy=_GATE2_MARKER_CURRENT,
+        context_ticket=_GATE2_TICKET,
+        scope_drift_approval=(["src/a.py"], _BRANCH_HEAD),
+        cw_session_override=shared_session,
+    )
+    assert result_a.returncode == 0, result_a.stderr
+    assert result_b.returncode == 0, result_b.stderr
+
+    session_wt_a = (tmp_path / "worker-a" / "session-wt").resolve()
+    session_wt_b = (tmp_path / "worker-b" / "session-wt").resolve()
+    assert session_wt_a != session_wt_b
+
+    touched_a = f"{session_wt_a}/.cw/touched-files.txt"
+    touched_b = f"{session_wt_b}/.cw/touched-files.txt"
+    approved_a = f"{session_wt_a}/.cw/approved-extra.txt"
+    approved_b = f"{session_wt_b}/.cw/approved-extra.txt"
+
+    assert f"--touched-files {touched_a}" in result_a.stdout
+    assert f"--touched-files {touched_b}" in result_b.stdout
+    assert touched_a != touched_b
+
+    assert f"--approved-extra-files {approved_a}" in result_a.stdout
+    assert f"--approved-extra-files {approved_b}" in result_b.stdout
+    assert approved_a != approved_b
+
+    # Neither resolved path contains the shared $CW_SESSION value: both are
+    # worktree-scoped, not session-scoped.
+    assert shared_session not in touched_a
+    assert shared_session not in touched_b
+    assert shared_session not in approved_a
+    assert shared_session not in approved_b
 
 
 def test_canonical_template_shows_the_hard_stop_shape() -> None:
