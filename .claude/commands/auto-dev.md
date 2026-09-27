@@ -297,6 +297,12 @@ Bash call. Both are covered by rule 3 below.
    sized timeout, treat it as that stage's existing failure disposition
    (gate failure / `agent_block`), not as something to wait on.
 
+`auto-dev-review.md`'s Step 3a dispatch-shape section carries a sibling
+instance of this rule's principle for reviewer dispatch: a teammate/agent-team
+message has the same no-completion-notification shape as a backgrounded raw
+Bash call, so review stations must use the Agent tool's subagent spawn only,
+never a teammate (#2156).
+
 ---
 
 ## Comment provenance rule (#2097)

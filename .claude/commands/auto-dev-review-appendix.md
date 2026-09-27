@@ -25,6 +25,16 @@ This async-dispatch exemption is scoped to the Agent tool's subagent spawn only 
 it does not extend to a raw Bash call; see `auto-dev.md`'s Worker Execution Discipline
 section for the no-backgrounding rule that applies there.
 
+**Why review-station dispatch may never use a teammate (#2156).** The same
+asymmetry rules out `SendMessage`/agent-teams teammate messaging for reviewer
+dispatch, for a sharper reason than the raw-Bash case above: a teammate reply
+is not tracked in the Stop hook's `background_tasks` list at all — that list
+enumerates in-flight Agent-tool subagent spawns only (ADR-0003) — so a
+coordinator that ends its turn expecting a second teammate message has no
+completion-notification path to resume it, ever. This is why
+`.claude/commands/auto-dev-review.md`'s Step 3a dispatch-shape section states
+review stations are Agent-tool subagent spawns only, never a teammate.
+
 ---
 
 ## Blocking-findings comment rule: header, body shape, and the three triggers
