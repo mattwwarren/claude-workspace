@@ -409,18 +409,15 @@ def test_detect_idle_candidates_skips_emit_cli_already_refused(
     assert candidates == []
 
 
-def test_emit_cli_stage_mismatch_refusal_keeps_staged_result_and_stops_reoffering(
+def test_emit_cli_stage_mismatch_refusal_stamps_marker_and_stops_reoffering(
     tmp_config_dir: Path,
     tmp_path: Path,
     no_transcript_parse: None,
     idle_daemon: FakeNativeDaemonClient,
 ) -> None:
-    """A #1031 refusal merges its flag into the staged result, never over it.
-
-    The worker's own emitted result stays the authoritative record; the
-    merged ``sentinel_advance_refused`` flag stops the next tick re-offering
-    the same doomed candidate.
-    """
+    """A #1031 refusal leaves the row and live session alone and is not
+    re-offered: the #1149 refusal marker replaces the staged result, so the
+    session no longer holds a terminal-shaped emit_cli result."""
     _write_staged_client()
     # A stage2_impl report against a row that already advanced to REVIEW.
     _seed_row(QueueItemStatus.RUNNING, Stage.REVIEW)
@@ -441,8 +438,7 @@ def test_emit_cli_stage_mismatch_refusal_keeps_staged_result_and_stops_reofferin
     assert _reload_row().model_dump() == before
     session = state.sessions[0]
     assert session.status is SessionStatus.ACTIVE
-    assert session.last_result == {**payload, "sentinel_advance_refused": True}
-    assert session.last_result_source is LastResultSource.EMIT_CLI
+    assert session.last_result == {"paused_status": "sentinel_stage_mismatch_refused"}
     assert idle_daemon.stop_calls == []
     assert (
         _detect_idle_candidates(

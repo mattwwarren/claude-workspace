@@ -54,11 +54,11 @@ def _staged_emit_result_refused(session: Session) -> bool:
     """Whether a prior tick already refused this staged result (#1149).
 
     The phantom sweep's ``already_refused`` check
-    (``phantom._detect._detect_phantom_candidates``), applied to the idle
-    sweep's staged-result producer: ``_apply_idle_routed_mutations`` merges
-    the refusal flag INTO a staged ``last_result``, which therefore stays
-    terminal-shaped and would otherwise be reconstructed and re-refused on
-    every tick, forever.
+    (``phantom._detect._detect_phantom_candidates``), applied verbatim to the
+    idle sweep's staged-result producer. A refusal flag merged INTO a staged
+    ``last_result`` (as the phantom and stalled sweeps stamp it) leaves it
+    terminal-shaped, so without this check it would be reconstructed and
+    re-refused on every tick, forever.
     """
     last_result = session.last_result
     return isinstance(last_result, dict) and (

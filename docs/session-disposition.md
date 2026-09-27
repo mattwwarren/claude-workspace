@@ -591,9 +591,12 @@ authorities can route that staged result to the dev-queue row:
   start) has passed. This catches the shape the hook cannot: an upstream
   `claude --bg` async-completion wakeup that is dropped entirely (#1889), so
   that no further Stop ever fires for the session. The sweep audits the
-  staged result rather than re-emitting it through the door, and a #1031
-  stage-mismatch refusal is merged into `last_result` as
-  `sentinel_advance_refused`, so the worker's record is never overwritten.
+  staged result rather than re-emitting it through the door. A #1031
+  stage-mismatch refusal leaves the row and the live session untouched, and
+  stamps the #1149 refusal marker (`paused_status=sentinel_stage_mismatch_refused`)
+  in place of the staged result so the candidate is not re-offered; only the
+  emit's `session.result_emitted` audit event (status and payload digest)
+  remains of the staged result.
 - **`cw spawn close`.** Closing a DAEMON session routes a staged result first.
   The #317 cancel runs only when nothing is staged, the staged dict does not
   reconstruct, or the route is refused.

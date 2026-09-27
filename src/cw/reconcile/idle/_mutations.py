@@ -16,7 +16,6 @@ from cw.models import (
 )
 from cw.reconcile._shared import (
     _PAUSED_STATUS_KEY,
-    _SENTINEL_ADVANCE_REFUSED_KEY,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     _apply_sentinel_to_task_audited,
     _resolve_routed_sentinel,
@@ -50,8 +49,7 @@ def _apply_idle_routed_mutations(
     ``session.last_result`` and passes ``session.claude_session_id`` straight
     back -- possibly ``None``, which the shared ``_resolve_routed_sentinel``
     guard tolerates. A staged candidate is audited rather than re-emitted
-    through the door (``audit_existing_result``), and its stage-mismatch
-    refusal is merged into ``last_result`` rather than overwriting it.
+    through the door (``audit_existing_result``).
 
     GitHub #1031 (extends #1019's phantom-path guard): when
     ``_apply_sentinel_to_task`` reports ``routed=False`` (a stage-mismatch
@@ -118,18 +116,16 @@ def _apply_idle_routed_mutations(
             # doomed candidate forever. No "status" key -> _has_terminal_sentinel
             # stays False.
             #
-            # #2458: a staged emit_cli candidate reaches here with the worker's
-            # own result in last_result -- overwriting it would destroy the
-            # authoritative record. Merge the refusal flag in instead
-            # (phantom's merge-aware stamp), which _staged_emit_result_refused
-            # reads on the next tick to stop re-offering it.
-            existing = session.last_result
-            if isinstance(existing, dict):
-                session.last_result = {**existing, _SENTINEL_ADVANCE_REFUSED_KEY: True}
-            else:
-                session.last_result = {
-                    _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
-                }
+            # #2458: a staged emit_cli candidate reaches here too, and the
+            # stamp replaces its staged result; with no "status" left,
+            # _holds_staged_emit_result turns False and the candidate is not
+            # re-offered. Only the emit's session.result_emitted audit event
+            # (status + payload digest) survives -- a merge-aware stamp would
+            # keep the full result but is a new door-guard write site (#2458
+            # follow-up).
+            session.last_result = {
+                _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+            }
             state_mutated = True
             continue
         if not routed and task_already_terminal:
