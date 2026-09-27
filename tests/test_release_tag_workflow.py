@@ -906,7 +906,6 @@ def test_dry_run_summary_skips_drift_report_when_subject_did_not_match(
 QUALITY_GATES_STEP_ID = "quality-gates"
 TAG_CHECK_STEP_ID = "tag"
 CREATE_TAG_STEP_NAME = "Create and push tag"
-INSTALL_TMUX_STEP_NAME = "Install tmux"
 INSTALL_DEPS_STEP_NAME = "Install dependencies"
 MATCH_TRUE_GATE = "steps.guard.outputs.match == 'true'"
 TAG_NOT_EXISTS_GATE = "steps.tag.outputs.exists == 'false'"
@@ -967,15 +966,13 @@ def test_quality_gates_step_has_no_continue_on_error() -> None:
 def test_installer_steps_precede_quality_gates_and_share_its_gate() -> None:
     gates_index = _step_index(QUALITY_GATES_STEP_ID)
     setup_uv_index = _step_index_by_uses_prefix(SETUP_UV_PIN)
-    tmux_index = _step_index_by_name(INSTALL_TMUX_STEP_NAME)
     deps_index = _step_index_by_name(INSTALL_DEPS_STEP_NAME)
 
     assert setup_uv_index < gates_index
-    assert tmux_index < gates_index
     assert deps_index < gates_index
 
     steps = _steps()
-    for index in (setup_uv_index, tmux_index, deps_index):
+    for index in (setup_uv_index, deps_index):
         assert MATCH_TRUE_GATE in steps[index]["if"]
 
 
@@ -985,11 +982,10 @@ def test_quality_gates_and_installer_steps_skip_on_idempotent_re_run() -> None:
     own tag.outputs.exists == 'false' gate, not just the match=='true' guard."""
     gates_index = _step_index(QUALITY_GATES_STEP_ID)
     setup_uv_index = _step_index_by_uses_prefix(SETUP_UV_PIN)
-    tmux_index = _step_index_by_name(INSTALL_TMUX_STEP_NAME)
     deps_index = _step_index_by_name(INSTALL_DEPS_STEP_NAME)
 
     steps = _steps()
-    for index in (setup_uv_index, tmux_index, deps_index, gates_index):
+    for index in (setup_uv_index, deps_index, gates_index):
         assert TAG_NOT_EXISTS_GATE in steps[index]["if"]
 
 
@@ -998,7 +994,6 @@ def test_installer_steps_land_after_the_tag_existence_check() -> None:
     not burn runner time ahead of the cheap guard/version/tag checks."""
     tag_index = _step_index(TAG_CHECK_STEP_ID)
     assert tag_index < _step_index_by_uses_prefix(SETUP_UV_PIN)
-    assert tag_index < _step_index_by_name(INSTALL_TMUX_STEP_NAME)
     assert tag_index < _step_index_by_name(INSTALL_DEPS_STEP_NAME)
 
 
@@ -1007,15 +1002,6 @@ def test_install_dependencies_step_syncs_dev_and_mcp_extras() -> None:
     both need the `mcp` extra present."""
     step = _steps()[_step_index_by_name(INSTALL_DEPS_STEP_NAME)]
     assert step["run"] == "uv sync --dev --extra mcp"
-
-
-def test_install_tmux_step_is_linux_only_with_no_os_conditional() -> None:
-    """`tag-release` is `ubuntu-latest`-only (no OS matrix like the deleted
-    `verify` job had), so the macOS half of the ported pattern is dead code."""
-    assert _workflow()["jobs"][JOB]["runs-on"] == "ubuntu-latest"
-    step = _steps()[_step_index_by_name(INSTALL_TMUX_STEP_NAME)]
-    assert step["run"] == "sudo apt-get update && sudo apt-get install -y tmux"
-    assert "runner.os" not in step["if"]
 
 
 def test_setup_uv_pin_matches_the_ci_workflow_pin() -> None:

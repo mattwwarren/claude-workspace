@@ -29,14 +29,6 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install tmux (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y tmux
-
-      - name: Install tmux (macOS)
-        if: runner.os == 'macOS'
-        run: brew install tmux
-
       # Must run BEFORE `uv sync`: sync without --locked/--frozen silently
       # rewrites a stale uv.lock on disk, which would make this check a no-op.
       # `uv lock --check` needs no venv, so it stands alone before install.
@@ -77,7 +69,7 @@ jobs:
       - name: Test (unit) with coverage
         run: uv run pytest tests/ -v --tb=short -m 'not integration' --cov=cw --cov-report=term --cov-report=xml --cov-fail-under=88
 
-      - name: Test (tmux integration)
+      - name: Test (integration)
         run: uv run pytest tests/ -v --tb=short -m integration
 
       - name: Patch coverage (diff-cover vs origin/main)
