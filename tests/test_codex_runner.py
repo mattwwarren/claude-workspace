@@ -1,13 +1,96 @@
-"""Tests for cw.codex_runner — CodexRunner seam (RFC 0005 F1)."""
+"""Tests for cw.codex_runner — CodexRunner seam (RFC 0005 F1) and the detached
+``cw codex run`` job launcher (RFC 0014 A2, #2388)."""
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
-from cw.codex_runner import FakeCodexRunner, RealCodexRunner
+import pytest
+
+from cw import codex_driver
+from cw.codex_runner import (
+    FakeCodexRunner,
+    RealCodexJobRunner,
+    RealCodexRunner,
+    build_codex_run_argv,
+    build_codex_run_env,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# build_codex_run_argv / build_codex_run_env / RealCodexJobRunner (#2388)
+# ---------------------------------------------------------------------------
+
+
+def test_build_codex_run_argv_includes_stage_review_and_session_id() -> None:
+    """argv runs ``python -m cw codex run <ticket> --stage review --session-id``."""
+    argv = build_codex_run_argv(
+        ticket_id="T-9", session_id="sid-9", wall_clock_budget_seconds=None
+    )
+
+    assert argv[:5] == [sys.executable, "-m", "cw", "codex", "run"]
+    assert argv[5] == "T-9"
+    stage_idx = argv.index("--stage")
+    assert argv[stage_idx + 1] == "review"
+    sid_idx = argv.index("--session-id")
+    assert argv[sid_idx + 1] == "sid-9"
+    # The launcher hardcodes the literal rather than importing cw.codex_driver
+    # (D-1); keep the two honest here.
+    assert codex_driver.STAGE_REVIEW == "review"
+
+
+def test_build_codex_run_argv_omits_wall_clock_flag_when_none() -> None:
+    argv = build_codex_run_argv(
+        ticket_id="T-9", session_id="sid-9", wall_clock_budget_seconds=None
+    )
+    assert "--wall-clock-budget-seconds" not in argv
+
+
+def test_build_codex_run_argv_includes_wall_clock_flag_when_set() -> None:
+    argv = build_codex_run_argv(
+        ticket_id="T-9", session_id="sid-9", wall_clock_budget_seconds=120
+    )
+    assert argv[-2:] == ["--wall-clock-budget-seconds", "120"]
+
+
+def test_build_codex_run_env_inherits_full_os_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike aider/opencode's allowlist, the job inherits the full environment."""
+    monkeypatch.setenv("CW_TEST_CODEX_RUN_SENTINEL", "kept")
+
+    env = build_codex_run_env()
+
+    assert env["CW_TEST_CODEX_RUN_SENTINEL"] == "kept"
+    assert env == dict(os.environ)
+
+
+def test_real_codex_job_runner_launch_writes_to_codex_driver_log(
+    tmp_path: Path,
+) -> None:
+    """RealCodexJobRunner.launch() redirects child output to .cw/codex_driver.log."""
+    runner = RealCodexJobRunner()
+    proc = runner.launch(tmp_path, ["sh", "-c", "echo hi"], dict(os.environ))
+    proc.wait()
+
+    log_path = tmp_path / ".cw" / "codex_driver.log"
+    assert log_path.exists()
+    assert "hi" in log_path.read_text(encoding="utf-8")
+
+
+def test_real_codex_job_runner_passes_start_new_session(tmp_path: Path) -> None:
+    """RealCodexJobRunner.launch() detaches the child into its own session."""
+    runner = RealCodexJobRunner()
+    with patch("cw.executor_launch.subprocess.Popen") as mock_popen:
+        runner.launch(tmp_path, ["sh", "-c", "true"], {})
+    assert mock_popen.call_args.kwargs["start_new_session"] is True
+    assert mock_popen.call_args.kwargs["cwd"] == tmp_path
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
-from cw.codex_background import join_outstanding_codex_threads
+from cw.codex_background import _default_background, join_outstanding_codex_threads
 from cw.config import (
     _load_concurrency_overrides,
     _save_concurrency_overrides,
@@ -73,7 +73,7 @@ from cw.exceptions import (
     VersionDriftError,
     WorktreeError,
 )
-from cw.local_runner import make_blocked
+from cw.executor.core import FakeFireAndForgetRunner
 from cw.models import (
     CODEX_BACKEND,
     DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
@@ -113,7 +113,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
     from cw.native_daemon import NativeDaemonClient
     from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
@@ -9795,29 +9795,39 @@ class TestClientFilter:
 # ---------------------------------------------------------------------------
 
 
-class _BlockedCodexReview:
-    """A ``run_review_with_fix_loop`` stand-in that parks until released.
+class _BlockedThreadWork:
+    """A unit of work that parks on a registered codex thread until released.
 
-    Stands in for the real blocking unit of work (``codex exec`` subprocesses,
-    up to the full REVIEW budget). Blocking here — rather than inside a
-    ``CodexRunner`` fake — puts the block at exactly the seam #1727 moved off
-    the ``dispatch_tick`` call stack, without needing a real git diff.
+    Registers directly through ``cw.codex_background._default_background`` —
+    since RFC 0014 A2 (#2388) CodexExecutor no longer starts threads, but the
+    shutdown drain still reports any it finds until B2 retires it.
     """
 
-    def __init__(self, worktree: Path, ticket_id: str) -> None:
+    def __init__(self) -> None:
         self.entered = threading.Event()
         self.release = threading.Event()
-        self._result = make_blocked(
-            ticket_id=ticket_id,
-            worktree=worktree,
-            reason="codex_review_unparseable",
-            stage_reached="stage3_review",
-        )
 
-    def __call__(self, **_kwargs: object) -> tuple[object, None]:
+    def __call__(self) -> None:
         self.entered.set()
         self.release.wait(timeout=30.0)
-        return self._result, None
+
+
+@pytest.fixture
+def fake_codex_job_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[FakeFireAndForgetRunner]:
+    """Swap CodexExecutor's detached ``cw codex run`` launcher for a fake.
+
+    Keeps a dispatch-driven codex spawn from launching a real ``cw`` child
+    (which would resolve the real, not the test's, state dirs).
+    """
+    runner = FakeFireAndForgetRunner()
+    monkeypatch.setattr("cw.executor.codex.RealCodexJobRunner", lambda: runner)
+    yield runner
+    for proc in runner.procs:
+        with contextlib.suppress(OSError):
+            proc.kill()
+            proc.wait()
 
 
 @pytest.mark.binary_on_path("codex")
@@ -9841,17 +9851,16 @@ class TestCodexSpawnDoesNotBlockDispatch:
         # makes that pre-flight see codex as present without shelling out —
         # CI runners have no real codex binary on PATH, and without this,
         # spawn() takes the synchronous CODEX_NOT_FOUND branch and never
-        # reaches _background(): blocked_review.entered is never set and
-        # these tests only passed on a dev machine that happens to have
-        # codex installed.
+        # launches the review job, and these tests only passed on a dev
+        # machine that happens to have codex installed.
 
     def test_other_client_spawns_while_codex_review_still_running(
         self,
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
-        monkeypatch: pytest.MonkeyPatch,
         mock_native_daemon: FakeNativeDaemonClient,
+        fake_codex_job_runner: FakeFireAndForgetRunner,
     ) -> None:
         """Acceptance item 1: both clients spawn in one tick, codex still ACTIVE."""
         ws_a = make_git_repo("workspace/codex-block-a")
@@ -9874,60 +9883,49 @@ class TestCodexSpawnDoesNotBlockDispatch:
         add_ticket(TicketTask(ticket_id="A-1", client="client-a", stage=Stage.REVIEW))
         add_ticket(TicketTask(ticket_id="B-1", client="client-b"))
 
-        blocked_review = _BlockedCodexReview(ws_a, "A-1")
-        monkeypatch.setattr(
-            "cw.codex_background.run_review_with_fix_loop", blocked_review
-        )
         config = OrchestratorConfig(
             tick_interval_seconds=30,
             per_client_max_parallel={"client-a": 1, "client-b": 1},
         )
-        try:
-            result = dispatch_tick(config, native_daemon=mock_native_daemon)
+        result = dispatch_tick(config, native_daemon=mock_native_daemon)
 
-            # The codex review is genuinely in flight, not already finished.
-            assert blocked_review.entered.wait(timeout=10.0)
+        # The codex review job was launched and is still running (a live
+        # `sleep 60` stands in for `cw codex run`).
+        [codex_job] = fake_codex_job_runner.procs
+        assert codex_job.poll() is None
+        # Both clients got a spawn out of the same tick.
+        assert result.spawned == 2
+        # client-b's task went to the daemon, i.e. the tick was never
+        # parked behind client-a's codex review.
+        assert len(mock_native_daemon.spawn_calls) == 1
 
-            # Both clients got a spawn out of the same tick.
-            assert result.spawned == 2
-            # client-b's task went to the daemon, i.e. the tick was never
-            # parked behind client-a's codex subprocess.
-            assert len(mock_native_daemon.spawn_calls) == 1
-
-            state = load_state()
-            codex_session = next(s for s in state.sessions if s.client == "client-a")
-            assert codex_session.status is SessionStatus.ACTIVE
-            # R1: session_id is on the RUNNING row before the review finishes.
-            tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
-            assert tasks["A-1"].status is QueueItemStatus.RUNNING
-            assert tasks["A-1"].session_id == codex_session.id
-        finally:
-            blocked_review.release.set()
-            join_outstanding_codex_threads(timeout_seconds=10.0)
+        state = load_state()
+        codex_session = next(s for s in state.sessions if s.client == "client-a")
+        assert codex_session.status is SessionStatus.ACTIVE
+        # RFC 0014 A2: a detached job with a liveness handle, not a thread.
+        assert codex_session.local_liveness is not None
+        assert codex_session.local_liveness.pid == codex_job.pid
+        assert codex_session.local_liveness.backend == "codex"
+        assert join_outstanding_codex_threads(timeout_seconds=0) == 0
+        # R1: session_id is on the RUNNING row before the review finishes.
+        tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
+        assert tasks["A-1"].status is QueueItemStatus.RUNNING
+        assert tasks["A-1"].session_id == codex_session.id
 
     def test_shutdown_join_reports_still_running_codex_threads(
         self,
         tmp_dispatch_dirs: Path,
-        tmp_path: Path,
-        make_git_repo: Callable[[str], Path],
         monkeypatch: pytest.MonkeyPatch,
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
-        """R7(b): the loop's shutdown path bounds the join and reports the count."""
-        ws_a = make_git_repo("workspace/codex-join-a")
-        client_a = ClientConfig(
-            name="client-a",
-            workspace_path=ws_a,
-            default_branch="main",
-            worktree_base=tmp_path / "worktrees-join",
-        )
-        _make_clients_yaml(tmp_dispatch_dirs, client_a, codex_review_client="client-a")
-        add_ticket(TicketTask(ticket_id="A-2", client="client-a", stage=Stage.REVIEW))
+        """R7(b): the loop's shutdown path bounds the join and reports the count.
 
-        blocked_review = _BlockedCodexReview(ws_a, "A-2")
-        monkeypatch.setattr(
-            "cw.codex_background.run_review_with_fix_loop", blocked_review
-        )
+        Until B2 retires the drain, any still-registered codex thread is
+        reported; the thread is registered directly because CodexExecutor no
+        longer starts one (#2388).
+        """
+        blocked_review = _BlockedThreadWork()
+        _default_background(blocked_review)
         # Keep the bounded join bounded *and fast* — the point is that it does
         # not wait the review out, not how many seconds it waits.
         monkeypatch.setattr(

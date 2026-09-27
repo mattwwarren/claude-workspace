@@ -21,7 +21,7 @@ from cw.executor._resolve import (
     resolve_executor_config,
     resolve_pipeline_stages,
 )
-from cw.executor.codex import CODEX_REVIEW_ONLY, CodexExecutor
+from cw.executor.codex import CODEX_REVIEW_ONLY, CodexExecutor, _codex_preflight
 from cw.executor.core import (
     _DEFAULT_PROBE_TIMEOUT_SECONDS,
     CODEX_NOT_FOUND,
@@ -51,6 +51,7 @@ __all__ = [
     "OpencodeExecutor",
     "StageExecutor",
     "_PreflightOK",
+    "_codex_preflight",
     "_complete_session_via_door",
     "_lane_pipeline",
     "_local_preflight",

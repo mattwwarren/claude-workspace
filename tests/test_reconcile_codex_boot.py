@@ -30,6 +30,7 @@ from cw.models import (
     ClientConfig,
     CompletionReason,
     CwState,
+    LocalLivenessHandle,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -340,6 +341,37 @@ def test_orphaned_codex_session_is_flagged(
     assert "worktree" in str(payloads[0]["breadcrumbs"])
     assert _PARK_REASON_GIT_ERROR in str(payloads[0]["breadcrumbs"])
     _assert_session_closed()
+
+
+def test_detached_codex_job_with_liveness_handle_is_not_an_orphan(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RFC 0014 A2 (#2388): a handle-bearing session survives a serve restart.
+
+    Its ``cw codex run`` job outlives serve and completes the session itself;
+    a dead PID is reconcile/local's codex harvest branch's call, not this
+    sweep's. Same seed as the flagged case above, plus the handle.
+    """
+    _use_auto_reap_policy(monkeypatch)
+    _no_codex_process(monkeypatch)
+    session = _mk_headless_daemon_session(
+        "T-orphan", tmp_path / "wt", _STARTED_AT
+    ).model_copy(
+        update={
+            "local_liveness": LocalLivenessHandle(
+                pid=os.getpid(), start_time_ns=1, backend="codex"
+            )
+        }
+    )
+    _seed(tmp_config_dir, tmp_path, session=session)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 0
+
+    _assert_session_left_active()
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.session_id == session.id
+    assert _attention_events("test-codex-boot-handle") == []
 
 
 def test_clean_orphan_with_fix_loop_off_is_requeued(
