@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **Leftover tmux/cmux scaffolding from the pre-1.0 multiplexer backend:** CI (`ci.yml`, `nightly-native.yml`, `release-tag.yml`) no longer installs tmux, since no test uses it; the unused `cmux` pytest marker and the `src/cw/cmux.py` ruff per-file ignore (that module no longer exists) are gone from `pyproject.toml`; and `scripts/install.sh` and `/install-cw` no longer tell macOS users to install and run cmux. The schema-v5 `surface_ref` migration that clears legacy pane IDs is unchanged.
+
 ### Fixed
 
 - **A Variant B park no longer holds its lane slot forever when its blocking PR is closed without merging (#1920):** `release_stale_gated_tasks`'s Variant B cross-reference scan previously matched only `MERGED` blocking PRs, so a park whose blocker PR was closed unmerged had no mechanical release path. The scan now also matches `CLOSED`-unmerged blocking PRs via a new `_closed_pr_numbers_by_client` helper (sharing the `_merged_pr_numbers_by_client` traversal logic), releasing the task to `PENDING` the same way a merge does.
